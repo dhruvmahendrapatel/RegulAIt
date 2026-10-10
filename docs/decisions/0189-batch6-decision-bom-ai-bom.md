@@ -1246,7 +1246,9 @@ below means `facts.rows`, then each addendum's `rows`, in `n` order.
   section is `unverifiable` only through an `unverifiable` check it depends on. `completeness` (`recorded`,
   `not_applicable`, `not_recorded` with its reason) is separate from validity: a `not_recorded` section whose
   recomputed gap matches the body is `valid`. The outcome aggregates checks and sections: any `invalid` gives
-  `invalid`, otherwise any `unverifiable` gives `valid_with_unverifiable`, otherwise `valid`.
+  `invalid`, otherwise any `unverifiable` gives `valid_with_unverifiable`, otherwise `valid`. *Superseded by B4.8
+  (2026-10-10): a result unverifiable by design does not lower the outcome, the middle outcome is `unverifiable`, and
+  a section is never `unverifiable`.*
 
 **Freezing** (§5, R15, R40, R44 and the round 8–10 entry conditions):
 
@@ -1430,8 +1432,9 @@ pinned (B4.1).
 `sections_projection`, `chain_links` and `finality` are `valid`; `decision_content_binding` is `unverifiable`
 `preimage_not_exported`; `anchor_record`, `anchor_imprint` and `tsa_token` are `unverifiable` `anchor_absent`;
 `ai_bom_link`, `facts_addenda_chain` and `facts_addenda_signatures` do not apply and are left out. The outcome is
-`valid_with_unverifiable`, the recorded and reported finality are `chain_signed`, `receiptPayloadVersion` is `v2`,
-and `cannotProve` is the five fixed Decision BOM entries (`contract-b4.ts:583-589`). Every section is `valid`; the
+`valid` (B4.8: every unverifiable result here is by design; this read `valid_with_unverifiable` before B4.8), the
+recorded and reported finality are `chain_signed`, `receiptPayloadVersion` is `v2`, and `cannotProve` is the five
+fixed Decision BOM entries (`contract-b4.ts:583-589`) plus `external_commitment` (B4.8, B4.10). Every section is `valid`; the
 completeness is as in the body (`model` `not_recorded` `not_captured_by_path`, `approval` `not_recorded`
 `no_bound_row`, `proof` `not_recorded` `anchor_absent`, the rest `recorded`).
 
@@ -1469,6 +1472,284 @@ Each item was open when this specification was first written (`195ccae`); the ma
    when the floor is relaxed; B4.5 specifies #315's behaviour, and B4 is built on #315.
 7. **Addendum signing bytes.** B4.2's decision stands: an addendum signature covers exactly the addendum's canonical
    payload bytes (`facts.addenda[i].payload`). The future sweep that signs addenda must sign exactly those bytes.
+
+### B4 spec gaps settled (2026-10-10)
+
+The specification-only vectors (PR #333, `packages/shared/test-vectors/decision-bom/`, written from B4.1 to B4.7
+alone) found fifteen gaps, G1 to G15, and one consequence of B4.4's aggregation: a Decision BOM could never verify
+`valid`, because `decision_content_binding` is always `unverifiable` (R39). This section decides all sixteen. It binds
+B4 like B4.1 to B4.7 and overrides them where it says so. Where `main` already fixes the answer it is cited by file and
+line and followed; every other answer is the strict one (ADR-0180). The changes it needs in the frozen contract are
+listed in B4.10; they are made in the ADR text only, and the contract itself changes in a separate PR reviewed with
+B6. The vectors follow this section.
+
+#### B4.8 The outcome, and what is unverifiable by design
+
+Some checks can never be `valid` for a correct BOM, because the bundle never carries what they would check. Such a
+result is **unverifiable by design**: it is reported in `checks` with its reason, the limit it stands for is listed in
+`cannotProve`, and it does not lower the outcome. Every other `unverifiable` result means evidence that should be
+there is missing, and it does lower the outcome. This replaces B4.4's last sentence under "Sections".
+
+| Subject | Check | Result | Exactly when | `cannotProve` entry it requires |
+|---|---|---|---|---|
+| Decision BOM | `decision_content_binding` | `unverifiable` `preimage_not_exported` | always (R39) | `decision_row_content` (fixed) |
+| Decision BOM | `receipt_facts_binding` | `unverifiable` `receipt_v1_no_factsHash` | the receipt is v1 (R46) | `facts_recorded_at_decision_time` |
+| Decision BOM | `anchor_record`, `anchor_imprint`, `tsa_token` | `unverifiable` `anchor_absent` | the recorded finality is `chain_signed` | `external_commitment` (new, B4.10) |
+| AI BOM | `supersedes` | `unverifiable` `earlier_snapshot_not_in_bundle` | a `bundle` source and snapshot version above 1 (B4.1 never carries the superseded snapshot) | `superseded_snapshot` (new, B4.10) |
+| both | `bundle_manifest_signature`, `bundle_manifest_files`, `bundle_subject`, `bundle_email_scan` | `unverifiable` `not_a_bundle` | a stored source (`decision_bom`, `ai_bom_snapshot`) | none: a stored source has no envelope to prove |
+
+No other pair is by design. In particular `no_timestamp_token`, `no_tsa_trust_bundle`, `request_facts_not_recorded`,
+`snapshot_not_in_bundle`, `rendering_not_producible` and `earlier_snapshot_not_in_bundle` on a stored source all lower
+the outcome. The `chain_signed` case is by design and a missing timestamp token is not, because `chain_signed` is
+declared inside the signed body (`finality`, and `completeness.proof` `not_recorded` `anchor_absent`), so its absence
+is part of what was signed; nothing signed says whether a deployment ran with timestamps off, so the verifier cannot
+tell an audited relaxation from a lost token. B4 leaves the four bundle checks out of a stored-source response (B4.4
+allows either form; the contract still admits `not_a_bundle`, and treats it as by design).
+
+**The outcome** (`BOM_VERIFY_OUTCOMES` becomes `valid`, `unverifiable`, `invalid`; B4.10):
+
+1. any check or section `invalid` gives `invalid`;
+2. otherwise any check `unverifiable` that is not by design (table above) gives `unverifiable`;
+3. otherwise `valid`: every check that can be verified passed.
+
+A section is never `unverifiable` in v1: its status is the `sections_projection` result for that section (`valid` or
+`invalid`), because every section is recomputed from bytes the bundle carries. **`cannotProve`** is exactly the fixed
+list of the subject, plus each conditional entry whose condition holds, in `BOM_CANNOT_PROVE` order, each once:
+`facts_recorded_at_decision_time` for a v1 receipt, `commitment_after_retain_until` when the reported finality is
+`anchored_lapsed`, `finite_lock_under_unbounded_retention` when the recorded finality is `anchored_finite_lock`,
+`external_commitment` for `chain_signed`, and `superseded_snapshot` as in the table. So the B4.6 worked example now
+verifies `valid`, with `cannotProve` the five fixed entries plus `external_commitment`.
+
+#### B4.9 Each gap, decided
+
+**G1. Row digest preimage.** The digest is SHA-256 over the canonical bytes of `{"projection": …, "table": …}`,
+exactly `bomRowDigest` (`contract.ts:397-398`, "R5: one rule, defined once"); the table name is in the preimage. R5's
+"canonicalJson of a fixed column list" means that object, whose `projection` holds exactly the table's column list
+(`BOM_ROW_PROJECTIONS`, `contract.ts:328-363`, absent columns as null, `projectBomRow` at `:391-395`).
+
+**G2. Approval projection columns.** `approvals` and `approval_decisions` project exactly the B1 lists
+(`contract.ts:329-337`): `approvals` {`id`, `objectType`, `serverId`, `toolName`, `ruleId`, `connectorId`,
+`projectId`, `approverUserId`, `namedApproverUserId`, `approverRoleId`, `status`, `requestedAt`, `decidedBy`,
+`decidedAt`, `argumentsDigest`, `contextDigest`, `approvalScope`, `quorum`, `signatureMode`, `expiresAt`};
+`approval_decisions` {`id`, `approvalId`, `deciderUserId`, `principalUserId`, `decision`, `stepUpMethod`,
+`credentialId`, `signedDigest`, `counterBefore`, `decidedAt`}. A bound row whose projection keys are not exactly its
+list fails `boundRowSchema` (`contract.ts:417-433`).
+
+**G3. The addendum payload.** `facts.addenda[i].payload` is the canonical bytes of a `decisionFactsAddendumSchema`
+object (`contract.ts:553-564`): `{auditId, n, postActionVerification, prev, rows, v}`, with `v`
+`regulait.decision-facts-addendum.v1`, `prev` the previous addendum's `facts_hash` (the decision's own for `n = 1`,
+R35) and `postActionVerification` null or `{result, stageId}` (B4.7-2). The body entry's `n` and `prevHash` must equal
+the payload's `n` and `prev`, and the payload's `auditId` the body's. `facts_addenda_chain` checks, in order: the
+entries are numbered 1 to k with no gap; each payload is canonical and parses; `n`, `prev` and `auditId` agree as
+above; `prev` of addendum 1 is SHA-256 of `facts.payload` and each later `prev` is SHA-256 of the previous payload;
+no `(table, id)` is bound twice across `facts.rows` and every addendum's `rows`. Addenda with a null `facts.payload`
+fail it. Results: `addendum_chain_break`, or `schema_violation` for a payload that does not parse. It is reported once,
+with `ref` null.
+
+**G4. `proof.anchor` spellings.** Exactly `decisionBomAnchorSchema` (`contract.ts:581-619`): `id`, `record` {`seq`,
+`rowHash`, `headAt`, `algorithm`, `payloadVersion`, `capturedAt`}, `destination` (`local_worm`, `s3_object_lock`,
+`external_log`, `none`), `status`, `externalRef`, `flushedAt`, `tamperResistant`, `observationMode`, `observedAt`,
+`retainUntil`, and `tsa`: null, or {`token`, `genTime`, `messageImprint`, `policyOid`, `nonce`, `requestSentAt`,
+`requestFactsLegacy`}. `record.algorithm` is the stored `audit_anchors.algorithm`, `"sha256"` today
+(`AUDIT_CHAIN_ALGORITHM`, `packages/shared/src/audit-chain.ts:88`).
+
+**G5. Anchor checks with no RFC 3161 token.** For an `anchored*` BOM:
+
+- `anchor_record`: `valid` when the record has all six fields and its `seq` and `rowHash` are those of the last
+  `proof.chain` row; a missing field is `invalid` `anchor_record_incomplete`, a different row `invalid`
+  `anchor_mismatch`.
+- `anchor_imprint`: with `tsa` null, `unverifiable` `no_timestamp_token`. Otherwise `valid` when `tsa.messageImprint`
+  is the SHA-256 of `canonicalJson(record)` (`anchorCanonicalBytes`, `apps/gateway/src/audit-timestamp.ts:52-54`, the
+  imprint at `:74`) and the token's own message imprint is the same value; else `invalid` `anchor_mismatch`.
+- `tsa_token`: with `tsa` null, `unverifiable` `no_timestamp_token`. With no TSA trust bundle, `unverifiable`
+  `no_tsa_trust_bundle`. A token that does not verify under the trust bundle, or whose nonce or time disagree with
+  `tsa.nonce` and `tsa.genTime`, is `invalid` `timestamp_invalid`; `requestFactsLegacy: true` is `unverifiable`
+  `request_facts_not_recorded` (R33); otherwise `valid`.
+
+None of these `unverifiable` results is by design (B4.8): timestamps are required by default
+(`audit_anchor_timestamp_mode` defaults to `required`, `packages/db/src/schema.ts:3884-3886`), so an anchored BOM
+with no token verifies `unverifiable` at best. node:crypto cannot build a TSA token, so the vectors carry no token and
+#312's P08 obligation stands for B4's own tests.
+
+**G6. Where the finality notes go.** `finite_lock_under_unbounded_retention` and `commitment_after_retain_until` are
+`cannotProve` entries (`contract-b4.ts:571-580`; the response refinement already requires them), not a separate field.
+The `finality` check stays `valid` for them and the outcome is unaffected; `reportedFinality` carries the lapse.
+
+**G7. Lapse at equality.** Lapsed once `retainUntil` is **not after** the verification time, as B4.5 says and
+`reportedFinality` does (`finality.ts:115-120`, `<=`). R44's "once it has passed" reads that way; it matches the freeze
+rule's `lock_lapsed` (`finality.ts:94`).
+
+**G8. A bound usage event with a null `costUsd`.** `cost.costUsd` is null, the token sums and `usageEventIds` are
+still given, and `completeness.cost` is `recorded`, as B4.4 states. The contract leaves no other answer: a present
+section is `recorded` exactly when it is non-null (`decisionBomBodySchema`'s refinement), and nulling the whole section
+would drop recorded tokens. R23's "a null cost is `not_recorded`" means the value is null, never 0 and never left out
+of a sum that is then reported.
+
+**G9. Every failing check is named.** The verifier reports each rule below under the check and reason given. A vector
+names the check and the reason; B4 may report further failures, and the outcome is `invalid`.
+
+| Rule broken | Check | Reason |
+|---|---|---|
+| the archive is not one root directory of regular USTAR files: a directory, symlink, hard link or other typeflag; a second root; a name outside the root or with `..`; a repeated name; unreadable gzip or tar | `bundle_manifest_files` | `bundle_unreadable` (verification stops; `identity` may be null) |
+| `manifest.json` not canonical, or not `exportBundleV3ManifestSchema` apart from its email refinement: `files` unsorted, repeated or listing `audit/rows/…`; `installIdSource` inconsistent with `installId`; `schema` other than `/3`; `payloadScope` other than `none`; a segment count that does not match its range | `bundle_manifest_files` | `schema_violation` |
+| the listed paths are not exactly the archive's files minus `manifest.json` and `.sig`, or not the B4.1 file set of the subject (for example `manifest.json` listed, a missing `README.txt`, `content/ai-bom.json` with no `basis.aiBomSnapshotId`) | `bundle_manifest_files` | `manifest_mismatch` |
+| a listed `sha256` is not the file's | `bundle_manifest_files` | `hash_mismatch` |
+| `manifest.json.sig` not padded standard base64 and one `\n` | `bundle_manifest_signature` | `schema_violation` |
+| it does not verify under the trusted key | `bundle_manifest_signature` | `signature_mismatch` |
+| the envelope disagrees with the body: `subject.kind` or `.id`, any descriptor field, the root directory name (B4.1, version and format suffix included), the `audit` segment (`segmentFromSeq`, `segmentToSeq`, `segmentRowCount` against `proof.chain`), `audit/chain.tsv` against `proof.chain`, `descriptor.formats` against the carried renderings | `bundle_subject` | `subject_mismatch` |
+| an email shape in any entry, `manifest.json` included | `bundle_email_scan` | `email_shape` |
+| `v` not the subject's | `body_version` | `unknown_body_version` |
+| the body file not canonical, or not `decisionBomBodySchema` / `aiBomNativeBodySchema` | `body_schema` | `schema_violation` |
+| the signature file not canonical, not exactly `{alg, keyId, signature, signedSha256}`, `alg` not `Ed25519`, or the signature not 86 base64url characters | `body_signature` | `schema_violation` |
+| `signedSha256` not the SHA-256 of the body file (or not `descriptor.bodySha256`) | `body_signature` | `hash_mismatch` |
+| the receipt payload not canonical, or neither v1 nor v2 | `receipt_payload_hash` | `schema_violation` |
+| `payloadHash` not the SHA-256 of `payload` | `receipt_payload_hash` | `hash_mismatch` |
+| `payload.keyId`, `payload.receiptSeq` or `payload.audit` disagree with `receipt` and `proof.chain[0]` (B4.3) | `receipt_signature` | `subject_mismatch` |
+| v2 `captured` with a different `factsHash` or a null `facts.payload`; v2 `capture_off` with a non-null `facts.payload` | `receipt_facts_binding` | `facts_hash_mismatch` |
+| the v2 `actor` disagrees with `actors` (B4.3 v2 bullet), or `basis` disagrees with its inputs (G13), or a row is bound twice (G15) | `sections_projection` | `section_mismatch` |
+| a `rowHash` that is not SHA-256(`prevHash` ‖ `contentHash`); rows that do not link or are not consecutive ascending seqs; a first row that is not the decision row; a `chain_signed` chain of more than one row | `chain_links` | `chain_break` |
+| `finality` inconsistent with `proof.anchor` (B4.5 structural rule) | `finality` | `anchor_mismatch` |
+| a body, receipt, addendum, linked-AI-BOM or manifest key id not held once by the trust root | that signature's check | `unknown_key` |
+| any of those signatures not verifying | that signature's check | `signature_mismatch` |
+
+`facts_addenda_signatures` is reported once with `ref` null and fails on the first bad addendum; an addendum signature
+in the wrong encoding is `schema_violation`.
+
+**G10. v2 receipts and the boundary.** The trust root's boundary is authoritative. A v2 receipt whose audit seq is
+below the known boundary, or verified against a trust root that records no boundary (no cutover), is
+`receipt_facts_binding` `invalid` `v2_receipt_before_boundary` (a new invalid reason, B4.10): nothing emits v2 before
+the recorded cutover (R34, R42). A v1 receipt with no boundary stays `unverifiable` `receipt_v1_no_factsHash`.
+
+**G11. Shortfall precedence.** The first condition that holds, in `strongest()`'s order (`finality.ts:88-103`), gives
+both the state and the `shortOf` reason: `anchor_not_flushed`, `destination_not_tamper_resistant`,
+`timestamp_pending`, `lock_not_recorded`, `lock_lapsed`, then the unbounded-retention branch (`anchored_finite_lock`
+under `accept`, else `retention_unbounded`), then `lock_shorter_than_retention`. So a non-tamper-resistant destination
+with a null `retain_until` is `destination_not_tamper_resistant`, and unbounded retention on a non-tamper-resistant
+destination is `anchored_unverified_destination` (`destination_not_tamper_resistant`) under `accept` as well: a
+finite lock is never emitted on a destination that failed an earlier condition. The timestamp setting's values are
+`required` and `off` (`AUDIT_ANCHOR_TIMESTAMP_MODES`, `packages/shared/src/batch4.ts:139`).
+
+**G12. AI BOM bundles.** Specified in full under "The AI BOM bundle" below.
+
+**G13. `basis`.** `sections_projection` recomputes `basis` as B4.4's table says: `auditSeq` the last `proof.chain` seq,
+`anchorId` `proof.anchor.id` or null, `receiptSeq` `receipt.receiptSeq`, `aiBomSnapshotId`
+`facts.model.aiBomSnapshotId` or null (null when there are no facts or no model). A difference is `invalid`
+`section_mismatch`, shown on the section the field comes from: `proof` for `auditSeq` and `anchorId`, `receipt` for
+`receiptSeq`, `model` for `aiBomSnapshotId`. `descriptor.aiBomSnapshotId` against `basis` is `bundle_subject`.
+
+**G14. Identifier and email shapes.** `bomIdentifierSchema` is 1 to 256 characters, each in `[A-Za-z0-9._:/@+#=-]`
+(`contract.ts:144`); `@` is allowed. A string has an **email shape** (`hasEmailShape`, `contract.ts:261-274`) when some
+`@` that is not its first character is preceded by a character in `` [A-Za-z0-9.!#$%&'*+/=?^_`{|}~-] `` and followed by
+one or more of `[A-Za-z0-9-]`, then `.`, then one more of `[A-Za-z0-9-]`. `findEmailShapes` (`:276-292`) applies it to
+every object key and string value and returns their JSON paths. So `search@v2` is an identifier and not an email
+shape; `search@v2.x` is both, and `bundle_email_scan` refuses it (as do assembly, R10, and the body schema).
+
+**G15. A body that binds a row twice.** The verifier's recomputation applies B4.4's duplicate rule: a
+`usage_events` or `trace_spans` id bound more than once across `facts.rows` and the addenda has no valid projection,
+so `sections_projection` is `invalid` `section_mismatch` with `cost` (or `trace`) `invalid`, whatever the body says;
+`facts_addenda_chain` is also `invalid` `addendum_chain_break` (G3).
+
+**Linked AI BOM in a Decision BOM bundle** (`ai_bom_link`, B4.1 row `content/ai-bom.json`). When
+`basis.aiBomSnapshotId` is set and the snapshot still exists, the bundle carries it and its `.sig`, and
+`receipt-keys.json` also names that signature's key. `ai_bom_link` is `valid` when the linked body is canonical,
+`aiBomNativeBodySchema`, `snapshot.id` equals `basis.aiBomSnapshotId`, its signature file's `signedSha256` is the
+SHA-256 of `content/ai-bom.json`, and the signature verifies; `invalid` `bom_link_mismatch` for a different
+`snapshot.id`, and the signature reasons above otherwise. When the snapshot has been pruned (its own retention) the
+bundle is built without it and `ai_bom_link` is `unverifiable` `snapshot_not_in_bundle`, which is not by design.
+
+#### The AI BOM bundle (G12)
+
+Everything below is taken from B3 on `main`; B4 adds only the envelope (B4.1, B4.2).
+
+**The signed body** is the stored `ai_bom_snapshots.body`: the RFC 8785 bytes `buildAiBom` writes
+(`packages/shared/src/bom/ai-bom-builder.ts:168-250`) and `aiBomNativeBodySchema` admits (`contract.ts:728-793`). Its
+keys: `v` (`regulait.ai-bom.v1`); `snapshot` {`id`, `subjectKind`, `subjectId`, `version`, `supersedes`, `trigger`,
+`createdAt` (the database clock at capture), `basis` (each loaded record's `table`, key and the SHA-256 of its
+canonical record, sorted by table then key; `ai-bom-builder.ts:223-229`)}; `serialNumber`, `urn:uuid:` and
+`aiBomSerialNumber(snapshot.id)` (`contract.ts:191-199`); `subject`, the subject's own record by kind
+(`ai-bom-builder.ts:146-166`; for the install subject `{"installId": …, "kind": "install"}`); `records`, every list of
+`AI_BOM_RECORD_LISTS` (`ai-bom-records.ts:351-356`) after `normaliseAiBomRecords` (`:684`), empty lists included;
+`unrecorded` (the gaps of the CycloneDX 1.7 rendering); `compositions`; and `renderings`. It is signed with the receipt
+key exactly as B4.2 says (`apps/gateway/src/ai-bom.ts:461`, `sign(null, bodyBytes, key)`, base64url), and the row
+keeps `signature`, `key_id` and `body_sha256` (`ai-bom.ts:469-473`), from which `content/ai-bom.json.sig` is written
+(B4.2 "Signature file").
+
+**The rendering commitment record** is `body.renderings[<format>]` (`contract.ts:722-726`, written at
+`ai-bom-builder.ts:238-241`): `{"bytes": <UTF-8 length>, "sha256": <SHA-256>, "status": "rendered", "validator":
+<the validator id>}` of the rendering's exact bytes (`:192`, `:219`), or `{"missing": [...], "status":
+"not_producible"}` for SPDX when a mandatory property has no value (R3, `:206-210`). CycloneDX 1.7 is always rendered
+(`:173`); 1.6 when `cyclonedx_export_versions` adds it; `in-toto` never for an AI BOM. The rendered bytes are the
+`bom_renderings` row's `bytes` (`ai-bom.ts:474-476`; `packages/db/src/schema.ts:12190-12205`), and a carried
+`content/ai-bom.<format>.json` is exactly those bytes. Because the body holds the commitment and the body is signed,
+the verifier compares hashes; it does not re-render or re-validate a rendering.
+
+**The manifest** follows B4.1 with `subject` `{"descriptor": …, "id": <snapshot id>, "kind": "ai-bom"}` and `audit`
+null. The descriptor is `aiBomBundleDescriptorSchema` (`contract-b4.ts:315-327`), every field taken from the body:
+`snapshotId` = `snapshot.id`; `subjectKind`, `subjectId`, `version`, `trigger` from `snapshot`; `serialNumber` =
+`serialNumber`; `bodySha256` = the SHA-256 of `content/ai-bom.json` (= `body_sha256`); `formats` = `native` followed by
+each carried rendering, in `AI_BOM_DOWNLOAD_FORMATS` order (`contract-b4.ts:67`). The files are `README.txt`,
+`content/ai-bom.json`, `content/ai-bom.json.sig`, one `content/ai-bom.<format>.json` per carried rendering,
+`receipt-keys.json` (the body signature's key) and `signing-key.pub`; there is no `audit/chain.tsv`. The root is
+B4.1's: `regulait-export-ai-bom-<snapshotId>-<format>` for `?format=` (`native` included), and
+`regulait-export-ai-bom-<snapshotId>` for `…/bundle`, which carries every rendering whose status is `rendered`.
+
+**The AI BOM checks** (B4.4 required set; G9 for the envelope and body checks):
+
+- `serial_number`: `serialNumber` is `urn:uuid:` and `aiBomSerialNumber(snapshot.id)`; else `invalid` `serial_mismatch`.
+- `supersedes`: left out for version 1. A `bundle` source above version 1: `unverifiable`
+  `earlier_snapshot_not_in_bundle`, by design (B4.8). A stored source: `valid` when the subject's snapshot of
+  `version - 1` exists and its id is `supersedes`; `invalid` `supersedes_mismatch` otherwise; `unverifiable`
+  `earlier_snapshot_not_in_bundle` (not by design) when that row has been pruned.
+- `rendering_hashes`: once per carried rendering (stored source: per `bom_renderings` row), `ref` the format. `valid`
+  when `renderings[<format>]` is `rendered` and its `sha256` and `bytes` are the file's SHA-256 and UTF-8 length;
+  `invalid` `rendering_not_in_body` when the body has no `rendered` entry for that format; `invalid` `hash_mismatch`
+  otherwise.
+- `identity` is the `ai-bom` form, `sections` is empty, and `cannotProve` is `facts_true`,
+  `signing_time_beyond_anchor` and, by B4.8, `superseded_snapshot`.
+
+**The AI BOM worked example** (TEST-ONLY; the B4.6 keys, the receipt key signing). Inputs: the install subject (nil
+subject id, R20) with `installId` null and every record list empty, `trigger` `on_demand`, `cyclonedx_export_versions`
+`["1.7"]`; snapshot A01 `ab000000-0000-4000-8000-000000000001`, version 1, captured `2026-10-10T11:00:00.000Z`; A03
+`ab000000-0000-4000-8000-000000000002`, version 2, captured `2026-10-10T11:30:00.000Z`. `buildAiBom` writes these bytes
+(on `main` @ `b19a6dc`); SPDX 3.0.1 is `rendered` too, so `…/bundle` would carry it, but the vectors use `?format=native`
+and `?format=cyclonedx-1.7` only. B4's build requirement: `apps/gateway/src/adr0189-b4-spec-example.test.ts` (or a
+sibling) rebuilds the three blocks with `buildAiBom` and compares them byte for byte, so they cannot drift.
+
+`content/ai-bom.json` of A01 (snapshot `ab000000-0000-4000-8000-000000000001`, version 1; 1571 bytes, SHA-256 `5c0205a132aeda3edefd95bfcc841fdc3111fef317187f38131600f8d0498e85`):
+
+```text b4-ai-example:v1/content/ai-bom.json
+{"compositions":[{"aggregate":"incomplete","assemblies":["install"]},{"aggregate":"incomplete","assemblies":["install"]}],"records":{"agents":[],"artifactScans":[],"builderAgents":[],"builderSkills":[],"configVersions":[],"connectors":[],"customProviders":[],"devStackTools":[],"engineRuns":[],"engines":[],"evalDatasets":[],"evalRuns":[],"grants":[],"mcpServers":[],"mcpTools":[],"memoryStores":[],"modelArtifacts":[],"modelCardApprovals":[],"modelCardEvidence":[],"modelCards":[],"promptTags":[],"releaseSboms":[],"trainingArtifacts":[],"trainingDatasets":[],"trainingJobs":[],"useCases":[]},"renderings":{"cyclonedx-1.7":{"bytes":849,"sha256":"6d6c7a7601df04683145f8354e2e8441dc42a8edda7cda9e27d8d2d5b869b2c2","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 cyclonedx-library 10.3.0 bom-1.7.SNAPSHOT.schema.json"},"spdx-3.0.1":{"bytes":3326,"sha256":"bb69d44087a694d4ca9ec9b8734d62082b3933ef9fc5d9c9ed25d3a1c4037012","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 spdx-json-schema-3.0.1 sha256:582c64e809d5b3ef9bd0c4de13a32391b47b0284a3e8d199569fb96f649234b1"}},"serialNumber":"urn:uuid:589e3cf8-69ef-8a44-acc8-a8c6bda58790","snapshot":{"basis":[],"createdAt":"2026-10-10T11:00:00.000Z","id":"ab000000-0000-4000-8000-000000000001","subjectId":"00000000-0000-0000-0000-000000000000","subjectKind":"install","supersedes":null,"trigger":"on_demand","version":1},"subject":{"installId":null,"kind":"install"},"unrecorded":[{"field":"externalReferences","reason":"release_sbom_identity_not_available","ref":"install"}],"v":"regulait.ai-bom.v1"}
+```
+
+`content/ai-bom.cyclonedx-1.7.json` of A01 (849 bytes, its `renderings["cyclonedx-1.7"]` commitment):
+
+```text b4-ai-example:v1/content/ai-bom.cyclonedx-1.7.json
+{"bomFormat":"CycloneDX","components":[],"compositions":[{"aggregate":"incomplete","assemblies":["install"],"bom-ref":"composition:0"},{"aggregate":"incomplete","assemblies":["install"],"bom-ref":"composition:1"}],"dependencies":[{"ref":"install"}],"metadata":{"component":{"bom-ref":"install","name":"RegulAIt install","properties":[{"name":"regulait:install:id","value":"not_recorded"},{"name":"regulait:subject:kind","value":"install"}],"type":"application"},"properties":[{"name":"regulait:snapshot:id","value":"ab000000-0000-4000-8000-000000000001"},{"name":"regulait:snapshot:trigger","value":"on_demand"}],"timestamp":"2026-10-10T11:00:00.000Z","tools":{"components":[{"name":"regulait-ai-bom","type":"application","version":"1"}]}},"serialNumber":"urn:uuid:589e3cf8-69ef-8a44-acc8-a8c6bda58790","services":[],"specVersion":"1.7","version":1}
+```
+
+`content/ai-bom.json` of A03 (snapshot `ab000000-0000-4000-8000-000000000002`, version 2, superseding A01; 1605 bytes, SHA-256 `113cad53dbd8130f4000991ce7b53db9aaa64e24ecda2866d1c6dda415a51eeb`):
+
+```text b4-ai-example:v2/content/ai-bom.json
+{"compositions":[{"aggregate":"incomplete","assemblies":["install"]},{"aggregate":"incomplete","assemblies":["install"]}],"records":{"agents":[],"artifactScans":[],"builderAgents":[],"builderSkills":[],"configVersions":[],"connectors":[],"customProviders":[],"devStackTools":[],"engineRuns":[],"engines":[],"evalDatasets":[],"evalRuns":[],"grants":[],"mcpServers":[],"mcpTools":[],"memoryStores":[],"modelArtifacts":[],"modelCardApprovals":[],"modelCardEvidence":[],"modelCards":[],"promptTags":[],"releaseSboms":[],"trainingArtifacts":[],"trainingDatasets":[],"trainingJobs":[],"useCases":[]},"renderings":{"cyclonedx-1.7":{"bytes":936,"sha256":"0c1536c6ce07c9d63533cf88c32ced0cab979ba75902b692b6404326a4e7583a","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 cyclonedx-library 10.3.0 bom-1.7.SNAPSHOT.schema.json"},"spdx-3.0.1":{"bytes":3326,"sha256":"06429c9d723c2ef8bf616a4c44f455135d2b30d40a354084eeb74783a93e3576","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 spdx-json-schema-3.0.1 sha256:582c64e809d5b3ef9bd0c4de13a32391b47b0284a3e8d199569fb96f649234b1"}},"serialNumber":"urn:uuid:8c36266d-1ddf-80a0-a7d1-56380ffafcc8","snapshot":{"basis":[],"createdAt":"2026-10-10T11:30:00.000Z","id":"ab000000-0000-4000-8000-000000000002","subjectId":"00000000-0000-0000-0000-000000000000","subjectKind":"install","supersedes":"ab000000-0000-4000-8000-000000000001","trigger":"on_demand","version":2},"subject":{"installId":null,"kind":"install"},"unrecorded":[{"field":"externalReferences","reason":"release_sbom_identity_not_available","ref":"install"}],"v":"regulait.ai-bom.v1"}
+```
+
+#### B4.10 Contract changes this needs (a separate PR, reviewed with B6)
+
+Not made here; `contract-b4.ts` on `main` is unchanged until that PR lands. Nothing else in the frozen contract
+changes: the manifest, descriptor, body and route shapes stay as they are.
+
+1. `BOM_VERIFY_OUTCOMES` becomes `["valid", "unverifiable", "invalid"]` (`valid_with_unverifiable` is removed; B6 has
+   not shipped, so no consumer reads it).
+2. `BOM_CANNOT_PROVE` gains `external_commitment` ("That the chain row was committed outside this deployment: this
+   BOM is chain_signed and has no anchor.") and `superseded_snapshot` ("What the snapshot this one supersedes held:
+   only its id is named, and it is not in the bundle."), appended in that order, with `BOM_CANNOT_PROVE_COPY` entries.
+3. `BOM_VERIFY_INVALID_REASONS` gains `v2_receipt_before_boundary`; the refinement that keeps v1 reasons off a v2
+   receipt also keeps this one off a v1 receipt.
+4. A pure exported `isUnverifiableByDesign(check, reason, {subject, source, receiptPayloadVersion, recordedFinality,
+   version})` holding B4.8's table, and `bomVerifyResponseSchema`'s refinement rewritten to B4.8: the three-step
+   outcome; `cannotProve` exactly the fixed list plus the conditional entries, in `BOM_CANNOT_PROVE` order; and no
+   section `unverifiable` (replacing "a section is unverifiable only through an unverifiable check it depends on").
+5. `contract-b4.test.ts`'s fixtures move from `valid_with_unverifiable` to `valid` or `unverifiable` accordingly.
 
 ### Owner items from the review (not decided here)
 
