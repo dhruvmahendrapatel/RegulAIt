@@ -36,12 +36,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([
-  // TEMPORARY (M-053): ADR-0187 B5-F ships the runner-revocation route; its
-  // button belongs to the Engines page, Codex's X26 (B5-W). Deleting this entry
-  // is part of X26's acceptance.
-  ["/v1/engine-runners/:x", "ADR-0187: revoke an engine runner — the Engines page button is X26 (Codex); remove this entry when it lands"],
-]);
+const DELIBERATELY_API_ONLY = new Map([]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {
