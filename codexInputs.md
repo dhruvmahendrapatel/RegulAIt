@@ -11,7 +11,7 @@ Independent evidence:
 
 Limits: route/config/cache reachability is source-inspected, not newly exploited; no new Trivy report or licence scan. The PR's earlier tests/audit are owner receipts, not independent reruns. First local garak inspection used the system Python and failed `PackageNotFoundError`; corrected to the image's configured venv before making version claims. Both owned containers completed and were removed.
 
-Validation: final web typecheck/build pending the shared two-lane handoff; this review changes only this ledger after composing the documentation dependency.
+Validation: `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` both exit0 on this composed head; logs `/tmp/x47-308-web-{tsc,build}.log`. This review changes only this ledger after composing the documentation dependency. Existing Vite large-chunk advisory remains.
 
 ## X42 — ADR-0190 I1 and migration 0185 independent review (2026-10-10)
 
