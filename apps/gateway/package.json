@@ -71,6 +71,7 @@
     "fastify": "^5.12.2",
     "jose": "6.2.12",
     "oauth4webapi": "3.8.8",
+    "oidc-provider": "9.12.2",
     "openid-client": "^6.8.4",
     "otpauth": "9.5.2",
     "pkijs": "3.4.1",
