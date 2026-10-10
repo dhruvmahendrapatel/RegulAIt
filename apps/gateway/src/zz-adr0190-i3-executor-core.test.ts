@@ -457,17 +457,27 @@ describe("mismatch and quarantine (decision 6)", () => {
     // a second open offer, withdrawn by the quarantine
     const second = await offerTo(r, { workloadKind: "engine_worker", profileDigest: ENGINE_WORKER_DIGEST, ttlSeconds: 300 });
     expect(second.kind).toBe("offered");
+    const secondId = (second as { offerId: string }).offerId;
     const [result] = await Promise.all([awaitPlacement(db, offerId, { pollMs: 50 }), r.run(2)]);
-    expect(result).toMatchObject({ kind: "failed", status: "mismatch", code: "execution_profile_mismatch" });
-    const sb = backend.sandboxes.find((s) => s.offerId === offerId)!;
+    // the loop handles offers concurrently (sandbox-executor loop.ts), so EITHER offer's lying report may be judged
+    // first; its quarantine withdraws the other. The first offer is therefore a mismatch itself, or withdrawn
+    // `executor_quarantined` by the second's; at least one of the two is the mismatch, and no input is ever released
+    const o1 = await offerRow(offerId);
+    const o2 = await offerRow(secondId);
+    if (o1.status === "mismatch") expect(result).toMatchObject({ kind: "failed", status: "mismatch", code: "execution_profile_mismatch" });
+    else expect(result).toMatchObject({ kind: "failed", status: "withdrawn", code: "executor_quarantined" });
+    const lying = [o1, o2].find((o) => o.status === "mismatch");
+    expect(lying, `offer statuses ${o1.status} / ${o2.status}`).toBeDefined();
+    expect(backend.sandboxes.filter((s) => (s.offerId === offerId || s.offerId === secondId) && s.released)).toHaveLength(0);
+    const sb = backend.sandboxes.find((s) => s.offerId === lying!.id)!;
     expect(sb).toMatchObject({ probed: true, released: false, killed: true });
-    expect(r.outcomes.find((o) => o.offer.id === offerId)!.outcome).toEqual({ kind: "mismatch" });
+    expect(r.outcomes.find((o) => o.offer.id === lying!.id)!.outcome).toEqual({ kind: "mismatch" });
     const ex = await executorRow(r.executorId);
     expect(ex).toMatchObject({ status: "quarantined", quarantineCode: "execution_profile_mismatch" });
     expect(ex.quarantinedAt).not.toBeNull();
-    const p = await placementRow((result as { placementId: string }).placementId);
+    const p = await placementRow(lying!.placementId!);
     expect(p).toMatchObject({ outcome: "mismatch", refusalCode: "execution_profile_mismatch", executorId: r.executorId });
-    const [mm] = await audits("execution-profile-mismatch", offerId);
+    const [mm] = await audits("execution-profile-mismatch", lying!.id);
     expect((mm!.detail as { failures: Array<{ code: string }> }).failures).toContainEqual({ probe: "no_executor_credentials", code: "credentials_reachable" });
     expect((await audits("executor-quarantined", r.executorId)).length).toBe(1);
     const alerts = await db.select().from(governanceAlerts).where(eq(governanceAlerts.subjectKey, `executor:${r.executorId}`));
@@ -475,12 +485,12 @@ describe("mismatch and quarantine (decision 6)", () => {
     expect(alerts[0]).toMatchObject({ ruleId: "execution-profile-mismatch", severity: "high", status: "open" });
     // the executor's loop saw it
     expect(r.logs.some((l) => l.includes("-> quarantined"))).toBe(true);
-    // the second offer: withdrawn by the quarantine, or (taken in the same window, by the same lying backend) judged a
+    // each offer: withdrawn by the quarantine, or (taken in the same window, by the same lying backend) judged a
     // mismatch itself; either way it ended without input (withdrawal on its own is proved by the admin quarantine below)
-    const o2 = await offerRow((second as { offerId: string }).offerId);
-    expect(["withdrawn", "mismatch"]).toContain(o2.status);
-    expect(["executor_quarantined", "execution_profile_mismatch"]).toContain((await placementRow(o2.placementId!)).refusalCode);
-    expect(backend.sandboxes.filter((s) => s.offerId === o2.id && s.released)).toHaveLength(0);
+    for (const o of [o1, o2]) {
+      expect(["withdrawn", "mismatch"]).toContain(o.status);
+      expect(["executor_quarantined", "execution_profile_mismatch"]).toContain((await placementRow(o.placementId!)).refusalCode);
+    }
     // nothing new is placed on it
     expect(await offerTo(r)).toMatchObject({ kind: "refused", code: "executor_quarantined" });
     // the stream tells a quarantined executor so, and its accept is refused
@@ -565,6 +575,112 @@ describe("mismatch and quarantine (decision 6)", () => {
     const sb = placementSandboxes(backend).filter((s) => s.offerId === offerId);
     expect(sb).toHaveLength(1);
     expect(sb[0]).toMatchObject({ released: false, killed: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #340 review (medium): accept and report judge class and status on the executor row RE-READ under a share lock in
+// their own transaction, never on the row loaded at authentication. Each case commits a change AFTER authentication has
+// read the row: the test holds the change uncommitted, so the authentication's `last_seen_at` write parks behind that
+// row lock with the OLD row already in hand; only then does the change commit. A neutral change (the same interleaving,
+// nothing that matters) is the control that the interleaving alone refuses nothing.
+describe("a change committed between authentication and the decision (accept, report)", () => {
+  type Change = "quarantined" | "lowered" | "neutral";
+  const changeSql: Record<Change, string> = {
+    quarantined: "UPDATE executors SET status = 'quarantined', quarantine_code = 'admin', quarantined_at = now(), updated_at = now() WHERE id = $1 AND status = 'active'",
+    lowered: "UPDATE executors SET declared_class = 'user_space_kernel', updated_at = now() WHERE id = $1",
+    neutral: "UPDATE executors SET updated_at = now() WHERE id = $1",
+  };
+
+  /** a transport that, for the first request to `route`, commits `change` only once that request has authenticated */
+  function interleaved(executorId: string, route: "accept" | "report", change: Change) {
+    const inner = injectHttp();
+    const seen: Array<{ status: number; body: string }> = [];
+    let armed = true;
+    const http: ExecutorHttp = async (url, init) => {
+      if (!armed || !new URL(url).pathname.endsWith(`/${route}`)) return inner(url, init);
+      armed = false;
+      const conn = await db.$client.connect();
+      try {
+        await conn.query("BEGIN");
+        expect((await conn.query(changeSql[change], [executorId])).rowCount).toBe(1);
+        const pending = inner(url, init);
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const { rows: waiting } = await db.$client.query<{ n: number }>(
+            `SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'update "executors" set "last_seen_at"%'`,
+          );
+          if (waiting[0]!.n > 0) break;
+          if (Date.now() > deadline) throw new Error("the request never parked behind the executor row lock");
+          await new Promise((res) => setTimeout(res, 10));
+        }
+        await conn.query("COMMIT");
+        const res = await pending;
+        const body = await res.text();
+        seen.push({ status: res.status, body });
+        return { status: res.status, text: async () => body };
+      } catch (e) {
+        await conn.query("ROLLBACK").catch(() => undefined);
+        throw e;
+      } finally {
+        conn.release();
+      }
+    };
+    return { http, seen };
+  }
+
+  it.each([
+    ["accept", "quarantined"],
+    ["accept", "lowered"],
+    ["accept", "neutral"],
+    ["report", "quarantined"],
+    ["report", "lowered"],
+    ["report", "neutral"],
+  ] as const)("%s, with the executor %s after authentication", async (route, change) => {
+    // a customer plane mapped to microvm, taking a microvm offer: lowering the mapping puts the call below its class
+    const r = await rig(`stale-${route}-${change}`, { backend: new FakeSandboxBackend({ backend: "customer" }) });
+    expect((await inject("PUT", `/v1/executors/${r.executorId}/declared-class`, adminAuth, { class: "microvm" })).statusCode).toBe(200);
+    await r.run(1);
+    const offered = await offerTo(r, { workloadKind: "byoc_worker", requiredClass: "microvm", ttlSeconds: 60 });
+    expect(offered).toMatchObject({ kind: "offered", attestedClass: "customer_declared" });
+    const offerId = (offered as { offerId: string }).offerId;
+    const { http, seen } = interleaved(r.executorId, route, change);
+    const client = new ExecutorClient({ gatewayUrl: ISSUER, credential: r.credential, http });
+    await runExecutorLoop({ client, backend: r.backend, credential: r.credential, maxWindows: 2, streamWindowSeconds: 1, backoffMs: 5, maxBackoffMs: 10 });
+    expect(seen, "the interleaved request was made").toHaveLength(1);
+    const res = { status: seen[0]!.status, json: JSON.parse(seen[0]!.body) as { error?: string; failures?: Array<{ code: string }> } };
+    const o = await offerRow(offerId);
+    const released = placementSandboxes(r.backend).filter((s) => s.offerId === offerId && s.released);
+    if (change === "neutral") {
+      // the control: the same interleaving with nothing that matters committed places the call
+      expect(res.status, seen[0]!.body).toBe(200);
+      expect(["placed", "ended"]).toContain(o.status);
+      expect(await audits("execution-placed", offerId)).toHaveLength(1);
+      return;
+    }
+    // never placed, never released, whatever the route
+    if (route === "accept") expect(["accepted", "placed", "ended", "mismatch"]).not.toContain(o.status);
+    expect(["placed", "ended"]).not.toContain(o.status);
+    expect(await audits("execution-placed", offerId)).toHaveLength(0);
+    expect(released).toHaveLength(0);
+    expect(res.status, seen[0]!.body).toBe(409);
+    if (change === "quarantined") {
+      // fail-closed with the existing refusal; the row the transaction re-read says so
+      expect(res.json.error).toBe("executor_quarantined");
+      expect((await executorRow(r.executorId)).status).toBe("quarantined");
+      if (route === "report") expect(o.status).toBe("accepted");
+    } else if (route === "accept") {
+      expect(res.json.error).toBe("class_below_required");
+    } else {
+      // the report's class falls below the requirement through the fresh mapping: a mismatch, audited, quarantined
+      expect(res.json.error).toBe("execution_profile_mismatch");
+      expect(res.json.failures).toContainEqual({ probe: "report", code: "class_below_required" });
+      expect(o.status).toBe("mismatch");
+      const [mm] = await audits("execution-profile-mismatch", offerId);
+      expect((mm!.detail as { failures: Array<{ code: string }> }).failures).toContainEqual({ probe: "report", code: "class_below_required" });
+      expect((await executorRow(r.executorId)).status).toBe("quarantined");
+    }
   });
 });
 
