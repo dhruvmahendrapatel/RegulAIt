@@ -159,6 +159,17 @@ export async function databaseNow(db: DbOrTx): Promise<Date> {
   return new Date(Number(r.rows[0]!.ms));
 }
 
+/**
+ * The database's WALL clock (`clock_timestamp()`), for a decision taken after waiting on a row lock
+ * (X43 I7S3-01): `now()` is the transaction's START, so a transaction that waited on the parent's lock
+ * past the parent's expiry would still judge it live. Every liveness and expiry decision taken after a
+ * lock is judged by this, sampled once the locks are held.
+ */
+export async function databaseWallNow(db: DbOrTx): Promise<Date> {
+  const r = await db.execute<{ ms: number | string }>(sql`select (extract(epoch from clock_timestamp()) * 1000)::float8 as ms`);
+  return new Date(Number(r.rows[0]!.ms));
+}
+
 /** the facts about an identity and its subject that decide whether it is in service */
 export interface IdentityServiceFacts {
   kind: string;
@@ -311,6 +322,7 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, nowIn?: Dat
     const consistent =
       complete &&
       g.depth === i &&
+      g.depth <= g.depthLimit &&
       (parent === null
         ? g.parentGrantId === null && g.rootGrantId === g.id && g.path.length === 0
         : g.parentGrantId === parent.id &&
@@ -323,6 +335,7 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, nowIn?: Dat
           g.builderTurnId === parent.builderTurnId &&
           g.engineRunId === parent.engineRunId &&
           g.scheduleId === parent.scheduleId &&
+          g.depthLimit <= parent.depthLimit &&
           g.expiresAt.getTime() <= parent.expiresAt.getTime());
     const authCred = r.authCredential?.id ? r.authCredential : null;
     const serviceFailure = identityServiceFailure(
@@ -514,7 +527,16 @@ interface CommonGrantInput {
   scope: DelegationScope;
   /** integer micro-dollars; null = uncapped */
   capMicros: number | null;
-  expiresAt: Date;
+  /**
+   * The grant's expiry: EITHER an absolute `expiresAt` (an external request that signed one) OR a lifetime
+   * `ttlMs`, which is turned into an expiry INSIDE the transaction from the database's wall clock sampled
+   * after the locks (S4 review M1, M-075: never a gateway clock), capped by `notAfter` and, for a child, by
+   * the parent's own expiry.
+   */
+  expiresAt?: Date;
+  ttlMs?: number;
+  /** with `ttlMs`: the expiry is at most this (e.g. a run's stored deadline) */
+  notAfter?: Date | null;
   binding: GrantBinding;
   /** decision 12: the credential behind the parent's proof (child) or the human delegation proof's id (root) */
   subjectCredentialId?: string | null;
@@ -524,6 +546,11 @@ interface CommonGrantInput {
 }
 export interface CreateRootGrantInput extends CommonGrantInput {
   sponsorUserId: string;
+  /**
+   * decision 23 `max_depth` for a root: how many delegations may follow it. Absent = the org's
+   * `delegation_max_depth`; more than that is refused. Stored as the absolute `depth_limit` (migration 0184).
+   */
+  maxFurtherDepth?: number;
   environment: string;
   projectId: string | null;
   context?: GrantContext;
@@ -534,8 +561,10 @@ export interface AdmitChildGrantInput extends CommonGrantInput {
   idempotencyKey: string;
   /**
    * decision 23 `max_depth`: how many further delegations the child may make.
-   * Checked against `delegation_max_depth` at admission (the child's depth plus
-   * this may not exceed it). Not stored: below the child, the org setting caps.
+   * STORED (migration 0184) as the absolute `depth_limit = min(parent.depth_limit,
+   * child.depth + max_depth)`, so every descendant is bound by it, not only this
+   * admission. A value past the parent's limit or the org setting is refused,
+   * never narrowed. Absent = inherit the parent's limit.
    */
   maxFurtherDepth?: number;
   /**
@@ -545,6 +574,21 @@ export interface AdmitChildGrantInput extends CommonGrantInput {
    */
   environment: string;
   projectId: string | null;
+}
+
+/** the expiry a request asks for, judged by `now` (the transaction's wall clock); see `CommonGrantInput` */
+function effectiveExpiry(input: CommonGrantInput, now: Date, parentExpiresAt: Date | null): Date {
+  if (input.ttlMs !== undefined) {
+    if (input.expiresAt !== undefined || !Number.isSafeInteger(input.ttlMs) || input.ttlMs <= 0) {
+      return refuse("delegation-request-invalid", "lifetime_invalid", "a grant names either an expiry or a positive lifetime, not both");
+    }
+    let ms = now.getTime() + input.ttlMs;
+    if (input.notAfter) ms = Math.min(ms, input.notAfter.getTime());
+    if (parentExpiresAt) ms = Math.min(ms, parentExpiresAt.getTime());
+    return new Date(ms);
+  }
+  if (!input.expiresAt) return refuse("delegation-request-invalid", "lifetime_invalid", "a grant names an expiry or a lifetime");
+  return input.expiresAt;
 }
 
 function validateCommon(input: CommonGrantInput, now: Date): void {
@@ -661,10 +705,20 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
     refuse("delegation-request-invalid", "context_invalid", "a grant is made for at most one run context");
   }
   return db.transaction(async (tx) => {
-    // the database clock: `created_at` and every window below are judged by it (a test may pin `now`)
-    const now = input.now ?? (await databaseNow(tx));
+    // the database's wall clock (X43 I7S3-01: never a transaction-start sample): `created_at` and every
+    // window below are judged by it (a test may pin `now`)
+    const now = input.now ?? (await databaseWallNow(tx));
+    input = { ...input, expiresAt: effectiveExpiry(input, now, null) };
     validateCommon(input, now);
     await checkActorSponsorScope(tx, input, now);
+    const org = await loadOrgSettings(tx as unknown as Db);
+    let depthLimit = Math.min(org.delegationMaxDepth, DELEGATION_DEPTH_CEILING);
+    if (input.maxFurtherDepth !== undefined) {
+      if (!Number.isInteger(input.maxFurtherDepth) || input.maxFurtherDepth < 0 || input.maxFurtherDepth > depthLimit) {
+        refuse("delegation-depth", "delegation_depth", `a root may allow at most ${depthLimit} further delegations`);
+      }
+      depthLimit = input.maxFurtherDepth;
+    }
     const id = randomUUID();
     const [row] = await tx
       .insert(delegationGrants)
@@ -674,6 +728,7 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
         parentGrantId: null,
         path: [],
         depth: 0,
+        depthLimit,
         sponsorUserId: input.sponsorUserId,
         actorIdentityId: input.actorIdentityId,
         runId: ctx.runId ?? null,
@@ -685,7 +740,7 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
         capMicros: input.capMicros,
         environment: input.environment,
         subjectCredentialId: input.subjectCredentialId ?? null,
-        expiresAt: input.expiresAt,
+        expiresAt: input.expiresAt!,
         createdAt: now,
         ...bindingColumns(input.binding),
       })
@@ -712,6 +767,7 @@ async function auditGrantCreated(tx: Tx, g: DelegationGrantRow, phase: "create" 
       parentGrantId: g.parentGrantId,
       path: g.path,
       depth: g.depth,
+      depthLimit: g.depthLimit,
       actorIdentityId: g.actorIdentityId,
       projectId: g.projectId,
       environment: g.environment,
@@ -733,12 +789,13 @@ function sameChildRequest(child: DelegationGrantRow, input: AdmitChildGrantInput
   const subjectCredential = input.subjectCredentialId ? input.subjectCredentialId.toLowerCase() : null;
   return (
     child.actorIdentityId === input.actorIdentityId &&
+    (input.maxFurtherDepth === undefined || child.depthLimit === child.depth + input.maxFurtherDepth) &&
     (child.subjectCredentialId?.toLowerCase() ?? null) === subjectCredential &&
     // the same authority (jsonb does not keep key order, so compare meaning, both ways)
     scopeSubset(child.scope, input.scope) &&
     scopeSubset(input.scope, child.scope) &&
     child.capMicros === input.capMicros &&
-    child.expiresAt.getTime() === input.expiresAt.getTime() &&
+    child.expiresAt.getTime() === input.expiresAt!.getTime() &&
     child.bindingKind === b.bindingKind &&
     child.bindingThumbprint === b.bindingThumbprint &&
     child.authCredentialId === b.authCredentialId &&
@@ -762,10 +819,12 @@ export async function admitChildGrant(
     refuse("delegation-request-invalid", "idempotency_key_invalid", "an idempotency key is 1 to 200 characters");
   }
   return db.transaction(async (tx) => {
-    const now = input.now ?? (await databaseNow(tx));
-    validateCommon(input, now);
     const [parent] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, input.parentGrantId)).for("update");
     if (!parent) return refuse("actor-chain-invalid", "parent_not_found", `no delegation grant ${input.parentGrantId}`);
+    // X43 I7S3-01: the clock is sampled AFTER the parent's lock is held (a wait past its expiry refuses)
+    const now = input.now ?? (await databaseWallNow(tx));
+    input = { ...input, expiresAt: effectiveExpiry(input, now, parent.expiresAt) };
+    validateCommon(input, now);
     if (input.environment !== parent.environment || input.projectId !== parent.projectId) {
       refuse("delegation-request-invalid", "delegation_body_mismatch", "the requested environment or project is not the parent's (a child inherits both)");
     }
@@ -812,15 +871,21 @@ export async function admitChildGrant(
     if (depth > org.delegationMaxDepth || depth > DELEGATION_DEPTH_CEILING) {
       refuse("delegation-depth", "delegation_depth", `depth ${depth} is past the delegation limit ${org.delegationMaxDepth}`);
     }
+    // the PARENT's stored limit (decision 23 max_depth, migration 0184): a child of a `max_depth: 0` grant is refused
+    if (depth > parent.depthLimit) {
+      refuse("delegation-depth", "delegation_depth", `depth ${depth} is past the depth its parent was authorised to delegate (${parent.depthLimit})`);
+    }
+    let depthLimit = Math.min(parent.depthLimit, org.delegationMaxDepth);
     if (input.maxFurtherDepth !== undefined) {
-      if (!Number.isInteger(input.maxFurtherDepth) || input.maxFurtherDepth < 0 || depth + input.maxFurtherDepth > org.delegationMaxDepth) {
-        refuse("delegation-depth", "delegation_depth", `a child at depth ${depth} may delegate at most ${Math.max(0, org.delegationMaxDepth - depth)} further`);
+      if (!Number.isInteger(input.maxFurtherDepth) || input.maxFurtherDepth < 0 || depth + input.maxFurtherDepth > depthLimit) {
+        refuse("delegation-depth", "delegation_depth", `a child at depth ${depth} may delegate at most ${Math.max(0, depthLimit - depth)} further`);
       }
+      depthLimit = depth + input.maxFurtherDepth;
     }
     if (!scopeSubset(input.scope, parent.scope)) {
       refuse("delegation-scope", "outside_parent_scope", "the requested scope is wider than the parent's");
     }
-    if (input.expiresAt.getTime() > parent.expiresAt.getTime()) {
+    if (input.expiresAt!.getTime() > parent.expiresAt.getTime()) {
       refuse("delegation-scope", "outlives_parent", "a child never outlives its parent");
     }
     const parentRemaining = remainingMicros(parent);
@@ -841,6 +906,7 @@ export async function admitChildGrant(
         parentGrantId: parent.id,
         path: [...parent.path, parent.id],
         depth,
+        depthLimit,
         sponsorUserId: parent.sponsorUserId,
         actorIdentityId: input.actorIdentityId,
         runId: parent.runId,
@@ -852,7 +918,7 @@ export async function admitChildGrant(
         capMicros: input.capMicros,
         environment: parent.environment,
         subjectCredentialId: input.subjectCredentialId ?? null,
-        expiresAt: input.expiresAt,
+        expiresAt: input.expiresAt!,
         createdAt: now,
         ...bindingColumns(input.binding),
       })
@@ -983,8 +1049,6 @@ export async function revokeDelegationGrant(
   input: { grantId: string; reason: DelegationRevokeReason; actorUserId?: string | null; now?: Date },
 ): Promise<{ revokedGrantIds: string[]; releasedMicros: number }> {
   return db.transaction(async (tx) => {
-    const now = input.now ?? (await databaseNow(tx));
-    const at = sql`${now.toISOString()}::timestamptz`;
     const [g] = await tx.select().from(delegationGrants).where(eq(delegationGrants.id, input.grantId));
     if (!g) throw new DelegationRefusedError("actor-chain-invalid", "grant_not_found", `no delegation grant ${input.grantId}`);
     // lock the parent and the whole subtree in one order (depth, then id)
@@ -1000,6 +1064,9 @@ export async function revokeDelegationGrant(
       )
       .orderBy(asc(delegationGrants.depth), asc(delegationGrants.id))
       .for("update");
+    // X43 I7S3-01: the clock is sampled once the subtree's locks are held
+    const now = input.now ?? (await databaseWallNow(tx));
+    const at = sql`${now.toISOString()}::timestamptz`;
     // a grant that has already EXPIRED (database clock) ended on its own: it is not stamped revoked, so its
     // record keeps saying how it really ended; only its edges are closed below (PR #279 review)
     const revoked = await tx

@@ -871,6 +871,7 @@ export class ModelBackedRecommendationJudge implements RecommendationJudge {
   }
 
   async judge(reqs: RecommendationJudgeRequest[]): Promise<RecommendationJudgeReply[]> {
+    // ADR-0188 S4: the platform's recommendation judge: one call per review for the person, no agent principal acts — decided as the person (no delegation grant).
     const outcome = await executeGovernedDispatch(this.db, this.dataKey, {
       userId: this.ctx.userId,
       served: this.ctx.agent,

@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { auditLog, mcpServers } from "@regulait/db"; // ADR-0181 (SC): seedStrictAdmission
 import { buildApp } from "./app.js";
+import { ensureIdentityFor } from "./in-process-delegation.js";
 import { seedBuiltinEvalDatasets } from "./eval-builtin-datasets.js";
 import { ensureEphemeralLicense } from "./ephemeral-license.js";
 import { dataKeyFormatError } from "./secrets.js";
@@ -214,6 +215,27 @@ for (const userId of [adminId, danaId, averyId]) {
   for (const agentId of Object.values(agentIds)) {
     await call("POST", "/v1/grants/agents", { userId, agentId }); // 409 dup = fine
   }
+}
+
+// ADR-0188 S4 (OWNER DECISION 1): under the strict `own_grants` default an agent acts only within grants OF
+// ITS OWN, and nothing is grandfathered (ADR-0180). The demo grants each seeded agent itself, in the modes the
+// demo uses, through the real admin route (`PUT /v1/workload-identities/:id/grants`, an `identity_manage`
+// step-up the bootstrap credential passes during first-admin setup — so this runs before Ada enrols). The
+// identity is the one the first-load step gives every agent. Converges on re-seed: an identity that already
+// holds a grant on itself is left alone, so an admin's later edits are never overwritten.
+const DEMO_AGENT_MODES = ["plan", "execute", "chat", "review", "ask", "read"];
+for (const agentId of Object.values(agentIds)) {
+  const identity = await ensureIdentityFor(db, { kind: "agent", id: agentId });
+  const current = await call("GET", `/v1/workload-identities/${identity.id}/grants`);
+  if ((current.agents ?? []).some((g: Json) => g.agentId === agentId)) continue;
+  await call("PUT", `/v1/workload-identities/${identity.id}/grants`, {
+    revision: current.revision,
+    tools: current.tools ?? [],
+    servers: current.servers ?? [],
+    connectors: current.connectors ?? [],
+    roleIds: current.roleIds ?? [],
+    agents: [...(current.agents ?? []), { agentId, allowedModes: DEMO_AGENT_MODES }],
+  });
 }
 
 /** the agents whose stewardship review Ada records today, once her key exists */

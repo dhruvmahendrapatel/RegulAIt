@@ -60,6 +60,7 @@ import { engineRunTestHooks, engineRuntime, runEngineRunSweep, runEngineSchedule
 import { recordVirtualKeySpend } from "./virtual-keys.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { relaxAgentEntitlementsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 
@@ -92,6 +93,10 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreIdentity: (() => Promise<void>) | undefined;
 let restoreGates: (() => Promise<void>) | undefined;
+// ADR-0188 S4: engine runners register throughout this file (and through the real runner loop), so granting
+// each runner identity its target agents in the fixture is impractical; the file runs `sponsor_only`
+// (every delegation term still applies) and restores the strict default in afterAll.
+let restoreAgentEntitlements: (() => Promise<void>) | undefined;
 let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean } | null = null;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
 let alice: { id: string; key: { authorization: string } };
@@ -235,6 +240,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreAgentEntitlements = await relaxAgentEntitlementsForTest(db);
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), engines: { manifest: MANIFEST, gatewayBaseUrl: GATEWAY_BASE } });
   await app.ready();
@@ -297,6 +303,7 @@ afterAll(async () => {
   await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test suite finished' WHERE revoked_at IS NULL`);
   await db.update(orgSettings).set({ ...BATCH5_STRICT_DEFAULTS }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   await restoreGates?.();
+  await restoreAgentEntitlements?.();
   await restoreIdentity?.();
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
   else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;

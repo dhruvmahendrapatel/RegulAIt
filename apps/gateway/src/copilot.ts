@@ -616,7 +616,7 @@ async function lookupEntityCandidate(
       if (!actor.isAdmin) {
         const decision = evaluateConnector({
           userId: actor.userId,
-          actor: null, // ADR-0188 S4 replaces
+          actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
           // ADR-0124 — listing which connectors the actor may use. Visibility.
           execution: EVALUATION_ONLY_EXECUTION,
           connectorId: c.id,
@@ -1437,6 +1437,7 @@ export class ModelBackedNarrator implements CopilotNarrator {
   }
 
   async narrate(req: CopilotNarrationRequest): Promise<CopilotNarration> {
+    // ADR-0188 S4: the copilot's narration of one question the person asked: one model call made for that person directly, no agent principal acts — decided as the person (no delegation grant).
     const outcome = await executeGovernedDispatch(this.db, this.dataKey, {
       userId: this.ctx.userId,
       served: this.ctx.agent,
@@ -1508,7 +1509,7 @@ export async function agentDecision(
   }
   const decision = evaluateAgent({
     userId,
-    actor: null, // ADR-0188 S4 replaces
+    actor: null, // ADR-0188 S4: the person's own decision; agent paths decide with their delegation grant in the governed core
     // ADR-0124 — the copilot's narrator really dispatches, and its own comment
     // says it "is not exempt from anything". A halt is no exception.
     execution: { ...postureOf(await loadExecutionMode(db), agentHaltOf(agent)), ...(await literacySlot(db, userId)) },

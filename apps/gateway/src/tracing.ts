@@ -48,6 +48,7 @@
  * let an operator keep prompts for a year under a framework that says ninety
  * days, which is the exact drift a cascade exists to prevent.
  */
+import { actorColumns } from "./in-process-delegation.js";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
@@ -312,6 +313,8 @@ export async function recordSpan(
     const [row] = await db
       .insert(traceSpans)
       .values({
+        // ADR-0188 S4 (decision 9): a span recorded while an agent acts names it
+        ...actorColumns(),
         traceId: ctx.traceId,
         parentSpanId: args.parentSpanId === undefined ? ctx.parentSpanId : args.parentSpanId,
         seq: counted.seq,

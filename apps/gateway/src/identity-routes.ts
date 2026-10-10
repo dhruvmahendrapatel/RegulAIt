@@ -11,6 +11,11 @@
  * rotate, revoke), over `identity-signing-keys.ts`. Every other route below is
  * still the S1 stub.
  *
+ * BUILT IN S4 (`workload-identity-admin.ts`): the identity list and detail, and
+ * an identity's own grant set (read, and replace under an `identity_manage`
+ * step-up), because S4 switches the agent paths on under the strict default
+ * and an admin must be able to grant.
+ *
  * Public (no RegulAIt credential; each authenticates IN-ROUTE once built):
  *   GET  /.well-known/jwks.json             the issuer's public keys (S3, built)
  *   POST /oauth/token                       RFC 8693 token exchange (S5): client
@@ -48,6 +53,7 @@ import {
   revokeIdentitySigningKey,
   rotateIdentitySigningKey,
 } from "./identity-signing-keys.js";
+import { workloadIdentityAdminHandlers } from "./workload-identity-admin.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const kidParam = z.object({ kid: z.string().regex(IDENTITY_SIGNING_KID_PATTERN) });
@@ -66,6 +72,7 @@ function signingKeyRefusal(reply: FastifyReply, err: unknown) {
 
 export function registerIdentityRoutes(app: FastifyInstance, db: Db): void {
   const notBuilt = async (_req: unknown, reply: FastifyReply) => reply.status(501).send(IDENTITY_NOT_BUILT);
+  const s4 = workloadIdentityAdminHandlers(db);
   // public: the issuer's PUBLIC keys (decision 5) — active, and retired ones
   // inside their overlap; never a revoked key. Short cache: a revocation must
   // reach verifiers quickly.
@@ -79,16 +86,16 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db): void {
   // a person acting for themselves
   app.post("/v1/delegations/proofs", notBuilt);
   // admin: identities, credentials, an agent's own grants
-  app.get("/v1/workload-identities", notBuilt);
+  app.get("/v1/workload-identities", s4.list);
   app.post("/v1/workload-identities", notBuilt);
-  app.get("/v1/workload-identities/:identityId", notBuilt);
+  app.get("/v1/workload-identities/:identityId", s4.get);
   app.patch("/v1/workload-identities/:identityId", notBuilt);
   app.post("/v1/workload-identities/:identityId/revoke", notBuilt);
   app.get("/v1/workload-identities/:identityId/credentials", notBuilt);
   app.post("/v1/workload-identities/:identityId/credentials", notBuilt);
   app.delete("/v1/workload-identities/:identityId/credentials/:credentialId", notBuilt);
-  app.get("/v1/workload-identities/:identityId/grants", notBuilt);
-  app.put("/v1/workload-identities/:identityId/grants", notBuilt);
+  app.get("/v1/workload-identities/:identityId/grants", s4.getGrants);
+  app.put("/v1/workload-identities/:identityId/grants", s4.putGrants);
   app.get("/v1/workload-identities/:identityId/grant-proposals", notBuilt);
   // admin: what the identity forms may offer (sponsors, subjects, environments, grant targets)
   app.get("/v1/identity/picker-sources", notBuilt);
