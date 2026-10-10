@@ -60,7 +60,8 @@ export function EngineScanEvidenceChip(props: { scan: ArtifactScan | null | unde
     );
   }
   const status = scanStatus(scan, props.artifact ?? null);
-  const to = `/admin/admission?tab=artifacts&artifact=${encodeURIComponent(scan.artifactId)}`;
+  // B5W-01: the link names THIS scan, so the page shows it and not a newer one
+  const to = `/admin/admission?tab=artifacts&artifact=${encodeURIComponent(scan.artifactId)}&scan=${encodeURIComponent(scan.id)}`;
   return (
     <span className={m.chip} data-testid="engine-scan-chip">
       <ScanStatusBadge status={status} />

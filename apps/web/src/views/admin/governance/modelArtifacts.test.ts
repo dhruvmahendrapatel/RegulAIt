@@ -9,10 +9,15 @@ import { ApiError } from "../../../api/client";
 import {
   SCAN_CHIP,
   findingSentence,
+  findingSeverity,
+  severityLabel,
+  chooseScan,
   latestScan,
+  scanFindings,
   nameMismatch,
   preUploadRefusal,
   refusalText,
+  retentionText,
   safeFindingId,
   scanStatus,
   statusWord,
@@ -166,7 +171,37 @@ describe("the upload", () => {
   it("refusal sentences: known codes get ours, others the client's", () => {
     expect(refusalText(new ApiError(413, { error: "artifact_too_large", detail: "the limit is 512 MiB" }))).toMatch(/over the organisation's model-artifact size limit.*\(the limit is 512 MiB\)/);
     expect(refusalText(new ApiError(503, { error: "artifact_store_unavailable" }))).toMatch(/no model-artifact store/);
-    expect(refusalText(new ApiError(409, { error: "artifact_quota_exceeded" }))).toMatch(/Artifact quota exceeded/i);
+    expect(refusalText(new ApiError(409, { error: "artifact_shelf_full" }))).toMatch(/Artifact shelf full/i);
+  });
+
+  it("quota refusals: separate wording for a count and for bytes, for the uploader and the deployment", () => {
+    const q = (status: number, p: Record<string, unknown>) => refusalText(new ApiError(status, { error: "artifact_quota_exceeded", detail: "raw detail", ...p }));
+    expect(q(409, { scope: "uploader", measure: "count", limit: 20, used: 20 })).toBe(
+      "Storing this would take your model artifacts past the limit of 20 artifacts (20 stored). Delete artifacts you no longer need, or an admin may raise the quota (the change needs a step-up). Nothing of this upload was kept.",
+    );
+    expect(q(413, { scope: "uploader", measure: "bytes", limit: 2048 * MIB, used: 2000 * MIB })).toMatch(/^Storing this would take your model artifacts past the limit of 2\.00 GiB \(1\.95 GiB stored\)\./);
+    expect(q(409, { scope: "org", measure: "count", limit: 1000, used: 1000 })).toMatch(/^Storing this would take this deployment's model artifacts past the limit of 1000 artifacts/);
+    expect(q(413, { scope: "org", measure: "bytes", limit: 10 * MIB, used: "x" })).toMatch(/past the limit of 10\.0 MiB\. Delete/);
+    // a shape this page does not know still reads as a quota refusal, never the raw detail
+    expect(q(409, {})).toMatch(/^Storing this would exceed a model-artifact storage quota\./);
+    expect(q(409, {})).not.toContain("raw detail");
+  });
+
+  it("artifact_in_use is a fixed sentence", () => {
+    expect(refusalText(new ApiError(409, { error: "artifact_in_use", citedScans: 1, unfinishedRuns: 0, detail: "server words" }))).toBe(
+      "This artifact is still in use, so it was not deleted: a scan of it is cited as model-card evidence, or a run on it has not finished. Detach the evidence from the model card or wait for the run to end, then delete it.",
+    );
+  });
+
+  it("retention states the setting and the first date the sweep may delete it", () => {
+    expect(retentionText("2026-10-01T12:00:00.000Z", 30, true)).toMatch(/^Kept for 30 days\. It may be deleted from Oct 31, 2026, unless a scan of it is cited/);
+    // B5W-09: an unread setting promises no lifetime and no date
+    const unread = retentionText("2026-10-01T12:00:00.000Z", 30, false);
+    expect(unread).toMatch(/^The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here\./);
+    expect(unread).toMatch(/the strict default is 30 days/);
+    expect(unread).not.toMatch(/Kept for/);
+    expect(unread).not.toMatch(/Oct 31, 2026|deleted from/);
+    expect(unread).toMatch(/never deletes an artifact while a scan of it is cited as model-card evidence or a run on it is unfinished/);
   });
 
   it("posts raw bytes as octet-stream with the CSRF header, reports progress, and turns a refusal into an ApiError", async () => {
@@ -209,5 +244,120 @@ describe("the upload", () => {
     const refused = await uploadModelArtifact(blob, { filename: "m.pkl", xhr: fake }).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(ApiError);
     expect((refused as ApiError).status).toBe(413);
+  });
+});
+
+describe("X30 review: B5W-01 the cited scan, never the newest in its place", () => {
+  const r1 = scan({ id: "11111111-r1", engineRunId: "run-1", verdict: "unknown", format: "pickle", admissible: false, createdAt: "2026-10-01T00:00:00Z" });
+  const r2 = scan({ id: "22222222-r2", engineRunId: "run-2", createdAt: "2026-10-09T00:00:00Z" });
+  it("a link naming the older inconclusive scan shows that scan, not the newer clean one", () => {
+    const c = chooseScan([r2, r1], { scanId: r1.id, runId: "run-1" });
+    expect(c).toEqual({ kind: "cited", scan: r1 });
+    expect(scanStatus(c.kind === "cited" ? c.scan : null, SAFETENSORS).clean).toBe(false);
+  });
+  it("an older link that carries only the run is matched by it", () => {
+    expect(chooseScan([r2, r1], { runId: "run-1" })).toEqual({ kind: "cited", scan: r1 });
+  });
+  it("a citation that matches nothing is unavailable, never the latest", () => {
+    expect(chooseScan([r2, r1], { scanId: "gone" })).toEqual({ kind: "cited_missing", scanId: "gone", runId: null });
+    expect(chooseScan([r2, r1], { runId: "run-9" }).kind).toBe("cited_missing");
+    expect(chooseScan(undefined, { scanId: "gone" }).kind).toBe("cited_missing");
+  });
+  it("with nothing cited, the newest", () => {
+    expect(chooseScan([r1, r2], {})).toEqual({ kind: "latest", scan: r2 });
+  });
+});
+
+describe("X30 review: B5W-06 a malformed scan record is inconclusive, never clean, and never throws", () => {
+  const bad: unknown[] = [undefined, null, "none", {}, [null], [{ kind: 1, id: "x" }], [{ kind: "unsafe_operator" }]];
+  for (const findings of bad) {
+    it(`findings = ${JSON.stringify(findings) ?? "undefined"}`, () => {
+      const s = scan({ findings: findings as never });
+      const st = scanStatus(s, SAFETENSORS);
+      expect(st).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown });
+      expect(st.reasons[0]).toMatch(/incomplete or malformed/);
+      expect(scanFindings(s)).toEqual([]);
+    });
+  }
+  it("a record with no verdict is inconclusive too", () => {
+    expect(scanStatus(scan({ verdict: undefined as never }), SAFETENSORS).clean).toBe(false);
+  });
+});
+
+describe("X30 review: B5W-08 a finding's severity is validated, never rendered raw", () => {
+  const bad: unknown[] = [{ untrusted: "synthetic" }, ["high"], undefined, null, 3, "HIGH", "severe", "info"];
+  for (const severity of bad) {
+    it(`severity = ${JSON.stringify(severity) ?? "undefined"} reads as "unknown severity" and the scan is inconclusive`, () => {
+      expect(findingSeverity(severity)).toBeNull();
+      expect(severityLabel(severity)).toBe("unknown severity");
+      const st = scanStatus(scan({ verdict: "clean", findings: [{ kind: "scan_error", id: "synthetic_error", severity } as never] }), SAFETENSORS);
+      expect(st).toMatchObject({ clean: false, admissible: false, label: SCAN_CHIP.unknown });
+      expect(st.reasons[0]).toBe("A finding has an unknown or malformed severity, so the scan is treated as inconclusive.");
+      expect(st.reasons.join(" ")).not.toContain("synthetic\"");
+      // the finding still lists (the record is not dropped)
+      expect(scanFindings(scan({ findings: [{ kind: "scan_error", id: "synthetic_error", severity } as never] }))).toHaveLength(1);
+    });
+  }
+  it("an unsafe verdict stays unsafe, with the severity in fixed words", () => {
+    const st = scanStatus(scan({ verdict: "unsafe", format: "pickle", admissible: false, findings: [{ kind: "unsafe_operator", id: "os.system", severity: { x: 1 } } as never] }), PICKLE);
+    expect(st).toMatchObject({ clean: false, label: SCAN_CHIP.unsafe });
+    expect(st.reasons[0]).toBe("An unsafe operator was found: os.system (unknown severity).");
+  });
+  it("valid severities stay readable", () => {
+    for (const s of ["critical", "high", "medium", "low"]) expect(severityLabel(s)).toBe(s);
+  });
+});
+
+describe("X30 review: B5W-04 the upload and its abort signal", () => {
+  it("a signal already aborted rejects at once and sends nothing", async () => {
+    let made = 0;
+    const ctl = new AbortController();
+    ctl.abort();
+    const started = Date.now();
+    const out = await Promise.race([
+      uploadModelArtifact(new Blob([new Uint8Array([1])]), {
+        filename: "x",
+        signal: ctl.signal,
+        xhr: () => {
+          made += 1;
+          throw new Error("no request may be made");
+        },
+      }).catch((e: unknown) => e),
+      new Promise((r) => setTimeout(() => r("pending"), 500)),
+    ]);
+    expect(out).toBeInstanceOf(Error);
+    expect((out as Error).message).toMatch(/Upload cancelled/);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(made).toBe(0);
+  });
+
+  it("the abort listener is removed once the upload settles", async () => {
+    let aborts = 0;
+    const fake = () => {
+      const x = {
+        upload: {} as Record<string, unknown>,
+        withCredentials: false,
+        status: 0,
+        responseText: "",
+        onload: null as null | (() => void),
+        onerror: null as null | (() => void),
+        onabort: null as null | (() => void),
+        open: () => undefined,
+        setRequestHeader: () => undefined,
+        abort: () => {
+          aborts += 1;
+        },
+        send: () => {
+          x.status = 201;
+          x.responseText = JSON.stringify({ artifact: { id: "a1" } });
+          x.onload?.();
+        },
+      };
+      return x as unknown as XMLHttpRequest;
+    };
+    const ctl = new AbortController();
+    await uploadModelArtifact(new Blob([new Uint8Array([1])]), { filename: "x", signal: ctl.signal, xhr: fake });
+    ctl.abort();
+    expect(aborts).toBe(0);
   });
 });
