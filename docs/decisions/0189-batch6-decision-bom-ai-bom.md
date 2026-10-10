@@ -445,6 +445,10 @@ for ADR-0188 S1 and S4, as the slice plan says.
    default.
 10. **OWNER DECISION — training-data sources of third-party models.** *Recommended:* record only what the supplier
     declared (from the model card's `data_claims`), marked supplier-declared, and `unknown` otherwise; never infer.
+    *Read with OWNER DECISION 13 (2026-10-10):* for the mandatory SPDX properties of models and datasets, the B9
+    declaration store is the only source; the `releaseTime` and `downloadLocation` keys of a model card's
+    `data_claims`, B5's earlier source, are retired (R51, landing with B9, #322). Every value stays supplier-declared,
+    never inferred.
 11. **OWNER DECISION — retention.** *Recommended:* Decision BOMs and AI BOM snapshots follow the compliance profile's
     audit retention and are kept under evidence holds; renderings are deleted with their parent.
 12. **OWNER DECISION — automatic AI BOM snapshots while no signing key is configured (accepted 2026-10-10, review
@@ -1584,10 +1588,12 @@ an accepted decision or needs an owner choice.
 ## Open questions
 
 1. **Receipt payload v2.** ADR-0188 decision 9 adds sponsor, actor chain and grant id to receipts; this ADR adds
-   `factsHash`. Proposed: one `regulait.receipt.v2` carrying both, defined once in ADR-0188 S1 and emitted only after
-   the recorded cutover of amendment R34 (never with a null `factsHash` except `capture_off`), so receipts never go
-   through a v3. Needs agreement with ADR-0188's slice owner before S1
-   freezes.
+   `factsHash`. *Settled (2026-10-10):* one `regulait.receipt.v2` carries both, so receipts never go through a v3. The
+   payload is defined in `packages/shared/src/batch4.ts` and its schema enforced by the verifier in
+   `packages/shared/src/receipts/verify.ts` (B1, #283), as amendments R34, R42 and R43 and B1's slice row describe.
+   Still pending, as a rollout gate rather than an open question: **emission**. Nothing emits v2 until the recorded
+   cutover of R34/R42, after B2 and ADR-0188 S4 and the drained rollout of R43 (never with a null `factsHash` except
+   `capture_off`). Verifier support does not mean the cutover has happened.
 2. **Suite gating.** CLAUDE.md requires checking the suite capability map before building what another module may own
    (evidence export, AI inventory). The suite documents are not reachable from this session. Proposed: the suite agent
    confirms RegulAIt owns PF-09 for its own gateway before B1.
