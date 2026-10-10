@@ -2,7 +2,7 @@
 #
 # Built from the REPOSITORY ROOT (the shim is a workspace package):
 #
-#   docker build -f engines/promptfoo/Dockerfile -t regulait/engine-promptfoo:0.123.1 .
+#   docker build -f engines/promptfoo/Dockerfile -t regulait/engine-promptfoo:0.124.1 .
 #
 # Signing and the image-level Trivy scan (vulnerabilities and the OS-layer licence scan) join the
 # gateway image's pipeline (ADR-0184: publish-image.yml / security.yml) in a follow-up: they need a
@@ -12,6 +12,12 @@
 # The shipped manifest (packages/shared/src/engines/manifest.ts) carries NO digest until an image
 # has actually been built and its digest recorded there; until then no runner can pass the
 # self-test and the engine cannot be enabled.
+#
+# ONE image, TWO containers (ADR-0187 B5-P2, decisions 170 on; docker-compose.yml): the RUNNER
+# (`node /app/dist/main.js`, the default CMD) holds the runner token and talks to the gateway, and
+# never runs promptfoo; the WORKER (`node /app/dist/worker-main.js`) runs promptfoo with only each
+# run's virtual key, no state volume and no runner or enrolment token. They exchange jobs and results
+# through two tmpfs-backed volumes.
 #
 # What the image is:
 #   - promptfoo exactly as pinned by engines/promptfoo/package-lock.json (npm ci, no optional
@@ -41,7 +47,7 @@ COPY engines/promptfoo/package.json engines/promptfoo/package-lock.json engines/
 # the CycloneDX SBOM of exactly what was installed ships inside the image (npm's own `npm sbom`)
 RUN node licence-gate.mjs package-lock.json \
  && npm ci --omit=optional --ignore-scripts --no-audit --no-fund \
- && node -e "const v=require('./node_modules/promptfoo/package.json').version; if (v !== '0.123.1') { console.error('expected promptfoo 0.123.1, got ' + v); process.exit(1); }" \
+ && node -e "const v=require('./node_modules/promptfoo/package.json').version; if (v !== '0.124.1') { console.error('expected promptfoo 0.124.1, got ' + v); process.exit(1); }" \
  && npm sbom --omit=optional --sbom-format cyclonedx --sbom-type application > sbom.cdx.json \
  && rm -rf /root/.npm licence-gate.mjs
 COPY engines/promptfoo/patches/telemetry-disabled-sends-nothing.mjs /tmp/telemetry-patch.mjs
@@ -62,15 +68,18 @@ RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
 FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS runtime
 LABEL org.opencontainers.image.title="regulait-engine-promptfoo" \
       org.regulait.engine="promptfoo" \
-      org.regulait.engine-version="0.123.1" \
+      org.regulait.engine-version="0.124.1" \
       org.regulait.patches="telemetry-disabled-sends-nothing"
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=promptfoo /opt/promptfoo /opt/promptfoo
 COPY --from=shim /out /app
 # the runner's own state volume (PR #205 review [49]): the runner token survives a restart. Owned by
-# the runner uid and 0700 here, so a fresh named volume mounted on it inherits both.
-RUN mkdir -p /state && chown 10001:10001 /state && chmod 0700 /state
+# the runner uid and 0700 here, so a fresh named volume mounted on it inherits both. B5-P2: the
+# exchange mount points (/jobs, /results in the runner; /jobs, /out in the worker) exist for the
+# volumes compose mounts on them. In the WORKER container /state stays this empty image directory
+# (the worker's self-test checks that it is empty: the runner's volume is never mounted there).
+RUN mkdir -p /state /jobs /results /out && chown 10001:10001 /state /jobs /results /out && chmod 0700 /state
 # REGULAIT_EGRESS_PROBE_ADDRESS: the public literal address the egress self-test must FAIL to reach
 # (ADR-0187 decision 19). The PROMPTFOO_* values are the manifest's usage-data switches
 # (PROMPTFOO_USAGE_DATA_ENV); packages/engine-promptfoo/src/image.test.ts keeps the two in lockstep.

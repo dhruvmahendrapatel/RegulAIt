@@ -15,6 +15,7 @@
  */
 import type { RedTeamAttackClass } from "../redteam.js";
 import type { EvalScorerKind } from "../evals.js";
+import { garakTaxonomyEntries } from "./garak.js";
 import { promptfooTaxonomyEntries } from "./promptfoo.js";
 
 export interface EngineTaxonomyEntry {
@@ -37,11 +38,12 @@ export interface EngineTaxonomy {
 /**
  * THE TABLE. Version history: 1 = empty (foundation); 2 = promptfoo 0.123.1 rows (B5-P, from the
  * catalogue in promptfoo.ts: plugin rows apply to a plugin's `basic` test cases, `strategy:<id>`
- * rows to the test cases that strategy rewrote). garak's rows come with B5-G.
+ * rows to the test cases that strategy rewrote); 3 = garak 0.17.0 rows (B5-G, from the catalogue in
+ * garak.ts: one row per admitted probe, keyed by garak's `module.Class`).
  */
 export const ENGINE_TAXONOMY: EngineTaxonomy = Object.freeze({
-  version: 2,
-  entries: Object.freeze(promptfooTaxonomyEntries().map((e) => Object.freeze(e))),
+  version: 3,
+  entries: Object.freeze([...promptfooTaxonomyEntries(), ...garakTaxonomyEntries()].map((e) => Object.freeze(e))),
 });
 
 /** the entry for one (system, id), or null when the item is unmapped */

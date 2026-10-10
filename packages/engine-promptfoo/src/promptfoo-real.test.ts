@@ -1,5 +1,5 @@
 /**
- * ADR-0187 B5-P — the REAL promptfoo (the pinned 0.123.1, telemetry-patched like the image) driven
+ * ADR-0187 B5-P — the REAL promptfoo (the pinned release, telemetry-patched like the image) driven
  * by the adapter against a fake OpenAI-compatible gateway on loopback, with a preload that records
  * and blocks every non-loopback connect or lookup.
  *
@@ -18,13 +18,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runProcessGroup } from "@regulait/engine-runner";
-import type { EngineLease } from "@regulait/shared";
+import { PROMPTFOO_ENGINE_VERSION, type EngineLease } from "@regulait/shared";
 import { promptfooAdapter } from "./adapter.js";
+import { ExchangePromptfooExecutor, promptfooWorkerTick } from "./exchange.js";
 
 const HOME = process.env.REGULAIT_PROMPTFOO_HOME;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -91,7 +92,7 @@ function lease(sets: string[]): EngineLease {
   return {
     runId: "22222222-2222-4222-8222-222222222222",
     engineId: "promptfoo",
-    engineVersion: "0.123.1",
+    engineVersion: PROMPTFOO_ENGINE_VERSION,
     spec: { config: { sets, params: {} }, trials: 2 },
     target: { baseUrl: `http://127.0.0.1:${port}/v1`, model: "target-model", apiKey: KEY, headers: { "x-regulait-agent-id": "agent-t", "x-regulait-project-id": "proj-1" } },
     judge: { model: "judge-model", headers: { "x-regulait-agent-id": "agent-j", "x-regulait-project-id": "proj-1" } },
@@ -131,7 +132,7 @@ describe.skipIf(!HOME)("[59] the generated upstream lists match the installed pa
   });
 });
 
-describe.skipIf(!HOME)("the real promptfoo 0.123.1 against a fake gateway", () => {
+describe.skipIf(!HOME)(`the real promptfoo ${PROMPTFOO_ENGINE_VERSION} against a fake gateway`, () => {
   it("every call goes to the gateway on the run's key; nothing else is contacted", async () => {
     seen = [];
     revokeAfter = Infinity;
@@ -153,6 +154,45 @@ describe.skipIf(!HOME)("the real promptfoo 0.123.1 against a fake gateway", () =
     for (const f of ["redteam-config.json", "redteam.yaml", "results.json"]) {
       expect(existsSync(path.join(workDir, f))).toBe(true);
       expect(readFileSync(path.join(workDir, f), "utf8")).not.toContain(KEY);
+    }
+  }, 240_000);
+
+  it("B5-P2: through the runner/worker exchange, the worker runs the real engine on the run key alone", async () => {
+    seen = [];
+    revokeAfter = Infinity;
+    const root = await mkdtemp(path.join(tmpdir(), "pf-real-split-"));
+    const v = { jobs: path.join(root, "jobs"), results: path.join(root, "results"), work: path.join(root, "work"), runner: path.join(root, "runner") };
+    for (const d of Object.values(v)) await mkdir(d, { recursive: true });
+    const egressLog = path.join(root, "egress.log");
+    writeFileSync(egressLog, "");
+    let stop = false;
+    const worker = (async () => {
+      while (!stop) {
+        await promptfooWorkerTick({
+          jobsRoot: v.jobs,
+          resultsRoot: v.results,
+          workRoot: v.work,
+          pollMs: 50,
+          promptfoo: {
+            entrypoint: `${HOME}/dist/src/entrypoint.js`,
+            run: (cmd, args, opts) => runProcessGroup(cmd, args, { ...opts, env: { ...opts.env, EGRESS_LOG: egressLog, NODE_OPTIONS: `--require ${path.join(here, "fixtures", "egress-hook.cjs")}` } }),
+          },
+        });
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    })();
+    try {
+      const adapter = promptfooAdapter({ entrypoint: "/never/run/by/the/runner.js", executor: new ExchangePromptfooExecutor(v.jobs, v.results, { pollMs: 50 }) });
+      const body = await adapter(lease(["prompt-extraction", "pii:direct"]), { workDir: v.runner, signal: new AbortController().signal, progress: () => {} });
+      expect(body.status).toBe("completed");
+      expect(body.items.length).toBeGreaterThanOrEqual(2);
+      expect(body.items.every((i) => i.verdict === "pass")).toBe(true);
+      expect(seen.length).toBeGreaterThan(0);
+      for (const s of seen) expect(s.auth).toBe(`Bearer ${KEY}`);
+      expect(readFileSync(egressLog, "utf8")).toBe("");
+    } finally {
+      stop = true;
+      await worker;
     }
   }, 240_000);
 
