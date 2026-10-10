@@ -1,0 +1,16 @@
+{
+  "stripe_key": "[sr]k[-_](live|test)[-_][a-zA-Z0-9]{20,}",
+  "github_token": "(?:gh[pour]_[A-Za-z0-9_]{36,}|ghs_[A-Za-z0-9.\\-_]{36,})",
+  "gitlab_service_token": "gl(?:ft|imt|agent|wt|ffct)-[a-zA-Z0-9\\-_]{20,}",
+  "aws_secret_key": "(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY|secret.?access.?key|SecretAccessKey)\\s*[\"'=:\\s]{1,5}\\s*[A-Za-z0-9/+=]{40}",
+  "discord_bot_token": "(?:(?-i:[MN])[A-Za-z0-9]{23,}\\.[A-Za-z0-9\\-_]{6}\\.[A-Za-z0-9\\-_]{27,}|(?-i:mfa\\.)[A-Za-z0-9\\-_]{84,})",
+  "twilio_api_key": "\\bSK[a-f0-9]{32}\\b",
+  "sendgrid_api_key": "(?-i:SG\\.)[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9_-]{43}",
+  "vercel_token": "(?:vercel|vc[piark])_[a-zA-Z0-9]{24,}\\b",
+  "jwt_token": "(?:(?-i:ey[JA])[a-zA-Z0-9_\\-=]{7,}|(?-i:ew[ok0])[a-zA-Z0-9_\\-=]{7,})\\.(?:(?-i:ey[JA])[a-zA-Z0-9_\\-=]{7,}|(?-i:ew[ok0])[a-zA-Z0-9_\\-=]{7,}|(?-i:e30=?))\\.[a-zA-Z0-9_\\-=]{10,}",
+  "extended_private_key": "[xyzt]prv[1-9A-HJ-NP-Za-km-z]{107,108}",
+  "ethereum_private_key": "0x[0-9a-f]{64}\\b",
+  "social_security_number": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+  "google_oauth_client_id": "[0-9]{6,}-[0-9A-Za-z_]{32}\\.apps\\.googleusercontent\\.com",
+  "environment_variable_secret": "(?-i:[A-Z][A-Z0-9]*[_-](?:SECRET(?:[_-]ACCESS)?[_-]?KEY|SECRET|PASSWORD|PASSWD|TOKEN|API[_-]?KEY))\\b\\s*=\\s*[A-Za-z0-9_+/=~.-]\\S{7,}"
+}

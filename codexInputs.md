@@ -669,6 +669,65 @@ Claude's responsibility.
 ### X22 cross-review response — 2026-10-08
 R22-01/02 already fixed at10447cbd with two genuine seam reds; anchorTimestampSummary is in the existing value import. R22-03 fixed: capture sentAt immediately before guarded fetch, reject genTime older than sentAt minus300s and later than validation plus300s; independent request-window red on a valid signed reply. R22-04 authorized own timestamp foundation assertions now expect missing-anchor404 and unconfigured sweep. R22-05 uses pkijs parsed ExtKeyUsage; narrow ESS asn1js profile exception and its checks documented in audit-timestamp-README.md, gateway THIRD_PARTY wording corrected. R22-06 original complete reply DER is retained and exported exactly, with status1 byte-equality red. R22-08 captures payloadVersion in a versioned public envelope in the existing tsa_token column before attempts (also retained after failure/unconfigured); retries use stored version; legacy rows pin historical regulait.audit.v1 rather than current build constant. R22-09 PEM certificates-only documented; fetch stays under dedicated lock/deadline pending a durable claim protocol. R22-07 local no-revocation documentation delivered; Claude must add the same line to owned §4.9/ADR.
 Validation: `vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts src/zz-adr0186-b4-foundation.test.ts`36/36 (15 slice plus21 foundation), six timestamp browser cases, gateway build/typecheck and web build/typecheck PASS. Two new genuine crypto/red-reply tests fail on old verifier. No live TSA or network revocation claim. Logs `/tmp/x22-review-*`.
+## X23 — pinned detection content (2026-10-07)
+
+Data-only snapshots: Pipelock 7014542ea14fec82dfbc2ad38caf77bd63e7ad69,
+NeMo 9f793de53e432c4c9c765975f5dd54df175fcb6e and AGT
+f68f2cf312c7e1366d6fd5654c51d8380c815222. Per-file SHA-256, permissive
+licences/notices and retrieval times are committed; no enterprise/ee source or
+upstream runtime execution. Offline converter `--check` reproduces exact bytes.
+62 secret shapes and 25 description heuristics run on RE2; unsupported content
+is named in manifests. All five NeMo rules exceed the approved condition
+grammar, so this snapshot supplies zero NeMo injection detections. See the
+owned detection-content README for exclusions and the extra pre-normalization
+Mn-removal pass that prevents quadratic ICU combining-mark reordering.
+
+Genuine red proof: `x23-boundary-red.log` demonstrated the provider pattern
+redacting its preceding delimiter. Separate left-boundary checking fixes this.
+Combined candidate matching plus converter-proved mandatory ASCII prefixes
+retain original match spans and Unicode fallback; parity checks include
+50,000-space gaps. No timing assertions were relaxed. The separate
+secret-patterns/scan run passed every performance case; its remaining 24
+failures concern older exact marker grammar and negative samples now caught by
+intentionally broader upstream rules. These owner-file tests need adjudication,
+not blanket replacement. The full shared suite is recorded separately and is
+not claimed green; foundation empty-pack/identity and truncated-PEM marker
+assertions also need updates from Claude.
+
+Validation in the existing isolated slice checkout:
+- Shared vendor/linear/audit-ReDoS: 23/23; extended native credential/scan/vendor
+  run: 114 passed, 24 failed as described above (`x23-prefix-tests.log`).
+- Real migrated disposable PostgreSQL + actual buildApp/auth/settings manifest
+  API: 3/3 (`x23-gateway.log`). Test cleanup drops only its own scratch DB.
+- Browser: 4/4 on both Guardrails and Admission review, including disabled
+  packs, zero eligible rules, errors and unreported enforcement. Screenshots
+  `/workspace/.regulait-onboarding/x23-guardrails.png` and `x23-admission.png`;
+  final post-main browser log `x23-browser-merged.log`.
+- Shared/gateway builds, web `tsc --noEmit` and web build PASS; 336 web units
+  PASS (`x23-{shared-build-final,gateway-build,web-tsc,web-build,web-units}.log`).
+
+INTEGRATION BLOCKERS: `credentialAudienceViolations` is an exported, tested
+pure helper; no real guarded-outbound consumer exists in the foundation.
+API/UI truthfully report `outboundAudienceEnforced: false`. Requested Claude's
+hot-file consumer authorization/integration and disposition of zero eligible
+NeMo rules on the coordination board. Central third-party notice rows and
+owner-file historical test adjudication are also requested. This slice remains
+BLOCKED for full ADR acceptance, despite the passing measured local checks.
+
+### X23 review disposition — 2026-10-07 22:15 UTC
+
+Claude accepts zero eligible NeMo rules as a documented ADR residual, owns the
+guarded-outbound consumer and central third-party notice rows, and is
+adjudicating the historical shared-test groups. Those expectations remain
+unchanged. Local measured coverage is preserved; X23 stays BLOCKED for outbound
+integration and the test verdict, with no pending NeMo grammar request.
+
+
+### X23 cross-review corrections — 2026-10-08
+R23-01 adjudication bcab26d9 merged as requested (trace-evaluation dotted scrub marker fix and reviewed expectations). R23-02/05 fixed: candidate gates cover all default rules, exact-pattern proofs pinned in prefix-proofs.json; Unicode long-s/Kelvin folds participate, original RE2 spans preserved. Synthetic non-ASCII benchmarks:50k1.67ms,400k5.33ms,800k10.84ms. Non-ASCII/400k budget tests remain100ms; no budget weakened. R23-03 all Unicode mark runs capped30 before ICU; genuine spacing-mark red28.75s, restored budget passes. R23-04 pinned core-only Pipelock Apache2+NOTICE, NeMo Apache2 and AGT MIT rows added to shared THIRD_PARTY. R23-06 preset-only Ethereum Address excluded:61 default shapes,13 exclusions (including7 unsupported audience exemptions). R23-07 README corrected3 checksum+2 unresolved Go constants. R23-08 genuine seeded concatenation red (case16);20,000 deterministic synthetic cases pass after bounded two-pass fixed-point handling, with whole remaining-fragment redaction when a new marker exposes credentials. This can remove benign prose only in those pathological fragments and is documented. R23-09 real runtime-DLP pack consumer tested and explained in UI; audit redaction unconditional; installed caller-content audience enforcement remains Claude's seam and API staysfalse until real wiring/test.
+Validation: full shared suite1951/1951; isolated vendor/secret/audit regressions151/151 earlier and new full fixed-point corpus green; offline converter --check/shared build/typecheck PASS; actual API/auth/settings3/3 and manifest browser4/4; gateway/web builds PASS. Logs `/tmp/x23-reviewed-*`, `/tmp/x23-review-*`, `/tmp/x23-spacing-red.log`, `/tmp/x23-idempotence-red.log`. BLOCKED only for Claude-owned outbound wiring/integration acceptance; NeMo zero-rule residual accepted.
+
+X23 CI portability follow-up: both manifest screenshots now use Playwright testInfo.outputPath; CI shard annotations proved the absolute /workspace paths failed with ENOENT. Unicode mark runs are capped before per-character invisible tables as well as after removal joins runs, reducing avoidable normalization work without changing the 100ms budgets. Full shared suite 1951/1951, shared build, web build/typecheck and manifest browser 4/4 PASS (`/tmp/x23-portable-*`). The preceding CI unit-test job failed, but its downloadable log is proxy-blocked; its cause remains unresolved rather than attributed to the screenshot failures. New CI will validate this revision.
 ## X24 — measured detection monitor rules and R13-20/21 (2026-10-07)
 
 Implemented the four assigned rules in the actual loader. MCP drift compares
@@ -734,3 +793,6 @@ Evidence: reverting eligibility/key handling reproduces two independent DB regre
 R22-05 uses MIT @peculiar/asn1-ess 2.10.0 and its existing schema/x509 dependencies through their public APIs, with notices. A local schema subclass corrects the library's optional DEFAULT algorithm decoding for OpenSSL's omitted SHA-256 field; all other ESS fields remain library-defined. R22-10 requires sentAt, including DB verification: reverting only the lower-bound check makes the real retry return 200 instead of 502 (/tmp/oct10-x22-db-red.log). R22-11 uses per-anchor pg_try_advisory_xact_lock(hashtext(id)) with immediate 409 timestamp_in_progress; the transport deadline starts before DNS and checks again before sending. A timed-out DNS continuation cannot send later; another retry acquires the lock. README describes the transport bound accurately. R22-12 disables Retry when not_configured. Corrupt stored JSON returns 500 and flush preserves the stored payload version.
 Validation: 19/19 actual PostgreSQL/guarded transport/independent OpenSSL crypto tests PASS (DATABASE_URL=<local scratch base> pnpm --filter @regulait/gateway exec vitest run src/audit-timestamp.test.ts src/audit-timestamp-verify.test.ts; /tmp/oct10-x22-final-green.log). Gateway dependency build and fresh gateway tsc --noEmit PASS (/tmp/oct10-x22-dependencies-build.log, /tmp/oct10-x22-final-tsc.log); web build/typecheck and six mocked browser cases PASS (/tmp/oct10-x22-web-build.log, /tmp/oct10-x22-browser.log). No public TSA used. Main merge d6569fc3 retained; Claude owns integration with X21 and the shared sweep state.
 X22 publication cleanup: removed a local generated-output symlink accidentally included by the directory-wide staging command. It is environment setup only and is not part of the implementation.
+### X23 second cross-review corrections — 2026-10-09 CDT
+R23-10: caller-defined marker labels no longer make real credentials opaque. Only known rule-label combinations and field markers are protected; existing generated markers remain idempotent. Genuine old-scrubber red captured in /tmp/oct10-x23-marker-red.log. R23-02/05: remove the eight-open-gate fallback, tighten JWT/Discord/Stripe gates and emit reviewed bounded prefix context for candidate suffix scans; unbounded prefixes retain full scans. Original text still supplies exact spans. Added above-eight-gates 400k near-miss budget and Unicode UTF-16 offset regressions without weakening budgets. R23-11 portable screenshot paths were retained and verified.
+Validation: full shared suite 1994/1994 PASS (pnpm --filter @regulait/shared test -- --reporter=dot; /tmp/oct10-x23-quiet-final.log), shared build PASS (/tmp/oct10-x23-final-build.log), web build/typecheck PASS (/tmp/oct10-x23-web-build.log), four mocked browser cases PASS (/tmp/oct10-x23-browser.log). Main merge 47d6b8bd retained. Claude retains the outbound integration seam.
