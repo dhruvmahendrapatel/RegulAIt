@@ -70,8 +70,12 @@ export const IDENTITY_SETTING_COPY: Readonly<Record<IdentitySettingKey, { label:
   },
   delegationMaxDepth: {
     label: "Longest delegation chain",
-    strict: "3: an agent's delegate's delegate may act, and no agent further down the chain.",
-    relaxed: "A longer chain (up to 8) lets authority travel through more agents before it reaches a call.",
+    strict:
+      "3: the first agent plus up to three delegations below it, so at most four agents in one chain. A fourth " +
+      "delegation is refused.",
+    relaxed:
+      "A longer chain (up to 8 delegations, nine agents) lets authority travel through more agents before it " +
+      "reaches a call.",
   },
   workloadClientAuthMethods: {
     label: "How workloads may sign in",

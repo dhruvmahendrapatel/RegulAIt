@@ -51,10 +51,15 @@ CREATE TABLE "workload_identities" (
   "sponsor_user_ids" uuid[] NOT NULL,
   "environments" text[] DEFAULT '{}'::text[] NOT NULL,
   "status" text DEFAULT 'active' NOT NULL,
+  -- the revision of the identity's own grant set (X33): every replacing
+  -- `PUT .../grants` names the revision it read and bumps it by one, so a
+  -- stale write is refused (409 grants_revision_conflict) rather than lost
+  "grants_revision" integer DEFAULT 0 NOT NULL,
   "created_by" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "workload_identities_identifier_uq" UNIQUE ("identifier"),
+  CONSTRAINT "workload_identities_grants_revision_check" CHECK ("grants_revision" >= 0),
   -- one identity per subject (decision 2)
   CONSTRAINT "workload_identities_agent_uq" UNIQUE ("agent_id"),
   CONSTRAINT "workload_identities_builder_agent_uq" UNIQUE ("builder_agent_id"),
@@ -109,6 +114,11 @@ BEGIN
   IF OLD."status" = 'revoked' AND NEW."status" <> 'revoked' THEN
     RAISE EXCEPTION 'workload_identities: a revoked identity is never reinstated'
       USING ERRCODE = 'insufficient_privilege', HINT = 'create a new identity (ADR-0188 decision 12)';
+  END IF;
+  -- the grant-set revision only moves forward, one step per replacement
+  IF NEW."grants_revision" <> OLD."grants_revision" AND NEW."grants_revision" <> OLD."grants_revision" + 1 THEN
+    RAISE EXCEPTION 'workload_identities: grants_revision moves forward by exactly one per grant-set replacement'
+      USING ERRCODE = 'insufficient_privilege';
   END IF;
   RETURN NEW;
 END;

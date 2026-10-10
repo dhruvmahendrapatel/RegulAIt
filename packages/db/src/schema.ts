@@ -12161,6 +12161,8 @@ export const workloadIdentities = pgTable(
     /** the target environments and deploy modes it may act in (empty = none) */
     environments: text("environments").array().notNull().default(sql`'{}'::text[]`),
     status: text("status", { enum: WORKLOAD_IDENTITY_STATUSES }).notNull().default("active"),
+    /** the revision of the identity's own grant set: a replacing PUT names it and bumps it by one (X33) */
+    grantsRevision: integer("grants_revision").notNull().default(0),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -12191,6 +12193,7 @@ export const workloadIdentities = pgTable(
       sql`cardinality(${t.environments}) <= 20 AND array_position(${t.environments}, NULL) IS NULL AND "regulait_text_array_matches"(${t.environments}, '^[a-z0-9][a-z0-9_.-]{0,63}$')`,
     ),
     check("workload_identities_status_check", sql`${t.status} IN ('active', 'suspended', 'revoked')`),
+    check("workload_identities_grants_revision_check", sql`${t.grantsRevision} >= 0`),
     index("workload_identities_status_idx").on(t.status),
     index("workload_identities_sponsors_gin").using("gin", t.sponsorUserIds),
   ],
