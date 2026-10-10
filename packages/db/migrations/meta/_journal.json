@@ -1233,6 +1233,13 @@
       "when": 1785120000000,
       "tag": "0185_guard_search_path_and_truncate",
       "breakpoints": true
+    },
+    {
+      "idx": 186,
+      "version": "7",
+      "when": 1785121000000,
+      "tag": "0186_ai_bom_spdx_declarations",
+      "breakpoints": true
     }
   ]
 }
