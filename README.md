@@ -200,12 +200,17 @@ Google SDKs build and run without them) and those two are named in
 about any newcomer that starts wanting a build script.
 
 The steps, for reading — run them by hand only if you cannot run the script.
-It is the same sequence CI's `build-and-test` job runs (`.github/workflows/ci.yml`)
-— build, test, and both pre-flights (the affordance census and the
-unique-constraint check) — plus a repo-wide `--noEmit` typecheck and an
-explicitly disposable database (the job's remaining step lints
-`AgentCoordination.md`, the agents' bookkeeping file, and is not part of
-verifying a checkout). It is the only sequence whose result is meaningful:
+It is the same build, test and pre-flight work CI's `build-and-test` check
+runs (`.github/workflows/ci.yml`), done serially on one database here. In CI
+`build-and-test` is an aggregate of three jobs: `build-and-test-base` (install,
+build, every package's tests except the gateway's, the affordance census and
+the `scripts/*.test.mjs` tests), `gateway-tests` (the gateway suite split
+`vitest --shard=i/4` over four jobs, each with its own Postgres and object store,
+and each running the unique-constraint pre-flight on its own database after its
+tests) and `gateway-coverage` (every gateway test file ran in exactly one shard).
+This sequence adds a repo-wide `--noEmit` typecheck and an explicitly disposable
+database, and leaves out the base job's `AgentCoordination.md` lint (the agents'
+bookkeeping file, not part of verifying a checkout). It is the only sequence whose result is meaningful:
 anything that skips a step below can go green on a tree that does not actually
 build.
 
@@ -261,7 +266,9 @@ pnpm -r test
 #    product's own write paths wrote. Migrations 0108/0109 ADD constraints and
 #    REFUSE — they never repair, merge or delete — so this is the report that
 #    tells an operator what a failed upgrade would have been about, before the
-#    upgrade fails. See ADR-0109 and ADR-0110. CI runs this same step.
+#    upgrade fails. See ADR-0109 and ADR-0110. CI runs this same step in
+#    each of the four `gateway-tests` shards, after that shard's tests, on that
+#    shard's own database; here one database holds the whole suite's rows.
 node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
 
 dropdb --if-exists "$PGDATABASE_VERIFY"

@@ -140,6 +140,14 @@ constraint out is still right.
 
 ### 7. The pre-flight becomes a real CI gate — one step, in the existing job
 
+> **Amended 2026-10-10 (PR #284, gateway sharding).** The single `build-and-test` job described
+> below no longer exists. `build-and-test` is now an aggregate check over `build-and-test-base`,
+> `gateway-tests` (the gateway suite as `vitest --shard=i/4`, four jobs, each with its own Postgres
+> service) and `gateway-coverage`. This step runs in **every** `gateway-tests` shard, after that
+> shard's tests, on that shard's own database: each database holds only its slice of the suite's
+> rows, and across the four shards the scans cover the whole suite, as before. The reasoning below
+> ("after the suite, not before") is unchanged; only where the step lives moved.
+
 `.github/workflows/ci.yml`, `build-and-test`, **after `pnpm -r test`**:
 
 ```yaml
