@@ -10,10 +10,13 @@ async function setup(page: Page, mode = '') {
     let grantBody = '';
     let failRead = false;
     let failAfterWrite = false;
+    let malformedAfterWrite = false;
+    let malformedRead = false;
     await page.route('**/v1/**', async (route) => {
         const req = route.request(), path = new URL(req.url()).pathname, method = req.method();
         const reply = (status: number, body: unknown) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
         if (path === '/v1/org/settings' && method === 'GET') {
+            if (malformedRead) return reply(200, {});
             if (failRead)
                 return reply(503, { error: 'unavailable' });
             return reply(200, { settings: stored });
@@ -28,6 +31,7 @@ async function setup(page: Page, mode = '') {
             stored = { ...stored, ...body };
             if (failAfterWrite)
                 failRead = true;
+            if (malformedAfterWrite) malformedRead = true;
             return reply(200, { settings: stored });
         }
         if (path === '/v1/auth/step-up/options') {
@@ -45,7 +49,7 @@ async function setup(page: Page, mode = '') {
     });
     await page.goto(`/ui/e2e/fixtures/isolation-preview.html${mode ? '?mode=' + mode : ''}`);
     await expect(page.getByRole('heading', { name: 'Isolation UI mock preview' })).toBeVisible();
-    return { writes, ceremonies, get stored() { return stored; }, set(v: Record<string, unknown>) { stored = v; }, failReads() { failRead = true; }, failAfter() { failAfterWrite = true; } };
+    return { writes, ceremonies, get stored() { return stored; }, set(v: Record<string, unknown>) { stored = v; }, failReads() { failRead = true; }, failAfter() { failAfterWrite = true; }, malformedAfter() { malformedAfterWrite = true; } };
 }
 const publicFloor = (page: Page) => page.getByLabel('Isolation floor: public projects', { exact: true });
 async function confirmIdentity(page: Page) { const dialog = page.getByRole('dialog', { name: /Confirm/ }); await expect(dialog).toBeVisible(); await dialog.getByLabel(/Authenticator code/).fill('123456'); await dialog.getByRole('button', { name: /Verify|Confirm/ }).click(); }
@@ -181,6 +185,53 @@ test('existing Engines and posture pages expose real settings plus unavailable i
     await expect(page.getByRole('heading', { name: 'Enforcement posture', exact: true, level: 1 })).toBeVisible();
     await expect(publicFloor(page)).toHaveValue('user_space_kernel');
     await axe(page);
+});
+
+test('malformed settings envelopes keep Engines usable and all isolation controls unmeasured and disabled', async ({ page }) => {
+ const { installBuilderMock } = await import('./builder-fixtures');
+ const { installEnginesMock } = await import('./engines-fixtures');
+ await installBuilderMock(page, { isAdmin: true });
+ await installEnginesMock(page);
+ let envelope: unknown = {};
+ const writes: string[] = [];
+ await page.route('**/v1/org/settings', route => {
+  if (route.request().method() !== 'GET') { writes.push(route.request().method()); return route.fulfill({ status: 400, body: '{}' }); }
+  return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(envelope) });
+ });
+ for (const body of [{}, null, false, 0, '', [], { settings: null }, { settings: [] }]) {
+  envelope = body;
+  await page.goto('/ui/admin/engines');
+  await expect(page.getByTestId('engine-promptfoo').getByText('On — self-test passed')).toBeVisible();
+  await expect(page.getByText('Isolation settings are unmeasured. The gateway has not reported all eight values; editing is unavailable.')).toBeVisible();
+  const save = page.getByRole('button', { name: 'Save isolation settings', exact: true });
+  await expect(save).toBeDisabled();
+  const controls = save.locator('..').locator('input, select');
+  await expect(controls).toHaveCount(8);
+  for (const control of await controls.all()) await expect(control).toBeDisabled();
+  await expect(publicFloor(page)).toHaveValue('');
+  await expect(page.getByText('At least as strict as default', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Unexpected Application Error!', { exact: true })).toHaveCount(0);
+ }
+ expect(writes).toEqual([]);
+ await axe(page);
+ await page.screenshot({ path: '/tmp/x40-engines-unmeasured-settings.png', fullPage: true });
+});
+
+test('a valid settings card becomes unmeasured and cannot save again when its same-page refresh is malformed', async ({ page }) => {
+ const state = await setup(page);
+ const lifetime = page.getByLabel('Executor attestation lifetime (minutes)', { exact: true });
+ await expect(lifetime).toHaveValue('120');
+ state.malformedAfter();
+ await lifetime.fill('60');
+ await page.getByRole('button', { name: 'Save isolation settings', exact: true }).click();
+ await expect(page.getByText('Isolation settings are unmeasured. The gateway has not reported all eight values; editing is unavailable.')).toBeVisible();
+ await expect(page.getByRole('button', { name: 'Save isolation settings', exact: true })).toBeDisabled();
+ await expect(lifetime).toBeDisabled();
+ await expect(lifetime).toHaveValue('');
+ await expect(publicFloor(page)).toHaveValue('');
+ expect(state.writes.map(write => write.body)).toEqual([{ executorAttestationMaxAgeMinutes: 60 }]);
+ expect(state.stored.executorAttestationMaxAgeMinutes).toBe(60);
+ await expect(page.getByText('At least as strict as default', { exact: true })).toHaveCount(0);
 });
 
 test('builder and local MCP mounts keep assignment disabled until the floor/assignment contract exists; remote MCP is external',async({page})=>{

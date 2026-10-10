@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { attestationReading, checkProfileIntegrity, eligibleProfiles, PROBES, SETTING_DEFAULTS, SETTING_KEYS, SETTING_LABEL, settingChanges, settingRelaxed, type ExecutorView, type ProfileView } from './isolationModel';
+import { attestationReading, checkProfileIntegrity, eligibleProfiles, PROBES, SETTING_DEFAULTS, SETTING_KEYS, SETTING_LABEL, settingChanges, settingRelaxed, settingsFromEnvelope, type ExecutorView, type ProfileView } from './isolationModel';
 import { SHIPPED_PREVIEW_PROFILES } from './shippedPreviewProfiles';
 import { ISOLATION_STRICT_DEFAULTS, ISOLATION_SETTING_COPY, SHIPPED_EXECUTION_PROFILES, canonicalExecutionProfile, executionProfileDigest } from '../../../../../../../packages/shared/src/isolation/index';
 const now = Date.parse('2026-10-10T12:00:00Z');
@@ -9,6 +9,14 @@ const executor = (p: ProfileView): ExecutorView => ({ id: 'synthetic', name: 'Sy
 const draft = (values: Record<string, unknown>) => Object.fromEntries(SETTING_KEYS.map(k => [k, String(values[k])])) as Record<typeof SETTING_KEYS[number], string>;
 afterEach(() => vi.restoreAllMocks());
 describe('published contract parity and partial settings changes', () => {
+    it.each([undefined, null, false, 0, '', {}, [], 'unknown', { settings: null }, { settings: [] }, { settings: 0 }, { settings: 'unknown' }])('malformed settings envelope %j stays unmeasured without invented defaults', value => {
+        expect(settingsFromEnvelope(value)).toEqual({});
+    });
+    it('preserves actual settings, including unreadable values, and refuses inherited envelope properties', () => {
+        const settings = { ...SETTING_DEFAULTS, isolationEnforcement: 'unknown' };
+        expect(settingsFromEnvelope({ settings })).toBe(settings);
+        expect(settingsFromEnvelope(Object.create({ settings: SETTING_DEFAULTS }))).toEqual({});
+    });
     it('all eight defaults, labels and three canonical profile fixtures equal the shared contract', () => {
         expect(SETTING_DEFAULTS).toEqual(ISOLATION_STRICT_DEFAULTS);
         for (const k of SETTING_KEYS)

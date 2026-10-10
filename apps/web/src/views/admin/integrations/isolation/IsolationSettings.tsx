@@ -4,13 +4,12 @@ import { api } from '../../../../api/client';
 import { putOrgSettings } from '../../../../stepup/stepUp';
 import { Button, Card, ConfirmModal, Field, Input, Select, Badge } from '../../../../ui/kit';
 import { QueryGate, readCurrentOrgSettings, reconfirmNeeded, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from '../../adminKit';
-import { CLASSES, CLASS_LABEL, SETTING_DEFAULTS, SETTING_KEYS, SETTING_LABEL, isSetting, settingChanges, settingRelaxed, type SettingKey } from './isolationModel';
+import { CLASSES, CLASS_LABEL, SETTING_DEFAULTS, SETTING_KEYS, SETTING_LABEL, isSetting, settingChanges, settingRelaxed, settingsFromEnvelope, type SettingKey } from './isolationModel';
 import v from '../../../views.module.css';
 export function IsolationSettingsCard() {
-    const q = useQuery({ queryKey: ['admin', 'org-settings'], queryFn: () => api.get<{
-            settings: Record<string, unknown>;
-        }>('/v1/org/settings') });
-    return <Card title="Isolation settings"><QueryGate loading={q.isLoading} error={q.data ? null : q.error} onRetry={() => void q.refetch()}>{q.data && q.isError && <p role="alert">Current settings could not be reloaded. Last loaded values are shown; further saves stay locked after a write.</p>}{q.data && <IsolationSettingsForm key={JSON.stringify(q.data.settings)} settings={q.data.settings}/>}</QueryGate></Card>;
+    const q = useQuery({ queryKey: ['admin', 'org-settings'], queryFn: () => api.get<unknown>('/v1/org/settings') });
+    const settings = settingsFromEnvelope(q.data), loaded = q.data !== undefined;
+    return <Card title="Isolation settings"><QueryGate loading={q.isLoading} error={loaded ? null : q.error} onRetry={() => void q.refetch()}>{loaded && q.isError && <p role="alert">Current settings could not be reloaded. Last loaded values are shown; further saves stay locked after a write.</p>}{loaded && <IsolationSettingsForm key={JSON.stringify(settings)} settings={settings}/>}</QueryGate></Card>;
 }
 export function IsolationSettingsForm({ settings }: {
     settings: Record<string, unknown>;
@@ -98,7 +97,7 @@ export function IsolationSettingsForm({ settings }: {
     const busy = act.busy || flight.busy || baseline.stale;
     return <form className={v.stack} onSubmit={e => { e.preventDefault(); void submit(); }}>
   <p>Strict defaults require L2 for public, internal and confidential workloads, L3 for regulated workloads, and a passing executor self-test no older than two hours. Relaxations require confirmation of your identity and are audited. A saved setting does not prove that a live workload ran under it.</p>
-  {settings.isolationEnforcement === 'warn' && <p role="status"><Badge tone="warn">Isolation: not enforced</Badge> The saved mode is warn; a placement shortfall is recorded instead of refused.</p>}
+  {settings.isolationEnforcement === 'warn' && <p role="status"><Badge tone="warn">Isolation: not enforced</Badge> Warn is an audited relaxation. No placement outcome has been measured here.</p>}
   {unavailable && <p role="status">Isolation settings are unmeasured. The gateway has not reported all eight values; editing is unavailable.</p>}
   <div className={v.grid3}>{SETTING_KEYS.map(key => <div key={key}><Field label={SETTING_LABEL[key]} help={`Strict default: ${key.startsWith('isolationFloor') ? CLASS_LABEL[SETTING_DEFAULTS[key] as keyof typeof CLASS_LABEL] : String(SETTING_DEFAULTS[key])}`}>
    {key === 'executorAttestationMaxAgeMinutes' ? <Input type="number" min={60} max={1440} step={1} required value={draft[key]} disabled={busy || unavailable} onChange={e => setDraft({ ...draft, [key]: e.target.value })}/> : <Select value={draft[key]} disabled={busy || unavailable} onChange={e => setDraft({ ...draft, [key]: e.target.value })}>
@@ -108,7 +107,7 @@ export function IsolationSettingsForm({ settings }: {
   </Field>
    {isSetting(key, settings[key]) && <Badge tone={settingRelaxed(key, settings[key], SETTING_DEFAULTS[key]) ? 'warn' : 'neutral'}>{settingRelaxed(key, settings[key], SETTING_DEFAULTS[key]) ? 'Audited relaxation' : 'At least as strict as default'}</Badge>}
   </div>)}</div>
-  <p>Warn permits placement on the best available isolation and records the shortfall. A lower floor permits weaker isolation, never below L1. A longer attestation lifetime permits older reports. Third-party code remains outside the gateway.</p>
+  <p>Warn is an audited relaxation; placement behavior is unmeasured on this gateway. A lower floor relaxes the required isolation, never below L1. A longer attestation lifetime permits older reports. Third-party code remains outside the gateway.</p>
   <Button type="submit" variant="primary" disabled={busy || unavailable}>Save isolation settings</Button>
   {act.error && <p role="alert">{act.error}</p>}
   {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()}/>}

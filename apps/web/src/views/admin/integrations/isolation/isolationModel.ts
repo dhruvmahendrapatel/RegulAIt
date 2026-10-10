@@ -11,6 +11,12 @@ export const SETTING_LABEL: Record<SettingKey, string> = {
     isolationEnforcement: 'Enforce isolation', isolationFloorPublic: 'Isolation floor: public projects', isolationFloorInternal: 'Isolation floor: internal projects', isolationFloorConfidential: 'Isolation floor: confidential projects', isolationFloorRegulated: 'Isolation floor: regulated projects', isolationFloorMcpStdio: 'Isolation floor: local (stdio) MCP servers', isolationFloorEngineWorker: 'Isolation floor: engine workers', executorAttestationMaxAgeMinutes: 'Executor attestation lifetime (minutes)',
 };
 export type SettingValues = Record<SettingKey, string | number>;
+/** Read only the published settings envelope; absent/malformed data stays unmeasured. */
+export function settingsFromEnvelope(value: unknown): Record<string, unknown> {
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, 'settings')) return {};
+    const settings = (value as Record<string, unknown>).settings;
+    return settings !== null && typeof settings === 'object' && !Array.isArray(settings) ? settings as Record<string, unknown> : {};
+}
 export const isClass = (v: unknown): v is IsolationClass => typeof v === 'string' && (CLASSES as readonly string[]).includes(v);
 export function isSetting(key: SettingKey, v: unknown): v is string | number {
     if (key === 'isolationEnforcement')
