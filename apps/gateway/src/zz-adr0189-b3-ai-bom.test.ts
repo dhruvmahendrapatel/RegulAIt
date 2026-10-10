@@ -81,6 +81,7 @@ import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomSnapshotTriggerGate, captur
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
 import { buildAiBom } from "@regulait/shared";
+import { BOM_SUBJECT_LOCK_NAMESPACE, withAiBomSubjectSessionLock } from "@regulait/db";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -326,16 +327,35 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
     }
   }, 60_000);
 
-  it("4237346650: concurrent freezes of one subject wait on the session lock and take contiguous versions", async () => {
+  it("4237346650: a freeze that waits behind another writer of the subject captures AFTER it (fresh snapshot, next version)", async () => {
     withKey(true);
+    const other = createDb(urlFor(SCRATCH));
     try {
       const subject = { kind: "agent" as const, id: ids.agent2! };
-      const results = await Promise.allSettled([1, 2, 3, 4].map(() => takeAiBomSnapshot(db, { subject, trigger: "on_demand", actorUserId: users.admin.id })));
-      expect(results.filter((r) => r.status === "rejected")).toEqual([]);
-      const versions = (await db.select({ v: aiBomSnapshots.version, id: aiBomSnapshots.id, s: aiBomSnapshots.supersedesId }).from(aiBomSnapshots).where(and(eq(aiBomSnapshots.subjectKind, "agent"), eq(aiBomSnapshots.subjectId, ids.agent2!)))).sort((a, b) => a.v - b.v);
-      expect(versions.map((v) => v.v)).toEqual([1, 2, 3, 4]);
-      for (let i = 1; i < versions.length; i++) expect(versions[i]!.s).toBe(versions[i - 1]!.id);
+      // another writer (another replica) holds the subject: it takes the lock FIRST, then captures and commits slowly
+      let locked!: () => void;
+      const holding = new Promise<void>((r) => { locked = r; });
+      const holder = other.transaction(async (tx) => {
+        await lockAiBomSubject(tx, subject.kind, subject.id);
+        locked();
+        const t = await captureAiBomSnapshotInTx(tx as unknown as Db, { subject, trigger: "on_demand", actorUserId: null });
+        await new Promise((r) => setTimeout(r, 1_000));
+        return t;
+      }, { isolationLevel: "repeatable read" });
+      await holding;
+      const waiter = takeAiBomSnapshot(db, { subject, trigger: "on_demand", actorUserId: users.admin.id });
+      const [h, w] = await Promise.all([holder, waiter]);
+      expect(w.version).toBe(h.version + 1);
+      const [row] = await db.select({ s: aiBomSnapshots.supersedesId }).from(aiBomSnapshots).where(eq(aiBomSnapshots.id, w.id));
+      expect(row!.s).toBe(h.id);
+      // in-process single-flight: a burst for one subject gets one freeze and fast 409s, never a queue of parked connections
+      const burst = await Promise.allSettled([1, 2, 3].map(() => takeAiBomSnapshot(db, { subject, trigger: "on_demand", actorUserId: users.admin.id })));
+      expect(burst.filter((r) => r.status === "fulfilled").length).toBe(1);
+      for (const r of burst.filter((x): x is PromiseRejectedResult => x.status === "rejected")) expect(r.reason).toMatchObject({ status: 409, code: "bom_snapshot_busy" });
+      const versions = (await db.select({ v: aiBomSnapshots.version }).from(aiBomSnapshots).where(and(eq(aiBomSnapshots.subjectKind, "agent"), eq(aiBomSnapshots.subjectId, ids.agent2!)))).map((x) => x.v).sort((x, y) => x - y);
+      expect(versions).toEqual(versions.map((_, i) => i + 1));
     } finally {
+      await (other.$client as { end: () => Promise<void> }).end();
       withKey(false);
     }
   }, 120_000);
@@ -443,4 +463,79 @@ describe("routes (R2, R8, R17, §7)", () => {
       await db.execute(sql`update org_settings set bom_export_rate_limit_per_minute = 30`);
     }
   });
+});
+
+describe("PR #287 MEDIUM: the per-subject lock wait is bounded and single-flight", () => {
+  const LOCK_BOUND_MS = 5_000; // the documented bound (BOM_SUBJECT_LOCK_TIMEOUT_MS)
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  it("a waiter behind a holder fails bounded with bom_snapshot_busy, and the small pool still serves an unrelated query", async () => {
+    const small = createDb(urlFor(SCRATCH), { max: 2 });
+    const holderDb = createDb(urlFor(SCRATCH), { max: 1 });
+    const subject = randomUUID();
+    const holder = await (holderDb.$client as { connect: () => Promise<{ query: (q: string, p?: unknown[]) => Promise<unknown>; release: () => void }> }).connect();
+    await holder.query("select pg_advisory_lock($1::int, hashtext($2))", [BOM_SUBJECT_LOCK_NAMESPACE, `agent:${subject}`]);
+    try {
+      const waiter = withAiBomSubjectSessionLock(small, "agent", subject, async () => "ran").then(() => "acquired", (e: unknown) => e);
+      const other = await small.execute(sql`select 1 as one`);
+      expect(rowsOf<{ one: number }>(other)[0]!.one).toBe(1);
+      const outcome = await Promise.race([waiter, sleep(LOCK_BOUND_MS + 5_000).then(() => "hung")]);
+      expect(outcome, "the waiter must not hang past the bound").not.toBe("hung");
+      expect((outcome as { code?: string }).code).toBe("bom_snapshot_busy");
+    } finally {
+      await holder.query("select pg_advisory_unlock($1::int, hashtext($2))", [BOM_SUBJECT_LOCK_NAMESPACE, `agent:${subject}`]);
+      holder.release();
+      await sleep(200);
+      await (small.$client as { end: () => Promise<void> }).end();
+      await (holderDb.$client as { end: () => Promise<void> }).end();
+    }
+  }, 30_000);
+
+  it("a second in-process request for the same subject is refused at once (single-flight), another subject proceeds", async () => {
+    const subject = randomUUID();
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    const first = withAiBomSubjectSessionLock(db, "agent", subject, async () => { await gate; return "first"; });
+    await sleep(50);
+    const second = await withAiBomSubjectSessionLock(db, "agent", subject, async () => "second").then((v) => v, (e: unknown) => e);
+    expect((second as { code?: string }).code).toBe("bom_snapshot_busy");
+    expect(await withAiBomSubjectSessionLock(db, "agent", randomUUID(), async () => "other")).toBe("other");
+    open();
+    expect(await first).toBe("first");
+  }, 30_000);
+});
+
+describe("PR #287 LOW: atomic audit, no echoed values", () => {
+  it("the snapshot and its audit row commit together: a failing audit append leaves no snapshot", async () => {
+    withKey(true);
+    // scratch database only: a test trigger that refuses this one audit rule
+    await db.execute(sql.raw(`CREATE FUNCTION b3_refuse_snapshot_audit() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+      BEGIN IF NEW.rule_id = 'ai-bom-snapshot-taken' THEN RAISE EXCEPTION 'b3 test: audit refused'; END IF; RETURN NEW; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER b3_refuse_snapshot_audit BEFORE INSERT ON public.audit_log FOR EACH ROW EXECUTE FUNCTION b3_refuse_snapshot_audit()`));
+    try {
+      const subject = { kind: "use_case" as const, id: ids.useCase! };
+      const count = async () => rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from ai_bom_snapshots where subject_id = ${subject.id}`))[0]!.n;
+      const before = await count();
+      const e = await takeAiBomSnapshot(db, { subject, trigger: "on_demand", actorUserId: users.admin.id }).catch((x: unknown) => x);
+      expect(String((e as Error).message) + String((e as { cause?: Error }).cause?.message ?? "")).toMatch(/audit refused/);
+      expect(await count()).toBe(before);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER b3_refuse_snapshot_audit ON public.audit_log`));
+      await db.execute(sql.raw(`DROP FUNCTION b3_refuse_snapshot_audit()`));
+      withKey(false);
+    }
+  }, 60_000);
+
+  it("a 422 refusal names the field and rule, never the record value", async () => {
+    const [uc] = await db.select({ name: aiUseCases.name }).from(aiUseCases).where(eq(aiUseCases.id, ids.useCase!));
+    await db.update(aiUseCases).set({ name: "owner leak.person@example.com" }).where(eq(aiUseCases.id, ids.useCase!));
+    try {
+      const r = await inject("GET", `/v1/ai-bom/use_case/${ids.useCase}/drift`, users.admin.auth);
+      expect(r.statusCode, r.body).toBe(422);
+      expect(r.json().error).toBe("ai_bom_build_refused");
+      expect(r.body).toMatch(/\$\.[A-Za-z.\[\]0-9]*name/); // the field path
+      expect(r.body).not.toContain("leak.person");
+    } finally {
+      await db.update(aiUseCases).set({ name: uc!.name }).where(eq(aiUseCases.id, ids.useCase!));
+    }
+  }, 60_000);
 });

@@ -29,6 +29,24 @@ import { withAuditChain } from "./audit-chain.js";
 import { withProseScrub } from "./prose-scrub.js";
 import { BOM_SUBJECT_LOCK_NAMESPACE } from "./bom-locks.js";
 
+/** PR #287: the longest a writer waits for a subject's lock before it is told the subject is busy */
+export const BOM_SUBJECT_LOCK_TIMEOUT_MS = 5_000;
+
+/** the subject is being snapshotted by someone else: retry later (409 `bom_snapshot_busy`) */
+export class BomSubjectBusyError extends Error {
+  readonly code = "bom_snapshot_busy";
+  constructor(readonly reason: "in_process" | "lock_timeout") {
+    super(reason === "in_process" ? "A snapshot of this subject is already being taken by this process." : "A snapshot of this subject is being taken elsewhere; the lock wait timed out.");
+    this.name = "BomSubjectBusyError";
+  }
+}
+
+/**
+ * In-process single-flight: one writer per subject per process, so a burst of
+ * requests for one subject never parks several pool connections on one lock.
+ */
+const inFlight = new Set<string>();
+
 /** the handle `fn` receives: the same wrappers as `createDb`, bound to ONE connection */
 export type BoundBomDb = ReturnType<typeof bind>;
 const bind = (client: pg.PoolClient) => withProseScrub(withAuditChain(drizzle(client, { schema })));
@@ -39,28 +57,46 @@ export async function withAiBomSubjectSessionLock<T>(
   subjectId: string,
   fn: (bound: BoundBomDb) => Promise<T>,
 ): Promise<T> {
-  const pool = db.$client as pg.Pool;
-  const client = await pool.connect();
   const key = `${subjectKind}:${subjectId}`;
-  let broken: Error | undefined;
+  if (inFlight.has(key)) throw new BomSubjectBusyError("in_process");
+  inFlight.add(key);
   try {
+    const pool = db.$client as pg.Pool;
+    const client = await pool.connect();
+    let broken: Error | undefined;
     try {
-      await client.query("select pg_advisory_lock($1::int, hashtext($2))", [BOM_SUBJECT_LOCK_NAMESPACE, key]);
-    } catch (e) {
-      broken = e instanceof Error ? e : new Error(String(e));
-      throw e;
-    }
-    try {
-      return await fn(bind(client));
-    } finally {
       try {
-        await client.query("select pg_advisory_unlock($1::int, hashtext($2))", [BOM_SUBJECT_LOCK_NAMESPACE, key]);
+        // BOUNDED WAIT (PR #287): lock_timeout applies to advisory locks too; it is reset before `fn`
+        // runs so the capture transaction keeps the server default
+        await client.query(`set lock_timeout = ${BOM_SUBJECT_LOCK_TIMEOUT_MS}`);
+        try {
+          await client.query("select pg_advisory_lock($1::int, hashtext($2))", [BOM_SUBJECT_LOCK_NAMESPACE, key]);
+        } catch (e) {
+          if ((e as { code?: string }).code === "55P03") {
+            await client.query("reset lock_timeout");
+            throw new BomSubjectBusyError("lock_timeout");
+          }
+          throw e;
+        }
+        await client.query("reset lock_timeout");
       } catch (e) {
-        broken = e instanceof Error ? e : new Error(String(e));
+        if (!(e instanceof BomSubjectBusyError)) broken = e instanceof Error ? e : new Error(String(e));
+        throw e;
       }
+      try {
+        return await fn(bind(client));
+      } finally {
+        try {
+          await client.query("select pg_advisory_unlock($1::int, hashtext($2))", [BOM_SUBJECT_LOCK_NAMESPACE, key]);
+        } catch (e) {
+          broken = e instanceof Error ? e : new Error(String(e));
+        }
+      }
+    } finally {
+      // a broken connection is destroyed (which releases any lock it held), never returned to the pool
+      client.release(broken);
     }
   } finally {
-    // a broken connection is destroyed (which releases any lock it held), never returned to the pool
-    client.release(broken);
+    inFlight.delete(key);
   }
 }

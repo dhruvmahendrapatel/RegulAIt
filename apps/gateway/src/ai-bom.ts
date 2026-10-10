@@ -73,12 +73,14 @@ import {
   trainingJobs,
   usageEvents,
   users,
+  BomSubjectBusyError,
   withAiBomSubjectSessionLock,
   workloadIdentities,
   type Db,
 } from "@regulait/db";
 import {
   AI_BOM_INSTALL_SUBJECT_ID,
+  AI_BOM_MAX_RECORDS_PER_LIST,
   aiBomInventoryIndex,
   bomDigestOf,
   bomExpiresAt,
@@ -111,6 +113,12 @@ export class AiBomError extends Error {
 
 type Tx = Db;
 const uniq = <T>(xs: Iterable<T>): T[] => [...new Set(xs)];
+/** PR #287: an install-wide read is bounded; over the cap the snapshot is refused, never truncated */
+const CAP = AI_BOM_MAX_RECORDS_PER_LIST;
+function capped<T>(rows: T[], what: string): T[] {
+  if (rows.length > CAP) throw new AiBomError(422, "ai_bom_too_large", `${what}: more than ${CAP} records; an install AI BOM is refused over the cap`);
+  return rows;
+}
 const iso = (d: Date | string | null | undefined): string | null => (d === null || d === undefined ? null : new Date(d).toISOString());
 
 export interface AiBomSubject {
@@ -156,8 +164,8 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
     builderRows = await tx.select(baCols).from(builderAgents).where(eq(builderAgents.id, subject.id));
     agentIds = builderRows[0]!.modelAgentId ? [builderRows[0]!.modelAgentId] : [];
   } else {
-    builderRows = await tx.select(baCols).from(builderAgents).where(isNull(builderAgents.archivedAt));
-    agentIds = (await tx.select({ id: agents.id }).from(agents)).map((r) => r.id);
+    builderRows = capped(await tx.select(baCols).from(builderAgents).where(isNull(builderAgents.archivedAt)).limit(CAP + 1), "builder_agents");
+    agentIds = capped(await tx.select({ id: agents.id }).from(agents).limit(CAP + 1), "agents").map((r) => r.id);
     for (const b of builderRows) if (b.modelAgentId) agentIds.push(b.modelAgentId);
   }
   const agentRows = agentIds.length
@@ -171,7 +179,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
     subject.kind === "use_case"
       ? await tx.select(ucCols).from(aiUseCases).where(eq(aiUseCases.id, subject.id))
       : install
-        ? await tx.select(ucCols).from(aiUseCases)
+        ? capped(await tx.select(ucCols).from(aiUseCases).limit(CAP + 1), "ai_use_cases")
         : agentIds.length
           ? await tx.select(ucCols).from(aiUseCases).where(sql`${aiUseCases.intendedAgentIds} ?| ${`{${agentIds.join(",")}}`}::text[]`)
           : [];
@@ -217,7 +225,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   // ---- training lineage (#280 4237488600)
   const taCols = { id: trainingArtifacts.id, jobId: trainingArtifacts.jobId, name: trainingArtifacts.name, method: trainingArtifacts.method, kind: trainingArtifacts.kind, agentId: trainingArtifacts.agentId, modelCardId: trainingArtifacts.modelCardId, payload: trainingArtifacts.payload, createdAt: trainingArtifacts.createdAt };
   const taRows = install
-    ? await tx.select(taCols).from(trainingArtifacts)
+    ? capped(await tx.select(taCols).from(trainingArtifacts).limit(CAP + 1), "training_artifacts")
     : agentIds.length || cardIds.length
       ? await tx.select(taCols).from(trainingArtifacts).where(sql`${trainingArtifacts.agentId} = any(${`{${agentIds.join(",")}}`}::uuid[]) or ${trainingArtifacts.modelCardId} = any(${`{${cardIds.join(",")}}`}::uuid[])`)
       : [];
@@ -236,10 +244,10 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   // ---- artifacts, scans, engines (R12, R29)
   const scanCols = { id: artifactScans.id, artifactId: artifactScans.artifactId, engineRunId: artifactScans.engineRunId, artifactSha256: artifactScans.artifactSha256, verdict: artifactScans.verdict, scannerVersion: artifactScans.scannerVersion, createdAt: artifactScans.createdAt };
   const scanIds = uniq(evidenceRows.map((e) => e.artifactScanId).filter((x): x is string => !!x));
-  const scanRows = install ? await tx.select(scanCols).from(artifactScans) : scanIds.length ? await tx.select(scanCols).from(artifactScans).where(inArray(artifactScans.id, scanIds)) : [];
+  const scanRows = install ? capped(await tx.select(scanCols).from(artifactScans).limit(CAP + 1), "artifact_scans") : scanIds.length ? await tx.select(scanCols).from(artifactScans).where(inArray(artifactScans.id, scanIds)) : [];
   const artCols = { id: modelArtifacts.id, sha256: modelArtifacts.sha256, sizeBytes: modelArtifacts.sizeBytes, format: modelArtifacts.format };
   const artIds = uniq(scanRows.map((s) => s.artifactId));
-  const artRows = install ? await tx.select(artCols).from(modelArtifacts) : artIds.length ? await tx.select(artCols).from(modelArtifacts).where(inArray(modelArtifacts.id, artIds)) : [];
+  const artRows = install ? capped(await tx.select(artCols).from(modelArtifacts).limit(CAP + 1), "model_artifacts") : artIds.length ? await tx.select(artCols).from(modelArtifacts).where(inArray(modelArtifacts.id, artIds)) : [];
   const runIdsE = uniq(scanRows.map((s) => s.engineRunId).filter((x): x is string => !!x));
   const engineRunRows = runIdsE.length ? await tx.select({ id: engineRuns.id, engineId: engineRuns.engineId, engineVersion: engineRuns.engineVersion }).from(engineRuns).where(inArray(engineRuns.id, runIdsE)) : [];
   const engineIds = uniq(engineRunRows.map((r) => r.engineId));
@@ -297,10 +305,10 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   const keptGrants = grants.filter((g) => g.targetKind !== "mcp_tool" || liveTools.has(g.targetId));
   const serverIds = install ? null : uniq([...grantedTools.map((t) => t.serverId), ...keptGrants.filter((g) => g.targetKind === "mcp_server").map((g) => g.targetId)]);
   const serverCols = { id: mcpServers.id, name: mcpServers.name, transport: mcpServers.transport, url: mcpServers.url, releaseDigest: mcpServers.releaseDigest, admissionState: mcpServers.admissionState, admissionManifestDigest: mcpServers.admissionManifestDigest, identityPropagation: mcpServers.identityPropagation, ownerUserId: mcpServers.ownerUserId };
-  const serverRows = serverIds === null ? await tx.select(serverCols).from(mcpServers) : serverIds.length ? await tx.select(serverCols).from(mcpServers).where(inArray(mcpServers.id, serverIds)) : [];
+  const serverRows = serverIds === null ? capped(await tx.select(serverCols).from(mcpServers).limit(CAP + 1), "mcp_servers") : serverIds.length ? await tx.select(serverCols).from(mcpServers).where(inArray(mcpServers.id, serverIds)) : [];
   const serverGranted = new Set(keptGrants.filter((g) => g.targetKind === "mcp_server").map((g) => g.targetId));
   const toolRows = install
-    ? await tx.select({ id: mcpTools.id, serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind }).from(mcpTools)
+    ? capped(await tx.select({ id: mcpTools.id, serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind }).from(mcpTools).limit(CAP + 1), "mcp_tools")
     : uniq([
         ...grantedTools,
         // a server grant covers every tool the server lists
@@ -308,7 +316,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
       ].map((t) => JSON.stringify(t))).map((s) => JSON.parse(s) as { id: string; serverId: string; name: string; kind: "read" | "write" });
   const connIds = install ? null : uniq(keptGrants.filter((g) => g.targetKind === "connector").map((g) => g.targetId));
   const connCols = { id: connectors.id, name: connectors.name, kind: connectors.kind, url: connectors.baseUrl, ownerUserId: connectors.ownerUserId, credentialSet: sql<boolean>`exists (select 1 from "connector_credentials" cc where cc."connector_id" = "connectors"."id")` };
-  const connRows = connIds === null ? await tx.select(connCols).from(connectors) : connIds.length ? await tx.select(connCols).from(connectors).where(inArray(connectors.id, connIds)) : [];
+  const connRows = connIds === null ? capped(await tx.select(connCols).from(connectors).limit(CAP + 1), "connectors") : connIds.length ? await tx.select(connCols).from(connectors).where(inArray(connectors.id, connIds)) : [];
   const liveConn = new Set(connRows.map((c) => c.id));
   const finalGrants = keptGrants.filter((g) => g.targetKind !== "connector" || liveConn.has(g.targetId));
 
@@ -414,18 +422,28 @@ function snapshotKey() {
   return key;
 }
 
-/**
- * Capture, build, sign and insert one snapshot inside the CALLER's
- * transaction, which must be REPEATABLE READ or SERIALIZABLE (R22). Allocates
- * the next version from the newest snapshot this transaction can see; the
- * database's contiguous-version guard and unique constraint refuse a stale
- * allocation, so a capture that lost a race fails and never forks.
- */
-export async function captureAiBomSnapshotInTx(tx: Tx, input: TakeSnapshotInput): Promise<TakenSnapshot> {
+interface PreparedSnapshot {
+  id: string;
+  version: number;
+  prevId: string | null;
+  createdAt: string;
+  expiresAt: Date | null;
+  build: AiBomBuild;
+  signature: string;
+  key: NonNullable<ReturnType<typeof loadReceiptSigningKey>>;
+  keyRecorded: boolean;
+}
+
+async function assertRepeatableRead(tx: Tx): Promise<void> {
   const level = (await tx.execute(sql`select current_setting('transaction_isolation') as l`)) as unknown as { rows: Array<{ l: string }> };
   if (!["repeatable read", "serializable"].includes(level.rows[0]!.l)) {
-    throw new AiBomError(500, "ai_bom_capture_isolation", `an AI BOM capture needs a REPEATABLE READ transaction (got ${level.rows[0]!.l})`);
+    throw new AiBomError(500, "ai_bom_capture_isolation", "an AI BOM capture needs a REPEATABLE READ transaction");
   }
+}
+
+/** CAPTURE (R22): read everything from one REPEATABLE READ snapshot, allocate the version, build, sign. Writes nothing. */
+async function prepareAiBomSnapshot(tx: Tx, input: TakeSnapshotInput): Promise<PreparedSnapshot> {
+  await assertRepeatableRead(tx);
   const key = snapshotKey();
   const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId));
   if (recorded && (!sameReceiptPublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt)) throw new AiBomError(503, "receipt_signing_key_invalid", "The receipt signing key conflicts with its recorded public key.");
@@ -434,40 +452,77 @@ export async function captureAiBomSnapshotInTx(tx: Tx, input: TakeSnapshotInput)
     .where(and(eq(aiBomSnapshots.subjectKind, input.subject.kind), eq(aiBomSnapshots.subjectId, input.subject.id))).orderBy(desc(aiBomSnapshots.version)).limit(1);
   const head = (await tx.execute(sql`select gen_random_uuid()::text as id, now() as at`)) as unknown as { rows: Array<{ id: string; at: Date | string }> };
   const id = head.rows[0]!.id;
-  const createdAt = new Date(head.rows[0]!.at).toISOString(); // the DB clock, transaction start; equals the row default
+  const createdAt = new Date(head.rows[0]!.at).toISOString(); // the DB clock at the capture
   const records = await loadAiBomRecords(tx, input.subject, { personIdentifiers: settings.personIdentifiers, installId: input.installId ?? null });
   const version = (prev?.version ?? 0) + 1;
   const build = buildAiBom(records, { id, subjectKind: input.subject.kind, subjectId: input.subject.id, version, supersedes: prev?.id ?? null, trigger: input.trigger, createdAt }, { cyclonedxVersions: settings.cyclonedxVersions });
   const signature = sign(null, Buffer.from(build.bodyBytes, "utf8"), key.privateKey).toString("base64url");
-  if (!recorded) await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt: new Date(createdAt) });
   const expiresAt = bomExpiresAt(new Date(createdAt), await retentionFloorDays(tx));
+  return { id, version, prevId: prev?.id ?? null, createdAt, expiresAt, build, signature, key, keyRecorded: !!recorded };
+}
+
+/** FREEZE: the key row (first use), the snapshot and its renderings, and (when given) the audit row, in the caller's transaction */
+async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSnapshotInput, opts: { audit: boolean }): Promise<TakenSnapshot> {
+  if (!p.keyRecorded) await tx.insert(receiptSigningKeys).values({ keyId: p.key.keyId, publicJwk: p.key.jwk, firstUsedAt: new Date(p.createdAt) }).onConflictDoNothing();
   await tx.insert(aiBomSnapshots).values({
-    id, subjectKind: input.subject.kind, subjectId: input.subject.id, version, serialNumber: build.body.serialNumber.slice("urn:uuid:".length), supersedesId: prev?.id ?? null,
-    trigger: input.trigger, basis: { rows: build.basis.length, sha256: bomDigestOf(build.basis) }, body: build.bodyBytes, bodySha256: build.bodySha256,
-    signature, keyId: key.keyId, expiresAt, createdBy: input.actorUserId, createdAt: new Date(createdAt),
+    id: p.id, subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, serialNumber: p.build.body.serialNumber.slice("urn:uuid:".length), supersedesId: p.prevId,
+    trigger: input.trigger, basis: { rows: p.build.basis.length, sha256: bomDigestOf(p.build.basis) }, body: p.build.bodyBytes, bodySha256: p.build.bodySha256,
+    signature: p.signature, keyId: p.key.keyId, expiresAt: p.expiresAt, createdBy: input.actorUserId, createdAt: new Date(p.createdAt),
   } as never);
-  for (const r of build.renderings) {
-    await tx.insert(bomRenderings).values({ aiBomSnapshotId: id, format: r.format, bytes: r.bytes, sha256: r.sha256, validator: r.validator } as never);
+  for (const r of p.build.renderings) {
+    await tx.insert(bomRenderings).values({ aiBomSnapshotId: p.id, format: r.format, bytes: r.bytes, sha256: r.sha256, validator: r.validator } as never);
   }
-  return { id, version, serialNumber: build.body.serialNumber, bodySha256: build.bodySha256, build };
+  if (opts.audit) {
+    await tx.insert(auditLog).values({
+      userId: input.actorUserId ?? "00000000-0000-0000-0000-000000000000", objectType: "audit_export", objectId: p.id, effect: "allow",
+      ruleId: "ai-bom-snapshot-taken", ruleChain: [], reason: "AI BOM snapshot frozen and signed",
+      detail: { subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, trigger: input.trigger, bodySha256: p.build.bodySha256 },
+    });
+  }
+  return { id: p.id, version: p.version, serialNumber: p.build.body.serialNumber, bodySha256: p.build.bodySha256, build: p.build };
 }
 
 /**
- * THE ON-DEMAND FREEZE (R50, 4237346650): session lock first, then ONE
- * REPEATABLE READ read-write transaction, then the audit row, then unlock.
+ * Capture, build, sign and insert one snapshot inside the CALLER's
+ * transaction, which must be REPEATABLE READ or SERIALIZABLE (R22): the shape
+ * a sign-off trigger needs (#280 4237493034). A stale version allocation is
+ * refused by the contiguous-version guard and the unique constraint; it never
+ * forks.
+ *
+ * TODO(ADR-0189 R50, R17): this in-transaction path cannot take the
+ * per-subject lock BEFORE its snapshot (the caller's transaction already has
+ * one), and it writes no audit row (an audit append under REPEATABLE READ can
+ * read a stale chain tip after its lock wait). Both are settled when the
+ * release PR wires triggers: the triggering transaction must take the session
+ * lock first and append its audit row through a READ COMMITTED step. Until
+ * then it is reachable only through the inert `aiBomSnapshotTriggerGate`.
+ */
+export async function captureAiBomSnapshotInTx(tx: Tx, input: TakeSnapshotInput): Promise<TakenSnapshot> {
+  return insertPreparedSnapshot(tx, await prepareAiBomSnapshot(tx, input), input, { audit: false });
+}
+
+/**
+ * THE ON-DEMAND FREEZE (R50, 4237346650, PR #287): session lock first (bounded
+ * wait, single-flight); the capture in one REPEATABLE READ READ ONLY
+ * transaction; then ONE write transaction holding the snapshot, its
+ * renderings AND its audit row, so neither exists without the other; then
+ * unlock. The write is READ COMMITTED because the audit chain append reads its
+ * tip after its own lock wait, which a REPEATABLE READ snapshot would make
+ * stale. The session lock spans both, so no other writer of this subject can
+ * land between them, and the version guard re-checks contiguity at insert.
  */
 export async function takeAiBomSnapshot(db: Db, input: TakeSnapshotInput): Promise<TakenSnapshot> {
   snapshotKey(); // refuse before taking any lock when there is no key (409, nothing half-done)
-  return withAiBomSubjectSessionLock(db, input.subject.kind, input.subject.id, async (bound) => {
-    const b = bound as unknown as Db;
-    const taken = await b.transaction((tx) => captureAiBomSnapshotInTx(tx as unknown as Db, input), { isolationLevel: "repeatable read", accessMode: "read write" });
-    await b.insert(auditLog).values({
-      userId: input.actorUserId ?? "00000000-0000-0000-0000-000000000000", objectType: "audit_export", objectId: taken.id, effect: "allow",
-      ruleId: "ai-bom-snapshot-taken", ruleChain: [], reason: "AI BOM snapshot frozen and signed",
-      detail: { subjectKind: input.subject.kind, subjectId: input.subject.id, version: taken.version, trigger: input.trigger, bodySha256: taken.bodySha256 },
+  try {
+    return await withAiBomSubjectSessionLock(db, input.subject.kind, input.subject.id, async (bound) => {
+      const b = bound as unknown as Db;
+      const prepared = await b.transaction((tx) => prepareAiBomSnapshot(tx as unknown as Db, input), { isolationLevel: "repeatable read", accessMode: "read only" });
+      return b.transaction((tx) => insertPreparedSnapshot(tx as unknown as Db, prepared, input, { audit: true }), { isolationLevel: "read committed" });
     });
-    return taken;
-  });
+  } catch (e) {
+    if (e instanceof BomSubjectBusyError) throw new AiBomError(409, "bom_snapshot_busy", e.message);
+    throw e;
+  }
 }
 
 /**
