@@ -519,6 +519,112 @@ Open questions I3 leaves to the master (also in the PR):
 4. ~~Whether re-enable should also require a fresh self-test on the gateway side before the executor's classes count
    again.~~ Answered by amendment T: yes. The gateway counts only attestations observed after the re-enable.
 
+## Amendments from the conformance-vector gaps (2026-10-10)
+
+The specification vectors merged in PR #334 (`packages/shared/test-vectors/placement/`) list the places where this
+ADR left a behaviour undefined. Each numbered item below closes one. Where the decisions already imply the answer, it
+is written down. Where the code on `main` (slice I3) answers it securely and consistently with the decisions, the
+code's behaviour is adopted and cited. Where the code is weaker, the strict rule is written and marked **code
+follow-up required**. Where the rule binds a slice that is not built yet (I2, I4, I7), it says so. Two product choices
+are left to the owner at the end. None of these items relaxes a strict default (ADR-0180).
+
+1. **An expired offer is a refused placement with reason `no_executor`. `offer_expired` is never a placement
+   reason.** An offer that nobody accepts in time, or that is accepted but has no report by the deadline, expires on
+   the database clock. It gets a refused placement row with `no_executor` under an `execution-refused` audit row.
+   `offer_expired` is only the channel's answer to the executor (`409`), when it tries to accept or report on an
+   offer that has already expired. The caller never sees it. *Adopted from the code:* `expireLockedOffer` and the
+   accept and report routes in `apps/gateway/src/executor-channel.ts`.
+2. **The five decline codes, and the placement reason each one gives.** An executor declines with one of these codes,
+   which a database CHECK and the route's enum enforce (amendment S): `attestation_stale` gives `attestation_stale`;
+   `class_below_required` gives `class_below_required`; `capacity` gives `no_executor`; `quarantined` gives
+   `executor_quarantined`; `profile_unknown` gives `profile_retired`. This is amendment P's "the executor's reason",
+   expressed in decision 7's fixed vocabulary. *Adopted from the code* (`EXECUTION_OFFER_DECLINE_REASONS`,
+   `declineToRefusal`).
+3. **A latest failing self-test gives `attestation_stale`.** Decision 7 fixes five reasons, and none of them is
+   "failed". Amendment P's `attestation_stale` means that an attestation exists but none counts as a fresh `pass`.
+   Under amendment N, a latest `fail` is such an attestation. *Adopted from the code:* `offerPlacement` returns
+   `attestation_stale` when a counting row exists and `freshAttestation` returns none. The audit trail still records
+   the failure itself (`executor-attestation-failed`). Vector `attestation-failing`.
+4. **Freshness ends at the boundary instant.** A `pass` is fresh while `now() < observed_at + limit`, where `limit` is
+   amendment N's minimum. At exactly `observed_at + limit` it is stale. Both times come from the database, and both
+   are stamped in the same statement. *Adopted from the code:* `expires_at = now() + limit` at insert, and
+   `freshAttestation` refuses when `expires_at <= now`. Vector `freshness-boundary`.
+5. **The insecure-HTTP flag is on only for the exact value `1`.** Any other value of
+   `REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP` leaves the flag off, including `true`, `yes`, `0` and the empty string. A
+   plain `http:` URL to a host that is not loopback then refuses to start. *Adopted from the code*
+   (`packages/sandbox-executor/src/main.ts`). Vector `executor-url-flag-not-1`.
+6. **Loopback is judged on the URL's normalised host.** The loopback hosts are `localhost`, `127.0.0.0/8` in any
+   spelling that the WHATWG URL parser normalises into that range (for example `127.1`), and `[::1]` in any spelling
+   that normalises to it (for example `[0:0:0:0:0:0:0:1]`). An IPv4-mapped address such as `[::ffff:127.0.0.1]` is
+   not loopback, and neither is `localhost.` (with a trailing dot): over `http:` without the flag, both refuse to
+   start. Prefix and suffix tricks such as `localhost.example.invalid` and `127.0.0.1.example.invalid` are refused.
+   *Adopted from the code* (`checkGatewayUrl`, `packages/sandbox-executor/src/client.ts`). Vectors `executor-url-*`.
+7. **A `bh` mismatch consumes nothing.** The order is fixed: the body hash is checked first, then the one-use `jti`
+   is claimed, then the executor is looked up. A request whose valid proof header does not match its body is refused
+   `401 proof_body`, writes one `executor-channel-refused` row and leaves the `jti` unclaimed. A substituted body
+   therefore cannot burn the real request's proof, as ADR-0188 decision 23 rules for a delegation authorization.
+   Replay stays closed, because the proof is only accepted with the exact body it hashes. *Adopted from the code*
+   (`apps/gateway/src/executor-channel-auth.ts`, the body phase). Vector `channel-proven-header-then-bad-body-hash`.
+8. **An unmapped `customer_declared` plane gives `class_below_required`.** Its attestation is fresh, but by
+   owner decision 6 it maps to no class, so it is below every requirement. *Adopted from the code* (`offerPlacement`
+   and the accept and report routes: `declaredClass` null satisfies nothing). Vector `customer-declared-unmapped`.
+9. **Ties are unspecified on purpose.** Among eligible executors with the same number of open offers, the broker may
+   pick any one. A test must not pin which one is chosen, and no tie order carries a security property. *Adopted from
+   the code* (an unordered read, then a stable sort on open offers).
+10. **A mismatch answers `409 execution_profile_mismatch`.** The executor's report route answers `409` with that
+    error, `next: quarantined` and the failures. *Adopted from the code.* Binds I4: the governed call whose placement
+    failed this way is refused to its caller with `409`, error `execution_profile_mismatch` and rule id
+    `execution-profile`, and zero input bytes are delivered. Vector `placement-report-mismatch`.
+11. **`delegation-isolation` takes the shape of a delegation refusal.** Binds I2. The check runs at child admission
+    (ADR-0188 decision 22), at the same point as the budget and depth checks. On the token endpoint it is
+    `invalid_grant` with `error_code` `delegation_isolation`, by decision 15's pattern for `delegation_budget` and
+    `delegation_depth`; I2 adds the code to `DELEGATION_ERROR_CODES`. In process it is the delegation refusal with
+    rule id `delegation-isolation`. Either way it is audited, and no grant is created. Vectors
+    `delegation-L2-L1`, `delegation-L3-L1` and `delegation-L3-L2`.
+12. **A middle actor's invalid placement is an `actor-chain-invalid` refusal.** Binds I2. Decision 8's live-chain
+    addition is part of ADR-0188 decision 17, and ADR-0188 decision 28 refuses a chain with an actor that is not live
+    as `actor-chain-invalid`. Three conditions trigger it: the executor that holds the middle actor's placement is not
+    `active`, it is quarantined, or its attestation for the required class is not fresh. The refusal has the same
+    envelope as every other `actor-chain-invalid` on that path. Its detail names the failing grant and which of the
+    three conditions failed, and the upstream counter stays at zero. Vectors `middle-actor-executor-*`.
+13. **An OpenShell placement on gVisor is refused at both ends.** The gateway side is built: an `openshell` report
+    that claims `user_space_kernel` fails `class_not_attestable_by_backend` (`BACKEND_ATTESTABLE_CLASSES`). In a
+    self-test, that withdraws the class. In a placement report, it is a mismatch: the executor is quarantined.
+    *Adopted from the code.* Binds I7 on the executor side: an executor configured for the `openshell` backend with
+    `runtimeClassName: gvisor` refuses to start (a configuration error, with no sandbox started), and it never offers
+    to take such a placement. Vector `openshell-gvisor-refused`.
+14. **`warn` never places below the required class, until the owner rules.** Decision 11's table makes "falling back
+    to a lower class than required" an invariant that cannot be relaxed. The `warn` row contradicts it, and so does
+    the Fail closed test strategy line. Until open item A below is decided, the invariant wins (ADR-0180): under
+    `warn`, as under `enforce`, no call is placed below its required class. The broker already behaves this way:
+    `offerPlacement` filters on the class whatever the mode. **Code follow-up required:** the per-placement report
+    check exempts `warn` offers from the class comparison (`o.enforcement === "enforce" && …` in the report route of
+    `executor-channel.ts`). A report whose applied class is below the requirement must be an
+    `execution_profile_mismatch` in every mode. The `isolationEnforcement` help text in
+    `packages/shared/src/isolation/settings.ts` ("placed on the best isolation available") must say the same. Vector
+    `warn-shortfall`.
+15. **Unresolved policy facts fail closed before any offer.** Binds I2. Several inputs can be missing or not
+    resolvable: an unknown workload kind, an unknown sensitivity, an unknown class in a floor or a compliance tag, or
+    a policy lookup that did not resolve. In each case the call is refused before any executor is offered work and
+    before any upstream is contacted. No placement is offered, and the refusal is audited `execution-refused`. A
+    missing fact is never coerced to a class, never dropped from the MAX, and never defaulted. The one exception is
+    decision 7 item 5's unknown agent, which defaults to the most restrictive profile. The envelope is open item B
+    below. Vectors `unknown-*`.
+
+**Open for the owner.**
+
+- **A. What `warn` means.** *Recommended:* retire `warn` as a value of `isolation_enforcement`. An admin who cannot
+  provide a class lowers the requirement itself, through the relaxations decision 11 already audits (each
+  sensitivity floor down to L1, the `mcp_stdio` and `engine_worker` floors down to L1, each with a step-up). The
+  requirement and the placement then never disagree, and no call is ever placed below what its own record says it
+  required. Alternative: keep `warn` as "enforce, plus a posture warning when a call is refused", which also keeps
+  the invariant. Either way, the decision 11 row and the Fail closed test strategy line are rewritten to match.
+- **B. The envelope for an unresolved policy fact (item 15).** *Recommended:* `409 execution_profile_unavailable`,
+  rule id `execution-profile`, with a sixth fixed reason `policy_unresolved` added to decision 7's list. The caller
+  sees the same refusal family as every other isolation refusal, and the audit row can tell a configuration fault
+  from a capacity fault. Alternative: answer with a server-side error (`503`), treating the fact as a fault in our own
+  data rather than a policy outcome.
+
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches (`schema.ts`, migrations, `app.ts`, `route-classes.ts`, `openapi-registry.ts`, the

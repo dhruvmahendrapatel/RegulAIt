@@ -64,14 +64,25 @@ rejection and RFC 7638 thumbprints, then proves it rejects deliberate corruption
 
 ## Spec gaps found (ADR-0188 @ b6-identity-s5)
 
+Each gap is now closed by ADR-0188 "Amendments from the conformance-vector gaps (2026-10-10)". The item number is
+given for each. The vector expectations are unchanged. A vector that still says `exactErrorUnspecified` or `gap` can
+now pin the exact outcome the item names.
+
 - Precedence between `delegation_depth_unenforced` and `mtls_parent_handoff_unsupported` for an mTLS parent
-  (`child-mtls-parent-active`).
+  (`child-mtls-parent-active`). **Closed by item 1:** `mtls_parent_handoff_unsupported` comes first.
 - No error code for raising `delegationRootMaxLifetimeSeconds` above 24 h (`s5-max-lifetime-setting-over-24h`).
+  **Closed by item 3:** `400 validation`, and nothing is saved.
 - The refusal code when a step-up grant names other facts (item 8 says only "refused and not spent").
-- No refusal codes for the human-credential rules of owner decision 4 (bootstrap token, virtual key, API key without MFA).
+  **Closed by item 4:** `403 step_up_required` with `presentedGrant: "not_valid_for_this_action"`, and the grant is
+  not spent.
+- No refusal codes for the human-credential rules of owner decision 4 (bootstrap token, virtual key, API key without
+  MFA). **Closed by item 5:** `403` with `delegation_proof_credential`, `virtual_key_scope` and
+  `mfa_enrollment_required` respectively. Code follow-up: the first is not audited yet.
 - A child audience other than the parent's (recorded ruling) has no error code (`child-other-audience`).
+  **Closed by item 2:** `invalid_target` with `audience_not_parent`.
 - Decision 15's root request names and types for cap, depth and lifetime, the human-proof JWT claim names, and whether
-  `delegation` is canonical text or an object, remain unfrozen (X49's original notes stand).
+  `delegation` is canonical text or an object, remain unfrozen (X49's original notes stand). **Closed by item 6:**
+  the names and types are recorded, and `delegation` is RFC 8785 canonical text, never an object.
 
 ## Vector map (id → ADR-0188 paragraph)
 

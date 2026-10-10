@@ -39,19 +39,35 @@ amendment from K to W, whose text is not yet on `main` (the checker enforces thi
 
 ## Spec gaps found (ADR-0190 @ b6-isolation-i3)
 
+Each gap now points to ADR-0190 "Amendments from the conformance-vector gaps (2026-10-10)". The item number is given
+for each. The vector expectations are unchanged. A vector that still says `gap`, `contract_gap` or
+`fail_closed_pending_contract` can now pin the outcome its item names, except where the item leaves the choice to the
+owner (open items A and B).
+
 - **`offer_expired`** is not in the ADR text. Amendment P says a declined or expired offer is refused with
   `no_executor` "or the executor's reason", and amendment S mentions five decline codes without listing them
-  (`offer-*`, gap `offer_expired_code`).
+  (`offer-*`, gap `offer_expired_code`). **Closed by items 1 and 2:** an expired offer is `no_executor`, and
+  `offer_expired` is only the channel's `409` to the executor. The five decline codes and their mapping are listed.
 - Which fixed reason a latest **failing** self-test gives: read literally from P as `attestation_stale`
-  (`attestation-failing`, gap `failing_latest_reason_reading`).
+  (`attestation-failing`, gap `failing_latest_reason_reading`). **Closed by item 3:** `attestation_stale`, as the
+  vector reads it.
 - Freshness equality at exactly `observed_at + limit` (N fixes the clock and the min rule, not the boundary).
+  **Closed by item 4:** stale at equality.
 - Values of `REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP` other than `1`; whether `[::1]` and other IPv6 loopback spellings
-  (`::ffff:127.0.0.1`) count.
+  (`::ffff:127.0.0.1`) count. **Closed by items 5 and 6:** only `1` turns the flag on. `[::1]` counts, and so does any
+  spelling the URL parser normalises to it; `[::ffff:127.0.0.1]` does not.
 - Whether a `bh` mismatch after a valid proof header consumes the `jti` (W orders the steps, not the claim outcome).
+  **Closed by item 7:** it does not.
 - Reason for an unmapped `customer_declared` plane; refusal envelopes for unknown facts, `delegation-isolation`,
-  the live-chain refusal and the OpenShell refusal; the HTTP status of `execution_profile_mismatch`.
+  the live-chain refusal and the OpenShell refusal; the HTTP status of `execution_profile_mismatch`. **Closed by
+  item 8** (`class_below_required`), **item 11** (`invalid_grant` / `delegation_isolation`), **item 12**
+  (`actor-chain-invalid`), **item 13** (both ends refuse) and **item 10** (`409`). For unknown facts, **item 15**
+  fixes the fail-closed rule, and the envelope is **open item B**.
 - **`warn` versus "never fall back"** (decision 11 table and test strategy) is still unresolved (`warn-shortfall`).
-- Tie-break between eligible executors with equal open offers.
+  **Item 14** sets the interim rule (the invariant wins, so there is no placement below the required class), with a
+  code follow-up. What `warn` means is **open item A**.
+- Tie-break between eligible executors with equal open offers. **Closed by item 9:** unspecified on purpose, so a
+  test must not pin one.
 
 ## Checks
 
