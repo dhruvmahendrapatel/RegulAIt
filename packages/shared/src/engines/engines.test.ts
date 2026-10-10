@@ -3,9 +3,14 @@
  * and caps, the not-clean normaliser, the self-test verdict, the setting and
  * engine-row relaxation predicates, and the taxonomy table's own checks.
  */
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   BATCH5_STRICT_DEFAULTS,
+  ENGINE_REASON_MAX_LENGTH,
+  ENGINE_SELF_TEST_FUTURE_SKEW_MS,
+  ENGINE_SELF_TEST_MAX_AGE_SECONDS,
+  revokeRunnerSchema,
   ENGINE_MANIFEST,
   ENGINE_RESULT_VERSION,
   ENGINE_TAXONOMY,
@@ -278,5 +283,32 @@ describe("review round 2", () => {
     expect(n.probeStats[0]!.status).toBe("not_run");
     expect(n.asrTrials).toBe(0);
     expect(n.verdict).toBe("unknown");
+  });
+});
+
+/**
+ * The SPA does not depend on this package; the Engines page mirrors the bounds it
+ * enforces before a request (as LiteracyPage.tsx does for ai-literacy). These pin
+ * each mirror to the constant the gateway applies (PR #230 review).
+ */
+describe("the Engines page's mirrored bounds", () => {
+  const web = readFileSync(new URL("../../../../apps/web/src/views/admin/integrations/engineModel.ts", import.meta.url), "utf8");
+  const mirrored = (name: string): number => {
+    const m = new RegExp(`export const ${name} = ([0-9_]+);`).exec(web);
+    expect(m, `${name} in engineModel.ts`).not.toBeNull();
+    return Number(m![1]!.replaceAll("_", ""));
+  };
+
+  it("the revocation reason cap is the schema's", () => {
+    expect(ENGINE_REASON_MAX_LENGTH).toBeGreaterThan(0);
+    expect(mirrored("RUNNER_REVOKE_REASON_MAX")).toBe(ENGINE_REASON_MAX_LENGTH);
+    expect(revokeRunnerSchema.safeParse({ reason: "x".repeat(ENGINE_REASON_MAX_LENGTH) }).success).toBe(true);
+    expect(revokeRunnerSchema.safeParse({ reason: "x".repeat(ENGINE_REASON_MAX_LENGTH + 1) }).success).toBe(false);
+  });
+
+  it("the self-test freshness bound and the future-dated skew are the verdict's", () => {
+    expect(mirrored("SELF_TEST_MAX_AGE_MS")).toBe(ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000);
+    expect(ENGINE_SELF_TEST_FUTURE_SKEW_MS).toBeGreaterThan(0);
+    expect(mirrored("SELF_TEST_FUTURE_SKEW_MS")).toBe(ENGINE_SELF_TEST_FUTURE_SKEW_MS);
   });
 });
