@@ -427,6 +427,40 @@ for ADR-0188 S1 and S4, as the slice plan says.
 11. **OWNER DECISION — retention.** *Recommended:* Decision BOMs and AI BOM snapshots follow the compliance profile's
     audit retention and are kept under evidence holds; renderings are deleted with their parent.
 
+## Amendments after spike B0 (2026-10-10)
+
+Spike B0 (`docs/research/R12-bom-b0-spike.md`, PR #265) returned GO on the ADR-0176 §4 exception. These amendments
+bind slices B1 to B8.
+
+1. **The CycloneDX library is used for its schema files only.** At runtime, 10.3.0's model also lacks `compositions`,
+   `definitions`, `annotations`, top-level `externalReferences`, and `Service.endpoints/data/trustZone/authenticated`.
+   Its 1.7 serializer silently drops fields forced onto the objects. B3 never uses the library's model or serializer.
+2. **`iri-reference` maps to the ajv-formats `uri-reference` check (ASCII only).** The library's accept-all behaviour
+   is an insecure default under ADR-0180.
+3. **Ajv settings:** `strict: true` and `strictRequired: false`; `meta:enum` registered as an annotation-only keyword;
+   schemas compiled once at boot or precompiled, because compiling takes 2-3 s.
+4. **`spdx3-validate` is "No as shipped" for air-gapped use.** It fetches the schema, the SHACL model and the
+   JSON-LD context. The CI job uses the vendored files, the offline driver, a hash-locked install and no network.
+5. **Exact-bytes rules:**
+   - SPDX `created` is truncated to whole seconds; the native body keeps the full time.
+   - `serialNumber` is an RFC 9562 v8 UUID derived from SHA-256 of `regulait:ai-bom:<snapshot id>`.
+   - Sorting is by code unit, never `localeCompare`.
+   - Integers must not exceed 2^53.
+   - Metric values are strings.
+6. **CI-only Python closure (owner, 2026-10-10):** PSF-2.0 (`typing_extensions`) and W3C-20150513 (`owlrl`) are
+   allowed for CI tooling that never ships; see the ADR-0176 amendment of the same date.
+7. **Vendored SPDX 3.0.1 schema, model and context (owner, 2026-10-10):** admitted as standards-body specification
+   data under Community-Spec-1.0 / CC-BY-3.0, with attribution in THIRD_PARTY.md; see ADR-0176.
+8. **CycloneDX mapping additions,** from the OWASP AIBOM field registry:
+   - `modelCard.modelParameters.task` and `modelArchitecture`;
+   - `licenses` on model components, with an unknown licence stated as unknown and the composition marked
+     `incomplete`;
+   - `purl` or a distribution reference, only when the provider supplies one;
+   - the SPDX AI-profile fields as `regulait:` properties, marked unknown or supplier-declared.
+
+   Open question 6 is updated accordingly.
+9. **B0's "CI container" was met only as a hash-locked, network-isolated venv.** B5 builds the real CI job.
+
 ## Open questions
 
 1. **Receipt payload v2.** ADR-0188 decision 9 adds sponsor, actor chain and grant id to receipts; this ADR adds
