@@ -9,14 +9,17 @@ import { canonicalJson } from "../audit-chain.js";
 import { RECEIPT_PAYLOAD_VERSION } from "../batch4.js";
 import {
   AI_BOM_ONLY_CHECKS,
+  AI_BOM_REQUIRED_CHECKS,
   AI_BOM_VERSION,
   aiBomSerialNumber,
   aiBomSnapshotFormatQuerySchema,
+  BOM_ANCHOR_CHECKS,
   BOM_ANCHOR_PENDING_REASONS,
   BOM_B4_ERROR_CODES,
   BOM_B4_ROUTE_CONTRACT,
   BOM_B4_ROUTES,
   BOM_BUNDLE_HEADERS,
+  BOM_BUNDLE_REQUIRED_CHECKS,
   BOM_CANNOT_PROVE,
   BOM_CANNOT_PROVE_COPY,
   BOM_ERROR_CODES,
@@ -35,6 +38,7 @@ import {
   DECISION_BOM_CANNOT_PROVE_FIXED,
   DECISION_BOM_FINALITY_STATES,
   DECISION_BOM_ONLY_CHECKS,
+  DECISION_BOM_REQUIRED_CHECKS,
   DECISION_BOM_SECTIONS,
   DECISION_BOM_VERSION,
   DECISION_FACTS_VERSION,
@@ -44,6 +48,8 @@ import {
   projectBomRow,
   type BomCapabilities,
   type BomErrorCode,
+  type BomVerifyCheck,
+  type BomVerifyCheckResult,
   type BomVerifyResponse,
   type DecisionBomBody,
   type DecisionBomFinalityState,
@@ -164,18 +170,19 @@ function decisionManifest() {
   };
 }
 
-const decisionChecks = (lapsed = false) => [
-  ...DECISION_BOM_ONLY_CHECKS.map((check) => ({ check, status: "valid" as const, reason: null, ref: null })),
-  { check: "bundle_manifest_signature" as const, status: "valid" as const, reason: null, ref: "manifest.json" },
-].map((c) =>
-  c.check === "decision_content_binding"
-    ? { ...c, status: "unverifiable" as const, reason: "preimage_not_exported" as const }
-    : c.check === "tsa_token"
-      ? { ...c, status: "unverifiable" as const, reason: "no_timestamp_token" as const }
-      : c.check === "finality" && lapsed
-        ? { ...c, status: "valid" as const }
-        : c,
-);
+/** a complete Decision BOM check set (B4C-01): the required checks, plus the bundle envelope for a bundle source */
+const decisionChecks = (finality: DecisionBomFinalityState, receipt: "v1" | "v2", source: "bundle" | "decision_bom" = "bundle"): BomVerifyCheckResult[] => [
+  ...DECISION_BOM_REQUIRED_CHECKS.map((check): BomVerifyCheckResult => {
+    if (check === "decision_content_binding") return { check, status: "unverifiable", reason: "preimage_not_exported", ref: null };
+    if (check === "receipt_facts_binding" && receipt === "v1") return { check, status: "unverifiable", reason: "receipt_v1_no_factsHash", ref: null };
+    if ((BOM_ANCHOR_CHECKS as readonly string[]).includes(check) && finality === "chain_signed") return { check, status: "unverifiable", reason: "anchor_absent", ref: null };
+    if (check === "tsa_token") return { check, status: "unverifiable", reason: "no_timestamp_token", ref: null };
+    return { check, status: "valid", reason: null, ref: null };
+  }),
+  ...BOM_BUNDLE_REQUIRED_CHECKS.map((check): BomVerifyCheckResult =>
+    source === "bundle" ? { check, status: "valid", reason: null, ref: "manifest.json" } : { check, status: "unverifiable", reason: "not_a_bundle", ref: null },
+  ),
+];
 
 function verifyResponse(finality: DecisionBomFinalityState = "anchored", opts: { lapsed?: boolean; receipt?: "v1" | "v2" } = {}): BomVerifyResponse {
   const cannotProve = new Set<string>(DECISION_BOM_CANNOT_PROVE_FIXED);
@@ -188,7 +195,7 @@ function verifyResponse(finality: DecisionBomFinalityState = "anchored", opts: {
     bodyVersion: DECISION_BOM_VERSION,
     identity: { subject: "decision-bom", auditId: U(1), bomId: U(21), version: 1, recordedFinality: finality, reportedFinality: opts.lapsed ? "anchored_lapsed" : finality, receiptPayloadVersion: opts.receipt ?? "v1" },
     outcome: "valid_with_unverifiable",
-    checks: decisionChecks(opts.lapsed),
+    checks: decisionChecks(finality, opts.receipt ?? "v1"),
     sections: DECISION_BOM_SECTIONS.map((section) => ({ section, status: "valid" as const, completeness: section === "trace" ? ("not_recorded" as const) : ("recorded" as const), notRecordedReason: section === "trace" ? ("no_bound_row" as const) : null })),
     cannotProve: [...cannotProve] as BomVerifyResponse["cannotProve"],
     manifest: decisionManifest() as BomVerifyResponse["manifest"],
@@ -336,8 +343,9 @@ describe("B4 contract: POST /v1/boms/verify", () => {
       identity: { subject: "ai-bom", snapshotId: U(50), subjectKind: "use_case", subjectId: U(8), version: 2, serialNumber: `urn:uuid:${aiBomSerialNumber(U(50))}` },
       outcome: "valid_with_unverifiable",
       checks: [
-        { check: "body_signature", status: "valid", reason: null, ref: null },
-        ...AI_BOM_ONLY_CHECKS.map((check) => ({ check, status: "valid" as const, reason: null, ref: check === "rendering_hashes" ? "cyclonedx-1.7" : null })),
+        ...AI_BOM_REQUIRED_CHECKS.map((check) => ({ check, status: "valid" as const, reason: null, ref: null })),
+        { check: "rendering_hashes", status: "valid", reason: null, ref: "cyclonedx-1.7" },
+        { check: "rendering_hashes", status: "valid", reason: null, ref: "spdx-3.0.1" },
         { check: "supersedes", status: "unverifiable", reason: "earlier_snapshot_not_in_bundle", ref: null },
         { check: "bundle_manifest_signature", status: "unverifiable", reason: "not_a_bundle", ref: null },
       ],
@@ -380,6 +388,119 @@ describe("B4 contract: POST /v1/boms/verify", () => {
   });
   it("every cannotProve entry has its sentence", () => {
     for (const c of BOM_CANNOT_PROVE) expect(BOM_CANNOT_PROVE_COPY[c].length, c).toBeGreaterThan(10);
+  });
+});
+
+describe("B4 contract round 2: Codex X48 counterexamples (B4C-01..03) and the required check sets", () => {
+  /** Codex's baseline (#318 X48): a stored-source v1 Decision BOM with every check and the mandated limitations */
+  const baseline = (): BomVerifyResponse => {
+    const checks = [...DECISION_BOM_ONLY_CHECKS, ...BOM_VERIFY_CHECKS.filter((c) => c.startsWith("bundle_") || c.startsWith("body_"))].map((check): BomVerifyCheckResult =>
+      check.startsWith("bundle_")
+        ? { check, status: "unverifiable", reason: "not_a_bundle", ref: null }
+        : check === "decision_content_binding"
+          ? { check, status: "unverifiable", reason: "preimage_not_exported", ref: null }
+          : check === "receipt_facts_binding"
+            ? { check, status: "unverifiable", reason: "receipt_v1_no_factsHash", ref: null }
+            : { check, status: "valid", reason: null, ref: null },
+    );
+    return {
+      ...verifyResponse("anchored"),
+      source: "decision_bom",
+      manifest: null,
+      checks,
+      sections: DECISION_BOM_SECTIONS.map((section) => ({ section, status: "valid" as const, completeness: "recorded" as const, notRecordedReason: null })),
+    };
+  };
+  const valid = (check: BomVerifyCheck): BomVerifyCheckResult => ({ check, status: "valid", reason: null, ref: null });
+  const accepts = (r: BomVerifyResponse) => bomVerifyResponseSchema.safeParse(r).success;
+
+  it("Codex's baseline is accepted, and so is every existing fixture shape", () => {
+    roundTrips(bomVerifyResponseSchema, baseline());
+    for (const f of DECISION_BOM_FINALITY_STATES) for (const receipt of ["v1", "v2"] as const) roundTrips(bomVerifyResponseSchema, verifyResponse(f, { receipt }));
+  });
+  it("B4C-01: one check cannot claim valid", () => {
+    expect(accepts({ ...baseline(), checks: [valid("body_schema")], outcome: "valid" })).toBe(false);
+  });
+  it("B4C-01: a duplicated check cannot stand in for the set", () => {
+    expect(accepts({ ...baseline(), checks: [valid("body_schema"), valid("body_schema")], outcome: "valid" })).toBe(false);
+  });
+  it("B4C-01: decision_content_binding is never valid (R39)", () => {
+    const b = baseline();
+    expect(accepts({ ...b, checks: b.checks.map((c) => (c.check === "decision_content_binding" ? valid(c.check) : c)) })).toBe(false);
+  });
+  it("B4C-01: a v1 receipt's facts binding is never valid (R46)", () => {
+    const b = baseline();
+    expect(accepts({ ...b, checks: b.checks.map((c) => (c.check === "receipt_facts_binding" ? valid(c.check) : c)) })).toBe(false);
+    // the B4.3 alternative stays representable: v1 at or above a known boundary is invalid
+    const after = b.checks.map((c): BomVerifyCheckResult => (c.check === "receipt_facts_binding" ? { ...c, status: "invalid", reason: "v1_receipt_after_boundary" } : c));
+    expect(accepts({ ...b, checks: after, outcome: "invalid" })).toBe(true);
+  });
+  it("B4C-02: an invalid section beside a valid projection and a non-invalid outcome is refused", () => {
+    const b = baseline();
+    expect(accepts({ ...b, sections: b.sections.map((s, i) => (i === 0 ? { ...s, status: "invalid" } : s)) })).toBe(false);
+  });
+  it("B4C-02: combined omissions cannot report an invalid section under an overall valid", () => {
+    const b = baseline();
+    const r: BomVerifyResponse = {
+      ...b,
+      checks: b.checks.map((c) => valid(c.check)),
+      outcome: "valid",
+      identity: { ...(b.identity as Extract<BomVerifyResponse["identity"], { subject: "decision-bom" }>), receiptPayloadVersion: "v2" },
+      sections: b.sections.map((s, i) => (i === 0 ? { ...s, status: "invalid" } : s)),
+    };
+    expect(accepts(r)).toBe(false);
+  });
+  it("B4C-03: a stored AI BOM source cannot identify a Decision BOM, nor the reverse", () => {
+    expect(accepts({ ...baseline(), source: "ai_bom_snapshot" })).toBe(false);
+  });
+
+  it("B4C-02: an invalid section needs an invalid sections_projection, and the outcome is then invalid", () => {
+    const b = baseline();
+    const sections = b.sections.map((s, i) => (i === 3 ? { ...s, status: "invalid" as const } : s));
+    const checks = b.checks.map((c): BomVerifyCheckResult => (c.check === "sections_projection" ? { ...c, status: "invalid", reason: "section_mismatch" } : c));
+    expect(accepts({ ...b, sections, checks, outcome: "invalid" })).toBe(true);
+    expect(accepts({ ...b, sections, checks, outcome: "valid_with_unverifiable" })).toBe(false);
+    expect(accepts({ ...b, checks, outcome: "invalid" })).toBe(false); // projection invalid but no section names it
+  });
+  it("B4C-02: an unverifiable section never yields valid; completeness stays separate from validity", () => {
+    const b = verifyResponse("anchored", { receipt: "v2" });
+    const allValid = b.checks.map((c) => (c.check === "decision_content_binding" ? c : c.status === "unverifiable" ? valid(c.check) : c));
+    const sections = b.sections.map((s) => (s.section === "cost" ? { ...s, status: "unverifiable" as const } : s));
+    expect(accepts({ ...b, checks: allValid, sections })).toBe(true);
+    expect(accepts({ ...b, checks: allValid, sections, outcome: "valid" })).toBe(false);
+    // a not_recorded section is still `valid` when its recomputed gap matches
+    expect(b.sections.find((s) => s.section === "trace")).toMatchObject({ status: "valid", completeness: "not_recorded" });
+  });
+  it("B4C-01: a bundle source must report the envelope, and a stored source may never claim it", () => {
+    const bundle = verifyResponse();
+    expect(accepts({ ...bundle, checks: bundle.checks.filter((c) => c.check !== "bundle_manifest_files") })).toBe(false);
+    expect(accepts({ ...baseline(), checks: baseline().checks.map((c) => (c.check === "bundle_subject" ? valid(c.check) : c)) })).toBe(false);
+    expect(accepts({ ...bundle, checks: bundle.checks.map((c): BomVerifyCheckResult => (c.check === "bundle_subject" ? { ...c, status: "unverifiable", reason: "not_a_bundle", ref: null } : c)) })).toBe(false);
+    // a stored source may also leave the envelope out entirely
+    expect(accepts({ ...baseline(), checks: baseline().checks.filter((c) => !c.check.startsWith("bundle_")) })).toBe(true);
+  });
+  it("chain_signed reports its anchor checks unverifiable anchor_absent, and only it", () => {
+    const cs = verifyResponse("chain_signed");
+    expect(accepts(cs)).toBe(true);
+    expect(accepts({ ...cs, checks: cs.checks.map((c) => (c.check === "anchor_record" ? valid(c.check) : c)) })).toBe(false);
+    const anchored = verifyResponse("anchored");
+    expect(accepts({ ...anchored, checks: anchored.checks.map((c): BomVerifyCheckResult => (c.check === "anchor_record" ? { ...c, status: "unverifiable", reason: "anchor_absent" } : c)) })).toBe(false);
+  });
+  it("the conditional checks may be left out, and supersedes is required exactly for an AI BOM above version 1", () => {
+    expect(DECISION_BOM_REQUIRED_CHECKS).not.toContain("ai_bom_link");
+    expect(DECISION_BOM_REQUIRED_CHECKS).not.toContain("facts_addenda_chain");
+    const ai: BomVerifyResponse = {
+      ...verifyResponse(), source: "ai_bom_snapshot", bodyVersion: AI_BOM_VERSION, sections: [], cannotProve: ["facts_true", "signing_time_beyond_anchor"], manifest: null,
+      identity: { subject: "ai-bom", snapshotId: U(50), subjectKind: "agent", subjectId: U(7), version: 1, serialNumber: `urn:uuid:${aiBomSerialNumber(U(50))}` },
+      outcome: "valid",
+      checks: AI_BOM_REQUIRED_CHECKS.map(valid),
+    };
+    expect(accepts(ai)).toBe(true);
+    expect(accepts({ ...ai, checks: [...ai.checks, valid("supersedes")] })).toBe(false);
+    const v2 = { ...ai, identity: { ...(ai.identity as Extract<BomVerifyResponse["identity"], { subject: "ai-bom" }>), version: 2 } };
+    expect(accepts(v2)).toBe(false);
+    expect(accepts({ ...v2, checks: [...ai.checks, valid("supersedes")] })).toBe(true);
+    expect(accepts({ ...ai, checks: ai.checks.filter((c) => c.check !== "serial_number") })).toBe(false);
   });
 });
 

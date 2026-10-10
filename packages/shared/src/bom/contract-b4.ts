@@ -433,6 +433,23 @@ export const DECISION_BOM_ONLY_CHECKS = [
   "sections_projection", "chain_links", "decision_content_binding", "anchor_record", "anchor_imprint", "tsa_token", "finality", "ai_bom_link",
 ] as const satisfies readonly BomVerifyCheck[];
 export const AI_BOM_ONLY_CHECKS = ["rendering_hashes", "serial_number", "supersedes"] as const satisfies readonly BomVerifyCheck[];
+/**
+ * B4C-01: the checks a readable, non-`invalid` response MUST report (spec B4.4: a check that does not apply is left
+ * out, so the conditional ones are named here too). Conditional, left out when not applicable:
+ *  - Decision BOM: `facts_addenda_chain` and `facts_addenda_signatures` (no addenda), `ai_bom_link` (no snapshot link);
+ *  - AI BOM: `rendering_hashes` (no rendering carried), `supersedes` (required exactly when version > 1).
+ */
+export const DECISION_BOM_REQUIRED_CHECKS = [
+  "body_version", "body_schema", "body_signature",
+  "receipt_signature", "receipt_payload_hash", "receipt_facts_binding",
+  "sections_projection", "chain_links", "decision_content_binding",
+  "anchor_record", "anchor_imprint", "tsa_token", "finality",
+] as const satisfies readonly BomVerifyCheck[];
+export const AI_BOM_REQUIRED_CHECKS = ["body_version", "body_schema", "body_signature", "serial_number"] as const satisfies readonly BomVerifyCheck[];
+/** required for a `bundle` source; a stored source has no envelope and reports these only as `unverifiable` `not_a_bundle` */
+export const BOM_BUNDLE_REQUIRED_CHECKS = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"] as const satisfies readonly BomVerifyCheck[];
+/** a `chain_signed` BOM reports these `unverifiable` `anchor_absent` (B4.4) */
+export const BOM_ANCHOR_CHECKS = ["anchor_record", "anchor_imprint", "tsa_token"] as const satisfies readonly BomVerifyCheck[];
 
 export const BOM_VERIFY_INVALID_REASONS = [
   "signature_mismatch",
@@ -596,22 +613,68 @@ export const bomVerifyResponseSchema = z
   .strict()
   .superRefine((r, ctx) => {
     const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-    const statuses = new Set(r.checks.map((c) => c.status));
+    // the outcome aggregates the checks AND the sections (B4C-02): any invalid -> invalid; else any unverifiable -> valid_with_unverifiable
+    const statuses = new Set([...r.checks.map((c) => c.status), ...r.sections.map((s) => s.status)]);
     const want = statuses.has("invalid") ? "invalid" : statuses.has("unverifiable") ? "valid_with_unverifiable" : "valid";
-    if (r.outcome !== want) issue(`outcome is ${want} for these checks`);
+    if (r.outcome !== want) issue(`outcome is ${want} for these checks and sections`);
+    // a check reported more than once names a distinct `ref` each time (B4C-01)
+    const seen = new Map<string, Array<string | null>>();
+    for (const c of r.checks) seen.set(c.check, [...(seen.get(c.check) ?? []), c.ref]);
+    for (const [check, refs] of seen) {
+      if (refs.length > 1 && (refs.includes(null) || new Set(refs).size !== refs.length)) issue(`${check}: a repeated check needs a distinct ref each time`);
+    }
+    const of = (check: BomVerifyCheck) => r.checks.filter((c) => c.check === check);
+    const all = (check: BomVerifyCheck, status: BomVerifyStatus, reason: string) => of(check).every((c) => c.status === status && c.reason === reason);
     if (r.identity === null || r.bodyVersion === null) {
-      if (r.outcome !== "invalid") issue("an unreadable bundle is invalid");
+      if (r.outcome !== "invalid" || !r.checks.some((c) => c.status === "invalid")) issue("an unreadable bundle is invalid, with the failing check");
     } else {
       const decision = r.identity.subject === "decision-bom";
       if (r.bodyVersion !== (decision ? "regulait.decision-bom.v1" : "regulait.ai-bom.v1")) issue("bodyVersion matches the subject");
+      // B4C-03: a stored source names its own subject; a bundle may hold either
+      if ((r.source === "decision_bom" && !decision) || (r.source === "ai_bom_snapshot" && decision)) issue("the stored source matches the verified subject");
       const foreign = decision ? AI_BOM_ONLY_CHECKS : DECISION_BOM_ONLY_CHECKS;
       if (r.checks.some((c) => (foreign as readonly string[]).includes(c.check))) issue("checks belong to the subject (R19)");
       if (decision && r.sections.map((s) => s.section).join() !== DECISION_BOM_SECTIONS.join()) issue("every Decision BOM section, in order");
       if (!decision && r.sections.length) issue("an AI BOM has no Decision BOM sections");
       const fixed = decision ? DECISION_BOM_CANNOT_PROVE_FIXED : AI_BOM_CANNOT_PROVE_FIXED;
       if (fixed.some((c) => !r.cannotProve.includes(c))) issue("the fixed cannotProve list is always present");
+
+      // B4C-01: the minimum check set for this source and subject; an inapplicable conditional check is left out (B4.4)
+      const required: readonly BomVerifyCheck[] = [
+        ...(decision ? DECISION_BOM_REQUIRED_CHECKS : AI_BOM_REQUIRED_CHECKS),
+        ...(r.source === "bundle" ? BOM_BUNDLE_REQUIRED_CHECKS : []),
+        ...(r.identity.subject === "ai-bom" && r.identity.version > 1 ? (["supersedes"] as const) : []),
+      ];
+      const missing = required.filter((c) => of(c).length === 0);
+      if (missing.length && r.outcome !== "invalid") issue(`a ${r.outcome} response reports every required check; missing: ${missing.join(", ")}`);
+      // the bundle envelope: claimed only for a bundle; a stored source may report it only as not_a_bundle
+      for (const c of BOM_BUNDLE_REQUIRED_CHECKS) {
+        if (r.source !== "bundle" && !all(c, "unverifiable", "not_a_bundle")) issue(`${c}: a stored source has no bundle envelope (only unverifiable not_a_bundle)`);
+      }
+      if (r.source === "bundle" && r.checks.some((c) => c.reason === "not_a_bundle")) issue("not_a_bundle is never reported for a bundle");
+      if (r.checks.some((c) => c.reason === "not_a_bundle" && !(BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(c.check))) issue("not_a_bundle applies to the bundle_* checks only");
+      if (r.identity.subject === "ai-bom" && r.identity.version === 1 && of("supersedes").length) issue("version 1 supersedes nothing: the supersedes check is left out");
       if (r.identity.subject === "decision-bom") {
         const id = r.identity;
+        // R39: the decision row's preimage is never exported, so its content binding is never claimed
+        if (!all("decision_content_binding", "unverifiable", "preimage_not_exported")) issue("decision_content_binding is unverifiable preimage_not_exported (R39)");
+        // R46: a v1 receipt never commits to the facts (or is invalid after the boundary, B4.3)
+        const v1Binding = of("receipt_facts_binding").every((c) => (c.status === "unverifiable" && c.reason === "receipt_v1_no_factsHash") || (c.status === "invalid" && c.reason === "v1_receipt_after_boundary"));
+        if (id.receiptPayloadVersion === "v1" && !v1Binding) issue("a v1 receipt's facts binding is unverifiable receipt_v1_no_factsHash, or invalid after the boundary (R46)");
+        if (id.receiptPayloadVersion === "v2" && r.checks.some((c) => c.reason === "receipt_v1_no_factsHash" || c.reason === "v1_receipt_after_boundary")) issue("a v2 receipt takes no v1 reason");
+        // a chain_signed BOM has no anchor: its anchor checks are unverifiable anchor_absent (B4.4)
+        if (id.recordedFinality === "chain_signed") {
+          for (const c of BOM_ANCHOR_CHECKS) if (!all(c, "unverifiable", "anchor_absent")) issue(`${c}: unverifiable anchor_absent for chain_signed`);
+        } else if (r.checks.some((c) => c.reason === "anchor_absent")) issue("anchor_absent only for chain_signed");
+        // B4C-02: a section result is the sections_projection result broken down; completeness is separate from validity
+        const projection = of("sections_projection");
+        const sectionInvalid = r.sections.some((s) => s.status === "invalid");
+        const projectionInvalid = projection.some((c) => c.status === "invalid");
+        if (sectionInvalid !== projectionInvalid) issue("a section is invalid exactly when sections_projection is invalid (section_mismatch)");
+        if (projection.some((c) => c.status === "unverifiable")) issue("sections_projection is a pure recomputation: never unverifiable");
+        if (r.sections.some((s) => s.status === "unverifiable") && !r.checks.some((c) => c.status === "unverifiable")) {
+          issue("a section is unverifiable only through an unverifiable check it depends on");
+        }
         const lapsed = id.reportedFinality === "anchored_lapsed";
         if (!(id.reportedFinality === id.recordedFinality || (lapsed && (id.recordedFinality === "anchored" || id.recordedFinality === "anchored_finite_lock")))) {
           issue("reportedFinality is the recorded state, or anchored_lapsed for an anchored state");
