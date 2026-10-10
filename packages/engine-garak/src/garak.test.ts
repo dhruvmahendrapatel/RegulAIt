@@ -145,6 +145,40 @@ describe("B5-G mapper: garak's exit code decides nothing; the report does", () =
     }
   });
 
+  it("B5X-02: a pass needs every generated attempt and output scored exactly once (UUID and cardinality reconciled)", () => {
+    const run = "11111111-2222-4333-8444-555555555555";
+    const L = (o: unknown) => JSON.stringify(o);
+    const gen = (uuid: string, outputs = 1) => L({ entry_type: "attempt", uuid, status: 1, probe_classname: PI, outputs: Array.from({ length: outputs }, () => ({ text: "t" })), detector_results: {} });
+    const done = (uuid: string, scores: Array<number | null>, outputs = scores.length) =>
+      L({ entry_type: "attempt", uuid, status: 2, probe_classname: PI, outputs: Array.from({ length: outputs }, () => ({ text: "t" })), detector_results: { [PI_DET]: scores } });
+    const ev = (passed: number, fails = 0, nones = 0) =>
+      L({ entry_type: "eval", probe: PI, detector: PI_DET, passed, fails, nones, total_evaluated: passed + fails, total_processed: passed + fails + nones });
+    const rep = (...body: string[]) =>
+      Buffer.from([L({ entry_type: "init", garak_version: "0.17.0", run }), ...body, L({ entry_type: "completion", run })].join("\n"));
+    const read = (...body: string[]) => readGarakProbeReport(pi(), outcome(rep(...body)));
+    // control: one generation, its one completed record, one output, one score
+    expect(read(gen("a"), done("a", [0]), ev(1))).toMatchObject({ verdict: "pass", problem: null });
+    // (a) another uuid generated an output that was never scored
+    expect(read(gen("a"), gen("b"), done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // (b) the completed attempt has two outputs but one score (both lists agree, still incomplete)
+    expect(read(gen("a", 2), done("a", [0], 2), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a generation of two outputs completed with one
+    expect(read(gen("a", 2), done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a null score is unscored: unknown
+    expect(read(gen("a"), done("a", [null]), ev(0, 0, 1))).toMatchObject({ verdict: "unknown" });
+    // a duplicate (or conflicting) completed record
+    expect(read(gen("a"), done("a", [0]), done("a", [0]), ev(2))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a duplicate generation record
+    expect(read(gen("a"), gen("a"), done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    // a completed record with no generation, and one with no uuid
+    expect(read(done("a", [0]), ev(1))).toMatchObject({ verdict: "unknown", problem: "coverage_incomplete" });
+    expect(read(gen("a"), done("a", [0]), L({ entry_type: "attempt", status: 2, probe_classname: PI, outputs: [{ text: "t" }], detector_results: { [PI_DET]: [0] } }), ev(2))).toMatchObject({
+      verdict: "unknown",
+    });
+    // a hit is never hidden by incomplete coverage
+    expect(read(gen("a"), gen("b"), done("a", [1]), ev(0, 1))).toMatchObject({ verdict: "fail", hits: 1, problem: "coverage_incomplete" });
+  });
+
   it("another garak version's report is not read", () => {
     expect(readGarakProbeReport(pi(), outcome(report({ version: "0.18.0" })))).toMatchObject({ verdict: "unknown", problem: "version_mismatch" });
   });
