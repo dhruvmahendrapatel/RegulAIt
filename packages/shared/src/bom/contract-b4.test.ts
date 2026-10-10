@@ -4,6 +4,9 @@
  * finality state and every refusal code is representable, and each invariant
  * has a negative control beside it. Pure: no database, no clock, no network.
  */
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../audit-chain.js";
 import { RECEIPT_PAYLOAD_VERSION } from "../batch4.js";
@@ -27,8 +30,11 @@ import {
   BOM_EXPORT_VERIFY_KEYS_ENV,
   BOM_EXPORT_VERIFY_KEYS_FILE_ENV,
   BOM_VERIFY_CHECKS,
+  BOM_VERIFY_INVALID_REASONS,
   BOM_VERIFY_MAX_BASE64,
   BOM_VERIFY_MAX_REQUEST_BYTES,
+  BOM_VERIFY_OUTCOMES,
+  BOM_VERIFY_UNVERIFIABLE_REASONS,
   bomBundleHeadersSchema,
   bomCanonicalBytes,
   bomCapabilitiesSchema,
@@ -51,7 +57,9 @@ import {
   decisionBomReadQuerySchema,
   decisionBomReadResponseSchema,
   exportBundleV3ManifestSchema,
+  isUnverifiableByDesign,
   projectBomRow,
+  type BomByDesignContext,
   type BomCapabilities,
   type BomErrorCode,
   type BomVerifyCheck,
@@ -190,20 +198,25 @@ const decisionChecks = (finality: DecisionBomFinalityState, receipt: "v1" | "v2"
   ),
 ];
 
+/**
+ * A bundle-source Decision BOM report. B4.8: its unverifiable results are by design except `tsa_token`
+ * `no_timestamp_token` on an anchored state (B4.9 G5), so it is `valid` for chain_signed and `unverifiable` otherwise.
+ */
 function verifyResponse(finality: DecisionBomFinalityState = "anchored", opts: { lapsed?: boolean; receipt?: "v1" | "v2" } = {}): BomVerifyResponse {
   const cannotProve = new Set<string>(DECISION_BOM_CANNOT_PROVE_FIXED);
   if (opts.lapsed) cannotProve.add("commitment_after_retain_until");
   if (finality === "anchored_finite_lock") cannotProve.add("finite_lock_under_unbounded_retention");
   if ((opts.receipt ?? "v1") === "v1") cannotProve.add("facts_recorded_at_decision_time");
+  if (finality === "chain_signed") cannotProve.add("external_commitment");
   return {
     trust: "deployment_registry",
     source: "bundle",
     bodyVersion: DECISION_BOM_VERSION,
     identity: { subject: "decision-bom", auditId: U(1), bomId: U(21), version: 1, recordedFinality: finality, reportedFinality: opts.lapsed ? "anchored_lapsed" : finality, receiptPayloadVersion: opts.receipt ?? "v1" },
-    outcome: "valid_with_unverifiable",
+    outcome: finality === "chain_signed" ? "valid" : "unverifiable",
     checks: decisionChecks(finality, opts.receipt ?? "v1"),
     sections: DECISION_BOM_SECTIONS.map((section) => ({ section, status: "valid" as const, completeness: section === "trace" ? ("not_recorded" as const) : ("recorded" as const), notRecordedReason: section === "trace" ? ("no_bound_row" as const) : null })),
-    cannotProve: [...cannotProve] as BomVerifyResponse["cannotProve"],
+    cannotProve: BOM_CANNOT_PROVE.filter((c) => cannotProve.has(c)),
     manifest: decisionManifest() as BomVerifyResponse["manifest"],
     verifiedAt: T,
     capabilities: adminCaps(),
@@ -347,7 +360,8 @@ describe("B4 contract: POST /v1/boms/verify", () => {
       source: "ai_bom_snapshot",
       bodyVersion: AI_BOM_VERSION,
       identity: { subject: "ai-bom", snapshotId: U(50), subjectKind: "use_case", subjectId: U(8), version: 2, serialNumber: `urn:uuid:${aiBomSerialNumber(U(50))}` },
-      outcome: "valid_with_unverifiable",
+      // B4.8: a stored source should hold the earlier snapshot, so its absence is not by design
+      outcome: "unverifiable",
       checks: [
         ...AI_BOM_REQUIRED_CHECKS.map((check) => ({ check, status: "valid" as const, reason: null, ref: null })),
         { check: "rendering_hashes", status: "valid", reason: null, ref: "cyclonedx-1.7" },
@@ -360,6 +374,7 @@ describe("B4 contract: POST /v1/boms/verify", () => {
       manifest: null,
     };
     roundTrips(bomVerifyResponseSchema, ai);
+    expect(bomVerifyResponseSchema.safeParse({ ...ai, outcome: "valid" }).success).toBe(false);
     expect(bomVerifyResponseSchema.safeParse({ ...ai, checks: [...ai.checks, { check: "chain_links", status: "valid", reason: null, ref: null }] }).success).toBe(false);
     expect(bomVerifyResponseSchema.safeParse({ ...ai, bodyVersion: DECISION_BOM_VERSION }).success).toBe(false);
   });
@@ -372,6 +387,7 @@ describe("B4 contract: POST /v1/boms/verify", () => {
   it("negative controls: outcome, sections, cannotProve and lapse must follow the checks", () => {
     const r = verifyResponse();
     expect(bomVerifyResponseSchema.safeParse({ ...r, outcome: "valid" }).success).toBe(false);
+    expect(bomVerifyResponseSchema.safeParse({ ...r, outcome: "valid_with_unverifiable" }).success).toBe(false);
     expect(bomVerifyResponseSchema.safeParse({ ...r, sections: r.sections.slice(1) }).success).toBe(false);
     expect(bomVerifyResponseSchema.safeParse({ ...r, cannotProve: r.cannotProve.filter((c) => c !== "decision_row_content") }).success).toBe(false);
     expect(bomVerifyResponseSchema.safeParse({ ...r, cannotProve: r.cannotProve.filter((c) => c !== "facts_recorded_at_decision_time") }).success).toBe(false);
@@ -412,6 +428,8 @@ describe("B4 contract round 2: Codex X48 counterexamples (B4C-01..03) and the re
     return {
       ...verifyResponse("anchored"),
       source: "decision_bom",
+      // B4.8: every unverifiable result here is by design (not_a_bundle, preimage_not_exported, a v1 receipt)
+      outcome: "valid",
       manifest: null,
       checks,
       sections: DECISION_BOM_SECTIONS.map((section) => ({ section, status: "valid" as const, completeness: "recorded" as const, notRecordedReason: null })),
@@ -465,15 +483,18 @@ describe("B4 contract round 2: Codex X48 counterexamples (B4C-01..03) and the re
     const sections = b.sections.map((s, i) => (i === 3 ? { ...s, status: "invalid" as const } : s));
     const checks = b.checks.map((c): BomVerifyCheckResult => (c.check === "sections_projection" ? { ...c, status: "invalid", reason: "section_mismatch" } : c));
     expect(accepts({ ...b, sections, checks, outcome: "invalid" })).toBe(true);
-    expect(accepts({ ...b, sections, checks, outcome: "valid_with_unverifiable" })).toBe(false);
+    expect(accepts({ ...b, sections, checks, outcome: "unverifiable" })).toBe(false);
+    expect(accepts({ ...b, sections, checks, outcome: "valid" })).toBe(false);
     expect(accepts({ ...b, checks, outcome: "invalid" })).toBe(false); // projection invalid but no section names it
   });
-  it("B4C-02: an unverifiable section never yields valid; completeness stays separate from validity", () => {
+  it("B4C-02 under B4.8: a section is never unverifiable in v1; completeness stays separate from validity", () => {
     const b = verifyResponse("anchored", { receipt: "v2" });
     const allValid = b.checks.map((c) => (c.check === "decision_content_binding" ? c : c.status === "unverifiable" ? valid(c.check) : c));
+    expect(accepts({ ...b, checks: allValid, outcome: "valid" })).toBe(true);
     const sections = b.sections.map((s) => (s.section === "cost" ? { ...s, status: "unverifiable" as const } : s));
-    expect(accepts({ ...b, checks: allValid, sections })).toBe(true);
-    expect(accepts({ ...b, checks: allValid, sections, outcome: "valid" })).toBe(false);
+    for (const outcome of BOM_VERIFY_OUTCOMES) expect(accepts({ ...b, checks: allValid, sections, outcome }), outcome).toBe(false);
+    // not even beside a lowering check
+    for (const outcome of BOM_VERIFY_OUTCOMES) expect(accepts({ ...b, sections, outcome }), outcome).toBe(false);
     // a not_recorded section is still `valid` when its recomputed gap matches
     expect(b.sections.find((s) => s.section === "trace")).toMatchObject({ status: "valid", completeness: "not_recorded" });
   });
@@ -507,6 +528,184 @@ describe("B4 contract round 2: Codex X48 counterexamples (B4C-01..03) and the re
     expect(accepts(v2)).toBe(false);
     expect(accepts({ ...v2, checks: [...ai.checks, valid("supersedes")] })).toBe(true);
     expect(accepts({ ...ai, checks: ai.checks.filter((c) => c.check !== "serial_number") })).toBe(false);
+  });
+});
+
+describe("B4 contract: ADR-0189 B4.8 outcome and cannotProve (B4.10)", () => {
+  const accepts = (r: unknown) => bomVerifyResponseSchema.safeParse(r).success;
+  const valid = (check: BomVerifyCheck): BomVerifyCheckResult => ({ check, status: "valid", reason: null, ref: null });
+  const unv = (check: BomVerifyCheck, reason: BomVerifyCheckResult["reason"]): BomVerifyCheckResult => ({ check, status: "unverifiable", reason, ref: null });
+  const set = (r: BomVerifyResponse, check: BomVerifyCheck, to: BomVerifyCheckResult) => ({ ...r, checks: r.checks.map((c) => (c.check === check ? to : c)) });
+  /** an AI BOM response; supersedes reported unverifiable earlier_snapshot_not_in_bundle when version > 1 */
+  const aiResponse = (source: "bundle" | "ai_bom_snapshot", version: number, outcome: BomVerifyResponse["outcome"], cannotProve: BomVerifyResponse["cannotProve"]): BomVerifyResponse => ({
+    ...verifyResponse(), source, bodyVersion: AI_BOM_VERSION, sections: [], cannotProve, outcome,
+    manifest: source === "bundle" ? (decisionManifest() as BomVerifyResponse["manifest"]) : null,
+    identity: { subject: "ai-bom", snapshotId: U(50), subjectKind: "agent", subjectId: U(7), version, serialNumber: `urn:uuid:${aiBomSerialNumber(U(50))}` },
+    checks: [
+      ...AI_BOM_REQUIRED_CHECKS.map(valid),
+      ...(source === "bundle" ? BOM_BUNDLE_REQUIRED_CHECKS.map((c) => ({ ...valid(c), ref: "manifest.json" })) : []),
+      ...(version > 1 ? [unv("supersedes", "earlier_snapshot_not_in_bundle")] : []),
+    ],
+  });
+
+  it("the outcomes are valid, unverifiable, invalid; valid_with_unverifiable is gone", () => {
+    expect([...BOM_VERIFY_OUTCOMES]).toEqual(["valid", "unverifiable", "invalid"]);
+    for (const f of DECISION_BOM_FINALITY_STATES) for (const receipt of ["v1", "v2"] as const) {
+      expect(accepts({ ...verifyResponse(f, { receipt }), outcome: "valid_with_unverifiable" }), `${f} ${receipt}`).toBe(false);
+    }
+  });
+  it("the new cannotProve entries and the invalid reason are appended, with their sentences", () => {
+    expect(BOM_CANNOT_PROVE.slice(-2)).toEqual(["external_commitment", "superseded_snapshot"]);
+    expect(BOM_CANNOT_PROVE_COPY.external_commitment).toBe("That the chain row was committed outside this deployment: this BOM is chain_signed and has no anchor.");
+    expect(BOM_CANNOT_PROVE_COPY.superseded_snapshot).toBe("What the snapshot this one supersedes held: only its id is named, and it is not in the bundle.");
+    expect(BOM_VERIFY_INVALID_REASONS).toContain("v2_receipt_before_boundary");
+  });
+
+  it("isUnverifiableByDesign holds exactly B4.8's table", () => {
+    const base = { source: "bundle", receiptPayloadVersion: "v2", recordedFinality: "anchored", version: 1 } as const;
+    const contexts: BomByDesignContext[] = [];
+    for (const source of ["bundle", "decision_bom", "ai_bom_snapshot"] as const) for (const version of [1, 2]) {
+      for (const receiptPayloadVersion of ["v1", "v2"] as const) for (const recordedFinality of DECISION_BOM_FINALITY_STATES) {
+        contexts.push({ ...base, subject: "decision-bom", source, version, receiptPayloadVersion, recordedFinality });
+      }
+      contexts.push({ subject: "ai-bom", source, version, receiptPayloadVersion: null, recordedFinality: null });
+    }
+    const expected = (check: string, reason: string, x: BomByDesignContext): boolean => {
+      const stored = x.source !== "bundle";
+      if (["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"].includes(check)) return stored && reason === "not_a_bundle";
+      if (x.subject === "decision-bom") {
+        if (check === "decision_content_binding") return reason === "preimage_not_exported";
+        if (check === "receipt_facts_binding") return reason === "receipt_v1_no_factsHash" && x.receiptPayloadVersion === "v1";
+        if (["anchor_record", "anchor_imprint", "tsa_token"].includes(check)) return reason === "anchor_absent" && x.recordedFinality === "chain_signed";
+        return false;
+      }
+      return check === "supersedes" && reason === "earlier_snapshot_not_in_bundle" && !stored && x.version > 1;
+    };
+    let yes = 0;
+    for (const x of contexts) for (const check of BOM_VERIFY_CHECKS) for (const reason of [...BOM_VERIFY_UNVERIFIABLE_REASONS, ...BOM_VERIFY_INVALID_REASONS, null]) {
+      const got = isUnverifiableByDesign(check, reason, x);
+      expect(got, `${check} ${reason} ${JSON.stringify(x)}`).toBe(expected(check, reason ?? "", x));
+      if (got) yes++;
+    }
+    expect(yes).toBeGreaterThan(0);
+    // B4.8 "no other pair is by design"
+    const anchoredBundle: BomByDesignContext = { subject: "decision-bom", ...base };
+    for (const reason of ["no_timestamp_token", "no_tsa_trust_bundle", "request_facts_not_recorded", "snapshot_not_in_bundle", "rendering_not_producible"] as const) {
+      for (const check of BOM_VERIFY_CHECKS) expect(isUnverifiableByDesign(check, reason, anchoredBundle)).toBe(false);
+    }
+    expect(isUnverifiableByDesign("supersedes", "earlier_snapshot_not_in_bundle", { subject: "ai-bom", source: "ai_bom_snapshot", receiptPayloadVersion: null, recordedFinality: null, version: 2 })).toBe(false);
+  });
+
+  it("rule 2: an unverifiable result that is not by design lowers the outcome to unverifiable", () => {
+    const cs = verifyResponse("chain_signed", { receipt: "v2" });
+    expect(accepts(cs)).toBe(true);
+    expect(cs.outcome).toBe("valid");
+    expect(accepts({ ...cs, outcome: "unverifiable" })).toBe(false);
+    // ai_bom_link without its snapshot (B4.8: snapshot_not_in_bundle is not by design)
+    const linked = { ...cs, checks: [...cs.checks, unv("ai_bom_link", "snapshot_not_in_bundle")] };
+    expect(accepts({ ...linked, outcome: "unverifiable" })).toBe(true);
+    expect(accepts({ ...linked, outcome: "valid" })).toBe(false);
+    // anchored with no timestamp token (B4.9 G5)
+    const anchored = verifyResponse("anchored", { receipt: "v2" });
+    expect(anchored.checks.find((c) => c.check === "tsa_token")).toMatchObject({ status: "unverifiable", reason: "no_timestamp_token" });
+    expect(accepts(anchored)).toBe(true);
+    expect(accepts({ ...anchored, outcome: "valid" })).toBe(false);
+    expect(accepts({ ...set(anchored, "tsa_token", valid("tsa_token")), outcome: "valid" })).toBe(true);
+    // a v1 receipt is by design; the same reason is never accepted on a v2 receipt at all
+    const v1 = verifyResponse("chain_signed", { receipt: "v1" });
+    expect(accepts(v1)).toBe(true);
+    expect(v1.outcome).toBe("valid");
+  });
+  it("rule 1: any invalid check or section gives invalid, whatever else is unverifiable", () => {
+    const anchored = verifyResponse("anchored", { receipt: "v2" });
+    const broken = set(anchored, "chain_links", { check: "chain_links", status: "invalid", reason: "chain_break", ref: null });
+    expect(accepts({ ...broken, outcome: "invalid" })).toBe(true);
+    expect(accepts({ ...broken, outcome: "unverifiable" })).toBe(false);
+    expect(accepts({ ...broken, outcome: "valid" })).toBe(false);
+  });
+  it("cannotProve is exactly the fixed list plus the conditional entries, in BOM_CANNOT_PROVE order", () => {
+    const cs = verifyResponse("chain_signed", { receipt: "v2" });
+    expect(cs.cannotProve).toEqual([...DECISION_BOM_CANNOT_PROVE_FIXED, "external_commitment"]);
+    expect(accepts({ ...cs, cannotProve: cs.cannotProve.filter((c) => c !== "external_commitment") })).toBe(false);
+    expect(accepts({ ...cs, cannotProve: [...cs.cannotProve].reverse() })).toBe(false);
+    expect(accepts({ ...cs, cannotProve: [...cs.cannotProve, "external_commitment"] })).toBe(false);
+    expect(accepts({ ...cs, cannotProve: [...cs.cannotProve, "superseded_snapshot"] })).toBe(false);
+    expect(accepts({ ...cs, cannotProve: [...DECISION_BOM_CANNOT_PROVE_FIXED, "facts_recorded_at_decision_time", "external_commitment"] })).toBe(false);
+    const anchored = verifyResponse("anchored", { receipt: "v2" });
+    expect(accepts({ ...anchored, cannotProve: [...anchored.cannotProve, "external_commitment"] })).toBe(false);
+    expect(accepts({ ...anchored, cannotProve: [...anchored.cannotProve, "commitment_after_retain_until"] })).toBe(false);
+    expect(accepts({ ...anchored, cannotProve: [...anchored.cannotProve, "finite_lock_under_unbounded_retention"] })).toBe(false);
+    const lapsedFinite = verifyResponse("anchored_finite_lock", { lapsed: true, receipt: "v1" });
+    expect(lapsedFinite.cannotProve).toEqual([...DECISION_BOM_CANNOT_PROVE_FIXED, "commitment_after_retain_until", "facts_recorded_at_decision_time", "finite_lock_under_unbounded_retention"]);
+    expect(accepts(lapsedFinite)).toBe(true);
+    // an unreadable bundle names no subject, so it claims no limits
+    const unreadable = { ...verifyResponse(), bodyVersion: null, identity: null, outcome: "invalid", sections: [], manifest: null, checks: [{ check: "bundle_manifest_signature", status: "invalid", reason: "bundle_unreadable", ref: null }] };
+    expect(accepts({ ...unreadable, cannotProve: [] })).toBe(true);
+    expect(accepts({ ...unreadable, cannotProve: ["facts_true"] })).toBe(false);
+  });
+  it("an AI BOM: supersedes is by design only in a bundle, which adds superseded_snapshot", () => {
+    const fixed = ["facts_true", "signing_time_beyond_anchor"] as BomVerifyResponse["cannotProve"];
+    const withSuperseded = [...fixed, "superseded_snapshot"] as BomVerifyResponse["cannotProve"];
+    expect(accepts(aiResponse("bundle", 2, "valid", withSuperseded))).toBe(true);
+    expect(accepts(aiResponse("bundle", 2, "unverifiable", withSuperseded))).toBe(false);
+    expect(accepts(aiResponse("bundle", 2, "valid", fixed))).toBe(false);
+    expect(accepts(aiResponse("bundle", 1, "valid", fixed))).toBe(true);
+    expect(accepts(aiResponse("bundle", 1, "valid", withSuperseded))).toBe(false);
+    expect(accepts(aiResponse("ai_bom_snapshot", 2, "unverifiable", fixed))).toBe(true);
+    expect(accepts(aiResponse("ai_bom_snapshot", 2, "valid", fixed))).toBe(false);
+    expect(accepts(aiResponse("ai_bom_snapshot", 2, "unverifiable", withSuperseded))).toBe(false);
+  });
+  it("a stored source's not_a_bundle envelope is by design", () => {
+    const stored = { ...verifyResponse("chain_signed", { receipt: "v2" }), source: "decision_bom" as const, manifest: null };
+    const checks = stored.checks.map((c) => ((BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(c.check) ? unv(c.check, "not_a_bundle") : c));
+    expect(accepts({ ...stored, checks, outcome: "valid" })).toBe(true);
+    expect(accepts({ ...stored, checks, outcome: "unverifiable" })).toBe(false);
+  });
+  it("v2_receipt_before_boundary is the facts binding of a v2 receipt only (B4.9 G10)", () => {
+    const before = (r: BomVerifyResponse, check: BomVerifyCheck = "receipt_facts_binding") =>
+      ({ ...set(r, check, { check, status: "invalid", reason: "v2_receipt_before_boundary", ref: null }), outcome: "invalid" as const });
+    expect(accepts(before(verifyResponse("chain_signed", { receipt: "v2" })))).toBe(true);
+    expect(accepts(before(verifyResponse("chain_signed", { receipt: "v1" })))).toBe(false);
+    expect(accepts(before(verifyResponse("chain_signed", { receipt: "v2" }), "receipt_signature"))).toBe(false);
+  });
+
+  /**
+   * The specification-only vectors' response rules (b4-vectors.json `responseRules`, Q01-Q23) restated in the
+   * contract's shape: the contract must accept exactly the responses the vectors say conform.
+   */
+  it("agrees with every B4 vector response rule", () => {
+    type Rule = {
+      id: string; conforms: boolean;
+      response: {
+        subject: "decision_bom" | "ai_bom"; source: "bundle" | "stored"; storedKind?: "decision_bom" | "ai_bom_snapshot";
+        finality?: DecisionBomFinalityState; receiptPayloadVersion: "v1" | "v2"; version?: number; outcome: string;
+        checks: Array<{ name: BomVerifyCheck; result: BomVerifyCheckResult["status"]; reason?: string }>;
+        cannotProve: string[]; sections?: Record<string, string>;
+      };
+    };
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const corpus = JSON.parse(readFileSync(path.resolve(here, "../../test-vectors/decision-bom/b4-vectors.json"), "utf8")) as { responseRules: Rule[] };
+    expect(corpus.responseRules.length).toBeGreaterThanOrEqual(23);
+    for (const { id, conforms, response: q } of corpus.responseRules) {
+      const decision = q.subject === "decision_bom";
+      const source = q.source === "bundle" ? "bundle" : (q.storedKind ?? (decision ? "decision_bom" : "ai_bom_snapshot"));
+      const r = {
+        trust: "deployment_registry",
+        source,
+        bodyVersion: decision ? DECISION_BOM_VERSION : AI_BOM_VERSION,
+        identity: decision
+          ? { subject: "decision-bom", auditId: U(1), bomId: U(21), version: q.version ?? 1, recordedFinality: q.finality, reportedFinality: q.finality, receiptPayloadVersion: q.receiptPayloadVersion }
+          : { subject: "ai-bom", snapshotId: U(50), subjectKind: "agent", subjectId: U(7), version: q.version ?? 1, serialNumber: `urn:uuid:${aiBomSerialNumber(U(50))}` },
+        outcome: q.outcome,
+        checks: q.checks.map((c) => ({ check: c.name, status: c.result, reason: c.reason ?? null, ref: null })),
+        sections: decision ? DECISION_BOM_SECTIONS.map((section) => ({ section, status: q.sections?.[section] ?? "valid", completeness: "recorded", notRecordedReason: null })) : [],
+        cannotProve: q.cannotProve,
+        manifest: source === "bundle" ? decisionManifest() : null,
+        verifiedAt: T,
+        capabilities: adminCaps(),
+      };
+      expect(accepts(r), id).toBe(conforms);
+    }
   });
 });
 
