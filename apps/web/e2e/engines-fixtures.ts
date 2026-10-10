@@ -327,7 +327,8 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       return json(route, 200, { runs: state.runs.filter((r) => (!engineId || r.engineId === engineId) && (!status || r.status === status)) });
     }
     if (p === "/v1/engine-runs" && method === "POST") {
-      const sensitive = (body.config?.sets ?? []).some((s: string) => s !== "basic");
+      // as the manifests class them: promptfoo's `basic` and modelscan's `scan` are standard, anything else waits for approval
+      const sensitive = (body.config?.sets ?? []).some((s: string) => s !== "basic" && !(body.engineId === "modelscan" && s === "scan"));
       if (sensitive && !body.approverUserId) return json(route, 422, { error: "engine_approver_required", detail: "this run uses an agentic, offensive or unclassified set, so it waits for approval" });
       const r = run(`99999999-7777-4000-8000-${String(state.runs.length).padStart(12, "0")}`, {
         engineId: body.engineId,
@@ -335,6 +336,8 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
         config: body.config,
         projectId: body.projectId ?? null,
         targetAgentId: body.target?.agentId ?? null,
+        targetKind: body.target?.artifactId ? "artifact" : "agent",
+        targetArtifactId: body.target?.artifactId ?? null,
         judgeAgentId: body.target?.judgeAgentId ?? null,
         createdAt: new Date().toISOString(),
       });
@@ -372,6 +375,16 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
       return json(route, 201, { artifact: a });
     }
     const artifactMatch = /^\/v1\/model-artifacts\/([0-9a-f-]+)$/.exec(p);
+    // ADR-0187 decision 127: the uploader or an admin deletes, with a `settings_relax` step-up
+    if (artifactMatch && method === "DELETE") {
+      const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
+      if (!a) return json(route, 404, { error: "unknown_artifact" });
+      if (!headers["x-regulait-step-up"]) {
+        return json(route, 403, { error: "step_up_required", actionKind: "settings_relax", methods: ["passkey", "totp"], action: { kind: "settings_relax", facts: { modelArtifactId: a.id, values: { deleted: true } } } });
+      }
+      state.artifacts = state.artifacts.filter((x) => x.id !== a.id);
+      return json(route, 200, { deleted: { id: a.id, sha256: a.sha256, scansDeleted: (ARTIFACT_SCANS[a.id] ?? []).length, object: "deleted" } });
+    }
     if (artifactMatch && method === "GET") {
       const a = state.artifacts.find((x) => x.id === artifactMatch[1]);
       if (!a) return json(route, 404, { error: "unknown_artifact" });
