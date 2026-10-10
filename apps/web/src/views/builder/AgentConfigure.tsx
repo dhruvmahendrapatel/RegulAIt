@@ -20,6 +20,7 @@ import { AddConnectionDialog, AddSkillDialog, CodeDialog, NewScheduleDialog, New
 import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, useMyProjects, type PatchAgentBody, type ScheduleBody } from "./builderApi";
 import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, skillPrivateOnSharedAgentCopy, skillWithheldCopy, spendState } from "./builderLogic";
 import { AgentAvatar, Icon, Section, Segmented, Switch, ToolLogo } from "./BuilderUi";
+import { ExecutionProfileSelector } from '../admin/integrations/isolation/IsolationPanel';
 import { AutonomyPanel } from "./AutonomyPanel";
 import s from "./builder.module.css";
 
@@ -664,6 +665,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
       {!ro && (
         <Section title="Autonomy" icon={Icon.check()} defaultOpen={false}>
           <AutonomyPanel agent={agent} />
+          <ExecutionProfileSelector context="agent" />
         </Section>
       )}
 

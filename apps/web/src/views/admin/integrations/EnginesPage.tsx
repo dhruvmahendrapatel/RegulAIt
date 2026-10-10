@@ -42,6 +42,8 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Modal, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { KV, QueryGate } from "../adminKit";
+import { IsolationPanel } from './isolation/IsolationPanel';
+import { IsolationSettingsCard } from './isolation/IsolationSettings';
 import { EngineStatusBadge } from "./EngineStatusBadge";
 import {
   ENGINE_DIAL_LIMITS,
@@ -235,6 +237,8 @@ export default function EnginesPage() {
           )}
           <ContentSetsCard query={content} taxonomyVersion={engines.data?.taxonomyVersion ?? null} />
         </QueryGate>
+        <IsolationPanel />
+        <IsolationSettingsCard />
       </div>
 
       <ConfirmModal
@@ -633,7 +637,7 @@ function RunnersTable(props: { engine: Engine; now: number; busy: boolean; onRev
         { key: "registered", header: "Registered", render: (r) => <span title={fmtAt(r.registeredAt)}>{ago(r.registeredAt)}</span> },
         {
           key: "actions",
-          header: "",
+          header: "Actions",
           render: (r) => (
             <Button size="sm" variant="ghost" disabled={props.busy} aria-label={`Revoke runner ${r.name}`} onClick={() => props.onRevoke(r)}>
               Revoke
