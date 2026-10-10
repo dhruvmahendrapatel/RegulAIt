@@ -17,7 +17,7 @@
 import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakJudgeSets, garakManifestSets, garakReducedSet } from "./garak.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
-import { ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
+import { ENGINE_SELF_TEST_FUTURE_SKEW_MS, ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
 
 /** how a named plugin/probe set is classed for the approvals rule (owner decision 4) */
 export type EngineSetClass = "standard" | "agentic" | "offensive";
@@ -272,7 +272,7 @@ export function evaluateRunnerSelfTest(
   if (!isPublicAddress(report.egress.address)) failures.push("egress_address_missing");
   else if (report.egress.addressConnected) failures.push("egress_address_connected");
   const at = Date.parse(report.at);
-  if (!Number.isFinite(at) || now.getTime() - at > ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000 || at - now.getTime() > 300_000) {
+  if (!Number.isFinite(at) || now.getTime() - at > ENGINE_SELF_TEST_MAX_AGE_SECONDS * 1000 || at - now.getTime() > ENGINE_SELF_TEST_FUTURE_SKEW_MS) {
     failures.push("stale");
   }
   return { passed: failures.length === 0, failures };
