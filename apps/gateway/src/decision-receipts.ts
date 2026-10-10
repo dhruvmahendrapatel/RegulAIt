@@ -2,7 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } f
 import { readFileSync, statSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { and, asc, auditLog, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
-import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isReceiptBundle, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, receiptPayloadHash, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
+import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, receiptPayloadHash, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
@@ -33,6 +33,34 @@ function signingKey(): SigningKey | null {
 }
 const samePublicKey = (a: ReceiptPublicKey["jwk"], b: ReceiptPublicKey["jwk"]) => a.kty === b.kty && a.crv === b.crv && a.x === b.x;
 const envelope = (row: typeof decisionReceipts.$inferSelect): SignedDecisionReceipt => ({ receiptSeq: row.receiptSeq, payload: row.payload as DecisionReceiptPayload, signature: row.signature, keyId: row.keyId });
+
+/**
+ * ADR-0189 R34 / R42 / R43 — the recorded receipt v2 boundary: the first audit
+ * seq that v2 governs, or null (no boundary: every receipt is v1). Read from the
+ * append-only, verifier-trusted `receipt_payload_versions` table; every writer
+ * reads it under the receipt sign lock before each pass.
+ */
+export async function loadReceiptV2Boundary(db: { execute: Db["execute"] }): Promise<number | null> {
+  const res = (await db.execute(sql`select min("from_audit_seq")::bigint as "from" from "receipt_payload_versions"`)) as unknown as { rows: Array<{ from: string | number | null }> };
+  const from = res.rows[0]?.from;
+  return from === null || from === undefined ? null : Number(from);
+}
+
+/** R43: thrown at boot when a receipt v2 boundary exists and this build cannot emit v2 receipts with facts */
+export class ReceiptV2BootError extends Error {
+  constructor(readonly fromAuditSeq: number) {
+    super(
+      `A receipt v2 boundary is recorded (from audit seq ${fromAuditSeq}), and this build emits v1 receipts only. ` +
+        "Refusing to start: a v1 receipt at or above the boundary is invalid (ADR-0189 R43). Deploy a build that emits v2.",
+    );
+    this.name = "ReceiptV2BootError";
+  }
+}
+/** R43: every binary from B1 on checks at boot; this one refuses to start once a boundary exists */
+export async function assertReceiptEmitterBootable(db: { execute: Db["execute"] }, supportsV2: boolean = RECEIPT_EMITTER_SUPPORTS_V2): Promise<void> {
+  const from = await loadReceiptV2Boundary(db);
+  if (from !== null && !supportsV2) throw new ReceiptV2BootError(from);
+}
 const publicKeys = async (db: Db): Promise<ReceiptPublicKey[]> => (await db.select().from(receiptSigningKeys).orderBy(asc(receiptSigningKeys.createdAt))).map((key) => ({ keyId: key.keyId, jwk: key.publicJwk, firstUsedAt: key.firstUsedAt?.toISOString() ?? null, retiredAt: key.retiredAt?.toISOString() ?? null }));
 
 // Receipt eligibility is classified at the writer and is fail-closed. Unknown
@@ -49,15 +77,20 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
     if ((await loadOrgSettings(tx as unknown as Db)).decisionReceiptsMode === "off") return { signed: 0, state: "off" as const };
     const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId));
     if (recorded && (!samePublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt)) throw new ReceiptKeyError();
+    // R43: the v2 boundary, read under the sign lock before the pass. This build emits v1 only, so it signs
+    // nothing at or above the boundary (rows below it stay v1 whenever the sweep reaches them, R42); the
+    // `decision_receipts_version_guard` trigger refuses a v1 receipt there in any case.
+    const v2FromAuditSeq = await loadReceiptV2Boundary(tx as unknown as Db);
     const [last] = await tx.select().from(decisionReceipts).orderBy(desc(decisionReceipts.receiptSeq)).limit(1);
     if (last) {
       const keys = await publicKeys(tx as unknown as Db);
-      const checked = verifyReceiptBundle({ verifier: RECEIPT_PAYLOAD_VERSION, receipts: [envelope(last)], keys });
+      const checked = verifyReceiptBundle({ verifier: RECEIPT_PAYLOAD_VERSION, receipts: [envelope(last)], keys, receiptV2FromAuditSeq: v2FromAuditSeq });
       if (!keys.some((k) => k.keyId === last.keyId) || checked.results.some((r) => r.status === "invalid") ||
           !isDecisionReceiptPayload(last.payload) || last.payloadHash !== receiptPayloadHash(last.payload) || last.prevHash !== last.payload.prev)
         throw new Error("Receipt chain tip failed integrity verification; no new receipts signed.");
     }
-    const rows = await tx.select().from(auditLog).where(eligibleAfter(last?.auditSeq ?? 0)).orderBy(asc(auditLog.seq)).limit(SWEEP_LIMIT);
+    const eligible = eligibleAfter(last?.auditSeq ?? 0);
+    const rows = await tx.select().from(auditLog).where(v2FromAuditSeq === null || RECEIPT_EMITTER_SUPPORTS_V2 ? eligible : and(eligible, sql`${auditLog.seq} < ${v2FromAuditSeq}`)).orderBy(asc(auditLog.seq)).limit(SWEEP_LIMIT);
     if (!rows.length) return { signed: 0, state: "signing" as const };
     if (!recorded) await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt: opts.now });
     // ADR-0188 decision 19: rows from the recorded v2 boundary on hash as v2 (and must say so)
@@ -80,7 +113,7 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
         decision: { at: row.at.toISOString(), userId: row.userId, objectType: row.objectType, objectId: row.objectId, serverId: row.serverId, toolName: tool.value, ...(tool.hash?{toolNameHash:tool.hash}:{}), effect: row.effect, ruleId: rule.value, ...(rule.hash?{ruleIdHash:rule.hash}:{}) },
         prev, keyId: key.keyId,
       };
-      if (!isDecisionReceiptPayload(payload)) throw new Error("Audit decision cannot be represented by the receipt contract.");
+      if (!isDecisionReceiptPayloadV1(payload)) throw new Error("Audit decision cannot be represented by the receipt contract.");
       const payloadHash = receiptPayloadHash(payload);
       const signature = sign(null, Buffer.from(receiptCanonicalBytes(payload)), key.privateKey).toString("base64url");
       await tx.insert(decisionReceipts).values({ receiptSeq, auditId: row.id, auditSeq: row.seq, payload, payloadHash, prevHash: prev, signature, keyId: key.keyId, createdAt: opts.now });
@@ -140,12 +173,13 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
     if (from === null || to === null || to < from || to - from + 1 > EXPORT_LIMIT) return reply.status(400).send({ error: "invalid_receipt_export_range", detail: "Choose a nonempty range of at most 5000 receipts." });
     const rows = await db.select().from(decisionReceipts).where(and(gte(decisionReceipts.receiptSeq, from), lte(decisionReceipts.receiptSeq, to))).orderBy(asc(decisionReceipts.receiptSeq)).limit(EXPORT_LIMIT);
     await db.insert(auditLog).values({ userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000", objectType: "decision_receipt", objectId: null, effect: "allow", ruleId: "decision-receipt-exported", ruleChain: [], reason: "Decision receipt bundle exported", detail: { fromSeq: from, toSeq: to, rows: rows.length } });
-    return { receipts: rows.map(envelope), keys: await publicKeys(db), verifier: RECEIPT_PAYLOAD_VERSION };
+    return { receipts: rows.map(envelope), keys: await publicKeys(db), verifier: RECEIPT_PAYLOAD_VERSION, receiptV2FromAuditSeq: await loadReceiptV2Boundary(db) };
   });
   app.post("/v1/receipts/verify", { bodyLimit: 5 * 1024 * 1024 }, async (req, reply) => {
     if (!isReceiptBundle(req.body)) return reply.status(400).send({ error: "invalid_receipt_bundle" });
     const trusted=await publicKeys(db);
-    return {...verifyReceiptBundle({...req.body,keys:trusted}),trust:"deployment_registry"};
+    // the server's recorded keys AND its recorded v2 boundary are the trust root here, never the caller's
+    return {...verifyReceiptBundle({...req.body,keys:trusted,receiptV2FromAuditSeq:await loadReceiptV2Boundary(db)}),trust:"deployment_registry"};
   });
   app.get("/v1/receipts/:auditId", async (req, reply) => {
     const { auditId } = req.params as { auditId: string };

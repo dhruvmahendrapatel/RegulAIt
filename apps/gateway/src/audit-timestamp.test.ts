@@ -84,11 +84,14 @@ describe.skipIf(!base)("X22 real timestamp persistence and guarded transport", (
     expect(transport.requests.length - before).toBe(1);
     expect(transport.requests.at(-1)!.target).toMatchObject({ host: "tsa.example.test", addresses: ["93.184.216.34"] });
     const [stored] = await db.select().from(auditAnchors).where(eq(auditAnchors.id, row.id));
-    expect(stored).toMatchObject({ status: "flushed", tsaStatus: "granted", tsaAttempts: 1 });
+    expect(stored).toMatchObject({ status: "flushed", tsaStatus: "granted", tsaAttempts: 1, tsaRequestFactsLegacy: false });
+    // ADR-0189 R33: the request facts the offline verifier needs are stored: the nonce and the send time
+    expect(stored!.tsaRequestSentAt).toBeInstanceOf(Date);
+    expect(stored!.tsaRequestSentAt!.getTime()).toBeGreaterThanOrEqual(stored!.createdAt.getTime());
     const download = await app.inject({ method: "GET", url: `/v1/audit/anchors/${row.id}/timestamp.tsr`, headers: auth });
     expect(download.statusCode).toBe(200);
     expect(download.headers["content-type"]).toContain("application/timestamp-reply");
-    const checked = await verifyTimestampResponse(download.rawPayload, { bytes: anchorCanonicalBytes(anchorRecordFromRow(stored!)), nonceHex: stored!.tsaNonce!, trust: parseTimestampTrustBundle(readFileSync(tsa.trustBundle, "utf8")), now: new Date(),sentAt:stored!.createdAt });
+    const checked = await verifyTimestampResponse(download.rawPayload, { bytes: anchorCanonicalBytes(anchorRecordFromRow(stored!)), nonceHex: stored!.tsaNonce!, trust: parseTimestampTrustBundle(readFileSync(tsa.trustBundle, "utf8")), now: new Date(),sentAt:stored!.tsaRequestSentAt! });
     expect(checked.imprint).toBe(stored!.tsaMessageImprint);
   });
   it("preserves successful storage flushes when timestamp transport fails, and respects mode off", async () => {
