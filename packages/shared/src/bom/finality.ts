@@ -15,7 +15,10 @@
  *    `retain_until` is still in the future. It ranks BELOW `anchored`; the strict
  *    default refuses it (pending, reason `retention_unbounded`), and an admin's
  *    audited relaxation `decision_bom_finite_lock_finality = accept` makes it
- *    final (security review F6, ADR-0180). The signed body carries
+ *    final (security review F6, ADR-0180). Under `refuse` the state is never
+ *    produced, whatever the floor: the facts count as a lock that does not cover
+ *    the retention (R44), so a relaxed floor freezes `anchored_unverified_destination`.
+ *    The signed body carries
  *    `retain_until`; the verifier reports `anchored_lapsed` once it has passed
  *    (R44), and `cannotProve` says the commitment is finite while the retention
  *    is not.
@@ -90,7 +93,11 @@ function strongest(i: FinalityInput): { state: DecisionBomFinalityState; shortOf
   if (a.retainUntil === null) return { state: "anchored_unverified_destination", shortOf: "lock_not_recorded" };
   if (a.retainUntil.getTime() <= i.now.getTime()) return { state: "anchored_unverified_destination", shortOf: "lock_lapsed" };
   const end = bomExpiresAt(i.decisionAt, i.retainedDays);
-  if (end === null) return { state: "anchored_finite_lock", shortOf: null };
+  // F6 under ADR-0180: `refuse` never yields anchored_finite_lock, whatever the floor; an uncovered lock is at most
+  // anchored_unverified_destination (R44), so a relaxed floor freezes that state and the strict floor stays pending
+  if (end === null) {
+    return i.finiteLock === "accept" ? { state: "anchored_finite_lock", shortOf: null } : { state: "anchored_unverified_destination", shortOf: "retention_unbounded" };
+  }
   if (a.retainUntil.getTime() < end.getTime()) return { state: "anchored_unverified_destination", shortOf: "lock_shorter_than_retention" };
   return { state: "anchored", shortOf: null };
 }
@@ -99,7 +106,8 @@ export function decisionBomFinality(i: FinalityInput): FinalityDecision {
   if (!i.receiptSigned) return { freeze: false, reason: "receipt_unsigned" };
   const { state, shortOf } = strongest(i);
   if (RANK[state] >= FLOOR[i.setting]) return { freeze: true, state };
-  if (state === "anchored_finite_lock") return i.finiteLock === "accept" ? { freeze: true, state } : { freeze: false, reason: "retention_unbounded" };
+  // only reached under `accept` (strongest() never returns it under `refuse`)
+  if (state === "anchored_finite_lock") return { freeze: true, state };
   return { freeze: false, reason: shortOf ?? "anchor_not_flushed" };
 }
 
