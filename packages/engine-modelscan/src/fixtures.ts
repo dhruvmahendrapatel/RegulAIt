@@ -121,13 +121,40 @@ export function safetensorsFile(tensors: ReadonlyArray<[string, string, number[]
   return Buffer.concat([n, json, Buffer.alloc(off + (opts.trailing ?? 0))]);
 }
 
+/**
+ * A NumPy .npy file, byte by byte: the magic, the version, the header length (2 bytes for 1.0, 4 for
+ * 2.0 and 3.0), the header (padded with spaces to a 64-byte boundary and ended by a newline, as
+ * numpy's writer does, unless `pad` is false), then `payload`. `headerLength` overrides the length
+ * field (to lie about it).
+ */
+export function npyFile(opts: { header: string; payload: Buffer; version?: readonly [number, number]; headerLength?: number; pad?: boolean }): Buffer {
+  const [major, minor] = opts.version ?? [1, 0];
+  const width = major === 1 ? 2 : 4;
+  let header = opts.header;
+  if (opts.pad !== false) {
+    while ((8 + width + enc(header).length + 1) % 64 !== 0) header += " ";
+    header += "\n";
+  }
+  const pre = Buffer.alloc(8 + width);
+  Buffer.from([0x93, ...enc("NUMPY"), major, minor]).copy(pre, 0);
+  const len = opts.headerLength ?? enc(header).length;
+  if (width === 2) pre.writeUInt16LE(len, 8);
+  else pre.writeUInt32LE(len, 8);
+  return Buffer.concat([pre, enc(header), opts.payload]);
+}
+
+/** the header numpy writes for `descr` and `shape` */
+export function npyHeader(descr: string, shape: readonly number[]): string {
+  const s = shape.length === 1 ? `(${shape[0]},)` : `(${shape.join(", ")})`;
+  return `{'descr': '${descr}', 'fortran_order': False, 'shape': ${s}, }`;
+}
+
+/** a float64 .npy of `n` zeros (numeric: no pickle anywhere) */
+export function numericNpy(version: readonly [number, number] = [1, 0], n = 3): Buffer {
+  return npyFile({ header: npyHeader("<f8", [n]), payload: Buffer.alloc(8 * n), version });
+}
+
 /** a NumPy .npy file with an object dtype whose payload is `pickle` */
-export function objectNpy(pickle: Buffer): Buffer {
-  let header = "{'descr': '|O', 'fortran_order': False, 'shape': (1,), }";
-  while ((10 + header.length + 1) % 64 !== 0) header += " ";
-  header += "\n";
-  const h = Buffer.alloc(10);
-  Buffer.from([0x93, ...enc("NUMPY"), 0x01, 0x00]).copy(h, 0);
-  h.writeUInt16LE(header.length, 8);
-  return Buffer.concat([h, enc(header), pickle]);
+export function objectNpy(pickle: Buffer, version: readonly [number, number] = [1, 0]): Buffer {
+  return npyFile({ header: npyHeader("|O", [1]), payload: pickle, version });
 }
