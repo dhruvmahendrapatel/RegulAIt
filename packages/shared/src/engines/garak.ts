@@ -20,8 +20,9 @@
  *                        personal data, has no licence G19 could establish, or carries a licence outside the
  *                        ADR-0176 list (each an OWNER DECISION where a licence exists but is not on the list);
  *   - `missing_preseed`  the probe or its detector needs a Hugging Face model or dataset, or a lexicon,
- *                        downloaded at run time; nothing is pre-seeded in this build and the engines network
- *                        has no route out;
+ *                        that is not pre-seeded in the image, and the engines network has no route out. The
+ *                        licence-clear Hub assets R10 names ARE pre-seeded at pinned revisions (owner,
+ *                        open question 22; decisions 198-200): `GARAK_PRESEEDED_HF_ASSETS`;
  *   - `cloud_only`       the probe drives a hosted attacker or judge model, or fetches its payload from the
  *                        internet at run time.
  *
@@ -138,6 +139,25 @@ const LOCAL: readonly Local[] = [
   // --- training-data divergence (garak-authored; the same class as promptfoo's divergent-repetition) ---
   ["divergence.Repeat", "standard", "data_exfiltration", "medium"],
   ["divergence.RepeatExtended", "standard", "data_exfiltration", "medium"],
+  // --- admitted by the owner 2026-10-10 (open question 20; decision 195): inline payloads reproduced from
+  //     named third-party posts (doctor, grandma, goodside, glitch) and the Unicode-licensed confusables
+  //     data (badchars). Each one's primary detector is a string, trigger or regex detector.
+  ...moduleProbes("doctor").map((p): Local => [p, "offensive", "jailbreak", "high"]),
+  ["grandma.Substances", "offensive", "jailbreak", "high"],
+  ["grandma.Win10", "offensive", "jailbreak", "medium"],
+  ["grandma.Win11", "offensive", "jailbreak", "medium"],
+  ["goodside.Tag", "standard", "prompt_injection", "high"],
+  ["goodside.WhoIsRiley", "standard", null, "low"],
+  ["goodside.ThreatenJSON", "standard", null, "low"],
+  ["goodside.Davidjl", "standard", null, "low"],
+  ...moduleProbes("glitch").map((p): Local => [p, "standard", null, "low"]),
+  ["badchars.BadCharacters", "offensive", "encoding_evasion", "medium"],
+  // --- runnable since the owner's pre-seed decision (open question 22; decision 199): the Apache-2.0
+  //     system-prompt dataset and package-list datasets are in the image at pinned revisions ---
+  ["sysprompt_extraction.SystemPromptExtraction", "standard", "system_prompt_extraction", "high"],
+  ...moduleProbes("packagehallucination")
+    .filter((p) => p !== "packagehallucination.Rust")
+    .map((p): Local => [p, "standard", null, "medium"]),
   // --- reported, never counted ---
   ["divergence.RepeatedToken", "standard", null, "low"],
   ...moduleProbes("web_injection").map((p): Local => [p, "standard", null, "medium"]),
@@ -173,31 +193,22 @@ const NOT_RUN: ReadonlyArray<[probes: readonly string[], disposition: Exclude<Ga
   [moduleProbes("continuation"), "excluded_licence", "slang-dictionary examples with no licence stated (G19: unverified)"],
   [["misleading.FalseAssertion"], "excluded_licence", "false-claim files with no source or licence (G19: unverified)"],
   [moduleProbes("phrasing"), "excluded_licence", "tense-rephrasing prompts whose source has no licence (G19: unverified)"],
-  [["badchars.BadCharacters"], "excluded_licence", "Unicode confusables data under the Unicode licence, outside the ADR-0176 list (OWNER DECISION)"],
   [["tap.TAPCached"], "excluded_licence", "cached TAP prompt file whose own origin is not stated (G19: unverified)"],
+  // admitted by the owner 2026-10-10 (open question 20) but still not runnable here (decision 196): the
+  // toxicity detector's model is not pre-seeded, and its module reads the two word lists kept deleted
   [
     [...moduleProbes("latentinjection").filter((p) => p.startsWith("latentinjection.LatentJailbreak")), "atkgen.Tox", "lmrc.Bullying", ...moduleProbes("realtoxicityprompts")],
-    "excluded_licence",
-    "the primary detector is a toxicity model under a use-restricted (OpenRAIL) licence (OWNER DECISION)",
+    "missing_preseed",
+    "licence admitted; its toxicity-model detector is not pre-seeded and its detector module reads word lists kept deleted",
   ],
   [
-    ["lmrc.Profanity", "lmrc.SexualContent", "lmrc.Sexualisation", "lmrc.SlurUsage", "grandma.Slurs"],
+    ["lmrc.Profanity", "lmrc.SexualContent", "lmrc.Sexualisation", "lmrc.SlurUsage"],
     "excluded_licence",
-    "the detector reads word lists with no licence (G19: unverified) or under CC-BY-4.0 (OWNER DECISION)",
+    "its detector reads the profanity word list, which has no licence G19 could establish and stays deleted (owner)",
   ],
-  [
-    [...moduleProbes("doctor"), ...moduleProbes("grandma").filter((p) => p !== "grandma.Slurs"), ...moduleProbes("goodside"), ...moduleProbes("glitch")],
-    "excluded_licence",
-    "payloads reproduced from named third-party posts; provenance not reviewed by G19 (OWNER DECISION)",
-  ],
-  [["sysprompt_extraction.SystemPromptExtraction"], "excluded_licence", "needs a CC-BY-4.0 Hub dataset (OWNER DECISION) and a second one not pre-seeded"],
+  [["grandma.Slurs"], "excluded_licence", "its detector reads the slang-dictionary slur list, which has no licence stated (G19: unverified)"],
   [["packagehallucination.Rust"], "excluded_licence", "its Hub dataset declares no licence"],
   [["audio.AudioAchillesHeel"], "excluded_licence", "its Hub dataset declares no licence (and it needs audio input)"],
-  [
-    moduleProbes("packagehallucination").filter((p) => p !== "packagehallucination.Rust"),
-    "missing_preseed",
-    "its package-list Hub dataset is not pre-seeded in this build",
-  ],
   [["ansiescape.AnsiRawTokenizerHF"], "missing_preseed", "loads a Hugging Face tokenizer that is not pre-seeded"],
   [moduleProbes("topic"), "missing_preseed", "downloads the WordNet lexicon at run time"],
   [["sata.MLM"], "missing_preseed", "downloads an NLTK tagger at run time"],

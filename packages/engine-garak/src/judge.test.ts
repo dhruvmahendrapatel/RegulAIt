@@ -133,7 +133,7 @@ describe("decision 204: the judge is reached only through the gateway, with the 
       ["an off-gateway parser", withAb({ ...ab, parse_model_config: { ...detCfg, uri: "https://x.example/v1/" } }), "config_not_gateway"],
       ["an agent config file override", withAb({ ...ab, agent_config_file: "/etc/passwd" }), "config_unexpected_key"],
       ["a judge section on a probe that needs none", { ...plain, plugins: { ...plain.plugins, detectors: c.plugins["detectors"] } }, "config_unexpected_key"],
-      ["an attacker section on a probe that needs none", { ...plain, plugins: { ...plain.plugins, probes: c.plugins["probes"] } }, "config_unexpected_key"],
+      ["an attacker section on a probe that needs none", { ...plain, plugins: { ...plain.plugins, probes: c.plugins["probes"] } }, "config_probe_settings"],
     ];
     for (const [name, v, code] of variants) {
       expect(refusal(() => assertGatewayOnly(v, env(), BASE)), name).toBe(code);
