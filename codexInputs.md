@@ -1307,3 +1307,76 @@ or claimed B4I-03 closed without their integration/CI verification.
 The proposed CI filter was dry-checked:18 remaining workspace projects, with
 both shared and the recursive root script explicitly excluded. The first
 negative-only filter included the root; the reviewed proposal now excludes it.
+
+
+### X47 returned B7 review — PR #314, 2026-10-10 UTC
+
+Reviewed exact owner head `cda4c1f63a0a508c867ca3567a1bb258ca9dc9cb`
+against ADR-0189 R9, R17, R28 and the original X41 B9F-01/02 predicates.
+Review branch starts from main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7`;
+the owner head was checked out temporarily for builds and probes, then restored
+to this review branch. Only owned review probes and this ledger are published.
+Board `2536ab4b4ca5ad54efd6741534f91c720770a302` was reread before publication.
+
+**Disposition: B9F-01 and B9F-02 addressed on the reviewed head.** Original
+`1bba1dce` pure-builder probe is copied verbatim as
+`apps/web/review/x47-314-bom.probe.ts`; the original PostgreSQL probe is copied
+as `x47-314-bom-db.probe.ts` with only its scratch database guard changed to
+`regulait_review_x47_314_oct10b`. All original credential and private-path/query
+assertions now pass: six credential-bearing fields and three private URL fields
+are refused or absent from native and both CycloneDX renderings; the persisted
+agent-model credential is refused through the actual gateway loader. SQL byte
+identity, append-only/prune guards, the receipt boundary and the pre-BEGIN
+session lock controls also pass. Original assertions were not weakened.
+
+**B7 review: no additional defect reproduced in this scope.** The R17 switch is
+shared by gateway, builder seam and CLI and stays false. Workflow producing
+steps (artifact downloads, cosign installation, identity/signing, BOM generation,
+upload) require `released == true`; both producing CLI commands return inert
+before reading files and have no flag that turns the switch on. Package
+compilation and inventory validation still run while the snapshot step is inert.
+The release identity binds exact workspace/image SBOM byte hashes, serials,
+versions, release commit and image digest. The workflow verifies the identity
+with cosign against its pinned main workflow identity and issuer before passing
+the verification outcome to the builder. The builder emits BOM-Link identities
+and hashes, not raw SBOM content, secrets or runner paths; development tools are
+formulation components with explicit missing-version gaps. Without an identity,
+links are absent and composition remains incomplete.
+
+Independent `x47-314-release.probe.ts` checks exact-byte Ed25519 identity mutation
+as a genuine cryptographic control, unverified/unknown-method refusal, changed
+SBOM bytes with the same serial/version, missing image bytes, mismatched release
+commit, output identity/hash/provenance and content exclusion, honest absent-
+identity composition, switch-off versus harness-on, and actual inert CLI output.
+The Ed25519 control is synthetic and independent of the product; it does not
+claim that a local cosign verification ran. The typed verification flag is a
+trusted-caller seam, not proof by itself. Current CI ordering supplies that
+seam; install-time verification/trust-root selection remains explicitly deferred
+by ADR-0189 owner item 2 and SECURITY_CI.md §6a. No certificate/Rekor/OIDC,
+released GitHub workflow, deployed install or SPDX acceptance claim is made.
+
+Fresh validation on the exact owner head, one reserved CPU lane:
+
+- `pnpm install --frozen-lockfile` PASS.
+- `pnpm --filter @regulait/gateway... build` PASS (full dependency closure).
+- `node apps/web/review/x47-314-bom.probe.ts`: **15/15 PASS**.
+- `DATABASE_URL=<own scratch> node apps/web/review/x47-314-bom-db.probe.ts`:
+  **14/14 PASS**, real newly migrated PostgreSQL database.
+- `node apps/web/review/x47-314-release.probe.ts`: **10/10 PASS**.
+- `pnpm --filter @regulait/shared exec vitest run src/bom/ai-bom.test.ts src/bom/release-ai-bom.test.ts --maxWorkers=1`:
+  **63/63 PASS**.
+- `pnpm --filter @regulait/gateway exec vitest run src/adr0189-b7-release-switch.test.ts --maxWorkers=1`:
+  **2/2 PASS**.
+- `pnpm exec vitest run scripts/release-ai-bom.test.mjs --maxWorkers=1`:
+  **4/4 PASS**.
+- `pnpm --filter @regulait/web exec tsc --noEmit` and
+  `pnpm --filter @regulait/web build`: PASS.
+
+**108/108 selected checks**, no skipped or failed cases in these runs. No full
+shared/gateway suite claim. Logs `/tmp/x47-314-{install,closure,pure,db,release,shared,gateway,cli,web-tsc,web-build}.log`.
+Initial shell `psql` command was unavailable; database creation/drop used the
+existing local PostgreSQL container instead. Own database was dropped, owned
+CLI temporary directory removed and no review processes remain. CPU lane was
+released before publication to X42 for its regression checks. The board remains
+root-owned. Web application source is identical between reviewed owner head and
+review branch; the only existing web difference is the excluded X42 review probe.
