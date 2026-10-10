@@ -28,6 +28,7 @@ import {
   aiBomSerialNumber,
   bomCanonicalBytes,
   bomDigestOf,
+  bomJsonSafeIssues,
   bomSha256,
   type AiBomNativeBody,
   type BomRenderingFormat,
@@ -66,22 +67,8 @@ export function findEmailShapesBroad(value: unknown, at = "$"): string[] {
   return hits;
 }
 
-/** canonical JSON rule: only safe integers, only ASCII object keys */
-export function findNonCanonicalShapes(value: unknown, at = "$"): string[] {
-  const hits: string[] = [];
-  const walk = (v: unknown, p: string) => {
-    if (typeof v === "number" && !Number.isSafeInteger(v)) hits.push(`${p} (number ${v})`);
-    else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${p}[${i}]`));
-    else if (v !== null && typeof v === "object") {
-      for (const [k, x] of Object.entries(v)) {
-        if (!/^[\x20-\x7e]*$/.test(k)) hits.push(`${p}{key ${JSON.stringify(k)}}`);
-        walk(x, `${p}.${k}`);
-      }
-    }
-  };
-  walk(value, at);
-  return hits;
-}
+/** canonical JSON rule (the B1 security round): B1's `bomJsonSafeIssues`, one definition for facts and AI BOMs */
+export const findNonCanonicalShapes = (value: unknown): string[] => bomJsonSafeIssues(value);
 
 /** every `bom-ref` in a CycloneDX document; duplicates are reported */
 export function duplicateBomRefs(doc: unknown): string[] {

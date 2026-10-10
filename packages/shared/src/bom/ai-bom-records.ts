@@ -512,8 +512,11 @@ function dataClaims(v: unknown, at: string): Record<string, string | number | bo
 
 const spiffeOrNull = (what: string, v: unknown): string | null => {
   if (v === null) return null;
-  if (typeof v !== "string" || !/^spiffe:\/\/[a-z0-9._-]{1,255}(\/[A-Za-z0-9._-]+)+$/.test(v) || v.length > 2048) fail(`${what}: not a workload identity URI`);
-  return v as string;
+  // linear check (no nested quantifier, CodeQL js/polynomial-redos): length first, then split on "/"
+  if (typeof v !== "string" || v.length > 2048 || !v.startsWith("spiffe://")) return fail(`${what}: not a workload identity URI`);
+  const [domain, ...segments] = v.slice("spiffe://".length).split("/");
+  if (!/^[a-z0-9._-]{1,255}$/.test(domain!) || !segments.length || segments.some((x) => !/^[A-Za-z0-9._-]+$/.test(x))) fail(`${what}: not a workload identity URI`);
+  return v;
 };
 
 // ---------------------------------------------------------------------------
