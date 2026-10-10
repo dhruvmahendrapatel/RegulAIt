@@ -1,3 +1,4 @@
+import { DetectionContentPanel } from "./DetectionContentPanel";
 /**
  * ADR-0175 A6/A5 — ADMISSION REVIEW: one admin page for what the admission
  * detectors and the release-age waiting period are holding.
@@ -167,6 +168,7 @@ export default function AdmissionReviewPage() {
         />
       ) : (
       <div className={v.stack}>
+        <DetectionContentPanel />
         <WaitingPeriodCard q={quarantine.data} onOverride={(item, target) => setPending({ kind: "override", item, target })} loading={quarantine.isLoading} />
 
         <Card title="Builder skills held by the admission detectors">

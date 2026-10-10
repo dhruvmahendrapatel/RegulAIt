@@ -296,7 +296,7 @@ export async function applyRemediationDecision(
       userId: deciderUserId,
       objectType: "agent",
       objectId: agentId!,
-      detail: { phase: "owner", from: agent.ownerUserId, to: ownerUserId, remediationId: p.id, approvalId: approval.id },
+      detail: { phase: "owner", from: agent.ownerUserId, to: ownerUserId, remediationId: p.id, approvalId: approval.id, receiptClass: "configuration" },
       effect: "allow",
       ruleId: "agent-owner-set",
       ruleChain: [],

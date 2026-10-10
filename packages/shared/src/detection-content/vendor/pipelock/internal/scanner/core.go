@@ -1,0 +1,957 @@
+// Copyright 2026 Josh Waldrep
+// SPDX-License-Identifier: Apache-2.0
+
+package scanner
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"net"
+	"net/url"
+	"regexp"
+	"strings"
+
+	"github.com/luckyPipewrench/pipelock/internal/config"
+	"github.com/luckyPipewrench/pipelock/internal/destination"
+	"github.com/luckyPipewrench/pipelock/internal/normalize"
+)
+
+// Core scanner constants. These label values flow into metrics and audit logs.
+const (
+	ScannerCoreDLP      = "core_dlp"
+	ScannerCoreSSRF     = "core_ssrf"
+	ScannerCoreResponse = "core_response"
+)
+
+// Built-in pattern names - referenced in pattern definitions, tests, and
+// red-team assertions so the canonical spelling lives in one place.
+const (
+	patternNameAWSAccessID     = "AWS Access ID"
+	patternNamePromptInjection = "Prompt Injection"
+)
+
+// CoreDLPCount returns the number of immutable core DLP patterns.
+func CoreDLPCount() int { return len(coreDLPPatternDefs()) }
+
+// CoreResponseCount returns the number of immutable core response patterns.
+func CoreResponseCount() int { return len(coreResponsePatternDefs()) }
+
+// coreDLPPattern defines a single immutable DLP pattern compiled into the binary.
+// These patterns represent the safety floor - they CANNOT be disabled by any
+// config field (include_defaults, response_scanning.enabled, etc.).
+type coreDLPPattern struct {
+	name                                string
+	regex                               string
+	severity                            string
+	credentialAudienceHosts             []string
+	credentialAudienceAuthorizationOnly bool
+	credentialAudienceCarrierMask       uint16
+	credentialAudienceGitHosts          []string
+	credentialAudienceRegistryHosts     []string
+}
+
+// coreResponsePattern defines a single immutable response scanning pattern.
+type coreResponsePattern struct {
+	name  string
+	regex string
+}
+
+const externalDataTransferDirectivePatternName = "External Data Transfer Directive"
+
+// coreDLPPatternDefs returns the immutable core DLP patterns.
+// Decision rule: "Would you be ashamed if this got through?"
+//
+// These patterns are the absolute minimum safety floor. They detect
+// credential types where a false negative is catastrophic - leaked
+// cloud keys, source control tokens, and cryptographic material.
+func coreDLPPatternDefs() []coreDLPPattern {
+	patterns := config.CoreDLPPatterns()
+	out := make([]coreDLPPattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		out = append(out, coreDLPPattern{
+			name:                                pattern.Name,
+			regex:                               pattern.Regex,
+			severity:                            pattern.Severity,
+			credentialAudienceHosts:             append([]string(nil), pattern.CredentialAudienceHosts...),
+			credentialAudienceAuthorizationOnly: pattern.CredentialAudienceAuthorizationOnly,
+			credentialAudienceCarrierMask:       pattern.CredentialAudienceCarrierMask,
+			credentialAudienceGitHosts:          append([]string(nil), pattern.CredentialAudienceGitHosts...),
+			credentialAudienceRegistryHosts:     append([]string(nil), pattern.CredentialAudienceRegistryHosts...),
+		})
+	}
+	return out
+}
+
+// coreResponsePatternDefs returns the immutable core response scanning patterns.
+// These are the highest-confidence prompt injection signatures where a false
+// negative means an agent gets hijacked.
+func coreResponsePatternDefs() []coreResponsePattern {
+	return []coreResponsePattern{
+		{
+			name:  patternNamePromptInjection,
+			regex: config.PromptInjectionRegex,
+		},
+		{
+			name:  "System Override",
+			regex: `(?im)^\s*system\s*:`,
+		},
+		{
+			name:  externalDataTransferDirectivePatternName,
+			regex: config.ExternalDataTransferDirectiveRegex,
+		},
+		{
+			name:  "Role Override",
+			regex: `(?i)you\s+are\s+(now\s+)?(a\s+)?((?-i:\bDAN\b)|evil|unrestricted|jailbroken|unfiltered)`,
+		},
+		{
+			name:  "Hidden Instruction",
+			regex: `(?i)(do\s+not\s+(reveal|tell|show|display|mention)\s+this\s+to\s+the\s+user|hidden\s+instructions?\s*[:=]|invisible\s+to\s+(the\s+)?user|the\s+user\s+(cannot|must\s+not|should\s+not)\s+see\s+this)`,
+		},
+		{
+			// Credential Solicitation is direction-anchored: it fires only when
+			// a hand-over verb and a credential noun co-occur with an explicit
+			// "send it back to the requester" cue (to verify/confirm, so I can,
+			// in your reply, to me/us, to a URL/email, etc.) in the same local
+			// solicitation clause.
+			// A bare verb+noun ("provide your API key in config") is NOT an
+			// attack here - it is the same shape legitimate setup documentation
+			// uses, so direction is what separates solicitation from prose.
+			// The direction cue does not cross sentence punctuation or newlines,
+			// so unrelated bullets do not pair. The verb-to-noun gap still allows
+			// newline splitting to catch short wrapped solicitations. This is the
+			// immutable floor; the config default mirrors it for preset parity.
+			// Replaces the prior .{0,80} verb-near-noun rule that hard-blocked
+			// ordinary credential documentation.
+			name:  "Credential Solicitation",
+			regex: config.CredentialSolicitationRegex,
+		},
+		{
+			name:  "Markdown Link Credential Exfiltration",
+			regex: config.MarkdownLinkCredentialExfilRegex,
+		},
+		{
+			name:  "Markdown Link Credential Value Exfiltration",
+			regex: config.MarkdownLinkCredentialValueExfilRegex,
+		},
+		{
+			name:  "Markdown Link Credential Follow Exfiltration",
+			regex: config.MarkdownLinkCredentialFollowExfilRegex,
+		},
+		{
+			name:  "System Prompt Disclosure",
+			regex: config.SystemPromptDisclosureEffectiveRegex,
+		},
+		{
+			name:  "Credential Path Directive",
+			regex: config.CredentialPathDirectiveRegex,
+		},
+		{
+			name:  "Covert Action Directive",
+			regex: `(?is)(secretly|silently|covertly|quietly|without\s+(?:the\s+user\s+)?(?:knowing|noticing|seeing))[,;:]?\s+.{0,40}\b(execut\w*|run|call|invoke|send|fetch|curl|wget|download|upload|post)\b`,
+		},
+		{
+			name:  "Instruction Boundary",
+			regex: `(<\|(?:endoftext|im_start|im_end|system|end_header_id|begin_of_text)\|>|\[/?INST\]|<\|(?:user|assistant)\|>|<<SYS>>)`,
+		},
+	}
+}
+
+// coreInternalCIDRDefs returns the private/reserved ranges and metadata
+// endpoints that the core SSRF scanner always blocks. These ranges are checked
+// regardless of the user's config.Internal setting.
+func coreInternalCIDRDefs() []string {
+	return []string{
+		"0.0.0.0/8",        // "this" network (RFC 1122)
+		"127.0.0.0/8",      // loopback (RFC 1122)
+		"10.0.0.0/8",       // private class A (RFC 1918)
+		"172.16.0.0/12",    // private class B (RFC 1918)
+		"192.168.0.0/16",   // private class C (RFC 1918)
+		"169.254.0.0/16",   // link-local / cloud metadata (RFC 3927)
+		"168.63.129.16/32", // Azure WireServer metadata
+		"100.64.0.0/10",    // carrier-grade NAT (RFC 6598)
+		"224.0.0.0/4",      // IPv4 multicast
+		"::/128",           // IPv6 unspecified
+		"::1/128",          // IPv6 loopback
+		"fc00::/7",         // IPv6 unique local
+		"fe80::/10",        // IPv6 link-local
+		"ff00::/8",         // IPv6 multicast
+	}
+}
+
+// compiledCoreScanner holds pre-compiled core patterns. Initialized once
+// in initCoreScanner and stored on the Scanner struct.
+type compiledCoreScanner struct {
+	dlpPatterns                []*compiledPattern
+	dlpPreFilter               *dlpPreFilter
+	responsePatterns           []*compiledPattern
+	responsePreFilter          *responsePreFilter
+	responseOptSpacePatterns   []*compiledPattern
+	responseOptSpacePreFilter  *responsePreFilter
+	responseVowelFoldPatterns  []*compiledPattern
+	responseVowelFoldPreFilter *responsePreFilter
+	internalCIDRs              []*net.IPNet
+}
+
+// initCoreScanner compiles all core patterns and CIDRs. Called once from
+// scanner.New(). Panics on invalid patterns (these are compile-time constants,
+// so invalid patterns are programming errors caught in CI).
+func initCoreScanner(cfg *config.Config) *compiledCoreScanner {
+	cs := &compiledCoreScanner{}
+
+	// Compile core DLP patterns.
+	for _, p := range coreDLPPatternDefs() {
+		pattern := p.regex
+		if !strings.HasPrefix(pattern, "(?i)") {
+			pattern = "(?i)" + pattern
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			panic(fmt.Sprintf("BUG: core DLP pattern %q failed to compile: %v", p.name, err))
+		}
+		hosts := p.credentialAudienceHosts
+		var github, gitlab []string
+		if cfg != nil {
+			github = cfg.DLP.GitHubEnterpriseHosts
+			gitlab = cfg.DLP.GitLabHosts
+		}
+		requirements := analyzePatternMatchRequirements(re, nil)
+		cs.dlpPatterns = append(cs.dlpPatterns, &compiledPattern{
+			name:                                p.name,
+			re:                                  re,
+			requiresEquals:                      requirements.requiresEquals,
+			minASCIIDigits:                      requirements.minASCIIDigits,
+			shapeGate:                           requirements.shape,
+			severity:                            p.severity,
+			credentialAudienceHosts:             config.AppendDeclaredCredentialAudienceHosts(p.name, hosts, github, gitlab),
+			credentialAudienceAuthorizationOnly: p.credentialAudienceAuthorizationOnly,
+			credentialAudienceCarrierMask:       p.credentialAudienceCarrierMask,
+			credentialAudienceGitHosts:          config.AppendDeclaredCredentialAudienceHosts(p.name, p.credentialAudienceGitHosts, github, gitlab),
+			credentialAudienceRegistryHosts:     append([]string(nil), p.credentialAudienceRegistryHosts...),
+			validate:                            builtinDLPValidatorForRegex(p.regex),
+			validateJoined:                      builtinDLPJoinedValidatorForRegex(p.regex),
+		})
+	}
+	cs.dlpPreFilter = newDLPPreFilter(cs.dlpPatterns)
+
+	// Compile core response patterns with all variant passes.
+	for _, p := range coreResponsePatternDefs() {
+		re, err := regexp.Compile(p.regex)
+		if err != nil {
+			panic(fmt.Sprintf("BUG: core response pattern %q failed to compile: %v", p.name, err))
+		}
+		requiredLiteralsAny := responsePatternRequiredLiterals(p.regex)
+		cs.responsePatterns = append(cs.responsePatterns, &compiledPattern{
+			name:                p.name,
+			re:                  re,
+			responseMemoRegexp:  re,
+			requiredLiteralsAny: requiredLiteralsAny,
+		})
+
+		// Optional-whitespace variant: \s+ → \s*
+		optRegex := strings.ReplaceAll(p.regex, `\s+`, `\s*`)
+		optRegex = strings.ReplaceAll(optRegex, `[-,;:.\s]+`, `[-,;:.\s]*`)
+		if optRegex != p.regex {
+			if optRe, optErr := regexp.Compile(optRegex); optErr == nil {
+				cs.responseOptSpacePatterns = append(cs.responseOptSpacePatterns, &compiledPattern{
+					name:                p.name,
+					re:                  optRe,
+					responseMemoRegexp:  optRe,
+					requiredLiteralsAny: requiredLiteralsAny,
+				})
+			}
+		}
+
+		// Vowel-folded variant for confusable-vowel attacks.
+		vfRegex := p.regex
+		vfPrefix := ""
+		if strings.HasPrefix(vfRegex, "(?") {
+			if end := strings.Index(vfRegex, ")"); end > 1 {
+				flags := vfRegex[2:end]
+				allFlags := true
+				for _, r := range flags {
+					if !strings.ContainsRune("imsU-", r) {
+						allFlags = false
+						break
+					}
+				}
+				if allFlags {
+					vfPrefix = vfRegex[:end+1]
+					vfRegex = vfRegex[end+1:]
+				}
+			}
+		}
+		vfRegex = vfPrefix + normalize.FoldVowels(vfRegex)
+		if vfRegex != p.regex {
+			if vfRe, vfErr := regexp.Compile(vfRegex); vfErr == nil {
+				cs.responseVowelFoldPatterns = append(cs.responseVowelFoldPatterns, &compiledPattern{
+					name:                p.name,
+					re:                  vfRe,
+					responseMemoRegexp:  vfRe,
+					requiredLiteralsAny: requiredLiteralsAny,
+				})
+			}
+		}
+	}
+
+	// Build response pre-filters.
+	if len(cs.responsePatterns) > 0 {
+		cs.responsePreFilter = newResponsePreFilter(cs.responsePatterns)
+	}
+	if len(cs.responseOptSpacePatterns) > 0 {
+		cs.responseOptSpacePreFilter = newResponsePreFilter(cs.responseOptSpacePatterns)
+	}
+	if len(cs.responseVowelFoldPatterns) > 0 {
+		cs.responseVowelFoldPreFilter = newResponsePreFilter(cs.responseVowelFoldPatterns)
+	}
+
+	// Parse core internal CIDRs.
+	for _, cidr := range coreInternalCIDRDefs() {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic(fmt.Sprintf("BUG: core internal CIDR %q failed to parse: %v", cidr, err))
+		}
+		cs.internalCIDRs = append(cs.internalCIDRs, ipNet)
+	}
+
+	return cs
+}
+
+// ScanCoreResponse runs core response patterns against content. This runs
+// regardless of ResponseScanning.Enabled - the safety floor is non-negotiable.
+// Returns filtered matches found by core patterns only; the caller should run
+// the main response scanner separately if enabled.
+func (s *Scanner) ScanCoreResponse(ctx context.Context, content string) []ResponseMatch {
+	if ctx != nil && ctx.Err() != nil {
+		return nil
+	}
+	coreSet := s.scanCoreResponse(content, nil, false)
+	return coreSet.matches
+}
+
+type coreResponseSuppressor func([]ResponseMatch) []ResponseMatch
+
+func filterCoreResponsePass(content, _ string, matches []ResponseMatch, viewLabel string, suppress coreResponseSuppressor) []ResponseMatch {
+	matches = filterDefensiveCredentialSolicitationMatches(content, matches)
+	matches = withResponseSpans(matches, viewLabel)
+	if suppress != nil {
+		matches = suppress(matches)
+	}
+	return matches
+}
+
+func hasIdentityByteOffsetMap(source, transformed string) bool {
+	if len(source) != len(transformed) {
+		return false
+	}
+	for i := 0; i < len(source); i++ {
+		if source[i] >= 0x80 || transformed[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Scanner) scanCoreResponse(content string, suppress coreResponseSuppressor, forceEncodedDecode bool) responseMatchSet {
+	return s.scanCoreResponseWithMemo(content, suppress, forceEncodedDecode, nil)
+}
+
+func (s *Scanner) scanCoreResponseWithMemo(content string, suppress coreResponseSuppressor, forceEncodedDecode bool, memo *responseMatchMemo) responseMatchSet {
+	if s.core == nil {
+		return responseMatchSet{}
+	}
+
+	original := content
+	content = normalize.ForMatching(content)
+
+	// Each pass drops defensive anti-solicitation matches (e.g. "never send
+	// your password to us") and operator suppressions BEFORE treating the pass
+	// as a hit, so an all-filtered pass
+	// falls through to the later encoded passes. Filtering here, not in the
+	// caller, closes masking bypasses where an early false-positive decoy
+	// short-circuits the scan and hides a later normalized/base64 finding.
+
+	// Primary pass.
+	if matches := filterCoreResponsePass(content, "", memo.match(s.core.responsePreFilter, s.core.responsePatterns, content), ViewForMatching, suppress); len(matches) > 0 {
+		return responseMatchSet{matches: matches, content: content}
+	}
+
+	// Secondary: replace invisible chars with spaces.
+	spaced := normalize.ForMatching(normalize.ReplaceInvisibleWithSpace(original))
+	if spaced != content {
+		if matches := filterCoreResponsePass(spaced, "", memo.match(s.core.responsePreFilter, s.core.responsePatterns, spaced), ViewInvisibleSpaced, suppress); len(matches) > 0 {
+			return responseMatchSet{matches: matches, content: spaced}
+		}
+	}
+
+	// Tertiary: leetspeak normalization.
+	leeted := normalize.Leetspeak(content)
+	if leeted != content {
+		if matches := filterCoreResponsePass(leeted, content, memo.match(s.core.responsePreFilter, s.core.responsePatterns, leeted), ViewLeetspeak, suppress); len(matches) > 0 {
+			return responseMatchSet{matches: matches, content: leeted}
+		}
+	}
+
+	// Quaternary: optional-whitespace matching.
+	if len(s.core.responseOptSpacePatterns) > 0 {
+		if matches := filterCoreResponsePass(content, "", memo.match(s.core.responseOptSpacePreFilter, s.core.responseOptSpacePatterns, content), ViewForMatching, suppress); len(matches) > 0 {
+			return responseMatchSet{matches: matches, content: content}
+		}
+	}
+
+	// Quinary: vowel-folded matching.
+	if len(s.core.responseVowelFoldPatterns) > 0 {
+		folded := normalize.FoldVowels(content)
+		if folded != content {
+			if matches := filterCoreResponsePass(folded, content, memo.match(s.core.responseVowelFoldPreFilter, s.core.responseVowelFoldPatterns, folded), ViewVowelFold, suppress); len(matches) > 0 {
+				return responseMatchSet{matches: matches, content: folded}
+			}
+		}
+	}
+
+	// Senary: base64/hex decode pass for encoded injection payloads.
+	if forceEncodedDecode || hasEncodedRun(content) {
+		if decodedSet := s.matchDecodedCoreResponse(content, suppress); len(decodedSet.matches) > 0 {
+			return decodedSet
+		}
+	}
+
+	return responseMatchSet{}
+}
+
+// matchDecodedCoreResponse tries base64/hex decoding content and checks the
+// decoded result against core response patterns. Entry point for the senary pass.
+func (s *Scanner) matchDecodedCoreResponse(content string, suppress coreResponseSuppressor) responseMatchSet {
+	return markFragmentBoundaries(s.matchDecodedCoreResponseRecursive(content, 0, suppress), content)
+}
+
+// matchDecodedCoreResponseRecursive is the recursive implementation of
+// matchDecodedCoreResponse. Mirrors the main scanner's matchDecodedResponseRecursive
+// but uses only core response patterns.
+func (s *Scanner) matchDecodedCoreResponseRecursive(content string, depth int, suppress coreResponseSuppressor) responseMatchSet {
+	if depth >= responseDecodeMaxDepth {
+		return responseMatchSet{}
+	}
+
+	// Strategy 1: whole-content decode (strip whitespace first).
+	stripped, sourceOffsets := stripDecodeWhitespace(content, 0)
+
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.URLEncoding,
+		base64.RawStdEncoding, base64.RawURLEncoding,
+	} {
+		if decoded, err := enc.DecodeString(stripped); err == nil && len(decoded) > 0 {
+			d := string(decoded)
+			if decodedSet := s.matchDecodedCoreNormalized(d, ViewBase64Decoded, suppress); len(decodedSet.matches) > 0 {
+				return mapDecodedSources(decodedSet, d, sourceOffsets, false)
+			}
+			if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1, suppress); len(decodedSet.matches) > 0 {
+				return mapDecodedSources(decodedSet, d, sourceOffsets, false)
+			}
+		}
+	}
+	if decoded, err := hex.DecodeString(stripped); err == nil && len(decoded) > 0 {
+		d := string(decoded)
+		if decodedSet := s.matchDecodedCoreNormalized(d, ViewHexDecoded, suppress); len(decodedSet.matches) > 0 {
+			return mapDecodedSources(decodedSet, d, sourceOffsets, true)
+		}
+		if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1, suppress); len(decodedSet.matches) > 0 {
+			return mapDecodedSources(decodedSet, d, sourceOffsets, true)
+		}
+	}
+
+	// Strategy 2: segment-level decode.
+	segments := extractEncodedRunSpans(content, minSegmentDecodeLen)
+	for _, seg := range segments {
+		_, sourceOffsets := stripDecodeWhitespace(seg.text, seg.start)
+		for _, enc := range []*base64.Encoding{
+			base64.StdEncoding, base64.URLEncoding,
+			base64.RawStdEncoding, base64.RawURLEncoding,
+		} {
+			if decoded, err := enc.DecodeString(seg.text); err == nil && len(decoded) > 0 && isPrintableText(decoded) {
+				d := string(decoded)
+				if decodedSet := s.matchDecodedCoreNormalized(d, ViewBase64Decoded, suppress); len(decodedSet.matches) > 0 {
+					return mapDecodedSources(decodedSet, d, sourceOffsets, false)
+				}
+				if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1, suppress); len(decodedSet.matches) > 0 {
+					return mapDecodedSources(decodedSet, d, sourceOffsets, false)
+				}
+			}
+		}
+		if decoded, err := hex.DecodeString(seg.text); err == nil && len(decoded) > 0 && isPrintableText(decoded) {
+			d := string(decoded)
+			if decodedSet := s.matchDecodedCoreNormalized(d, ViewHexDecoded, suppress); len(decodedSet.matches) > 0 {
+				return mapDecodedSources(decodedSet, d, sourceOffsets, true)
+			}
+			if decodedSet := s.matchDecodedCoreResponseRecursive(d, depth+1, suppress); len(decodedSet.matches) > 0 {
+				return mapDecodedSources(decodedSet, d, sourceOffsets, true)
+			}
+		}
+	}
+
+	return responseMatchSet{}
+}
+
+func (s *Scanner) matchDecodedCoreNormalized(decoded, decodedViewLabel string, suppress coreResponseSuppressor) responseMatchSet {
+	normalized := normalize.ForMatching(decoded)
+	if matches := filterCoreResponsePass(normalized, "", matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, normalized), decodedViewLabel, suppress); len(matches) > 0 {
+		return responseMatchSet{matches: matches, content: normalized}
+	}
+	spaced := normalize.ForMatching(normalize.ReplaceInvisibleWithSpace(decoded))
+	if spaced != normalized {
+		if matches := filterCoreResponsePass(spaced, "", matchPatternsPreFiltered(s.core.responsePreFilter, s.core.responsePatterns, spaced), spanViewLabel("invisible_spaced", decodedViewLabel), suppress); len(matches) > 0 {
+			return responseMatchSet{matches: matches, content: spaced}
+		}
+	}
+	if len(s.core.responseOptSpacePatterns) > 0 {
+		if matches := filterCoreResponsePass(normalized, "", matchPatternsPreFiltered(s.core.responseOptSpacePreFilter, s.core.responseOptSpacePatterns, normalized), decodedViewLabel, suppress); len(matches) > 0 {
+			return responseMatchSet{matches: matches, content: normalized}
+		}
+	}
+	if len(s.core.responseVowelFoldPatterns) > 0 {
+		folded := normalize.FoldVowels(normalized)
+		if folded != normalized {
+			if matches := filterCoreResponsePass(folded, normalized, matchPatternsPreFiltered(s.core.responseVowelFoldPreFilter, s.core.responseVowelFoldPatterns, folded), vowelFoldViewLabel(decodedViewLabel), suppress); len(matches) > 0 {
+				return responseMatchSet{matches: matches, content: folded}
+			}
+		}
+	}
+	return responseMatchSet{}
+}
+
+// scanCoreDLP runs core DLP patterns against text. Returns matches found by
+// core patterns only.
+func (s *Scanner) scanCoreDLP(text string) []TextDLPMatch {
+	return s.scanCoreDLPWithDecodes(text, nil)
+}
+
+func (s *Scanner) scanCoreDLPWithDecodes(text string, decodes *decodingMemo) []TextDLPMatch {
+	if s.core == nil || len(s.core.dlpPatterns) == 0 {
+		return nil
+	}
+
+	cleaned := decodes.normalize(text)
+	var matches []TextDLPMatch
+
+	for _, idx := range s.core.dlpPreFilter.patternsToCheck(cleaned) {
+		p := s.core.dlpPatterns[idx]
+		if start, end, ok := p.matchSpan(cleaned); ok {
+			matches = append(matches, TextDLPMatch{
+				PatternName:                         p.name,
+				Severity:                            p.severity,
+				credentialAudienceHosts:             p.credentialAudienceHosts,
+				credentialAudienceAuthorizationOnly: p.credentialAudienceAuthorizationOnly,
+				credentialAudienceCarrierMask:       p.credentialAudienceCarrierMask,
+				credentialAudienceGitHosts:          p.credentialAudienceGitHosts,
+				credentialAudienceRegistryHosts:     p.credentialAudienceRegistryHosts,
+				span:                                newMatchSpan(start, end, ViewDLPNormalized, p.name, "", ""),
+			})
+		}
+	}
+	// URL-decoded variant.
+	if decoded := IterativeDecode(cleaned); decoded != cleaned {
+		matches = append(matches, s.matchCoreDLPPatterns(decoded, "url")...)
+	}
+
+	if decoded := decodeHTMLEntities(cleaned); decoded != cleaned {
+		matches = append(matches, s.matchCoreDLPPatterns(decoded, encodingHTML)...)
+	}
+
+	// Subdomain dot-collapse.
+	if strings.Contains(cleaned, ".") {
+		dotless := removeHostnameDots(cleaned)
+		if dotless != cleaned {
+			matches = append(matches, s.matchCoreDLPPatterns(dotless, "subdomain")...)
+		}
+	}
+
+	// Whitespace-collapse catches key material split with ordinary spaces,
+	// tabs, or newlines before it reaches the configurable pattern layer.
+	if compacted := compactTextDLPWhitespace(cleaned); compacted != cleaned {
+		_, offsets := compactTextDLPWhitespaceWithOffsets(cleaned)
+		matches = append(matches, s.matchCoreDLPWhitespaceView(compacted, cleaned, offsets)...)
+	}
+
+	// Fixpoint encoding decode: try base64, hex, base32, and URL decoding
+	// until no new bounded candidates appear. Catches stacked encodings while
+	// bounding candidate count and candidate size.
+	matches = append(matches, s.decodeAndMatchCoreWithDecodes(cleaned, decodes)...)
+	if len(matches) == 0 {
+		matches = append(matches, s.decodeCoreDLPTextSegmentsWithDecodes(cleaned, decodes)...)
+	}
+
+	return deduplicateMatches(matches)
+}
+
+// matchCoreDLPPatterns runs core DLP regex patterns against text with encoding tag.
+func (s *Scanner) matchCoreDLPPatterns(text, encoding string) []TextDLPMatch {
+	return s.matchCoreDLPPatternsNormalized(normalize.ForDLP(text), encoding)
+}
+
+func (s *Scanner) matchCoreDLPPatternsNormalized(text, encoding string) []TextDLPMatch {
+	var matches []TextDLPMatch
+	for _, idx := range s.core.dlpPreFilter.patternsToCheck(text) {
+		p := s.core.dlpPatterns[idx]
+		if start, end, ok := p.matchSpan(text); ok {
+			matches = append(matches, TextDLPMatch{
+				PatternName:                         p.name,
+				Severity:                            p.severity,
+				Encoded:                             encoding,
+				credentialAudienceHosts:             p.credentialAudienceHosts,
+				credentialAudienceAuthorizationOnly: p.credentialAudienceAuthorizationOnly,
+				credentialAudienceCarrierMask:       p.credentialAudienceCarrierMask,
+				credentialAudienceGitHosts:          p.credentialAudienceGitHosts,
+				credentialAudienceRegistryHosts:     p.credentialAudienceRegistryHosts,
+				span:                                newMatchSpan(start, end, dlpViewLabel(encoding), p.name, "", ""),
+			})
+		}
+	}
+	return matches
+}
+
+// matchCoreDLPWhitespaceView is matchCoreDLPPatterns for the whitespace-joined
+// view. compacted is already normalized and is not normalized again, because
+// offsets index these exact bytes.
+func (s *Scanner) matchCoreDLPWhitespaceView(compacted, source string, offsets []int) []TextDLPMatch {
+	var matches []TextDLPMatch
+	for _, idx := range s.core.dlpPreFilter.patternsToCheck(compacted) {
+		p := s.core.dlpPatterns[idx]
+		if start, end, ok := p.matchSpanInJoinedView(compacted, source, offsets); ok {
+			matches = append(matches, TextDLPMatch{
+				PatternName:                         p.name,
+				Severity:                            p.severity,
+				Encoded:                             "whitespace",
+				credentialAudienceHosts:             p.credentialAudienceHosts,
+				credentialAudienceAuthorizationOnly: p.credentialAudienceAuthorizationOnly,
+				credentialAudienceCarrierMask:       p.credentialAudienceCarrierMask,
+				credentialAudienceGitHosts:          p.credentialAudienceGitHosts,
+				credentialAudienceRegistryHosts:     p.credentialAudienceRegistryHosts,
+				span:                                newMatchSpan(start, end, dlpViewLabel("whitespace"), p.name, "", ""),
+			})
+		}
+	}
+	return matches
+}
+
+// decodeAndMatchCoreWithDecodes runs core DLP patterns over every bounded
+// fixpoint decode candidate, reusing views within the calling scan.
+func (s *Scanner) decodeAndMatchCoreWithDecodes(text string, decodes *decodingMemo) []TextDLPMatch {
+	var matches []TextDLPMatch
+	for _, d := range decodes.decode(text, true) {
+		matches = append(matches, s.matchCoreDLPPatternsNormalized(decodes.normalize(d.text), d.encoding)...)
+	}
+	return matches
+}
+
+func (s *Scanner) decodeCoreDLPTextSegmentsWithDecodes(text string, decodes *decodingMemo) []TextDLPMatch {
+	for _, seg := range strings.FieldsFunc(text, isTextDLPEncodingDelimiter) {
+		if len(seg) < 10 {
+			continue
+		}
+		for _, d := range decodes.decode(seg, true) {
+			if m := s.matchCoreDLPPatternsNormalized(decodes.normalize(d.text), d.encoding); len(m) > 0 {
+				return m
+			}
+		}
+	}
+	return nil
+}
+
+// isCoreCIDRBlocked checks whether an IP falls within any core internal CIDR.
+// This check always runs, even if the user's config.Internal is empty.
+func (s *Scanner) isCoreCIDRBlocked(ip net.IP) bool {
+	if s.core == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	for _, cidr := range s.core.internalCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergedSSRFCIDRs returns core CIDRs combined with user-configured CIDRs.
+// Core CIDRs come first so they're checked before config CIDRs. Duplicate
+// ranges are acceptable - net.IPNet.Contains is cheap and the total count is small.
+func (s *Scanner) mergedSSRFCIDRs() []*net.IPNet {
+	if s.core == nil {
+		return s.internalCIDRs
+	}
+	if len(s.internalCIDRs) == 0 {
+		return s.core.internalCIDRs
+	}
+	merged := make([]*net.IPNet, 0, len(s.core.internalCIDRs)+len(s.internalCIDRs))
+	merged = append(merged, s.core.internalCIDRs...)
+	merged = append(merged, s.internalCIDRs...)
+	return merged
+}
+
+// checkCoreSSRFLiteral blocks requests to literal private IP addresses when
+// SSRF config is disabled (cfg.Internal is nil). This provides the same
+// immutable floor for SSRF as core DLP and core response scanning.
+//
+// When SSRF IS active (cfg.Internal non-nil), the normal checkSSRF path
+// already includes core CIDRs via mergedSSRFCIDRs() and provides richer
+// diagnostics (hints, config mismatch classification). This function only
+// serves as the safety net for the disabled case.
+//
+// Only checks IP literals (standard dotted-decimal, hex, octal, decimal
+// integer). Hostname-based SSRF (where DNS resolves to a private IP) remains
+// config-gated because it requires DNS resolution.
+//
+// Respects ssrf.ip_allowlist so operators can explicitly permit specific
+// internal IPs (e.g., sidecar communication, test servers).
+func (s *Scanner) checkCoreSSRFLiteral(dest destination.Destination) Result {
+	hostname := dest.Host
+	if s.core == nil {
+		return Result{Allowed: true}
+	}
+
+	// When SSRF is active, checkSSRF handles everything (including core
+	// CIDRs via mergedSSRFCIDRs). Only fire here as the safety net.
+	if len(s.internalCIDRs) > 0 {
+		return Result{Allowed: true}
+	}
+
+	// url.URL.Hostname() already strips brackets from "[::1]". ParseIPLiteral is
+	// the scanner's canonical IP-literal parser: it strips a trailing root dot
+	// and any zone id (e.g. "::1%eth0" -> "::1"), decodes alternative IPv4 forms
+	// (hex/octal/decimal), and normalizes IPv4-mapped IPv6 to 4-byte IPv4. The
+	// forwarder target checks use the same helper, so config, the core floor,
+	// and dial-time enforcement agree on what a given literal resolves to.
+	ip := ParseIPLiteral(hostname)
+	if ip == nil {
+		return Result{Allowed: true} // hostname, not IP literal
+	}
+
+	// Operator override: ip_allowlist exempts specific ranges.
+	if s.IsIPAllowlisted(ip) || s.destinationGrants.Contains(dest) {
+		return Result{Allowed: true}
+	}
+
+	if s.isCoreCIDRBlocked(ip) {
+		r := Result{
+			Allowed: false,
+			Reason:  fmt.Sprintf("core SSRF: %s is a private/internal IP address", hostname),
+			Scanner: ScannerCoreSSRF,
+			Score:   1.0,
+		}
+		// If the IP is in api_allowlist, this is a config mismatch (operator
+		// intended to allow it) rather than a real attack. Classify so
+		// adaptive enforcement doesn't escalate, and hint toward ip_allowlist.
+		classificationHost := hostname
+		if zone := strings.IndexByte(classificationHost, '%'); zone >= 0 {
+			classificationHost = classificationHost[:zone]
+		}
+		// Check both the original zone-free spelling and the canonical IP. The
+		// former preserves equivalent expanded-IPv6 api_allowlist entries; the
+		// latter recognizes mapped and otherwise canonicalized literals. Never
+		// match the raw zone text: it is attacker-controlled and could spoof an
+		// allowlisted domain suffix.
+		apiAllowlisted := s.IsInAPIAllowlist(classificationHost) || s.IsInAPIAllowlist(ip.String())
+		if apiAllowlisted {
+			// Config mismatch (operator allowlisted this IP), not an attack:
+			// classify so adaptive enforcement doesn't escalate. The agent-facing
+			// hint stays terse (no knob); the operator gets ssrf.ip_allowlist from
+			// `pipelock explain` and the audit remediation_hint, and the block
+			// reason carries the offending IP.
+			r.Hint = HintForScanner(ScannerCoreSSRF)
+			r.Class = ClassConfigMismatch
+		}
+		return r
+	}
+
+	return Result{Allowed: true}
+}
+
+// checkCoreDLPWithDecodes runs core DLP patterns against a parsed URL. Mirrors the main
+// checkDLP flow but uses only core patterns. Core findings are FINAL.
+func (s *Scanner) checkCoreDLPWithDecodes(parsed *url.URL, decodes *decodingMemo) Result {
+	if s.core == nil || len(s.core.dlpPatterns) == 0 {
+		return Result{Allowed: true}
+	}
+
+	decodedQuery := IterativeDecode(parsed.RawQuery)
+	targets := []dlpTarget{
+		{parsed.Path, dlpViewLabel("url_path"), ""},
+		{decodedQuery, dlpViewLabel("url_query"), ""},
+	}
+
+	// Individual query keys and values (decoded + encoding variants).
+	for key, values := range parsed.Query() {
+		decodedKey := IterativeDecode(key)
+		targets = append(targets, dlpTarget{decodedKey, dlpViewLabel("url_query_key"), ""})
+		for _, d := range decodes.decode(decodedKey, false) {
+			targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), ""})
+		}
+		if stripped := stripURLNoise(decodedKey); stripped != decodedKey {
+			targets = append(targets, dlpTarget{stripped, dlpViewLabel("url_noise_stripped"), decodedKey})
+		}
+		for _, v := range values {
+			decoded := IterativeDecode(v)
+			targets = append(targets, dlpTarget{decoded, dlpViewLabel("url_query_value"), ""})
+			// The floor sees the same decoded views configured DLP does, so an
+			// empty configured pattern list cannot reopen an encoding.
+			targets = append(targets, queryValueDecodedTargetsWithDecodes(decoded, decodes)...)
+			if stripped := stripURLNoise(decoded); stripped != decoded {
+				targets = append(targets, dlpTarget{stripped, dlpViewLabel("url_noise_stripped"), decoded})
+			}
+		}
+	}
+
+	// Dot-collapse hostname.
+	if hostname := parsed.Hostname(); strings.Contains(hostname, ".") {
+		targets = append(targets, dlpTarget{removeHostnameDots(hostname), dlpViewLabel("subdomain"), hostname})
+	}
+
+	// Noise-stripped path.
+	if stripped := stripURLNoise(parsed.Path); stripped != parsed.Path {
+		targets = append(targets, dlpTarget{stripped, dlpViewLabel("url_noise_stripped"), parsed.Path})
+	}
+
+	// Double-encoded escaped path.
+	rawPath := parsed.RawPath
+	if rawPath == "" {
+		rawPath = parsed.EscapedPath()
+	}
+	decodedPath := IterativeDecode(rawPath)
+	if decodedPath != "" && decodedPath != parsed.Path {
+		targets = append(targets, dlpTarget{decodedPath, dlpViewLabel("url_path_decoded"), ""})
+	}
+
+	// Path segment decoding (hex/base64/base32).
+	for _, segment := range strings.Split(parsed.Path, "/") {
+		if len(segment) >= 10 {
+			for _, d := range decodes.decode(segment, false) {
+				targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), ""})
+			}
+		}
+	}
+
+	// Ordered query-value concatenation (catches secrets split across params).
+	targets = appendQueryConcatTargets(targets, parsed.Path, parsed.RawQuery)
+
+	// A DNS-over-HTTPS query is also read as the message it carries. Every
+	// name, record payload and fixed-width field, and their decodings, reach
+	// the floor, which configured exemptions never narrow.
+	for _, text := range dnsQueryDLPTexts(parsed.RawQuery) {
+		targets = append(targets, dlpTarget{text, dlpViewLabel("doh"), ""})
+		for _, d := range decodes.decode(text, false) {
+			targets = append(targets, dlpTarget{d.text, dlpViewLabel(d.encoding), ""})
+		}
+	}
+
+	// Coarse full-URL fallback runs after component targets so path/query spans
+	// keep their more precise view labels when both views match.
+	targets = append(targets, dlpTarget{parsed.String(), dlpViewLabel("url"), ""})
+
+	for _, target := range targets {
+		if target.text == "" {
+			continue
+		}
+		cleaned := decodes.normalize(target.text)
+		for _, idx := range s.core.dlpPreFilter.patternsToCheck(cleaned) {
+			p := s.core.dlpPatterns[idx]
+			if start, end, ok := p.matchSpan(cleaned); ok {
+				return Result{
+					Allowed: false,
+					Reason:  fmt.Sprintf("core DLP match: %s (%s)", p.name, p.severity),
+					Scanner: ScannerCoreDLP,
+					Score:   1.0,
+					spans: []MatchSpan{
+						newMatchSpan(start, end, target.viewLabel, p.name, "", ""),
+					},
+				}
+			}
+		}
+	}
+
+	// Subsequence scan: try ordered combinations of query values to catch
+	// secrets split across params with junk values interleaved.
+	if result := s.querySubsequenceCoreDLP(parsed.RawQuery); !result.Allowed {
+		return result
+	}
+
+	return Result{Allowed: true}
+}
+
+// querySubsequenceCoreDLP checks ordered combinations of query values against
+// core DLP patterns. Mirrors the main scanner's querySubsequenceDLP -- see
+// its doc comment for why the size-4 cap is a deliberately bounded secondary
+// defense, not the primary one, and is left unchanged.
+//
+//pipelock:provenance-transform query_subsequence
+func (s *Scanner) querySubsequenceCoreDLP(rawQuery string) Result {
+	if rawQuery == "" || !strings.Contains(rawQuery, "&") {
+		return Result{Allowed: true}
+	}
+	values := querySubsequenceValues(rawQuery)
+	n := len(values)
+	if n < 3 {
+		return Result{Allowed: true}
+	}
+	for size := 2; size <= 4 && size <= n; size++ {
+		if result := s.checkCoreDLPCombinations(values, n, size); !result.Allowed {
+			return result
+		}
+	}
+	return Result{Allowed: true}
+}
+
+// checkCoreDLPCombinations tries all ordered combinations of query values
+// of the given size against core DLP patterns.
+func (s *Scanner) checkCoreDLPCombinations(values []string, n, size int) Result {
+	indices := make([]int, size)
+	for i := range indices {
+		indices[i] = i
+	}
+	for {
+		var concat strings.Builder
+		for _, idx := range indices {
+			concat.WriteString(values[idx])
+		}
+		combined := concat.String()
+		cleaned := normalize.ForDLP(combined)
+		for _, idx := range s.core.dlpPreFilter.patternsToCheck(cleaned) {
+			p := s.core.dlpPatterns[idx]
+			if start, end, ok := p.matchSpan(cleaned); ok {
+				return Result{
+					Allowed: false,
+					Reason:  fmt.Sprintf("core DLP match: %s (%s)", p.name, p.severity),
+					Scanner: ScannerCoreDLP,
+					Score:   1.0,
+					spans: []MatchSpan{
+						newMatchSpan(start, end, dlpViewLabel("query_subsequence"), p.name, "", ""),
+					},
+				}
+			}
+		}
+		// Advance to next combination in lexicographic order.
+		i := size - 1
+		for i >= 0 && indices[i] == n-size+i {
+			i--
+		}
+		if i < 0 {
+			break
+		}
+		indices[i]++
+		for j := i + 1; j < size; j++ {
+			indices[j] = indices[j-1] + 1
+		}
+	}
+	return Result{Allowed: true}
+}
+
+// CorePatternCount returns the number of core DLP + response patterns.
+// Used by diagnostics and health checks.
+func (s *Scanner) CorePatternCount() (dlp, response int) {
+	if s.core == nil {
+		return 0, 0
+	}
+	return len(s.core.dlpPatterns), len(s.core.responsePatterns)
+}

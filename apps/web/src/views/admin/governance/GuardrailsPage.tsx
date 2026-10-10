@@ -1,3 +1,4 @@
+import { DetectionContentPanel } from "./DetectionContentPanel";
 /**
  * Guardrails (ADR-0042).
  *
@@ -161,6 +162,7 @@ export default function GuardrailsPage() {
         info={<p>Content-safety detectors evaluated at the same interception point, and with the same block / warn / log verbs, as PII enforcement — on the way in AND on the way out. Every detector shipped today is a deterministic local rule set, not a model: it catches literal phrasings, misses novel ones, and will occasionally fire on benign text. That is why the shipped posture is 'log', and why this page shows each detector's limits next to its switch.</p>}
       />
       <div className={v.stack}>
+        <DetectionContentPanel />
         <QueryGate
           loading={info.isLoading || config.isLoading}
           error={info.error ?? config.error}

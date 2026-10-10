@@ -40,7 +40,8 @@ export function EngineProvenanceChip(props: { provenance: Provenance }) {
     `engine ${p.engine} ${p.version}`,
     p.digest ? `image ${p.digest}` : "image digest not recorded on this run",
     p.generation != null ? `manifest generation ${p.generation}` : null,
-    p.signature ? `signature ${p.signature.replaceAll("_", " ")}` : null,
+    p.signature ? `signature of this run's build: ${p.signature.replaceAll("_", " ")}` : "signature not recorded for this run",
+    p.current ? `current engine build: ${p.current.version}, signature ${p.current.signature.replaceAll("_", " ")}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -51,7 +52,14 @@ export function EngineProvenanceChip(props: { provenance: Provenance }) {
       </Badge>
       <code className={v.faint}>{digestText}</code>
       {p.generation != null && <span className={v.faint}>manifest gen. {p.generation}</span>}
-      {p.signature && <span className={v.faint}>signature {p.signature.replaceAll("_", " ")}</span>}
+      <span className={v.faint} data-testid="engine-run-signature">
+        {p.signature ? `signature of this run's build: ${p.signature.replaceAll("_", " ")}` : "signature not recorded for this run"}
+      </span>
+      {p.current && !p.signature && (
+        <span className={v.faint} data-testid="engine-current-build">
+          (current engine build, not this run&apos;s: {p.current.version}, signature {p.current.signature.replaceAll("_", " ")})
+        </span>
+      )}
     </span>
   );
 }

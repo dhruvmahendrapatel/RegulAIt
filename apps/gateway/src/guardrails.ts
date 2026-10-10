@@ -420,6 +420,7 @@ export async function recordGuardrailDecision(
       },
       ...(args.projectId ? { projectId: args.projectId } : {}),
       ...(args.detail ?? {}),
+      receiptClass: "decision",
     },
     effect: outcome === "blocked" ? "deny" : "allow",
     ruleId: `guardrail-${outcome}`,

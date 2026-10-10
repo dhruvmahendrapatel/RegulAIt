@@ -130,6 +130,7 @@ export async function attributionDispatchGate(
         agentId: ctx.agentId,
         agentName: ctx.agentName,
         projectId: null,
+        receiptClass: "decision",
       },
       effect: "deny",
       ruleId: "attribution-required",
