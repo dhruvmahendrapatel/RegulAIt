@@ -1502,6 +1502,114 @@ adds a unique index): a dev database that applied 0175 from `b5-modelscan` befor
      the artifact verdict reads the normalised items, never a summary, and the run's aggregates are recomputed by the
      shared normaliser; the report summary was the only instance.
 
+**Review round 2 (PR #212's five deferred Codex findings, 2026-10-09, branch `b5-m-followup`; each red first).**
+**Migration 0176** (`0176_model_artifact_quotas_retention`, hand-written, journal `when` 1785111000000; 0175 is merged
+and not edited). Tests: `apps/gateway/src/zz-b5-modelscan-storage.test.ts` (12, the real gateway) [127] [128];
+`model-artifacts.test.ts` (+2) [127] [130]; `packages/engine-modelscan/src/image.test.ts` [129];
+`modelscan.test.ts` (+1) [131]. The mutation that turned each proof red is named with its decision.
+
+127. **Model-artifact storage is bounded: quotas, deletion and retention, strict by default** [4235322397]. Any
+     user could upload without limit and nothing was ever removed.
+     - **Quotas.** Five new org settings, each in the strictness registry (raising one is a `settings_relax`
+       step-up, audited; lowering needs nothing): `modelArtifactUploaderQuotaMegabytes` **2048** (1–1048576),
+       `modelArtifactUploaderQuotaCount` **20** (1–100000), `modelArtifactOrgQuotaMegabytes` **20480**
+       (1–10485760), `modelArtifactOrgQuotaCount` **200** (1–1000000). A quota counts every artifact row at its
+       own size, so the same bytes uploaded twice count twice (the per-row view the uploader sees; the store
+       may hold one object). "Org" is the deployment: `org_settings` is one row. An upload past a count quota is
+       refused **409**, past a byte quota **413**, both `artifact_quota_exceeded` with `{scope, measure, setting,
+       limit, used}` and a `model-artifact-upload-refused` audit; nothing of it is kept.
+     - **Decided under one lock.** Every quota decision, every object write a row will name and every object
+       delete take one transaction-scoped advisory lock (`regulait:model-artifact-storage`). The upload reads
+       what is stored and inserts its row inside that transaction, so concurrent uploads cannot both fit; an
+       unlocked fast check refuses early before anything is written to the store. Red: with the lock a no-op
+       (and the decision widened by a test seam), six concurrent uploads under a quota of one all answered 201.
+       Concurrent uploads serialise only for the short decision, not for the bytes: the object is written
+       before the lock and re-checked under it.
+     - **Write-ahead, so an object is never left unnamed.** Before an upload writes a NEW object it queues that
+       key in `model_artifact_object_deletions` with `not_before` six hours ahead; the upload's locked
+       transaction removes the entry when its row lands (or makes it due at once when the quota refuses). A
+       crash between the write and the row therefore leaves a queued delete, not an orphan. If a delete removed
+       the object between the upload's write and its lock, the upload writes it again under the lock.
+     - **DELETE `/v1/model-artifacts/:artifactId`.** The uploader or an admin (404 `unknown_artifact` for anyone
+       else), with a `settings_relax` step-up bound to `{modelArtifactId, values:{deleted:true}}` (an API key can
+       never step up, so it is refused 403). **409 `artifact_in_use`** `{citedScans, unfinishedRuns}` while a scan
+       of it is cited as model-card evidence or a run on it is not in a terminal status, audited
+       `model-artifact-delete-refused`; checked before the step-up is asked for (so no grant is spent) and again on
+       the locked row. Otherwise the row and its uncited scans go in one transaction with a `model-artifact-deleted`
+       audit (sha256, size, format, the scan ids); finished runs keep their history (`target_artifact_id` set
+       null). Red: without the in-use check the cited and the queued-run artifacts went to the step-up instead of
+       409.
+     - **The object goes only after the row is gone and committed.** The delete's transaction queues the key
+       only when no other row names it (content addressing: `object: "shared"` when one does). After it
+       commits, each queued key is deleted in its own transaction under the lock, re-checking that no row names
+       it; the queue entry goes with the object. A failed delete keeps the entry (`attempts` + 1,
+       `last_error_code`, retried after 5 minutes per attempt, at most a day) with a
+       `model-artifact-object-delete-failed` audit; it is never half-done. Success is audited
+       `model-artifact-object-deleted`. Red: re-throwing the store error answered 500 with the row gone and no
+       record; skipping the "still named" re-check deleted an object a row named. The test store records, from
+       a second connection, that no row was visible at each delete.
+     - **Retention.** The scheduler job `model-artifact-retention-sweep` (hourly, ADR-0187) deletes artifacts older
+       than `modelArtifactRetentionDays` (**30**, 1–3650, larger relaxes it) that nothing keeps (the same two
+       references), with their uncited scans, audited `model-artifact-expired`; then it drains every due queued
+       delete, retrying failures. The setting is read on every run, so lowering it applies to what is stored.
+       Red: with the cutoff removed, a recent artifact was deleted.
+     - **`ArtifactStore.delete`** for both stores: the filesystem store removes the file (`rm --force`, so a retry
+       is idempotent) and fsyncs its directory; the S3 store sends `DeleteObjectCommand` (S3 answers success for
+       a missing key). Both refuse any key that is not `sha256/<hex>`.
+     - **Not built:** the button. No Model artifacts page exists yet (X28, reassigned to Claude by the owner on 10-10); the route is a TEMPORARY
+       `DELIBERATELY_API_ONLY` entry in `scripts/preflight-ui-affordances.mjs` (M-053), and deleting it is part
+       of X28's acceptance. The mock fixtures (`apps/web/e2e/engines-fixtures.ts`) answer the new refusals.
+     - **Open-source check (ADR-0176):** quotas, references and retention are governance semantics, our own
+       code; the lock is Postgres's advisory lock; the S3 delete is the AWS SDK the gateway already ships. No new
+       dependency.
+128. **`clean` with no format is refused by the database** [4235322386]. 0175's CHECK `verdict <> 'clean' OR
+     format = 'safetensors'` is NULL, not false, when `format` is NULL, so a clean scan with no format passed. 0176
+     replaces it with `verdict <> 'clean' OR (format IS NOT NULL AND format = 'safetensors')`, after turning any
+     such row (none can exist on a first load) into `unknown`, never better. `format` stays nullable for the
+     other verdicts. Red: with 0175's CHECK put back on the test database, a clean scan with a NULL format was
+     accepted.
+129. **The modelscan runtime proves at build time that Node runs on its base** [4235322394]. The Node binary is
+     copied from the node image into `python:3.12-slim-trixie`, which links `libstdc++.so.6` and `libgcc_s.so.1`.
+     **Measured from CI:** the `engine-image` leg for modelscan passed on main (Security run 38004560910, PR
+     #212's merge), and its build ran `node licence-gate.mjs` in the CLOSURE stage, whose base is the same digest
+     as the runtime stage, so that base does carry both libraries; nothing checked the runtime stage itself.
+     Chosen: keep them as the base's own Debian packages (so Trivy scans them), and fail the build in the
+     runtime stage unless `dpkg-query` finds `libstdc++6` and `libgcc-s1`, `ldd` resolves every library node
+     links, and `node --version` runs. Rejected: copying node's library closure from the node image (files no
+     package manager owns, which the image scan would not see). **Correction to the brief:** the gateway image
+     installs nothing from a pinned Debian snapshot; no Dockerfile here pins one. Red (static): removing the
+     `node --version` line fails `image.test.ts`. **Not run here:** no Docker daemon; CI's engine-image job is
+     the proof.
+130. **A failed filesystem-store write leaves nothing behind** [4235322391]. The temp file was left in the
+     persistent directory when the copy, the fsync or the rename failed. `putFile` now closes the handle and
+     removes the temp file in a `finally` that cannot itself throw; only a completed rename keeps it. Red:
+     with the removal disabled, an injected failure at each of the three steps left a `.tmp` file.
+131. **The HDF5 probe covers every superblock offset up to the file size** [4235322383]. The format probe
+     stopped at offset 2048, so an HDF5 file behind a larger user block read `unrecognised` (still never better
+     than `unknown`, but scanned as a pickle and not as HDF5). The HDF5 library looks for the superblock at 0 and
+     at every power of two from 512, so `hdf5SuperblockOffsets(size)` probes exactly those while the 8-byte
+     signature fits in the file. **The bound is the file size**, not a fixed 1 MiB: it covers every offset the
+     library would accept, and costs at most 24 eight-byte reads at the 8 GiB upload ceiling. Red: a header at
+     4096 read `unrecognised` with the old bound.
+132. **A safetensors header that repeats a key is never verified** (Codex review B5X-01, MEDIUM). The verifier read
+     the header with `JSON.parse`, which silently keeps the last of two equal keys, so a duplicate tensor name whose
+     first entry had an invalid dtype (`PICKLE`), or a tensor with `dtype` given twice (`U8` then `I8`), read as
+     verified `safetensors` (ceiling `clean`). **Measured against the reference parser** (safetensors 0.7.0, in a
+     scratch venv): it refuses the invalid-dtype duplicate, a repeated `dtype`, `shape` or `data_offsets`, and a
+     repeated `__metadata__`; it ACCEPTS a tensor name repeated with two valid entries and a key repeated inside
+     `__metadata__` (the last wins), and it accepts names that are escaped but distinct (`"w"` and `"wx"`,
+     `"a\"b"` and `"a\\b"`). **Chosen, stricter than the reference:** any key repeated in one object, at any level
+     (tensor names, a tensor's fields, `__metadata__` and its keys), makes the file `safetensors_invalid` (never
+     better than `unknown`). Keys are compared after unescaping, so `"w"` and `"w"` are one key (the
+     reference refuses that file too); escaped-but-distinct names stay accepted. **Open-source check (ADR-0176):**
+     `@humanwhocodes/momoa` 3.3.13 (Apache-2.0, released 2026-09-02, no dependencies, no install script, pure
+     JavaScript, so it works air-gapped) parses JSON to a syntax tree that keeps every member;
+     `jsonHasDuplicateKey` walks that tree without recursion. It is a new exact-pinned dependency of
+     `@regulait/shared`, with its row in `packages/shared/THIRD_PARTY.md`. `JSON.parse` still produces the values
+     the existing checks read, and the evidence string is a fixed sentence (no artifact text). Red: with the
+     duplicate refusal disabled, six of the seven duplicate shapes read as verified `safetensors` (the escaped
+     duplicate already failed the tiling rule).
+
 ## Consequences
 
 - Engines run outside the gateway process with no way out except the gateway, and every model call they make is

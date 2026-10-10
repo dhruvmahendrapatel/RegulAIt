@@ -36,7 +36,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([]);
+const DELIBERATELY_API_ONLY = new Map([
+  // TEMPORARY (M-053): ADR-0187 decision 127 ships the model-artifact delete; no
+  // Model artifacts page exists yet. Its button belongs to X28 (reassigned to
+  // Claude by the owner on 10-10), and deleting this entry is part of X28's acceptance.
+  ["/v1/model-artifacts/:x", "ADR-0187 decision 127: delete a model artifact — the Model artifacts page button is X28; remove this entry when it lands"],
+]);
 
 const walk = (dir, out = []) => {
   for (const e of readdirSync(dir)) {

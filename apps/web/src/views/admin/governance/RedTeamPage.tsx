@@ -27,6 +27,7 @@ import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
+import { EngineRunsPanel } from "./EngineRunsPanel";
 import { QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -504,6 +505,9 @@ export default function RedTeamPage() {
               </div>
             </Card>
           ) : null}
+
+          {/* ADR-0187 (X27): sidecar engine runs — run form, run detail, not-run list */}
+          <EngineRunsPanel surface="redteam" />
         </QueryGate>
       </div>
     </>
