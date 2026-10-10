@@ -1307,3 +1307,195 @@ or claimed B4I-03 closed without their integration/CI verification.
 The proposed CI filter was dry-checked:18 remaining workspace projects, with
 both shared and the recursive root script explicitly excluded. The first
 negative-only filter included the root; the reviewed proposal now excludes it.
+
+## X56 — Batch 6 documentation drift audit (2026-10-10)
+
+**Scope:** findings only. Frozen code/docs baseline
+`2276739bb1ca3d5cddfcf03cbef186d59e1966a7`; owner board #306 at
+`c8d941a2` (17:30 queue), read independently. Later main `fb24991c` adds only
+`engines/garak/THIRD_PARTY.md` relative to this baseline and does not change
+these conclusions. No proposed backend head was merged into the comparison.
+No product, ADR, state, index or coordination file was edited. These findings
+concern documentation and ownership; they establish no runtime bypass.
+
+### DOC-01 — LOW: current STATE merge queue and 0186 reservation are stale
+
+**Evidence:** `project-state/STATE.md:25–33`, explicitly headed “Where we are
+(read this paragraph first)”, still puts #279 S3, #286 I1 and #287 B3 in the
+future. Frozen main contains merge commits `25089d72`, `94fffb65` and
+`88635b65`, respectively. Its next-number plan conditionally gives S5 `0186`;
+the owner board X44/X52/X53 and inbox instead reserve `0186` for B9 (#322).
+**Impact:** a new contributor receives the wrong dependency/number plan.
+**Acceptance:** refresh the current summary to separate merged slices from
+pending slices and reserve 0186 for B9. Preserve dated historical paragraphs.
+**Bound:** this is a reservation/documentation conflict, not evidence of two
+actual 0186 migrations: none is on frozen main.
+
+### DOC-02 — LOW: ADR-0190 index labels accepted owner decisions pending
+
+**Evidence:** `docs/decisions/README.md:193` says “nine owner decisions pending”
+while marking the ADR Accepted. ADR-0190:469–507 explicitly records acceptance
+of all nine on 2026-10-10, including deferred Wasmtime and software-only
+attestation. I1 is already merged (#286).
+**Acceptance:** mark all nine accepted in the index; distinguish explicit
+future slices and unanswered questions from owner acceptance.
+
+### DOC-03 — LOW: ADR-0189 index retains superseded queue rules and count
+
+**Evidence:** `docs/decisions/README.md:192` says “eleven owner decisions”,
+“automatic snapshots queued durably without a key”, and “queued requests
+drained first”, then later says decision 12 means no queue. ADR-0189:412–455
+records twelve decisions; R25:716–729 is fail-closed with an audited skip
+relaxation, and R41:875–877 is withdrawn. Its old migration `0181+` summary
+also predates actual B1 migration `0182_decision_bom_foundation`.
+**Acceptance:** update the current summary/count/migration, or label review
+history explicitly superseded; no present-tense queue instruction should
+survive alongside decision 12.
+**Bound:** current main's snapshot release switch remains false
+(`apps/gateway/src/ai-bom.ts:105`, `bom-routes.ts:88`); this does not claim a
+live queue or that B4/B5 have shipped.
+
+### DOC-04 — LOW: newly assigned B9 has no canonical rollout row
+
+**Evidence:** ADR-0189:371–379 and README:192 end at B8. Its owner decision
+10:445–446 still names model-card `data_claims` as the supplier-declaration
+source. The frozen owner board X52/X53 (327–334) and inbox:759,763 assign B9,
+0186, declaration CRUD/withdraw, and declarations as the only source with the
+`data_claims` fallback being retired. Those obligations have no B9 row in
+main's ADR table and no amendment reconciling decision 10's source with the
+new declaration flow.
+**Acceptance:** add the owner-approved B9 scope, dependencies, migration
+reservation and UI/backend ownership; clarify which authoritative declaration
+source supersedes the old fallback, retaining “supplier-declared, never
+inferred”.
+**Bound:** #322 is announced pending work. This finding requests a canonical
+plan amendment, not a speculative main implementation change or a claim that
+main already has the declaration routes.
+
+### DOC-05 — LOW: new S5/S6 decisions remain open or unassigned in ADR-0188
+
+**Evidence:** ADR-0188:945–949 still asks whether child audience must match
+parent audience and whether S5 or S6 will provide grant administration
+routes. Its S6 row:985 describes web-only work against stubs. Frozen board
+X54:335 resolves child resource = parent audience, assigns workload-identity
+CRUD to S6 backend with `identity_manage`, and sets steward/project authority,
+a root cap unless admin-relaxed, 15-minute default grant lifetime, and
+`delegation_depth_unenforced`/`invalid_target` guidance. Those new decisions
+have no corresponding amendment/explicit backend slice ownership in main's
+canonical ADR table.
+**Acceptance:** record the owner decisions as a dated amendment and assign
+S6 backend routes separately from Codex's web-only scope. Resolve the audience
+question rather than leave two contracts for implementers.
+**Bound:** the existing owner decision 7's 300-second **token** TTL is a
+separate value and is not a contradiction with 15-minute **grant** lifetime.
+S5's fix round is still pending announcement; no unannounced head was reviewed.
+
+### DOC-06 — LOW: ADR-0190 amendment H contradicts retained survey questions
+
+**Evidence:** ADR-0190:406–408 says survey corrections include Kata versions,
+nsjail date and `go-landlock` MIT, and “Open question 8 drops the items R13
+verified”. Yet Open question 8:525–527 still calls those facts unverified,
+alongside OpenShell telemetry defaults already constrained by amendment
+G:396–405. Amendment I correctly retains the untested macOS/Windows VM path.
+**Acceptance:** remove only the facts R13 actually verified from question 8,
+link their measured/source evidence, and retain genuinely unverified release,
+provenance and platform questions. Do not promote untested hosts to verified.
+
+### DOC-07 — LOW: receipt-v2 agreement still presented as pre-S1 open work
+
+**Evidence:** ADR-0189:1010–1015 says one receipt v2 with actor fields and
+`factsHash` is proposed and needs agreement before S1 freezes. Frozen main
+already defines precisely this combined payload in
+`packages/shared/src/batch4.ts:117–123,283–299` and enforces its schema in
+`packages/shared/src/receipts/verify.ts:39–45`. R34/R42/R43 and B1's rollout row
+already specify the recorded cutover and readiness rules.
+**Acceptance:** mark the combined payload/schema agreement settled, pointing
+to the accepted amendment and shared contract, while keeping emission/cutover
+readiness as a separate pending rollout gate.
+**Bound:** parser support does not prove the v2 cutover happened or that any
+current receipt stream emits v2.
+
+### DOC-08 — LOW: board §4.9 still labels implemented R/S/V routes 501 stubs
+
+**Evidence:** owner board `c8d941a2` §4.9:679 states R, S and V routes are 501
+`not_built` stubs until their slices land. Frozen main registers their actual
+handlers in `apps/gateway/src/app.ts:5243–5245`:
+`decision-receipts.ts:138–190` reads/signature-verifies/exports receipts;
+`audit-timestamp.ts:177–200` requests and serves timestamps;
+`detection-content-routes.ts:7–23` returns actual converted pack/posture data.
+They are not the stated foundation stubs.
+**Acceptance:** update the heading to implemented routes and state actual
+configuration/key/TSA availability limits. Keep §4.11's separate B4 “routes
+stay 501 until built” statement and explicit frozen #307 reference.
+**Bound:** handler existence is a source audit, not a fresh successful HTTP,
+TSA-service or cryptographic verification measurement.
+
+### Owner-decision coverage (accepted recommendations, not completion claims)
+
+Every accepted numbered recommendation was traced to a slice or an explicit
+cross-slice gate. The table records that mapping; it does not mean all slices
+are implemented. ADR-0188 owner section:1099–1153; ADR-0189:412–455;
+ADR-0190:469–507. New board decisions lacking a canonical row are DOC-04/05.
+
+| ADR | Owner decision | Matching slice / explicit gate |
+|---|---|---|
+| 0188 | 1 strict first grants + reviewed proposals | S1 identity/schema, S4 explicit internal grants, S6 reviewed observed-use proposals |
+| 0188 | 2 libraries conditional on S0 | S0 GO recorded:952–967, S5 protocol integration, S9 SPIFFE |
+| 0188 | 3 sender constraint invariant | S3 mint/resource verifier; S5 external client auth/DPoP/mTLS |
+| 0188 | 4 permitted human credentials + step-up | S3 authorization; S5 token authentication; S6 admin writes |
+| 0188 | 5 PF-02 suite confirmation | Explicit pre-S5 wire-freeze gate:1103–1106,1132–1136; not silently complete |
+| 0188 | 6 upstream identity default none | S8 signed-assertion opt-in |
+| 0188 | 7 token/depth/key defaults | S1 settings, S3 lifecycle, S4 persisted depth, S5 enforcement |
+| 0188 | 8 remove runner/PDP bearer secrets | S7 retirement, preserving human dispatch/engine keys |
+| 0188 | 9 refuse overscope, never narrow | S3 grants/authorization and S5 exchange refusals |
+| 0189 | 1 native Decision BOM authority | B1 contract, B2 captured facts, B4 assembler/verifier |
+| 0189 | 2 receipt key/domain separation | B4 signing and verifier |
+| 0189 | 3 eager facts, lazy BOM | B2 capture; B4 freeze on request |
+| 0189 | 4 finality and audited relaxation | B1 settings, B4 finality; board §4.11 floor/state amendment and #315 |
+| 0189 | 5 no content invariant | B3/B4/B5 validation and export scan; B6 safe display |
+| 0189 | 6 CycloneDX 1.7/1.6 | B3 renderers |
+| 0189 | 7 SPDX 3.0.1 | B5, plus new B9 source collection (DOC-04) |
+| 0189 | 8 sign-off/on-demand snapshots, no scheduler | B3 trigger/drift implementation gated by B4/B5 (R17) |
+| 0189 | 9 admins/auditor export, audited | B4 routes; B6 capability-gated UI |
+| 0189 | 10 supplier declarations only | B3 loader, B5 rendering; new B9 source amendment missing (DOC-04) |
+| 0189 | 11 audit retention/evidence holds | B1 immutable tables/prune guards; B4/B8 retention proof/runbooks |
+| 0189 | 12 no-key fail-closed, audited skip relaxation | R25, B3 trigger; B1 setting; B6 posture; index stale (DOC-03) |
+| 0190 | 1 gVisor/Kata, optional OpenShell | I0 feasibility, I4 runsc/Kata, I7 optional OpenShell with amendment F |
+| 0190 | 2 no gateway-host third-party execution | I4 stdio migration without grace period |
+| 0190 | 3 sensitivity floors/step-up relaxations | I1 settings, I2 required-class decision, I9 UI |
+| 0190 | 4 engine L2 strict floor | I2 placement, I5 engine workers, I9 posture |
+| 0190 | 5 software-only attestation limits | I3 self-test/report, I4 backend probe, I8 evidence |
+| 0190 | 6 declared customer plane mapping | I1 contract, I2 class mapping, I3 report, I6 BYOC, I8 evidence |
+| 0190 | 7 OpenShell local socket/auth conditions | I0 feasibility, I7 admission, amendments F/G |
+| 0190 | 8 Wasmtime deferred | Explicit deferred decision; correctly no current I4 WASI implementation row |
+| 0190 | 9 resources + 2h attestation defaults | I1 profiles/settings, I3 freshness/report, I4 enforcement, I9 UI |
+
+### Migration census and limits
+
+Read-only JSON census of `packages/db/migrations/meta/_journal.json`: **174
+entries, every adjacent `when` strictly increasing**. Last entries are 0180
+identity (`1785115000000`), 0181 outbound audience (`1785116000000`), 0182 BOM
+(`1785117000000`), and 0183 isolation (`1785118000000`). Actual frozen main
+has no files or journal entries numbered 0184–0188. Reserved gaps 0177–0179
+are not treated as an ordering defect.
+
+| Number | Owner documentation reservation | On frozen main |
+|---|---|---|
+| 0184 | S4 persisted grant depth, ADR-0188:924; board inbox:761 | absent |
+| 0185 | #285 guard hardening after S4, board X42/inbox | absent |
+| 0186 | B9 #322, board X44/X52/X53; conflicts with current STATE S5 plan (DOC-01) | absent |
+| 0187 | I3 if present, board X51:325 | absent |
+| 0188 | no reservation located in frozen reviewed board/three ADRs | absent; owner confirmation required before allocation |
+
+This census validates current journal order only. Pending branch migrations
+must still be checked at their own frozen heads and again in merge order;
+no synthetic future journal, database migration execution or branch-merge
+success is claimed. The unspecified B4 archive/signature/facts layout is
+explicitly tracked by board §4.11/X55 and is not itself a new drift finding.
+
+Validation: source comparison and migration census completed;
+`pnpm --filter @regulait/web exec tsc --noEmit` and
+`pnpm --filter @regulait/web build` both **PASS (exit 0)** on frozen main
+plus this ledger. Logs: `/tmp/oct10-x56-web-tsc.log` and
+`/tmp/oct10-x56-web-build.log`. `git diff --check` PASS. No browser/DB
+tests were run for this ledger-only audit.

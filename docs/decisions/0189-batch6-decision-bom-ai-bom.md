@@ -377,6 +377,7 @@ against the specification rather than against itself.
 | **B6 web UI** | Codex | Decision 9's tabs, actions and verify panel; drift view; posture rows | B1 stubs | **Yes** (web only); merges after B4's real routes |
 | **B7 our own AI BOM** | Claude | An install-scope AI BOM per release, BOM-linked to ADR-0184's SBOMs through release-published, signed SBOM identity metadata (amendment R9); PathForward's "inventory of AI tools in the development stack" as a checked-in, reviewed list rendered into it | B3, B4 and B5 (inactive until the R17 switch flips, R28) | **Yes** (developed in parallel), with B4–B6 |
 | **B8 runbooks** | Claude, reviewed by Codex | Air-gapped and BYOC verification runbooks; every command executed before it is written down (M-041) | B4, B5 | **Yes**, with B6, B7 |
+| **B9 SPDX fields** | Claude | OWNER DECISION 13 and amendment R51: migration `0186` (`ai_bom_spdx_declarations`, append-only), admin routes to set, withdraw and read the supplier-declared SPDX properties of models and datasets (audited), the loader and the SPDX renderer reading them | B5 | **Yes**, with B6, B7 and B8 |
 
 ## Test strategy
 
@@ -413,7 +414,7 @@ Every rule gets a red proof (fails with the control removed, then passes), throu
 ## Owner decisions (accepted 2026-10-10)
 
 The owner accepted all eleven recommendations on 2026-10-10, as written below, and decided a twelfth (from review
-owner item 3) the same day. Spike B0 may start now; B1 onward waits
+owner item 3) and a thirteenth (from review owner item 1) the same day. Spike B0 may start now; B1 onward waits
 for ADR-0188 S1 and S4, as the slice plan says.
 
 1. **OWNER DECISION — Decision BOM format.** *Recommended:* our own `regulait.decision-bom.v1` (no standard defines a
@@ -444,6 +445,10 @@ for ADR-0188 S1 and S4, as the slice plan says.
    default.
 10. **OWNER DECISION — training-data sources of third-party models.** *Recommended:* record only what the supplier
     declared (from the model card's `data_claims`), marked supplier-declared, and `unknown` otherwise; never infer.
+    *Read with OWNER DECISION 13 (2026-10-10):* for the mandatory SPDX properties of models and datasets, the B9
+    declaration store is the only source; the `releaseTime` and `downloadLocation` keys of a model card's
+    `data_claims`, B5's earlier source, are retired (R51, landing with B9, #322). Every value stays supplier-declared,
+    never inferred.
 11. **OWNER DECISION — retention.** *Recommended:* Decision BOMs and AI BOM snapshots follow the compliance profile's
     audit retention and are kept under evidence holds; renderings are deleted with their parent.
 12. **OWNER DECISION — automatic AI BOM snapshots while no signing key is configured (accepted 2026-10-10, review
@@ -452,6 +457,12 @@ for ADR-0188 S1 and S4, as the slice plan says.
     ADR-0180; an admin may relax it, audited, to proceed and record an audited `snapshot_skipped_no_key` gap. There is
     no queue. Rejected: (a) a durable queue of captured record sets (seven review findings across rounds 7–9), and (c)
     skip-and-record as the default. Amendment R25 states the rule.
+13. **OWNER DECISION — mandatory SPDX properties with no recorded value (decided 2026-10-10, review owner item 1).**
+    *Chosen:* **collect** them. The supplier-declared values are recorded, with their provenance, in a governed store
+    (slice B9, amendment R51), so a model or dataset whose values are all recorded renders SPDX 3.0.1. R3's strict
+    fallback stays for every record that still lacks one: no SPDX rendering, `spdx-3.0.1: not_producible` with the
+    missing property names, and never a placeholder. Rejected: accepting CycloneDX-only for such subjects as the end
+    state, and (b) emitting SPDX without the mandatory properties.
 
 ## Amendments after spike B0 (2026-10-10)
 
@@ -1521,10 +1532,12 @@ an accepted decision or needs an owner choice.
 ## Open questions
 
 1. **Receipt payload v2.** ADR-0188 decision 9 adds sponsor, actor chain and grant id to receipts; this ADR adds
-   `factsHash`. Proposed: one `regulait.receipt.v2` carrying both, defined once in ADR-0188 S1 and emitted only after
-   the recorded cutover of amendment R34 (never with a null `factsHash` except `capture_off`), so receipts never go
-   through a v3. Needs agreement with ADR-0188's slice owner before S1
-   freezes.
+   `factsHash`. *Settled (2026-10-10):* one `regulait.receipt.v2` carries both, so receipts never go through a v3. The
+   payload is defined in `packages/shared/src/batch4.ts` and its schema enforced by the verifier in
+   `packages/shared/src/receipts/verify.ts` (B1, #283), as amendments R34, R42 and R43 and B1's slice row describe.
+   Still pending, as a rollout gate rather than an open question: **emission**. Nothing emits v2 until the recorded
+   cutover of R34/R42, after B2 and ADR-0188 S4 and the drained rollout of R43 (never with a null `factsHash` except
+   `capture_off`). Verifier support does not mean the cutover has happened.
 2. **Suite gating.** CLAUDE.md requires checking the suite capability map before building what another module may own
    (evidence export, AI inventory). The suite documents are not reachable from this session. Proposed: the suite agent
    confirms RegulAIt owns PF-09 for its own gateway before B1.
