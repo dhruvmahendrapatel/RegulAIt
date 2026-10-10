@@ -942,8 +942,15 @@ describe("ADR-0189 §9: every route is a 501 stub under the admin route class", 
       const [method, p] = r.split(" ") as [Method, string];
       const body = method === "POST" ? {} : undefined;
       const ok = await inject(method, url(p), users.admin.auth, body);
-      expect(ok.statusCode, `${r}: ${ok.body}`).toBe(501);
-      expect(ok.json(), r).toEqual({ error: "not_built" });
+      // slice B3 built three of them (zz-adr0189-b3-ai-bom.test.ts); the snapshot freeze stays 501 until R17
+      const built: Partial<Record<string, [number, string | null]>> = {
+        "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": [501, "bom_snapshots_not_released"],
+        "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": [200, null],
+        "GET /v1/ai-bom/:subjectKind/:subjectId/drift": [404, "ai_bom_subject_not_found"],
+      };
+      const [status, error] = built[r] ?? [501, "not_built"];
+      expect(ok.statusCode, `${r}: ${ok.body}`).toBe(status);
+      if (error) expect(ok.json().error, r).toBe(error);
       expect((await inject(method, url(p), users.member.auth, body)).statusCode, r).toBe(403);
       expect((await inject(method, url(p), {}, body)).statusCode, r).toBe(401);
     }
