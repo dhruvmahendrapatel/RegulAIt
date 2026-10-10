@@ -986,6 +986,8 @@ async function executeGovernedToolCallInner(
         contextDigest,
         projectId,
         target: auditTarget(serverRow),
+        // ADR-0189 B2: the approved queue row this decision relied on, so its facts bind that row (R5)
+        ...(approvedApprovalId ? { approvedApprovalId } : {}),
         receiptClass: "decision",
       },
       effect: decision.effect,

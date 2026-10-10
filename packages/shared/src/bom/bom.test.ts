@@ -470,8 +470,8 @@ describe("receipt payload v2 (R34, R42, R48): verified, never emitted by this bu
   const verify = (receipts: ReceiptBundle["receipts"], boundary?: number | null) =>
     verifyReceiptBundle({ verifier: RECEIPT_PAYLOAD_VERSION, receipts, keys, ...(boundary !== undefined ? { receiptV2FromAuditSeq: boundary } : {}) }).results.map((r) => r.status);
 
-  it("NEGATIVE CONTROL: this build emits v1 only", () => {
-    expect(RECEIPT_EMITTER_SUPPORTS_V2).toBe(false);
+  it("B2: this build can emit v2 with facts (R43), and still emits it only from a recorded boundary", () => {
+    expect(RECEIPT_EMITTER_SUPPORTS_V2).toBe(true);
   });
   it("a v1 chain still verifies with no boundary (the receipts emitted today)", () => {
     expect(verify(chain(["v1", "v1"]))).toEqual(["valid", "valid"]);

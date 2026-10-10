@@ -26,6 +26,8 @@ export {
   type AuditActorStamp,
 } from "./audit-chain.js";
 
+// ADR-0189 B2 — the shared decision fact writer (called by the audit chain writer)
+export { captureDecisionFacts, loadDecisionCaptureStatus } from "./decision-facts.js";
 // ADR-0189 — the per-decision and per-subject lock targets of the BOM writers
 export { BOM_DECISION_LOCK_NAMESPACE, BOM_SUBJECT_LOCK_NAMESPACE, lockAiBomSubject, lockDecisionForBom } from "./bom-locks.js";
 // ADR-0189 B3 — the session-level per-subject lock taken before a REPEATABLE READ capture

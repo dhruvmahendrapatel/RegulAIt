@@ -1,8 +1,8 @@
 import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
-import { and, asc, auditLog, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
-import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, receiptCanonicalBytes, receiptPayloadHash, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
+import { and, asc, auditLog, decisionCaptureStatus, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
+import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2, receiptCanonicalBytes, receiptPayloadHash, receiptVersionForAuditSeq, type AnyDecisionReceiptPayload, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
@@ -77,9 +77,9 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
     if ((await loadOrgSettings(tx as unknown as Db)).decisionReceiptsMode === "off") return { signed: 0, state: "off" as const };
     const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId));
     if (recorded && (!samePublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt)) throw new ReceiptKeyError();
-    // R43: the v2 boundary, read under the sign lock before the pass. This build emits v1 only, so it signs
-    // nothing at or above the boundary (rows below it stay v1 whenever the sweep reaches them, R42); the
-    // `decision_receipts_version_guard` trigger refuses a v1 receipt there in any case.
+    // R43: the v2 boundary, read under the sign lock before the pass. Rows below it are always v1, whenever
+    // the sweep reaches them (R42); from it on every receipt is v2 and carries the decision's facts binding
+    // (ADR-0189 B2). The `decision_receipts_version_guard` trigger refuses the wrong version in any case.
     const v2FromAuditSeq = await loadReceiptV2Boundary(tx as unknown as Db);
     const [last] = await tx.select().from(decisionReceipts).orderBy(desc(decisionReceipts.receiptSeq)).limit(1);
     if (last) {
@@ -100,6 +100,12 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
     const v2FromSeq = boundary.v2FromSeq;
     let receiptSeq = last?.receiptSeq ?? 0;
     let prev = last?.payloadHash ?? RECEIPT_GENESIS_PREV;
+    // ADR-0189 B2 / R34: the capture-status marker of every row v2 governs, written in the decision's own
+    // transaction. A v2 row without one is a missing fact and stops the pass, as an integrity failure does.
+    const v2Ids = rows.filter((r) => r.seq !== null && receiptVersionForAuditSeq(r.seq, v2FromAuditSeq) === RECEIPT_PAYLOAD_VERSION_V2).map((r) => r.id);
+    const markers = new Map(
+      (v2Ids.length ? await tx.select().from(decisionCaptureStatus).where(inArray(decisionCaptureStatus.auditId, v2Ids)) : []).map((m) => [m.auditId, m]),
+    );
     for (const row of rows) {
       // Never notarise corrupted audit content merely because the stored hash exists.
       if (row.seq === null || !row.contentHash || !row.rowHash || !row.prevHash ||
@@ -107,13 +113,25 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
           row.contentHash !== auditContentHashFor(row, auditChainVersionAt(row.seq, v2FromSeq)) || row.rowHash !== auditRowHash(row.prevHash, row.contentHash))
         throw new Error("Audit row failed integrity verification; no receipts from this pass committed.");
       const tool=boundedDecisionField(row.toolName),rule=boundedDecisionField(row.ruleId);
-      const payload: DecisionReceiptPayload = {
+      const v1: DecisionReceiptPayload = {
         v: RECEIPT_PAYLOAD_VERSION, receiptSeq: ++receiptSeq,
         audit: { id: row.id, seq: row.seq, rowHash: row.rowHash, contentHash: row.contentHash },
         decision: { at: row.at.toISOString(), userId: row.userId, objectType: row.objectType, objectId: row.objectId, serverId: row.serverId, toolName: tool.value, ...(tool.hash?{toolNameHash:tool.hash}:{}), effect: row.effect, ruleId: rule.value, ...(rule.hash?{ruleIdHash:rule.hash}:{}) },
         prev, keyId: key.keyId,
       };
-      if (!isDecisionReceiptPayloadV1(payload)) throw new Error("Audit decision cannot be represented by the receipt contract.");
+      let payload: AnyDecisionReceiptPayload = v1;
+      if (receiptVersionForAuditSeq(row.seq, v2FromAuditSeq) === RECEIPT_PAYLOAD_VERSION_V2) {
+        const marker = markers.get(row.id);
+        if (!marker || marker.auditSeq !== row.seq) throw new Error("Decision at or above the receipt v2 boundary has no capture-status marker; no receipts from this pass committed.");
+        // the actor binding is read from ADR-0188's columns, which only an audit v2 row's hash covers
+        if (row.chainVersion !== 2) throw new Error("Decision at or above the receipt v2 boundary is not an audit v2 row; run the audit v2 cutover first. No receipts from this pass committed.");
+        payload = {
+          ...v1, v: RECEIPT_PAYLOAD_VERSION_V2,
+          actor: { identityId: row.actorIdentityId, delegationGrantId: row.delegationGrantId, chain: row.actorChain ? [...row.actorChain] : null },
+          factsStatus: marker.status, factsHash: marker.status === "captured" ? marker.factsHash : null,
+        };
+        if (!isDecisionReceiptPayload(payload) || payload.v !== RECEIPT_PAYLOAD_VERSION_V2) throw new Error("Audit decision cannot be represented by the receipt v2 contract.");
+      } else if (!isDecisionReceiptPayloadV1(payload)) throw new Error("Audit decision cannot be represented by the receipt contract.");
       const payloadHash = receiptPayloadHash(payload);
       const signature = sign(null, Buffer.from(receiptCanonicalBytes(payload)), key.privateKey).toString("base64url");
       await tx.insert(decisionReceipts).values({ receiptSeq, auditId: row.id, auditSeq: row.seq, payload, payloadHash, prevHash: prev, signature, keyId: key.keyId, createdAt: opts.now });

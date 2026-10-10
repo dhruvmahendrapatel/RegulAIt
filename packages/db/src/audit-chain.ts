@@ -77,6 +77,7 @@ import {
   type AuditChainFields,
 } from "@regulait/shared";
 import { auditLog } from "./schema.js";
+import { captureDecisionFacts } from "./decision-facts.js";
 
 /**
  * The advisory-lock key every append serializes on. A single global key,
@@ -269,9 +270,17 @@ export async function appendChainedAuditRows(
   };
   // `.returning()` with no argument means "every column", which is drizzle's
   // own signature; callers that ask for a projection get exactly that.
-  if (returning !== undefined) return returning === ALL_COLUMNS ? insert.returning() : insert.returning(returning);
-  await insert;
-  return undefined;
+  let out: unknown = undefined;
+  if (returning === undefined) await insert;
+  else out = await (returning === ALL_COLUMNS ? insert.returning() : insert.returning(returning));
+  // ADR-0189 B2 — every receipt-eligible row gets its capture-status marker and
+  // (capture on) its decision facts HERE: in the same transaction, still under
+  // the chain lock, from the row exactly as stored. This is the one shared
+  // writer every `receiptClass: "decision"` writer goes through; a rollback of
+  // the decision takes its facts with it, and migration 0189 refuses a decision
+  // row committed without its marker.
+  await captureDecisionFacts(tx as never, rows);
+  return out;
 }
 
 /**
