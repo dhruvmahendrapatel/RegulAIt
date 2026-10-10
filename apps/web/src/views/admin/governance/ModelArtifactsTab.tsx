@@ -10,6 +10,10 @@
  *    clean. `scanStatus` enforces this whatever the server sends.
  *  - Reasons are fixed sentences from structured fields. No file content and
  *    no scanner text is ever shown.
+ *  - An artifact can be deleted by its uploader or an admin, after a
+ *    confirmation and a step-up (`settings_relax`); the gateway refuses while
+ *    a scan of it is cited as model-card evidence or a run on it is unfinished.
+ *    Its retention (`modelArtifactRetentionDays`) is stated in the detail.
  *  - The upload respects the org's `modelArtifactMaxMegabytes` before a byte is
  *    sent, shows progress, and can be cancelled; the gateway's own refusals
  *    (413, 503, 415, and anything else) are shown as they arrive.
@@ -17,24 +21,31 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { withStepUp } from "../../../stepup/stepUp";
 import { ago } from "../../../api/format";
-import { Badge, Button, Card, EmptyState, Field, IdChip, SeverityBadge, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, SeverityBadge, Table } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 import m from "./modelArtifacts.module.css";
 import { ScanReasons, ScanStatusBadge } from "./EngineScanChip";
 import {
   DEFAULT_MAX_MEGABYTES,
+  DEFAULT_RETENTION_DAYS,
   findingKindLabel,
+  findingSeverity,
+  severityLabel,
   formatBytes,
   formatName,
   isLiveRun,
+  chooseScan,
   latestScan,
   nameMismatch,
   preUploadRefusal,
   refusalText,
+  retentionText,
   runStatusText,
   safeFindingId,
+  scanFindings,
   scanStatus,
   SCAN_ENGINE_ID,
   uploadModelArtifact,
@@ -55,16 +66,25 @@ interface EngineLite {
   signature?: string;
 }
 
-export default function ModelArtifactsTab(props: { selected: string | null; onSelect: (id: string | null) => void }) {
+export default function ModelArtifactsTab(props: {
+  selected: string | null;
+  /** B5W-01: the scan (and run) a model card cites; shown instead of the newest, never replaced by it */
+  citedScanId?: string | null;
+  citedRunId?: string | null;
+  onSelect: (id: string | null) => void;
+}) {
   const qc = useQueryClient();
   const settings = useQuery({
     queryKey: [...KEY, "limit"],
-    queryFn: () => api.get<{ settings?: { modelArtifactMaxMegabytes?: number } }>("/v1/org/settings"),
+    queryFn: () => api.get<{ settings?: { modelArtifactMaxMegabytes?: number; modelArtifactRetentionDays?: number } }>("/v1/org/settings"),
     retry: false,
   });
   const declared = settings.data?.settings?.modelArtifactMaxMegabytes;
   // until the org's value is read (or if it cannot be), the strict shipped default applies
   const maxMegabytes = typeof declared === "number" && declared > 0 ? declared : DEFAULT_MAX_MEGABYTES;
+  const declaredRetention = settings.data?.settings?.modelArtifactRetentionDays;
+  const retentionKnown = typeof declaredRetention === "number" && declaredRetention > 0;
+  const retentionDays = retentionKnown ? declaredRetention : DEFAULT_RETENTION_DAYS;
 
   const artifacts = useQuery({ queryKey: [...KEY, "list"], queryFn: () => api.get<{ artifacts: ModelArtifact[] }>("/v1/model-artifacts") });
   const rows = useMemo(() => (artifacts.data?.artifacts ?? []).slice(0, SHOWN), [artifacts.data]);
@@ -183,6 +203,15 @@ export default function ModelArtifactsTab(props: { selected: string | null; onSe
           engineError={engine.error}
           liveRun={liveRunOf.get(selected.id) ?? null}
           onScanStarted={() => void qc.invalidateQueries({ queryKey: [...KEY, "runs"] })}
+          citedScanId={props.citedScanId ?? null}
+          citedRunId={props.citedRunId ?? null}
+          onShowLatest={() => props.onSelect(selected.id)}
+          retentionDays={retentionDays}
+          retentionKnown={retentionKnown}
+          onDeleted={() => {
+            props.onSelect(null);
+            void qc.invalidateQueries({ queryKey: KEY });
+          }}
         />
       )}
     </div>
@@ -286,6 +315,12 @@ function ArtifactDetail(props: {
   engineError: unknown;
   liveRun: EngineRunLite | null;
   onScanStarted: () => void;
+  citedScanId: string | null;
+  citedRunId: string | null;
+  onShowLatest: () => void;
+  retentionDays: number;
+  retentionKnown: boolean;
+  onDeleted: () => void;
 }) {
   const a = props.artifact;
   const { toast } = useToast();
@@ -293,12 +328,16 @@ function ArtifactDetail(props: {
     queryKey: [...KEY, "detail", a.id],
     queryFn: () => api.get<{ artifact: ModelArtifact; scans: ArtifactScan[] }>(`/v1/model-artifacts/${a.id}`),
   });
-  const scans = useMemo(
-    () => [...(detail.data?.scans ?? [])].sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt)),
-    [detail.data],
-  );
-  const latest = latestScan(scans);
+  const scans = useMemo(() => {
+    const list = Array.isArray(detail.data?.scans) ? detail.data!.scans : [];
+    const at = (s: ArtifactScan) => (Number.isFinite(Date.parse(s?.createdAt)) ? Date.parse(s.createdAt) : -Infinity);
+    return [...list].sort((x, y) => at(y) - at(x));
+  }, [detail.data]);
+  const choice = chooseScan(scans, { scanId: props.citedScanId, runId: props.citedRunId });
+  // the scan this view is about: the cited one when a model card links here, else the newest
+  const latest = choice.kind === "cited_missing" ? null : choice.scan;
   const status = scanStatus(latest, a);
+  const findings = scanFindings(latest);
   const run = useQuery({
     queryKey: [...KEY, "run", latest?.engineRunId ?? null],
     enabled: Boolean(latest?.engineRunId),
@@ -308,6 +347,36 @@ function ArtifactDetail(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mismatch = nameMismatch(a);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const doDelete = async () => {
+    setConfirmDelete(false);
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      // the gateway asks for a step-up (`settings_relax`); the dialog answers it and the same DELETE is resent once
+      const out = await withStepUp((h) =>
+        // the shared client with the grant header: its session-loss handling and refusal reading, as every write
+        api.delWithHeaders<{ deleted?: { object?: "deleted" | "shared" | "queued" } }>(`/v1/model-artifacts/${encodeURIComponent(a.id)}`, h),
+      );
+      const obj = out?.deleted?.object;
+      toast(
+        `Deleted ${a.filename}` +
+          (obj === "shared"
+            ? "; its stored bytes are kept because another artifact has the same content"
+            : obj === "queued"
+              ? "; its stored bytes will be removed by the retention sweep"
+              : ""),
+        "success",
+      );
+      props.onDeleted();
+    } catch (e) {
+      setDeleteError(refusalText(e));
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const engineOff = props.engine !== null && !props.engine.enabled;
   const scanBlocked = engineOff || props.liveRun !== null;
@@ -342,6 +411,8 @@ function ArtifactDetail(props: {
           <dd className={v.mono}>{a.sha256}</dd>
           <dt>Uploaded</dt>
           <dd>{ago(a.createdAt)}</dd>
+          <dt>Retention</dt>
+          <dd data-testid="artifact-retention">{retentionText(a.createdAt, props.retentionDays, props.retentionKnown)}</dd>
         </dl>
         {mismatch && (
           <div role="note" data-testid="name-mismatch">
@@ -350,15 +421,37 @@ function ArtifactDetail(props: {
         )}
 
         <div>
-          <div className={v.sectionTitle}>Latest scan</div>
+          <div className={v.sectionTitle}>{choice.kind === "latest" ? "Latest scan" : "Cited scan"}</div>
           {detail.isLoading ? (
             <span className={v.dim}>Loading…</span>
           ) : detail.error ? (
             <div className={v.errLine} role="alert">
               Couldn't read this artifact's scans — {refusalText(detail.error)}
             </div>
+          ) : choice.kind === "cited_missing" ? (
+            <div data-testid="cited-scan-missing">
+              <div role="alert" className={v.errLine}>
+                The cited scan is unavailable: no scan of this artifact matches it. It may have been deleted. The newest scan is not
+                shown in its place.
+              </div>
+              <span className={m.status}>
+                <Badge tone="warn">Not clean</Badge>
+                <span>Scan record unavailable</span>
+              </span>{" "}
+              <Button size="sm" onClick={props.onShowLatest}>
+                Show the latest scan
+              </Button>
+            </div>
           ) : (
             <div data-testid="latest-scan">
+              {choice.kind === "cited" && (
+                <p className={v.dim} style={{ marginTop: 0 }} data-testid="cited-note">
+                  This is the scan a model card cites. It may not be the newest scan of this artifact.{" "}
+                  <Button size="sm" onClick={props.onShowLatest}>
+                    Show the latest scan
+                  </Button>
+                </p>
+              )}
               <ScanStatusBadge status={status} />{" "}
               <Badge tone={status.admissible ? "ok" : "neutral"}>{status.admissible ? "Admissible" : "Not admissible"}</Badge>
               <ScanReasons status={status} />
@@ -366,14 +459,22 @@ function ArtifactDetail(props: {
           )}
         </div>
 
-        {latest && latest.findings.length > 0 && (
-          <Table<{ i: number; kind: string; id: string; severity: string }>
-            rows={latest.findings.map((f, i) => ({ i, kind: f.kind, id: f.id, severity: f.severity }))}
+        {findings.length > 0 && (
+          <Table<{ i: number; kind: string; id: string; severity: unknown }>
+            rows={findings.map((f, i) => ({ i, kind: f.kind, id: f.id, severity: f.severity }))}
             rowKey={(f) => String(f.i)}
             columns={[
               { key: "kind", header: "Finding", render: (f) => findingKindLabel(f.kind) },
               { key: "id", header: "Identifier", render: (f) => <code>{safeFindingId(f.id)}</code> },
-              { key: "sev", header: "Severity", render: (f) => <SeverityBadge severity={f.severity} /> },
+              {
+                key: "sev",
+                header: "Severity",
+                // B5W-08: only a known severity reaches the badge; anything else is fixed words, never the raw value
+                render: (f) => {
+                  const sev = findingSeverity(f.severity);
+                  return sev ? <SeverityBadge severity={sev} /> : <Badge tone="warn">{severityLabel(f.severity)}</Badge>;
+                },
+              },
             ]}
           />
         )}
@@ -430,17 +531,50 @@ function ArtifactDetail(props: {
           )}
         </div>
 
-        {scans.length > 1 && (
+        <div>
+          <div className={v.sectionTitle}>Delete</div>
+          <Button variant="danger" disabled={deleting} onClick={() => setConfirmDelete(true)} aria-label={`Delete ${a.filename}`}>
+            Delete artifact…
+          </Button>
+          {deleteError && (
+            <div className={v.errLine} role="alert" data-testid="delete-error">
+              {deleteError}
+            </div>
+          )}
+          <ConfirmModal
+            open={confirmDelete}
+            danger
+            title={`Delete ${a.filename}?`}
+            confirmLabel="Delete"
+            body={
+              <div className={v.stack}>
+                <p style={{ margin: 0 }}>
+                  The artifact and its scans are deleted. The stored bytes are removed once no other artifact has the same
+                  content. The deletion is recorded in the audit log under your name; the audit records of the upload and
+                  its scans are kept.
+                </p>
+                <p style={{ margin: 0 }}>You'll be asked to confirm it's you (a step-up) before anything is deleted.</p>
+                <p style={{ margin: 0 }}>
+                  It can't be deleted while a scan of it is cited as model-card evidence or a run on it has not finished.
+                </p>
+              </div>
+            }
+            onConfirm={() => void doDelete()}
+            onCancel={() => setConfirmDelete(false)}
+          />
+        </div>
+
+        {scans.filter((s) => s !== latest).length > 0 && (
           <div>
-            <div className={v.sectionTitle}>Earlier scans</div>
+            <div className={v.sectionTitle}>{choice.kind === "latest" ? "Earlier scans" : "Other scans of this artifact"}</div>
             <Table<ArtifactScan>
-              rows={scans.slice(1)}
+              rows={scans.filter((s) => s !== latest)}
               rowKey={(s) => s.id}
               columns={[
                 { key: "at", header: "Scanned", render: (s) => ago(s.createdAt) },
                 { key: "status", header: "Result", render: (s) => <ScanStatusBadge status={scanStatus(s, a)} /> },
                 { key: "v", header: "Engine version", render: (s) => s.scannerVersion ?? "—" },
-                { key: "id", header: "Scan ID", render: (s) => <IdChip id={s.id} /> },
+                { key: "id", header: "Scan ID", render: (s) => <IdChip id={typeof s.id === "string" ? s.id : null} /> },
               ]}
             />
           </div>
