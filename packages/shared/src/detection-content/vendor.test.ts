@@ -60,7 +60,7 @@ describe("Vendored detection admission and real consumers", () => {
       for (const rule of secretCandidateRules(text, rawRules)) expect(optimized.has(rule.id), rule.id).toBe(true);
       expect(vendoredSecretSpans(text)).toEqual(vendoredSecretSpans(text, { rules: rawRules }));
     }
-  });
+  }, 30_000); // correctness corpus over the unoptimised raw path (~6 s here), not a latency budget
   it("R23-02: non-ASCII and 400k near misses retain the 100ms budget",()=>{
     for(const text of ["é".repeat(50000),"é".repeat(400000),"x".repeat(400000)+"ſ", "a".repeat(400000)+"K"]){
       const start=performance.now();expect(vendoredSecretSpans(text)).toEqual([]);expect(performance.now()-start).toBeLessThan(100);
@@ -81,7 +81,7 @@ describe("Vendored detection admission and real consumers", () => {
       const input=Array.from({length:2+next()%7},()=>chunks[next()%chunks.length]).join("");
       const once=scrubAuditText(input);expect(scrubAuditText(once),`seeded case ${i}: ${input}`).toBe(once);
     }
-  });
+  }, 30_000); // 20,000-case correctness corpus, not a latency budget
   it("R23-06/09: default rules omit preset Ethereum addresses and the pack controls runtime DLP",()=>{
     expect(VENDORED_SECRET_RULES.some(rule=>rule.id==="pipelock.secrets.ethereum_address")).toBe(false);
     expect(VENDORED_PACK_MANIFESTS.find(pack=>pack.id==="pipelock-secrets")!.notImported.some(entry=>entry.reason.includes("Preset-only"))).toBe(true);
