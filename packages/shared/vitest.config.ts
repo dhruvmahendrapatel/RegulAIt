@@ -27,6 +27,8 @@ export const TIMING_FILES = [
   "src/detection-content/scan-plans.test.ts",
   // ADR-0189 B1: 100k-character adversarial inputs for every BOM pattern check (CodeQL js/polynomial-redos)
   "src/bom/bom-timing.test.ts",
+  // ADR-0190 I1: the isolation contract's patterns on 100k adversarial inputs (CodeQL js/redos)
+  "src/isolation/isolation-redos-timing.test.ts",
 ];
 
 export default defineConfig({
