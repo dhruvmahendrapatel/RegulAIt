@@ -1,6 +1,6 @@
 # ADR-0190: Batch 6 item 3 — isolation and execution profiles (PF-06)
 
-- **Status:** Proposed
+- **Status:** Accepted (owner, 2026-10-10)
 - **Date:** 2026-10-10
 - **Deciders:** owner (the OWNER DECISION items below); the rest follows ADR-0180 (secure by default) and ADR-0176
   (open source first)
@@ -136,7 +136,7 @@ customer's Kubernetes with RuntimeClass) and air-gapped installs.
 VM lifecycle manager (kernels, images, networking, jailer), which ADR-0176 forbids when Kata already does it. Rejected;
 Firecracker stays reachable through Kata.
 
-## Decision (Proposed)
+## Decision (Accepted 2026-10-10)
 
 ### 1. Isolation classes: a fixed, ordered vocabulary
 
@@ -420,7 +420,13 @@ counter that must stay at zero for every refusal (the `pillar7-inheritance.test.
 - **Regression.** ADR-0187 engine suites, ADR-0185 stdio suites (re-targeted to the executor) and the ADR-0188 suites
   pass unchanged in behaviour apart from the placement.
 
-## Owner decisions (with recommendations)
+## Owner decisions (accepted 2026-10-10)
+
+The owner accepted all nine recommendations on 2026-10-10, as written below: gVisor for L2 and Kata for L3 (OpenShell
+optional after the I0 spike); no third-party code on the gateway host (invariant); sensitivity floors L2/L2/L2/L3,
+relaxable to L1 only with step-up and audit; engine workers at L2; software attestation in v1; `customer_declared`
+maps to no class until an admin maps it; OpenShell over a local unix socket only; Wasmtime deferred; resource defaults
+and a 2-hour attestation age as listed. Slice I0 may start now; I1 onward follows the slice plan.
 
 1. **OWNER DECISION — first real backend.** *Recommended:* gVisor (`runsc`) for L2 everywhere and Kata for L3 on
    Kubernetes, behind the contract; OpenShell as an optional backend after spike I0, never the only path to a required
