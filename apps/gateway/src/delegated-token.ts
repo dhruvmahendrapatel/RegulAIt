@@ -46,7 +46,7 @@ import {
   type JWTPayload,
 } from "jose";
 import * as oauth from "oauth4webapi";
-import { eq, issuedTokens, lte, replayClaims, type Db, type IdentitySigningKeyRow } from "@regulait/db";
+import { and, eq, isNotNull, issuedTokens, lte, or, replayClaims, workloadCredentials, type Db, type IdentitySigningKeyRow } from "@regulait/db";
 import {
   actClaimFromChain,
   canonicalDelegationBody,
@@ -326,6 +326,19 @@ async function storedAndLive(
   ) {
     return fail("issued_token_mismatch");
   }
+  // decision 12: a REGISTERED key or certificate used only as this token's binding, once revoked, refuses
+  // every token bound to its thumbprint (the grant itself survives; its holder may re-authenticate)
+  const [boundRevoked] = await db
+    .select({ id: workloadCredentials.id })
+    .from(workloadCredentials)
+    .where(
+      and(
+        or(eq(workloadCredentials.jwkThumbprint, binding.thumbprint), eq(workloadCredentials.x5tS256, binding.thumbprint)),
+        isNotNull(workloadCredentials.revokedAt),
+      ),
+    )
+    .limit(1);
+  if (boundRevoked) return fail("binding_key_revoked");
   const live = await loadLiveChain(db, row.grantId, now);
   if (!live) return fail("grant_not_found");
   if (live.failure) return fail(`chain_${live.failure.code}`);

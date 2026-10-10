@@ -199,7 +199,7 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date =
     .leftJoin(engineRunners, eq(engineRunners.id, workloadIdentities.engineRunnerId))
     .leftJoin(workloadCredentials, eq(workloadCredentials.id, delegationGrants.authCredentialId))
     .where(
-      sql`${delegationGrants.id} = ANY ((SELECT g2.path || g2.id FROM ${delegationGrants} g2 WHERE g2.id = ${leafGrantId}))`,
+      sql`${delegationGrants.id} IN (SELECT unnest(g2.path || g2.id) FROM ${delegationGrants} g2 WHERE g2.id = ${leafGrantId})`,
     )
     .orderBy(asc(delegationGrants.depth));
   const leafRow = rows.find((r) => r.grant.id === leafGrantId);
@@ -592,7 +592,9 @@ function sameChildRequest(child: DelegationGrantRow, input: AdmitChildGrantInput
   const b = bindingColumns(input.binding);
   return (
     child.actorIdentityId === input.actorIdentityId &&
-    JSON.stringify(child.scope) === JSON.stringify(input.scope) &&
+    // the same authority (jsonb does not keep key order, so compare meaning, both ways)
+    scopeSubset(child.scope, input.scope) &&
+    scopeSubset(input.scope, child.scope) &&
     child.capMicros === input.capMicros &&
     child.expiresAt.getTime() === input.expiresAt.getTime() &&
     child.bindingKind === b.bindingKind &&
