@@ -44,6 +44,7 @@ import {
   approvals,
   asc,
   auditLog,
+  delegationGrants,
   desc,
   engineRunItems,
   engineRunners,
@@ -110,7 +111,9 @@ import { loadOrgSettings } from "./org-settings.js";
 import { refuseRunStartWithoutLiteracy } from "./ai-literacy.js";
 import { encryptSecret } from "./secrets.js";
 import { engineKeyName, generateVirtualKeyToken } from "./virtual-keys.js";
-import { AGENT_HEADER, PROJECT_HEADER } from "./compat-core.js";
+import { AGENT_HEADER, COMPAT_MODE, PROJECT_HEADER } from "./compat-core.js";
+import { DelegationRefusedError, revokeDelegationGrant } from "./delegation.js";
+import { agentScopeItem, ensureIdentityFor, startInProcessChain } from "./in-process-delegation.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -136,6 +139,15 @@ export const ENGINE_SCHEDULE_JOB_NAME = "engine-schedule-sweep";
 // Keys
 // ---------------------------------------------------------------------------
 
+/** ADR-0188 S4: end every live delegation grant made for this engine run (idempotent) */
+export async function endEngineRunDelegation(db: Db | Tx, engineRunId: string): Promise<void> {
+  const live = await db
+    .select({ id: delegationGrants.id })
+    .from(delegationGrants)
+    .where(and(eq(delegationGrants.engineRunId, engineRunId), isNull(delegationGrants.revokedAt), isNull(delegationGrants.parentGrantId)));
+  for (const g of live) await revokeDelegationGrant(db as Db, { grantId: g.id, reason: "run_ended" });
+}
+
 /** revoke a run's key now (idempotent), audited with the cause */
 export async function revokeRunKey(
   db: Db | Tx,
@@ -143,6 +155,8 @@ export async function revokeRunKey(
   cause: string,
   actorUserId: string,
 ): Promise<boolean> {
+  // ADR-0188 S4: the run's delegation grant ends with its key (cascade; unspent allocation returned)
+  await endEngineRunDelegation(db, run.id);
   if (!run.virtualKeyId) return false;
   const revoked = await db
     .update(virtualKeys)
@@ -1707,6 +1721,48 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         return { kind: "refused" as const, ended };
       }
       const deadlineAt = new Date(now.getTime() + run.timeoutSeconds * 1000);
+      // ADR-0188 S4 (decisions 4, 6) — THE RUN'S DELEGATION GRANT, before any key is minted: the run-as
+      // person delegates to the runner's workload identity exactly the target (and judge) agent in the
+      // compat mode, for this run, until its deadline. Refused (the runner's own grants under
+      // `own_grants`, the person's, depth, lifetime) = the run ends `not_run` here, audited, keyless.
+      if (run.targetKind === "agent" && m.needsModelAccess) {
+        try {
+          const ident = await ensureIdentityFor(tx as unknown as Db, { kind: "engine_runner", id: runnerId });
+          await startInProcessChain(tx as unknown as Db, {
+            sponsorUserId: person!.id,
+            projectId: run.projectId ?? null,
+            context: { engineRunId: run.id },
+            hops: [
+              {
+                identityId: ident.id,
+                scope: [...new Set([target!.id, ...(judge ? [judge.id] : [])])].map((id) => agentScopeItem(id, COMPAT_MODE)),
+                capMicros: null,
+              },
+            ],
+            ttlMs: Math.max(60_000, deadlineAt.getTime() - now.getTime()),
+            now,
+          });
+        } catch (err) {
+          if (!(err instanceof DelegationRefusedError)) throw err;
+          await tx.insert(auditLog).values({
+            userId: person!.id,
+            objectType: "engine_run",
+            objectId: run.id,
+            detail: { phase: "delegation", engineId, runnerId, code: err.code },
+            effect: "deny",
+            ruleId: err.ruleId,
+            ruleChain: [],
+            reason: `${engineId} run ${run.id} was not delegated to runner ${runnerId}: ${err.message}`,
+          });
+          const ended = await endLockedRun(
+            tx,
+            run,
+            { status: "not_run", errorCode: "delegation_refused", normalised: noResult("not_run"), cause: "delegation_refused", actorUserId: NO_IDENTITY },
+            now,
+          );
+          return { kind: "refused" as const, ended };
+        }
+      }
       let apiKey: string | null = null;
       let keyId: string | null = null;
       if (run.targetKind === "agent" && m.needsModelAccess) {

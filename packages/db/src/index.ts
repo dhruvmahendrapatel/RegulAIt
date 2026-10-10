@@ -19,7 +19,11 @@ export {
   appendChainedAuditRows,
   loadAuditChainBoundary,
   readAuditV2Boundary,
+  runWithAuditActor,
+  runAuditV2Cutover,
+  currentAuditActor,
   withAuditChain,
+  type AuditActorStamp,
 } from "./audit-chain.js";
 
 // ADR-0102 — the operator-prose credential scrub for reason/note columns

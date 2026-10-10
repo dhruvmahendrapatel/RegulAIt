@@ -41,6 +41,9 @@
  * a re-submit after the decision executes the identical call. A READ under the
  * dial is still refused, as before: the hold is defined for writes.
  */
+import type { GovernedActor } from "@regulait/policy-kernel";
+import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
+import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import {
   and,
   approvals,
@@ -191,6 +194,13 @@ export interface GovernedConnectorCallArgs {
   trace?: TraceContext | null | undefined;
   /** correlation ids merged into the decision audit row's detail */
   detail?: Record<string, unknown> | undefined;
+  /**
+   * ADR-0188 S4 (decision 6) — the delegation grant an in-process agent makes
+   * this call under: decided for the person AND the stored chain, read fresh
+   * (decision 17), its price settled along the chain with the usage row.
+   * Absent = the person's own call (`actor: null`).
+   */
+  delegationGrantId?: string | undefined;
 }
 
 /** the approval-queue object type of a held connector write */
@@ -416,9 +426,22 @@ export async function executeGovernedConnectorCall(
             approverUserId: dial.approverUserId,
           })
         : null;
-    const decision = evaluateConnector({
+    // ADR-0188 S4: a delegated call carries the stored chain, read now; a grant that cannot be read refuses
+    let delegatedActor: GovernedActor | null = null;
+    let delegationRefusal: ReturnType<typeof delegationRefusalDecision> | null = null;
+    if (args.delegationGrantId) {
+      try {
+        delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: connector.pricePerCallUsd != null });
+      } catch (err) {
+        if (!(err instanceof DelegationRefusedError)) throw err;
+        delegationRefusal = delegationRefusalDecision(err);
+      }
+    }
+    const decision = delegationRefusal
+      ? (delegationRefusal as ReturnType<typeof evaluateConnector>)
+      : evaluateConnector({
       userId,
-      actor: null, // ADR-0188 S4 replaces
+      actor: delegatedActor,
       // ADR-0124 — the kill switch on the connector path. A connector has no
       // per-subject halt of its own; the dial governs it.
       execution: { ...postureOf(dial.mode, null), approverUserId: dial.approverUserId, ...connectorLiteracy },
@@ -1114,6 +1137,8 @@ export async function executeGovernedConnectorCall(
       // list price. Unpriced → null, never an invented figure (agents' rule).
       const costUsd = connector.pricePerCallUsd ?? null;
       const [connectorUsageRow] = await evidenceDb.insert(usageEvents).values({
+        // ADR-0188 S4: the acting agent, when one acts (decision 9)
+        ...actorColumns(),
         userId,
         objectType: "connector",
         connectorId,
@@ -1145,6 +1170,10 @@ export async function executeGovernedConnectorCall(
       // in the same call that inserted it. Never a recomputed price.
       sink.usageEventId = connectorUsageRow?.id ?? null;
       sink.costUsd = costUsd;
+      // ADR-0188 S4 (decision 22): settled along the chain in the usage row's transaction
+      if (args.delegationGrantId && connectorUsageRow) {
+        await settleDelegationCharge(evidenceDb, { usageEventId: connectorUsageRow.id, leafGrantId: args.delegationGrantId, amountMicros: usdToMicros(costUsd) });
+      }
       if (cgOutput) {
         const outcome = guardrailOutcome(cgOutput);
         if (outcome) {

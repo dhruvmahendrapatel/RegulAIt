@@ -220,6 +220,7 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date =
     const consistent =
       complete &&
       g.depth === i &&
+      g.depth <= g.depthLimit &&
       (parent === null
         ? g.parentGrantId === null && g.rootGrantId === g.id && g.path.length === 0
         : g.parentGrantId === parent.id &&
@@ -232,6 +233,7 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, now: Date =
           g.builderTurnId === parent.builderTurnId &&
           g.engineRunId === parent.engineRunId &&
           g.scheduleId === parent.scheduleId &&
+          g.depthLimit <= parent.depthLimit &&
           g.expiresAt.getTime() <= parent.expiresAt.getTime());
     if (!consistent) code = "chain_inconsistent";
     else if (g.revokedAt) code = "grant_revoked";
@@ -438,6 +440,11 @@ interface CommonGrantInput {
 }
 export interface CreateRootGrantInput extends CommonGrantInput {
   sponsorUserId: string;
+  /**
+   * decision 23 `max_depth` for a root: how many delegations may follow it. Absent = the org's
+   * `delegation_max_depth`; more than that is refused. Stored as the absolute `depth_limit` (migration 0184).
+   */
+  maxFurtherDepth?: number;
   environment: string;
   projectId: string | null;
   context?: GrantContext;
@@ -448,8 +455,10 @@ export interface AdmitChildGrantInput extends CommonGrantInput {
   idempotencyKey: string;
   /**
    * decision 23 `max_depth`: how many further delegations the child may make.
-   * Checked against `delegation_max_depth` at admission (the child's depth plus
-   * this may not exceed it). Not stored: below the child, the org setting caps.
+   * STORED (migration 0184) as the absolute `depth_limit = min(parent.depth_limit,
+   * child.depth + max_depth)`, so every descendant is bound by it, not only this
+   * admission. A value past the parent's limit or the org setting is refused,
+   * never narrowed. Absent = inherit the parent's limit.
    */
   maxFurtherDepth?: number;
   /**
@@ -565,6 +574,14 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
   }
   return db.transaction(async (tx) => {
     await checkActorSponsorScope(tx, input, now);
+    const org = await loadOrgSettings(tx as unknown as Db);
+    let depthLimit = Math.min(org.delegationMaxDepth, DELEGATION_DEPTH_CEILING);
+    if (input.maxFurtherDepth !== undefined) {
+      if (!Number.isInteger(input.maxFurtherDepth) || input.maxFurtherDepth < 0 || input.maxFurtherDepth > depthLimit) {
+        refuse("delegation-depth", "delegation_depth", `a root may allow at most ${depthLimit} further delegations`);
+      }
+      depthLimit = input.maxFurtherDepth;
+    }
     const id = randomUUID();
     const [row] = await tx
       .insert(delegationGrants)
@@ -574,6 +591,7 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
         parentGrantId: null,
         path: [],
         depth: 0,
+        depthLimit,
         sponsorUserId: input.sponsorUserId,
         actorIdentityId: input.actorIdentityId,
         runId: ctx.runId ?? null,
@@ -612,6 +630,7 @@ async function auditGrantCreated(tx: Tx, g: DelegationGrantRow, phase: "create" 
       parentGrantId: g.parentGrantId,
       path: g.path,
       depth: g.depth,
+      depthLimit: g.depthLimit,
       actorIdentityId: g.actorIdentityId,
       projectId: g.projectId,
       environment: g.environment,
@@ -631,6 +650,7 @@ function sameChildRequest(child: DelegationGrantRow, input: AdmitChildGrantInput
   const b = bindingColumns(input.binding);
   return (
     child.actorIdentityId === input.actorIdentityId &&
+    (input.maxFurtherDepth === undefined || child.depthLimit === child.depth + input.maxFurtherDepth) &&
     // the same authority (jsonb does not keep key order, so compare meaning, both ways)
     scopeSubset(child.scope, input.scope) &&
     scopeSubset(input.scope, child.scope) &&
@@ -694,10 +714,16 @@ export async function admitChildGrant(
     if (depth > org.delegationMaxDepth || depth > DELEGATION_DEPTH_CEILING) {
       refuse("delegation-depth", "delegation_depth", `depth ${depth} is past the delegation limit ${org.delegationMaxDepth}`);
     }
+    // the PARENT's stored limit (decision 23 max_depth, migration 0184): a child of a `max_depth: 0` grant is refused
+    if (depth > parent.depthLimit) {
+      refuse("delegation-depth", "delegation_depth", `depth ${depth} is past the depth its parent was authorised to delegate (${parent.depthLimit})`);
+    }
+    let depthLimit = Math.min(parent.depthLimit, org.delegationMaxDepth);
     if (input.maxFurtherDepth !== undefined) {
-      if (!Number.isInteger(input.maxFurtherDepth) || input.maxFurtherDepth < 0 || depth + input.maxFurtherDepth > org.delegationMaxDepth) {
-        refuse("delegation-depth", "delegation_depth", `a child at depth ${depth} may delegate at most ${Math.max(0, org.delegationMaxDepth - depth)} further`);
+      if (!Number.isInteger(input.maxFurtherDepth) || input.maxFurtherDepth < 0 || depth + input.maxFurtherDepth > depthLimit) {
+        refuse("delegation-depth", "delegation_depth", `a child at depth ${depth} may delegate at most ${Math.max(0, depthLimit - depth)} further`);
       }
+      depthLimit = depth + input.maxFurtherDepth;
     }
     if (!scopeSubset(input.scope, parent.scope)) {
       refuse("delegation-scope", "outside_parent_scope", "the requested scope is wider than the parent's");
@@ -723,6 +749,7 @@ export async function admitChildGrant(
         parentGrantId: parent.id,
         path: [...parent.path, parent.id],
         depth,
+        depthLimit,
         sponsorUserId: parent.sponsorUserId,
         actorIdentityId: input.actorIdentityId,
         runId: parent.runId,

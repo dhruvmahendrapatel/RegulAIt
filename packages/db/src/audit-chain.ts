@@ -61,6 +61,7 @@
  * Under the advisory lock, `max(seq)+1` is exactly as safe and produces a
  * genuinely gapless sequence, so a gap MEANS something.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { desc, isNotNull } from "drizzle-orm";
 import { sql, type SQL } from "drizzle-orm";
@@ -88,6 +89,35 @@ import { auditLog } from "./schema.js";
  * three.
  */
 export const AUDIT_CHAIN_LOCK_KEY = 6_000_000_060;
+
+/**
+ * ADR-0188 slice S4 — WHO IS ACTING, for every audit row written while an agent acts.
+ *
+ * Decision 9 puts the actor (identity, leaf grant, chain) on every agent-made audit row. There are hundreds of
+ * `insert(auditLog)` sites; threading the actor through each would make stamping a convention, which is exactly
+ * what this file exists to avoid (see the header). So the in-process agent paths (S4: orchestration workers,
+ * builder turns and schedules, engine runs) run their governed work inside `runWithAuditActor`, and the ONE
+ * writer below stamps every row appended in that async context that does not name an actor itself.
+ *
+ * Before the decision 19 boundary a v1 hash cannot cover the actor COLUMNS, so the writer puts the same facts in
+ * `detail.delegation` instead (covered by the v1 hash as part of `detail`); from the boundary on it fills the
+ * columns. The choice is made under the append lock, from the boundary read there, so it cannot race the cutover.
+ */
+export interface AuditActorStamp {
+  actorIdentityId: string;
+  delegationGrantId: string;
+  /** identity ids, root first (decision 25) */
+  actorChain: string[];
+}
+const auditActorContext = new AsyncLocalStorage<AuditActorStamp>();
+/** run `fn` with every audit row it appends stamped with `stamp` (unless a row names its own actor) */
+export function runWithAuditActor<T>(stamp: AuditActorStamp, fn: () => Promise<T>): Promise<T> {
+  return auditActorContext.run(stamp, fn);
+}
+/** the actor stamp of the current async context, if any (tracing and usage read it too) */
+export function currentAuditActor(): AuditActorStamp | undefined {
+  return auditActorContext.getStore();
+}
 
 /** Marker property: `true` on a handle that already chains, so wrapping is
  * idempotent and a doubly-wrapped handle cannot chain a row twice. */
@@ -198,6 +228,25 @@ export async function appendChainedAuditRows(
     const resolved = resolveDefaults(raw);
     // ADR-0188 decision 19: the boundary decides the version, never the caller
     const version = auditChainVersionAt(nextSeq, v2FromSeq);
+    // ADR-0188 S4: stamp the acting agent from the async context (a row that names its own actor keeps it)
+    const stamp = auditActorContext.getStore();
+    if (stamp && resolved.actorIdentityId == null && resolved.delegationGrantId == null && resolved.actorChain == null) {
+      if (version === 2) {
+        resolved.actorIdentityId = stamp.actorIdentityId;
+        resolved.delegationGrantId = stamp.delegationGrantId;
+        resolved.actorChain = [...stamp.actorChain];
+      } else {
+        // a non-object detail (never written today) is left as it is rather than reshaped
+        const detail = resolved.detail;
+        const base = detail == null ? {} : typeof detail === "object" && !Array.isArray(detail) ? (detail as Record<string, unknown>) : null;
+        if (base && !("delegation" in base)) {
+          resolved.detail = {
+            ...base,
+            delegation: { actorIdentityId: stamp.actorIdentityId, delegationGrantId: stamp.delegationGrantId, actorChain: [...stamp.actorChain] },
+          };
+        }
+      }
+    }
     if (version === 1 && (resolved.actorIdentityId != null || resolved.delegationGrantId != null || resolved.actorChain != null)) {
       // a v1 hash does not cover the actor fields: writing them unprotected would be worse than refusing
       throw new Error(
@@ -279,6 +328,53 @@ export async function readAuditV2Boundary(tx: { execute: (query: SQL) => Promise
     throw new Error(`audit-chain: the chain is at serialisation version ${boundary.version}, which this build cannot write`);
   }
   return boundary.v2FromSeq;
+}
+
+/**
+ * ADR-0188 decision 19 — THE AUDIT v2 CUTOVER, run once, only after every replica runs v2-aware code (a drained
+ * rolling deploy: see `docs/runbooks` and the gateway's `audit-v2-cutover` command).
+ *
+ * One transaction under the chain append lock: read the tip, record `audit_chain_versions (2, tip + 1)`, and
+ * append the cutover's own audit row, which is therefore the first v2 row. Because writers read the boundary
+ * under the same lock, no append can land a v1 row past it; the database trigger `audit_log_v2_floor`
+ * (migration 0184) refuses one from a writer that does not read the boundary at all. Idempotent: a recorded
+ * boundary is returned unchanged and nothing is appended.
+ *
+ * `tx` must be a real transaction on a chained handle (`db.transaction`); a caller passing the top-level db
+ * gets one opened here.
+ */
+export async function runAuditV2Cutover(
+  dbOrTx: { transaction: <T>(cb: (tx: never) => Promise<T>) => Promise<T> },
+  opts: { setBy: string | null; inTransaction?: boolean },
+): Promise<{ fromSeq: number; created: boolean }> {
+  const body = async (tx: AuditExec & { insert: (t: unknown) => { values: (v: unknown) => Promise<unknown> } }) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_KEY})`);
+    const boundary = await loadAuditChainBoundary(tx as unknown as { execute: (q: SQL) => PromiseLike<unknown> });
+    if (!boundary.supported) throw new Error(`audit-chain: the chain is at serialisation version ${boundary.version}, which this build cannot write`);
+    if (boundary.v2FromSeq !== null) return { fromSeq: boundary.v2FromSeq, created: false };
+    const tip = (await tx
+      .select({ seq: auditLog.seq })
+      .from(auditLog)
+      .where(isNotNull(auditLog.seq))
+      .orderBy(desc(auditLog.seq))
+      .limit(1)) as Array<{ seq: number | null }>;
+    const fromSeq = (tip[0]?.seq ?? AUDIT_GENESIS_SEQ - 1) + 1;
+    await tx.execute(sql`insert into "audit_chain_versions" ("version", "from_seq", "set_by") values (2, ${fromSeq}, ${opts.setBy})`);
+    // the first v2 row: the cutover itself (still under the lock; this handle chains)
+    await tx.insert(auditLog).values({
+      userId: opts.setBy ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "audit_chain",
+      objectId: null,
+      detail: { phase: "cutover", version: 2, fromSeq },
+      effect: "allow",
+      ruleId: "audit-chain-v2-cutover",
+      ruleChain: [],
+      reason: `audit chain serialisation v2 from seq ${fromSeq} (ADR-0188 decision 19)`,
+    });
+    return { fromSeq, created: true };
+  };
+  if (opts.inTransaction) return body(dbOrTx as never);
+  return dbOrTx.transaction((tx) => body(tx as never));
 }
 
 /** Sentinel for `.returning()` called with no projection. */

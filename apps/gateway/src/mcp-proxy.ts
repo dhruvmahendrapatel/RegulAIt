@@ -29,7 +29,9 @@ import {
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
-import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kernel";
+import { visibleTools, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
+import { DelegationRefusedError, settleDelegationCharge } from "./delegation.js";
+import { actorColumns, actorForGrant, delegationRefusalDecision, usdToMicros } from "./in-process-delegation.js";
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import {
@@ -570,6 +572,14 @@ export async function executeGovernedToolCall(
      * governed call is findable from the caller's own record. Never decides
      * anything; absent = byte-identical. */
     detail?: Record<string, unknown> | undefined;
+    /**
+     * ADR-0188 S4 (decision 6) — the delegation grant an in-process agent makes
+     * this call under. When set, the call is decided for the sponsor `userId`
+     * AND the stored actor chain, read fresh here (decision 17), and its price
+     * is settled along the chain with the usage row (decision 22). Absent = a
+     * person's own call (`actor: null`), byte-identical.
+     */
+    delegationGrantId?: string | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -836,8 +846,20 @@ async function executeGovernedToolCallInner(
       traceInput.value = args.arguments ?? {};
     }
 
+    // ADR-0188 S4: the actor chain of a delegated call; a grant that cannot be read is a refusal
+    let delegatedActor: GovernedActor | null = null;
+    if (args.delegationGrantId) {
+      try {
+        delegatedActor = await actorForGrant(db, args.delegationGrantId, { costKnown: pricePerCallUsd != null });
+      } catch (err) {
+        if (!(err instanceof DelegationRefusedError)) throw err;
+        const decision = delegationRefusalDecision(err);
+        await db.insert(auditLog).values({ userId, serverId, toolName, ...decision, detail: { projectId, phase: "delegation", delegationGrantId: args.delegationGrantId, receiptClass: "decision" } });
+        return { kind: "denied", decision };
+      }
+    }
     const {
-      decision,
+      decision: evaluated,
       approvedApprovalId,
       argumentsDigest,
       approvalScope,
@@ -862,8 +884,16 @@ async function executeGovernedToolCallInner(
       preparedPii,
       // AER-039: bind the consent to the row this call connects with
       approvalTargetForServer(serverId, serverRow),
-      { actor: null }, // ADR-0188 S4 replaces
+      // ADR-0188 S4: a delegated call is decided with the stored chain, read now; a person's own call is `null`
+      { actor: delegatedActor },
     );
+    // ADR-0188 S4 (decision 6): the §5.1 ceiling is folded into the worker's delegation scope, so a tool the
+    // lead's ceiling excludes is refused by the scope term first; it keeps its distinct `lead-ceiling` rule id
+    const decision: Decision =
+      delegatedActor && evaluated.effect === "deny" && evaluated.ruleId === "delegation-scope" &&
+      args.ceilingTools != null && !args.ceilingTools.includes(toolName)
+        ? { ...evaluated, ruleId: "lead-ceiling", reason: `tool '${toolName}' is outside the lead's ceiling for this worker (its delegation scope)` }
+        : evaluated;
 
     if (preparedPii && preparationGeneration?.epoch !== policyEpoch) {
       return refuseTransformation("PII policy changed during action preparation; retry for fresh evaluation");
@@ -1305,7 +1335,9 @@ async function executeGovernedToolCallInner(
     // can never hit a project budget — every project rollup and the budget
     // gate filter on projectId. Unpriced server → null, never an invented
     // figure. Denied calls and upstream failures still bill nothing.
-    await db.insert(usageEvents).values({
+    // ADR-0188 S4: stamped with the acting agent; settled along its chain in the same transaction
+    const toolUsageWrite = (h: Db) => h.insert(usageEvents).values({
+      ...actorColumns(),
       userId,
       objectType: "mcp_tool",
       // usage_events has no server column; `operation` carries the tool name
@@ -1331,7 +1363,16 @@ async function executeGovernedToolCallInner(
             }
           : {}),
       },
-    });
+    }).returning({ id: usageEvents.id });
+    const toolGrantId = args.delegationGrantId;
+    if (toolGrantId) {
+      await db.transaction(async (tx) => {
+        const [u] = await toolUsageWrite(tx as unknown as Db);
+        if (u) await settleDelegationCharge(tx, { usageEventId: u.id, leafGrantId: toolGrantId, amountMicros: usdToMicros(pricePerCallUsd) });
+      });
+    } else {
+      await toolUsageWrite(db);
+    }
     if (mgOutput) {
       const outcome = guardrailOutcome(mgOutput);
       if (outcome) {

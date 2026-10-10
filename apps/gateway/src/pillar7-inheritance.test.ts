@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { grantAgentOwnGrantsForTest } from "./testing/agent-own-grants.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -124,6 +125,9 @@ beforeAll(async () => {
   otherAgent = await mkAgent("p7-other");
   await grantAgent(ivyId, workerAgent);
   await grantAgent(ivyId, otherAgent);
+  // ADR-0188 S4: under the strict `own_grants` default an agent acts only within grants of its own
+  await grantAgentOwnGrantsForTest(db, workerAgent);
+  await grantAgentOwnGrantsForTest(db, otherAgent);
 });
 
 describe("pillar 7: a worker never exceeds the INITIATING user's entitlements", () => {

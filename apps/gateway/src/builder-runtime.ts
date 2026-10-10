@@ -96,6 +96,20 @@ import {
   type ToolRun,
 } from "./builder-tools.js";
 import { loadOrgSettings } from "./org-settings.js";
+import type { DelegationScopeItem } from "@regulait/policy-kernel";
+import { loadActorEntitlements } from "./actor-entitlements.js";
+import { actorEntitlementsReach, DelegationRefusedError, sponsorGrantsMiss } from "./delegation.js";
+import {
+  agentScopeItem,
+  connectorScopeItem,
+  delegationRefusalDecision,
+  endInProcessChain,
+  ensureIdentityFor,
+  runAsActor,
+  startInProcessChain,
+  toolScopeItems,
+  type InProcessChain,
+} from "./in-process-delegation.js";
 import { assertProjectAttribution, piiInternationalCategories, projectPiiMode } from "./projects.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { beginTrace, childContext, finishTrace, recordSpan, type TraceContext } from "./tracing.js";
@@ -647,6 +661,11 @@ interface Segment {
   stepSpanId: string | null;
   /** the newest step's entitlement decision (the dispatch row repeats it) */
   decision: { effect: string; ruleId: string; ruleChain: unknown; reason: string } | null;
+  /**
+   * ADR-0188 S4 — the delegation grant this segment acts under (decision 6), and
+   * the toolbox names its chain was granted. Null before `runDelegatedLoop`.
+   */
+  delegation?: { grantId: string; offered: Set<string> } | null;
 }
 
 /** the model turn history a new turn replays: text only (system notes and
@@ -778,7 +797,7 @@ async function turnBody(
     latencyMs: 0,
     stepSeq: 0,
   };
-  return runLoop(seg, state);
+  return runDelegatedLoop(seg, state);
 }
 
 /** a system note in the thread (never replayed to a model) */
@@ -867,13 +886,104 @@ async function stepGate(seg: Segment, state: LoopState, phase: "step" | "tool"):
   });
 }
 
+/**
+ * ADR-0188 S4 (decisions 4, 6) — run a segment under its DELEGATION CHAIN: a root
+ * grant from the person to the builder agent's identity (context: this turn, or
+ * the schedule that fired it), exactly the model in `chat` and the toolbox
+ * entries the person may use and the builder agent itself holds (under
+ * `own_grants`). An agent with no grant of its own for its model is refused
+ * (`actor-allow-list`), audited, with a note in the thread. Every step and tool
+ * call is decided with the chain read fresh and stamped with the actor; the
+ * chain is revoked (`run_ended`) when the segment ends, paused or not.
+ */
+async function runDelegatedLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
+  const { db } = seg;
+  // the PERSON first (decision 30: when the person is not entitled, the reason shown is the person's)
+  const personGate = await stepGate(seg, state, "step");
+  if (personGate) return stopWithRefusal(seg, state, personGate);
+  const ident = await ensureIdentityFor(db, { kind: "builder_agent", id: seg.agent.id });
+  const box = await resolveToolbox(db, seg.agent, seg.userId);
+  const org = await loadOrgSettings(db);
+  const own = org.agentEntitlementMode === "own_grants" ? (await loadActorEntitlements(db, [ident.id])).get(ident.id)! : null;
+  const offered = new Set<string>();
+  const tools: Array<{ serverId: string; toolName: string; kind: "read" | "write" }> = [];
+  const connectorItems: DelegationScopeItem[] = [];
+  for (const e of box.entries) {
+    if (e.kind === "mcp_tool" && e.serverId && e.toolName) {
+      const kind = e.toolKind ?? "write";
+      if (own && !actorEntitlementsReach(own, { type: "mcp_tool", serverId: e.serverId, toolName: e.toolName, kind })) continue;
+      tools.push({ serverId: e.serverId, toolName: e.toolName, kind });
+      offered.add(e.name);
+    } else if (e.kind === "connector") {
+      const ops = (e.operations ?? []).filter((op) => !own || actorEntitlementsReach(own, { type: "connector", connectorId: e.refId, kind: op }));
+      if (!ops.length) continue;
+      for (const op of ops) connectorItems.push(connectorScopeItem(e.refId, op));
+      offered.add(e.name);
+    }
+  }
+  // only what the person holds is requested (a delegation of what the person lacks is refused, never narrowed)
+  const keepTools: typeof tools = [];
+  for (const t of tools) if (!(await sponsorGrantsMiss(db, seg.userId, [{ type: "mcp_tool", serverId: t.serverId, toolName: t.toolName, kind: t.kind }]))) keepTools.push(t);
+  const keepConnectors: DelegationScopeItem[] = [];
+  for (const c of connectorItems) if (!(await sponsorGrantsMiss(db, seg.userId, [{ type: "connector", connectorId: c.connectorId!, kind: c.kind }]))) keepConnectors.push(c);
+  for (const e of box.entries) {
+    if (e.kind === "mcp_tool" && !keepTools.some((t) => t.serverId === e.serverId && t.toolName === e.toolName)) offered.delete(e.name);
+    if (e.kind === "connector" && !keepConnectors.some((c) => c.connectorId === e.refId)) offered.delete(e.name);
+  }
+  const scope: DelegationScopeItem[] = [agentScopeItem(seg.model.id, "chat"), ...toolScopeItems(keepTools), ...keepConnectors];
+  let chain: InProcessChain;
+  try {
+    chain = await startInProcessChain(db, {
+      sponsorUserId: seg.userId,
+      projectId: seg.agent.projectId ?? null,
+      context: seg.source === "schedule" && seg.thread.scheduleId ? { scheduleId: seg.thread.scheduleId } : { builderTurnId: randomUUID() },
+      hops: [{ identityId: ident.id, scope, capMicros: null }],
+    });
+  } catch (err) {
+    if (!(err instanceof DelegationRefusedError)) throw err;
+    const decision = delegationRefusalDecision(err);
+    await db.insert(auditLog).values({
+      userId: seg.userId,
+      objectType: "agent",
+      objectId: seg.model.id,
+      detail: { ...seg.baseDetail, mode: "chat", phase: "delegation", code: err.code, actorIdentityId: ident.id, receiptClass: "decision" },
+      effect: "deny",
+      ruleId: decision.ruleId,
+      ruleChain: [],
+      reason: decision.reason,
+    });
+    return stopWithRefusal(seg, state, { ok: false, status: 403, error: "agent_delegation_refused", detail: decision.reason });
+  }
+  seg.delegation = { grantId: chain.leafGrantId, offered };
+  try {
+    return await runAsActor({ actorIdentityId: ident.id, delegationGrantId: chain.leafGrantId, actorChain: [ident.id] }, () => runLoop(seg, state));
+  } finally {
+    await endInProcessChain(db, chain);
+  }
+}
+
+/** the toolbox as this segment's chain was granted it: anything else is unavailable to the model */
+function delegatedToolbox(seg: Segment, box: Toolbox): Toolbox {
+  const d = seg.delegation;
+  if (!d) return box;
+  const entries = box.entries.filter((e) => d.offered.has(e.name));
+  return {
+    entries,
+    byName: new Map(entries.map((e) => [e.name, e])),
+    unavailable: [
+      ...box.unavailable,
+      ...box.entries.filter((e) => !d.offered.has(e.name)).map((e) => ({ displayName: e.displayName, kind: e.kind })),
+    ],
+  };
+}
+
 async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
   const { db } = seg;
   let box: Toolbox | null = null;
   for (;;) {
     // 1. answer every queued tool call of the newest assistant turn
     if (state.queue.length) {
-      box ??= await resolveToolbox(db, seg.agent, seg.userId);
+      box ??= delegatedToolbox(seg, await resolveToolbox(db, seg.agent, seg.userId));
       const q = await runQueue(seg, state, box);
       if (q) return q; // paused, or stopped
       state.messages.push({ role: "user", content: state.results });
@@ -896,7 +1006,7 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
     if (gate) return stopWithRefusal(seg, state, gate);
 
     // 4. one governed model step, with the toolbox as the person may use it
-    box = await resolveToolbox(db, seg.agent, seg.userId);
+    box = delegatedToolbox(seg, await resolveToolbox(db, seg.agent, seg.userId));
     const built = await buildSystemPromptWithSkills(db, seg.agent, seg.userId, box);
     const system = built.prompt;
     // ADR-0175 A6: the digests of the skill bodies this step carried (and of
@@ -924,6 +1034,8 @@ async function runLoop(seg: Segment, state: LoopState): Promise<TurnOutcome> {
       modelFeature: BUILDER_MODEL_FEATURE,
       virtualKey: seg.virtualKey,
       mode: "chat",
+      // ADR-0188 S4: decided for the person AND the builder agent's stored chain, per step
+      delegationGrantId: seg.delegation?.grantId,
       trace: seg.trace,
       traceSpanName: `step ${step}: ${seg.model.name}`,
       detail: { ...seg.baseDetail, step, ...skillTrace },
@@ -1138,6 +1250,7 @@ async function runQueue(seg: Segment, state: LoopState, box: Toolbox): Promise<T
       trace: childContext(seg.trace, seg.stepSpanId),
       toolCallId: call.id,
       detail: { ...seg.baseDetail, builderStepId: stepId },
+      delegationGrantId: seg.delegation?.grantId,
     });
     const latencyMs = Date.now() - started;
     if (run.approvalId) {
@@ -1595,7 +1708,7 @@ async function resumeUnderGate(
       });
       seg.textStart = state.texts.length;
       if (state.agentMessageId) seg.touched.add(state.agentMessageId);
-      return await runLoop(seg, state);
+      return await runDelegatedLoop(seg, state);
     } catch (err) {
       // never a thread stuck on a step nobody can answer: the step (and any
       // call of this turn still marked running) goes to error, the paused
