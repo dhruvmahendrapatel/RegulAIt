@@ -1,0 +1,9 @@
+{
+  "agent.spdx.json": 287,
+  "builder_agent.spdx.json": 287,
+  "install.spdx.json": 312,
+  "use_case.spdx.json": 287,
+  "use_case.supplied-by-tool.expect-fail.json": 287,
+  "with-datasets-declared.spdx.json": 422,
+  "with-datasets.draft.spdx.json": 401
+}

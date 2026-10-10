@@ -209,8 +209,8 @@ regexTarget = "secret"
 regexes = ['''^abcdefgh12345678$''', '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U$''']
 
 [[allowlists]]
-description = "ADR-0189 B3 leak tests: synthetic secret-shaped canaries (sk-live-CANARY…, token=…CANARY) that prove the AI BOM never exports them. Scoped to this one test file and to matches containing CANARY."
+description = "ADR-0189 B3 leak tests: synthetic secret-shaped canaries (sk-live-CANARY…, token=…CANARY) that prove the AI BOM never exports them. B5 adds its SPDX leak tests; B9 its SPDX-field validator and route tests. Scoped to these test files and to matches containing CANARY."
 condition = "AND"
-paths = ['''^packages/shared/src/bom/ai-bom\.test\.ts$''']
+paths = ['''^packages/shared/src/bom/ai-bom\.test\.ts$''', '''^packages/shared/src/bom/ai-bom-spdx\.test\.ts$''', '''^packages/shared/src/bom/ai-bom-spdx-fields\.test\.ts$''', '''^apps/gateway/src/zz-adr0189-b9-spdx-fields\.test\.ts$''']
 regexTarget = "match"
 regexes = ['''CANARY''']
