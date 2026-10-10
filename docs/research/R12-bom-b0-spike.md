@@ -168,9 +168,17 @@ with Ed25519 under a synthetic fixed-seed key. Ed25519 is deterministic, so the 
 The fixtures are [`records-a.json`](../../spikes/bom-b0/fixtures/records-a.json) and `records-b.json`. B holds the
 same facts with every array reversed and every key order reversed, which models a second replica or machine.
 
+The cross-version run was first made on the original fixtures (A and B, Node v20.20.2, v21.7.3 and v22.22.2, each in
+a fresh process (6 runs), plus twice in-process); every row matched. The review rounds in §10 to §14 changed the
+fixtures and the renderer, so the hashes changed with them. The values below are the final ones, from the tenth
+round (§14, `npm run test:offline`, 44 tests, all passing):
+
 | Run | native | CycloneDX 1.7 | CycloneDX 1.6 | SPDX 3.0.1 | signature |
 |---|---|---|---|---|---|
-| A and B, Node v20.20.2, v21.7.3 and v22.22.2, each in a fresh process (6 runs), plus twice in-process | `cdf0c876…d3cc` | `c9a367e3…1ee5` | `1d451d5a…023e` | `e3dede3a…bf91` | `n9ZXFfLc…S6kcBA==` |
+| A and B, final fixtures | `2663180c…f6b64c` | `b978c93a…f1ed76` | `9db1e936…681f62` | `14b380aa…0a3b` | `7csMwSO2…zRMpAQ==` |
+
+The first run's values (`cdf0c876…d3cc`, `c9a367e3…1ee5`, `1d451d5a…023e`, `e3dede3a…bf91`, `n9ZXFfLc…S6kcBA==`) are
+kept in the history of PR #265.
 
 The full hashes are in [`evidence/sample.sha256.json`](../../spikes/bom-b0/evidence/sample.sha256.json), and the
 renderings are in `evidence/sample.*.json`.
@@ -204,8 +212,9 @@ holds 23 packages and every wheel hash, and run under `unshare -n`. B5 still has
 
 Results ([`evidence/spdx3-validate-offline.txt`](../../spikes/bom-b0/evidence/spdx3-validate-offline.txt)):
 
-- The sample conforms: 179 triples, 0 schema errors, 0 SHACL errors. The stock online CLI agrees (exit 0).
-- A negative control, `ai_AIPackage.suppliedBy` pointing at a `Tool`, **passes Ajv's JSON schema** and fails SHACL
+- The sample conforms: 177 triples on the final fixtures (179 on the first ones), 0 schema errors, 0 SHACL errors. The
+  stock online CLI agrees (exit 0).
+- A negative control (179 triples), `ai_AIPackage.suppliedBy` pointing at a `Tool`, **passes Ajv's JSON schema** and fails SHACL
   with `sh:ClassConstraintComponent`. The stock CLI also fails it (exit 1).
 
 So JSON-schema validation in the product is necessary but not sufficient for SPDX, and the CI SHACL step is not
