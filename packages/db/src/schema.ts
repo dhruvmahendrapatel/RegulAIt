@@ -3806,6 +3806,14 @@ export const orgSettings = pgTable(
     engineSensitiveSetApproval: boolean("engine_sensitive_set_approval").notNull().default(true),
     /** B5-M (migration 0175): the largest model-artifact upload, in MiB; larger relaxes it */
     modelArtifactMaxMegabytes: integer("model_artifact_max_megabytes").notNull().default(512),
+    /** ADR-0187 decision 127 (migration 0176): what one uploader may keep stored, in MiB and artifacts; larger relaxes it */
+    modelArtifactUploaderQuotaMegabytes: integer("model_artifact_uploader_quota_megabytes").notNull().default(2048),
+    modelArtifactUploaderQuotaCount: integer("model_artifact_uploader_quota_count").notNull().default(20),
+    /** what the whole deployment may keep stored, in MiB and artifacts; larger relaxes it */
+    modelArtifactOrgQuotaMegabytes: integer("model_artifact_org_quota_megabytes").notNull().default(20480),
+    modelArtifactOrgQuotaCount: integer("model_artifact_org_quota_count").notNull().default(200),
+    /** an artifact nothing cites or is scanning is deleted this many days after upload; longer relaxes it */
+    modelArtifactRetentionDays: integer("model_artifact_retention_days").notNull().default(30),
 
     // --- compaction behaviour ----------------------------------------------
     compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
@@ -4434,6 +4442,11 @@ export const orgSettings = pgTable(
       sql`${t.engineRawReportRetentionDays} BETWEEN 1 AND 3650`,
     ),
     check("org_settings_model_artifact_max_megabytes_check", sql`${t.modelArtifactMaxMegabytes} BETWEEN 1 AND 8192`),
+    check("org_settings_model_artifact_uploader_quota_megabytes_check", sql`${t.modelArtifactUploaderQuotaMegabytes} BETWEEN 1 AND 1048576`),
+    check("org_settings_model_artifact_uploader_quota_count_check", sql`${t.modelArtifactUploaderQuotaCount} BETWEEN 1 AND 100000`),
+    check("org_settings_model_artifact_org_quota_megabytes_check", sql`${t.modelArtifactOrgQuotaMegabytes} BETWEEN 1 AND 10485760`),
+    check("org_settings_model_artifact_org_quota_count_check", sql`${t.modelArtifactOrgQuotaCount} BETWEEN 1 AND 1000000`),
+    check("org_settings_model_artifact_retention_days_check", sql`${t.modelArtifactRetentionDays} BETWEEN 1 AND 3650`),
   ],
 );
 
@@ -11847,6 +11860,36 @@ export const modelArtifacts = pgTable(
     check("model_artifacts_format_check", sql`${t.format} IN (${sql.raw(ARTIFACT_FORMATS.map((f) => `'${f}'`).join(", "))})`),
     check("model_artifacts_storage_key_check", sql`${t.storageKey} = 'sha256/' || ${t.sha256}`),
     index("model_artifacts_sha256_idx").on(t.sha256),
+    // ADR-0187 decision 127 (migration 0176): the per-uploader quota sums by uploader
+    index("model_artifacts_uploader_idx").on(t.uploadedByUserId),
+  ],
+);
+
+/**
+ * ADR-0187 decision 127 (migration 0176): a stored object waiting to be deleted. Written in the
+ * transaction that removes the last artifact row naming the key (or ahead of an upload's object write);
+ * the object is deleted after that commits, under the storage lock, only while no row names the key.
+ * A failed delete keeps the row; the retention sweep retries it.
+ */
+export const modelArtifactObjectDeletions = pgTable(
+  "model_artifact_object_deletions",
+  {
+    storageKey: text("storage_key").primaryKey(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    /** not attempted before this (an upload's write-ahead record waits for the upload to finish) */
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull().defaultNow(),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+  },
+  (t) => [
+    check("model_artifact_object_deletions_key_check", sql`${t.storageKey} ~ '^sha256/[0-9a-f]{64}$'`),
+    check("model_artifact_object_deletions_attempts_check", sql`${t.attempts} >= 0`),
+    check(
+      "model_artifact_object_deletions_error_code_check",
+      sql`${t.lastErrorCode} IS NULL OR ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$'`,
+    ),
+    index("model_artifact_object_deletions_due_idx").on(t.notBefore),
   ],
 );
 
@@ -12009,7 +12052,8 @@ export const artifactScans = pgTable(
     index("artifact_scans_artifact_idx").on(t.artifactId),
     check("artifact_scans_sha256_check", sql`${t.artifactSha256} ~ '^[0-9a-f]{64}$'`),
     // B5-M (migration 0175): clean only for a verified non-executable format; one scan per run
-    check("artifact_scans_clean_format_check", sql`${t.verdict} <> 'clean' OR ${t.format} = 'safetensors'`),
+    // migration 0176 (PR #212 review [4235322386]): a NULL format fails the clean branch explicitly
+    check("artifact_scans_clean_format_check", sql`${t.verdict} <> 'clean' OR (${t.format} IS NOT NULL AND ${t.format} = 'safetensors')`),
     uniqueIndex("artifact_scans_engine_run_unique").on(t.engineRunId).where(sql`${t.engineRunId} IS NOT NULL`),
   ],
 );

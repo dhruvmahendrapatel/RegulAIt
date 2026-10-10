@@ -11,6 +11,7 @@ import {
   ARTIFACT_FORMATS,
   deriveArtifactScanVerdict,
   detectArtifactFormat,
+  hdf5SuperblockOffsets,
   mapModelscanReport,
   modelscanArtifactName,
   type ArtifactFormat,
@@ -101,6 +102,23 @@ describe("B5-M format detection: from the bytes, never the name", () => {
     expect(await detect(Buffer.from([0x78, 0x9c, 1, 2]))).toBe("compressed");
     expect(await detect(Buffer.alloc(0))).toBe("empty");
     expect(await detect(protocol0MaliciousPickle())).toBe("unrecognised");
+  });
+
+  it("PR #212 review [4235322383]: an HDF5 superblock behind any power-of-two user block is HDF5, up to the file size", async () => {
+    const SIG = Buffer.from([0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const at = (offset: number, size = offset + 64) => {
+      const b = Buffer.alloc(size, 0x20);
+      SIG.copy(b, offset);
+      return b;
+    };
+    for (const offset of [0, 512, 2048, 4096, 65536, 1 << 20, 1 << 22]) expect(await detect(at(offset)), `offset ${offset}`).toBe("keras_h5");
+    // not a power of two: not a superblock position
+    expect(await detect(at(3000))).not.toBe("keras_h5");
+    // the probe's bound is the file size: every power of two whose signature fits, no further
+    expect(hdf5SuperblockOffsets(7)).toEqual([]);
+    expect(hdf5SuperblockOffsets(4104)).toEqual([0, 512, 1024, 2048, 4096]);
+    expect(hdf5SuperblockOffsets(4103)).toEqual([0, 512, 1024, 2048]);
+    expect(hdf5SuperblockOffsets(8 * 1024 ** 3).length).toBe(25);
   });
 
   it("a safetensors header must account for the data exactly", async () => {

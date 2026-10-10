@@ -164,6 +164,20 @@ const SIG = {
 } as const;
 
 /**
+ * Where an HDF5 superblock may start: offset 0, then every power of two from 512 (a user block of any
+ * power-of-two size, as the HDF5 library itself searches) while the 8-byte signature still fits in the
+ * file. PR #212 review [4235322383] (ADR-0187 decision 131): the probe stopped at 2048, so a header behind
+ * a larger user block read `unrecognised`. The bound is THE FILE SIZE, so every offset the library
+ * would accept is probed; that is at most 24 reads of 8 bytes for the 8 GiB upload ceiling (2^33),
+ * and never more than 54 for any size a reader can report.
+ */
+export function hdf5SuperblockOffsets(size: number): number[] {
+  const out = size >= 8 ? [0] : [];
+  for (let at = 512; at + 8 <= size && at <= Number.MAX_SAFE_INTEGER / 2; at *= 2) out.push(at);
+  return out;
+}
+
+/**
  * What the artifact really is, from its bytes. Order matters: a pickle is recognised before anything
  * that could be parsed out of its tail; a zip is classified from its central directory; safetensors
  * only when its header verifies. No extension is consulted anywhere.
@@ -177,8 +191,8 @@ export async function detectArtifactFormat(reader: ArtifactReader): Promise<Arti
     return { format: "pickle", evidence: `pickle PROTO opcode, protocol ${head[1]}` };
   }
   if (bytesEq(head, 0, SIG.zipLocal) || bytesEq(head, 0, SIG.zipEmpty)) return classifyZip(reader);
-  for (const at of [0, 512, 1024, 2048]) {
-    if (at === 0 ? bytesEq(head, 0, SIG.hdf5) : at + 8 <= reader.size && bytesEq(await reader.read(at, 8), 0, SIG.hdf5)) {
+  for (const at of hdf5SuperblockOffsets(reader.size)) {
+    if (at === 0 ? bytesEq(head, 0, SIG.hdf5) : bytesEq(await reader.read(at, 8), 0, SIG.hdf5)) {
       return { format: "keras_h5", evidence: `HDF5 superblock signature at offset ${at}` };
     }
   }

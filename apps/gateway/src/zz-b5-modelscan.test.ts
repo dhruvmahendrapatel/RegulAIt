@@ -171,6 +171,10 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" });
+  // this suite uploads more artifacts as one person than the strict per-uploader quota (20, ADR-0187
+  // decision 127) allows; the quotas themselves are proven in zz-b5-modelscan-storage.test.ts.
+  // afterAll restores every batch-5 setting to its strict default.
+  await db.update(orgSettings).set({ modelArtifactUploaderQuotaCount: 1000 }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   storeDir = await mkdtemp(path.join(tmpdir(), "b5m-store-"));
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), engines: { manifest: MANIFEST }, artifactStore: new FileArtifactStore(storeDir) });
   await app.ready();
