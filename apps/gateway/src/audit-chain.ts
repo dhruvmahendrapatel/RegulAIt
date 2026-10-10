@@ -74,7 +74,7 @@ import {
   type ChainedAuditRow,
 } from "@regulait/shared";
 
-import { anchorTimestampSummary, anchorTimestamper as defaultAnchorTimestamper } from "./audit-timestamp.js";
+import { anchorTimestampSummary, anchorRecordFromRow, anchorTimestamper as defaultAnchorTimestamper } from "./audit-timestamp.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -827,7 +827,7 @@ export async function flushPendingAnchors(
       rowHash: row.rowHash,
       headAt: row.headAt.toISOString(),
       algorithm: row.algorithm,
-      payloadVersion: AUDIT_PAYLOAD_VERSION,
+      payloadVersion: anchorRecordFromRow(row).payloadVersion,
       capturedAt: row.createdAt.toISOString(),
     };
     const res = await flushAnchorRow(db, sink, { id: row.id, record });

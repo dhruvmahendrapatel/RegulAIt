@@ -83,7 +83,8 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
   return db.transaction(async (tx) => {
     // One writer across capture, scheduled retry and manual retry. No network
     // attempt or nonce can overwrite a concurrently granted token.
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(${ANCHOR_TIMESTAMP_LOCK_KEY})`);
+    const lock=await tx.execute(sql`select pg_try_advisory_xact_lock(hashtext(${id})) as acquired`);
+    if(!(lock.rows[0] as {acquired:boolean}).acquired)return {state:"timestamp_in_progress" as const,attempted:0,granted:0,failed:0};
     const [row] = await tx.select().from(auditAnchors).where(eq(auditAnchors.id, id));
     if (!row) return { state: "missing" as const, attempted: 0, granted: 0, failed: 0 };
     if (row.tsaStatus === "granted") return { state: "granted" as const, attempted: 0, granted: 0, failed: 0 };
@@ -93,6 +94,7 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
     const org = await loadOrgSettings(tx as unknown as Db);
     if (org.auditAnchorTimestampMode === "off") return { state: "off" as const, attempted: 0, granted: 0, failed: 0 };
     if (!options.force && (row.tsaAttempts >= MAX_ATTEMPTS || (row.tsaNextAttemptAt && row.tsaNextAttemptAt > now))) return { state: "backoff" as const, attempted: 0, granted: 0, failed: 0 };
+    anchorRecordFromRow(row);
     let request: ReturnType<typeof timestampRequest> | undefined;
     let tsaUrl: string | undefined;
     try {
@@ -108,10 +110,13 @@ async function timestampAnchor(db: Db, id: string, now: Date, options: { record?
       }
       request = timestampRequest(record);
       if (config.policyOid) request.request.reqPolicy = config.policyOid;
-      const fetch = createGuardedFetch({ allowList: await loadEgressAllowList(tx as unknown as Db), providerAllowsPlaintextHttp: false });
+      const signal=AbortSignal.timeout(DEADLINE_MS);
+      const fetch = createGuardedFetch({ beforeSend:async()=>signal.throwIfAborted(), allowList: await loadEgressAllowList(tx as unknown as Db), providerAllowsPlaintextHttp: false });
       const sentAt=new Date();
-      const response = await fetch(config.url, { method: "POST", headers: { "content-type": "application/timestamp-query", accept: "application/timestamp-reply" }, body: new Uint8Array(request.request.toSchema().toBER(false)), signal: AbortSignal.timeout(DEADLINE_MS) });
-      const checked = await verifyTimestampResponse(await boundedResponse(response), { bytes: request.bytes, nonceHex: request.nonceHex, trust: config.trust, ...(config.policyOid ? { policyOid: config.policyOid } : {}), now: new Date(), sentAt });
+      let onAbort:()=>void=()=>{};
+      const aborted=new Promise<never>((_,reject)=>{onAbort=()=>reject(signal.reason);signal.addEventListener("abort",onAbort,{once:true});if(signal.aborted)onAbort();});
+      const bytes=await Promise.race([(async()=>await boundedResponse(await fetch(config.url, { method: "POST", headers: { "content-type": "application/timestamp-query", accept: "application/timestamp-reply" }, body: new Uint8Array(request.request.toSchema().toBER(false)), signal: signal })))(),aborted]).finally(()=>signal.removeEventListener("abort",onAbort));
+      const checked = await verifyTimestampResponse(bytes, { bytes: request.bytes, nonceHex: request.nonceHex, trust: config.trust, ...(config.policyOid ? { policyOid: config.policyOid } : {}), now: new Date(), sentAt });
       await tx.update(auditAnchors).set({ tsaStatus: "granted", tsaUrl: config.url, tsaToken: timestampStorage(record.payloadVersion,checked.tokenBase64), tsaGenTime: checked.genTime, tsaSerial: checked.serial, tsaPolicyOid: checked.policyOid, tsaMessageImprint: checked.imprint, tsaNonce: request.nonceHex, tsaAttempts: row.tsaAttempts + 1, tsaNextAttemptAt: null, tsaLastError: null }).where(eq(auditAnchors.id, id));
       return { state: "granted" as const, attempted: 1, granted: 1, failed: 0 };
     } catch (error) {
@@ -147,6 +152,7 @@ export function registerAuditTimestampRoutes(app: FastifyInstance, db: Db): void
     const { anchorId } = req.params as { anchorId: string };
     if (!validId(anchorId)) return reply.status(400).send({ error: "invalid_anchor_id" });
     const out = await timestampAnchor(db, anchorId, new Date(), { force: true });
+    if (out.state === "timestamp_in_progress") return reply.status(409).send({error:"timestamp_in_progress"});
     if (out.state === "missing") return reply.status(404).send({ error: "anchor_not_found" });
     const [row] = await db.select().from(auditAnchors).where(eq(auditAnchors.id, anchorId));
     await db.insert(auditLog).values({ userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000", objectType: "audit_chain", objectId: anchorId, effect: out.state === "granted" ? "allow" : "deny", ruleId: "audit-anchor-timestamp-retried", ruleChain: [], reason: "Admin requested anchor timestamp retry", detail: { state: out.state, attempted: out.attempted } });
@@ -159,6 +165,6 @@ export function registerAuditTimestampRoutes(app: FastifyInstance, db: Db): void
     if (!row) return reply.status(404).send({ error: "anchor_not_found" });
     if (row.tsaStatus !== "granted" || !row.tsaToken) return reply.status(409).send({ error: "anchor_not_timestamped" });
     try { return reply.type("application/timestamp-reply").header("cache-control", "no-store").send(timestampReplyBytes(storedTimestamp(row.tsaToken)?.replyDer ?? row.tsaToken)); }
-    catch { return reply.status(503).send({ error: "timestamp_token_unreadable" }); }
+    catch { return reply.status(500).send({ error: "timestamp_token_unreadable" }); }
   });
 }

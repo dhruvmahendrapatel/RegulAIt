@@ -1,6 +1,9 @@
 /** RFC 3161 validation. No HTTP, AIA, OCSP or CRL retrieval occurs here. */
 import { createHash } from "node:crypto";
 import * as asn1 from "asn1js";
+import { ESSCertIDv2, SigningCertificate, SigningCertificateV2 } from "@peculiar/asn1-ess";
+import { AlgorithmIdentifier as EssAlgorithmIdentifier } from "@peculiar/asn1-x509";
+import { AsnProp, AsnConvert } from "@peculiar/asn1-schema";
 import { Certificate, ContentInfo, ExtKeyUsage, PKIStatusInfo, RelativeDistinguishedNames, SignedData, TSTInfo, TimeStampResp } from "pkijs";
 
 export const TSA_SHA256_OID = "2.16.840.1.101.3.4.2.1";
@@ -24,42 +27,32 @@ export function parseTimestampTrustBundle(pem: string): Certificate[] {
   try { return matches.map((match) => new Certificate({ schema: derSchema(Buffer.from(match[1]!.replace(/\s/g, ""), "base64")) })); }
   catch { return refuse("timestamp_trust_bundle_invalid"); }
 }
-function children(block: asn1.BaseBlock): asn1.BaseBlock[] {
-  if (!(block instanceof asn1.Sequence)) refuse("timestamp_ess_invalid");
-  return block.valueBlock.value;
-}
+// asn1-ess 2.10.0 represents the default algorithm as optional ANY. With
+// OpenSSL's omitted SHA-256 it consumes certHash instead. Preserve the library
+// schema, making this one optional field a typed SEQUENCE before decoding.
+class TimestampEssCertIdV2 extends ESSCertIDv2 {}
+AsnProp({type:EssAlgorithmIdentifier,optional:true})(TimestampEssCertIdV2.prototype,"hashAlgorithm");
+class TimestampSigningCertificateV2 extends SigningCertificateV2 {}
+AsnProp({type:TimestampEssCertIdV2,repeated:"sequence"})(TimestampSigningCertificateV2.prototype,"certs");
 function essBinding(cms: SignedData, signer: Certificate) {
-  const attrs = cms.signerInfos[0]?.signedAttrs?.attributes ?? [];
-  const bindings = attrs.filter((attr) => attr.type === ESS_V1 || attr.type === ESS_V2);
-  if (bindings.length !== 1 || bindings[0]!.values.length !== 1) refuse("timestamp_ess_missing_or_duplicate");
-  const attr = bindings[0]!;
-  const root = children(attr.values[0]!);
-  const certs = root[0] && children(root[0]);
-  if (!certs?.length) refuse("timestamp_ess_invalid");
-  const first = children(certs[0]!);
-  let algorithm = attr.type === ESS_V1 ? "sha1" : "sha256", index = 0;
-  if (attr.type === ESS_V2 && first[0] instanceof asn1.Sequence) {
-    const id = children(first[0])[0];
-    if (!(id instanceof asn1.ObjectIdentifier)) refuse("timestamp_ess_invalid");
-    const algorithms: Record<string, string> = { [TSA_SHA256_OID]: "sha256", "2.16.840.1.101.3.4.2.2": "sha384", "2.16.840.1.101.3.4.2.3": "sha512" };
-    algorithm = algorithms[id.valueBlock.toString()] ?? refuse("timestamp_ess_hash_unsupported"); index++;
-  }
-  const hash = first[index++];
-  if (!(hash instanceof asn1.OctetString) || !Buffer.from(hash.valueBlock.valueHexView).equals(createHash(algorithm).update(Buffer.from(signer.toSchema(true).toBER(false))).digest())) refuse("timestamp_ess_certificate_mismatch");
-  if (first[index]) {
-    const issuerSerial = children(first[index++]!);
-    if (issuerSerial.length !== 2 || !(issuerSerial[1] instanceof asn1.Integer) || !issuerSerial[1].isEqual(signer.serialNumber)) refuse("timestamp_ess_issuer_mismatch");
-    const names = children(issuerSerial[0]!);
-    const match = names.some((name) => {
-      if (!(name instanceof asn1.Constructed) || name.idBlock.tagClass !== 3 || name.idBlock.tagNumber !== 4 || name.valueBlock.value.length !== 1) return false;
-      return new RelativeDistinguishedNames({ schema: name.valueBlock.value[0]! }).isEqual(signer.issuer);
-    });
-    if (!match) refuse("timestamp_ess_issuer_mismatch");
-  }
-  if (index !== first.length) refuse("timestamp_ess_invalid");
+ const bindings=(cms.signerInfos[0]?.signedAttrs?.attributes??[]).filter(attr=>attr.type===ESS_V1||attr.type===ESS_V2);
+ if(bindings.length!==1||bindings[0]!.values.length!==1)refuse("timestamp_ess_missing_or_duplicate");
+ const attr=bindings[0]!;
+ const der=attr.values[0]!.toBER(false);
+ const certs=attr.type===ESS_V1?AsnConvert.parse(der,SigningCertificate).certs:AsnConvert.parse(der,TimestampSigningCertificateV2).certs;
+ const first=certs[0];if(!first)refuse("timestamp_ess_invalid");
+ const oid=first instanceof ESSCertIDv2?first.hashAlgorithm?.algorithm??TSA_SHA256_OID:null;
+ const hashes:Record<string,string>={[TSA_SHA256_OID]:"sha256","2.16.840.1.101.3.4.2.2":"sha384","2.16.840.1.101.3.4.2.3":"sha512"};
+ const algorithm=attr.type===ESS_V1?"sha1":hashes[oid!]??refuse("timestamp_ess_hash_unsupported");
+ if(!Buffer.from(first.certHash.buffer).equals(createHash(algorithm).update(Buffer.from(signer.toSchema(true).toBER(false))).digest()))refuse("timestamp_ess_certificate_mismatch");
+ if(first.issuerSerial){
+  const issuer=first.issuerSerial;
+  if(!new asn1.Integer({valueHex:issuer.serialNumber}).isEqual(signer.serialNumber))refuse("timestamp_ess_issuer_mismatch");
+  if(!issuer.issuer.some(name=>name.directoryName&&new RelativeDistinguishedNames({schema:derSchema(new Uint8Array(AsnConvert.serialize(name.directoryName)))}).isEqual(signer.issuer)))refuse("timestamp_ess_issuer_mismatch");
+ }
 }
 
-export interface TimestampRequestFacts { bytes: Uint8Array; nonceHex: string; trust: Certificate[]; policyOid?: string; now: Date; sentAt?: Date }
+export interface TimestampRequestFacts { bytes: Uint8Array; nonceHex: string; trust: Certificate[]; policyOid?: string; now: Date; sentAt: Date }
 export async function verifyTimestampResponse(der: Uint8Array, facts: TimestampRequestFacts) {
   try {
     const response = new TimeStampResp({ schema: derSchema(der) });
@@ -72,7 +65,7 @@ export async function verifyTimestampResponse(der: Uint8Array, facts: TimestampR
     if (info.version !== 1 || info.messageImprint.hashAlgorithm.algorithmId !== TSA_SHA256_OID || Buffer.from(info.messageImprint.hashedMessage.valueBlock.valueHexView).toString("hex") !== imprint) refuse("timestamp_imprint_mismatch");
     if (!info.nonce || Buffer.from(info.nonce.valueBlock.valueHexView).toString("hex") !== facts.nonceHex) refuse("timestamp_nonce_mismatch");
     if (facts.policyOid && info.policy !== facts.policyOid) refuse("timestamp_policy_mismatch");
-    if (!Number.isFinite(info.genTime.getTime()) || info.genTime.getTime() > facts.now.getTime() + 300_000 || (facts.sentAt !== undefined && (!Number.isFinite(facts.sentAt.getTime()) || info.genTime.getTime() < facts.sentAt.getTime() - 300_000))) refuse("timestamp_generation_time_invalid");
+    if (!Number.isFinite(info.genTime.getTime()) || info.genTime.getTime() > facts.now.getTime() + 300_000 || (!facts.sentAt || !Number.isFinite(facts.sentAt.getTime()) || info.genTime.getTime() < facts.sentAt.getTime() - 300_000)) refuse("timestamp_generation_time_invalid");
     // Chain at the signed generation time. All issuers must be in the token or
     // explicitly configured trust bundle. Revocation is not claimed: this
     // air-gapped validator never contacts certificate-controlled URLs.

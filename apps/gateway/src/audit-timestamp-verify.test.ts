@@ -51,7 +51,7 @@ beforeAll(() => {
   const request = timestampRequest(record);
   request.request.reqPolicy = "1.2.3.4.5.6";
   response = issue(request);
-  facts = { bytes: request.bytes, nonceHex: request.nonceHex, trust, policyOid: "1.2.3.4.5.6", now: new Date() };
+  facts = { bytes: request.bytes, nonceHex: request.nonceHex, trust, policyOid: "1.2.3.4.5.6", now: new Date(), sentAt: new Date() };
 }, 30_000);
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -63,6 +63,9 @@ describe("RFC 3161 independent issuer verification", () => {
     const rebuilt = timestampReplyBytes(result.tokenBase64);
     expect(new TimeStampResp({ schema: derSchema(rebuilt) }).status.status).toBe(0);
     expect((await verifyTimestampResponse(rebuilt, facts)).imprint).toBe(result.imprint);
+  });
+  it("requires the request time at runtime too",async()=>{
+    await expect(verifyTimestampResponse(response,{...facts,sentAt:undefined} as unknown as TimestampRequestFacts)).rejects.toThrow("timestamp_generation_time_invalid");
   });
   it("R22-03: refuses a signed response older than the request window",async()=>{
     const sentAt=new Date(facts.now.getTime()+301000);

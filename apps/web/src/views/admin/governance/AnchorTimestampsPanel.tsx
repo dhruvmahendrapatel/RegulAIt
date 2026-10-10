@@ -23,7 +23,7 @@ export function AnchorTimestampsPanel() {
           return value.status === "not_configured" ? "Not timestamped: no authority configured" : value.status === "pending" ? "Waiting for anchor storage or timestamp retry" : "Timestamp attempt failed";
         } },
         { key: "actions", header: "Actions", render: (row) => <div className={v.stack}>
-          <Button disabled={act.busy || row.status !== "flushed" || row.timestamp?.status === "granted"} onClick={() => void act.run(async () => { await api.post(`/v1/audit/anchors/${row.id}/timestamp`); await anchors.refetch(); }, "Anchor timestamp checked").then(() => void anchors.refetch())}>Retry timestamp for anchor {row.seq}</Button>
+          <Button disabled={act.busy || row.status !== "flushed" || (row.timestamp?.status === "granted" || row.timestamp?.status === "not_configured")} onClick={() => void act.run(async () => { await api.post(`/v1/audit/anchors/${row.id}/timestamp`); await anchors.refetch(); }, "Anchor timestamp checked").then(() => void anchors.refetch())}>Retry timestamp for anchor {row.seq}</Button>
           <Button disabled={act.busy || row.timestamp?.status !== "granted" || !row.timestamp.verified} onClick={() => void act.run(async () => { await downloadCsv(`/v1/audit/anchors/${row.id}/timestamp.tsr`, `anchor-${row.seq}.tsr`, (message) => { throw new Error(message); }); }, "Timestamp reply downloaded")}>Download timestamp for anchor {row.seq}</Button>
         </div> },
       ]} /> : anchors.data ? <p>Anchor timestamp data is not reported by this gateway.</p> : null}

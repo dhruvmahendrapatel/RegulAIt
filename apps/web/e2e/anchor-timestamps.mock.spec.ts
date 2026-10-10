@@ -23,6 +23,7 @@ async function setup(page: Page, state: "not_configured" | "failed" | "pending" 
 for (const [state, text] of [["not_configured", "Not timestamped: no authority configured"], ["pending", "Waiting for anchor storage or timestamp retry"], ["failed", "Timestamp attempt failed"]] as const) test(`${state} does not claim a verified timestamp`, async ({ page }) => {
   await setup(page, state);
   await expect(page.getByText(text, { exact: true })).toBeVisible();
+  if(state==="not_configured")await expect(page.getByRole("button",{name:"Retry timestamp for anchor 4"})).toBeDisabled();
   await expect(page.getByRole("button", { name: "Download timestamp for anchor 4" })).toBeDisabled();
   await expect(page.getByText(/Verified at issuance/)).toHaveCount(0);
 });
