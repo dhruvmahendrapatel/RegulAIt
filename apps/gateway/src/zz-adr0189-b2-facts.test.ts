@@ -62,6 +62,7 @@ import { buildApp } from "./app.js";
 import { assertReceiptEmitterBootable, ReceiptV2BootError, receiptV2PayloadFor, runDecisionReceiptSignSweep } from "./decision-receipts.js";
 import { startInProcessChain, toolScopeItems } from "./in-process-delegation.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { GOVERNANCE_POLICY_CHANGED_RULE_ID, setDecisionRecheckHookForTest } from "./governed-evaluate.js";
 import { executeGovernedProtocolCall } from "./mcp-protocol.js";
 import { grantAgentOwnGrantsForTest } from "./testing/agent-own-grants.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
@@ -468,6 +469,133 @@ describe("every governed path writes its facts through the one shared writer, in
     const haltedRow = rows.find((x) => x.facts.policy!.killSwitch === "engaged");
     expect(haltedRow, "the halted decision records the kill switch engaged").toBeDefined();
     expect(haltedRow!.row.effect).toBe("deny");
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("the MCP decision commit re-checks the epoch and the kill switch it was decided under (review round 2)", () => {
+  type Path = { name: string; toolName: string; call: (userId: string) => Promise<{ kind: string; decision?: { ruleId: string } }> };
+  const paths: Path[] = [
+    { name: "MCP tool call", toolName: "get_time", call: (u) => executeGovernedToolCall(db, undefined, { userId: u, serverId, toolName: "get_time", arguments: {} }) },
+    { name: "MCP protocol call", toolName: "mcp:prompts", call: (u) => executeGovernedProtocolCall(db, { userId: u, serverId, method: "prompts/list", params: {} }) },
+  ];
+  /** run `fn` once, between evaluation and the decision's commit, on another connection */
+  const between = (fn: () => Promise<void>) => {
+    let ran = false;
+    setDecisionRecheckHookForTest(async () => {
+      if (ran) return;
+      ran = true;
+      await fn();
+    });
+    return () => ran;
+  };
+  const decisionsSince = async (from: number, userId: string) => (await auditSince(from)).filter((r) => r.userId === userId && isReceiptEligibleAuditRow(r));
+
+  for (const path of paths) {
+    it(`${path.name}: the epoch moving between evaluation and commit refuses the call, and nothing is recorded with the stale epoch`, async () => {
+      const u = await mkUser(`recheck-epoch-${path.toolName.replace(/[^a-z]/g, "")}`);
+      const other = await mkUser(`recheck-other-${path.toolName.replace(/[^a-z]/g, "")}`);
+      expect((await inject("POST", "/v1/grants/tools", AUTH, { userId: u.id, serverId, toolName: path.toolName })).statusCode).toBeLessThan(300);
+      const [org] = await db.select({ m: orgSettings.mcpProtocolMethods }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      await db.update(orgSettings).set({ mcpProtocolMethods: ["prompts/list"] }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      try {
+        // CONTROL: nothing moves; the decision is written with the epoch and kill-switch state it ran under
+        let from = await tipSeq();
+        const ok = await path.call(u.id);
+        expect(ok.kind).toBe("allowed");
+        const [allowed] = await decisionsSince(from, u.id);
+        expect((await factsOf(allowed!.id))!.facts).toMatchObject({ policy: { governancePolicyEpoch: await currentEpoch(), killSwitch: "off" } });
+
+        // a policy write (another person's grant, which advances the epoch) lands between evaluation and commit
+        from = await tipSeq();
+        const epochBefore = await currentEpoch();
+        const fired = between(async () => {
+          const g = await inject("POST", "/v1/grants/tools", AUTH, { userId: other.id, serverId, toolName: "write_note" });
+          expect(g.statusCode).toBeLessThan(300);
+        });
+        const refused = await path.call(u.id);
+        expect(fired()).toBe(true);
+        expect(await currentEpoch()).toBeGreaterThan(epochBefore);
+        expect(refused.kind).toBe("denied");
+        expect(refused.decision?.ruleId).toBe(GOVERNANCE_POLICY_CHANGED_RULE_ID);
+        expect(await decisionsSince(from, u.id), "no decision is recorded under the stale epoch").toEqual([]);
+
+        // re-submitted, it is decided afresh under the current epoch
+        setDecisionRecheckHookForTest(null);
+        from = await tipSeq();
+        expect((await path.call(u.id)).kind).toBe("allowed");
+        const [fresh] = await decisionsSince(from, u.id);
+        expect(((await factsOf(fresh!.id))!.facts as DecisionFacts).policy!.governancePolicyEpoch).toBe(await currentEpoch());
+      } finally {
+        setDecisionRecheckHookForTest(null);
+        await db.update(orgSettings).set({ mcpProtocolMethods: org!.m }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      }
+    });
+  }
+
+  it("MCP tool call: a deployment halt landing between evaluation and commit refuses the call; nothing pairs the old epoch with the new kill switch", async () => {
+    const u = await mkUser("recheck-halt");
+    await grantUserTool(u.id, "get_time");
+    // the deployment dial (org_settings advances the epoch, migration 0120, so the halt cannot commit while the
+    // decision holds the epoch row FOR SHARE; landing before that lock, it is caught at the re-check)
+    const setMode = async (mode: "normal" | "halted") => {
+      await db.update(orgSettings).set({ executionMode: mode, executionModeReason: mode === "halted" ? "b2 recheck probe" : null }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    };
+    // CONTROL: the same call, nothing landing in between, is allowed
+    expect((await executeGovernedToolCall(db, undefined, { userId: u.id, serverId, toolName: "get_time", arguments: {} })).kind).toBe("allowed");
+    const from = await tipSeq();
+    const epochBefore = await currentEpoch();
+    const fired = between(async () => {
+      await setMode("halted");
+    });
+    try {
+      const refused = await executeGovernedToolCall(db, undefined, { userId: u.id, serverId, toolName: "get_time", arguments: {} });
+      expect(fired()).toBe(true);
+      expect(await currentEpoch(), "the halt is a policy write (0120 trigger)").toBeGreaterThan(epochBefore);
+      expect(refused.kind).toBe("denied");
+      expect(refused.kind === "denied" && refused.decision.ruleId).toBe(GOVERNANCE_POLICY_CHANGED_RULE_ID);
+      expect(await decisionsSince(from, u.id)).toEqual([]);
+      // re-submitted under the halt: decided afresh, refused, recorded with the kill switch engaged
+      setDecisionRecheckHookForTest(null);
+      const again = await executeGovernedToolCall(db, undefined, { userId: u.id, serverId, toolName: "get_time", arguments: {} });
+      expect(again.kind).toBe("denied");
+      const [row] = await decisionsSince(from, u.id);
+      expect(((await factsOf(row!.id))!.facts as DecisionFacts).policy).toMatchObject({ governancePolicyEpoch: await currentEpoch(), killSwitch: "engaged" });
+    } finally {
+      setDecisionRecheckHookForTest(null);
+      await setMode("normal");
+    }
+  });
+
+  it("MCP protocol call: a deployment halt landing between evaluation and commit refuses the call", async () => {
+    const u = await mkUser("recheck-proto-halt");
+    expect((await inject("POST", "/v1/grants/tools", AUTH, { userId: u.id, serverId, toolName: "mcp:prompts" })).statusCode).toBeLessThan(300);
+    const [org] = await db.select({ m: orgSettings.mcpProtocolMethods }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    await db.update(orgSettings).set({ mcpProtocolMethods: ["prompts/list"] }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    // the deployment dial (org_settings advances the epoch, migration 0120, so the halt cannot commit while the
+    // decision holds the epoch row FOR SHARE; landing before that lock, it is caught at the re-check)
+    const setMode = async (mode: "normal" | "halted") => {
+      await db.update(orgSettings).set({ executionMode: mode, executionModeReason: mode === "halted" ? "b2 recheck probe" : null }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    };
+    // CONTROL: the same call, nothing landing in between, is allowed
+    expect((await executeGovernedProtocolCall(db, { userId: u.id, serverId, method: "prompts/list", params: {} })).kind).toBe("allowed");
+    const from = await tipSeq();
+    const fired = between(async () => {
+      await setMode("halted");
+    });
+    try {
+      const epochBefore = await currentEpoch();
+      const refused = await executeGovernedProtocolCall(db, { userId: u.id, serverId, method: "prompts/list", params: {} });
+      expect(fired()).toBe(true);
+      expect(await currentEpoch(), "the halt is a policy write (0120 trigger)").toBeGreaterThan(epochBefore);
+      expect(refused.kind).toBe("denied");
+      expect(refused.kind === "denied" && refused.decision.ruleId).toBe(GOVERNANCE_POLICY_CHANGED_RULE_ID);
+      expect(await decisionsSince(from, u.id)).toEqual([]);
+    } finally {
+      setDecisionRecheckHookForTest(null);
+      await setMode("normal");
+      await db.update(orgSettings).set({ mcpProtocolMethods: org!.m }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
   });
 });
 

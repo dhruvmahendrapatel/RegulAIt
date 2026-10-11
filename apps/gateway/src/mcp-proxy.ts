@@ -59,7 +59,7 @@ import {
   runGuardrails,
   type DispatchGuardrails,
 } from "./guardrails.js";
-import { approvalTargetForServer, governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
+import { approvalTargetForServer, decisionPolicyStillCurrent, governedEvaluate, policyChangedDecision, type RetiredApproval } from "./governed-evaluate.js";
 import { decodeMcpBlobs, prepareMcpPiiAction, redactMcpResult, scannableMcpText } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
@@ -962,7 +962,11 @@ async function executeGovernedToolCallInner(
     // DIGEST, never the arguments: the audit log is not a place to put a
     // payload that may carry a secret, and the approver-facing rendering lives
     // scrubbed on the queue row instead.
-    await db.insert(auditLog).values({
+    // ADR-0189 B2: written only if the epoch and the kill-switch state it was decided under still hold, read in
+    // this transaction (`decisionPolicyStillCurrent`); otherwise refused, nothing written, nothing run
+    const recorded = await db.transaction(async (tx) => {
+      if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName }))) return false;
+      await tx.insert(auditLog).values({
       userId,
       serverId,
       toolName,
@@ -998,7 +1002,10 @@ async function executeGovernedToolCallInner(
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
+      });
+      return true;
     });
+    if (!recorded) return { kind: "denied", decision: policyChangedDecision() };
 
     if (decision.effect === "deny") return { kind: "denied", decision };
 
