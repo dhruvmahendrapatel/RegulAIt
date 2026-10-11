@@ -54,6 +54,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -213,10 +214,18 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  srv.closeAllConnections();
-  await new Promise<void>((r) => srv.close(() => r()));
-  await restoreSb2Gates();
-  await app.close();
+  // M-068: a pre-flight test withdraws and re-inserts the 127.0.0.1 entry (a new id),
+  // so it is removed by host. It goes first, while the app is open; its outcome is
+  // asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" });
+  try {
+    srv.closeAllConnections();
+    await new Promise<void>((r) => srv.close(() => r()));
+    await restoreSb2Gates();
+    await app.close();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 const scoreUrl = () => `http://127.0.0.1:${port}/score`;

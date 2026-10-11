@@ -58,6 +58,7 @@ import {
   SAML_MAX_CLOCK_SKEW_MINUTES,
   spEntityId,
 } from "./saml.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -345,6 +346,9 @@ const latestAudit = async (ruleId: string) => {
   return row ?? null;
 };
 
+// M-068: the loopback allow entry the lockout-guard case creates is global state on the
+// shared database; its id is recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -362,23 +366,30 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  // Providers go out through the DB rather than the API so the no-lockout
-  // guard can never refuse this file's own cleanup; the singleton is restored
-  // afterwards to exactly the row this file found.
-  if (createdSamlProviderIds.size > 0) {
-    await db.delete(samlProviders).where(inArray(samlProviders.id, [...createdSamlProviderIds]));
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    // Providers go out through the DB rather than the API so the no-lockout
+    // guard can never refuse this file's own cleanup; the singleton is restored
+    // afterwards to exactly the row this file found.
+    if (createdSamlProviderIds.size > 0) {
+      await db.delete(samlProviders).where(inArray(samlProviders.id, [...createdSamlProviderIds]));
+    }
+    if (createdOidcProviderIds.size > 0) {
+      await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdOidcProviderIds]));
+    }
+    if (orgSettingsSnapshot) {
+      await db
+        .update(orgSettings)
+        .set(orgSettingsSnapshot)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+    await removeLicenseFixture(db);
+    await app?.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  if (createdOidcProviderIds.size > 0) {
-    await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdOidcProviderIds]));
-  }
-  if (orgSettingsSnapshot) {
-    await db
-      .update(orgSettings)
-      .set(orgSettingsSnapshot)
-      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  }
-  await removeLicenseFixture(db);
-  await app?.close();
 });
 
 // ===========================================================================
@@ -1010,6 +1021,7 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
       },
     });
     expect([200, 201]).toContain(allow.statusCode);
+    loopbackAllowHostId = allow.json().id;
     const oidc2 = await app.inject({
       method: "POST", headers: AUTH, url: "/v1/auth/oidc-providers",
       payload: {

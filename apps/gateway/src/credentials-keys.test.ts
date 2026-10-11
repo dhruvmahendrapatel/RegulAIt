@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { and, createDb, eq, modelCredentials, runMigrations, userModelCredentials, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -47,6 +48,9 @@ let ninaAuth: { authorization: string };
 let ninaKeyId: string;
 let ninaToken: string;
 let agentId: string;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
@@ -71,6 +75,7 @@ beforeAll(async () => {
     },
   });
   expect(allowed.statusCode).toBe(201);
+  loopbackAllowHostId = allowed.json().id;
 
   const nina = await app.inject({
     method: "POST",
@@ -441,5 +446,12 @@ describe("/admin agent-policy editor", () => {
 });
 
 afterAll(async () => {
-  await restoreSb2Gates();
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreSb2Gates();
+  } finally {
+    loopback.assertRemoved();
+  }
 });

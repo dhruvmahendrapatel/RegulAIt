@@ -13,6 +13,7 @@ import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { platformEnvKey } from "./agents-connectors.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -95,6 +96,9 @@ async function invokeAnthropic(auth: { authorization: string }) {
 }
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   clearEnv();
   db = createDb(DATABASE_URL);
@@ -122,6 +126,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   // start from a known-clean anthropic platform slot (another suite may have left
   // its own; this file owns the anthropic 409/fallback story while it runs)
@@ -171,15 +176,22 @@ beforeAll(async () => {
 beforeEach(clearEnv);
 
 afterAll(async () => {
-  await restoreSb1Posture?.();
-  // leave the shared DB and the process env exactly as they were found
-  await db.delete(userModelCredentials).where(eq(userModelCredentials.userId, userId));
-  await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
-  clearEnv();
-  for (const name of PROVIDER_ENV_VARS) {
-    if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreSb1Posture?.();
+    // leave the shared DB and the process env exactly as they were found
+    await db.delete(userModelCredentials).where(eq(userModelCredentials.userId, userId));
+    await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
+    clearEnv();
+    for (const name of PROVIDER_ENV_VARS) {
+      if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
+    }
+    await restoreSb2Gates();
+  } finally {
+    loopback.assertRemoved();
   }
-  await restoreSb2Gates();
 });
 
 describe("platformEnvKey helper", () => {
