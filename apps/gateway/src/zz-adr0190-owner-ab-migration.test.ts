@@ -85,7 +85,14 @@ describe("migration 0191: warn retired (OWNER DECISION A), policy_unresolved (OW
     const prev = journal.entries.find((e) => e.tag === "0190_delegation_depth_limit_signed")!;
     expect(mine.idx).toBe(prev.idx + 1);
     expect(mine.when).toBeGreaterThan(prev.when);
-    expect(Math.max(...journal.entries.map((e) => e.when))).toBe(mine.when);
+    // the hazard this guards: an entry whose `when` is not later than every entry before it is
+    // silently never applied (M-052 family). Checked over the WHOLE journal, so it keeps holding
+    // as later migrations land after 0191 (pinning 0191 as the newest broke at 0192).
+    const byIdx = [...journal.entries].sort((a, b) => a.idx - b.idx);
+    for (let i = 1; i < byIdx.length; i++) {
+      expect(byIdx[i]!.when, `${byIdx[i]!.tag} must be later than ${byIdx[i - 1]!.tag}`).toBeGreaterThan(byIdx[i - 1]!.when);
+    }
+    expect(byIdx.filter((e) => e.idx > mine.idx).every((e) => e.when > mine.when)).toBe(true);
   });
 
   it("rewrites a stored warn to enforce (setting and offers), keeps placement evidence, and admits only enforce afterwards", async () => {

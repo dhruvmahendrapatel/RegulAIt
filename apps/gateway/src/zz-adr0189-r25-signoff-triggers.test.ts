@@ -545,8 +545,14 @@ const NO_KEY_CASES: NoKeyCase[] = [
     trigger: (f) => ({ ruleId: "config-version-activated", objectId: f.agentId! }),
   },
   {
-    name: "PATCH /v1/agents/:id (an agent_config edit)",
-    setup: async () => ({ agentId: await k.model("nokey-patch") }),
+    name: "PATCH /v1/agents/:id (an agent_config edit of a VERSIONED agent: mints and activates a version)",
+    setup: async () => {
+      const agentId = await k.model("nokey-patch");
+      // a stored, active agent_config version, so the edit below goes through activateVersion
+      const v1 = await k.req("POST", `/v1/config-versions/agent_config/${agentId}`, k.BOOT, { body: { costPerMTokIn: 1, costPerMTokOut: 2 }, activate: true });
+      expect(v1.statusCode, v1.body).toBeLessThan(300);
+      return { agentId };
+    },
     act: (f) => k.req("PATCH", `/v1/agents/${f.agentId}`, k.BOOT, { costPerMTokIn: 7.25 }),
     state: async (f) => ({ versions: await versionsOf("agent_config", f.agentId!), agent: await agentRow(f.agentId!) }),
     trigger: (f) => ({ ruleId: "agent-config-edited", objectId: f.agentId! }),
@@ -638,6 +644,28 @@ describe("R25 review: every sign-off route refuses 409 with no key, and nothing 
       expect(await ledger()).toEqual(ledgerBefore);
     }, 120_000);
   }
+});
+
+describe("R25 review: an UNVERSIONED agent's PATCH is a plain row write, not a config promotion", () => {
+  // item 1 names activateVersion (promote, activate, rollback) as the config-promotion hook; an
+  // agent with no stored agent_config version keeps the plain row write (no version is activated),
+  // so it owes no snapshot and is not refused without a key; drift reports it (item 11)
+  it("owes nothing and commits without a key", async () => {
+    const agentId = await k.model("unversioned-patch");
+    const before = await ledger();
+    useKey(false);
+    let res;
+    try {
+      res = await k.req("PATCH", `/v1/agents/${agentId}`, k.BOOT, { costPerMTokIn: 3.5 });
+    } finally {
+      useKey(true);
+    }
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().versionMinted ?? null).toBeNull();
+    expect((await agentRow(agentId)).costPerMTokIn).toBe(3.5);
+    expect(await versionsOf("agent_config", agentId)).toEqual([]);
+    expect(await ledger()).toEqual(before);
+  }, 120_000);
 });
 
 describe("R25 review High 1: the workflow routes refuse before the transition commits", () => {
