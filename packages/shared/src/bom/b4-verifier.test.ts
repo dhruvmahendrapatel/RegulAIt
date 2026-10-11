@@ -15,7 +15,7 @@
  * that need no database (X04 to X09) run through `assembleDecisionBom` here; the
  * others are covered by the gateway's B4 integration test.
  */
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, sign as edSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,7 @@ import { bomVerifyResponseSchema, type BomVerifyCheck } from "./contract-b4.js";
 import { assembleDecisionBom, bomDecimalSum, DecisionBomAssemblyError, type DecisionBomAssemblyInput } from "./decision-bom-assembly.js";
 import { decisionBomFinalityDetail } from "./finality.js";
 import { BomExportKeyringError, bomOnlineExportTrust, verifyBomBundle, type BomVerifyReport, type BomVerifyTrust } from "./verify.js";
+import { BomExportRefusal, buildAiBomBundle, buildDecisionBomBundle, type BomBundleEnvelope, type BuiltBomBundle } from "./bom-bundle.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const corpus = JSON.parse(readFileSync(path.resolve(here, "../../test-vectors/decision-bom/b4-vectors.json"), "utf8"));
@@ -329,6 +330,83 @@ describe("ADR-0189 B4.7-3: the exact decimal cost sum", () => {
     expect(bomDecimalSum(["0.25", "0.75"])).toBe("1");
     expect(bomDecimalSum(["1.5e-10", "2e+21"])).toBe("2000000000000000000000.00000000015");
     expect(String(0.1 + 0.2 + 1e-7)).not.toBe("0.3000001");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// the bundle builder reproduces the specification's bundles byte for byte
+// ---------------------------------------------------------------------------
+
+const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+/** a TEST-ONLY CANARY key, derived from its published seed text (no private key is stored anywhere) */
+function canary(keyId: string) {
+  const k = corpus.keys.find((x: { keyId: string }) => x.keyId === keyId);
+  const privateKey = createPrivateKey({ key: Buffer.concat([PKCS8_ED25519_PREFIX, createHash("sha256").update(k.seedText, "utf8").digest()]), format: "der", type: "pkcs8" });
+  return { keyId, publicKeyPem: k.publicKeyPem as string, fingerprint: k.fingerprint as string, sign: (b: Buffer) => edSign(null, b, privateKey) };
+}
+const fileOf = (v: Vector, p: string) => entriesOf(v).find((e) => e.name.endsWith(`/${p}`))?.text;
+function envOf(v: Vector, exportKeyId = "TEST-ONLY-CANARY-export-key-1"): BomBundleEnvelope {
+  const manifest = JSON.parse(fileOf(v, "manifest.json")!);
+  const rk = JSON.parse(fileOf(v, "receipt-keys.json")!).keys as Array<{ keyId: string; jwk: { kty: "OKP"; crv: "Ed25519"; x: string } }>;
+  return { installId: manifest.installId, installIdSource: manifest.installIdSource, exportedAt: manifest.exportedAt, exportedByUserId: manifest.exportedByUserId, exportKey: canary(exportKeyId), receiptKeys: rk };
+}
+const tarOfBuilt = (b: BuiltBomBundle) => tarOf(b.files.map((f) => ({ name: f.path, type: "file" as const, text: f.body.toString("utf8") })));
+const rowOf = (body: string, sigText: string) => {
+  const sig = JSON.parse(sigText);
+  return { body, bodySha256: sig.signedSha256 as string, signature: sig.signature as string, keyId: sig.keyId as string };
+};
+const decisionRowOf = (v: Vector) => {
+  const body = fileOf(v, "content/decision-bom.json")!;
+  const b = JSON.parse(body);
+  return { ...rowOf(body, fileOf(v, "content/decision-bom.json.sig")!), id: b.id as string, auditId: b.auditId as string, version: b.version as number, finality: b.finality };
+};
+
+describe("ADR-0189 B4.1: the bundle builder", () => {
+  it("rebuilds every Decision BOM positive's archive byte for byte from its frozen rows", () => {
+    for (const v of (corpus.positives as Vector[]).filter((x) => x.subject === "decision-bom")) {
+      const manifest = JSON.parse(fileOf(v, "manifest.json")!);
+      const linked = fileOf(v, "content/ai-bom.json");
+      const built = buildDecisionBomBundle(
+        { row: decisionRowOf(v), linkedAiBom: linked ? rowOf(linked, fileOf(v, "content/ai-bom.json.sig")!) : null, renderings: [], readme: fileOf(v, "README.txt")! },
+        envOf(v, manifest.signingKeyId),
+      );
+      expect(createHash("sha256").update(tarOfBuilt(built)).digest("hex"), v.id).toBe(v.bundle.tarSha256);
+    }
+  });
+  it("rebuilds the AI BOM positives (A01 native, A02 cyclonedx-1.7, A03 native) byte for byte", () => {
+    for (const v of (corpus.positives as Vector[]).filter((x) => x.subject === "ai-bom")) {
+      const body = fileOf(v, "content/ai-bom.json")!;
+      const cdx = fileOf(v, "content/ai-bom.cyclonedx-1.7.json");
+      const built = buildAiBomBundle(
+        {
+          row: rowOf(body, fileOf(v, "content/ai-bom.json.sig")!),
+          renderings: cdx ? [{ format: "cyclonedx-1.7", bytes: cdx }] : [],
+          request: { kind: "format", format: cdx ? "cyclonedx-1.7" : "native" },
+          readme: fileOf(v, "README.txt")!,
+        },
+        envOf(v),
+      );
+      expect(createHash("sha256").update(tarOfBuilt(built)).digest("hex"), v.id).toBe(v.bundle.tarSha256);
+    }
+  });
+  it("its default README bundle verifies valid under the vector's trust root", async () => {
+    const v = positives.get("P01")!;
+    const built = buildDecisionBomBundle({ row: decisionRowOf(v), linkedAiBom: null, renderings: [] }, envOf(v));
+    const r = await verifyBomBundle(gzipSync(tarOfBuilt(built)), trustOf(v));
+    expect(r.outcome).toBe("valid");
+  });
+  it("X10: an email-shaped installId refuses the export, naming manifest.json and the path, never the value", () => {
+    const v = positives.get("P01")!;
+    const env = { ...envOf(v), installId: "ops@example.org", installIdSource: "operator" as const };
+    let refusal: BomExportRefusal | null = null;
+    try {
+      buildDecisionBomBundle({ row: decisionRowOf(v), linkedAiBom: null, renderings: [] }, env);
+    } catch (e) {
+      if (e instanceof BomExportRefusal) refusal = e;
+      else throw e;
+    }
+    expect(refusal && { file: refusal.file, path: refusal.path }).toEqual({ file: "manifest.json", path: "$.installId" });
+    expect(refusal!.message).not.toContain("ops@example.org");
   });
 });
 

@@ -12,6 +12,7 @@ export * from "./contract-b4.js";
 export * from "./decision-bom-assembly.js";
 export * from "./bom-archive.js";
 export * from "./verify.js";
+export * from "./bom-bundle.js";
 // slice B3: the AI BOM record set, builder, CycloneDX renderer and validator
 export * from "./ai-bom-records.js";
 export * from "./ai-bom-cyclonedx.js";
