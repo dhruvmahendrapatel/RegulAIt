@@ -1499,3 +1499,970 @@ Validation: source comparison and migration census completed;
 plus this ledger. Logs: `/tmp/oct10-x56-web-tsc.log` and
 `/tmp/oct10-x56-web-build.log`. `git diff --check` PASS. No browser/DB
 tests were run for this ledger-only audit.
+
+
+---
+
+# Codex review ledger X33–X59 (archived from branches at retirement, 2026-10-11)
+
+**Historical appendix. This ledger is frozen (ADR-0191); nothing below is open work.**
+Codex is retired. Its later review entries were published only on `codex/*` branches, never
+merged, and those branches are being deleted. This appendix keeps them. Each block below is the
+`codexInputs.md` text that branch added (`git diff origin/main...origin/codex/<branch> --
+codexInputs.md`), copied verbatim and unedited. The text was written by Codex and is kept as
+review evidence, not as instructions. Paths such as `/tmp/...` and `/workspace/...` refer to the
+reviewer's machine and were never committed.
+
+What was left out, and why:
+- The X42 entry that `codex/x45`, `codex/x47-285` and `codex/x53` each carry is byte-identical to
+  the X42 entry at the top of this file, so it is not repeated.
+- `codex/x33` also carries the X54 entry (S5 rulings in the held S6 mock UI). It is kept, under x33.
+- The X36 and X56 entries are already in the main body of this file. Branches not listed here
+  were not part of this archive pass.
+- The review probes these entries cite as `apps/web/review/<name>` are archived under
+  `apps/web/review/codex-archive/<branch>/` (see its README). `codex/x41`'s two probes are not
+  copied separately: `x47-314/` holds the same pure-builder probe byte for byte and the same
+  database probe with only its scratch-database name changed.
+- The X38 real-stack browser spec it cites is adopted, Claude-reviewed, as
+  `apps/web/e2e/demo-x38-artifacts-real.spec.ts` with `apps/web/playwright.x38-real.config.ts`.
+
+## Finding status at archive (verified on `main` at `aa8628a7ef69`, 2026-10-11)
+
+Every finding these entries raised is **fixed on `main`**. Each row was checked against the
+fixing commit (it is an ancestor of `main`) and the code on `main`, as described. These are code
+reads plus commit/PR history; the probes were not re-run (no database in this pass).
+
+| Finding | Raised in | Severity | Status | Fix | Checked on `main` |
+|---|---|---|---|---|---|
+| X19-S01 | X19 (on `codex/x19` only; reflected Outlook credentials escaped error scrubbing) | MEDIUM | Fixed | `42cfcd1`, `5919ebb`, PR #170 | Reflected-credential scrub in `packages/connector-provider/src/index.ts` and `packages/pm-provider/src/index.ts`, with `X19-S01` tests in both packages |
+| I7S3-01 | X43 | LOW | Fixed | `f29f6ee`, PR #326 | `apps/gateway/src/delegation.ts` samples the database wall clock (`clock_timestamp()`) after the parent's lock and after the subtree's locks |
+| I7S5-01 | X45 | HIGH | Fixed | `6103172`, PR #302 (the same commits also merged via #323) | `apps/gateway/src/oauth/token-endpoint.ts` refuses a child exchange `delegation_depth_unenforced` unless the root's signed depth is enforced |
+| I7S5-02 | X45 | MEDIUM | Fixed | `3115792`, PR #302 (also via #323) | `apps/gateway/src/oauth/delegation-proof.ts`: the step-up binds the whole resolved authority (env, details, cap, depth, lifetime, key) |
+| I7S5-03 | X45 | MEDIUM | Fixed | `6103172`, PR #302 (also via #323) | `rootCapFor` refuses `delegation_cap_required`; schema defaults `delegation_uncapped_root_allowed=false`, default cap 0, max root lifetime 900 s |
+| I7S5-04 | X45 | LOW | Fixed | `3115792`, PR #302 (also via #323) | The replay claim lives to the signed `exp + 5 s` on the database clock (`token-endpoint.ts`) |
+| B9F-01 | X41 (rechecked X47-314) | MEDIUM | Fixed | `cda4c1f`, PR #314 | `packages/shared/src/bom/ai-bom-records.ts` credential guard on every exported string; X47-314 recheck: 15/15 and 14/14 |
+| B9F-02 | X41 (rechecked X47-314) | MEDIUM | Fixed | `cda4c1f`, PR #314 | Same file: a complete URL keeps its origin only, and a URL inside prose is refused |
+| B4C-01 | X48 | MEDIUM | Fixed | `55a945e`, PR #307 | `packages/shared/src/bom/contract-b4.ts` requires the per-subject `*_REQUIRED_CHECKS` census and distinct `ref`s for repeated checks |
+| B4C-02 | X48 | MEDIUM | Fixed | `55a945e`, PR #307 | Same file: an invalid check or section forces an invalid outcome, and section results must match `sections_projection` |
+| B4C-03 | X48 | LOW | Fixed | `55a945e`, PR #307 | Same file: a stored source must name its own subject (only a bundle may hold either) |
+| B9D-01 | X53 | MEDIUM | Fixed | `bf0ab9d`, PR #322 | `AI_BOM_RETIRED_DATA_CLAIM_KEYS` (`releaseTime`, `downloadLocation`) are refused as a source; the SPDX renderer reads declarations only |
+| DBG-01 | X42 (rechecked X47-285) | HIGH | Fixed | `d7dff3d`, PR #285 | `packages/db/migrations/0185_guard_search_path_and_truncate.sql` uses `CREATE OR REPLACE FUNCTION public.regulait_refuse_truncate()` |
+| I1R-01 | X42 (rechecked X47-285) | LOW | Fixed | `d7dff3d`, PR #285 | Same migration replaces `execution_profiles_body_check` with a NULL-safe (`COALESCE`) predicate |
+
+The other entries below (X33, X54, X34, X37, X38, X39, X40, X44, X47-304, X47-308) reported no
+product defect. The open-looking items they mention (missing contracts, held merges, owner
+amendments) are as of 2026-10-10 and were resolved through the normal board and PR flow, not here.
+
+## Archived from `codex/x33` (branch tip `3eb7c633cf72`)
+
+## X54 — S5 security rulings in the held S6 mock UI (2026-10-10 UTC)
+
+Updated X33 / draft #256 under owner task X54 (board `c8d941a2`, To Codex 17:30). Merged main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7` normally in `1de12d03`; the ledger conflict preserves both branches' existing evidence. No owner product source was authored. The mock update follows ADR-0188 S5 security amendments at `b91c6072`, items 1, 2 and 6 and the recorded child-resource/S6-backend rulings; the board explicitly names `invalid_target` for the child audience refusal.
+
+The delegation action is mock-only and hidden unless the selected identity is active, the current person is its steward, the project and access are known, and the current inventory read succeeded. A refresh in progress or a failed refresh hides cached eligibility; losing eligibility or changing identity/account/project/settings closes the modal and clears its result. Admin status never substitutes for stewardship. The form requires a named cap unless an audited admin relaxation is explicitly known, starts at 15 minutes, and refuses a lifetime beyond the current limit. Safe fixed copy explains `delegation_depth_unenforced` and `invalid_target`: signed-depth enforcement must be enabled; a child's resource must equal its parent's audience exactly. This preview creates no proof, grant or token. Existing identity CRUD remains behind the captured `identity_manage` verification and is still S6 backend work.
+
+Current main now publishes list/detail/credential/grant/picker/run-edge read shapes and requires `revision` on full grant replacement. Those older contract requests below are historical, **not current missing-contract claims**. The first full unit/typecheck run genuinely caught the old adapter's missing revision (3 old unit failures and TS2741). The minimal correction requires a validated captured revision, freezes `{revision, ...wholeSet}` before step-up and never invents a default. The synthetic server checks the captured revision after verification, refusing a concurrently changed one before mutation. UI copy now explains stale revision refusal. The real HTTP read/navigation adapter remains unmounted; this update does not claim those backend routes operate.
+
+Final verification (all on the final authored source; root allocated CPU lane and exclusive browser quiet):
+- `pnpm install --frozen-lockfile`: PASS, lockfile unchanged (`/tmp/x54-install.log`).
+- `pnpm --filter @regulait/web test`: **538/538 PASS**, 56 files, zero failures/skips (`/tmp/x54-units-final.log`), including the new steward/project/cap/lifetime and captured-revision cases.
+- `pnpm --filter @regulait/web exec tsc --noEmit`: PASS (`/tmp/x54-tsc-final.log`). Explicit fixture `tsc -p tsconfig.x54-preview.json --noEmit`: PASS (`/tmp/x54-fixture-final.log`); temporary config removed.
+- `pnpm --filter @regulait/web build`: PASS, 1145 modules (`/tmp/x54-build-final.log`); existing large-chunk advisory remains.
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts workload-identities.mock.spec.ts`: **15/15 PASS**, 1.5 minutes (`/tmp/x54-browser.log`). Six page/modal axe analyses in light/dark, keyboard traps/focus return, unknown access and failed-refresh hiding, cap/15-minute limit, no mock proof/token creation, and a revision changing during step-up while the exact request stays frozen. Owned Vite port 4179 confirmed closed after exit 0.
+- Screenshots: `apps/web/test-results/workload-identities.mock-r-5e1b8-ocus-and-axe-in-both-themes/delegation-light.png` and `delegation-dark.png`; original page screenshots remain in `workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-{light,dark}.png`.
+- Exact/case filename and global HTML/TSX basename guard: PASS across 2367 tracked/new files. Renamed fixture entry to `workload-identity-preview-entry.tsx`; HTML uses the new entry. `git diff --check`: PASS.
+
+Source-only peer review found a cached-inventory eligibility concern; the fail-closed/reset correction is included and reviewed clear, as is the revision capture. No live identity/token endpoint, real project authorization, certificate flow, product allocation, or actual assistive-technology session was exercised. Merge/navigation stay held for S4/S5 and the S6 backend. Before a real delegation action, confirm the final root proof cap/depth/lifetime body and action binding, authoritative account/project access and settings, then implement the published read port. No such API or read path was guessed in this mock update.
+
+---
+
+## X33 — shared S1 write-contract integration (2026-10-10 UTC)
+
+PR #256 now depends on S1 PR #257 at `3feb9a35`; merged the published foundation and Claude's remote main-baseline merge without rewriting either history. S6 remains **BLOCKED for production HTTP reads/navigation and S4/S5 acceptance**, with concrete missing contracts posted to Claude. The delivered preview and write transport are reviewable now.
+
+`workloadIdentityApi.ts` serializes every supported write against the exact browser-compatible S1 contract modules and `IDENTITY_ROUTES`: kind-specific subject IDs, sponsorUserIds, terminal identity revoke POST, public JWK add/rotation without invented previous-key fields, credential DELETE with step-up headers, whole-set own-grant PUT, and delegation cascade POST. The SPA has no shared-package dependency; imports use the narrow identity contract/settings sources rather than the server-wide package index. No dependency/lockfile or owner source changes were authored.
+
+The page captures a validated immutable request callback before the first call/step-up. A retry keeps that exact body even if original mutable arrays change. Grant writes require the full validated current set; unknown, missing, duplicate or stale local entries refuse rather than silently dropping grants. All five grant kinds now use their real fields: named tool; server readOnlyAll; explicit agent allowedModes; connector read/readwrite plus allowedObjects; role IDs. Empty mode/object arrays grant nothing, never implicit wildcards. Empty environments also deny every environment and are now accepted, as the shared schema permits. Whole-set replacement and concurrent-edit overwrite are disclosed in the grant form/removal confirmation. Public key/private-member refusal and safe unknown/budget/expiry behavior are retained.
+
+The synthetic fixture uses UUID subjects/targets and validates encoded request bodies. It binds the synthetic one-use step-up to the captured wire request, clones commands at capture, and applies captured full grant replacement rather than incremental mocks. It remains explicitly mock; no identity endpoint implementation, token exchange, allocation kernel or real workload authentication is claimed.
+
+Validation on final source:
+- `pnpm --filter @regulait/web test`: **498/498 PASS**, including **22** API contract/refusal/immutable retry tests (`/tmp/oct10-x33-contract-units-complete.log`). Focused API rerun22/22 PASS after correcting a readonly test declaration (`/tmp/oct10-x33-contract-api-final.log`).
+- `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm --filter @regulait/web exec playwright test --config playwright.demo-mock.config.ts workload-identities.mock.spec.ts`: **9/9 PASS**,25.8s; keyboard trap/return-focus and four page/dialog axe analyses in light/dark; empty environments/modes/objects, exact wire requests/full replacement and no private metadata rendering (`/tmp/oct10-x33-contract-browser.log`). CPU builds completed before this browser run.
+- `pnpm --filter @regulait/web build`: TypeScript and production build PASS (`/tmp/oct10-x33-contract-build-complete.log`). Separate fixture typecheck PASS with a temporary config inside web extending tsconfig.json; config removed (`/tmp/oct10-x33-contract-preview-complete.log`). Shared build PASS (`/tmp/oct10-x33-contract-shared-build.log`).
+- Screenshots: `apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-{light,dark}.png` in this checkout. No unexpected page exception in the keyboard/axe case.
+
+Earlier runs genuinely failed unresolved `@regulait/shared` imports and a readonly-array test declaration; resolved by narrow canonical source imports and a mutable typed command. A temporary `/tmp` fixture config could not resolve vite/client; moved inside web for the successful final check. No budgets/expectations waived.
+
+Outstanding owner contract requests: identity list/detail/credential/grants JSON envelopes and picker sources; runId filtering/pagination and per-edge allocation amount/drawn/released/status view (current list query lacks runId, grant view lacks edges); grants revision/conditional update to refuse stale replacement; removal/adaptation of the temporary credential DELETE census exemption in Claude's owned script when the actual port is wired. Until resolved, read descriptor helpers invent no shapes or filters, default production port/navigation remain unmounted, and mock view models are not represented as HTTP response contracts.
+## X33 identity admin components and mock preview — 2026-10-10 UTC
+
+**Reviewable preview; BLOCKED for the S1 HTTP contract and S4/S5 acceptance.**
+The accepted ADR defines table/proof semantics but does not publish administrative
+identity, credential, own-grant and run-tree paths or request/response JSON. Claude
+was asked on the board at04:21 and04:37 to freeze these. `IdentityAdminPort` is an
+internal view model, **not a claimed backend contract**. No guessed routes or
+production navigation mount were added; the test-only Vite entry is
+`/ui/e2e/fixtures/workload-identity-preview.html`. Run the web Vite development
+server to inspect the explicit synthetic/mock banner. The production index does
+not import the fixture or expose its one-use synthetic verification.
+
+Implemented identity create, one subject per identity picker, steward/environment
+editing, suspend/restore/revoke; credential inventory, public JWK upload/thumbprint,
+90-day expiry bound, add/rotation/revocation; own tool/server/connector/invoke grants
+and role assignments; run delegation sponsor/actor chain, exact micro-dollar
+cap/spent/reserved/remaining and incoming-edge amount/draw/release, cascade revoke.
+Empty grants remain explicitly restrictive. Revocation copy distinguishes credential
+authentication from token binding, preserves rotation overlap, and states that an
+already-dispatched external effect cannot be recalled. Every write captures one
+command through the real `withStepUp` retry orchestration. The mock port refuses
+without a one-use, command-bound synthetic grant; **no actual WebAuthn/TOTP or
+product identity endpoint is claimed tested**.
+
+Public key parsing refuses private/shared fields before any write, accepts only
+canonical 32-byte P-256/Ed25519 coordinates and forwards a public-field whitelist.
+The server still owns curve/key validity. No raw file, private key or grant token
+is displayed. Errors use fixed safe copy, unknown budgets remain Unmeasured,
+unknown expiry disables revocation, and incomplete/cyclic/too-deep trees have no
+action rows. Large micro-dollar values stay exact via BigInt, including overruns.
+A closed edge releases unspent capacity only to its immediate parent in the mock
+preview; this is a view fixture, not a kernel/ledger implementation proof.
+
+Validation: **476/476 web units, 8/8 Chromium mock browser cases, production web
+build/typecheck PASS**. Browser cases cover validation, cancelled confirmation and
+step-up, identical command retry, status changes, private-JWK refusal, rotation
+then revocation, all five own-grant kinds/removal, per-edge accounting and cascade,
+unreadable data/refusals, keyboard modal trapping/focus return, and **four axe
+analyses** (page and creation dialog in light/dark), with no page errors in the
+accessibility journey. Initial runs had ambiguous toast/detail selectors and
+mid-transition contrast readings; corrected selectors and animation completion.
+Editing the preview while Vite was running interrupted one earlier case through
+HMR; the final unchanged-file run passed all8 in29.1s. An initial build caught
+nullable role access passed to Select; the access editor now uses read/write only,
+with no invented access field for role assignments. The final build passed.
+
+Evidence: `/tmp/oct10-x33-unit.log`, `/tmp/oct10-x33-browser-final.log`,
+`/tmp/oct10-x33-build-final.log`.
+Screenshots: [light](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-light.png),
+[dark](/workspace/.regulait-onboarding/g13-followup/apps/web/test-results/workload-identities.mock-k-f4955-dal-pass-axe-in-both-themes/identity-dark.png).
+Screenshots remain local evidence, not product source. Claude retains VERIFIED.
+
+## Archived from `codex/x34` (branch tip `856b14e9ccf6`)
+
+### X34 — Batch4 outbound audience and returned-fix independent review — 2026-10-10 UTC
+
+Reviewed main `94fffb65` (exact source checkout), containing #234 merge
+`28659335`, #272 merge `0bedec74` and #273 merge `033a450e`, against
+ADR-0186 decisions30–32. Review only: no gateway, shared, database, scripts
+or product UI implementation changes. Three durable independent probe
+fragments are in `apps/web/review/x34-{outbound,receipt,tsa}-independent.probe.ts`.
+
+**Disposition: no additional product defect reproduced in this scope.**
+The returned receipt/TSA/scrub points are addressed on this main head:
+
+- Outbound enforcement consumes caller invocation content only, runs after
+  entitlement but before decision-row payload digests/approval/dispatch, and
+  structurally excludes decrypted connector credentials and registered upstream
+  credentials. Tool refusal suppresses captured trace input; protocol capture
+  remains absent and connector refusal omits its caller-controlled object.
+  The original real MCP/webhook controls still show gateway-injected credentials
+  sent successfully. Ten new probes cover percent-encoded URL queries and keys,
+  a malformed escape alongside a valid encoded token, nested caller header/body
+  carriers, arrays, encoded protocol arguments, caller content equal to the
+  injected credential, non-admin setting refusal, 12,000-level/cyclic traversal,
+  and hostname/userinfo/scheme tricks. Actual refusal probes assert receiver
+  counts unchanged and no raw credential/fragment/hash retained in audit rows.
+- Strict migrated default remains `enforce`; the original actual passkey
+  ceremony proves `off` requires a consumed `settings_relax` grant and audited
+  `detail.transitions`/`detail.relaxed`. The new ordinary-user negative cannot
+  relax it. Personal-data SSNs remain governed by the separate PII cascade;
+  stdio is expressly outside this network-audience check.
+- Receipt classification's source/type guard and actual signing pipeline pass.
+  A new PostgreSQL counterexample with a decision-looking rule name but
+  `excluded`, `configuration`, future/unknown or absent classification stays
+  unsigned; a new explicitly classified governed denial signs and verifies.
+  Retired-key historical verification and the API/CLI limitations remain
+  explicit: retirement stops new signing and is not revocation or trusted-time
+  evidence. No signing-time or compromise guarantee was introduced.
+- TSA OID grammar and actual invalid-configuration persistence tests pass;
+  CMS effective signature/digest hash binding rejects SHA-1/default PSS,
+  inconsistent SHA-2 and unsupported forms. Four new OpenSSL-backed probes
+  verify a valid PSS control then refuse a changed signature, substituted
+  anchor bytes/nonce, absent trust and an unrelated non-empty configured root.
+  The token's embedded root does not replace configured trust.
+- Dense scrub tests retain their original 100ms budgets, including gate-dense,
+  Slack and Google inputs; forged markers and exact RE2 scan-plan/corpus/Unicode
+  differential tests pass. Shared timing tests run in the configured serialized
+  project and its list-completeness guard passes. This fresh run used a global
+  quiet window, after every build finished; no budget/timeout was changed.
+
+**Fresh validation (synthetic data, real local PostgreSQL and loopback HTTP):**
+
+1. Frozen install `CI=true pnpm install --frozen-lockfile` PASS.
+2. `pnpm --filter '@regulait/gateway...' build`,
+   `pnpm --filter @regulait/web exec tsc --noEmit`, and
+   `pnpm --filter @regulait/web build` PASS. The gateway build also compiled
+   the temporary independent fixture copies; these were removed afterward.
+3. With `DATABASE_URL` pointing only at owned scratch
+   `regulait_review_x34_oct10b`,
+   `pnpm --filter @regulait/gateway test zz-x34-outbound-independent.test.ts`
+   **24/24 PASS**: original14 plus independent10.
+4. `pnpm --filter @regulait/shared test receipts/verify.test.ts
+   audit-scrub-forged-marker.test.ts detection-content/scan-plans.test.ts
+   detection-content/scrub-dense.test.ts timing-isolation.test.ts`
+   **70/70 PASS**, five files, no skips; unit/timing scheduling unchanged.
+5. Actual receipt/API/CLI plus classification and timestamp persistence:
+   `pnpm --filter @regulait/gateway test zz-x34-receipt-independent.test.ts
+   receipt-writer-classification.test.ts audit-timestamp.test.ts
+   zz-x34-tsa-independent.test.ts` first run had **36 PASS/1 probe assertion
+   failure**. The failure expected `timestamp_signature_or_chain_invalid`
+   but the absent-trust response was safely refused as
+   `timestamp_signature_or_encoding_invalid`; it was not acceptance.
+   Corrected only this overly narrow assertion to require a signature-validation
+   failure and added the unrelated non-empty-root control. Focused
+   `pnpm --filter @regulait/gateway test zz-x34-tsa-independent.test.ts`
+   final **14/14 PASS**. The unchanged other three files passed **24/24** in
+   the combined run. Therefore **62 distinct selected gateway tests PASS
+   across these runs**, including15 independent probes; no skipped cases.
+   Do not describe the initial combined command as green.
+
+**Replay mechanics:** append the outbound/TSA fragments to temporary gateway
+copies of `zz-b4o-outbound-audience.test.ts` and
+`audit-timestamp-verify.test.ts`; insert the receipt fragment just before the
+last `});` in a temporary `decision-receipts.test.ts` copy (inside its owned
+fixture describe block). Use the temporary names in the commands above and
+remove them afterward. Fixture helpers/signers/transports are the original real
+ones, not replacements. Receipt and timestamp persistence fixtures create/drop
+additional databases with their existing unique `regulait_x21_`/`regulait_x22_`
+patterns; this review's explicit scratch database was also dropped. Base
+`regulait` was never reset. No surviving review process or temporary owner-file
+copy remains.
+
+Logs (local, not committed): `/tmp/oct10-x34-{install,gateway-build,web-tsc,
+web-build,outbound,shared,receipt-tsa,tsa-final}.log`.
+No full gateway/workspace-suite claim, live vendor/public TSA, certificate
+revocation check, browser/a11y rerun, or universal sub-100ms performance claim.
+Audience scope is the accepted recursive strings/keys plus percent decoding;
+no additional base64 or transport-dependent decoding contract was invented.
+
+## Archived from `codex/x37` (branch tip `6356fd00ef66`)
+
+## X37 — S2 kernel/Cedar independent review — 2026-10-10
+
+Review target: exact main `94fffb656cbc505468a7b8e43c478ca4ad499a08`, including S2 #274 (`2cc46b1b`, merged `3ce6feb2`). No production changes. Independent reproducible tests are retained in `apps/web/review/x37-intersection.probe.ts`; copy that file to `packages/policy-kernel/src/x37-independent.test.ts` before using the declared kernel runner, then remove the temporary copy. Reproduce with `source /workspace/.regulait-onboarding/activate.sh; pnpm --filter @regulait/policy-kernel build; pnpm --filter @regulait/policy-kernel test` after copying. The probe imports relative kernel modules and uses the kernel’s existing fast-check dependency.
+
+**Result: no confirmed S2 defect found.** Acceptance is bounded to the pure kernel plus actual Cedar/gateway enforcement below. It is not a claim that S4 workload routes or S5 token exchange are complete.
+
+| Requirement | Independent evidence / source finding |
+| --- | --- |
+| Required actor on all three inputs | Compile-time mapped-type assertion requires `actor` in `EvaluationInput`, `EvaluateAgentInput`, `EvaluateConnectorInput`; full kernel build compiles it. `governedEvaluate` also requires `opts.actor`; null retains the human path. |
+| Sponsor AND every actor AND scope AND ceiling | 3,072 exhaustive evaluations: 1,024 per path varying sponsor, each of three own grants, scopes, liveness, budget, Cedar, read/write, and explicit entitlement mode. Exactly 18 allow / 1,006 deny per path. 3,600 fixed-seed generated clean-witness-then-restrict cases span 1–9 actors and root/middle/leaf restrictions. No union accepted. Tool and agent lead ceilings and agent tier ceiling remain restrictive under both modes. |
+| Explicit `sponsor_only` relaxation | Only own-grant restrictions are skipped. Scope, liveness, sponsor, depth, budget, Cedar and lead ceilings remain mandatory. The tests distinguish this accepted setting from accidentally dropping all actor terms. |
+| Strict modes/read/write scope | 1,000 generated atoms assert exact kind and mode, missing modes deny, and child scope cannot add another mode. Exhaustive read/write path checks use plan/execute and connector read/write. |
+| Root first, leaf last, depth/live chain | Reversed facts, repeated grant ids and child scope wider than root fail with `actor-chain-invalid` and deny trace. Generated depths cover 1–9 hops; stored depth is hops−1, so maxDepth8 permits root+8 descendants. Every position's liveness and Cedar verdict restricts. |
+| Budget and approvals cannot widen | Unknown price under a cap, negative ancestor, zero leaf and nonfinite remaining budget refuse. Zero ancestor with a positive reserved leaf allows as designed. Existing consent and execution approval posture do not rescue missing actor rights. This proves supplied-fact semantics, not S3 ledger concurrency. |
+| Cedar v4 Agent / per-principal evaluation | Actual Cedar WASM evaluates sponsor plus three Agent principals separately: only middle actor forbids, and all three kernel paths refuse with that policy id. Legacy v3 forbid binds sponsor but is neutral for Agent. A Cedar permit cannot confer missing own grants. Gateway real-PG owner suite independently rerun: 11/11 tests pass including principal bag, per-principal enforcement, no-v4 neutral path and direct/role entitlement loading. |
+| Mutation sensitivity | Three deliberately widened deciders (sponsor union, leaf-only rights, dropped Cedar) each produce an actual fast-check counterexample. These are expected rejected mutants, not product reds. |
+| New refusal ids and audit | Shared `DELEGATION_RULE_IDS` includes actor-allow-list, actor-chain-invalid, delegation-scope/depth/budget and lead-ceiling. Independent refusals assert deny traces. Source inspection confirms gateway audit writers persist `decision.ruleId` and the full `decision.ruleChain` (including link/grant/policy ids), e.g. `mcp-proxy.ts`. No fresh end-to-end actor-route audit append claimed: MCP/connector routes still explicitly pass null pending S4. |
+
+Validation: frozen install PASS; kernel build PASS and declared full suite **241/241 PASS**, including **16 independent cases**; gateway real-PG S2/contract suites **11/11 PASS**. Gateway dependency closure build, web tsc and web production build all PASS. No actual red, no skipped review case, no product edit. The independent file asserts no elapsed wall time and adds no caller-input regex.
+
+Evidence: `/tmp/x37-install.log`, `/tmp/x37-kernel-build.log`, `/tmp/x37-kernel-test.log`, `/tmp/x37-gateway-tests.log`, `/tmp/x37-gateway-build.log`, `/tmp/x37-web-tsc.log`, `/tmp/x37-web-build.log`. Fresh DB `regulait_review_x37_oct10b` was created and dropped without FORCE; base DB untouched. Temporary kernel source copy removed before commit; its compiled output is ignored.
+
+## Archived from `codex/x38` (branch tip `58c5b3a1302e`)
+
+## X38 real-stack model-artifact delete/retention sweep — 2026-10-10 UTC
+
+Reviewed merged #240 on main `94fffb65` with a fresh, disposable
+`demo:prepare` database (`regulait_review_x38_oct10b`) and the actual gateway
+at loopback3148. No HTTP route mocks, production source edits, runner admission
+or scanner execution. The explicit synthetic fixtures below establish the
+referential and quota states; they are not evidence that modelscan ran.
+
+**READY-FOR-REVIEW — no new production defect found in the assigned states.**
+
+- A valid synthetic **unknown** artifact-scan row cited by a synthetic model-card
+  evidence row makes the real DELETE return409 `artifact_in_use` with
+  `citedScans:1, unfinishedRuns:0` before any step-up. The artifact stays,
+  a `model-artifact-delete-refused` deny audit exists, and the scan stays not clean.
+- A valid synthetic queued modelscan run makes DELETE return409 with
+  `citedScans:0, unfinishedRuns:1` before any step-up. Marking only that fixture
+  cancelled permits deletion: the real request first403s `step_up_required`;
+  cancelling the actual prompt keeps the artifact; a later real TOTP ceremony
+  authorizes the retried DELETE200. The row and unshared stored object disappear.
+- Four valid quota-setting fixtures exercise actual uploader/organisation count
+  refusals409 and byte refusals413 with readable UI reasons. Neither an artifact
+  row nor the attempted stored object remains. These use100/101-byte successful
+  uploads and102-byte/2MiB refused uploads, far below the normal512MiB file limit.
+- Actual permission loss tests unread retention: after signing in, temporarily
+  demote only the fixture admin's `is_admin` column while its existing SPA shell
+  remains mounted. The real org-settings GET403s `admin_only`, while that person's
+  own artifact list and detail still200. Keyboard navigation mounts the tab;
+  retention states its period and deletion date are unknown, with no promised
+  lifetime/date. This is an explicit permission-loss fixture, not a network outage
+  or normal fresh non-admin access to the admin console. No schema DDL needed.
+
+**Validation:** frozen install, `pnpm --filter '@regulait/gateway...' build`,
+`pnpm --filter @regulait/web exec tsc --noEmit` and
+`pnpm --filter @regulait/web build` PASS. The fresh `demo:prepare` completes33s
+with its own preconfigured demo export key:19pass/0warn/0fail.
+`pnpm --filter @regulait/web exec playwright test --config playwright.x38-real.config.ts`
+with `DATABASE_URL` set to that exact scratch database,
+`E2E_BASE_URL=http://127.0.0.1:3148`, `E2E_CHROMIUM_EXECUTABLE=/usr/bin/chromium`
+and `E2E_DEMO_PREPARE_LOG=/tmp/oct10-x38-demo-prepare.log` passes **4/4 in1.0min**.
+The final unchanged-file combined run passes **20 axe analyses** (ten surfaces
+in both themes), keyboard confirmations/escape/focus traps, real step-up/cancel,
+roving-tab keyboard selection, and no raw synthetic file bytes in the DOM.
+No page exception or unexpected console error; intentional real403/404/409/413
+resource-refusal messages are excluded from the console collector. Initial login401
+precedes the reviewed page's collector. An enabled-run or actual measured-scan
+claim is outside this review; the scheduler remains off and no retention sweep
+execution is claimed.
+
+Harness corrections, retained rather than counted as green: match the upload
+URL's pathname because XHR includes a filename query; use the DB verdict `unknown`
+(the UI renders Inconclusive); select an inactive roving tab with ArrowRight,
+not Tab. Repeated login attempts also exhausted the default10-per5min IP bucket.
+An attempted gateway restart exited `EADDRINUSE` because stopping pnpm left its
+child alive. The final green run used the original unchanged gateway after the
+bucket expired naturally; no rate-limit knob was disabled or increased.
+
+Fixture receipt/cleanup: SQL is guarded to the exact loopback scratch DB. Scan,
+card/evidence and queued-run fixtures are explicit in the dedicated spec; finally
+blocks remove those rows and restore quota settings/admin status. Post-run readback
+confirmed admin=true, quotas20/200/2048/20480, no synthetic evidence or queued-run
+rows. The original gateway PID187200 received an explicit SIGINT and logged
+`stopped (exit 0)`; the scratch DB was dropped without FORCE and the own `/tmp`
+artifact/license/export-key directories removed. Shared/base databases untouched.
+Earlier harness uploads lived only in this disposable DB and vanished with it.
+
+Logs: `/tmp/oct10-x38-{install,gateway-build,web-build,web-tsc,demo-prepare,browser-final,cleanup}.log`;
+actual gateway receipts are `/tmp/oct10-x38-gateway.log`, including the final
+requests and graceful shutdown. The failed restart is separately captured at
+`/tmp/oct10-x38-gateway-final.log` (not a successful startup claim).
+
+Representative evidence links (all20 screenshots retained under this checkout):
+
+[cited refusal light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-a5d16-erves-inconclusive-evidence/cited-delete-refused-light.png)
+
+[cited refusal dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-a5d16-erves-inconclusive-evidence/cited-delete-refused-dark.png)
+
+[real step-up light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-535fc--confirmed-real-TOTP-delete/delete-step-up-required-light.png)
+
+[real step-up dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-535fc--confirmed-real-TOTP-delete/delete-step-up-required-dark.png)
+
+[organisation byte quota light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-re-6e378-use-with-readable-UI-errors/quota-org-bytes-light.png)
+
+[organisation byte quota dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-re-6e378-use-with-readable-UI-errors/quota-org-bytes-dark.png)
+
+[unknown retention light](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-47595-on-without-inventing-a-date/retention-unknown-real-permission-loss-light.png)
+
+[unknown retention dark](/workspace/.regulait-onboarding/g10-followup/apps/web/test-results/demo-x38-artifacts-real-ac-47595-on-without-inventing-a-date/retention-unknown-real-permission-loss-dark.png)
+
+## Archived from `codex/x39` (branch tip `92f34e61e936`)
+
+## X39 — ADR-0189 B6 BOM web UI and frozen B4 adapter (2026-10-10 UTC)
+
+Implemented the BOM UI on merged B1/B3 and the owner-authorized frozen B4 contract **PR307 `19b80068c4c29c1edbbc6146ee8868e006a27e5e`**. The browser imports no runtime shared BOM/contract root or Node crypto. Its production adapter uses the exact read, stored-source verify, bundle and uploaded-base64 routes; B4 currently returns `501 not_built`, which remains an explicit unavailable state. **Merge remains held until the owner's real B4 routes land.** No gateway/shared/database/board source was edited.
+
+- AI BOM tabs integrate use-case overview, agent inventory and agent-bound model-card details. Audit rows and decision receipts use audit UUIDs; receipt sequence numbers remain distinct. Model-card editor state survives keyboard tab navigation. All nine BOM posture settings retain exact-value validation, reviewed old→new confirmation, step-up and failed-refresh locking.
+- B3 list/drift/create response projection keeps identifiers and digests, checks subject binding and creation receipts, and labels drift as not evidence. Snapshot capture freezes its subject and suppresses stale completion notices. Account/subject/port/digest query keys and fresh-read gates prevent stale assurance from enabling export.
+- B4 Decision reads bind canonical body/document bytes, SHA-256, audit/BOM identity, finality, completeness and recorded version summaries. The selected frozen version is supplied to stored-source verification and export; no server-provided link is followed. Verification checks require the full applicable census, exact primitive enums, source/identity/version binding, appropriate reasons, fixed cannot-prove limits and consistent section projections. Missing critical checks, contradictory outcomes, false R39/v1 assurance and unsupported values are refused. Legitimate unreadable uploaded bundles show an explicit invalid result without invented identity. Finite and lapsed locks remain distinct from durable anchoring.
+- Server capabilities gate exports/verification; actual403 hides the refused action. Verifier views reset across subject/audit/version/account changes. Online trust is the deployment's recorded key registry, never a key supplied by the bundle. Uploaded bytes (8 MiB decoded maximum), arbitrary document prose, metadata references, private file paths and server detail strings are never rendered.
+- Every format downloads a fixed-name `.tar.gz` export-bundle/3. The adapter checks gzip media/magic, typed headers, requested subject/body digest and SHA-256 of the opaque transport bytes. **These transport checks do not verify archive members, manifest signatures or signer trust locally.** The server verifier reports signature/member checks; the download notice asks users to verify signatures before relying on the archive. Offline instructions require independently obtained key fingerprints/keyring and TSA trust material.
+
+Validation: **554/554 web unit tests PASS**, including20 new B4 boundary controls; web TypeScript/production build and standalone preview+HTTP-spec TypeScript PASS. **17/17 Chromium browser cases PASS**, preserving the original11 and adding6 exact HTTP contract/refusal/race/version cases, with traces for every case and **zero axe violations in light and dark themes**. Production-wire tests cover exact POST stored-source bodies/CSRF, Decision read→verify→version-bound export, gzip downloads, invalid checks/identity, absent capability, current501, forbidden-action hiding, unreadable invalid bundles, stale verifier results and stale capture completion. The first browser pass was16/17 because `/bom*` did not match `/bom/bundle`; the corrected full mock-route run is the passing proof. Temporary harness typing failures were corrected before the passing standalone check; product gates were green.
+
+Evidence: `/tmp/x39-b4-{focused-final,units-final,preview-tsc-final,build-final,browser-final}.log`, traces `apps/web/test-results/bom-evidence.mock-*/trace.zip`, screenshots under the light/dark axe case. A separate read-only source review confirmed the final identity/census/permission/staleness guards. **Synthetic DTO/HTTP/archive fixtures do not establish live B4 authorization, cryptographic validity, deployed exports or GitHub CI completion.** The client deliberately refuses incomplete verifier responses permitted by the current contract's weaker census constraints; the owner is preparing contract/projection amendments. The B4 routes and their real cryptographic/member proofs still require owner implementation and integration validation.
+
+CI filename follow-up was preserved: run38068137636/job114259877428 at5ea237c6 passed package gates/B9c then detected equal `bom-preview.html`/`bom-preview.tsx` basenames. The prior patch2796192c renamed only the TSX entry to `bom-preview-entry.tsx`, keeping its HTML URL unchanged; exact scripts56/56, renamed-preview TypeScript and build passed. No guard relaxation is included.
+
+## Archived from `codex/x40` (branch tip `fbacff61e425`)
+
+## X40 — ADR-0190 I9 isolation UI — 2026-10-10 UTC
+
+### CI settings-envelope regression fixed — 2026-10-10 17:38 UTC
+
+Exact PR #303 head `07bd5ddcdbc8f5cb2ad964186465644b28203722` failed spa-mock shard 3 (run `38069558879`, job `114264062773`): **154 passed / 3 failed**, all original `x30-engines-independent.mock.spec.ts` cases. Check annotations are retained in `/tmp/x40-ci-shard3-annotations.json`; direct job-log download returned Azure 403. An unchanged local run reproduced **3/3 failures**. Trace/error contexts show the newly mounted isolation settings card crashing the Engines route on HTTP 200 `{}` with `Cannot read properties of undefined (reading 'isolationEnforcement')`. The original builder mock supplies that absent settings envelope; the three substantive Engines assertions remain unchanged.
+
+The card now treats the published settings envelope as unknown input. Missing, null, array, primitive and top-level falsy responses render all eight settings explicitly unmeasured with editing disabled; actual setting records are retained without replacing unknown values with strict defaults. The shared org-settings query cache retains its original raw envelope. A successful write followed by a malformed same-page refresh also locks further editing. Existing failed-refresh cached-state and step-up protections remain covered. Warn copy now states an audited relaxation without promising a disputed placement outcome; production I2–I4 administration/assignment remains unavailable.
+
+Final validation: **538/538 web unit tests PASS** (55 files, zero skipped); explicit web TypeScript and production Vite build PASS; **15/15 real-Chromium mock browser cases PASS**, zero skipped, with traces. The browser set includes the unchanged three original X30 cases, all original ten isolation cases, and two new regressions for actual Engines malformed/falsy envelopes plus same-mounted valid-to-malformed refresh. Existing page/dialog light/dark axe checks and the new malformed Engines axe check pass. Logs: `/tmp/x40-ci-{web-units-final,web-tsc-final,web-build,fixed}.log`; initial red `/tmp/x40-ci-repro.log`; final traces `/workspace/.regulait-onboarding/x40-ci-fixed/`; screenshot `/tmp/x40-engines-unmeasured-settings.png`. Browser/Vite exited 0 and port 4179 has no listener. No owner source, budgets, CI gates or original X30 assertions changed. This is local focused evidence; the new full GitHub CI run remains pending.
+
+CI filename follow-up: the exact repository guard exposed the BOM preview HTML/TSX basename collision on X39. Fixed the same X40 issue by renaming the TSX entry to `isolation-preview-entry.tsx` and updating its HTML module reference. Preview URL and behavior are unchanged. On preserved latest branch `9134d84d`, `pnpm exec vitest run --dir scripts` **56/56 PASS**, `pnpm --filter @regulait/web build` PASS and standalone renamed-preview TypeScript PASS. Evidence `/tmp/x40-filename-guard-fix.log`, `/tmp/x40-ci-filename-{build,preview-tsc}.log`. Temporary config removed; no gate relaxation or owner source edits. Prior browser/unit proof remains applicable; no broad rerun for this entry-file rename.
+
+**READY-FOR-REVIEW for published settings and explicitly synthetic previews; production profile/executor/placement reads and assignment remain unavailable pending I2–I4.** Based on main `88635b65`, with I1 #286. Only web source, web tests and this handoff are changed. Owner gateway/shared/database files and the coordination board are untouched. Merge after I2–I4's real routes as assigned; the missing success DTOs, computed-floor/provenance response, builder/MCP assignment fields/write routes and report verification/time contract were requested through the coordination lead.
+
+Execution profile selectors appear in the existing agent configuration and selected local MCP server view; remote MCP explicitly describes external, unverified host isolation. Profiles, executor evidence and placement refusal surfaces sit under Engines; all eight real org settings appear in Engines and Enforcement Posture, without a new navigation group. Production administration reports unavailable even if an unknown success response arrives, rather than decoding invented DTOs. Assignment is disabled while floor/current assignment are unmeasured. Test-only preview entry uses three exact shared shipped profile bodies/digests, explicit synthetic settings and internal projection types; it runs no workload and saves no assignment. The preview HTML is outside the production application entry.
+
+Settings use the existing published GET/PUT and identity-confirmation wrapper, send only edited fields, compare relaxation against both loaded/current state and strict defaults, refresh before writing, reconfirm concurrent changes, and lock further saves if the read after a write fails. Unknown values disable editing. Warn visibly says **Isolation: not enforced**; stored policy is never represented as proof of live workload isolation. Evidence checks require canonical SHA-256 profile integrity, unchanged fingerprints across asynchronous hashing, known backend/class, profile class floor, every required passing probe, digest and finite lifetime/time checks. Missing org policy remains unmeasured; customer declarations never become verified; stale evidence expires while the view stays open. Device-clock preview freshness does not claim gateway admission.
+
+Independent source review findings were fixed: below-profile class reports, stale customer declarations, invented default freshness, prototype-key lookups, missing workload-kind filtering and asynchronous profile mutation. Existing Engines action-column headers now say Actions; this fixes the actual axe empty-header finding on the modified page.
+
+Validation: full web unit suite **525/525 PASS**, 55 files, zero skipped (30 new model cases); final real-Chromium mock browser suite **10/10 PASS**, zero skipped, covering selectors, all evidence/refusal states, live expiry, unknown settings, cancelled relaxation/identity proof, bound retries, concurrent confirmation, failed reads, keyboard focus and actual existing page mounts. Full preview/page and profile-dialog axe checks have zero violations in both themes; existing Engines and posture page checks also pass. Production TypeScript/Vite build and isolated preview TypeScript check PASS. Browser fixtures are HTTP mocks and synthetic reports, not deployed executor verification or real runtime isolation. Initial browser run was 9 PASS/1 FAIL on existing blank action headers; fixed final runs pass. An initial standalone preview typecheck exposed an accidental shared Node-crypto type dependency, removed by using a structural browser mirror with shared-contract parity tests.
+
+Evidence: `/tmp/x40-web-units.log`, `/tmp/x40-web-build-post-browser.log`, `/tmp/x40-preview-tsc-post-browser.log`, `/tmp/x40-browser-final-copy.log`; final traces under `/workspace/.regulait-onboarding/x40-browser-final-copy/`; screenshots `/tmp/x40-isolation-light.png`, `/tmp/x40-isolation-dark.png`, `/tmp/x40-engines-production-stubs.png`. Previous build passes remain in `/tmp/x40-web-build-clean.log`; temporary preview tsconfig is removed. No dependency install or base-database mutation was needed for X40. No production route/assignment contract or full CI claim.
+
+## Archived from `codex/x41` (branch tip `7b683863102b`)
+
+## X41 — B1/B3 independent cross-review (2026-10-10 15:59 UTC)
+
+Review frozen at main `94fffb656cbc505468a7b8e43c478ca4ad499a08` (B1 #283 included) plus B3 #287 `0009a7bcc757ff9c1c0eb120047b210c226efd62`. B3 remote remained unchanged at final check; main subsequently advanced to `88635b65`, outside this frozen review. Review branch merges the exact B3 dependency; authored changes are only the two independent probes below and this ledger. No gateway/shared/db/config product fix is made.
+
+**B9F-01 — MEDIUM, OPEN: recognised credentials escape through unguarded metadata strings into signed native and both CycloneDX bodies.** `normaliseAiBomRecords` uses `req`/`opt`, rather than its existing credential-refusing `free`/`freeOpt`, for `agents.provider`, `model`, `expectedServedModel`, every `ownerDisplayName`, and `modelCards.pinnedModelVersion`. Six independent synthetic cases put a detector-recognised provider token in these fields; all six builds succeed and all three exact byte bodies retain the token. The positive control confirms `scrubAuditText` recognises this same canary, and the guarded agent-name control refuses it. The database probe also inserts a real agent with this synthetic model through the normal wrapped DB insert, runs actual `loadAiBomRecords` under strict `id_only`, and reproduces the leak. Agent model/expected-model and card-pin schemas accept strings; this is persisted input, not only a forged builder object. Owner display-name cases additionally require the existing audited display-name relaxation. B3's public snapshot POST remains 501/unreleased, so this is a release blocker in the foundation, not a claim of a currently exposed snapshot-export endpoint.
+
+Acceptance: apply the existing refusal guard to **every** string allowed into native/rendering output, including metadata/provider/model/version and all owner-name projections; prefer one invariant scan over the complete output as a final defence as well as field validation. Do not redact a signed body's value or echo the token in refusal prose. Every current negative probe becomes green by refusal/absence; safe provider/model/version names continue to build with identical bytes.
+
+**B9F-02 — MEDIUM, OPEN: private URL paths and queries pass through permitted prose fields.** An agent name, model-card intended use or limitations consisting of `https://internal.example/private-location?signature=SYNTHETIC_QUERY` survives the exact signed native body despite the assignment's no-path/query/private-location invariant. The endpoint and reference helpers sanitise origin-only, but `free` only invokes the credential-pattern scrubber and does not apply `urlOrText` or URL refusal. A credential can therefore survive in an unrecognised query shape, and private storage/document paths are emitted. These three independent negatives use no userinfo and no detector-recognised token, to isolate the URL boundary from B9F-01.
+
+Acceptance: freeze a consistent URL/prose export policy with Claude: origin-only for a complete URL, refusal for URLs embedded in prose (matching the existing `urlOrText` policy), or a stricter whole-output refusal. Apply it to every exported free-text/metadata field, not just endpoint/data-claim fields. Names and intended-use text containing no private URL remain byte-stable; userinfo always refuses. All three negatives must pass in native and both CycloneDX renderings.
+
+Independent executable evidence (all synthetic; no browser or external HTTP):
+
+- `source /workspace/.regulait-onboarding/activate.sh; CI=true pnpm install --frozen-lockfile`: PASS; `pnpm --filter '@regulait/gateway...' build`: PASS.
+- `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_review_x41_oct10b REGULAIT_DATABASE_SSL=disable pnpm --filter @regulait/gateway test zz-adr0189-b1-foundation.test.ts zz-adr0189-b3-ai-bom.test.ts`: **51/51 PASS**, two files. Their own uniquely named scenario databases are isolated by the existing helper.
+- `pnpm --filter @regulait/shared test src/bom/bom.test.ts src/bom/ai-bom.test.ts`: **81/81 PASS**, two files.
+- `node apps/web/review/x41-bom.probe.ts`: **6 controls PASS / 9 genuine red acceptance predicates**, intentionally exits 1. Six token cases identify each native/1.7/1.6 rendering as exposed; three URL cases identify retained private paths. Green controls cover existing token detection, guarded-name refusal, normal offline schema validation of both formats, exact ordering stability including reversed rendering-version request, canonical shape bounds and strict-versus-relaxed finite-lock finality.
+- `DATABASE_URL=<the exact scratch URL above> REGULAIT_DATABASE_SSL=disable node apps/web/review/x41-bom-db.probe.ts`: **13 PASS / 1 genuine red persisted-secret acceptance predicate**, intentionally exits 1. Passing independent probes compare SQL/RFC8785 exact bytes for escaping/non-ASCII values/safe integer bounds; reject fractions/exponents/Unicode keys; refuse UPDATE/DELETE/TRUNCATE, future prune, unexpired/unbounded prune; admit expired same-transaction prune; refuse RR receipt-boundary insertion. Session-lock probe observes an actual advisory-lock DB wait, commits a newer row in the blocker, and verifies the subsequent RR callback sees it. No elapsed-time assertion is used.
+- `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build`: PASS; normal existing Vite chunk-size advisory only. Logs `/tmp/x41-web-tsc.log` and `/tmp/x41-web-build.log`.
+- Dedicated probe typecheck: `pnpm --filter @regulait/gateway exec tsc --noEmit --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext --types node ../web/review/x41-bom.probe.ts ../web/review/x41-bom-db.probe.ts`: PASS. Probe files are excluded from SPA build/test collection; they are explicit review commands, not red CI tests.
+
+Logs: `/tmp/x41-install.log`, `/tmp/x41-build.log`, `/tmp/x41-gateway.log`, `/tmp/x41-shared.log`, `/tmp/x41-independent-final.log`, `/tmp/x41-db-independent.log`, `/tmp/x41-probe-tsc.log`. Earlier probe harness import resolution (`shared` from the standalone web package, then `pg` from gateway rather than its declaring db package) and the loader transaction type adapter were corrected before final evidence. No product defect is inferred from those harness failures.
+
+Limits: this is source + local real PostgreSQL + pure official-schema validation, not released snapshot UI/API, WORM/TSA deployment or new end-to-end cutover verification. R34/R42/R43 receipt behavior and audited finite-lock settings also pass the declared owner tests; the independent boundary addition checks RR refusal rather than rerunning every owner scenario as a new implementation mirror. No evidence-preservation table was weakened or disabled; all injected rows roll back and the scratch database is removed after the run.
+
+## Archived from `codex/x43` (branch tip `27dbd793aecd`)
+
+## X43 — ADR-0188 S3 independent cross-review (2026-10-10)
+
+Reviewed frozen main `94fffb656cbc505468a7b8e43c478ca4ad499a08`, including S3 PR #279
+head `95d334d6` merged as `25089d7246e4db5101cb020e8324c3f7c4eaca12`.
+Review only: no gateway/db/shared/product edits. Source probes are retained under
+`apps/web/review/x43-s3-independent.probe.ts`; temporary gateway copies were removed.
+Existing `/tmp/x35-preserved-symlinks` remains untouched. PostgreSQL database
+`regulait_review_x43_oct10b` is this review's scratch; the base database was untouched.
+
+### I7S3-01 — LOW: a lock-wait admission judges expiry by an old transaction timestamp
+
+**Trigger and evidence.** `admitChildGrant` samples `databaseNow(tx)` before its parent
+`FOR UPDATE`. PostgreSQL `now()` is the transaction-start timestamp. An independent
+pool holds the parent lock until its 1.5-second remaining lifetime passes. The second
+pool starts admission while the parent is live and demonstrably waits on that lock
+(`pg_stat_activity.wait_event_type = 'Lock'`). After the database deadline, releasing
+the lock permits admission: one new child and a 25-dollar reservation are committed
+under an expired root. An immediate, fresh `loadLiveChain` returns `grant_expired`.
+The exact code is `delegation.ts:765–767`, followed by the chain check at ~789;
+`databaseNow` at ~157 uses `now()`. The retained final probe uses an actual database
+lock barrier and database deadline, not a mocked refusal or elapsed-time assertion.
+
+**Impact and limit.** Admission reports success and reserves capacity for an already
+expired delegation. This proof does **not** show a post-expiry token or governed effect:
+a new point-of-use chain read still refuses it. The finding concerns strict admission
+and misleading success/budget bookkeeping, so severity is LOW. It is independent of
+replica process skew. Existing creation/credential predicates and normal budget races
+passed. Revocation also samples time before waiting for locks; inspect that path when
+fixing the shared clock policy, without assuming it was separately reproduced here.
+
+**Acceptance.** Obtain a fresh database wall-clock value *after* the relevant locks,
+then use the same refreshed value for expiry/credential predicates and admission stamps.
+Simply moving/repeating `now()` inside the same transaction does not refresh it;
+`clock_timestamp()` supplies the database clock at the point of use. Keep test-pinned
+`now` explicit, retain the one shared liveness predicate, and apply the timing policy
+consistently at other lock-wait boundaries. The retained `X43_EXPECT_FIXED=1` acceptance
+case must refuse with `grant_expired` and leave no child/allocation/reservation. Also keep
+an otherwise-identical live-parent control successful and all skew/rotation tests green.
+No owner implementation change is made by this review.
+
+### Validation and reproducibility
+
+- `CI=true pnpm install --frozen-lockfile`: PASS. Gateway dependency closure build PASS
+  (`/tmp/x43-closure.log`). Source SHA is frozen above; no owner branch is edited.
+- Existing S3 suite, alone on freshly recreated scratch: **51/51 PASS**, no skips,
+  `/tmp/x43-owner-clean.log`. Calls real Fastify routes, real PostgreSQL and pinned JWT
+  libraries; no fabricated external certificate validation claim.
+- Independent final suite: **9/9 PASS**, no skips, `/tmp/x43-independent-9-final.log`.
+  Eight security/control cases pass; the ninth proves the current defect as an observation,
+  rather than claiming fixed acceptance. Real two-pool 20-way cap race (4 winners), 16-way
+  admission replay (one child/edge/reservation), 16-way usage settlement (one charge across
+  every ancestor), concurrent release (one return to immediate parent), exact credential
+  boundaries/ownership/revocation, committed middle credential expiry, rotation/verification
+  under opposite two-hour process skews, issuer revocation on the other pool and refusal to
+  silently activate another key. Replica concurrency here means two independent PostgreSQL
+  pools in one test process; opposite process-clock skew is simulated by Date-only fake timers.
+  No separate OS-replica, Docker/public-egress or full S5 endpoint claim.
+- Genuine negative acceptance run on the reviewed source: **1 expected FAIL / 8 selected-out**,
+  `/tmp/x43-acceptance-red.log`; expected `grant_expired`, received success (`undefined` error).
+  Run with `X43_EXPECT_FIXED=1` and `-t X43-01`; this is an open finding, not a waived gate.
+- Returned X35: the original three independent probes now **3/3 PASS**; existing S1 audit
+  regression suite **10/10 PASS**. These are separate from S3 counts and demonstrate I7S-01
+  actor-on-v1 refusal, I7S-02 unknown-boundary refusal (CHECK lifted only in rollback), v2
+  positive control, and I7S-03 actor-count copy. Log `/tmp/x43-existing-and-returned.log`.
+  Owner S1 suite creates/drops its own uniquely named `a188x35_*` database; no base mutation.
+- Initial independent harness: 5 PASS/3 failed because each nested child's default expiry
+  was recomputed milliseconds later and outlived its parent. Fixed only that fixture to one
+  shared expiry; subsequent 8/8, then final 9/9 pass. No product fix or weakened assertion.
+- Initial combined owner run: 50 S3 PASS/1 failure plus 13 returned-audit PASS. Independent
+  ahead-clock activation had left an audit `at` two hours in the future; the owner test asks
+  for the globally latest signing audit by `at`, so it saw activation instead of rotation.
+  Fresh-scratch owner-only run passes 51/51. This is recorded isolation contamination,
+  not an unexplained flake or a new product finding; no combined green claim.
+- Web `pnpm --filter @regulait/web exec tsc --noEmit` and
+  `pnpm --filter @regulait/web build`: **PASS**, `/tmp/x43-web-tsc.log` and
+  `/tmp/x43-web-build.log`. No UI implementation changed; no browser screenshot required.
+- Scratch `regulait_review_x43_oct10b` dropped without FORCE after all runs; no retained
+  processes or temporary gateway source copies. Existing backup symlinks untouched.
+
+To reproduce the independent suite, in a scratch checkout at the frozen SHA, concatenate
+its fixture prefix with the retained owned probe and add the two named product imports:
+
+```python
+from pathlib import Path
+source = Path('apps/gateway/src/zz-adr0188-s3-issuer-grants.test.ts').read_text()
+prefix = source[:source.index('describe("ADR-0188 S3 — creation')]
+prefix = prefix.replace('  admitChildGrant,', '  admitChildGrant,\n  databaseNow,\n  credentialLiveAt,')
+Path('apps/gateway/src/zz-x43-independent.tmp.test.ts').write_text(
+    prefix + Path('apps/web/review/x43-s3-independent.probe.ts').read_text())
+```
+
+Then, with onboarding Node/pnpm activated and `DATABASE_URL` pointing only to the scratch,
+run `pnpm --filter @regulait/gateway test zz-x43-independent.tmp.test.ts --maxWorkers=1`.
+Run the original owner suite on a fresh scratch **before** these skew probes to avoid the
+recorded future audit-timestamp contamination. Remove the temporary gateway test afterward.
+The known S3 max-depth persistence, mTLS validation, and S4/S5 integration gaps remain as
+recorded in ADR-0188's S3 amendment; this review does not reopen them or claim completion.
+
+## Archived from `codex/x44` (branch tip `d5ca3e8c080c`)
+
+## X44 — independent SPDX 3.0.1 B5 review (2026-10-10 UTC)
+
+Reviewed PR #297 frozen at `a2f5489dd074075425860848ea3c0b4aa7749b7f`, retained as dependency merge `c382932a` on main `2276739b`. Owner board #306 was read at `f3517fe4`, then its later two-line contract/fix update was rechecked before push; PR #297's head remains unchanged. **No additional B9S defect reproduced in the reviewed scope.** Only independent web/review probes and this ledger are authored; no owner product files were edited. The pre-existing X41 branch and its subsequently advanced remote were preserved.
+
+Independent R3/entry4237371312 checks cover all five AIPackage and six DatasetPackage required properties, absent/null/empty-string/empty-array cases on a second element, unique exact missing names, missing recorded release/download/version values, signed rendering digest/length, per-package/file declared and concluded licence relationships, and the source-level R17 false switch plus POST refusal. Dataset output records exactly builtTime/originatedBy/releaseTime/software_downloadLocation missing, emits no SPDX bytes, and retains both CycloneDX outputs; the standard's permitted datasetType noAssertion is distinct from invented literal placeholders. B9's future metadata collection remains owner work, not silently filled here.
+
+The independent schema/SHACL cross-check is measured: valid output (287 triples), an AI package missing all five external mandatory properties (282), and a dataset draft missing its four currently unavailable properties (401) all conform to the official schema and SHACL. The product's explicit mandatory check independently refuses the latter two. Changing an AI package's suppliedBy to the Tool stays schema-valid but correctly fails SHACL. All four expected outcomes passed using spdx3-validate0.0.7, the hash-locked Python closure and locally pinned schema/context/model in a fresh user/network namespace; the driver's --require-offline probes could not connect outside it.
+
+Validation: frozen install, shared build, **80/80 owner tests** (ai-bom-spdx.test.ts and ai-bom.test.ts), **56/56 independent checks**, **4/4 independent actual schema/SHACL checks**, standalone probe TypeScript, web TypeScript and production build all PASS. Commands: `pnpm --filter @regulait/shared test ai-bom-spdx.test.ts ai-bom.test.ts`; `node apps/web/review/x44-spdx.probe.ts`; `unshare -Urn -- /tmp/x44-spdx-venv/bin/python -I apps/web/review/x44-spdx-offline.probe.py /tmp/x44-spdx-vectors`; standard web tsc/build. The initial probe harness tried a non-exposed tsx executable and looked for the switch in its importing route file; both harness assumptions were corrected before the passing controls. The sandbox's read-only uid_map prevented the first namespace attempt; the authorized isolated invocation succeeded. No product negative failed unexpectedly.
+
+Evidence: `/tmp/x44-{install,shared-build,owner-tests,probes,probe-tsc,web-tsc,web-build,python-install,shacl}.log`; generated independent documents `/tmp/x44-spdx-vectors/`. The retained hash-locked temporary Python environment is reusable for returned B9/B5 reviews; no database, gateway or browser was started. The CI conformance step was source-reviewed and its driver measured locally, not a fresh full GitHub CI execution or all six CI fixture/triple-count proof. No deployed export, current route acceptance, licence legal conclusion or new privacy guarantee is claimed. R17 remains disabled and the prior B9F input-safety findings remain routed to B7; this review does not close them.
+
+## Archived from `codex/x45` (branch tip `31bd1b96d302`)
+
+## X45 — independent S5 review (2026-10-10)
+
+Reviewed product head `37476e9cb35a723114718f132077648f48ebc9ec` (#302) on main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7`; later ADR-only head `b91c6072b2e28c38bed163c68ff33be6635b852c` was read only after initial independent analysis was recorded. No owner product fixes. Four required-behavior predicates fail with seven controls passing in `/tmp/x45-independent-final-red.log`. Durable synthetic regression scenarios: `apps/web/review/x45-s5-independent.probe.ts`; scaffolding attributed to owner fixture, acceptance independently authored.
+
+- **I7S5-01 HIGH, authority-depth release blocker:** a signed human root proof with `maxDepth:0` still permits a child exchange, HTTP200 where the acceptance requires400. `createRootGrant` loses the signed root depth; the temporary S5 guard checks only whether the parent is already non-root. Preserve/enforce the original depth ceiling, or refuse every child exchange until S4 enforces it. This grants authority beyond the signed limit; delegated resource execution still refuses while `DELEGATED_ROUTES_WIRED=false`. The later ADR amendment corroborates this blocker but changes no product code.
+- **I7S5-02 MEDIUM, confirmation-body binding:** a previously verified classified-write step-up grant matching operation/agent/project/resource also authorizes substituted scope/cap/depth/lifetime/output-key, creating a proof with HTTP201 where acceptance requires403. `oauth/delegation-proof.ts:83` facts omit these authority fields. The probe seeds an already verified grant to isolate the route's digest matching; it does not execute or claim a passkey/TOTP ceremony bypass. Bind the complete canonical intended authority body before confirmation, then refuse changes at execution. Add an actual ceremony-to-route regression in owner code.
+- **I7S5-03 MEDIUM, strict-default policy gap:** omitted root cap creates an unlimited per-grant allocation, HTTP201 where the accepted updated strict contract requires400. The initial source also defaults root lifetime to3600s and permits explicit24h; tokens independently retain their <=300s default, so this is not a token-TTL claim. The later ADR records finite root caps as required and a shorter bounded lifetime. Require a finite cap and implement those accepted defaults; add omission/bounds cases. Initial policy concern was recorded before the owner amendment.
+- **I7S5-04 LOW, replay retention under process skew:** an accepted private-key assertion with a +30s process clock stores a DB expiry approximately29.8s before signed `exp+5`. `token-endpoint.ts:199` adds the provider's process-relative TTL to DB `s.now`. Store an expiry covering the signed DB-clock acceptance window rather than mixing clocks. This proves premature retention expiry, not a successful live replay: the production sweeper is currently unconnected, and exploitability depends on cleanup removing the record. No sleep or performance-budget assertion is used.
+
+Existing S5 regression:32 token-endpoint cases PASS on an isolated fresh `regulait_review_x45_owner_root_oct10`; provider-contract and X50919 cases PASS (51 total). Child resource=stored parent audience is the explicitly conservative v1 boundary, not a defect. Delegated paths remain disabled; no current MCP execution claim. Initial stale built shared-contract test results were discarded; final four negatives were collected after rebuilding frozen source dependencies. Initial gateway closure typecheck failed because the temporary probe inferred optional undefined fields; the durable fixture now explicitly types the mutation collection as `Form[]`, and the copied temporary source was synchronized for final compilation.
+
+Final gates: `pnpm --filter @regulait/gateway exec tsc --noEmit`, `pnpm --filter @regulait/web exec tsc --noEmit`, and `pnpm --filter @regulait/web build` each exit0. Logs `/tmp/x45-root-{gateway-tsc,web-tsc,web-build,owner-regression,client-regression}.log`. The initial dependency-closure command exited2 solely on the temporary fixture type error above; no successful full-closure rerun is claimed. The temporary gateway test copy and both task scratch DBs were removed; the base DB is untouched. No full suite, deployed credential, or CI-green claim.
+
+## Archived from `codex/x47-285` (branch tip `081eb9c4fdcc`)
+
+## X47-285 — returned DBG-01 / I1R-01 independent recheck — 2026-10-10 UTC
+
+**Both findings are addressed in the reviewed scope.** Rechecked exact #285 `d7dff3d858238e92f7d023e8faaeeb797a5a5675` on current main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7`, preserving the owner dependency with ordinary merge `7bfd8835`. No owner product files or journal entries were authored, resolved or renumbered. The exact owner journal keeps strictly increasing `when`/`idx` (existing historical idx gaps preserved), with 0185 `when=1785120000000`. This supersedes the original OPEN findings below for this head; Claude retains official VERIFIED/merge ownership.
+
+- **DBG-01:** fresh full migration through main's 0182/0183 and exact owner 0185 succeeds. The migration table records the frozen 0185 timestamp. Executing the complete exact 0185 SQL twice more in a rollback-only transaction succeeds; no statements are omitted. The original `6f6de2bc` SQL still reproduces SQLSTATE42723/duplicate_function as an independent negative control. Current catalog has 34 public SQL/PLpgSQL functions, zero missing search-path pins, and 34 TRUNCATE-guarded tables with zero census omissions. Every guarded table actually refuses `TRUNCATE CASCADE` under savepoints and rollback.
+- **I1R-01:** both original bodies (`{}` and all-three JSON-null fields), plus independently omitted schema/name/minClass, now refuse with SQLSTATE23514 specifically naming `execution_profiles_body_check`. Restoring only the original predicate in a rollback-only transaction accepts both original malformed bodies, proving the changed predicate closes the observed issue. A full shipped profile body with a fresh name/digest still inserts successfully and is rolled back.
+- The original hostile **nonpublic** caller schema deletion now refuses and keeps synthetic incident evidence. Resetting only the original function pin recreates the deletion inside rollback. Future synthetic unpinned function and append-only table without a TRUNCATE guard are detected by the invariant census. Existing profile-version temp-shadow refusal, I1's four TRUNCATE guards, runsc amendments, digest ordering, backend class claims and strict-setting comparisons remain passing.
+
+Validation using the onboarding activation helper:
+
+- `DATABASE_URL=postgres://regulait:regulait@127.0.0.1:5432/regulait_review_x47_285_oct10 pnpm --filter @regulait/gateway test zz-dbguard-0185.test.ts zz-adr0190-i1-foundation.test.ts zz-x47-285-independent.test.ts` — **44/44 actual PostgreSQL tests PASS**, three files, zero skipped:14 owner guard +16 I1 foundation +14 independent. Retained probe `apps/web/review/x47-285-isolation.probe.ts` is copied temporarily to the named gateway test for execution; the original migration is loaded from its exact Git object. Temporary gateway copy removed afterward.
+- `pnpm install --frozen-lockfile`, `pnpm --filter '@regulait/gateway...' build`, `pnpm --filter @regulait/web exec tsc --noEmit`, `pnpm --filter @regulait/web build` — PASS. Initial closure attempt exposed stale installed B3 AJV/CycloneDX dependencies; frozen install restored the exact existing lock dependencies, then the full closure passed. No lockfile/package source change.
+- `pnpm exec vitest run --dir scripts` — **56/56 PASS**; `node scripts/coordination.mjs lint` and diff checks PASS. No broad web/browser rerun for this review-only source.
+
+Evidence: `/tmp/x47-285-{pg,catalog,install,gateway-build-final,web-tsc,web-build,scripts,coord}.log`. Synthetic scratch `regulait_review_x47_285_oct10` was created and dropped without FORCE; the owner's generated `dbg185_` scratch also cleaned up, verified absent. Base database untouched. Owner board `698a93d4` holds #285 merge until S4/0184: this receipt proves current main through0183 plus frozen0185, not an unmeasured later S4 composition, full CI or deployment.
+
+## Archived from `codex/x47-304` (branch tip `2de0aecfd6f3`)
+
+## X47 rolling review: CI/local-failure PR #304 — 2026-10-10 UTC
+
+**READY-FOR-REVIEW — no new defect found.** Reviewed exact owner head
+`1a7ca6d26363d7a3ed601b759b40d869a11fe58d` (`ci-docs-local-fails`), using a
+clean detached checkout during verification. The findings branch starts at main
+`2276739b`; owner source was not edited, and the checkout is back on the findings
+branch. This delivery adds only this ledger and an independent review probe.
+
+The README, dated ADR-0110 amendment and verification-script header agree with
+`.github/workflows/ci.yml`: base build/non-gateway/static checks; four gateway
+shards, each with its own Postgres/object store and post-test unique-constraint
+pre-flight; coverage confirming each file ran once; and the required aggregate
+check. The ADR preserves its original wording under a dated amendment. The
+verification script's executable commands are unchanged; `bash -n` passes.
+
+With `REGULAIT_DATA_KEY` removed from the invoking environment, all three changed
+suites pass together: **57/57 tests in three files** (59.91s). This is the combined
+seed, docker-demo-license and receipt-writer result, not a standalone seed-suite
+count. The built seed succeeds on its fresh per-run scratch databases because the
+changed test harness supplies the synthetic 64-hex fixture key. A nonempty supplied
+key still wins over that fallback in both spawn environments; shipping seed/auth
+code and the data-key requirement are unchanged.
+
+The independent TypeScript differential examines the real gateway AST and compares
+old whole-literal eligibility with optimized initializer eligibility at every
+literal `insert(auditLog).values` site: **489 writers, 101 eligible, 15 spread
+fallbacks, zero changed eligibility**. The original classification test also passes.
+A compiler-host-only mutation renames `receiptClass` at the real eligible writer
+`agent-stewardship.ts:372`; both scans detect exactly that one missing class. No
+owner source file is changed for the negative control. The optimized branch retains
+whole-literal typing when a spread is present. This establishes equivalence on the
+current inventory, not every possible future TypeScript syntax form. No elapsed
+wall-time budget assertion is introduced, so no shared timing-file change is needed.
+
+Commands on the frozen owner head:
+
+- `CI=true pnpm install --frozen-lockfile` — PASS.
+- `pnpm --filter '@regulait/gateway...' build` — PASS.
+- `pnpm --filter @regulait/web exec tsc --noEmit` — PASS.
+- `pnpm --filter @regulait/web build` — PASS.
+- `env -u REGULAIT_DATA_KEY DATABASE_URL=<own scratch URL> pnpm --filter @regulait/gateway exec vitest run src/seed.test.ts src/docker-demo-license.test.ts src/receipt-writer-classification.test.ts` — 57 PASS.
+- `node apps/web/review/x47-304-writer-differential.mjs` — inventory and renamed-class negative PASS; emits the counts above.
+- `bash -n scripts/verify-clean-checkout.sh` — PASS.
+
+The disposable parent database was `regulait_review_x47_304_oct10`, on loopback
+Postgres; the seed/license suites made and removed their own per-run child
+scratch databases. The parent was dropped without FORCE after verification.
+No shared/base database was reset, and no gateway listener or browser was started.
+Logs: `/tmp/oct10-x47-304-{install,gateway-build,web-tsc,web-build,selected-tests,differential,cleanup}.log`.
+Claude retains adjudication, VERIFIED and merge authority.
+
+## Archived from `codex/x47-308` (branch tip `2304964403f8`)
+
+## X47 — dependency-advisory documentation review (#308, 2026-10-10)
+
+Target: `7c3333338a0836a080a0c06b886f9b0fd6059135` (`deps-advisories-1010`), baseline main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7`. Review only; no dependency or security-gate changes. No new confirmed defect in the added advisory triage.
+
+Independent evidence:
+- Queried all five [GitHub advisory records](https://api.github.com/advisories/GHSA-27vj-qcqg-25rc), including [datasets](https://api.github.com/advisories/GHSA-379c-qx7v-6h59), [NLTK](https://api.github.com/advisories/GHSA-8mgp-746c-j5xp), [braces](https://api.github.com/advisories/GHSA-vfj7-8cjw-p6xm), and [node-forge](https://api.github.com/advisories/GHSA-86w9-cpqp-85rv). fsspec first patch is 2026.6.0; datasets first patch is 5.0.1; the other three have no first patched version recorded. Datasets severity is GitHub `medium` (the PR uses npm's equivalent `moderate`). Saved response facts: `/tmp/x47-308-advisories.json`.
+- Independently queried primary PyPI metadata for garak0.17.0, datasets3.6.0/5.0.1 and nltk3.10.3. Garak latest remains0.17.0 with `datasets>=3.0.0,<4.0` and `nltk>=3.10.3`; datasets3.6.0 caps fsspec at2025.3.0; datasets5.0.1 raises the cap to2026.6.0; NLTK latest remains3.10.3. Datasets latest is5.1.0, consistent with the documented first fixed5.0.1. `/tmp/x47-308-upstream-pins.json`.
+- Actual previously built local garak image `regulait-review/engine-garak:oct10` (`6f1d74cc3c1a`) under `--network none`, executing `/opt/garak/venv/bin/python`, confirms the four pinned distribution versions and relevant garak/datasets constraints. `/tmp/x47-308-image-metadata.json`. This is a dependency-closure observation, not a scan, signature admission, or proof that the newer pre-seeded image was built.
+- Promptfoo lock entries for braces3.0.3/node-forge1.4.0 are both optional; Dockerfile uses `npm ci --omit=optional`. Actual previously built promptfoo image `regulait-review/engine-promptfoo:oct10` (`1fcfab70273f`) refuses `require.resolve` for both with `MODULE_NOT_FOUND` under `--network none`. Existing runner/worker image and pruned closure evidence remains in prior X29-G review; no rebuilt-image claim.
+- Read exact gate implementation: `scripts/security-gate.mjs` admits only fixable HIGH/CRITICAL to its finding list (requires `FixedVersion`); no gate or suppression change in #308. fsspec allowance names CVE-2026-104851, expires2026-12-09, and records the upstream pin and cache restrictions. No vulnerability was dismissed, no affected package upgraded, no claim that the unresolved findings are fixed.
+
+Limits: route/config/cache reachability is source-inspected, not newly exploited; no new Trivy report or licence scan. The PR's earlier tests/audit are owner receipts, not independent reruns. First local garak inspection used the system Python and failed `PackageNotFoundError`; corrected to the image's configured venv before making version claims. Both owned containers completed and were removed.
+
+Validation: `pnpm --filter @regulait/web exec tsc --noEmit` and `pnpm --filter @regulait/web build` both exit0 on this composed head; logs `/tmp/x47-308-web-{tsc,build}.log`. This review changes only this ledger after composing the documentation dependency. Existing Vite large-chunk advisory remains.
+
+## Archived from `codex/x47-314` (branch tip `220f8a76adc8`)
+
+### X47 returned B7 review — PR #314, 2026-10-10 UTC
+
+Reviewed exact owner head `cda4c1f63a0a508c867ca3567a1bb258ca9dc9cb`
+against ADR-0189 R9, R17, R28 and the original X41 B9F-01/02 predicates.
+Review branch starts from main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7`;
+the owner head was checked out temporarily for builds and probes, then restored
+to this review branch. Only owned review probes and this ledger are published.
+Board `2536ab4b4ca5ad54efd6741534f91c720770a302` was reread before publication.
+
+**Disposition: B9F-01 and B9F-02 addressed on the reviewed head.** Original
+`1bba1dce` pure-builder probe is copied verbatim as
+`apps/web/review/x47-314-bom.probe.ts`; the original PostgreSQL probe is copied
+as `x47-314-bom-db.probe.ts` with only its scratch database guard changed to
+`regulait_review_x47_314_oct10b`. All original credential and private-path/query
+assertions now pass: six credential-bearing fields and three private URL fields
+are refused or absent from native and both CycloneDX renderings; the persisted
+agent-model credential is refused through the actual gateway loader. SQL byte
+identity, append-only/prune guards, the receipt boundary and the pre-BEGIN
+session lock controls also pass. Original assertions were not weakened.
+
+**B7 review: no additional defect reproduced in this scope.** The R17 switch is
+shared by gateway, builder seam and CLI and stays false. Workflow producing
+steps (artifact downloads, cosign installation, identity/signing, BOM generation,
+upload) require `released == true`; both producing CLI commands return inert
+before reading files and have no flag that turns the switch on. Package
+compilation and inventory validation still run while the snapshot step is inert.
+The release identity binds exact workspace/image SBOM byte hashes, serials,
+versions, release commit and image digest. The workflow verifies the identity
+with cosign against its pinned main workflow identity and issuer before passing
+the verification outcome to the builder. The builder emits BOM-Link identities
+and hashes, not raw SBOM content, secrets or runner paths; development tools are
+formulation components with explicit missing-version gaps. Without an identity,
+links are absent and composition remains incomplete.
+
+Independent `x47-314-release.probe.ts` checks exact-byte Ed25519 identity mutation
+as a genuine cryptographic control, unverified/unknown-method refusal, changed
+SBOM bytes with the same serial/version, missing image bytes, mismatched release
+commit, output identity/hash/provenance and content exclusion, honest absent-
+identity composition, switch-off versus harness-on, and actual inert CLI output.
+The Ed25519 control is synthetic and independent of the product; it does not
+claim that a local cosign verification ran. The typed verification flag is a
+trusted-caller seam, not proof by itself. Current CI ordering supplies that
+seam; install-time verification/trust-root selection remains explicitly deferred
+by ADR-0189 owner item 2 and SECURITY_CI.md §6a. No certificate/Rekor/OIDC,
+released GitHub workflow, deployed install or SPDX acceptance claim is made.
+
+Fresh validation on the exact owner head, one reserved CPU lane:
+
+- `pnpm install --frozen-lockfile` PASS.
+- `pnpm --filter @regulait/gateway... build` PASS (full dependency closure).
+- `node apps/web/review/x47-314-bom.probe.ts`: **15/15 PASS**.
+- `DATABASE_URL=<own scratch> node apps/web/review/x47-314-bom-db.probe.ts`:
+  **14/14 PASS**, real newly migrated PostgreSQL database.
+- `node apps/web/review/x47-314-release.probe.ts`: **10/10 PASS**.
+- `pnpm --filter @regulait/shared exec vitest run src/bom/ai-bom.test.ts src/bom/release-ai-bom.test.ts --maxWorkers=1`:
+  **63/63 PASS**.
+- `pnpm --filter @regulait/gateway exec vitest run src/adr0189-b7-release-switch.test.ts --maxWorkers=1`:
+  **2/2 PASS**.
+- `pnpm exec vitest run scripts/release-ai-bom.test.mjs --maxWorkers=1`:
+  **4/4 PASS**.
+- `pnpm --filter @regulait/web exec tsc --noEmit` and
+  `pnpm --filter @regulait/web build`: PASS.
+
+**108/108 selected checks**, no skipped or failed cases in these runs. No full
+shared/gateway suite claim. Logs `/tmp/x47-314-{install,closure,pure,db,release,shared,gateway,cli,web-tsc,web-build}.log`.
+Initial shell `psql` command was unavailable; database creation/drop used the
+existing local PostgreSQL container instead. Own database was dropped, owned
+CLI temporary directory removed and no review processes remain. CPU lane was
+released before publication to X42 for its regression checks. The board remains
+root-owned. Web application source is identical between reviewed owner head and
+review branch; the only existing web difference is the excluded X42 review probe.
+
+## Archived from `codex/x48` (branch tip `0971738f41b8`)
+
+### X48 — consumer review of the frozen B4 contract (#307) and finite-lock fix (#315) — 2026-10-10 UTC
+
+Reviewed exact owner head `19b80068` (`b6-bom-b4-contract`) against main
+`2276739b` and the whole owner boards `698a93d4` and `2536ab4b`. This delivery changes only
+the findings ledger and independent probes under `apps/web/review`.
+All five B4 routes remain admin-only `501 not_built` stubs. These findings are
+inconsistencies in the contract frozen for B6, **not** demonstrated runtime
+signature bypasses, archive-verifier bugs or deployed authorization failures.
+The ADR's freeze expressly changes no earlier decision.
+
+**B4C-01 — MEDIUM — a positive verification outcome does not require the
+subject's evidence checks, and mandatory unverifiable bindings can be valid.**
+`packages/shared/src/bom/contract-b4.ts:596` derives the overall outcome solely
+from the statuses of whatever `checks` the producer supplied. A Decision DTO
+with just `body_schema: valid`, all sections, and the required `cannotProve`
+entries parses with `outcome: valid`: no body-signature, receipt-signature,
+facts-binding, chain or finality check is present. Repeating that one check
+also parses; it does not establish a census. Separately, a complete 20-check
+Decision DTO parses when `decision_content_binding` is changed to `valid`
+(R39 explicitly requires `unverifiable/preimage_not_exported`), or when a v1
+receipt's `receipt_facts_binding` is changed to `valid` (R46 explicitly
+requires `unverifiable/receipt_v1_no_factsHash`). Fixed limitation sentences
+remain present, so the individual claimed-valid bindings contradict them.
+
+Impact: B6 can consume a schema-valid positive result without evidence that
+the required checks ran, or display a valid binding the accepted ADR forbids.
+No attacker-controlled producer or current verifier execution is claimed.
+Acceptance: freeze a source/subject-specific minimum check census for
+non-invalid readable responses; enforce the R39 and v1 R46 status/reason
+rules. Permit repeated checks for distinct item references where needed
+(addenda/renderings), rather than banning all repeated check names. Specify
+stored-source handling of outer-bundle checks. The sparse/duplicate and both
+binding mutations must fail, while complete positive/limited controls remain
+representable. Preserve partial invalid/unreadable results.
+
+**B4C-02 — MEDIUM — an invalid section can accompany a non-invalid outcome
+and a valid section-projection check.**
+The same response refinement requires every Decision section, but ignores its
+`status`. Starting from a complete DTO that preserves the required R39/R46
+unverifiable checks, changing only the first section to `invalid` still parses
+with `sections_projection: valid` and `outcome: valid_with_unverifiable`.
+This is independent of B4C-01. A combined mutation also parses with an invalid
+section and overall `valid`. R37 requires any section-projection difference to
+be invalid, so this contradictory wire response has no defined truthful UI
+interpretation.
+
+Acceptance: make section statuses consistent with `sections_projection` and
+the aggregate outcome; an invalid section requires an invalid verification
+result. Define how genuinely unverifiable projections aggregate, keeping
+completeness (`not_recorded`/`not_applicable`) distinct from verification
+failure. Reject the existing contradictory fixtures without losing valid
+section sets or limited responses.
+
+**B4C-03 — LOW — a stored-source discriminator can identify the wrong BOM
+subject.**
+A complete Decision response still parses when its sole change is
+`source: ai_bom_snapshot`; the body version, identity, sections and checks all
+continue to identify a Decision BOM. A stored AI snapshot cannot be the source
+of that identity under the strict request union. The response already checks
+body-version/identity agreement but omits source/identity agreement.
+Acceptance: bind `decision_bom` to Decision identity and `ai_bom_snapshot` to
+AI identity for readable responses; bundle source may hold either. Retain
+unreadable invalid responses with null identity.
+
+Other reviewed obligations: capability output requires an explicit auditor
+grant plus `admins_and_auditors`, keeps drift admin-only and export reasons
+consistent, and states no step-up for reads/exports. Admission remains a
+server obligation on every request, with shared per-user rate limiting and
+auditing required by the ADR. The strict verify request rejects caller keys,
+trust roots and time; online trust is `deployment_registry`. Bundles document
+`application/gzip`, `.tar.gz`, export-bundle/3 and digest/key headers; selected
+AI formats still include signed native evidence (R7). Manifest syntax bans raw
+`audit/rows/*` payloads, uses hash-only audit scope and sorted unique paths.
+Actual archive layout, signature/header/body bindings, decoded byte ceilings,
+content scanning, recorded-key/TSA trust and current authorization require the
+future B4 implementation; a passing DTO schema is not proof of these behaviors.
+Finality transitions and the R44/v1/finite-lock limitation entries have useful
+existing structural guards. No display-name or raw invocation exception was
+introduced. OpenAPI keeps all five routes internal and explicitly unbuilt.
+The Decision response supplies `versions` (id, version, supersedes, finality,
+digest, key id and time), so B6 needs no invented list route. Per the owner's
+consumer guidance, 403 hides the action, no capability preflight exists, and
+auditor grants have no expiry field. `canVerify` and export availability are
+separate capabilities, preserving verification without a private signing key.
+
+Durable probe: `apps/web/review/x48-b4-contract-counterexamples.mjs` imports
+the target checkout's freshly built shared contract. Its four controls accept
+the complete limited DTO and reject the wrong outcome, foreign check and
+missing section; seven independent/combined mutations reproduce the findings.
+The checked-in `.receipt.json` records acceptance/status/counts only. Run
+`node apps/web/review/x48-b4-contract-counterexamples.mjs <target-checkout>`
+for the frozen regression receipt, or add `--expect-fixed` for the owner-fix
+gate. On `19b80068` the latter exits 1 at the sparse claimed-valid mutation,
+as required for a genuine red; it is not falsely reported as a passing fix.
+
+Validation: frozen install; shared build; shared `test
+src/bom/contract-b4.test.ts` **52/52 PASS**; gateway `test
+adr0189-b4-contract.test.ts` **4/4 PASS**; independent receipt **11/11 expected
+observations** (seven bad DTOs accepted, four controls correct). Gateway `pnpm --filter @regulait/gateway exec tsc --noEmit`, web
+`pnpm --filter @regulait/web exec tsc --noEmit`, and
+`pnpm --filter @regulait/web build` **PASS**. All commands use the exact
+detached owner head; owner source remained byte-for-byte unchanged. No DB,
+HTTP mock, browser, timing suite or signature execution was used. Logs and
+full frozen receipts: `/tmp/oct10-x47-307-{install,shared-build,shared-tests,
+openapi-tests,gateway-tsc,web-tsc,web-build}.log`,
+`/tmp/oct10-x47-307-counterexamples.json`, and
+`/tmp/oct10-x47-307-fix-gate-red.log`. X39's adapter owner was notified before
+publication so the source work can continue without treating schema parsing
+as complete verification evidence.
+
+**#315 finite-lock fix — independent review PASS, no additional finding.**
+Reviewed exact `f6963763fc4723426edd1fea3b403d60363ee4cc`
+(`b1-finality-fix`), whose two changed files only adjust pure finality and its
+tests. Under unbounded retention, `refuse` can no longer produce
+`anchored_finite_lock` through a weaker finality floor: strict `anchored`
+remains pending with `retention_unbounded`, and relaxed floors yield at most
+`anchored_unverified_destination`. Only explicit `accept` permits
+`anchored_finite_lock`. This preserves the R44 distinction rather than
+silently treating the separate floor relaxation as finite-lock acceptance.
+
+Durable `apps/web/review/x48-finite-lock-review.mjs` independently checks all
+three floors and both finite-lock settings across future/null/exactly-expired/
+expired locks, destination observation, timestamp-required/off behavior,
+bounded retention covered/short, unsigned receipts and absent anchors:
+**66/66 admission cases PASS**, plus **6/6 reported-finality assertions**.
+Its unchanged assertions genuinely exit 1 against the old finality compiled
+from `19b80068`: the weaker floor under `refuse` incorrectly returns
+`anchored_finite_lock`, where the oracle requires
+`anchored_unverified_destination`. Frozen old-red receipt:
+`/tmp/oct10-x48-315-before-red.log`.
+
+Exact follow-up commands on detached `f6963763`: `pnpm --filter
+@regulait/shared build`; `node apps/web/review/x48-finite-lock-review.mjs`;
+`pnpm --filter @regulait/shared test src/bom/bom.test.ts` **36/36 PASS**.
+Logs `/tmp/oct10-x48-315-{shared-build,tests}.log` and full matrix
+`/tmp/oct10-x48-315-matrix.json`; the `.receipt.json` is checked in beside
+the probe. Shared compilation covers the entire two-file fix; web/gateway
+source is unchanged, so their preceding exact-#307 passing gates were not
+unnecessarily repeated. No owner product source was edited and no database
+was created or modified. The build lane was released directly to X49 before
+publication. Findings are now `B4C-NN` under the owner's 17:05 X48 assignment,
+replacing the initial internal X47/B9C labels. Branch `codex/x47-307` was
+preserved without commits; this delivery is `codex/x48` from main `2276739b`.
+
+## Archived from `codex/x53` (branch tip `c997fb2aedd3`)
+
+### X53 independent B9 declarations review — 2026-10-10 UTC
+
+Frozen owner PR #322 `ed49eaabbda3cec96633964d91c67a7894a78c14`, normally
+merged into main `2276739bb1ca3d5cddfcf03cbef186d59e1966a7` as `afcb66ac`
+for execution in the existing review checkout. Merge was pushed immediately;
+Codex changed no owner implementation. B5 dependency source is carried by the
+frozen owner ancestry. Board assignment and entry condition are pinned to
+`c8d941a2729a9041e2602de786f79ccf46d2ba2a` (17:30 UTC). Findings were recorded
+independently before exchange with the separate X52 UI author.
+
+**B9D-01 — MEDIUM, pending newer entry condition: undeclared or withdrawn model
+fields still render from legacy data_claims.** The newer X53 board requires
+`ai_bom_spdx_declarations` as the only source and says the `data_claims` fallback
+is being retired. Frozen ADR-0189 R51 Rendering expressly permits that fallback,
+and the implementation follows that older contract. This finding is therefore
+an outstanding announced acceptance requirement, not an assertion that the
+frozen code violates its frozen ADR or permits an unauthenticated write.
+
+Independent actual PostgreSQL / HTTP / gateway-loader counterexamples:
+
+1. A model card has a pinned version, a licence and legacy `data_claims`
+   releaseTime/downloadLocation, with zero declarations. The actual loader and
+   builder produce a schema-valid SPDX document, rather than `not_producible`
+   listing `ai_AIPackage.releaseTime` and
+   `ai_AIPackage.software_downloadLocation`.
+2. Declare new values through both admin PUT routes, then withdraw them through
+   both POST routes. GET correctly reports both fields undeclared and the current
+   declaration list empty. The next actual capture nevertheless renders SPDX
+   with the OLD time and old origin restored from `data_claims`.
+
+Source: `packages/shared/src/bom/ai-bom-spdx.ts:249` and `:250` use declaration
+`?? claimText(...)`; `currentSpdxDeclarations` intentionally excludes withdrawn
+rows, so a withdrawal becomes indistinguishable from never declared to the
+renderer. This undermines withdrawal effectiveness and the new provenance entry
+condition. Parent-card pin precedence remains accepted: R51 explicitly keeps a
+recorded pinned version first; it is not part of B9D-01.
+
+Acceptance for Claude's owned files: remove the legacy releaseTime and download
+location fallback, update R51's older source-precedence wording and affected B5
+fixtures/tests, and prove both cases return precisely the two missing property
+names with no SPDX bytes. Declaring both values must still render; correction
+and withdrawal retain their immutable, audited history. The root routed this
+finding before publication; no product fix is made in this review branch.
+
+**Other reviewed controls: no additional defect reproduced.** Anonymous requests
+return401 and member requests403 on GET/PUT/withdraw; admin validation rejects
+non-HTTPS, private path/query, fragment, userinfo, trailing slash, Unicode host,
+invalid port, bad source/property and fractional-second time without echoing
+values or persisting rows. Valid writes use database timestamps and the stated
+source, with exactly one audit row each. A scratch-only trigger intentionally
+fails the audit insert; the route returns500 and the declaration rolls back in
+the same transaction. The trigger/function are removed immediately. All three
+parent kinds refuse UPDATE/DELETE/TRUNCATE, admit only their own parent's
+cascade, and ignore a supplied future declared_at. Both new functions pin
+`search_path=pg_catalog, public, pg_temp`; a temp parent-table shadow cannot
+admit a direct delete. CHECK controls reject invalid direct URL/time/parent and
+column shapes. Existing tests also cover complete/partial dataset declarations,
+exact missing property names, schema/cardinality and withdrawal.
+
+Durable `apps/web/review/x53-spdx-declarations.probe.ts` contains18 independent
+cases. Run with `EXPECT_FIXED=1` to enforce the new entry condition:
+`EXPECT_FIXED=1 DATABASE_URL=<own scratch> node apps/web/review/x53-spdx-declarations.probe.ts`
+returned **16 PASS / 2 genuine RED**, expected exit1, both reds B9D-01. Its default
+diagnostic mode observes both reproductions and exits0; that diagnostic status
+is NOT a claim that the declaration-only acceptance passed. Initial harness
+setup used a model card without its required subject; the database rejected it
+before any case executed. Corrected the synthetic fixture, recreated only the
+owned database, then ran diagnostics and the strict assertions.
+
+Fresh bounded validation on the reviewed composition:
+
+- `pnpm install --frozen-lockfile` PASS.
+- `pnpm --filter @regulait/gateway... build` PASS, full dependency closure.
+- `pnpm --filter @regulait/shared exec vitest run src/bom/ai-bom-spdx-fields.test.ts src/bom/ai-bom-spdx.test.ts --maxWorkers=1`:
+  **55/55 PASS**.
+- `DATABASE_URL=<own scratch> pnpm --filter @regulait/gateway exec vitest run src/zz-adr0189-b9-spdx-fields.test.ts --maxWorkers=1`:
+  **20/20 PASS**, suite's own freshly migrated disposable DB removed by teardown.
+- `pnpm --filter @regulait/web exec tsc --noEmit` and
+  `pnpm --filter @regulait/web build`: PASS.
+
+**91 positive checks PASS / 2 acceptance RED**, across93 distinct selected
+checks; no skipped cases. Repeated diagnostic/strict observations are not added
+to the distinct count. This is not a wholly green acceptance result and not a
+full gateway/shared or SHACL-driver claim. Logs:
+`/tmp/x53-{install,closure,independent,independent-final,independent-strict,shared,gateway,web-tsc,web-build}.log`.
+Owned `regulait_review_x53_oct10b` was dropped; temporary audit-failure fixture
+removed, no review processes remain and CPU lane released before publication.
+
+Limits: database review migrated this frozen journal's0182/0183/0186 sequence on
+a fresh scratch database. S4's0184 and guard hardening0185 are not yet present in
+that owner journal; ordered0184/0185/0186 composition and a deployed upgrade
+remain unmeasured. Do not apply this sequence to a shared database: the declared
+HOLD after #297/#285 remains an integration prerequisite. This review used actual
+Fastify injection and the real database/loader, with the existing test identity
+posture helper disabling MFA only inside its disposable fixture; it does not
+claim a live transport, browser, released snapshot or deploy verification.
