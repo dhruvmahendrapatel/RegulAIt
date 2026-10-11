@@ -223,6 +223,22 @@ describe("the B4 readers", () => {
       vi.unstubAllGlobals();
     }
   });
+  it("the view comes from the signed body: a document that disagrees with it is refused", async () => {
+    const r = await readResponse();
+    // the completeness shown would differ from what was signed
+    const lying = { ...r.document, completeness: { ...r.document.completeness, actors: { status: "recorded" } } };
+    expect(() => m.readDecisionBom({ ...r, document: lying }, U(1))).toThrow(m.BomEvidenceError);
+    // key order is not a disagreement
+    const reordered = Object.fromEntries(Object.entries(r.document).reverse());
+    expect(m.readDecisionBom({ ...r, document: reordered }, U(1)).completeness).toHaveLength(12);
+  });
+  it("supersedes and the AI BOM link must match the signed body", async () => {
+    const r2 = await readResponse("anchored", 2);
+    expect(() => m.readDecisionBom({ ...r2, bom: { ...r2.bom, supersedes: U(99) } }, U(1))).toThrow(m.BomEvidenceError);
+    expect(() => m.readDecisionBom({ ...r2, bom: { ...r2.bom, supersedes: null } }, U(1))).toThrow(m.BomEvidenceError);
+    const r = await readResponse();
+    expect(() => m.readDecisionBom({ ...r, bom: { ...r.bom, aiBomSnapshotId: U(98) } }, U(1))).toThrow(m.BomEvidenceError);
+  });
   it("refuses a read whose bundle link, finality or document does not match the summary", async () => {
     const r = await readResponse();
     expect(() => m.readDecisionBom({ ...r, bundle: { ...r.bundle, href: `/v1/decisions/${U(1)}/bom/bundle?version=9` } }, U(1))).toThrow(m.BomEvidenceError);
@@ -279,6 +295,84 @@ describe("the B4 readers", () => {
   it("capabilities: the export reason is set exactly when export is unavailable", () => {
     expect(m.readCapabilities(adminCaps({ canExport: false, exportUnavailableReason: "export_signing_key_absent" })).canExport).toBe(false);
     expect(() => m.readCapabilities(adminCaps({ canExport: false }))).toThrow(m.BomEvidenceError);
+  });
+  it("capabilities: no export step-up, drift for admins only, an auditor needs a grant; each agrees with the shared schema", async () => {
+    const s = await sharedBom();
+    const auditor = { ...adminCaps(), access: "auditor_grant", exportRoles: "admins_and_auditors", canViewDrift: false, auditorGrant: { id: U(60), grantedAt: T, grantedBy: U(5) } };
+    const cases: Array<[string, Record<string, unknown>, boolean]> = [
+      ["admin", adminCaps(), true],
+      ["auditor with a grant", auditor, true],
+      ["export step-up claimed", adminCaps({ exportRequiresStepUp: true }), false],
+      ["admin without drift", adminCaps({ canViewDrift: false }), false],
+      ["auditor with drift", { ...auditor, canViewDrift: true }, false],
+      ["auditor with no grant", { ...auditor, auditorGrant: null }, false],
+      ["auditor while admins only", { ...auditor, exportRoles: "admins_only" }, false],
+      ["rate above 600", adminCaps({ rateLimitPerMinute: 601 }), false],
+    ];
+    for (const [name, value, ok] of cases) {
+      expect(s.bomCapabilitiesSchema.safeParse(value).success, `shared: ${name}`).toBe(ok);
+      if (ok) expect(m.readCapabilities(value).access, name).toBe(value.access);
+      else expect(() => m.readCapabilities(value), name).toThrow(m.BomEvidenceError);
+    }
+  });
+  it("the required-check sets and cannotProve rule match the shared contract", async () => {
+    const s = await sharedBom();
+    expect(m.DECISION_BOM_REQUIRED_CHECKS).toEqual(s.DECISION_BOM_REQUIRED_CHECKS);
+    expect(m.AI_BOM_REQUIRED_CHECKS).toEqual(s.AI_BOM_REQUIRED_CHECKS);
+    expect(m.BOM_BUNDLE_REQUIRED_CHECKS).toEqual(s.BOM_BUNDLE_REQUIRED_CHECKS);
+    expect(m.BOM_ANCHOR_CHECKS).toEqual(s.BOM_ANCHOR_CHECKS);
+    expect(m.DECISION_BOM_ONLY_CHECKS).toEqual(s.DECISION_BOM_ONLY_CHECKS);
+    expect(m.AI_BOM_ONLY_CHECKS).toEqual(s.AI_BOM_ONLY_CHECKS);
+    expect(m.DECISION_BOM_CANNOT_PROVE_FIXED).toEqual(s.DECISION_BOM_CANNOT_PROVE_FIXED);
+    expect(m.AI_BOM_CANNOT_PROVE_FIXED).toEqual(s.AI_BOM_CANNOT_PROVE_FIXED);
+    for (const source of m.BOM_VERIFY_SOURCES) {
+      for (const recordedFinality of m.DECISION_BOM_FINALITY_STATES) {
+        for (const lapsed of [false, true]) {
+          for (const receiptPayloadVersion of ["v1", "v2"] as const) {
+            const reportedFinality = lapsed ? "anchored_lapsed" : recordedFinality;
+            const id = { subject: "decision-bom" as const, auditId: U(1), bomId: U(2), version: 1, recordedFinality, reportedFinality, receiptPayloadVersion };
+            expect(m.cannotProveFor(id, source)).toEqual(s.bomCannotProveFor({ subject: "decision-bom", source, receiptPayloadVersion, recordedFinality, version: 1, reportedFinality }));
+          }
+        }
+      }
+      for (const version of [1, 2]) {
+        const id = { subject: "ai-bom" as const, snapshotId: U(1), subjectKind: "agent", subjectId: U(2), version, serialNumber: `urn:uuid:${U(3)}` };
+        expect(m.cannotProveFor(id, source)).toEqual(s.bomCannotProveFor({ subject: "ai-bom", source, receiptPayloadVersion: null, recordedFinality: null, version, reportedFinality: null }));
+      }
+    }
+  });
+  it("an empty 'valid' report is never shown as Valid", async () => {
+    const r = await aiVerify({ checks: [] });
+    expect((await sharedBom()).bomVerifyResponseSchema.safeParse(r).success).toBe(false);
+    expect(() => m.readVerifyReport(r, { source: "ai_bom_snapshot", snapshotId: U(70) })).toThrow(/no checks/);
+  });
+  it("a report that leaves out a required check, or carries the wrong limits, is refused (and the shared schema agrees)", async () => {
+    const s = await sharedBom();
+    const noSignature = await aiVerify();
+    noSignature.checks = noSignature.checks.filter((c: Any) => c.check !== "body_signature");
+    expect(s.bomVerifyResponseSchema.safeParse(noSignature).success).toBe(false);
+    expect(() => m.readVerifyReport(noSignature, { source: "ai_bom_snapshot", snapshotId: U(70) })).toThrow(/body_signature/);
+    const noSupersedes = await aiVerify();
+    noSupersedes.checks = noSupersedes.checks.filter((c: Any) => c.check !== "supersedes");
+    expect(s.bomVerifyResponseSchema.safeParse(noSupersedes).success).toBe(false);
+    expect(() => m.readVerifyReport(noSupersedes, { source: "ai_bom_snapshot", snapshotId: U(70) })).toThrow(/supersedes/);
+    const fewerLimits = await aiVerify({ cannotProve: ["facts_true"] });
+    expect(s.bomVerifyResponseSchema.safeParse(fewerLimits).success).toBe(false);
+    expect(() => m.readVerifyReport(fewerLimits, { source: "ai_bom_snapshot", snapshotId: U(70) })).toThrow(/cannot be proved/);
+    const claimsBundle = await aiVerify();
+    claimsBundle.checks = claimsBundle.checks.map((c: Any) => (c.check === "bundle_subject" ? { ...c, status: "valid", reason: null } : c));
+    expect(s.bomVerifyResponseSchema.safeParse(claimsBundle).success).toBe(false);
+    expect(() => m.readVerifyReport(claimsBundle, { source: "ai_bom_snapshot", snapshotId: U(70) })).toThrow(/bundle checks/);
+    const foreign = await aiVerify();
+    foreign.checks = [...foreign.checks, { check: "finality", status: "valid", reason: null, ref: null }];
+    expect(s.bomVerifyResponseSchema.safeParse(foreign).success).toBe(false);
+    expect(() => m.readVerifyReport(foreign, { source: "ai_bom_snapshot", snapshotId: U(70) })).toThrow(/other kind/);
+  });
+  it("an invalid report that is missing checks is still shown, as invalid (it claims nothing)", async () => {
+    const r = await aiVerify({ outcome: "invalid" });
+    r.checks = [{ check: "body_signature", status: "invalid", reason: "signature_mismatch", ref: null }, ...r.checks.filter((c: Any) => c.check.startsWith("bundle_"))];
+    expect((await sharedBom()).bomVerifyResponseSchema.safeParse(r).success).toBe(true);
+    expect(m.readVerifyReport(r, { source: "ai_bom_snapshot", snapshotId: U(70) }).outcome).toBe("invalid");
   });
 });
 

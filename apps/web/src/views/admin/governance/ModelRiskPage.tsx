@@ -24,7 +24,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Tabs, Textarea, tabIds } from "../../../ui/kit";
 import {
   QueryGate,
   RemoveButton,
@@ -615,17 +615,24 @@ export default function ModelRiskPage() {
                     ]}
                     active={bomCardId === detail.id ? "ai-bom" : "card"}
                     onChange={(tab) => setBomCardId(tab === "ai-bom" ? detail.id : null)}
+                    idPrefix={`mrm-${detail.id}`}
                   />
                 )}
                 {detail.agentId && bomCardId === detail.id && (
-                  <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
-                    <AiBomPanel key={detail.agentId} subject={{ kind: "agent", id: detail.agentId }} />
-                  </Suspense>
+                  <div role="tabpanel" id={tabIds(`mrm-${detail.id}`, "ai-bom").panel} aria-labelledby={tabIds(`mrm-${detail.id}`, "ai-bom").tab}>
+                    <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
+                      <AiBomPanel key={detail.agentId} subject={{ kind: "agent", id: detail.agentId }} />
+                    </Suspense>
+                  </div>
                 )}
-                {/* the card itself stays mounted (its forms keep their state) and is hidden; .stack would override [hidden] */}
+                {/* the card itself stays mounted (its forms keep their state) and is hidden; .stack would override [hidden].
+                    With an agent it is the "Model card" tab's panel; a custom-provider card has no tabs. */}
                 <div
                   className={detail.agentId && bomCardId === detail.id ? undefined : v.stack}
                   hidden={Boolean(detail.agentId) && bomCardId === detail.id}
+                  {...(detail.agentId
+                    ? { role: "tabpanel", id: tabIds(`mrm-${detail.id}`, "card").panel, "aria-labelledby": tabIds(`mrm-${detail.id}`, "card").tab }
+                    : {})}
                 >
 
                 {/* ADR-0086 — staleness first: a certified card whose world

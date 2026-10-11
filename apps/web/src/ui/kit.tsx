@@ -767,10 +767,19 @@ export function ConfirmModal(props: {
 
 // ---- Tabs -----------------------------------------------------------------
 
+/** the ids that tie a tab to its panel (see `Tabs` `idPrefix`) */
+export const tabIds = (prefix: string, id: string) => ({ tab: `${prefix}-tab-${id}`, panel: `${prefix}-panel-${id}` });
+
 export function Tabs(props: {
   tabs: Array<{ id: string; label: ReactNode }>;
   active: string;
   onChange: (id: string) => void;
+  /**
+   * When set, each tab gets the id `${idPrefix}-tab-${id}` and `aria-controls`
+   * `${idPrefix}-panel-${id}`; the caller renders each panel with that id,
+   * `role="tabpanel"` and `aria-labelledby` the tab (`tabIds` builds both).
+   */
+  idPrefix?: string;
 }) {
   const tabStop = props.tabs.find((tab) => tab.id === props.active)?.id ?? props.tabs[0]?.id;
   return (
@@ -779,6 +788,9 @@ export function Tabs(props: {
         <button
           key={t.id}
           role="tab"
+          id={props.idPrefix ? tabIds(props.idPrefix, t.id).tab : undefined}
+          // only the selected tab names its panel: an unselected panel is not rendered, and a dangling reference is invalid
+          aria-controls={props.idPrefix && t.id === props.active ? tabIds(props.idPrefix, t.id).panel : undefined}
           aria-selected={t.id === props.active}
           tabIndex={t.id === tabStop ? 0 : -1}
           className={t.id === props.active ? s.tabActive : s.tab}

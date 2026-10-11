@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BOM_POSTURE_SETTINGS, bomPostureValue, bomRelaxed, bomStoredValue, saveBomPostureAndReload } from "./BomPostureCard";
+import { BOM_POSTURE_SETTINGS, bomLooserThanStored, bomPostureValue, bomRelaxed, bomStoredValue, saveBomPostureAndReload } from "./BomPostureCard";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const shared = async (): Promise<any> => import(/* @vite-ignore */ new URL("../../../../../../packages/shared/src/bom/settings.ts", import.meta.url).pathname);
@@ -26,6 +26,30 @@ describe("the BOM posture rows mirror @regulait/shared", () => {
     expect(setting("aiBomSnapshotTriggers").options).toEqual(s.AI_BOM_SNAPSHOT_TRIGGER_MODES);
     expect(setting("aiBomSnapshotWithoutKey").options).toEqual(s.AI_BOM_SNAPSHOT_WITHOUT_KEY_MODES);
     expect(setting("decisionBomFiniteLockFinality").options).toEqual(s.DECISION_BOM_FINITE_LOCK_FINALITY_MODES);
+  });
+});
+
+describe("the step-up sentence follows the stored value (bomSettingLooser)", () => {
+  it("agrees with the gateway's comparator for every pair of offered values", async () => {
+    const s = await shared();
+    for (const row of BOM_POSTURE_SETTINGS) {
+      const inputs = row.options ?? ["10", "30", "31", "600"];
+      for (const a of inputs) {
+        for (const b of inputs) {
+          const value = bomPostureValue(row, a)!;
+          const stored = bomPostureValue(row, b)!;
+          expect(bomLooserThanStored(row, value, stored), `${row.key}: ${a} over stored ${b}`).toBe(s.bomSettingLooser(row.key, value, stored));
+        }
+      }
+    }
+  });
+  it("tightening from a relaxed value asks for no step-up, though the value is still relaxed", () => {
+    const finality = setting("decisionBomFinality");
+    expect(bomLooserThanStored(finality, "anchored_unverified_destination", "chain_signed")).toBe(false);
+    expect(bomRelaxed(finality, "anchored_unverified_destination")).toBe(true);
+    const limit = setting("bomExportRateLimitPerMinute");
+    expect(bomLooserThanStored(limit, 100, 200)).toBe(false);
+    expect(bomLooserThanStored(limit, 20, 10)).toBe(true);
   });
 });
 

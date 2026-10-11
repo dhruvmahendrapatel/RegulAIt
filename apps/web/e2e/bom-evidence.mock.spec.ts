@@ -36,6 +36,45 @@ const BODY1 = sha("snapshot-1");
 const caps = { access: "admin", exportRoles: "admins_only", auditorGrant: null, canExport: true, exportUnavailableReason: null, canVerify: true, canViewDrift: true, exportRequiresStepUp: false, rateLimitPerMinute: 30 };
 const snapshot = (id: string, version: number, body: string) => ({ id, version, serialNumber: `urn:uuid:${U(30 + version)}`, trigger: version === 1 ? "model_card_approval" : "on_demand", bodySha256: body, keyId: "receipt-2026", createdAt: T, formats: ["cyclonedx-1.7"] });
 
+/** a frozen Decision BOM, version `version` of 2; `document` is the parse of `body`, and the digest is over `body` */
+function decisionRead(version = 2): Json {
+  const completeness = Object.fromEntries(
+    ["decision", "receipt", "principal", "actors", "action", "policy", "model", "approval", "outcome", "cost", "trace", "proof"].map((s) =>
+      s === "actors" ? [s, { status: "not_recorded", reason: "pre_identity" }] : s === "trace" ? [s, { status: "not_applicable" }] : [s, { status: "recorded" }],
+    ),
+  );
+  const doc = { v: "regulait.decision-bom.v1", id: U(50 + version), auditId: AUDIT, version, supersedes: version === 1 ? null : U(51), finality: "anchored", completeness, basis: { auditSeq: 42, anchorId: U(60), receiptSeq: 5, aiBomSnapshotId: null } };
+  const body = JSON.stringify(doc);
+  const summary = (v: number) => ({ id: U(50 + v), version: v, supersedes: v === 1 ? null : U(51), finality: "anchored", bodySha256: v === version ? sha(body) : "a".repeat(64), keyId: "receipt-2026", createdAt: T });
+  return {
+    auditId: AUDIT,
+    bom: { ...summary(version), body, signature: "A".repeat(86), aiBomSnapshotId: null, reportedFinality: "anchored" },
+    document: doc,
+    versions: [summary(1), summary(2)],
+    renderings: [],
+    bundle: { schema: "regulait.export-bundle/3", subject: "decision-bom", href: `/v1/decisions/${AUDIT}/bom/bundle?version=${version}` },
+    capabilities: caps,
+  };
+}
+/** a stored-source Decision BOM verify report: anchored, receipt v2 */
+function decisionVerify(): Json {
+  const required = ["body_version", "body_schema", "body_signature", "receipt_signature", "receipt_payload_hash", "receipt_facts_binding", "sections_projection", "chain_links", "decision_content_binding", "anchor_record", "anchor_imprint", "tsa_token", "finality"];
+  return {
+    trust: "deployment_registry", source: "decision_bom", bodyVersion: "regulait.decision-bom.v1",
+    identity: { subject: "decision-bom", auditId: AUDIT, bomId: U(52), version: 2, recordedFinality: "anchored", reportedFinality: "anchored", receiptPayloadVersion: "v2" },
+    outcome: "valid",
+    checks: [
+      ...required.map((check) => (check === "decision_content_binding" ? { check, status: "unverifiable", reason: "preimage_not_exported", ref: null } : { check, status: "valid", reason: null, ref: null })),
+      ...["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"].map((check) => ({ check, status: "unverifiable", reason: "not_a_bundle", ref: null })),
+    ],
+    sections: ["decision", "receipt", "principal", "actors", "action", "policy", "model", "approval", "outcome", "cost", "trace", "proof"].map((section) => ({
+      section, status: "valid", completeness: section === "actors" ? "not_recorded" : section === "trace" ? "not_applicable" : "recorded", notRecordedReason: section === "actors" ? "pre_identity" : null,
+    })),
+    cannotProve: ["nothing_omitted_after_anchor", "facts_true", "signing_time_beyond_anchor", "destination_tamper_resistant", "decision_row_content"],
+    manifest: null, verifiedAt: T, capabilities: caps,
+  };
+}
+
 interface Scenario {
   snapshots: Json[];
   /** answers to POST …/snapshots, in order */
@@ -110,6 +149,7 @@ async function mockApi(page: Page, over: Partial<Scenario> = {}): Promise<Scenar
         },
       });
     }
+    if (p === "/v1/boms/verify" && body?.source === "decision_bom") return json(route, decisionVerify());
     if (p === "/v1/boms/verify") {
       return json(route, {
         trust: "deployment_registry", source: "ai_bom_snapshot", bodyVersion: "regulait.ai-bom.v1",
@@ -185,6 +225,8 @@ test.describe("ADR-0189 B6: AI BOM on the agents page", () => {
     // no key: refused in the dialog, nothing stored, no new row
     await panel.getByRole("button", { name: "Take snapshot" }).click();
     const dialog = page.getByRole("dialog", { name: "Take a signed AI BOM snapshot?" });
+    await expect(dialog).toBeVisible();
+    await expectAxeClean(page, "take-snapshot confirmation");
     await dialog.getByRole("button", { name: "Take snapshot" }).click();
     await expect(dialog.getByRole("alert")).toHaveText("No receipt signing key is configured, so nothing was signed or stored. Enforcement posture shows the key's state.");
     await expect(panel.getByRole("button", { name: "Open snapshot version 2" })).toHaveCount(0);
@@ -247,6 +289,28 @@ test.describe("ADR-0189 B6: Decision BOM from an audit row", () => {
     expect(st.calls.filter((c) => c.path.startsWith(`/v1/decisions/${AUDIT}/bom`))).toHaveLength(2);
     await expectAxeClean(page, "Decision BOM refused");
   });
+
+  test("a final Decision BOM: versions, completeness as recorded, and a verify result; axe-clean", async ({ page }) => {
+    const st = await mockApi(page, { decision: [{ status: 200, body: decisionRead(2) }, { status: 200, body: decisionRead(1) }] });
+    await page.goto("/ui/admin/audit");
+    await page.getByRole("button", { name: `Decision BOM for audit row ${AUDIT}` }).click();
+    const panel = page.getByTestId("decision-bom-panel");
+    await expect(panel.getByText("Version 2 of 2", { exact: false })).toBeVisible();
+    const actors = panel.getByRole("row").filter({ hasText: "Actor chain" });
+    await expect(actors).toContainText("not recorded");
+    await expect(actors).toContainText("Predates workload identity");
+    await expect(panel.getByRole("row").filter({ hasText: "Trace" })).toContainText("not applicable");
+    await panel.getByRole("button", { name: "Verify this version" }).click();
+    const result = panel.getByTestId("bom-verify-result");
+    await expect(result.getByRole("status")).toContainText("Valid");
+    await expect(result).toContainText("That the audit row's content is the decision described");
+    expect(st.calls.filter((c) => c.path === "/v1/boms/verify").map((c) => c.body)).toEqual([{ source: "decision_bom", auditId: AUDIT, version: 2 }]);
+    await expectAxeClean(page, "Decision BOM, final, verified");
+    // the version select reads the named version
+    await panel.getByLabel("Version").selectOption("1");
+    await expect(panel.getByText("Version 1 of 2", { exact: false })).toBeVisible();
+    expect(st.calls.filter((c) => c.path.startsWith(`/v1/decisions/${AUDIT}/bom`)).map((c) => c.path)).toEqual([`/v1/decisions/${AUDIT}/bom`, `/v1/decisions/${AUDIT}/bom?version=1`]);
+  });
 });
 
 test.describe("ADR-0189 B6: BOM posture", () => {
@@ -263,6 +327,9 @@ test.describe("ADR-0189 B6: BOM posture", () => {
     const dialog = page.getByRole("dialog", { name: "Change decision bom facts?" });
     await expect(dialog).toContainText("on → off");
     await expect(dialog).toContainText("Off: decisions made while off have no recorded facts");
+    // loosening the stored value: the dialog says a step-up follows
+    await expect(dialog).toContainText("you will be asked to confirm it's you");
+    await expectAxeClean(page, "BOM setting confirmation");
     await dialog.getByRole("button", { name: "Save setting" }).click();
     await expect(dialog).toBeHidden();
     expect(st.calls.filter((c) => c.method === "PUT" && c.path === "/v1/org/settings").map((c) => c.body)).toEqual([{ decisionFactsCapture: "off" }]);

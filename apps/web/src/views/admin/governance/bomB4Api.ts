@@ -99,12 +99,14 @@ export const bomB4Api: BomEvidencePort = {
   async decision(auditId, version) {
     const id = checkedAuditId(auditId);
     const q = version === undefined ? "" : `?version=${version}`;
-    const view = readDecisionBom(await api.get<unknown>(`/v1/decisions/${id}/bom${q}`), id);
-    if (version !== undefined && view.bom.version !== version) throw new BomEvidenceError("The gateway answered with a different Decision BOM version than the one asked for. Nothing is shown.");
-    // the summary's digest is over the exact stored body; checked here, not trusted
-    if ((await sha256Hex(new TextEncoder().encode(view.body))) !== view.bom.bodySha256) {
+    const raw = await api.get<unknown>(`/v1/decisions/${id}/bom${q}`);
+    // the digest is over the exact stored body; it is checked FIRST, and the view is then derived from that body
+    const bom = (raw as { bom?: { body?: unknown; bodySha256?: unknown } } | null)?.bom;
+    if (typeof bom?.body !== "string" || typeof bom.bodySha256 !== "string" || (await sha256Hex(new TextEncoder().encode(bom.body))) !== bom.bodySha256) {
       throw new BomEvidenceError("The Decision BOM's body does not match its digest. Nothing is shown.");
     }
+    const view = readDecisionBom(raw, id);
+    if (version !== undefined && view.bom.version !== version) throw new BomEvidenceError("The gateway answered with a different Decision BOM version than the one asked for. Nothing is shown.");
     const { body: _body, ...shown } = view;
     return shown;
   },

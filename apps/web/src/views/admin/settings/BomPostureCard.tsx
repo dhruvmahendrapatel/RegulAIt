@@ -152,6 +152,26 @@ export function bomRelaxed(setting: BomSetting, value: BomValue): boolean {
   return value !== setting.strictDefault;
 }
 
+const FINALITY_RANK: Record<string, number> = { anchored: 3, anchored_unverified_destination: 2, chain_signed: 1 };
+/**
+ * `bomSettingLooser` (shared), mirrored: is `value` looser than the value stored NOW? This is what the gateway's
+ * `settings_relax` step-up is judged on (ADR-0186 decision 26), so it decides whether the dialog says a step-up follows.
+ */
+export function bomLooserThanStored(setting: BomSetting, value: BomValue, stored: BomValue): boolean {
+  switch (setting.key) {
+    case "decisionBomFinality":
+      return (FINALITY_RANK[String(value)] ?? 0) < (FINALITY_RANK[String(stored)] ?? 0);
+    case "cyclonedxExportVersions": {
+      const before = new Set(Array.isArray(stored) ? stored.map(String) : []);
+      return Array.isArray(value) && value.some((x) => !before.has(String(x)));
+    }
+    case "bomExportRateLimitPerMinute":
+      return typeof value === "number" && typeof stored === "number" && value > stored;
+    default:
+      return value !== stored && value !== setting.strictDefault;
+  }
+}
+
 /** a successful write is not a fresh baseline until the follow-up read succeeds */
 export async function saveBomPostureAndReload(body: Record<string, unknown>, write: (body: Record<string, unknown>) => Promise<unknown>, settle: () => Promise<boolean>): Promise<boolean> {
   await write(body);
@@ -257,7 +277,7 @@ function BomSettingRow({ setting, current, locked, onSave }: { setting: BomSetti
   const act = useAction();
   const stored = bomStoredValue(setting, current);
   const [draft, setDraft] = useState(stored === null ? "" : text(stored));
-  const [pending, setPending] = useState<{ body: Record<string, unknown>; from: string; to: string; relaxes: boolean } | null>(null);
+  const [pending, setPending] = useState<{ body: Record<string, unknown>; from: string; to: string; relaxes: boolean; stepUp: boolean } | null>(null);
   const parsed = bomPostureValue(setting, draft);
   const disabled = locked || stored === null || act.busy || pending !== null;
   const unchanged = parsed !== null && stored !== null && text(parsed) === text(stored);
@@ -269,7 +289,7 @@ function BomSettingRow({ setting, current, locked, onSave }: { setting: BomSetti
       onSubmit={(event) => {
         event.preventDefault();
         if (disabled || parsed === null || stored === null || unchanged) return;
-        setPending({ body: { [setting.key]: parsed }, from: text(stored), to: text(parsed), relaxes: bomRelaxed(setting, parsed) });
+        setPending({ body: { [setting.key]: parsed }, from: text(stored), to: text(parsed), relaxes: bomRelaxed(setting, parsed), stepUp: bomLooserThanStored(setting, parsed, stored) });
       }}
     >
       <Field label={setting.label}>
@@ -336,7 +356,7 @@ function BomSettingRow({ setting, current, locked, onSave }: { setting: BomSetti
           {pending?.from} → {pending?.to}
         </p>
         <p>{pending?.relaxes ? setting.relaxed : setting.strict}</p>
-        <p>The change is audited.{pending?.relaxes ? " Loosening it asks you to confirm it's you." : ""}</p>
+        <p>The change is audited.{pending?.stepUp ? " It loosens the current value, so you will be asked to confirm it's you." : ""}</p>
       </Modal>
     </form>
   );

@@ -76,8 +76,23 @@ export const BOM_VERIFY_OUTCOMES = ["valid", "unverifiable", "invalid"] as const
 export type BomVerifyOutcome = (typeof BOM_VERIFY_OUTCOMES)[number];
 export const BOM_VERIFY_SOURCES = ["bundle", "decision_bom", "ai_bom_snapshot"] as const;
 export type BomVerifySource = (typeof BOM_VERIFY_SOURCES)[number];
-const BOM_BUNDLE_REQUIRED_CHECKS = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"];
-const BOM_ANCHOR_CHECKS = ["anchor_record", "anchor_imprint", "tsa_token"];
+export const BOM_BUNDLE_REQUIRED_CHECKS = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"] as const;
+export const BOM_ANCHOR_CHECKS = ["anchor_record", "anchor_imprint", "tsa_token"] as const;
+/** B4C-01: the checks a readable, non-invalid report MUST carry, per subject (contract-b4, mirrored) */
+export const DECISION_BOM_REQUIRED_CHECKS = [
+  "body_version", "body_schema", "body_signature",
+  "receipt_signature", "receipt_payload_hash", "receipt_facts_binding",
+  "sections_projection", "chain_links", "decision_content_binding",
+  "anchor_record", "anchor_imprint", "tsa_token", "finality",
+] as const;
+export const AI_BOM_REQUIRED_CHECKS = ["body_version", "body_schema", "body_signature", "serial_number"] as const;
+export const DECISION_BOM_ONLY_CHECKS = [
+  "receipt_signature", "receipt_payload_hash", "receipt_facts_binding", "facts_addenda_chain", "facts_addenda_signatures",
+  "sections_projection", "chain_links", "decision_content_binding", "anchor_record", "anchor_imprint", "tsa_token", "finality", "ai_bom_link",
+] as const;
+export const AI_BOM_ONLY_CHECKS = ["rendering_hashes", "serial_number", "supersedes"] as const;
+export const DECISION_BOM_CANNOT_PROVE_FIXED = ["nothing_omitted_after_anchor", "facts_true", "signing_time_beyond_anchor", "destination_tamper_resistant", "decision_row_content"] as const;
+export const AI_BOM_CANNOT_PROVE_FIXED = ["facts_true", "signing_time_beyond_anchor"] as const;
 
 /** the ADR's sentence for each limit (contract-b4 `BOM_CANNOT_PROVE_COPY`, verbatim) */
 export const BOM_CANNOT_PROVE_COPY: Readonly<Record<string, string>> = {
@@ -327,13 +342,22 @@ export interface BomCapabilities {
   canViewDrift: boolean;
   rateLimitPerMinute: number;
 }
+/** contract-b4 `bomCapabilitiesSchema`, including its refinements */
 export function readCapabilities(value: unknown): BomCapabilities {
   const v = obj(value);
+  const grant = obj(v?.auditorGrant);
+  const grantOk = v?.auditorGrant === null || (grant !== null && uuid(grant.id) && uuid(grant.grantedBy) && time(grant.grantedAt));
   if (
     !v || !oneOf(["admin", "auditor_grant"] as const, v.access) || !oneOf(["admins_only", "admins_and_auditors"] as const, v.exportRoles) ||
     typeof v.canExport !== "boolean" || typeof v.canVerify !== "boolean" || typeof v.canViewDrift !== "boolean" ||
     !(v.exportUnavailableReason === null || v.exportUnavailableReason === "export_signing_key_absent") ||
-    v.canExport !== (v.exportUnavailableReason === null) || !posInt(v.rateLimitPerMinute)
+    v.canExport !== (v.exportUnavailableReason === null) || !posInt(v.rateLimitPerMinute) || v.rateLimitPerMinute > 600 ||
+    // OWNER DECISION 9: never a step-up for reading or exporting
+    v.exportRequiresStepUp !== false ||
+    // R8: drift is admins only, never auditors
+    v.canViewDrift !== (v.access === "admin") ||
+    // an auditor needs an active grant and the relaxed setting
+    !grantOk || (v.access === "auditor_grant" && (grant === null || v.exportRoles !== "admins_and_auditors"))
   ) {
     return unreadable("Your BOM access");
   }
@@ -384,24 +408,50 @@ function readVersionSummary(value: unknown): DecisionBomVersion {
 }
 
 /**
- * The read response, checked for the bindings the contract states: the summary
- * matches the signed document, the bundle link downloads exactly this version,
- * and the reported finality is the frozen one (or `anchored_lapsed` for an
- * anchored one, R44). The body's hash is checked by `bomB4Api` (it needs
- * SubtleCrypto, which is async).
+ * Two parsed JSON values compared structurally: object keys sorted, so key
+ * order never matters. Both sides come from `JSON.parse`, so this is a value
+ * comparison, not a byte format (the signed bytes are `bom.body`, checked by digest).
+ */
+export function sameJson(a: unknown, b: unknown): boolean {
+  const norm = (x: unknown): unknown =>
+    Array.isArray(x) ? x.map(norm) : x !== null && typeof x === "object" ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, norm((x as Obj)[k])])) : x;
+  return JSON.stringify(norm(a)) === JSON.stringify(norm(b));
+}
+
+/**
+ * The read response. EVERYTHING shown comes from `bom.body`, the exact signed
+ * bytes whose digest `bomB4Api.decision` checks first; `document` is only
+ * accepted when it is the same value as the parsed body. The body's id,
+ * audit id, version, supersedes, finality and AI BOM link must match the
+ * summary; the bundle link must download exactly this version; the reported
+ * finality is the frozen one, or `anchored_lapsed` for an anchored one (R44).
  */
 export function readDecisionBom(value: unknown, auditId: string): DecisionBomView & { body: string } {
   const v = obj(value);
   const b = obj(v?.bom);
-  const d = obj(v?.document);
   const bundle = obj(v?.bundle);
-  if (!v || !b || !d || !bundle || v.auditId !== auditId || typeof b.body !== "string" || !Array.isArray(v.versions) || !Array.isArray(v.renderings)) {
+  if (!v || !b || !bundle || v.auditId !== auditId || typeof b.body !== "string" || !Array.isArray(v.versions) || !Array.isArray(v.renderings)) {
     return unreadable("The Decision BOM");
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(b.body);
+  } catch {
+    return unreadable("The Decision BOM");
+  }
+  const d = obj(parsed);
+  const basis = obj(d?.basis);
+  if (!d || !basis || !sameJson(v.document, parsed)) return unreadable("The Decision BOM");
   const bom = readVersionSummary({ id: b.id, version: b.version, finality: b.finality, bodySha256: b.bodySha256, keyId: b.keyId, createdAt: b.createdAt });
   const lapsedOk = b.reportedFinality === bom.finality || (b.reportedFinality === "anchored_lapsed" && (bom.finality === "anchored" || bom.finality === "anchored_finite_lock"));
   if (!oneOf(BOM_REPORTED_FINALITY_STATES, b.reportedFinality) || !lapsedOk || !(b.aiBomSnapshotId === null || uuid(b.aiBomSnapshotId))) return unreadable("The Decision BOM");
-  if (d.id !== bom.id || d.auditId !== auditId || d.version !== bom.version || d.finality !== bom.finality) return unreadable("The Decision BOM");
+  if (!(b.supersedes === null || uuid(b.supersedes)) || (bom.version === 1) !== (b.supersedes === null)) return unreadable("The Decision BOM");
+  if (
+    d.id !== bom.id || d.auditId !== auditId || d.version !== bom.version || d.finality !== bom.finality ||
+    d.supersedes !== b.supersedes || basis.aiBomSnapshotId !== b.aiBomSnapshotId
+  ) {
+    return unreadable("The Decision BOM");
+  }
   const versions = v.versions.map(readVersionSummary);
   if (!versions.some((x) => x.id === bom.id && x.version === bom.version && x.bodySha256 === bom.bodySha256) || versions.some((x, i) => i > 0 && x.version <= versions[i - 1]!.version)) {
     return unreadable("The Decision BOM");
@@ -459,14 +509,69 @@ export type VerifyExpectation =
 
 /** contract-b4 `isUnverifiableByDesign`, mirrored */
 function byDesign(check: string, reason: string | null, id: VerifyIdentity, source: BomVerifySource): boolean {
-  if (BOM_BUNDLE_REQUIRED_CHECKS.includes(check)) return reason === "not_a_bundle" && source !== "bundle";
+  if ((BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(check)) return reason === "not_a_bundle" && source !== "bundle";
   if (id.subject === "decision-bom") {
     if (check === "decision_content_binding") return reason === "preimage_not_exported";
     if (check === "receipt_facts_binding") return reason === "receipt_v1_no_factsHash" && id.receiptPayloadVersion === "v1";
-    if (BOM_ANCHOR_CHECKS.includes(check)) return reason === "anchor_absent" && id.recordedFinality === "chain_signed";
+    if ((BOM_ANCHOR_CHECKS as readonly string[]).includes(check)) return reason === "anchor_absent" && id.recordedFinality === "chain_signed";
     return false;
   }
   return check === "supersedes" && reason === "earlier_snapshot_not_in_bundle" && source === "bundle" && id.version > 1;
+}
+
+/** contract-b4 `bomCannotProveFor`, mirrored: the exact limits of a verified subject, in BOM_CANNOT_PROVE order */
+export function cannotProveFor(id: VerifyIdentity | null, source: BomVerifySource): string[] {
+  if (id === null) return [];
+  const want = new Set<string>(id.subject === "decision-bom" ? DECISION_BOM_CANNOT_PROVE_FIXED : AI_BOM_CANNOT_PROVE_FIXED);
+  if (id.subject === "decision-bom") {
+    if (id.receiptPayloadVersion === "v1") want.add("facts_recorded_at_decision_time");
+    if (id.reportedFinality === "anchored_lapsed") want.add("commitment_after_retain_until");
+    if (id.recordedFinality === "anchored_finite_lock") want.add("finite_lock_under_unbounded_retention");
+    if (id.recordedFinality === "chain_signed") want.add("external_commitment");
+  } else if (source === "bundle" && id.version > 1) want.add("superseded_snapshot");
+  return BOM_CANNOT_PROVE.filter((c) => want.has(c));
+}
+
+/** the checks a readable, non-invalid report must carry (B4C-01); an inapplicable conditional check is left out */
+export function requiredChecksFor(id: VerifyIdentity, source: BomVerifySource): string[] {
+  return [
+    ...(id.subject === "decision-bom" ? DECISION_BOM_REQUIRED_CHECKS : AI_BOM_REQUIRED_CHECKS),
+    ...(source === "bundle" ? BOM_BUNDLE_REQUIRED_CHECKS : []),
+    ...(id.subject === "ai-bom" && id.version > 1 ? ["supersedes"] : []),
+  ];
+}
+
+/**
+ * The contract's structural rules on a report (contract-b4 `bomVerifyResponseSchema`), as one sentence each.
+ * Null means none is broken. A report that breaks one is never displayed: it could claim more than it checked.
+ */
+function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], id: VerifyIdentity | null, source: BomVerifySource, outcome: string, cannotProve: string[]): string | null {
+  if (checks.length === 0) return "it reports no checks";
+  if (cannotProve.join() !== cannotProveFor(id, source).join()) return "its list of what cannot be proved is not the one for this BOM";
+  const refs = new Map<string, Array<string | null>>();
+  for (const c of checks) refs.set(c.check, [...(refs.get(c.check) ?? []), c.ref]);
+  for (const r of refs.values()) if (r.length > 1 && (r.includes(null) || new Set(r).size !== r.length)) return "it repeats a check without telling the results apart";
+  if (id === null) return outcome === "invalid" && sections.length === 0 ? null : "an unreadable bundle is reported as more than invalid";
+  const of = (check: string) => checks.filter((c) => c.check === check);
+  const all = (check: string, status: string, reason: string) => of(check).every((c) => c.status === status && c.reason === reason);
+  const decision = id.subject === "decision-bom";
+  const foreign: readonly string[] = decision ? AI_BOM_ONLY_CHECKS : DECISION_BOM_ONLY_CHECKS;
+  if (checks.some((c) => foreign.includes(c.check))) return "it reports checks that belong to the other kind of BOM";
+  if (decision ? sections.map((s) => s.section).join() !== DECISION_BOM_SECTIONS.join() : sections.length !== 0) return "its sections are not this BOM's sections";
+  const missing = requiredChecksFor(id, source).filter((c) => of(c).length === 0);
+  if (missing.length && outcome !== "invalid") return `it leaves out required checks (${missing.join(", ")})`;
+  for (const c of BOM_BUNDLE_REQUIRED_CHECKS) {
+    if (source !== "bundle" && !all(c, "unverifiable", "not_a_bundle")) return "it claims bundle checks for a stored BOM";
+  }
+  if (source === "bundle" && checks.some((c) => c.reason === "not_a_bundle")) return "it calls a bundle not a bundle";
+  if (id.subject === "ai-bom" && id.version === 1 && of("supersedes").length) return "it checks an earlier snapshot for version 1";
+  if (decision) {
+    if (!all("decision_content_binding", "unverifiable", "preimage_not_exported")) return "it claims the decision row's content, which is never exported";
+    if (id.recordedFinality === "chain_signed" && BOM_ANCHOR_CHECKS.some((c) => !all(c, "unverifiable", "anchor_absent"))) return "it claims anchor checks for a BOM with no anchor";
+    const projectionInvalid = of("sections_projection").some((c) => c.status === "invalid");
+    if (sections.some((s) => s.status === "invalid") !== projectionInvalid) return "its sections disagree with the section check";
+  }
+  return null;
 }
 
 function readIdentity(value: unknown): VerifyIdentity | null {
@@ -494,7 +599,9 @@ function readIdentity(value: unknown): VerifyIdentity | null {
  * The verify report. Besides its shape, the browser re-derives the outcome
  * from the checks and sections (B4.8) and refuses a report whose outcome is
  * better than its own checks: a `valid` claim over an `invalid` check is never
- * displayed as valid.
+ * displayed as valid. It also refuses a report that leaves out a required
+ * check, carries the wrong `cannotProve` list, or breaks another structural
+ * rule of the contract: an empty "valid" report is never shown as Valid.
  */
 export function readVerifyReport(value: unknown, expected: VerifyExpectation): VerifyView {
   const v = obj(value);
@@ -528,6 +635,8 @@ export function readVerifyReport(value: unknown, expected: VerifyExpectation): V
   if (derived !== v.outcome) {
     throw new BomEvidenceError(`The verification result is inconsistent: it reports "${v.outcome}" but its own checks give "${derived}". It is not shown as a result.`);
   }
+  const broken = brokenRule(checks, sections, identity, expected.source, v.outcome, v.cannotProve as string[]);
+  if (broken) throw new BomEvidenceError(`The verification result is inconsistent: ${broken}. It is not shown as a result.`);
   return {
     source: expected.source,
     outcome: v.outcome,
