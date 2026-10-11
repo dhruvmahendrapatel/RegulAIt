@@ -1087,7 +1087,15 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
         isNotNull(engineRuns.workflowInstanceId),
         isNotNull(engineRuns.finishedAt),
         isNull(engineRuns.workflowNotifiedAt),
-        sql`coalesce((${workflowInstances.context} -> 'signoffRefused' ->> 'at')::timestamptz, '-infinity'::timestamptz) < now() - make_interval(mins => ${SIGNOFF_REFUSAL_RETRY_MINUTES})`,
+        // #357 recheck: the marker holds back only the run of the stage it names
+        // (L-a), and is read without any cast a malformed value could fail — a
+        // non-number `atEpoch` is no back-off at all, and a jsonb number always
+        // casts to numeric (L-c), so one bad row cannot fail the sweep
+        sql`(case
+          when coalesce(jsonb_typeof(${workflowInstances.context} -> 'signoffRefused' -> 'atEpoch'), 'null') <> 'number' then true
+          when (${workflowInstances.context} -> 'signoffRefused' ->> 'stageId') is distinct from ${engineRuns.workflowStageId} then true
+          else (${workflowInstances.context} -> 'signoffRefused' ->> 'atEpoch')::numeric < extract(epoch from now()) - ${SIGNOFF_REFUSAL_RETRY_MINUTES * 60}
+        end)`,
       ),
     )
     .orderBy(asc(engineRuns.finishedAt))

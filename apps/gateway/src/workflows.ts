@@ -807,7 +807,9 @@ async function refuseCompletionIfNotAllowed(
     await tx
       .update(workflowInstances)
       .set({
-        context: sql`${workflowInstances.context} || jsonb_build_object('lastError', ${`${stageId}: ${detail}`}::text, ${SIGNOFF_REFUSED_KEY}::text, ${marker}::jsonb || jsonb_build_object('at', now()))`,
+        // `at` for people; `atEpoch` (a jsonb number) for the sweep, which can
+        // read it without a cast that a malformed value could fail (#357 L-c)
+        context: sql`${workflowInstances.context} || jsonb_build_object('lastError', ${`${stageId}: ${detail}`}::text, ${SIGNOFF_REFUSED_KEY}::text, ${marker}::jsonb || jsonb_build_object('at', now(), 'atEpoch', extract(epoch from now())))`,
       })
       .where(eq(workflowInstances.id, row.id));
     await tx.insert(auditLog).values({
@@ -2490,7 +2492,11 @@ async function commitStageResult(
   });
   // review item 6: the span is written only once the result is durable
   if (out.committed) await recordDeferredSpan(db, out.span);
-  return out.committed ? { committed: true, effects: out.effects } : { committed: false, reason: out.reason };
+  // PR #357 recheck H1: a commit-time refusal must reach the executor (and so
+  // the route answer, the decide warning and the engine hand-off)
+  return out.committed
+    ? { committed: true, effects: out.effects, ...(out.refused ? { refused: out.refused } : {}) }
+    : { committed: false, reason: out.reason };
 }
 
 /**

@@ -141,6 +141,7 @@ import { buildAgentHolderIndex, INVENTORY_NOTES } from "./inventory.js";
 import { IDEMPOTENCY_WINDOW_MS, readIdempotencyKey, referencedId, replayReference } from "./request-idempotency.js";
 import {
   createWorkflowTemplateValidated,
+  standingExecutorRefusal,
   startWorkflowInstanceWithTemplates,
 } from "./workflows.js";
 import {
@@ -1851,10 +1852,23 @@ async function useCaseReplayBody(
   const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
   if (!row || !row.workflowInstanceId || (!caller.isAdmin && row.ownerUserId !== caller.userId)) return { id: useCaseId };
   const [instance] = await db
-    .select({ id: workflowInstances.id, status: workflowInstances.status, state: workflowInstances.state })
+    .select({
+      id: workflowInstances.id,
+      status: workflowInstances.status,
+      state: workflowInstances.state,
+      stageEntry: workflowInstances.stageEntry,
+      context: workflowInstances.context,
+    })
     .from(workflowInstances)
     .where(eq(workflowInstances.id, row.workflowInstanceId));
-  return instance ? createdBody(row, instance) : { id: useCaseId };
+  if (!instance) return { id: useCaseId };
+  // PR #357 recheck L-b: a replay re-drives nothing (ADR-0179); it carries the
+  // refusal the intake still stands on, read from the instance (a pure read)
+  const standing = standingExecutorRefusal(instance);
+  return {
+    ...createdBody(row, { id: instance.id, status: instance.status, state: instance.state }),
+    ...(standing ? { executorRefusal: standing } : {}),
+  };
 }
 
 /** thrown inside the create transaction to roll back the key claim with it */

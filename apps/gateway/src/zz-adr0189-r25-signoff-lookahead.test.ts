@@ -481,7 +481,9 @@ describe("a check stage evaluated by a report (/checks)", () => {
       useKey(true);
     }
     expect(first.statusCode, first.body).toBe(200);
-    // the verdict read the reports stored at the commit (both passed), and the commit held it
+    // the verdict read the reports stored at the commit (both passed), and the commit held it —
+    // and the refusal REACHES the route answer (PR #357 recheck H1: it used to be dropped,
+    // so this route answered `evaluated`)
     expect(first.json()).toMatchObject({ status: "awaiting_execution", evaluation: "refused_signoff_unavailable" });
     expect(first.json().executorRefusal).toMatchObject({ stageId: "ci-gate", code: "bom_signing_unavailable" });
     expect(await refusals(f.instanceId)).toHaveLength(1);
@@ -492,6 +494,32 @@ describe("a check stage evaluated by a report (/checks)", () => {
     expect(retried.statusCode, retried.body).toBe(200);
     expect(retried.json().status).toBe("completed");
     await expectCompletedAndApproved(f.instanceId, f.useCaseId);
+  }, 180_000);
+
+  it("/advance refused at the commit (PR #357 recheck H1): 409 with executorRefusal, nothing completes", async () => {
+    const f = await startInstance("checks-commit-adv", CHECK_STAGES("checks_commit_adv", ["ci", "lint"]));
+    expect((await submit(f.instanceId)).json().status).toBe("awaiting_execution");
+    // ci passed, lint still pending: the next claim defers its guard to the commit
+    expect((await reportPass(f.instanceId, "ci")).json().status).toBe("awaiting_execution");
+    useKey(false);
+    let adv;
+    try {
+      const park = parkFirstCommit(f.instanceId, "ci-gate");
+      const pending = advance(f.instanceId, "ci-gate");
+      await park.arrived;
+      // the completing report lands while that executor holds the stage
+      expect((await reportPass(f.instanceId, "lint")).statusCode).toBe(202);
+      park.release();
+      adv = await pending;
+    } finally {
+      useKey(true);
+    }
+    expect(adv.statusCode, adv.body).toBe(409);
+    expect(adv.json()).toMatchObject({ error: "bom_signing_unavailable", status: "awaiting_execution" });
+    expect(adv.json().executorRefusal).toMatchObject({ stageId: "ci-gate", code: "bom_signing_unavailable" });
+    expect(await refusals(f.instanceId)).toHaveLength(1);
+    expect(await succeededEvents(f.instanceId)).toBe(0);
+    await expectRefusedAt(f.instanceId, f.useCaseId, "ci-gate", "proposed");
   }, 180_000);
 });
 
@@ -575,8 +603,8 @@ describe("an intake that would complete while its use case is being created (ins
       await db.update(workflowTemplates).set({ retiredAt: new Date() }).where(eq(workflowTemplates.id, tpl.row.id));
     }
   }
-  const propose = (label: string) =>
-    k.req("POST", "/v1/use-cases", owner.auth, {
+  const propose = (label: string, headers: Record<string, string> = {}) =>
+    k.req("POST", "/v1/use-cases", { ...owner.auth, ...headers }, {
       name: `look-proposal-${label}-${k.RUN}`,
       description: "look synthetic proposal",
       businessContext: "look synthetic",
@@ -585,7 +613,8 @@ describe("an intake that would complete while its use case is being created (ins
     });
 
   it("no key: the use case is created, but no branch is created and the intake does not complete; /advance with a key does both", async () => {
-    const created = await withGitIntake("start-nokey", () => withoutKey(() => propose("start-nokey")));
+    const idem = { "idempotency-key": `look-start-nokey-${k.RUN}` };
+    const created = await withGitIntake("start-nokey", () => withoutKey(() => propose("start-nokey", idem)));
     expect(created.statusCode, created.body).toBe(201);
     const useCaseId = created.json().id as string;
     const instanceId = created.json().workflowInstanceId as string;
@@ -596,10 +625,22 @@ describe("an intake that would complete while its use case is being created (ins
     expect(await externalEffects(instanceId)).toEqual([]);
     await expectRefusedAt(instanceId, useCaseId, "branch", "proposed");
 
+    // #357 recheck L-b: the Idempotency-Key replay (even with a key now) re-drives
+    // nothing and carries the refusal the intake still stands on
+    const replay = await propose("start-nokey", idem);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.headers["idempotent-replay"]).toBe("true");
+    expect(replay.json().id).toBe(useCaseId);
+    expect(replay.json().executorRefusal).toMatchObject({ stageId: "branch", code: "bom_signing_unavailable" });
+    expect(branchExists(instanceId)).toBe(false);
+    expect(await refusals(instanceId)).toHaveLength(1);
+
     const retried = await advance(instanceId, "branch");
     expect(retried.statusCode, retried.body).toBe(200);
     expect(branchExists(instanceId)).toBe(true);
     await expectCompletedAndApproved(instanceId, useCaseId);
+    // once the stage ran, a replay carries no refusal
+    expect((await propose("start-nokey", idem)).json().executorRefusal).toBeUndefined();
   }, 180_000);
 
   it("with a key: an intake that completes at start approves the use case in the creating transaction, with its snapshot", async () => {
@@ -620,8 +661,18 @@ describe("an engine run's hand-off to a stage held for a refused sign-off (PR #3
   async function ageRefusal(instanceId: string, minutes: number) {
     await db.execute(sql`
       update workflow_instances
-         set context = jsonb_set(context, '{signoffRefused,at}', to_jsonb(now() - make_interval(mins => ${minutes})))
+         set context = jsonb_set(context, '{signoffRefused,atEpoch}', to_jsonb(extract(epoch from now()) - ${minutes * 60}))
        where id = ${instanceId}::uuid`);
+  }
+  /** FIXTURE: an engine run bound to a stage of the instance, ended, its hand-off not yet landed */
+  async function endedRun(instanceId: string, stageId: string, round: number) {
+    const [run] = await db.insert(engineRuns).values({
+      engineId: "modelscan", engineVersion: "0.8.8", status: "completed", trigger: "workflow", targetKind: "artifact",
+      config: { sets: ["scan"], params: {} } as never, configHash: `look-${stageId}-${k.RUN}`, budgetUsd: 1, timeoutSeconds: 600,
+      queueExpiresAt: new Date(Date.now() + 3_600_000), finishedAt: new Date(),
+      workflowInstanceId: instanceId, workflowStageId: stageId, workflowCheckName: "ci", workflowRound: round,
+    } as never).returning({ id: engineRuns.id });
+    return run!.id;
   }
   async function notifiedAt(runId: string) {
     const [r] = await db.select({ at: engineRuns.workflowNotifiedAt }).from(engineRuns).where(eq(engineRuns.id, runId));
@@ -638,34 +689,43 @@ describe("an engine run's hand-off to a stage held for a refused sign-off (PR #3
     // the CI result is in, but the completing evaluation is held: no key
     expect((await withoutKey(() => reportPass(f.instanceId, "ci"))).json().evaluation).toBe("refused_signoff_unavailable");
     expect(await refusals(f.instanceId)).toHaveLength(1);
-    // FIXTURE: an engine run bound to this stage, ended, its hand-off not yet landed
     const round = (await instanceRow(f.instanceId)).round;
-    const [run] = await db.insert(engineRuns).values({
-      engineId: "modelscan", engineVersion: "0.8.8", status: "completed", trigger: "workflow", targetKind: "artifact",
-      config: { sets: ["scan"], params: {} } as never, configHash: `look-${k.RUN}`, budgetUsd: 1, timeoutSeconds: 600,
-      queueExpiresAt: new Date(Date.now() + 3_600_000), finishedAt: new Date(),
-      workflowInstanceId: f.instanceId, workflowStageId: "ci-gate", workflowCheckName: "ci", workflowRound: round,
-    } as never).returning({ id: engineRuns.id });
+    const runId = await endedRun(f.instanceId, "ci-gate", round);
+    // #357 recheck L-a: a run of ANOTHER stage of the same instance is not held back
+    // by the marker (that stage is not current, so its hand-off simply lands)
+    const otherRun = await endedRun(f.instanceId, "questionnaire", round);
 
-    // inside the back-off (the refusal is fresh): the sweep leaves it alone — no attempt, no new refusal row
+    // inside the back-off (the refusal is fresh): the sweep leaves the held stage's run
+    // alone — no attempt, no new refusal row — and still lands the other stage's run
     await withoutKey(() => runEngineRunSweep(db));
     expect(await refusals(f.instanceId)).toHaveLength(1);
-    expect(await notifiedAt(run!.id)).toBeNull();
+    expect(await notifiedAt(runId)).toBeNull();
+    expect(await notifiedAt(otherRun)).not.toBeNull();
+
+    // #357 recheck L-c: a malformed marker cannot fail the sweep — it is read as no
+    // back-off (tried, refused again, which writes a well-formed marker back)
+    await db.execute(sql`
+      update workflow_instances
+         set context = jsonb_set(jsonb_set(context, '{signoffRefused,atEpoch}', '"not-a-time"'), '{signoffRefused,at}', '"not-a-time"')
+       where id = ${f.instanceId}::uuid`);
+    await withoutKey(() => runEngineRunSweep(db));
+    expect(await refusals(f.instanceId)).toHaveLength(2);
+    expect(await notifiedAt(runId)).toBeNull();
 
     // past the back-off, still no key: tried once, refused again, still unnotified (retried later)
     await ageRefusal(f.instanceId, 11);
     await withoutKey(() => runEngineRunSweep(db));
-    expect(await refusals(f.instanceId)).toHaveLength(2);
-    expect(await notifiedAt(run!.id)).toBeNull();
+    expect(await refusals(f.instanceId)).toHaveLength(3);
+    expect(await notifiedAt(runId)).toBeNull();
     expect((await instanceRow(f.instanceId)).status).toBe("awaiting_execution");
     // ...and the fresh refusal starts a new back-off: the next tick does not try again
     await withoutKey(() => runEngineRunSweep(db));
-    expect(await refusals(f.instanceId)).toHaveLength(2);
+    expect(await refusals(f.instanceId)).toHaveLength(3);
 
     // past the back-off with a key: the hand-off lands, completes the instance and approves the use case
     await ageRefusal(f.instanceId, 11);
     await runEngineRunSweep(db);
-    expect(await notifiedAt(run!.id)).not.toBeNull();
+    expect(await notifiedAt(runId)).not.toBeNull();
     await expectCompletedAndApproved(f.instanceId, f.useCaseId);
   }, 180_000);
 });
