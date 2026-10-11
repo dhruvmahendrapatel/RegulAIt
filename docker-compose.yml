@@ -313,11 +313,12 @@ services:
       # REGULAIT_RECEIPT_SIGNING_KEY / _ID set, the gateway's first boot (and scripts/install.sh)
       # creates one Ed25519 key here, mode 0600, create-exclusive and never overwritten, on the
       # named volume below. Without any key every sign-off is refused (409 bom_signing_unavailable).
-      # Setting REGULAIT_RECEIPT_SIGNING_KEY and REGULAIT_RECEIPT_SIGNING_KEY_ID (a key you manage,
-      # mounted into the container) always wins; GET /v1/org/posture names which one is in use.
+      # A key you manage (REGULAIT_RECEIPT_SIGNING_KEY + REGULAIT_RECEIPT_SIGNING_KEY_ID) always wins;
+      # GET /v1/org/posture names which one is in use. They are deliberately NOT forwarded from the
+      # shell here: `demo:export-key` prints HOST paths, which do not exist in the container and would
+      # make the key `invalid`. scripts/install.sh --receipt-key-file sets them, with a read-only
+      # mount, in compose.install.yml; without the installer, set both in your own override file.
       REGULAIT_INSTALL_SECRETS_DIR: ${REGULAIT_INSTALL_SECRETS_DIR:-/app/install-secrets}
-      REGULAIT_RECEIPT_SIGNING_KEY: ${REGULAIT_RECEIPT_SIGNING_KEY:-}
-      REGULAIT_RECEIPT_SIGNING_KEY_ID: ${REGULAIT_RECEIPT_SIGNING_KEY_ID:-}
       # ADR-0181 FX3: the demo seed (demo users, keys and demo-only
       # relaxations) is OFF by default. `REGULAIT_DEMO_LICENSE=1` below is the
       # demo switch and seeds by itself; SEED_DEMO=1 seeds without the licence.

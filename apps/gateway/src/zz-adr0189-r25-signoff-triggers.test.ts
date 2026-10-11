@@ -404,6 +404,36 @@ describe("item 6: no signing key", () => {
     expect((await decide(approvalId, "approved")).statusCode).toBe(200);
   }, 120_000);
 
+  it("an INVALID install-generated key: the sign-off is refused 503 receipt_signing_key_invalid and nothing commits (R25 item 12)", async () => {
+    const [card] = await db.insert(modelCards).values({ agentId: ids.agentB, intendedUse: `r25 invalid key ${k.RUN}` }).returning({ id: modelCards.id });
+    const approvalId = await requestCardSignOff(card!.id);
+    const before = await ledger();
+    const invalidDir = mkdtempSync(path.join(tmpdir(), "r25-invalid-install-key-"));
+    writeFileSync(path.join(invalidDir, "receipt-signing-key.pem"), "not a key\n", { mode: 0o600 });
+    const savedInstallDir = process.env.REGULAIT_INSTALL_SECRETS_DIR;
+    useKey(false);
+    process.env.REGULAIT_INSTALL_SECRETS_DIR = invalidDir;
+    try {
+      const res = await decide(approvalId, "approved");
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json()).toMatchObject({ error: "receipt_signing_key_invalid" });
+      const ev = await k.req("POST", `/v1/mrm/cards/${card!.id}/evidence`, k.BOOT, { kind: "external", externalRef: `r25 invalid key ${k.RUN}` });
+      expect(ev.statusCode, ev.body).toBe(503);
+      expect(ev.json()).toMatchObject({ error: "receipt_signing_key_invalid" });
+    } finally {
+      if (savedInstallDir === undefined) delete process.env.REGULAIT_INSTALL_SECRETS_DIR;
+      else process.env.REGULAIT_INSTALL_SECRETS_DIR = savedInstallDir;
+      rmSync(invalidDir, { recursive: true, force: true });
+      useKey(true);
+    }
+    const [a] = await db.select({ status: approvals.status }).from(approvals).where(eq(approvals.id, approvalId));
+    expect(a!.status).toBe("pending");
+    expect(await triggeringRow("mrm-sign-off-approved", card!.id)).toBeNull();
+    expect(await db.select().from(modelCardEvidence).where(eq(modelCardEvidence.cardId, card!.id))).toEqual([]);
+    expect(await ledger()).toEqual(before);
+    expect((await decide(approvalId, "approved")).statusCode).toBe(200);
+  }, 120_000);
+
   it("relaxed (skip_and_record): the sign-off proceeds and each subject gets a skipped-no-key row in its transaction", async () => {
     const [card] = await db.insert(modelCards).values({ agentId: ids.agentB, intendedUse: `r25 skipped ${k.RUN}` }).returning({ id: modelCards.id });
     await setWithoutKey("skip_and_record");

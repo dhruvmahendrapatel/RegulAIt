@@ -4,7 +4,7 @@ import { and, asc, auditLog, decisionCaptureStatus, decisionReceipts, desc, eq, 
 import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2, receiptCanonicalBytes, receiptPayloadHash, receiptVersionForAuditSeq, type AnyDecisionReceiptPayload, type DecisionReceiptPayloadV2, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
-import { ReceiptKeyError, receiptSigningKeyPosture, resolveReceiptSigningKey } from "./receipt-signing-key.js";
+import { ReceiptKeyError, receiptPublicKeyFingerprint, receiptSigningKeyPosture, resolveReceiptSigningKey, type ReceiptKeySource } from "./receipt-signing-key.js";
 
 /** ADR-0186 R: one-writer, append-only receipts for chained governed decisions. */
 export const DECISION_RECEIPT_SIGN_JOB_NAME = "decision-receipt-sign-sweep";
@@ -13,7 +13,7 @@ const SWEEP_LIMIT = 500;
 const EXPORT_LIMIT = 5000;
 export interface DecisionReceiptSweepResult { signed: number; state: ReceiptSigningState }
 
-interface SigningKey { keyId: string; privateKey: KeyObject; jwk: ReceiptPublicKey["jwk"] }
+interface SigningKey { keyId: string; privateKey: KeyObject; jwk: ReceiptPublicKey["jwk"]; source: ReceiptKeySource }
 /**
  * ADR-0186 receipt key, ADR-0189 R25 item 12: the operator key (REGULAIT_RECEIPT_SIGNING_KEY +
  * _ID) when set, else the install-generated key (receipt-signing-key.ts), else null. Throws
@@ -21,7 +21,34 @@ interface SigningKey { keyId: string; privateKey: KeyObject; jwk: ReceiptPublicK
  */
 function signingKey(): SigningKey | null {
   const key = resolveReceiptSigningKey(process.env);
-  return key ? { keyId: key.keyId, privateKey: key.privateKey, jwk: key.jwk } : null;
+  return key ? { keyId: key.keyId, privateKey: key.privateKey, jwk: key.jwk, source: key.source } : null;
+}
+
+export const RECEIPT_KEY_REGISTERED_RULE_ID = "receipt-signing-key-registered";
+const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
+/**
+ * ADR-0189 R25 item 12: record a receipt signing key on its first use, and AUDIT it in the same
+ * transaction. Every writer that registers a key (the receipt sweep, an AI BOM snapshot, a Decision
+ * BOM) goes through here. The insert is ON CONFLICT DO NOTHING ... RETURNING, so of two writers racing
+ * on one key exactly one inserts and writes the audit row; the other waits on the key's unique index,
+ * finds the committed row, and writes nothing. A key that replaces a lost one has a new key id, so it is
+ * registered (and audited) once of its own. The row carries the key id, the SPKI fingerprint and the
+ * source, never key material. Returns true when this call registered the key.
+ */
+export async function registerReceiptSigningKey(
+  tx: Pick<Db, "insert">,
+  key: Pick<SigningKey, "keyId" | "jwk" | "source">,
+  firstUsedAt: Date,
+  via: "receipt-sweep" | "ai-bom-snapshot" | "decision-bom",
+): Promise<boolean> {
+  const inserted = await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt }).onConflictDoNothing().returning({ keyId: receiptSigningKeys.keyId });
+  if (inserted.length === 0) return false;
+  await tx.insert(auditLog).values({
+    userId: SYSTEM_ACTOR, objectType: "decision_receipt", objectId: null, effect: "allow", ruleId: RECEIPT_KEY_REGISTERED_RULE_ID, ruleChain: [],
+    reason: `Receipt signing key ${key.keyId} registered on first use (${key.source})`,
+    detail: { keyId: key.keyId, publicKeyFingerprint: receiptPublicKeyFingerprint(key.jwk), source: key.source, via },
+  });
+  return true;
 }
 const samePublicKey = (a: ReceiptPublicKey["jwk"], b: ReceiptPublicKey["jwk"]) => a.kty === b.kty && a.crv === b.crv && a.x === b.x;
 const envelope = (row: typeof decisionReceipts.$inferSelect): SignedDecisionReceipt => ({ receiptSeq: row.receiptSeq, payload: row.payload as DecisionReceiptPayload, signature: row.signature, keyId: row.keyId });
@@ -108,7 +135,7 @@ export async function runDecisionReceiptSignSweep(db: Db, opts: { now: Date } = 
     const eligible = eligibleAfter(last?.auditSeq ?? 0);
     const rows = await tx.select().from(auditLog).where(v2FromAuditSeq === null || RECEIPT_EMITTER_SUPPORTS_V2 ? eligible : and(eligible, sql`${auditLog.seq} < ${v2FromAuditSeq}`)).orderBy(asc(auditLog.seq)).limit(SWEEP_LIMIT);
     if (!rows.length) return { signed: 0, state: "signing" as const };
-    if (!recorded) await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt: opts.now });
+    if (!recorded) await registerReceiptSigningKey(tx as unknown as Db, key, opts.now, "receipt-sweep");
     // ADR-0188 decision 19: rows from the recorded v2 boundary on hash as v2 (and must say so)
     // the one boundary loader the writer and verifier share (X35 I7S-02): an unknown version signs nothing
     const boundary = await loadAuditChainBoundary(tx);

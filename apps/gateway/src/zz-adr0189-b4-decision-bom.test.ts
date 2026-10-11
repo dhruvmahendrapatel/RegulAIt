@@ -182,6 +182,22 @@ describe("ADR-0189 B4: freezing a Decision BOM", () => {
     const none = await inject("GET", `/v1/decisions/${first.id}/bom`);
     expect(none.statusCode, none.body).toBe(409);
     expect(none.json()).toMatchObject({ error: "bom_signing_unavailable", missingKey: "receipt" });
+    // ADR-0189 R25 item 12: an UNUSABLE install-generated key (operator variables unset) is 503
+    // receipt_signing_key_invalid, never reported as a missing key
+    const invalidDir = mkdtempSync(path.join(tmpdir(), "b4-invalid-install-key-"));
+    writeFileSync(path.join(invalidDir, "receipt-signing-key.pem"), "not a key\n", { mode: 0o600 });
+    const savedInstallDir = process.env.REGULAIT_INSTALL_SECRETS_DIR;
+    process.env.REGULAIT_INSTALL_SECRETS_DIR = invalidDir;
+    try {
+      const bad = await inject("GET", `/v1/decisions/${first.id}/bom`);
+      expect(bad.statusCode, bad.body).toBe(503);
+      expect(bad.json()).toMatchObject({ error: "receipt_signing_key_invalid" });
+      expect(await db.select().from(decisionBoms).where(eq(decisionBoms.auditId, first.id))).toEqual([]);
+    } finally {
+      if (savedInstallDir === undefined) delete process.env.REGULAIT_INSTALL_SECRETS_DIR;
+      else process.env.REGULAIT_INSTALL_SECRETS_DIR = savedInstallDir;
+      rmSync(invalidDir, { recursive: true, force: true });
+    }
     setReceiptKey(true);
     const unsigned = await inject("GET", `/v1/decisions/${first.id}/bom`);
     expect(unsigned.statusCode, unsigned.body).toBe(409);

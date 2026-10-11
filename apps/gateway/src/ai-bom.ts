@@ -96,7 +96,7 @@ import {
   type CycloneDxSpecVersion,
 } from "@regulait/shared";
 import { AI_BOM_SNAPSHOTS_RELEASED } from "@regulait/shared";
-import { loadReceiptSigningKey, ReceiptKeyError, sameReceiptPublicKey } from "./decision-receipts.js";
+import { loadReceiptSigningKey, ReceiptKeyError, registerReceiptSigningKey, sameReceiptPublicKey } from "./decision-receipts.js";
 import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
 
@@ -458,7 +458,7 @@ function snapshotKey() {
     if (e instanceof ReceiptKeyError) throw new AiBomError(503, "receipt_signing_key_invalid", e.message);
     throw e;
   }
-  if (!key) throw new AiBomError(409, "bom_signing_unavailable", "No receipt signing key is configured (REGULAIT_RECEIPT_SIGNING_KEY); an AI BOM snapshot is never stored unsigned.");
+  if (!key) throw new AiBomError(409, "bom_signing_unavailable", "No receipt signing key is available (the install-generated key in REGULAIT_INSTALL_SECRETS_DIR, or REGULAIT_RECEIPT_SIGNING_KEY/_ID); see GET /v1/org/posture receiptSigningKey. An AI BOM snapshot is never stored unsigned.");
   return key;
 }
 
@@ -503,7 +503,7 @@ async function prepareAiBomSnapshot(tx: Tx, input: TakeSnapshotInput): Promise<P
 
 /** FREEZE: the key row (first use), the snapshot and its renderings, and the audit row, in the caller's transaction */
 async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSnapshotInput): Promise<TakenSnapshot> {
-  if (!p.keyRecorded) await tx.insert(receiptSigningKeys).values({ keyId: p.key.keyId, publicJwk: p.key.jwk, firstUsedAt: new Date(p.createdAt) }).onConflictDoNothing();
+  if (!p.keyRecorded) await registerReceiptSigningKey(tx as unknown as Db, p.key, new Date(p.createdAt), "ai-bom-snapshot");
   await tx.insert(aiBomSnapshots).values({
     id: p.id, subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, serialNumber: p.build.body.serialNumber.slice("urn:uuid:".length), supersedesId: p.prevId,
     trigger: input.trigger, basis: { rows: p.build.basis.length, sha256: bomDigestOf(p.build.basis) }, body: p.build.bodyBytes, bodySha256: p.build.bodySha256,

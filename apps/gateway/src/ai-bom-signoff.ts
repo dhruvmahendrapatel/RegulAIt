@@ -131,7 +131,7 @@ function refusalFor(key: "missing" | "invalid"): AiBomError {
   return new AiBomError(
     409,
     "bom_signing_unavailable",
-    "No receipt signing key is configured (REGULAIT_RECEIPT_SIGNING_KEY), so this sign-off cannot take its signed AI BOM " +
+    "No receipt signing key is available (the install-generated key in REGULAIT_INSTALL_SECRETS_DIR, or REGULAIT_RECEIPT_SIGNING_KEY/_ID); see GET /v1/org/posture receiptSigningKey. This sign-off cannot take its signed AI BOM " +
       "snapshot and is refused (ai_bom_snapshot_without_key = refuse). Nothing was changed.",
   );
 }

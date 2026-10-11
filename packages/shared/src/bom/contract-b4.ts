@@ -153,6 +153,8 @@ export const bomErrorEnvelopeSchema = z.discriminatedUnion("error", [
   plain("ai_bom_build_refused"),
   plain("ai_bom_too_large"),
   plain("bom_snapshot_busy"),
+  /** a configured receipt key that cannot be used (ADR-0189 R25 item 12): 503, distinct from a missing key's 409 */
+  plain("receipt_signing_key_invalid"),
   z.object({ error: z.literal("rate_limited"), detail, retryAfterSeconds }).strict(),
   /** the global MFA gate (ADR-0181/0183): a session, or an API key (`credential: "api_key"`), whose owner must enroll TOTP */
   z.object({ error: z.literal("mfa_enrollment_required"), detail, credential: z.literal("api_key").optional() }).strict(),
@@ -842,6 +844,7 @@ export const BOM_B4_ROUTE_CONTRACT = {
       409: ["bom_anchor_pending", "bom_signing_unavailable"],
       422: ["bom_decision_not_eligible", "bom_export_refused"],
       500: ["bom_integrity_failure"],
+      503: ["receipt_signing_key_invalid"],
     },
   },
   "GET /v1/decisions/:auditId/bom/bundle": {
@@ -856,6 +859,7 @@ export const BOM_B4_ROUTE_CONTRACT = {
       409: ["bom_anchor_pending", "bom_signing_unavailable"],
       422: ["bom_decision_not_eligible", "bom_export_refused"],
       500: ["bom_integrity_failure"],
+      503: ["receipt_signing_key_invalid"],
     },
   },
   "GET /v1/ai-bom/snapshots/:snapshotId": {

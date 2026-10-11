@@ -7,20 +7,22 @@
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadReceiptSigningKey } from "./decision-receipts.js";
 import {
-  describeInstallReceiptKey,
+  checkReceiptSigningKey,
   ensureInstallReceiptKey,
   INSTALL_RECEIPT_KEY_FILE,
   installReceiptKeyId,
   ReceiptKeyError,
   receiptSigningKeyPosture,
+  removeStaleInstallKeyTemps,
   resolveReceiptSigningKey,
+  STALE_TMP_MS,
 } from "./receipt-signing-key.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -79,7 +81,7 @@ describe("first-boot generation", () => {
 
   it("never overwrites an existing file, even an unusable one, and reports it", () => {
     const dir = freshDir();
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const file = path.join(dir, INSTALL_RECEIPT_KEY_FILE);
     writeFileSync(file, "not a key\n", { mode: 0o600 });
     const r = ensureInstallReceiptKey(installEnv(dir));
@@ -101,10 +103,61 @@ describe("first-boot generation", () => {
     expect(mode(file)).toBe(0o644);
 
     const linked = freshDir();
-    mkdirSync(linked, { recursive: true });
+    mkdirSync(linked, { recursive: true, mode: 0o700 });
     chmodSync(file, 0o600);
     symlinkSync(file, path.join(linked, INSTALL_RECEIPT_KEY_FILE));
+    // opened O_NOFOLLOW: a symlink is never followed, even to a good key
     expect(() => resolveReceiptSigningKey(installEnv(linked))).toThrow(ReceiptKeyError);
+    expect(resolveReceiptSigningKey(installEnv(dir))?.source).toBe("install_generated");
+  });
+
+  it.runIf(posix)("refuses a key with a second hard link, and one in a directory with group or other access", () => {
+    const dir = freshDir();
+    ensureInstallReceiptKey(installEnv(dir));
+    const file = path.join(dir, INSTALL_RECEIPT_KEY_FILE);
+    const elsewhere = freshDir();
+    mkdirSync(elsewhere, { recursive: true, mode: 0o700 });
+    linkSync(file, path.join(elsewhere, "copy.pem"));
+    expect(() => resolveReceiptSigningKey(installEnv(dir))).toThrow(ReceiptKeyError);
+    rmSync(path.join(elsewhere, "copy.pem"));
+    expect(resolveReceiptSigningKey(installEnv(dir))?.source).toBe("install_generated");
+    chmodSync(dir, 0o750);
+    expect(() => resolveReceiptSigningKey(installEnv(dir))).toThrow(ReceiptKeyError);
+    expect(receiptSigningKeyPosture(installEnv(dir)).state).toBe("invalid");
+    chmodSync(dir, 0o700);
+    expect(resolveReceiptSigningKey(installEnv(dir))?.source).toBe("install_generated");
+  });
+
+  it.runIf(posix && process.getuid?.() === 0)("refuses a key file or directory owned by another user", () => {
+    const dir = freshDir();
+    ensureInstallReceiptKey(installEnv(dir));
+    const file = path.join(dir, INSTALL_RECEIPT_KEY_FILE);
+    chownSync(file, 1000, 1000);
+    expect(() => resolveReceiptSigningKey(installEnv(dir))).toThrow(ReceiptKeyError);
+    chownSync(file, 0, 0);
+    chownSync(dir, 1000, 1000);
+    expect(() => resolveReceiptSigningKey(installEnv(dir))).toThrow(ReceiptKeyError);
+  });
+
+  it("removes a crashed generation's stale temporary file, and never a fresh one or the key", () => {
+    const dir = freshDir();
+    ensureInstallReceiptKey(installEnv(dir));
+    const stale = path.join(dir, `.${INSTALL_RECEIPT_KEY_FILE}.4242.0123456789ab.tmp`);
+    const fresh = path.join(dir, `.${INSTALL_RECEIPT_KEY_FILE}.4243.ba9876543210.tmp`);
+    const unrelated = path.join(dir, "notes.tmp");
+    for (const f of [stale, fresh, unrelated]) writeFileSync(f, "x", { mode: 0o600 });
+    const old = new Date(Date.now() - STALE_TMP_MS - 5_000);
+    utimesSync(stale, old, old);
+    utimesSync(unrelated, old, old);
+    expect(removeStaleInstallKeyTemps(dir)).toBe(1);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(unrelated)).toBe(true);
+    expect(existsSync(path.join(dir, INSTALL_RECEIPT_KEY_FILE))).toBe(true);
+    // and the boot path sweeps them too
+    utimesSync(fresh, old, old);
+    expect(ensureInstallReceiptKey(installEnv(dir)).outcome).toBe("reused");
+    expect(existsSync(fresh)).toBe(false);
   });
 
   it("does nothing while the operator variables are set (a test or demo that sets its own key generates nothing)", () => {
@@ -135,7 +188,7 @@ describe("concurrent first boots (create-exclusive)", () => {
     const r = ensureInstallReceiptKey(installEnv(dir), {
       generate: () => {
         // another boot publishes its key between our existence check and our link
-        mkdirSync(dir, { recursive: true });
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
         writeFileSync(path.join(dir, INSTALL_RECEIPT_KEY_FILE), readFileSync((won as { path: string }).path), { mode: 0o600 });
         return { privateKeyPem: pem() };
       },
@@ -174,6 +227,58 @@ describe("concurrent first boots (create-exclusive)", () => {
   }, 30_000);
 });
 
+describe("the boot log and installer RESOLVE the key (an unusable operator key is invalid, exit 1)", () => {
+  const cli = path.resolve(here, "../dist/receipt-key-init.js");
+  const run = (env: NodeJS.ProcessEnv) => {
+    const full: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of ["REGULAIT_RECEIPT_SIGNING_KEY", "REGULAIT_RECEIPT_SIGNING_KEY_ID", "REGULAIT_INSTALL_SECRETS_DIR"]) delete full[k];
+    const r = spawnSync(process.execPath, [cli], { env: { ...full, ...env }, encoding: "utf8" });
+    return { code: r.status, out: `${r.stdout}${r.stderr}` };
+  };
+
+  it("checkReceiptSigningKey: only _KEY_ID, a missing file, and a non-key are invalid with exit code 1", () => {
+    const dir = freshDir();
+    for (const env of [
+      { ...installEnv(dir), REGULAIT_RECEIPT_SIGNING_KEY_ID: "operator-key-1" },
+      { ...installEnv(dir), REGULAIT_RECEIPT_SIGNING_KEY: "/nonexistent/receipt.pem", REGULAIT_RECEIPT_SIGNING_KEY_ID: "operator-key-1" },
+      { ...installEnv(dir), REGULAIT_RECEIPT_SIGNING_KEY: "/nonexistent/receipt.pem" },
+    ] as NodeJS.ProcessEnv[]) {
+      const c = checkReceiptSigningKey(env);
+      expect(c.ensure.outcome).toBe("operator_managed");
+      expect(c.posture.state).toBe("invalid");
+      expect(c.exitCode).toBe(1);
+      expect(c.line).toMatch(/^invalid/);
+    }
+    expect(existsSync(dir)).toBe(false); // and nothing was generated beside the broken operator key
+  });
+
+  it("checkReceiptSigningKey: a usable operator key is operator-managed, exit 0", () => {
+    const opDir = freshDir();
+    mkdirSync(opDir, { recursive: true, mode: 0o700 });
+    const opFile = path.join(opDir, "operator.pem");
+    writeFileSync(opFile, pem(), { mode: 0o600 });
+    const c = checkReceiptSigningKey({ REGULAIT_RECEIPT_SIGNING_KEY: opFile, REGULAIT_RECEIPT_SIGNING_KEY_ID: "operator-key-1" } as NodeJS.ProcessEnv);
+    expect(c).toMatchObject({ exitCode: 0, posture: { state: "operator_managed", keyId: "operator-key-1" } });
+    expect(c.line).toMatch(/^operator-managed: operator-key-1 \(sha256:/);
+  });
+
+  it.runIf(existsSync(cli))("the CLI exits 1 and prints invalid for only _KEY_ID set, and for _KEY=/nonexistent", () => {
+    const onlyId = run({ REGULAIT_RECEIPT_SIGNING_KEY_ID: "operator-key-1" });
+    expect(onlyId.code).toBe(1);
+    expect(onlyId.out).toMatch(/^receipt signing key: invalid/);
+    const missing = run({ REGULAIT_RECEIPT_SIGNING_KEY: "/nonexistent/receipt.pem", REGULAIT_RECEIPT_SIGNING_KEY_ID: "operator-key-1" });
+    expect(missing.code).toBe(1);
+    expect(missing.out).toMatch(/^receipt signing key: invalid/);
+  });
+
+  it.runIf(existsSync(cli))("the CLI exits 2 with nowhere to keep a key, and 0 with an install key", () => {
+    expect(run({}).code).toBe(2);
+    const ok = run({ REGULAIT_INSTALL_SECRETS_DIR: freshDir() });
+    expect(ok.code).toBe(0);
+    expect(ok.out).toMatch(/^receipt signing key: install-generated on this boot: install-ed25519-/);
+  });
+});
+
 describe("fail closed when generation fails", () => {
   it("a generator that throws leaves no key, and every signer still sees none", () => {
     const dir = freshDir();
@@ -182,7 +287,9 @@ describe("fail closed when generation fails", () => {
     expect(existsSync(path.join(dir, INSTALL_RECEIPT_KEY_FILE))).toBe(false);
     expect(resolveReceiptSigningKey(installEnv(dir))).toBeNull();
     expect(receiptSigningKeyPosture(installEnv(dir)).state).toBe("missing");
-    expect(describeInstallReceiptKey(r)).toContain("sign-offs stay refused");
+    const check = checkReceiptSigningKey(installEnv(dir), { generate: () => { throw new Error("entropy unavailable"); } });
+    expect(check.exitCode).toBe(1);
+    expect(check.line).toContain("sign-offs stay refused");
   });
 
   it("a generator that returns something other than an Ed25519 key writes nothing", () => {
@@ -294,9 +401,12 @@ describe("scripts/install.sh --check renders the receipt key choice", () => {
     expect(r.status).toBe(0);
     const env = readFileSync(path.join(dir, ".env"), "utf8");
     expect(env).toContain(`REGULAIT_RECEIPT_KEY_HOST_FILE=${keyFile}\n`);
-    expect(env).toContain("REGULAIT_RECEIPT_SIGNING_KEY=/run/secrets/regulait-receipt-signing-key\n");
-    expect(env).toContain("REGULAIT_RECEIPT_SIGNING_KEY_ID=operator-receipt-1\n");
+    expect(env).toContain("REGULAIT_RECEIPT_KEY_HOST_ID=operator-receipt-1\n");
+    // .env is interpolation input only; the base compose file no longer forwards these, the override sets them
+    expect(env).not.toMatch(/^REGULAIT_RECEIPT_SIGNING_KEY/m);
     const override = readFileSync(path.join(dir, "compose.install.yml"), "utf8");
+    expect(override).toContain('      REGULAIT_RECEIPT_SIGNING_KEY: "/run/secrets/regulait-receipt-signing-key"\n');
+    expect(override).toContain('      REGULAIT_RECEIPT_SIGNING_KEY_ID: "operator-receipt-1"\n');
     expect(override).toContain(`    volumes:\n      - "${keyFile}:/run/secrets/regulait-receipt-signing-key:ro"\n`);
     const body = keyPem.split("\n")[1]!;
     expect(r.output).not.toContain(body);
@@ -304,7 +414,30 @@ describe("scripts/install.sh --check renders the receipt key choice", () => {
     // a re-run with no flags keeps the operator key
     const again = runCheck(dir);
     expect(again.status).toBe(0);
-    expect(readFileSync(path.join(dir, ".env"), "utf8")).toContain("REGULAIT_RECEIPT_SIGNING_KEY_ID=operator-receipt-1\n");
+    expect(readFileSync(path.join(dir, ".env"), "utf8")).toContain("REGULAIT_RECEIPT_KEY_HOST_ID=operator-receipt-1\n");
+    expect(readFileSync(path.join(dir, "compose.install.yml"), "utf8")).toContain('REGULAIT_RECEIPT_SIGNING_KEY_ID: "operator-receipt-1"');
+  });
+
+  it.runIf(hasOpenssl)("refuses a key path outside the allowlist ^/[A-Za-z0-9._/@+-]+$ (no $, backslash, #, newline, space, colon, quotes, relative)", () => {
+    const dir = freshDir();
+    mkdirSync(dir, { recursive: true });
+    for (const bad of [`${dir}/$HOME.pem`, `${dir}/a\\b.pem`, `${dir}/a#b.pem`, `${dir}/a\nb.pem`, `${dir}/a b.pem`, `${dir}/a:b.pem`, `${dir}/a"b.pem`, `${dir}/a'b.pem`, "relative/key.pem"]) {
+      const r = runCheck(dir, ["--receipt-key-file", bad, "--receipt-key-id", "k1"]);
+      expect(r.status, bad).not.toBe(0);
+      expect(r.output, bad).toContain("--receipt-key-file");
+      expect(existsSync(path.join(dir, "compose.install.yml")), bad).toBe(false);
+    }
+  });
+
+  it.runIf(hasOpenssl && posix)("warns when the key file is not owned by uid 1000 (the container's node user)", () => {
+    const dir = freshDir();
+    mkdirSync(dir, { recursive: true });
+    const keyFile = path.join(dir, "operator-receipt.pem");
+    writeFileSync(keyFile, pem(), { mode: 0o600 });
+    const owner = statSync(keyFile).uid;
+    const r = runCheck(dir, ["--receipt-key-file", keyFile, "--receipt-key-id", "operator-receipt-1"]);
+    expect(r.status, r.output.slice(-2000)).toBe(0);
+    if (owner !== 1000) expect(r.output).toMatch(/owned by uid \d+, not 1000/);
   });
 
   it.runIf(hasOpenssl)("refuses half a configuration, a bad key id, and a file that is not an Ed25519 key", () => {

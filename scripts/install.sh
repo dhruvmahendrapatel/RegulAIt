@@ -352,7 +352,7 @@ if [ -f "$ENV_FILE" ]; then
   [ -n "$DB_PASSWORD" ]  || DB_PASSWORD="$(env_get "$ENV_FILE" REGULAIT_DB_PASSWORD)"
   if [ -z "$RECEIPT_KEY_FILE" ] && [ -z "$RECEIPT_KEY_ID" ]; then
     RECEIPT_KEY_FILE="$(env_get "$ENV_FILE" REGULAIT_RECEIPT_KEY_HOST_FILE)"
-    RECEIPT_KEY_ID="$(env_get "$ENV_FILE" REGULAIT_RECEIPT_SIGNING_KEY_ID)"
+    RECEIPT_KEY_ID="$(env_get "$ENV_FILE" REGULAIT_RECEIPT_KEY_HOST_ID)"
   fi
   [ -n "$MODE" ]         || MODE="$PRIOR_MODE"
   [ -n "$DOMAIN" ]       || DOMAIN="$PRIOR_DOMAIN"
@@ -546,14 +546,14 @@ fi
 step "Receipt signing key"
 if [ -n "$RECEIPT_KEY_FILE" ] || [ -n "$RECEIPT_KEY_ID" ]; then
   [ -n "$RECEIPT_KEY_FILE" ] && [ -n "$RECEIPT_KEY_ID" ] || die "--receipt-key-file and --receipt-key-id go together: pass both (a key you manage) or neither (the install generates one)."
-  case "$RECEIPT_KEY_FILE" in
-    /*) ;;
-    *) die "--receipt-key-file must be an absolute host path (it is bind-mounted into the gateway): $RECEIPT_KEY_FILE" ;;
-  esac
-  case "$RECEIPT_KEY_FILE" in
-    *:*|*\"*|*"'"*|*" "*) die "--receipt-key-file may not contain ':', quotes or spaces (it is written into a compose volume entry): $RECEIPT_KEY_FILE" ;;
-  esac
-  printf '%s' "$RECEIPT_KEY_ID" | grep -Eq '^[A-Za-z0-9._:-]{1,128}$' || die "--receipt-key-id must be 1-128 characters of A-Z a-z 0-9 . _ : - (the gateway refuses anything else)."
+  # ALLOWLISTS, matched by bash on the WHOLE value (grep is line-based, so a value with an embedded
+  # newline would pass on its first line). The path is written into a compose volume entry, where `$`
+  # is interpolated and `:`, `#`, quotes, backslashes and newlines change the meaning; the key id is
+  # written into the override's environment map.
+  path_re='^/[A-Za-z0-9._/@+-]+$'
+  [[ "$RECEIPT_KEY_FILE" =~ $path_re ]] || die "--receipt-key-file must be an absolute host path of A-Z a-z 0-9 . _ / @ + - only (it is written into a compose volume entry, where \$, :, #, quotes, backslashes, spaces and newlines are not safe): $(printf '%q' "$RECEIPT_KEY_FILE")"
+  id_re='^[A-Za-z0-9._:-]{1,128}$'
+  [[ "$RECEIPT_KEY_ID" =~ $id_re ]] || die "--receipt-key-id must be 1-128 characters of A-Z a-z 0-9 . _ : - (the gateway refuses anything else)."
   [ -f "$RECEIPT_KEY_FILE" ] || die "--receipt-key-file $RECEIPT_KEY_FILE is not a regular file on this host."
   if have openssl; then
     openssl pkey -in "$RECEIPT_KEY_FILE" -noout -text_pub 2>/dev/null | grep -q 'ED25519' \
@@ -564,6 +564,10 @@ if [ -n "$RECEIPT_KEY_FILE" ] || [ -n "$RECEIPT_KEY_ID" ]; then
     ""|?00|600|400) ;;
     *) warn "$RECEIPT_KEY_FILE has mode $perm; a signing key should be 0600 (or 0400), owned by uid 1000 so the gateway's node user can read it" ;;
   esac
+  owner="$(stat -c '%u' "$RECEIPT_KEY_FILE" 2>/dev/null || true)"
+  if [ -n "$owner" ] && [ "$owner" != "1000" ]; then
+    warn "$RECEIPT_KEY_FILE is owned by uid $owner, not 1000 (the gateway container's node user): at mode 0600 the gateway cannot read it, and the post-install check will fail. Fix: chown 1000:1000 $RECEIPT_KEY_FILE"
+  fi
   ok "operator-managed receipt key: $RECEIPT_KEY_FILE (key id $RECEIPT_KEY_ID), mounted read-only at $RECEIPT_KEY_CONTAINER_PATH"
 else
   ok "install-generated: the gateway creates one on first boot in the ${PROJECT}_install_secrets volume (never overwritten)"
@@ -739,12 +743,12 @@ ENV
     cat <<ENV
 
 # ---- receipt signing key: OPERATOR-MANAGED (ADR-0189 R25) ------------------
-# The host file is bind-mounted read-only at the container path below. Remove
-# these three lines and re-run without --receipt-key-file to go back to the
-# install-generated key.
+# Installer settings, read back on every re-run. compose.install.yml mounts the
+# host file read-only at $RECEIPT_KEY_CONTAINER_PATH and sets
+# REGULAIT_RECEIPT_SIGNING_KEY / _ID for the gateway. Remove these two lines
+# and re-run without --receipt-key-file to go back to the install-generated key.
 REGULAIT_RECEIPT_KEY_HOST_FILE=$RECEIPT_KEY_FILE
-REGULAIT_RECEIPT_SIGNING_KEY=$RECEIPT_KEY_CONTAINER_PATH
-REGULAIT_RECEIPT_SIGNING_KEY_ID=$RECEIPT_KEY_ID
+REGULAIT_RECEIPT_KEY_HOST_ID=$RECEIPT_KEY_ID
 ENV
   fi
   cat <<ENV
@@ -836,7 +840,10 @@ YML
   [ -z "$SAML_ENTITY_ID" ]  || printf '      REGULAIT_SAML_ENTITY_ID: "%s"\n' "$SAML_ENTITY_ID"
   [ -z "$SAML_CLOCK_SKEW" ] || printf '      REGULAIT_SAML_CLOCK_SKEW_MINUTES: "%s"\n' "$SAML_CLOCK_SKEW"
   if [ -n "$RECEIPT_KEY_FILE" ]; then
-    # ADR-0189 R25 item 12: the operator-managed receipt key, read-only
+    # ADR-0189 R25 item 12: the operator-managed receipt key, read-only. Both values passed the
+    # allowlists above, so neither can break out of its quotes or be interpolated by compose.
+    printf '      REGULAIT_RECEIPT_SIGNING_KEY: "%s"\n' "$RECEIPT_KEY_CONTAINER_PATH"
+    printf '      REGULAIT_RECEIPT_SIGNING_KEY_ID: "%s"\n' "$RECEIPT_KEY_ID"
     printf '    volumes:\n      - "%s:%s:ro"\n' "$RECEIPT_KEY_FILE" "$RECEIPT_KEY_CONTAINER_PATH"
   fi
   if [ "$MODE" = "air_gapped" ]; then
@@ -937,12 +944,23 @@ fi
 # fingerprint only, never the key.
 step "Receipt signing key (install-generated unless you passed --receipt-key-file)"
 RECEIPT_KEY_LINE=""
-if RECEIPT_KEY_LINE="$(docker compose "${COMPOSE_ARGS[@]}" exec -T gateway node apps/gateway/dist/receipt-key-init.js 2>&1)"; then
-  ok "$RECEIPT_KEY_LINE"
-else
-  warn "${RECEIPT_KEY_LINE:-the gateway could not be reached to check the receipt key}"
-  warn "until a receipt signing key exists every sign-off is refused (409 bom_signing_unavailable). Check: docker compose -p $PROJECT logs gateway | grep 'receipt key'"
-fi
+RECEIPT_KEY_RC=0
+RECEIPT_KEY_LINE="$(docker compose "${COMPOSE_ARGS[@]}" exec -T gateway node apps/gateway/dist/receipt-key-init.js 2>&1)" || RECEIPT_KEY_RC=$?
+case "$RECEIPT_KEY_RC:$RECEIPT_KEY_LINE" in
+  0:*) ok "$RECEIPT_KEY_LINE" ;;
+  1:*"receipt signing key: "*)
+    # the gateway resolved the key exactly as a signer does and cannot use it: every sign-off would
+    # answer 503 receipt_signing_key_invalid (an operator key it cannot read, a wrong path, half a
+    # configuration) or 409 (generation failed). Refuse to call this install finished.
+    die "$RECEIPT_KEY_LINE
+
+  Every sign-off is refused until this is fixed. For an operator-managed key: the file must be a
+  PKCS#8 Ed25519 key readable by uid 1000 inside the container (chown 1000:1000, chmod 600), and
+  --receipt-key-file / --receipt-key-id go together. Then re-run this installer." ;;
+  *)
+    warn "${RECEIPT_KEY_LINE:-the gateway could not be reached to check the receipt key}"
+    warn "until a usable receipt signing key exists every sign-off is refused. Check: docker compose -p $PROJECT logs gateway | grep 'receipt key'" ;;
+esac
 
 # ===========================================================================
 # 6. POST-INSTALL SUMMARY

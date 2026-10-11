@@ -172,6 +172,33 @@ document still works and every credential is still gone.
 
 ---
 
+## Rotating the receipt signing key after a lost volume (ADR-0189 R25)
+
+If `regulait_install_secrets` is lost, the next boot generates a new receipt signing key under a
+new key id, and the old key's public half stays recorded in `receipt_signing_keys`, so receipts it
+signed still verify. Every key's first use is audited (`receipt-signing-key-registered`, with its key
+id, fingerprint and source), so the audit log shows when the rotation happened.
+
+**A lost volume is not necessarily a destroyed one.** If the old private key may have been copied (a
+backup left somewhere, a host you no longer control), anyone holding it can still sign bytes that
+verify under the old key id. Retiring that key id is how a deployment stops trusting it.
+
+**Gap: there is no retire mechanism in the product yet.** The `retired_at` column exists and is
+honoured (a retired key can never sign again, and `GET /v1/receipts/keys` shows the date), but no
+route, admin action or CLI sets it. Until one exists:
+
+1. Record the old key id and fingerprint from the `receipt-signing-key-registered` audit row (or from
+   `GET /v1/receipts/keys`).
+2. Tell every verifier to **remove that key from their independently trusted key file**
+   (`scripts/verify-receipts.mjs <bundle> <trusted-keys.json>`). Receipts that need it then report
+   `unverifiable`, which is the honest answer for a key you no longer trust
+   (`packages/shared/src/receipts/README.md`).
+3. Do not edit `receipt_signing_keys` by hand. A manual `UPDATE ... SET retired_at` would bypass the
+   audit trail and the product's own checks.
+
+`retired_at` is a lifecycle marker, not a revocation attestation: it stops signing and keeps old
+receipts verifiable, but it does not prove which bytes were signed before retirement.
+
 ## RPO / RTO, honestly
 
 - **RPO**: whatever your schedule is. ADR-0035's reference schedule is one dump per day, so up to

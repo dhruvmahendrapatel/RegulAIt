@@ -20,7 +20,11 @@
  *     variables are set (a test or demo that sets its own key generates nothing).
  *   - It never logs or returns the private key: only the key id and the public-key fingerprint.
  *   - A failed generation leaves the deployment exactly where it was: no key, sign-offs refused.
- *   - An install-generated key file readable by group or others (POSIX) is `invalid`, not used.
+ *   - POSIX: an install-generated key is read only through an O_NOFOLLOW handle and must be a regular
+ *     file, 0600 or stricter, owned by the gateway's user, with one link, in a directory with no group
+ *     or other access; anything else is `invalid`, not used. A non-POSIX filesystem mounted on Linux
+ *     (drvfs, 9p, SMB) reports other bits and owners, so it fails closed: use the default named
+ *     volume. Native Windows skips the mode and owner checks (its stat has no such bits).
  *
  * Concurrency: the key is written to a private temporary file (`wx`, mode 0600, fsync) and then
  * published with link(2), which is create-exclusive and atomic. Two first boots racing produce one
@@ -29,7 +33,7 @@
  * Open source first (ADR-0176): Node's built-in `crypto.generateKeyPairSync("ed25519")`; no library.
  */
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export const RECEIPT_KEY_FILE_ENV = "REGULAIT_RECEIPT_SIGNING_KEY";
@@ -92,20 +96,56 @@ function loadOperatorKey(env: NodeJS.ProcessEnv): ResolvedReceiptKey {
   } catch { throw new ReceiptKeyError(); }
 }
 
-/** null when the file does not exist; ReceiptKeyError when it exists and is unusable */
+const POSIX = process.platform !== "win32";
+const UNUSABLE_INSTALL_KEY =
+  "not a regular file owned by the gateway's user with mode 0600 and one link, in a directory with no group or other access, or not a PKCS#8 Ed25519 key";
+
+/** synchronous pause for the short retries below (first boot only) */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * null when the file (or its directory) does not exist; ReceiptKeyError when it exists and is unusable.
+ * POSIX: the directory must be a real directory owned by this process's user with no group or other
+ * access; the file is opened O_NOFOLLOW and checked on the OPEN HANDLE (no check-then-read window): a
+ * regular file, mode 0600 or stricter, owned by this user, exactly one link. Windows and other
+ * non-POSIX platforms skip the mode and owner checks (their stat reports no meaningful bits).
+ */
 function loadInstallKey(file: string): ResolvedReceiptKey | null {
-  let st;
-  try { st = lstatSync(file); } catch (err) {
+  if (POSIX) {
+    let dir;
+    try { dir = lstatSync(path.dirname(file)); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw new ReceiptKeyError();
+    }
+    if (!dir.isDirectory() || (dir.mode & 0o077) !== 0 || dir.uid !== process.getuid!()) throw new ReceiptKeyError();
+  }
+  let fd: number;
+  try {
+    fd = openSync(file, POSIX ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW : "r");
+  } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new ReceiptKeyError();
+    throw new ReceiptKeyError(); // ELOOP: a symlink is never followed
   }
   try {
-    // never a symlink or a directory, and (POSIX) never readable by group or others
+    const st = fstatSync(fd);
     if (!st.isFile() || st.size > MAX_KEY_BYTES) throw new ReceiptKeyError();
-    if (process.platform !== "win32" && (st.mode & 0o077) !== 0) throw new ReceiptKeyError();
-    const parsed = parseReceiptPem(readFileSync(file));
+    if (POSIX && ((st.mode & 0o077) !== 0 || st.uid !== process.getuid!() || st.nlink !== 1)) throw new ReceiptKeyError();
+    const buf = Buffer.alloc(st.size);
+    let read = 0;
+    while (read < buf.length) {
+      const n = readSync(fd, buf, read, buf.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    const parsed = parseReceiptPem(buf.subarray(0, read));
     return { keyId: installReceiptKeyId(parsed.jwk), source: "install_generated", ...parsed };
-  } catch { throw new ReceiptKeyError(); }
+  } catch {
+    throw new ReceiptKeyError();
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
@@ -128,28 +168,65 @@ export type EnsureInstallReceiptKeyOutcome =
 export interface EnsureInstallReceiptKeyDeps {
   /** injected by tests to prove a failed generation fails closed */
   generate?: () => { privateKeyPem: string };
+  /** injected by tests: "now" for the stale-temporary-file sweep */
+  now?: () => number;
 }
 
 const defaultGenerate = () => ({
   privateKeyPem: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
 });
 
+const TMP_RE = new RegExp(`^\\.${INSTALL_RECEIPT_KEY_FILE.replace(/\./g, "\\.")}\\.\\d+\\.[0-9a-f]{12}\\.tmp$`);
+/** a generator's temporary file older than this was left by a crash, never by a generation in flight (milliseconds) */
+export const STALE_TMP_MS = 60_000;
+
+/** remove temporary key files a crashed generation left behind; never the key, never a fresh temporary file */
+export function removeStaleInstallKeyTemps(dir: string, now: number = Date.now()): number {
+  let removed = 0;
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return 0; }
+  for (const name of names) {
+    if (!TMP_RE.test(name)) continue;
+    const p = path.join(dir, name);
+    try {
+      const st = lstatSync(p);
+      if (st.isFile() && now - st.mtimeMs > STALE_TMP_MS) { unlinkSync(p); removed++; }
+    } catch { /* gone already, or not ours to remove */ }
+  }
+  return removed;
+}
+
+/** make the new directory entry durable (POSIX); best effort elsewhere */
+function fsyncDir(dir: string): void {
+  if (!POSIX) return;
+  let dfd: number | null = null;
+  try { dfd = openSync(dir, fsConstants.O_RDONLY); fsyncSync(dfd); } catch { /* the key is published; durability is best effort */ }
+  finally { if (dfd !== null) try { closeSync(dfd); } catch { /* closed */ } }
+}
+
 /**
  * First boot and the installer: create the install key when no key is configured. Idempotent, never
- * overwrites, create-exclusive. Never throws; a failure is an outcome, and the caller only logs it,
- * because without a key the sign-offs already fail closed.
+ * overwrites, create-exclusive. Never throws; a failure is an outcome. It does NOT validate an
+ * operator key: callers report the resolved state with `checkReceiptSigningKey`.
  */
 export function ensureInstallReceiptKey(env: NodeJS.ProcessEnv = process.env, deps: EnsureInstallReceiptKeyDeps = {}): EnsureInstallReceiptKeyOutcome {
   if (operatorReceiptKeyConfigured(env)) return { outcome: "operator_managed" };
   const file = installReceiptKeyPath(env);
   if (!file) return { outcome: "not_configured" };
+  const dir = path.dirname(file);
+  removeStaleInstallKeyTemps(dir, (deps.now ?? Date.now)());
   const reused = (): EnsureInstallReceiptKeyOutcome => {
-    try {
-      const key = loadInstallKey(file);
-      if (!key) return { outcome: "failed", reason: "the key file disappeared after it was created", path: file };
-      return { outcome: "reused", keyId: key.keyId, fingerprint: receiptPublicKeyFingerprint(key.jwk), path: file };
-    } catch {
-      return { outcome: "failed", reason: "an existing key file is unusable (not a regular file, readable by group or others, or not a PKCS#8 Ed25519 key); it was left untouched", path: file };
+    // a concurrent creator holds a second link for an instant (its temporary file) before removing it,
+    // so a refusal is retried briefly before it is reported
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const key = loadInstallKey(file);
+        if (!key) return { outcome: "failed", reason: "the key file disappeared after it was created", path: file };
+        return { outcome: "reused", keyId: key.keyId, fingerprint: receiptPublicKeyFingerprint(key.jwk), path: file };
+      } catch {
+        if (attempt >= 20) return { outcome: "failed", reason: `an existing key file is unusable (${UNUSABLE_INSTALL_KEY}); it was left untouched`, path: file };
+        pause(50);
+      }
     }
   };
   try {
@@ -158,10 +235,10 @@ export function ensureInstallReceiptKey(env: NodeJS.ProcessEnv = process.env, de
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { outcome: "failed", reason: `cannot inspect the key file (${(err as NodeJS.ErrnoException).code ?? "error"})`, path: file };
   }
-  const tmp = path.join(path.dirname(file), `.${INSTALL_RECEIPT_KEY_FILE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  const tmp = path.join(dir, `.${INSTALL_RECEIPT_KEY_FILE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let fd: number | null = null;
   try {
-    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const { privateKeyPem } = (deps.generate ?? defaultGenerate)();
     const parsed = parseReceiptPem(Buffer.from(privateKeyPem, "utf8"));
     fd = openSync(tmp, "wx", 0o600);
@@ -173,16 +250,18 @@ export function ensureInstallReceiptKey(env: NodeJS.ProcessEnv = process.env, de
       linkSync(tmp, file);
     } catch (err) {
       // another boot won the race: its key stands, ours is discarded
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") return reused();
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") { try { unlinkSync(tmp); } catch { /* finally retries */ } return reused(); }
       throw err;
     }
+    unlinkSync(tmp); // back to one link at once: a reader refuses a key file with two
+    fsyncDir(dir);
     return { outcome: "created", keyId: installReceiptKeyId(parsed.jwk), fingerprint: receiptPublicKeyFingerprint(parsed.jwk), path: file };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return { outcome: "failed", reason: code ? `could not write the key (${code})` : "could not generate a valid Ed25519 key", path: file };
   } finally {
     if (fd !== null) try { closeSync(fd); } catch { /* already closed */ }
-    try { unlinkSync(tmp); } catch { /* never created, or already linked and now removed */ }
+    try { unlinkSync(tmp); } catch { /* never created, or already removed */ }
   }
 }
 
@@ -206,7 +285,7 @@ export function receiptSigningKeyPosture(env: NodeJS.ProcessEnv = process.env): 
       state: "invalid", keyId: null, publicKeyFingerprint: null, publicKeys,
       note: operatorReceiptKeyConfigured(env)
         ? "The operator-managed receipt key is unusable (REGULAIT_RECEIPT_SIGNING_KEY and REGULAIT_RECEIPT_SIGNING_KEY_ID must both be set, to a PKCS#8 Ed25519 PEM and a key id). Sign-offs are refused until it is fixed."
-        : "The install-generated receipt key file is unusable (not a regular file, readable by group or others, or not a PKCS#8 Ed25519 key). It is never overwritten; sign-offs are refused until it is fixed or an operator key is set.",
+        : `The install-generated receipt key file is unusable (${UNUSABLE_INSTALL_KEY}). It is never overwritten; sign-offs are refused until it is fixed or an operator key is set.`,
     };
   }
   if (!key) {
@@ -223,13 +302,35 @@ export function receiptSigningKeyPosture(env: NodeJS.ProcessEnv = process.env): 
   };
 }
 
-/** the boot-log line for an ensure outcome; key id and fingerprint only, never key material */
-export function describeInstallReceiptKey(result: EnsureInstallReceiptKeyOutcome): string {
-  switch (result.outcome) {
-    case "operator_managed": return "operator-managed (REGULAIT_RECEIPT_SIGNING_KEY)";
-    case "not_configured": return "none configured and REGULAIT_INSTALL_SECRETS_DIR is unset — sign-offs are refused until a key exists";
-    case "created": return `install-generated on this boot: ${result.keyId} (${result.fingerprint}) at ${result.path}`;
-    case "reused": return `install-generated: ${result.keyId} (${result.fingerprint})`;
-    case "failed": return `INSTALL KEY GENERATION FAILED (${result.reason}${result.path ? `, ${result.path}` : ""}) — sign-offs stay refused`;
+export interface ReceiptSigningKeyCheck {
+  ensure: EnsureInstallReceiptKeyOutcome;
+  posture: ReceiptSigningKeyPosture;
+  /** 0 a usable key; 1 invalid, or generation failed; 2 nowhere to keep a key (not configured) */
+  exitCode: 0 | 1 | 2;
+  /** one line, key id and fingerprint only, never key material */
+  line: string;
+}
+
+/**
+ * Ensure, then RESOLVE: what the boot log and the installer report. An operator key is loaded exactly
+ * as a signer loads it, so a key the gateway cannot read (a root-owned 0600 file, a missing path, only
+ * one of the two variables) is reported `invalid` here, not at the first sign-off.
+ */
+export function checkReceiptSigningKey(env: NodeJS.ProcessEnv = process.env, deps: EnsureInstallReceiptKeyDeps = {}): ReceiptSigningKeyCheck {
+  const ensure = ensureInstallReceiptKey(env, deps);
+  const posture = receiptSigningKeyPosture(env);
+  const id = `${posture.keyId} (${posture.publicKeyFingerprint})`;
+  const why = ensure.outcome === "failed" ? ` (${ensure.reason}${ensure.path ? `, ${ensure.path}` : ""})` : "";
+  switch (posture.state) {
+    case "operator_managed":
+      return { ensure, posture, exitCode: 0, line: `operator-managed: ${id}` };
+    case "install_generated":
+      return { ensure, posture, exitCode: 0, line: ensure.outcome === "created" ? `install-generated on this boot: ${id} at ${ensure.path}` : `install-generated: ${id}` };
+    case "invalid":
+      return { ensure, posture, exitCode: 1, line: `invalid${why} — ${posture.note}` };
+    case "missing":
+      return ensure.outcome === "not_configured"
+        ? { ensure, posture, exitCode: 2, line: "missing — none configured and REGULAIT_INSTALL_SECRETS_DIR is unset; sign-offs are refused until a key exists" }
+        : { ensure, posture, exitCode: 1, line: `missing — INSTALL KEY GENERATION FAILED${why}; sign-offs stay refused` };
   }
 }
