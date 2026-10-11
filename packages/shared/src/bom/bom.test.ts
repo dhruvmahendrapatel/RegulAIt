@@ -51,6 +51,7 @@ import {
   projectBomRow,
   type DecisionBomBody,
 } from "./contract.js";
+import { isSpiffeId } from "../identity/contract.js";
 import { bomExpiresAt, decisionBomFinality, reportedFinality, type FinalityInput } from "./finality.js";
 import { BOM_STRICT_DEFAULTS, bomOrgSettingsFields, bomSettingLooser, bomSettingRelaxed } from "./settings.js";
 
@@ -558,6 +559,14 @@ describe("SPIFFE ID shape (SPIFFE-ID §2.1, §2.2)", () => {
     ok("spiffe://td/a/b");
     no("spiffe://td/a/b/");
     no("spiffe://td/");
+  });
+  it("caps the trust domain at 255 characters, as ADR-0188's isSpiffeId does", () => {
+    const at = "spiffe://" + "t".repeat(255) + "/a";
+    const over = "spiffe://" + "t".repeat(256) + "/a";
+    ok(at);
+    no(over);
+    expect(isSpiffeId(at)).toBe(true);
+    expect(isSpiffeId(over)).toBe(false);
   });
   it("keeps the 2048-character maximum", () => {
     const at = "spiffe://td/" + "a".repeat(2048 - "spiffe://td/".length);

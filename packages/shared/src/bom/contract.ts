@@ -155,7 +155,8 @@ export const bomIntSchema = z.number().int().safe();
  * trust domain of `a-z 0-9 . - _`; then one or more path segments of
  * `A-Z a-z 0-9 . - _`, none empty, `.` or `..`. So no percent-encoding, query,
  * fragment, userinfo, port or trailing `/` (each needs a character outside the
- * classes, or an empty segment). At most 2048 characters.
+ * classes, or an empty segment). At most 2048 characters, and the trust domain
+ * at most 255 (§2.3; the same cap as ADR-0188's `isSpiffeId`).
  */
 const SPIFFE_TRUST_DOMAIN = /^[a-z0-9._-]+$/;
 const SPIFFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
@@ -163,7 +164,7 @@ export function isBomSpiffeId(value: string): boolean {
   if (value.length > 2048 || !value.startsWith("spiffe://")) return false;
   const rest = value.slice("spiffe://".length);
   const slash = rest.indexOf("/");
-  if (slash < 1 || !SPIFFE_TRUST_DOMAIN.test(rest.slice(0, slash))) return false;
+  if (slash < 1 || slash > 255 || !SPIFFE_TRUST_DOMAIN.test(rest.slice(0, slash))) return false;
   return rest
     .slice(slash + 1)
     .split("/")
