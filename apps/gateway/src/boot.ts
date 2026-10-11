@@ -53,6 +53,7 @@ import { captureAnchor, flushPendingAnchors, resolveAnchorSink } from "./audit-c
 import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js";
 import { ManifestDigestRepinBootError, repinManifestDigests, type ManifestDigestRepinResult } from "./manifest-digest-repin.js";
 import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
+import { checkReceiptSigningKey } from "./receipt-signing-key.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
 import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
@@ -103,6 +104,12 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // bearer token (or with an unparseable address) refuses the boot here, for
   // the same reason — nothing exists yet to leave behind.
   const metricsConfig = resolveMetricsConfig(env);
+  // ADR-0189 R25 item 12: FIRST BOOT creates the install-generated receipt signing key when no key is
+  // configured (REGULAIT_INSTALL_SECRETS_DIR set, the operator variables unset). Idempotent,
+  // create-exclusive, never overwrites, never throws: a failure is logged below and sign-offs stay
+  // refused, which is where a deployment with no key already is. The key is then RESOLVED as a signer
+  // resolves it, so an unreadable operator key is logged `invalid` here, not found at the first sign-off.
+  const receiptKey = checkReceiptSigningKey(env);
 
   // ADR-0167 (CFG-02): the SERVING process logs. Resolved here, not inside
   // buildApp, so the ~100 test files that construct apps stay silent; forced
@@ -415,6 +422,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // anything running here is a secret anyone with the repository already has.
   // An operator who cannot see this from the boot log will not go looking.
   log(`  bootstrap: ${secrets.bootstrapLine}`);
+  log(`  receipt key: ${receiptKey.line}`);
   for (const finding of secrets.findings) {
     log(`  secrets:   DEV-GRADE — ${finding}`);
   }

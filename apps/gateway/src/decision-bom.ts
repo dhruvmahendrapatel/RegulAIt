@@ -57,7 +57,7 @@ import {
 
 type BomAnchorPendingReason = (typeof BOM_ANCHOR_PENDING_REASONS)[number];
 import { anchorRecordFromRow } from "./audit-timestamp.js";
-import { loadReceiptSigningKey, ReceiptKeyError, sameReceiptPublicKey } from "./decision-receipts.js";
+import { loadReceiptSigningKey, ReceiptKeyError, registerReceiptSigningKey, sameReceiptPublicKey } from "./decision-receipts.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const DAY_MS = 86_400_000;
@@ -80,7 +80,10 @@ export class BomRouteError extends Error {
 const pending = (reason: BomAnchorPendingReason, detail: string) =>
   new BomRouteError(409, { error: "bom_anchor_pending", reason, retryAfterSeconds: BOM_PENDING_RETRY_AFTER_SECONDS, detail }, BOM_PENDING_RETRY_AFTER_SECONDS);
 const noReceiptKey = () =>
-  new BomRouteError(409, { error: "bom_signing_unavailable", missingKey: "receipt", detail: "No receipt signing key is configured (REGULAIT_RECEIPT_SIGNING_KEY); a Decision BOM is never stored unsigned." });
+  new BomRouteError(409, { error: "bom_signing_unavailable", missingKey: "receipt", detail: `No receipt signing key is available (the install-generated key in REGULAIT_INSTALL_SECRETS_DIR, or REGULAIT_RECEIPT_SIGNING_KEY/_ID); see GET /v1/org/posture receiptSigningKey. A Decision BOM is never stored unsigned.` });
+/** a configured key that cannot be used (unreadable, malformed, or conflicting with its recorded public key) is 503, as on the AI BOM routes */
+const invalidReceiptKey = () =>
+  new BomRouteError(503, { error: "receipt_signing_key_invalid", detail: "The receipt signing key is configured but unusable or conflicts with its recorded public key; see GET /v1/org/posture receiptSigningKey. Nothing was stored." });
 
 const rowsOf = <T>(r: unknown): T[] => (r as { rows?: T[] }).rows ?? [];
 
@@ -89,7 +92,7 @@ function receiptKeyOrNull() {
   try {
     return loadReceiptSigningKey();
   } catch (e) {
-    if (e instanceof ReceiptKeyError) throw noReceiptKey();
+    if (e instanceof ReceiptKeyError) throw invalidReceiptKey();
     throw e;
   }
 }
@@ -281,8 +284,8 @@ export async function freezeDecisionBom(db: Db, auditId: string, actorUserId: st
     const key = receiptKeyOrNull();
     if (!key) throw noReceiptKey();
     const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId));
-    if (recorded && (!sameReceiptPublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt)) throw noReceiptKey();
-    if (!recorded) await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt: now }).onConflictDoNothing();
+    if (recorded && (!sameReceiptPublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt)) throw invalidReceiptKey();
+    if (!recorded) await registerReceiptSigningKey(tx as unknown as Db, key, now, "decision-bom");
     const signature = sign(null, Buffer.from(assembled.bodyBytes, "utf8"), key.privateKey).toString("base64url");
     const [row] = await tx
       .insert(decisionBoms)

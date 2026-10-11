@@ -147,6 +147,13 @@ describe("the posture READ — answering 'what is enforcing right now?'", () => 
 
     // every settings-backed control carries a non-empty `refuses`
     for (const c of body.controls) expect(typeof c.refuses).toBe("string");
+
+    // ADR-0189 R25 item 12: the receipt key's source is REPORTED beside the controls, never one of
+    // them (it blocks nothing and never counts toward `hardened`), and never carries key material
+    expect(["install_generated", "operator_managed", "missing", "invalid"]).toContain(body.receiptSigningKey.state);
+    expect(body.receiptSigningKey.publicKeys).toBe("/v1/receipts/keys");
+    expect(body.controls.some((c: { key: string }) => /receipt/i.test(c.key))).toBe(false);
+    expect(JSON.stringify(body.receiptSigningKey)).not.toContain("PRIVATE KEY");
   });
 
   it("reports the two environment-backed controls as NOT settable, with their OBSERVED state", async () => {

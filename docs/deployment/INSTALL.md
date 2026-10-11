@@ -201,7 +201,11 @@ The installer converges. It never destroys.
 - Rendered files are compared before writing; unchanged files are left alone and reported as
   `unchanged`.
 - All state lives in Docker named volumes (`regulait_pgdata`, `regulait_caddy_data`,
-  `regulait_caddy_config`). The install directory holds configuration only.
+  `regulait_caddy_config`, `regulait_install_secrets`). The install directory holds configuration
+  only.
+- The install-generated receipt signing key is never regenerated or overwritten; an operator key
+  passed with `--receipt-key-file` / `--receipt-key-id` is read back from `.env` like every other
+  setting.
 
 Reconfiguring is therefore just another run:
 
@@ -269,6 +273,86 @@ the only thing standing between you and losing it.
 ### 4. Know what leaves the box
 
 [DATA_BOUNDARY.md](DATA_BOUNDARY.md), per mode, with the greps to verify it yourself.
+
+### The receipt signing key (ADR-0189 R25)
+
+Every sign-off takes a signed AI BOM snapshot, so a sign-off is refused while no usable receipt
+signing key exists (409 `bom_signing_unavailable` with no key, 503 `receipt_signing_key_invalid`
+with one that cannot be used). The install creates one for you:
+
+- **First boot** of the gateway generates an Ed25519 key when no key is configured. It is written to
+  `REGULAIT_INSTALL_SECRETS_DIR` (`/app/install-secrets` in the image, on the named volume
+  `regulait_install_secrets`) as `receipt-signing-key.pem`, mode `0600`, owned by the gateway's
+  `node` user. The installer runs the same generator after the stack is up and prints the result.
+- It is **idempotent and never overwrites**: a second boot, or the installer, reuses the existing
+  key. Two gateways booting at once end with one key (the file is published with a create-exclusive
+  link). A temporary file left by a crashed generation is removed once it is a minute old.
+- **What the gateway accepts** (POSIX): the key is opened without following symlinks and checked
+  on the open file. It must be a regular file with mode `0600` or stricter, owned by the gateway's
+  user, with exactly one hard link, in a directory owned by that user with no group or other access.
+  Anything else is left untouched, reported as `invalid`, and sign-offs stay refused.
+- **Use the default named volume.** A directory on a Windows or other non-POSIX filesystem mounted
+  into Linux (drvfs/WSL, 9p, SMB/CIFS) reports group and other permissions or a foreign owner, so the
+  key there is `invalid` (fail closed). A gateway running natively on Windows skips the mode and
+  owner checks, because Windows has no such bits.
+- The private key is **never** logged or returned by any API. The boot log, the installer and the
+  posture read show only the key id (`install-ed25519-<hex>`, derived from the public key) and the
+  public-key fingerprint (`sha256:` over the SPKI DER).
+- If generation fails (an unwritable volume, for example) the boot log's `receipt key:` line says
+  `INSTALL KEY GENERATION FAILED`, the gateway still starts, and sign-offs stay refused until a key
+  exists.
+- The first time a key signs anything it is registered in `receipt_signing_keys` and an audit row
+  `receipt-signing-key-registered` records its key id, fingerprint and source
+  (`install_generated` or `operator_managed`), in the same transaction, once per key.
+
+Check which key is in use:
+
+```sh
+curl -sS https://your-host/v1/org/posture -H "Authorization: Bearer $ADMIN_KEY" | jq .receiptSigningKey
+curl -sS https://your-host/v1/receipts/status -H "Authorization: Bearer $ADMIN_KEY" | jq .signingKey
+```
+
+`state` is one of `install_generated`, `operator_managed`, `missing` or `invalid`. It is reported
+beside the posture controls, not as one of them: it never counts toward `hardened` and blocks
+nothing by itself.
+
+**Verifiers** fetch the public keys from `GET /v1/receipts/keys` (every key that ever signed,
+with `firstUsedAt` and `retiredAt`); `GET /v1/receipts/export` carries the same keys with the
+receipts, and `scripts/verify-receipts.mjs` checks a bundle offline.
+
+**Switching to a key you manage.** Generate the key off the gateway host, make it readable by
+uid 1000 (the container's `node` user), and re-run the installer with both flags:
+
+```sh
+openssl genpkey -algorithm ed25519 -out /etc/regulait/receipt-signing-key.pem
+chown 1000:1000 /etc/regulait/receipt-signing-key.pem && chmod 600 /etc/regulait/receipt-signing-key.pem
+./scripts/install.sh --dir /opt/regulait --yes \
+  --receipt-key-file /etc/regulait/receipt-signing-key.pem --receipt-key-id acme-receipts-2026
+```
+
+- The path may use only `A-Z a-z 0-9 . _ / @ + -` and must be absolute. The key id may use only
+  `A-Z a-z 0-9 . _ : -`, up to 128 characters. The installer warns when the file is not owned by
+  uid 1000.
+- The installer records both values in `.env` (`REGULAIT_RECEIPT_KEY_HOST_FILE`,
+  `REGULAIT_RECEIPT_KEY_HOST_ID`), bind-mounts the file read-only at
+  `/run/secrets/regulait-receipt-signing-key`, and sets `REGULAIT_RECEIPT_SIGNING_KEY` and
+  `REGULAIT_RECEIPT_SIGNING_KEY_ID` for the gateway in `compose.install.yml`.
+- After the stack is up the installer loads the key **inside the container**, exactly as a sign-off
+  does. If the gateway cannot use it (for example a root-owned `0600` file, which the `node` user
+  cannot read) the installer stops with `receipt signing key: invalid` instead of finishing.
+- Those two variables always win over the install-generated key. The base `docker-compose.yml`
+  deliberately does not forward them from your shell (a host path from `demo:export-key` would not
+  exist in the container); without the installer, set both in your own compose override, with the
+  file mounted.
+- Receipts already signed stay verifiable: the old key's public half stays recorded and listed at
+  `GET /v1/receipts/keys`. To go back, delete the two `REGULAIT_RECEIPT_KEY_HOST_*` lines from
+  `.env` and re-run without the flags.
+- A hardware-backed (HSM) key is a separate decision (ADR-0183) and not offered here.
+
+**Back it up** with `regulait_pgdata` (see [BACKUP_RESTORE.md](BACKUP_RESTORE.md)). Losing it is
+recoverable: the next boot makes a new key under a new key id, and the receipts signed with the old
+one still verify against its recorded public key. Read the key-retirement section there: the
+product has no way yet to retire the old key id.
 
 ### 5. Read the logs (ADR-0167)
 

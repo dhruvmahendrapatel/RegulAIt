@@ -11,7 +11,8 @@ import { spawnSync } from "node:child_process";
 import { auditLog, createDb, decisionReceipts, desc, eq, orgSettings, receiptSigningKeys, runMigrations, sql, schedulerJobs, type Db } from "@regulait/db";
 import { verifyReceiptBundle, receiptCanonicalBytes, type ReceiptBundle } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { runDecisionReceiptSignSweep } from "./decision-receipts.js";
+import { RECEIPT_KEY_REGISTERED_RULE_ID, registerReceiptSigningKey, runDecisionReceiptSignSweep } from "./decision-receipts.js";
+import { ensureInstallReceiptKey, receiptPublicKeyFingerprint } from "./receipt-signing-key.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 const suppliedConnection = process.env.RECEIPT_TEST_DATABASE_URL;
@@ -96,6 +97,8 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     await decision();
     expect(await runDecisionReceiptSignSweep(db)).toEqual({ signed: 0, state: "no_key" });
     expect((await get("/v1/receipts/status")).json()).toMatchObject({ state: "no_key", lastSeq: 0, lagRows: 1 });
+    // ADR-0189 R25 item 12: the status names the key's source (no install secrets dir in the suite: missing)
+    if (!process.env.REGULAIT_INSTALL_SECRETS_DIR) expect((await get("/v1/receipts/status")).json().signingKey).toMatchObject({ state: "missing", keyId: null });
     await db.update(orgSettings).set({ decisionReceiptsMode: "off" });
     useKey("fixture-1");
     expect(await runDecisionReceiptSignSweep(db)).toEqual({ signed: 0, state: "off" });
@@ -223,5 +226,63 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     expect(checked.json().cannotProve.join(" ")).toContain("not a revocation attestation");
     useKey("fixture-2", secondKey);
     expect((await runDecisionReceiptSignSweep(db)).signed).toBe(1);
+  });
+  it("R25 item 12: each new key is audited once, in the registering transaction, with its source; never key material", async () => {
+    type Detail = { keyId: string; publicKeyFingerprint: string; source: string; via: string };
+    const registered = async () =>
+      (await db.select().from(auditLog).where(eq(auditLog.ruleId, RECEIPT_KEY_REGISTERED_RULE_ID))).map((r) => ({ objectType: r.objectType, ...(r.detail as Detail) }));
+    // the operator keys the earlier tests registered: one row each
+    const op = await registered();
+    expect(op.map((r) => r.keyId).sort()).toEqual(["fixture-1", "fixture-2"]);
+    for (const r of op) {
+      expect(r).toMatchObject({ objectType: "decision_receipt", source: "operator_managed", via: "receipt-sweep" });
+      expect(r.publicKeyFingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
+    }
+    expect(JSON.stringify(op)).not.toMatch(/PRIVATE|"d"/);
+
+    // an install-generated key: registered and audited once; a later sweep adds nothing
+    const install = mkdtempSync(path.join(tmpdir(), "regulait-install-secrets-"));
+    const savedDir = process.env.REGULAIT_INSTALL_SECRETS_DIR;
+    clearKey();
+    process.env.REGULAIT_INSTALL_SECRETS_DIR = install;
+    try {
+      const first = ensureInstallReceiptKey(process.env);
+      expect(first.outcome).toBe("created");
+      await decision();
+      expect((await runDecisionReceiptSignSweep(db)).signed).toBe(1);
+      await decision();
+      expect((await runDecisionReceiptSignSweep(db)).signed).toBe(1);
+      const afterInstall = (await registered()).filter((r) => r.source === "install_generated");
+      expect(afterInstall).toEqual([expect.objectContaining({ keyId: (first as { keyId: string }).keyId, publicKeyFingerprint: (first as { fingerprint: string }).fingerprint, via: "receipt-sweep" })]);
+
+      // the volume is lost: the next key has a new id and is audited once of its own
+      rmSync(install, { recursive: true, force: true });
+      const second = ensureInstallReceiptKey(process.env);
+      expect(second.outcome).toBe("created");
+      expect((second as { keyId: string }).keyId).not.toBe((first as { keyId: string }).keyId);
+      await decision();
+      expect((await runDecisionReceiptSignSweep(db)).signed).toBe(1);
+      expect((await registered()).filter((r) => r.source === "install_generated").map((r) => r.keyId).sort())
+        .toEqual([(first as { keyId: string }).keyId, (second as { keyId: string }).keyId].sort());
+    } finally {
+      if (savedDir === undefined) delete process.env.REGULAIT_INSTALL_SECRETS_DIR;
+      else process.env.REGULAIT_INSTALL_SECRETS_DIR = savedDir;
+      rmSync(install, { recursive: true, force: true });
+    }
+
+    // two writers racing on one new key: exactly one registers it and exactly one audit row exists
+    const pair = generateKeyPairSync("ed25519");
+    const x = pair.publicKey.export({ format: "jwk" }).x!;
+    const raced = { keyId: "x21-race-key", jwk: { kty: "OKP" as const, crv: "Ed25519" as const, x }, source: "operator_managed" as const };
+    const results = await Promise.all([0, 1].map(() => db.transaction((tx) => registerReceiptSigningKey(tx as unknown as Db, raced, new Date(), "ai-bom-snapshot"))));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const racedRows = (await registered()).filter((r) => r.keyId === "x21-race-key");
+    expect(racedRows).toHaveLength(1);
+    expect(racedRows[0]!.publicKeyFingerprint).toBe(receiptPublicKeyFingerprint(raced.jwk));
+    // and a rolled-back registration leaves neither the key nor its audit row
+    const rolled = { ...raced, keyId: "x21-rolled-back-key" };
+    await expect(db.transaction(async (tx) => { await registerReceiptSigningKey(tx as unknown as Db, rolled, new Date(), "decision-bom"); throw new Error("abort"); })).rejects.toThrow("abort");
+    expect(await db.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, "x21-rolled-back-key"))).toEqual([]);
+    expect((await registered()).filter((r) => r.keyId === "x21-rolled-back-key")).toEqual([]);
   });
 });

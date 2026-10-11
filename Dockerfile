@@ -80,6 +80,10 @@ EXPOSE 3000
 # directory itself; everything else is read-only to it, which is what a
 # container escape or an RCE in a dependency then lands as.
 #
+# /app/install-secrets holds the secrets the gateway generates for itself on
+# first boot (ADR-0189 R25 item 12: the install-generated receipt signing key,
+# mode 0600). docker-compose.yml mounts the named volume `install_secrets` there.
+#
 # /app/demo-license-keys is the DEMO keyring (the licence's public key only),
 # used solely when REGULAIT_DEMO_LICENSE=1 (see apps/gateway/docker-start.sh).
 # In that mode it also holds export-signing/, the demo's export-signing keypair
@@ -93,9 +97,9 @@ EXPOSE 3000
 # return ("Syntax error: newline unexpected"). .gitattributes pins *.sh to LF too;
 # this keeps a checkout made before that rule bootable.
 RUN sed -i 's/\r$//' apps/gateway/docker-start.sh \
- && mkdir -p /app/audit-anchors /app/demo-license-keys \
- && chown node:node /app /app/audit-anchors /app/demo-license-keys \
- && chmod 0700 /app/demo-license-keys
+ && mkdir -p /app/audit-anchors /app/demo-license-keys /app/install-secrets \
+ && chown node:node /app /app/audit-anchors /app/demo-license-keys /app/install-secrets \
+ && chmod 0700 /app/demo-license-keys /app/install-secrets
 USER node
 
 # ADR-0167 (CFG-07): an orchestrator can tell a wedged gateway from a live
