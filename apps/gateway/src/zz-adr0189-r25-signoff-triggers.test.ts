@@ -32,6 +32,7 @@ import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
+  agents,
   aiBomSnapshots,
   aiUseCases,
   approvals,
@@ -39,6 +40,8 @@ import {
   builderAgentSkills,
   builderAgents,
   builderSkills,
+  configVersions,
+  customModelProviders,
   evalDatasets,
   evalRuns,
   eq,
@@ -48,9 +51,12 @@ import {
   modelCards,
   orgSettings,
   ORG_SETTINGS_ID,
+  promptPromotions,
+  promptTags,
   redteamLibraries,
   redteamRuns,
   sql,
+  workflowArtifacts,
   workflowInstances,
   type Db,
 } from "@regulait/db";
@@ -60,6 +66,7 @@ import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { syncUseCaseForInstance } from "./use-cases.js";
 import { AI_BOM_SIGNOFF_FANOUT_CAP, AI_BOM_SNAPSHOT_RULE_IDS, prepareAiBomSignoff, runAiBomSignoffs } from "./ai-bom-signoff.js";
 import { McpReleaseQuarantinedError, recordManifestScan } from "./mcp-admission.js";
+import { createWorkflowTemplateValidated, startWorkflowInstanceWithTemplates } from "./workflows.js";
 
 const KEY_ENV = ["REGULAIT_RECEIPT_SIGNING_KEY", "REGULAIT_RECEIPT_SIGNING_KEY_ID"] as const;
 const savedEnv = Object.fromEntries(KEY_ENV.map((k) => [k, process.env[k]]));
@@ -419,6 +426,336 @@ describe("item 6: no signing key", () => {
     const after = await ledger();
     expect(after.snapshots).toBe(before.snapshots);
     expect(after.gaps).toBe(before.gaps + 1);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// R25 review (Medium 3, High 1, Medium 2): every sign-off route, refused with no key
+// ---------------------------------------------------------------------------
+
+/** how many audit rows of one rule name one object */
+async function auditCount(ruleId: string, objectId: string) {
+  const [r] = rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from audit_log where rule_id = ${ruleId} and object_id = ${objectId}::uuid`));
+  return r!.n;
+}
+async function versionsOf(artifactType: "agent_system_prompt" | "agent_config", artifactId: string) {
+  return db
+    .select({ version: configVersions.version, status: configVersions.status, canaryPct: configVersions.canaryPct })
+    .from(configVersions)
+    .where(sql`${configVersions.artifactType} = ${artifactType} and ${configVersions.artifactId} = ${artifactId}`)
+    .orderBy(configVersions.version);
+}
+async function agentRow(agentId: string) {
+  const [a] = await db.select({ systemPrompt: agents.systemPrompt, costPerMTokIn: agents.costPerMTokIn }).from(agents).where(eq(agents.id, agentId));
+  return a!;
+}
+const ok = (res: { statusCode: number; body: string }, status = 200) => expect(res.statusCode, res.body).toBe(status);
+/** a template that is started directly, so no assignment rule is left in the scratch database */
+async function startInstance(label: string, stages: unknown[]) {
+  const tpl = await createWorkflowTemplateValidated(db, { name: `r25-${label}-${k.RUN}`, definition: { workflow: `r25-${label}-${k.RUN}`, stages } });
+  if (!tpl.ok) throw new Error(`template refused: ${JSON.stringify(tpl.body)}`);
+  const started = await startWorkflowInstanceWithTemplates(db, undefined, { templateIds: [tpl.row.id], initiatorUserId: owner.id, change: { description: `r25 ${label}`, paths: [] } });
+  if (!started.ok) throw new Error(`instance refused: ${JSON.stringify(started.body)}`);
+  const [uc] = await db.insert(aiUseCases).values({
+    name: `r25-uc-${label}-${k.RUN}`, description: "r25 synthetic", ownerUserId: owner.id, businessContext: "r25 synthetic",
+    intendedAgentIds: [ids.agentD], dataSensitivity: "internal", status: "proposed", workflowInstanceId: started.instance.id,
+  }).returning({ id: aiUseCases.id });
+  return { instanceId: started.instance.id, useCaseId: uc!.id };
+}
+async function instanceState(instanceId: string, useCaseId: string) {
+  const [i] = await db.select({ status: workflowInstances.status, state: workflowInstances.state }).from(workflowInstances).where(eq(workflowInstances.id, instanceId));
+  const [u] = await db.select({ status: aiUseCases.status }).from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+  const artifacts = await db.select({ id: workflowArtifacts.id }).from(workflowArtifacts).where(eq(workflowArtifacts.instanceId, instanceId));
+  return { instance: i, useCase: u!.status, artifacts: artifacts.length };
+}
+
+interface NoKeyCase {
+  name: string;
+  /** builds the fixture with the key present */
+  setup: () => Promise<Record<string, string>>;
+  /** the sign-off itself, sent with NO key */
+  act: (f: Record<string, string>) => ReturnType<BuilderKit["req"]>;
+  /** everything the refused sign-off must leave exactly as it was */
+  state: (f: Record<string, string>) => Promise<unknown>;
+  /** the triggering audit row that must not exist */
+  trigger: (f: Record<string, string>) => { ruleId: string; objectId: string };
+}
+
+const NO_KEY_CASES: NoKeyCase[] = [
+  {
+    name: "server admission clear",
+    setup: async () => {
+      const [s] = await db.insert(mcpServers).values({ name: `r25-nokey-server-${k.RUN}`, url: "https://mcp-nokey.r25.example/mcp", admissionState: "held", admissionManifestDigest: "r25-digest", admissionFindings: [] } as never).returning({ id: mcpServers.id });
+      return { serverId: s!.id };
+    },
+    act: (f) => k.req("POST", `/v1/servers/${f.serverId}/admission/clear`, k.BOOT, { reason: "r25 no key" }),
+    state: async (f) => db.select({ admissionState: mcpServers.admissionState }).from(mcpServers).where(eq(mcpServers.id, f.serverId!)),
+    trigger: (f) => ({ ruleId: "mcp-admission-cleared", objectId: f.serverId! }),
+  },
+  {
+    name: "skill admission (a skill a builder agent pins)",
+    setup: async () => {
+      const digest = createHash("sha256").update(`r25-nokey-skill-${k.RUN}`).digest("hex");
+      const [sk] = await db.insert(builderSkills).values({ name: `r25-skill-nokey-${k.RUN}`, ownerUserId: owner.id, contentDigest: digest, admissionState: "held" }).returning({ id: builderSkills.id });
+      await db.insert(builderAgentSkills).values({ agentId: ids.builderA, skillId: sk!.id, snapshotDigest: digest, snapshotAdmissionState: "held" } as never);
+      return { skillId: sk!.id, digest };
+    },
+    act: (f) => k.req("POST", `/v1/admission/skills/${f.skillId}/admit`, k.BOOT, { digest: f.digest, reason: "r25 no key" }),
+    state: async (f) => ({
+      skill: await db.select({ s: builderSkills.admissionState }).from(builderSkills).where(eq(builderSkills.id, f.skillId!)),
+      pinned: await db.select({ s: builderAgentSkills.snapshotAdmissionState }).from(builderAgentSkills).where(eq(builderAgentSkills.skillId, f.skillId!)),
+    }),
+    trigger: (f) => ({ ruleId: "builder-skill-admitted", objectId: f.skillId! }),
+  },
+  {
+    name: "config activate (an earlier system prompt version)",
+    setup: async () => {
+      const agentId = await k.model("nokey-activate");
+      for (const n of [1, 2]) ok(await k.req("POST", `/v1/agents/${agentId}/system-prompt`, k.BOOT, { systemPrompt: `r25 activate ${n} ${k.RUN}` }));
+      return { agentId };
+    },
+    act: (f) => k.req("POST", `/v1/config-versions/agent_system_prompt/${f.agentId}/activate`, k.BOOT, { version: 1, reason: "r25 no key" }),
+    state: async (f) => ({ versions: await versionsOf("agent_system_prompt", f.agentId!), agent: await agentRow(f.agentId!) }),
+    trigger: (f) => ({ ruleId: "config-version-activated", objectId: f.agentId! }),
+  },
+  {
+    name: "config rollback",
+    setup: async () => {
+      const agentId = await k.model("nokey-rollback");
+      for (const n of [1, 2]) ok(await k.req("POST", `/v1/agents/${agentId}/system-prompt`, k.BOOT, { systemPrompt: `r25 rollback ${n} ${k.RUN}` }));
+      return { agentId };
+    },
+    act: (f) => k.req("POST", `/v1/config-versions/agent_system_prompt/${f.agentId}/rollback`, k.BOOT, { reason: "r25 no key" }),
+    state: async (f) => ({ versions: await versionsOf("agent_system_prompt", f.agentId!), agent: await agentRow(f.agentId!) }),
+    trigger: (f) => ({ ruleId: "config-version-rolled-back", objectId: f.agentId! }),
+  },
+  {
+    name: "config canary promote",
+    setup: async () => {
+      const agentId = await k.model("nokey-promote");
+      ok(await k.req("POST", `/v1/agents/${agentId}/system-prompt`, k.BOOT, { systemPrompt: `r25 promote base ${k.RUN}` }));
+      const draft = await k.req("POST", `/v1/config-versions/agent_system_prompt/${agentId}`, k.BOOT, { body: { systemPrompt: `r25 promote canary ${k.RUN}` }, activate: false });
+      ok(draft, 201);
+      const canary = await k.req("POST", `/v1/config-versions/agent_system_prompt/${agentId}/canary`, k.BOOT, { version: draft.json().version.version, pct: 10 });
+      expect(canary.statusCode, canary.body).toBeLessThan(300);
+      return { agentId };
+    },
+    act: (f) => k.req("POST", `/v1/config-versions/agent_system_prompt/${f.agentId}/promote`, k.BOOT, { override: true, reason: "r25 no key (override of the evidence gates)" }),
+    state: async (f) => ({ versions: await versionsOf("agent_system_prompt", f.agentId!), agent: await agentRow(f.agentId!) }),
+    trigger: (f) => ({ ruleId: "config-version-activated", objectId: f.agentId! }),
+  },
+  {
+    name: "PATCH /v1/agents/:id (an agent_config edit)",
+    setup: async () => ({ agentId: await k.model("nokey-patch") }),
+    act: (f) => k.req("PATCH", `/v1/agents/${f.agentId}`, k.BOOT, { costPerMTokIn: 7.25 }),
+    state: async (f) => ({ versions: await versionsOf("agent_config", f.agentId!), agent: await agentRow(f.agentId!) }),
+    trigger: (f) => ({ ruleId: "agent-config-edited", objectId: f.agentId! }),
+  },
+  {
+    name: "POST /v1/agents/:id/system-prompt",
+    setup: async () => ({ agentId: await k.model("nokey-sysprompt") }),
+    act: (f) => k.req("POST", `/v1/agents/${f.agentId}/system-prompt`, k.BOOT, { systemPrompt: `r25 no key ${k.RUN}` }),
+    state: async (f) => ({ versions: await versionsOf("agent_system_prompt", f.agentId!), agent: await agentRow(f.agentId!) }),
+    trigger: (f) => ({ ruleId: "config-version-activated", objectId: f.agentId! }),
+  },
+  {
+    name: "red-team run evidence",
+    setup: async () => {
+      const [card] = await db.insert(modelCards).values({ agentId: ids.agentB, intendedUse: `r25 red-team no key ${k.RUN}` }).returning({ id: modelCards.id });
+      const [lib] = await db.insert(redteamLibraries).values({ name: `r25-lib-nokey-${k.RUN}` }).returning({ id: redteamLibraries.id });
+      const [ds] = await db.insert(evalDatasets).values({ name: `r25-ds-nokey-${k.RUN}`, version: 1 }).returning({ id: evalDatasets.id, version: evalDatasets.version });
+      const [er] = await db.insert(evalRuns).values({ datasetId: ds!.id, datasetVersion: ds!.version, agentId: ids.agentB, agentName: "r25 agent b", trigger: "manual" }).returning({ id: evalRuns.id });
+      const [run] = await db.insert(redteamRuns).values({ libraryId: lib!.id, libraryName: `r25-lib-nokey-${k.RUN}`, libraryVersion: 1, evalRunId: er!.id, agentId: ids.agentB, agentName: "r25 agent b" }).returning({ id: redteamRuns.id });
+      return { cardId: card!.id, runId: run!.id };
+    },
+    act: (f) => k.req("POST", `/v1/redteam/runs/${f.runId}/evidence`, k.BOOT, { cardId: f.cardId }),
+    state: async (f) => db.select({ id: modelCardEvidence.id }).from(modelCardEvidence).where(eq(modelCardEvidence.cardId, f.cardId!)),
+    trigger: (f) => ({ ruleId: "mrm-evidence-attached", objectId: f.cardId! }),
+  },
+  {
+    name: "prompt promotion (the decide path)",
+    setup: async () => {
+      const created = await k.req("POST", "/v1/prompts", owner.auth, { name: `r25-prompt-nokey-${k.RUN}`, description: "r25" });
+      ok(created, 201);
+      const promptId = created.json().prompt.id as string;
+      const c1 = await k.req("POST", `/v1/prompts/${promptId}/commits`, owner.auth, { template: "r25 no key {{x}}", parentHash: null, message: "first", modelConfig: { agentId: ids.agentA, maxTokens: null } });
+      ok(c1, 201);
+      const req = await k.req("PUT", `/v1/prompts/${promptId}/tags/prod`, owner.auth, { commitHash: c1.json().hash, approverUserId: approver.id });
+      ok(req, 202);
+      return { promptId, approvalId: req.json().promotion.approvalId as string };
+    },
+    act: (f) => decide(f.approvalId!, "approved"),
+    state: async (f) => ({
+      tags: await db.select({ name: promptTags.name, commitId: promptTags.commitId }).from(promptTags).where(eq(promptTags.promptId, f.promptId!)),
+      promotion: await db.select({ status: promptPromotions.status }).from(promptPromotions).where(eq(promptPromotions.promptId, f.promptId!)),
+      approval: await db.select({ status: approvals.status }).from(approvals).where(eq(approvals.id, f.approvalId!)),
+    }),
+    trigger: (f) => ({ ruleId: "prompt-promotion-applied", objectId: f.promptId! }),
+  },
+  {
+    name: "use-case approval, end to end through the decide path",
+    setup: async () => {
+      const { instanceId, useCaseId } = await startInstance("nokey-decide", [
+        { id: "intake", type: "trigger" },
+        { id: "questionnaire", type: "artifact_generation", output: "r25_intake" },
+        { id: "signoff", type: "human_approval", approvers: [approver.id] },
+      ]);
+      ok(await k.req("POST", `/v1/workflows/instances/${instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25 intake answers" }), 201);
+      const [gate] = await db.select({ id: approvals.id }).from(approvals).where(sql`${approvals.instanceId} = ${instanceId} and ${approvals.status} = 'pending'`);
+      expect(gate, "the intake sign-off is queued").toBeTruthy();
+      const [uc] = await db.select({ status: aiUseCases.status }).from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+      expect(uc!.status).toBe("under_review");
+      return { instanceId, useCaseId, approvalId: gate!.id };
+    },
+    act: (f) => decide(f.approvalId!, "approved"),
+    state: async (f) => ({
+      ...(await instanceState(f.instanceId!, f.useCaseId!)),
+      approval: await db.select({ status: approvals.status }).from(approvals).where(eq(approvals.id, f.approvalId!)),
+    }),
+    trigger: (f) => ({ ruleId: "use-case-approved", objectId: f.useCaseId! }),
+  },
+];
+
+describe("R25 review: every sign-off route refuses 409 with no key, and nothing of it commits (Medium 3)", () => {
+  for (const c of NO_KEY_CASES) {
+    it(c.name, async () => {
+      const f = await c.setup();
+      const before = await c.state(f);
+      const ledgerBefore = await ledger();
+      const t = c.trigger(f);
+      const triggersBefore = await auditCount(t.ruleId, t.objectId);
+      useKey(false);
+      let res;
+      try {
+        res = await c.act(f);
+      } finally {
+        useKey(true);
+      }
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({ error: "bom_signing_unavailable" });
+      expect(await c.state(f)).toEqual(before);
+      expect(await auditCount(t.ruleId, t.objectId), "no triggering audit row").toBe(triggersBefore);
+      expect(await ledger()).toEqual(ledgerBefore);
+    }, 120_000);
+  }
+});
+
+describe("R25 review High 1: the workflow routes refuse before the transition commits", () => {
+  it("artifact submit that would approve the use case: 409, no transition, no artifact row; with the key it approves and snapshots", async () => {
+    const { instanceId, useCaseId } = await startInstance("nokey-artifact", [
+      { id: "intake", type: "trigger" },
+      { id: "questionnaire", type: "artifact_generation", output: "r25_intake" },
+    ]);
+    const before = await instanceState(instanceId, useCaseId);
+    expect(before.useCase).toBe("proposed");
+    const ledgerBefore = await ledger();
+    useKey(false);
+    let res;
+    try {
+      res = await k.req("POST", `/v1/workflows/instances/${instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25 answers" });
+    } finally {
+      useKey(true);
+    }
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ error: "bom_signing_unavailable" });
+    expect(await instanceState(instanceId, useCaseId)).toEqual(before);
+    expect(await ledger()).toEqual(ledgerBefore);
+    // the same submission with a key goes through, approves the use case and takes its snapshot
+    const again = await k.req("POST", `/v1/workflows/instances/${instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25 answers" });
+    expect(again.statusCode, again.body).toBe(201);
+    expect(again.json().useCaseSignoffWarning).toBeUndefined();
+    expect((await instanceState(instanceId, useCaseId)).useCase).toBe("approved");
+    await expectEveryOwedSubjectAccounted(await triggeringRow("use-case-approved", useCaseId));
+    expect((await snapshotsOf("use_case", useCaseId, "use_case_approval")).length).toBe(1);
+  }, 120_000);
+
+  it("advance that would approve the use case: 409 and the instance stays where it was", async () => {
+    const { instanceId, useCaseId } = await startInstance("nokey-advance", [
+      { id: "intake", type: "trigger" },
+      { id: "build", type: "automated_build" },
+    ]);
+    const before = await instanceState(instanceId, useCaseId);
+    useKey(false);
+    let res;
+    try {
+      res = await k.req("POST", `/v1/workflows/instances/${instanceId}/advance`, owner.auth, { stageId: "build" });
+    } finally {
+      useKey(true);
+    }
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ error: "bom_signing_unavailable" });
+    expect(await instanceState(instanceId, useCaseId)).toEqual(before);
+    const again = await k.req("POST", `/v1/workflows/instances/${instanceId}/advance`, owner.auth, { stageId: "build" });
+    expect(again.statusCode, again.body).toBe(200);
+    expect((await instanceState(instanceId, useCaseId)).useCase).toBe("approved");
+  }, 120_000);
+
+  it("a transition that approves nothing is not refused without a key (a submission that only queues the sign-off)", async () => {
+    const { instanceId, useCaseId } = await startInstance("nokey-queue", [
+      { id: "intake", type: "trigger" },
+      { id: "questionnaire", type: "artifact_generation", output: "r25_intake" },
+      { id: "signoff", type: "human_approval", approvers: [approver.id] },
+    ]);
+    useKey(false);
+    let res;
+    try {
+      res = await k.req("POST", `/v1/workflows/instances/${instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25 answers" });
+    } finally {
+      useKey(true);
+    }
+    expect(res.statusCode, res.body).toBe(201);
+    expect((await instanceState(instanceId, useCaseId)).useCase).toBe("under_review");
+  }, 120_000);
+});
+
+describe("R25 review Medium 2: a bulk decision keeps going past a refused sign-off", () => {
+  it("the refused item is an ordinary refusal (409, audited), and the next item is still decided", async () => {
+    const [refusedCard] = await db.insert(modelCards).values({ agentId: ids.agentB, intendedUse: `r25 bulk refused ${k.RUN}` }).returning({ id: modelCards.id });
+    // a card on a custom provider no agent uses owes no snapshot, so it is decided without a key
+    const [provider] = await db.insert(customModelProviders).values({ name: `r25-provider-${k.RUN}`, wireProtocol: "openai_chat", baseUrl: "https://r25-provider.example.test/v1" }).returning({ id: customModelProviders.id });
+    const [okCard] = await db.insert(modelCards).values({ customProviderId: provider!.id, intendedUse: `r25 bulk decided ${k.RUN}` }).returning({ id: modelCards.id });
+    const refusedId = await requestCardSignOff(refusedCard!.id);
+    const okId = await requestCardSignOff(okCard!.id);
+    useKey(false);
+    let res;
+    try {
+      res = await k.req("POST", "/v1/approvals/bulk", approver.auth, { approvalIds: [refusedId, okId], decision: "approved", reason: "r25 bulk" });
+    } finally {
+      useKey(true);
+    }
+    expect(res.statusCode, res.body).toBe(207);
+    const results = res.json().results as Array<{ approvalId: string; ok: boolean; status: number; error?: string }>;
+    expect(results.find((r) => r.approvalId === refusedId)).toMatchObject({ ok: false, status: 409, error: "bom_signing_unavailable" });
+    expect(results.find((r) => r.approvalId === okId)).toMatchObject({ ok: true, status: 200 });
+    const status = async (id: string) => (await db.select({ s: approvals.status }).from(approvals).where(eq(approvals.id, id)))[0]!.s;
+    expect(await status(refusedId)).toBe("pending");
+    expect(await status(okId)).toBe("approved");
+    const refusals = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'approval-bulk-item-refused' and ${auditLog.detail}->>'approvalId' = ${refusedId}`);
+    expect(refusals.map((r) => (r.detail as { refusal?: string }).refusal)).toEqual(["bom_signing_unavailable"]);
+  }, 120_000);
+});
+
+describe("R25 review: one failing post-commit snapshot leaves the others running", () => {
+  it("a sign-off whose snapshot fails does not stop the next sign-off's snapshot", async () => {
+    const failing = await k.model("postcommit-failing");
+    const fine = await k.model("postcommit-fine");
+    await db.execute(sql.raw(`create or replace function r25_refuse_postcommit() returns trigger language plpgsql as $$
+      BEGIN IF NEW.subject_id = '${failing}'::uuid THEN RAISE EXCEPTION 'r25 test: snapshot refused'; END IF; RETURN NEW; END $$`));
+    await db.execute(sql.raw(`create trigger r25_refuse_postcommit before insert on ai_bom_snapshots for each row execute function r25_refuse_postcommit()`));
+    const mk = (agentId: string) => ({ id: randomUUID(), trigger: "config_promotion" as const, triggeringObjectId: agentId, actorUserId: null, subjects: [{ kind: "agent" as const, id: agentId }] });
+    const first = mk(failing);
+    const second = mk(fine);
+    let warning;
+    try {
+      warning = await runAiBomSignoffs(db, [first, second]);
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists r25_refuse_postcommit on ai_bom_snapshots`));
+      await db.execute(sql.raw(`drop function if exists r25_refuse_postcommit()`));
+    }
+    expect(warning).toMatchObject({ code: "ai_bom_snapshot_failed", subjects: [{ subjectKind: "agent", subjectId: failing, code: "snapshot_error" }] });
+    expect((await signoffRows(first.id)).map((r) => r.ruleId)).toEqual([AI_BOM_SNAPSHOT_RULE_IDS.failed]);
+    expect((await signoffRows(second.id)).map((r) => r.ruleId)).toEqual([AI_BOM_SNAPSHOT_RULE_IDS.taken]);
+    expect((await snapshotsOf("agent", fine, "config_promotion")).length).toBe(1);
   }, 120_000);
 });
 
