@@ -11,10 +11,9 @@
  * Live on the gateway today: the identity list and detail (S4), PATCH for
  * stewards, environments and suspend/restore (S4), the own-grant set read
  * and replace (S4), and the delegation-grant list and cascade revoke (S5).
- * `createWorkloadIdentity` is written to the frozen contract but its route
- * still answers 501 (`IDENTITY_ROUTES_NOT_BUILT`); the page keeps its
- * control disabled and never calls it until the model test says the route
- * is live.
+ * The routes that still answer 501 (`IDENTITY_ROUTES_NOT_BUILT`) have no call
+ * here: the page shows their controls disabled, and the affordance census
+ * skips a `notBuilt` stub until it becomes a real handler.
  */
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -27,7 +26,6 @@ import {
   type DelegationGrantView,
   type PutAgentGrants,
   type WorkloadIdentityDetailView,
-  type WorkloadIdentityKind,
   type WorkloadIdentityListView,
   type WorkloadIdentityView,
 } from "./workloadIdentityModel";
@@ -126,39 +124,4 @@ export function replaceIdentityGrants(identityId: string, set: PutAgentGrants): 
 export function revokeDelegationGrant(grantId: string): Promise<unknown> {
   const path = `/v1/delegation-grants/${seg(grantId)}/revoke`;
   return withStepUp((h) => stepUpApi.post(path, {}, h));
-}
-
-/** the subject column each kind names (`WORKLOAD_IDENTITY_SUBJECT_COLUMN`) */
-const SUBJECT_COLUMN: Record<WorkloadIdentityKind, "agentId" | "builderAgentId" | "engineRunnerId" | null> = {
-  agent: "agentId",
-  builder_agent: "builderAgentId",
-  engine_runner: "engineRunnerId",
-  worker_runtime: null,
-  pdp: null,
-};
-
-/**
- * `POST /v1/workload-identities` (createWorkloadIdentitySchema). NOT BUILT on
- * the gateway yet: the page's "Add identity" control is disabled with the
- * reason, and this is not called. It is here so the request is written to
- * the contract, and checked by its unit test, before the backend lands.
- */
-export function createWorkloadIdentity(input: {
-  kind: WorkloadIdentityKind;
-  subjectId: string | null;
-  stewardIds: string[];
-  environments: string[];
-}): Promise<WorkloadIdentityView> {
-  const column = SUBJECT_COLUMN[input.kind];
-  if (column === null && input.subjectId !== null) return Promise.reject(new Error("An external worker or policy client has no internal subject."));
-  if (column !== null && (input.subjectId === null || !UUID_PATTERN.test(input.subjectId))) {
-    return Promise.reject(new Error("Choose the subject this identity belongs to."));
-  }
-  const body = deepFreeze({
-    kind: input.kind,
-    ...(column ? { [column]: input.subjectId } : {}),
-    sponsorUserIds: [...input.stewardIds],
-    environments: [...input.environments],
-  });
-  return withStepUp((h) => stepUpApi.post<WorkloadIdentityView>("/v1/workload-identities", body, h));
 }

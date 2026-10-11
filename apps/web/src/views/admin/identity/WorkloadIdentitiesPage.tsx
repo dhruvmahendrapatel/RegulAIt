@@ -603,8 +603,13 @@ function RunDelegationTree(props: {
                     </div>
                     <div>{r.allocation.status}</div>
                   </>
-                ) : (
+                ) : r.grant.parentGrantId === null ? (
                   "Root (no incoming edge)"
+                ) : (
+                  // The list route returns only edges whose BOTH ends are on the
+                  // same page, so a child whose parent arrived on another page
+                  // has its edge missing here. That is "not loaded", never a root.
+                  "Edge not loaded"
                 ),
             },
             {

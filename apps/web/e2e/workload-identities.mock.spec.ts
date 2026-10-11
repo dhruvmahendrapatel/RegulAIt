@@ -10,6 +10,7 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
+import { IDENTITY_ROUTES_NOT_BUILT } from "../src/views/admin/identity/workloadIdentityModel";
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -38,30 +39,32 @@ const TREE = {
       capMicros: 60_000_000, settledMicros: 10_000_000, reservedMicros: 0, environment: "dev", audience: null, expiresAt: LATER, revokedAt: null, revokedReason: null, createdAt: ISO },
     { id: U(40), rootGrantId: U(40), parentGrantId: null, path: [], depth: 0, sponsorUserId: STEWARD.id, actorIdentityId: IDENTITY.id, runId: RUN, projectId: null,
       capMicros: 100_000_000, settledMicros: 10_000_000, reservedMicros: 50_000_000, environment: "dev", audience: null, expiresAt: LATER, revokedAt: null, revokedReason: null, createdAt: ISO },
+    // a grandchild whose edge is not in `edges`: the list route returns only edges with both ends on one page
+    { id: U(42), rootGrantId: U(40), parentGrantId: U(41), path: [U(40), U(41)], depth: 2, sponsorUserId: STEWARD.id, actorIdentityId: U(22), runId: RUN, projectId: null,
+      capMicros: 5_000_000, settledMicros: 0, reservedMicros: 0, environment: "dev", audience: null, expiresAt: LATER, revokedAt: null, revokedReason: null, createdAt: ISO },
   ],
   edges: [{ id: U(50), parentGrantId: U(40), childGrantId: U(41), amountMicros: 60_000_000, drawnMicros: 10_000_000, releasedMicros: 0, status: "open", createdAt: ISO, closedAt: null }],
   nextCursor: null,
 };
 
-/** the identity routes the gateway answers 501 today: the page must never call them */
-const NOT_BUILT = [
-  ["POST", /^\/v1\/workload-identities$/],
-  ["POST", /^\/v1\/workload-identities\/[^/]+\/revoke$/],
-  ["GET", /^\/v1\/workload-identities\/[^/]+\/credentials$/],
-  ["POST", /^\/v1\/workload-identities\/[^/]+\/credentials$/],
-  ["DELETE", /^\/v1\/workload-identities\/[^/]+\/credentials\/[^/]+$/],
-  ["GET", /^\/v1\/workload-identities\/[^/]+\/grant-proposals$/],
-  ["GET", /^\/v1\/identity\/picker-sources$/],
-] as const;
+/** the identity routes the gateway answers 501 today (the model's list, itself pinned to the gateway): never called */
+const NOT_BUILT = IDENTITY_ROUTES_NOT_BUILT.map(
+  (r) => [r.method, new RegExp(`^${r.path.replace(/:[A-Za-z]+/g, "[^/]+")}$`)] as const,
+);
+
+let current: Mock | null = null;
 
 interface Mock {
   calls: Array<{ method: string; path: string; search: string }>;
+  /** /v1 calls no mock answered: each fails the test (afterEach) */
+  unmatched: string[];
   grantsRevision: number;
   listFails: boolean;
 }
 
 async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
-  const m: Mock = { calls: [], grantsRevision: 4, listFails: false, ...opts };
+  const m: Mock = { calls: [], unmatched: [], grantsRevision: 4, listFails: false, ...opts };
+  current = m;
   const me = { userId: STEWARD.id, isAdmin: true, user: { id: STEWARD.id, email: STEWARD.email, displayName: STEWARD.displayName } };
   await page.route("**/*", async (route) => {
     const req = route.request();
@@ -73,6 +76,9 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
     if (NOT_BUILT.some(([verb, re]) => verb === method && re.test(p))) return json(route, { error: "not_built" }, 501);
     if (p === "/auth/me") return json(route, { ...me, via: "session", mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/v1/me") return json(route, me);
+    // the shell's own reads on every page: the acknowledgement gate and the approvals badge
+    if (p === "/v1/me/ai-literacy") return json(route, { required: false, current: true, documents: [], gateMode: "enforce", exempt: null, noticeDays: 14 });
+    if (p === "/v1/approvals" && method === "GET") return json(route, { approvals: [] });
     if (p === "/v1/users") return json(route, { users: [STEWARD, CO_STEWARD] });
     if (p === "/v1/servers") return json(route, { servers: [SERVER] });
     if (p === `/v1/servers/${SERVER.id}/tools`) return json(route, { tools: [{ serverId: SERVER.id, name: "read_record", kind: "read" }, { serverId: SERVER.id, name: "write_record", kind: "write" }] });
@@ -98,9 +104,16 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
     }
     if (p === "/v1/delegation-grants" && method === "GET") return json(route, TREE);
     if (p === `/v1/delegation-grants/${U(40)}/revoke` && method === "POST") return json(route, { grantId: U(40), revoked: 2 });
-    return json(route, {});
+    m.unmatched.push(`${method} ${p}`);
+    return json(route, { error: "unmatched_mock", detail: `${method} ${p} has no mock in this spec` }, 500);
   });
   return m;
+}
+
+/** an axe WCAG 2.2 AA scan of whatever is on screen now */
+async function expectNoAxeViolations(page: Page, what: string) {
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
+  expect(results.violations.map((v) => `${v.id}: ${v.help}`), `axe violations: ${what}`).toEqual([]);
 }
 
 const notBuiltCalls = (m: Mock) => m.calls.filter((c) => NOT_BUILT.some(([verb, re]) => verb === c.method && re.test(c.path)));
@@ -112,6 +125,13 @@ async function openIdentity(page: Page) {
 }
 
 test.describe("ADR-0188 S6: workload identities (preview)", () => {
+  test.beforeEach(() => {
+    current = null;
+  });
+  test.afterEach(() => {
+    expect(current?.unmatched ?? [], "every /v1 call this page makes is mocked deliberately").toEqual([]);
+  });
+
   test("lists identities from the live route, stays out of the navigation, and explains what is not built", async ({ page }) => {
     const m = await mockApi(page);
     await page.goto("/ui/admin/workload-identities");
@@ -140,8 +160,7 @@ test.describe("ADR-0188 S6: workload identities (preview)", () => {
     await page.keyboard.press("Enter");
     expect(notBuiltCalls(m)).toEqual([]);
 
-    const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
-    expect(results.violations.map((v) => `${v.id}: ${v.help}`)).toEqual([]);
+    await expectNoAxeViolations(page, "the page with an identity open");
   });
 
   test("a failed read says so and infers no empty list", async ({ page }) => {
@@ -210,6 +229,7 @@ test.describe("ADR-0188 S6: workload identities (preview)", () => {
     await editor.getByLabel("Grant kind", { exact: true }).selectOption("server");
     await editor.getByLabel("Target", { exact: true }).selectOption(SERVER.id);
     await expect(editor.getByLabel("Only its read-only tools")).toBeChecked();
+    await expectNoAxeViolations(page, "the open Add own grant dialog");
     await editor.getByRole("button", { name: "Review grant" }).click();
     await page.getByRole("dialog", { name: "Add own grant?" }).getByRole("button", { name: "Add grant" }).click();
     await confirmStepUp(page);
@@ -241,6 +261,9 @@ test.describe("ADR-0188 S6: workload identities (preview)", () => {
     await expect(tree.getByRole("row").nth(1)).toContainText("Root grant");
     await expect(tree.getByRole("row").nth(1)).toContainText("Remaining $40.00");
     await expect(tree.getByRole("row").nth(2)).toContainText("Allocated $60.00");
+    await expect(tree.getByRole("row").nth(3)).toContainText("Edge not loaded");
+    await expect(tree.getByRole("row").nth(3)).not.toContainText("Root");
+    await expectNoAxeViolations(page, "the loaded delegation tree");
     expect(m.calls.some((c) => c.path === "/v1/delegation-grants" && c.search.includes(`runId=${RUN}`))).toBe(true);
     await page.getByRole("button", { name: `Revoke grant for ${IDENTITY.identifier} and its descendants` }).click();
     await page.getByRole("dialog", { name: "Revoke grant and descendants?" }).getByRole("button", { name: "Revoke grant and descendants" }).click();

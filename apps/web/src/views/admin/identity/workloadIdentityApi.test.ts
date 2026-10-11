@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "../../../api/client";
 import { subscribeStepUpPrompt } from "../../../stepup/stepUp";
 import {
-  createWorkloadIdentity,
   listRunDelegationTree,
   listWorkloadIdentities,
   replaceIdentityGrants,
@@ -85,23 +84,5 @@ describe("writes go through the identity_manage step-up and resend the same body
     const post = vi.spyOn(api, "postWithHeaders").mockResolvedValue({ body: {}, headers: new Headers() } as never);
     await revokeDelegationGrant(U(9));
     expect(post).toHaveBeenCalledWith(`/v1/delegation-grants/${U(9)}/revoke`, {}, {});
-  });
-});
-
-describe("create (contract-ready; its route still answers 501 and the page does not call it)", () => {
-  it.each([
-    ["agent", "agentId"],
-    ["builder_agent", "builderAgentId"],
-    ["engine_runner", "engineRunnerId"],
-  ] as const)("maps %s to exactly its subject column", async (kind, column) => {
-    const post = vi.spyOn(api, "postWithHeaders").mockResolvedValue({ body: {}, headers: new Headers() } as never);
-    await createWorkloadIdentity({ kind, subjectId: U(2), stewardIds: [U(3)], environments: ["dev"] });
-    expect(post.mock.calls[0]![1]).toEqual({ kind, [column]: U(2), sponsorUserIds: [U(3)], environments: ["dev"] });
-  });
-  it("an external kind has no subject, and an internal kind needs one", async () => {
-    const post = vi.spyOn(api, "postWithHeaders");
-    await expect(createWorkloadIdentity({ kind: "pdp", subjectId: U(2), stewardIds: [U(3)], environments: [] })).rejects.toThrow(/no internal subject/);
-    await expect(createWorkloadIdentity({ kind: "agent", subjectId: null, stewardIds: [U(3)], environments: [] })).rejects.toThrow(/Choose the subject/);
-    expect(post).not.toHaveBeenCalled();
   });
 });

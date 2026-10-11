@@ -410,7 +410,8 @@ export const delegationRefusalMessages = {
     "A child's resource must exactly equal its parent's audience. A different audience cannot narrow this delegation.",
 } as const;
 
-const REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
+/** the refusal codes of the routes this page calls, in words (pinned to the gateway source by the model test) */
+export const REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
   [GRANTS_REVISION_CONFLICT]: "The grant set changed since this page loaded it, so nothing was replaced. It has been reloaded: make the change again.",
   identity_not_active: "This identity is not active, so it cannot be changed this way. Refresh to see its current status.",
   identity_not_found: "This identity no longer exists. Refresh the list.",

@@ -5,11 +5,13 @@ import {
   ENVIRONMENT_NAME_PATTERN,
   GRANTS_REVISION_CONFLICT,
   GRANT_SET_LIMITS,
+  REFUSAL_SENTENCES,
   IDENTITY_ROUTES_NOT_BUILT,
   WORKLOAD_IDENTITY_KINDS,
   WORKLOAD_IDENTITY_MAX_ENVIRONMENTS,
   WORKLOAD_IDENTITY_MAX_STEWARDS,
   WORKLOAD_IDENTITY_STATUSES,
+  delegationRefusalMessages,
   delegationState,
   formatMicros,
   grantRows,
@@ -179,6 +181,19 @@ describe("delegation tree", () => {
     expect(orderedDelegationTree({ items: [grant(2, 1)], edges: [] }).rows).toEqual([]);
     expect(orderedDelegationTree({ items: [grant(2, 1)], edges: [] }).problem).toMatch(/incomplete/);
     expect(orderedDelegationTree({ items: [grant(1, 2), grant(2, 1)], edges: [] }).problem).toMatch(/cycle/);
+  });
+});
+
+describe("refusal codes exist where the page's routes raise them", () => {
+  const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
+  it("every code given a sentence is one the S4 identity or S5 grant-admin routes return", () => {
+    const routes = [src("../../../../../gateway/src/workload-identity-admin.ts"), src("../../../../../gateway/src/oauth/grant-admin.ts"), contract].join("\n");
+    const missing = Object.keys(REFUSAL_SENTENCES).filter((code) => !routes.includes(`"${code}"`));
+    expect(missing).toEqual([]);
+  });
+  it("the delegation refusals the page explains are the shared contract's and the token endpoint's", () => {
+    const sources = [contract, src("../../../../../gateway/src/oauth/token-endpoint.ts")].join("\n");
+    expect(Object.keys(delegationRefusalMessages).filter((code) => !sources.includes(`"${code}"`))).toEqual([]);
   });
 });
 
