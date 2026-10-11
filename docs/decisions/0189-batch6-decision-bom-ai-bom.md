@@ -2059,7 +2059,8 @@ fixes were rechecked. These are the details the build settled:
     Both are revisited if posture or latency shows a problem.
 19. **The install-generated receipt key as built (PR #353).**
     - **Where the key lives.** First boot and `install.sh` generate an Ed25519 key in `<REGULAIT_INSTALL_SECRETS_DIR>/receipt-signing-key.pem`, which is the `install_secrets` Docker volume.
-    - **How it is created.** Generation is create-exclusive (a temp file opened with `wx`, fsynced, then `link()`, then a directory fsync). It never overwrites an existing key. The file must have mode 0600 and the directory 0700, and the file is checked on its open handle (`O_NOFOLLOW`).
+    - **How it is created.** Generation is create-exclusive (a temp file opened with `wx`, fsynced, then `link()`, then a directory fsync). It never overwrites an existing key. The temp link is removed right after `link()`, and a stale temp file older than 60 seconds is swept.
+    - **Checks at load.** The file is opened with `O_NOFOLLOW` and checked on the handle: it must be a regular file, have mode 0600 or stricter, be owned by the gateway's user, and have exactly one link. Its directory must also be owned by the gateway's user and give no group or other access. Native Windows skips the mode and owner checks. INSTALL.md carries the full rules.
     - **Precedence.** Operator variables always win.
     - **Key id.** The key id is derived from the public key, so a key lost with its volume is replaced under a new id. The old public key stays in `receipt_signing_keys`, so old receipts still verify.
     - **Install-time check.** The installer and boot load the key exactly as a signer does. An unusable key makes `install.sh` fail; it is not reported as ok.
