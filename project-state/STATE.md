@@ -21,6 +21,23 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-11 (night) - sign-off lookahead merged; Codex work adopted; branches cleaned up.**
+- **Sign-off lookahead (#357):** the executor checks sign-off in its claim transaction before any external effect, and
+  check stages that only report results are guarded at commit. Refusals carry `executorRefusal` and a `signoffRefused`
+  marker; the engine sweep backs off 10 minutes per refused stage. ADR-0189 items 12–19 record the result.
+- **Codex work kept, rebuilt by Claude (ADR-0191):** #359 archives the Codex reviews (all 15 findings were already
+  fixed on main); #360 workload identities page (x33); #361 isolation and execution-profile UI (x40, ADR-0190 I9 as an
+  honest preview over 501 stubs, recorded in ADR-0190); #362 AI BOM and Decision BOM evidence UI (x39); #363 isolation
+  settings card on the enforcement posture page. Each had an independent review and recheck.
+- **Cleanup:** the 16 open Codex PRs are closed with a note. `dhruv/active` was fast-forwarded to main. The owner ran
+  the first guarded delete script (267 remote branches to 41); a second script for the remaining branches (all
+  `codex/*`, `strict-int`, `dhruv/amazing-mayer-f42t40` and the merged work branches) has been sent to the owner. Each
+  script records the SHAs for restore.
+- **Last migration:** still 0192.
+- **Next:** the logged Lows from the #352–#363 rechecks (BOM verify-report mirror completeness, isolation Register
+  tests, posture-card query options, engines-fixtures heartbeat), the receipt-key retire action, and the
+  `audit_log.at` process clock. Owner items: EU AI Act Art. 50 legal review, Dependabot alerts.
+
 **2026-10-11 (evening) - stranded use cases can be recovered.** PR #355 adds an admin re-sync for a use case whose
 workflow instance completed while no receipt key was usable.
 - **Route:** `POST /v1/use-cases/:id/resync`, also offered as a Re-sync action on the Posture page. It needs an admin and an
