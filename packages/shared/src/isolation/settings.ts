@@ -3,6 +3,7 @@
  * what relaxing each gives up, and the predicates the gateway's strictness
  * registry (`org-setting-strictness.ts`) reads. Migration 0183 writes these
  * values onto the existing org row (first load, ADR-0180: no grandfathering).
+ * `isolation_enforcement` has one value, `enforce` (OWNER DECISION A).
  *
  * Every relaxation goes through the audited `PUT /v1/org/settings` and needs a
  * `settings_relax` step-up, judged against the strict default AND the stored
@@ -22,7 +23,12 @@
 import { z } from "zod";
 import { isolationClassRank, REQUIRABLE_ISOLATION_CLASSES, type RequirableIsolationClass } from "./contract.js";
 
-export const ISOLATION_ENFORCEMENT_MODES = ["enforce", "warn"] as const;
+/**
+ * OWNER DECISION A (2026-10-11): `warn` is retired; `enforce` is the only value. An admin who cannot provide a
+ * class lowers the requirement itself, through the audited floor relaxations below. Migration 0191 rewrote any
+ * stored `warn` to `enforce` (no grandfathering), and the API refuses `warn` with a 400.
+ */
+export const ISOLATION_ENFORCEMENT_MODES = ["enforce"] as const;
 export type IsolationEnforcementMode = (typeof ISOLATION_ENFORCEMENT_MODES)[number];
 
 /** the bounds (zod and the DB CHECKs of migration 0183 hold the same numbers) */
@@ -96,10 +102,9 @@ export const ISOLATION_SETTING_COPY: Readonly<Record<IsolationSettingKey, { labe
       "On: a call whose required isolation no executor can provide is refused before anything reaches the " +
       "upstream. There is never a fallback to weaker isolation.",
     relaxed:
-      "Warn: placement is unchanged. A call is still never placed below its required isolation, in any mode; a " +
-      "call no executor can serve at that class is refused, as under On (ADR-0190 amendment item 14). The setting " +
-      "is recorded on each offer and placement and counts as a relaxed posture. What else warn should do is an " +
-      "open owner decision.",
+      "Not relaxable: enforcement is always on, and a call is never placed below its required isolation. Where " +
+      "no executor can provide a class, lower the requirement itself through an isolation floor below (each " +
+      "change audited, with a step-up), so a call's record and its placement never disagree.",
   },
   isolationFloorPublic: floorCopy("public projects", "A user-space kernel sandbox (L2)."),
   isolationFloorInternal: floorCopy("internal projects", "A user-space kernel sandbox (L2)."),
@@ -115,8 +120,8 @@ export const ISOLATION_SETTING_COPY: Readonly<Record<IsolationSettingKey, { labe
 };
 
 /**
- * Is `value` a RELAXATION of the strict default for `key`? A lower floor,
- * `warn`, and a longer attestation lifetime are.
+ * Is `value` a RELAXATION of the strict default for `key`? A lower floor and
+ * a longer attestation lifetime are. Enforcement has no relaxed value.
  */
 export function isolationSettingRelaxed<K extends IsolationSettingKey>(key: K, value: IsolationSettings[K]): boolean {
   if (key === "isolationEnforcement") return value !== ISOLATION_STRICT_DEFAULTS.isolationEnforcement;
@@ -134,7 +139,8 @@ export function isolationSettingRelaxed<K extends IsolationSettingKey>(key: K, v
 
 /** ordered comparator against the stored value (ADR-0186 decision 26): a floor raised by an admin is lowered back only with a step-up */
 export function isolationSettingLooser(key: IsolationSettingKey, value: unknown, stored: unknown): boolean {
-  if (key === "isolationEnforcement") return stored === "enforce" && value === "warn";
+  // one value (OWNER DECISION A): nothing is looser than `enforce`
+  if (key === "isolationEnforcement") return false;
   if (key === "executorAttestationMaxAgeMinutes") {
     return typeof value === "number" && typeof stored === "number" && value > stored;
   }
@@ -146,7 +152,7 @@ const floor = z.enum(REQUIRABLE_ISOLATION_CLASSES).optional();
 
 /** the isolation fields of `PUT /v1/org/settings` (spread into `updateOrgSettingsSchema`) */
 export const isolationOrgSettingsFields = {
-  /** strict `enforce`; `warn` relaxes it */
+  /** `enforce` only (OWNER DECISION A): any other value, `warn` included, is a 400 */
   isolationEnforcement: z.enum(ISOLATION_ENFORCEMENT_MODES).optional(),
   /** strict L2 / L2 / L2 / L3 by data sensitivity; lower (never below L1) relaxes it */
   isolationFloorPublic: floor,

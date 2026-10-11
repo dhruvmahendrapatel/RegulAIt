@@ -3985,7 +3985,7 @@ export const orgSettings = pgTable(
       .notNull()
       .default("refuse"),
     // --- ADR-0190 (batch 6 item 3, migration 0183): all strict -----------------
-    /** enforce = refuse when no executor provides the required class; warn relaxes it */
+    /** enforce = refuse when no executor provides the required class; the only value (OWNER DECISION A, migration 0191) */
     isolationEnforcement: text("isolation_enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull().default("enforce"),
     /** the data-sensitivity floors (OWNER DECISION 3): L2 / L2 / L2 / L3; lower (never below L1) relaxes them */
     isolationFloorPublic: text("isolation_floor_public", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull().default("user_space_kernel"),
@@ -4666,7 +4666,7 @@ export const orgSettings = pgTable(
     ),
     check("org_settings_bom_export_rate_limit_per_minute_check", sql`${t.bomExportRateLimitPerMinute} BETWEEN 1 AND 600`),
     check("org_settings_decision_bom_finite_lock_finality_check", sql`${t.decisionBomFiniteLockFinality} IN ('refuse', 'accept')`),
-    check("org_settings_isolation_enforcement_check", sql`${t.isolationEnforcement} IN ('enforce', 'warn')`),
+    check("org_settings_isolation_enforcement_check", sql`${t.isolationEnforcement} = 'enforce'`),
     check(
       "org_settings_isolation_floors_check",
       sql`${t.isolationFloorPublic} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorInternal} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorConfidential} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorRegulated} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorMcpStdio} IN ('hardened_container', 'user_space_kernel', 'microvm') AND ${t.isolationFloorEngineWorker} IN ('hardened_container', 'user_space_kernel', 'microvm')`,
@@ -13341,8 +13341,9 @@ export type ExecutorAttestationRow = typeof executorAttestations.$inferSelect;
 /**
  * Decisions 7 and 13: one placement decision for an isolable call, append-only.
  * A refusal starts nothing; a placement names its executor, applied class and
- * per-placement report hash; a mismatch names the report that disagreed. Under
- * `enforce` a placement is never below its requirement (CHECK: no fallback).
+ * per-placement report hash; a mismatch names the report that disagreed. A
+ * placement is never below its requirement (CHECK: no fallback; `enforce` is
+ * the only mode, OWNER DECISION A).
  */
 export const executionPlacements = pgTable(
   "execution_placements",
@@ -13377,7 +13378,8 @@ export const executionPlacements = pgTable(
       "execution_placements_required_by_check",
       sql`${t.requiredBy} IN ('workload_kind', 'data_sensitivity', 'compliance_tag', 'autonomy_class', 'configured_profile', 'unknown_agent', 'parent_grant')`,
     ),
-    check("execution_placements_enforcement_check", sql`${t.enforcement} IN ('enforce', 'warn')`),
+    // migration 0191 adds this and the no-fallback CHECK NOT VALID: append-only rows from before stay as recorded
+    check("execution_placements_enforcement_check", sql`${t.enforcement} = 'enforce'`),
     check(
       "execution_placements_applied_class_check",
       sql`${t.appliedClass} IS NULL OR ${t.appliedClass} IN ('hardened_container', 'user_space_kernel', 'microvm', 'customer_declared')`,
@@ -13386,7 +13388,7 @@ export const executionPlacements = pgTable(
     check("execution_placements_outcome_check", sql`${t.outcome} IN ('placed', 'refused', 'mismatch')`),
     check(
       "execution_placements_refusal_code_check",
-      sql`${t.refusalCode} IS NULL OR ${t.refusalCode} IN ('no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired', 'execution_profile_mismatch')`,
+      sql`${t.refusalCode} IS NULL OR ${t.refusalCode} IN ('no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired', 'policy_unresolved', 'execution_profile_mismatch')`,
     ),
     check(
       "execution_placements_shape_check",
@@ -13394,7 +13396,7 @@ export const executionPlacements = pgTable(
     ),
     check(
       "execution_placements_no_fallback_check",
-      sql`${t.outcome} <> 'placed' OR ${t.enforcement} = 'warn' OR ${t.appliedClass} = 'customer_declared' OR array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.appliedClass}) >= array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.requiredClass})`,
+      sql`${t.outcome} <> 'placed' OR ${t.appliedClass} = 'customer_declared' OR array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.appliedClass}) >= array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.requiredClass})`,
     ),
     index("execution_placements_executor_idx").on(t.executorId, t.createdAt),
     index("execution_placements_created_idx").on(t.createdAt),
@@ -13440,7 +13442,7 @@ export const executionOffers = pgTable(
       "execution_offers_required_by_check",
       sql`${t.requiredBy} IN ('workload_kind', 'data_sensitivity', 'compliance_tag', 'autonomy_class', 'configured_profile', 'unknown_agent', 'parent_grant')`,
     ),
-    check("execution_offers_enforcement_check", sql`${t.enforcement} IN ('enforce', 'warn')`),
+    check("execution_offers_enforcement_check", sql`${t.enforcement} = 'enforce'`),
     check("execution_offers_image_digest_check", sql`${t.imageDigest} ~ '^sha256:[0-9a-f]{64}$'`),
     check(
       "execution_offers_status_check",

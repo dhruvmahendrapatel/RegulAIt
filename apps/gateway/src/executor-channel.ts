@@ -66,6 +66,7 @@ import {
   executorReportDigest,
   executorSelfTestSchema,
   isolationClassRank,
+  unresolvedPlacementFact,
   type AppliedIsolationKind,
   type ExecutionOffer,
   type ExecutionProfileBody,
@@ -262,9 +263,16 @@ async function withdrawOpenOffers(db: Db, executorId: string): Promise<void> {
 // Placement rows
 // ---------------------------------------------------------------------------
 
+/**
+ * Every offer and placement is written `enforce`, the only mode (ADR-0190 OWNER DECISION A). Migration 0191
+ * rewrote stored offers; an older placement keeps the mode it was recorded under, and nothing here copies the
+ * mode from a stored row.
+ */
+const ENFORCEMENT = "enforce" as const;
+
 async function refusedPlacement(
   db: Db,
-  o: Pick<ExecutionOfferRow, "id" | "workloadKind" | "requiredClass" | "requiredBy" | "enforcement" | "profileDigest"> & { executorId: string | null },
+  o: Pick<ExecutionOfferRow, "id" | "workloadKind" | "requiredClass" | "requiredBy" | "profileDigest"> & { executorId: string | null },
   code: ExecutionRefusalReason,
 ): Promise<string> {
   const auditId = await auditExecutor(db, {
@@ -278,7 +286,7 @@ async function refusedPlacement(
   });
   const [row] = await db
     .insert(executionPlacements)
-    .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: o.enforcement, profileDigest: o.profileDigest, outcome: "refused", refusalCode: code })
+    .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, outcome: "refused", refusalCode: code })
     .returning({ id: executionPlacements.id });
   return row!.id;
 }
@@ -290,7 +298,7 @@ function offerView(o: ExecutionOfferRow): ExecutionOffer {
     workloadKind: o.workloadKind,
     requiredClass: o.requiredClass,
     requiredBy: o.requiredBy,
-    enforcement: o.enforcement,
+    enforcement: ENFORCEMENT,
     profileDigest: o.profileDigest,
     imageDigest: o.imageDigest,
     expiresAt: o.expiresAt.toISOString(),
@@ -305,7 +313,6 @@ export interface OfferPlacementInput {
   workloadKind: IsolableWorkloadKind;
   requiredClass: RequirableIsolationClass;
   requiredBy: RequiredClassSource;
-  enforcement: "enforce" | "warn";
   profileDigest: string;
   imageDigest: string;
   /** how long the offer waits to be accepted (default EXECUTION_OFFER_TTL_SECONDS) */
@@ -325,6 +332,22 @@ export type OfferPlacementOutcome =
  * before any sandbox starts. Nothing here lowers the class.
  */
 export async function offerPlacement(db: Db, input: OfferPlacementInput): Promise<OfferPlacementOutcome> {
+  // Amendment item 15 with OWNER DECISION B: a policy fact that is missing or outside its vocabulary refuses
+  // `policy_unresolved` before anything else is looked at, and before any executor is offered work. There is
+  // no placement row (the row's own columns would have to hold the unresolved fact); the audit row records it.
+  const unresolved = unresolvedPlacementFact(input);
+  if (unresolved) {
+    await auditExecutor(db, {
+      userId: NO_IDENTITY,
+      objectType: "execution_placement",
+      objectId: null,
+      ruleId: "execution-refused",
+      effect: "deny",
+      detail: { unresolvedFact: unresolved, profileDigest: typeof input.profileDigest === "string" ? input.profileDigest : null, code: "policy_unresolved" },
+      reason: `placement refused (policy_unresolved): the policy fact ${unresolved} did not resolve (ADR-0190 decision 7, amendment item 15; never defaulted)`,
+    });
+    return { kind: "refused", code: "policy_unresolved", placementId: null };
+  }
   const now = await databaseNow(db);
   const refuse = async (code: ExecutionRefusalReason): Promise<OfferPlacementOutcome> => ({
     kind: "refused",
@@ -345,6 +368,8 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
     return { kind: "refused", code: "profile_retired", placementId: null };
   }
   if (profile.retiredAt) return refuse("profile_retired");
+  // the profile's own floor is a policy fact too: one that does not resolve is never dropped from the MAX
+  if (unresolvedPlacementFact({ ...input, profileMinClass: profile.minClass })) return refuse("policy_unresolved");
   if (isolationClassRank(profile.minClass) > isolationClassRank(input.requiredClass)) {
     // the profile's own floor is part of the requirement (decision 7 item 5)
     input = { ...input, requiredClass: profile.minClass, requiredBy: "configured_profile" };
@@ -387,7 +412,7 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
       workloadKind: input.workloadKind,
       requiredClass: input.requiredClass,
       requiredBy: input.requiredBy,
-      enforcement: input.enforcement,
+      enforcement: ENFORCEMENT,
       profileDigest: input.profileDigest,
       imageDigest: input.imageDigest,
       expiresAt: sql`now() + make_interval(secs => ${ttl})`,
@@ -803,7 +828,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         else failures.push(...evaluateExecutorReport(signed.report, { profile: profile.parsed, profileDigest: profile.digest, backend: ex.backend, classesDeclared: ex.classesDeclared, requiredClass: o.requiredClass }).failures);
         if (signed.report.imageDigest !== o.imageDigest) failures.push({ probe: "report", code: "image_digest_mismatch" });
         // the class actually applied must also satisfy the requirement through the customer mapping, if that is what it is.
-        // In EVERY enforcement mode (ADR-0190 amendment item 14): `warn` never places a call below its required class.
+        // Never below the required class (ADR-0190 decision 7; enforcement is the only mode, OWNER DECISION A).
         const effective = signed.report.class === "customer_declared" ? ex.declaredClass : signed.report.class;
         if (!effective || isolationClassRank(effective) < isolationClassRank(o.requiredClass)) {
           if (!failures.some((f) => f.code === "class_below_required")) failures.push({ probe: "report", code: "class_below_required" });
@@ -822,7 +847,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
           });
           const [pl] = await tx
             .insert(executionPlacements)
-            .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: o.enforcement, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "mismatch", refusalCode: "execution_profile_mismatch" })
+            .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "mismatch", refusalCode: "execution_profile_mismatch" })
             .returning({ id: executionPlacements.id });
           await tx.update(executionOffers).set({ status: "mismatch", reportedAt: sql`now()`, placementId: pl!.id }).where(eq(executionOffers.id, o.id));
           return { status: 409, code: "execution_profile_mismatch", failures, placementId: pl!.id } as const;
@@ -837,7 +862,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         });
         const [pl] = await tx
           .insert(executionPlacements)
-          .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: o.enforcement, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "placed" })
+          .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "placed" })
           .returning({ id: executionPlacements.id });
         await tx.update(executionOffers).set({ status: "placed", reportedAt: sql`now()`, placementId: pl!.id }).where(eq(executionOffers.id, o.id));
         return { status: 200, placementId: pl!.id, reportSha256 } as const;

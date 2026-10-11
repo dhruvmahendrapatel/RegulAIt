@@ -181,7 +181,7 @@ const placementRow = async (id: string) => (await db.select().from(executionPlac
 const placementSandboxes = (b: FakeSandboxBackend) => b.sandboxes.filter((s) => s.kind === "placement");
 /** the broker, restricted to this test's executor (every test file shares one database: other executors exist) */
 const offerTo = (r: { executorId: string }, over: Partial<Parameters<typeof offerPlacement>[1]> = {}): ReturnType<typeof offerPlacement> =>
-  offerPlacement(db, { workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", enforcement: "enforce", profileDigest: RESTRICTED_DIGEST, imageDigest: IMAGE, onlyExecutorIds: [r.executorId], ...over });
+  offerPlacement(db, { workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", profileDigest: RESTRICTED_DIGEST, imageDigest: IMAGE, onlyExecutorIds: [r.executorId], ...over });
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
@@ -423,6 +423,38 @@ describe("refused before any sandbox starts (decision 7, no fallback)", () => {
     expect(placementSandboxes(r.backend)).toHaveLength(0);
   });
 
+  it("an unresolved policy fact refuses policy_unresolved before any offer, audited; never defaulted, never a 500 (OWNER DECISION B)", async () => {
+    const r = await rig("unresolved");
+    await r.run(1);
+    const offersOf = async () => (await db.select({ id: executionOffers.id }).from(executionOffers).where(eq(executionOffers.executorId, r.executorId))).length;
+    const before = await offersOf();
+    const unresolved: Array<[Record<string, unknown>, string]> = [
+      [{ workloadKind: "future_kind" }, "workloadKind"],
+      [{ workloadKind: undefined }, "workloadKind"],
+      [{ requiredClass: "L9" }, "requiredClass"],
+      [{ requiredClass: undefined }, "requiredClass"],
+      // L0 is never a requirement: it is not coerced to anything
+      [{ requiredClass: "in_gateway" }, "requiredClass"],
+      [{ requiredBy: "a_lookup_that_did_not_resolve" }, "requiredBy"],
+    ];
+    for (const [over, fact] of unresolved) {
+      const out = await offerTo(r, { ttlSeconds: 1, ...(over as object) });
+      expect(out, JSON.stringify(over)).toEqual({ kind: "refused", code: "policy_unresolved", placementId: null });
+      const [row] = (await audits("execution-refused", null)).filter((a) => (a.detail as { unresolvedFact?: string }).unresolvedFact === fact);
+      expect(row, fact).toBeDefined();
+      expect(row!.effect).toBe("deny");
+      expect(row!.detail).toMatchObject({ code: "policy_unresolved", unresolvedFact: fact });
+    }
+    // no executor was offered work and no sandbox started
+    expect(await offersOf()).toBe(before);
+    expect(placementSandboxes(r.backend)).toHaveLength(0);
+    // positive control: the same executor, with every fact resolved, is offered the placement
+    const ok = await offerTo(r, { ttlSeconds: 1 });
+    expect(ok).toMatchObject({ kind: "offered", executorId: r.executorId });
+    expect(await offerRow((ok as { offerId: string }).offerId)).toMatchObject({ enforcement: "enforce" });
+    expect(await offersOf()).toBe(before + 1);
+  });
+
   it("an executor with no capacity declines (the placement is refused no_executor); an offer nobody takes expires", async () => {
     const r = await rig("decline");
     await r.run(1);
@@ -539,10 +571,12 @@ describe("mismatch and quarantine (decision 6)", () => {
     expect((mm!.detail as { failures: Array<{ code: string }> }).failures).toContainEqual({ probe: "report", code: "image_digest_mismatch" });
   });
 
-  // ADR-0190 amendment item 14 (vector `warn-shortfall`): a report whose applied class is below the requirement is an
-  // execution_profile_mismatch in EVERY enforcement mode. The class falls between acceptance and the report: a
-  // customer plane mapped to microvm takes a microvm offer, then its mapping is lowered before it reports.
-  it.each(["enforce", "warn"] as const)("under %s, a report whose class fell below the requirement after acceptance is never placed", async (enforcement) => {
+  // ADR-0190 amendment item 14 and OWNER DECISION A (vector `warn-shortfall`): a report whose applied class is below
+  // the requirement is an execution_profile_mismatch; `enforce` is the only mode. The class falls between acceptance
+  // and the report: a customer plane mapped to microvm takes a microvm offer, then its mapping is lowered before it
+  // reports.
+  it("a report whose class fell below the requirement after acceptance is never placed", async () => {
+    const enforcement = "enforce";
     const lowered: string[] = [];
     class LoweredOnStart extends FakeSandboxBackend {
       override async start(...args: Parameters<FakeSandboxBackend["start"]>) {
@@ -557,7 +591,7 @@ describe("mismatch and quarantine (decision 6)", () => {
     const r = await rig(`below-${enforcement}`, { backend });
     expect((await inject("PUT", `/v1/executors/${r.executorId}/declared-class`, adminAuth, { class: "microvm" })).statusCode).toBe(200);
     await r.run(1);
-    const offered = await offerTo(r, { workloadKind: "byoc_worker", requiredClass: "microvm", enforcement, ttlSeconds: 60 });
+    const offered = await offerTo(r, { workloadKind: "byoc_worker", requiredClass: "microvm", ttlSeconds: 60 });
     expect(offered).toMatchObject({ kind: "offered", attestedClass: "customer_declared" });
     const offerId = (offered as { offerId: string }).offerId;
     const [result] = await Promise.all([awaitPlacement(db, offerId, { pollMs: 50 }), r.run(2)]);

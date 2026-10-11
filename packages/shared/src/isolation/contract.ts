@@ -112,13 +112,19 @@ export type ExecutorQuarantineCode = (typeof EXECUTOR_QUARANTINE_CODES)[number];
 
 export const ATTESTATION_VERDICTS = ["pass", "fail"] as const;
 
-/** decision 7: `409 execution_profile_unavailable` reasons. There is no fallback to a lower class. */
+/**
+ * decision 7: `409 execution_profile_unavailable` reasons. There is no fallback to a lower class.
+ * `policy_unresolved` is the sixth (OWNER DECISION B, 2026-10-11; amendment item 15): a policy fact the
+ * requirement depends on is missing or not resolvable, so the call is refused before any offer. The audit
+ * row can then tell a configuration fault from a capacity fault.
+ */
 export const EXECUTION_REFUSAL_REASONS = [
   "no_executor",
   "attestation_stale",
   "class_below_required",
   "executor_quarantined",
   "profile_retired",
+  "policy_unresolved",
 ] as const;
 export type ExecutionRefusalReason = (typeof EXECUTION_REFUSAL_REASONS)[number];
 
@@ -140,6 +146,44 @@ export type PlacementOutcome = (typeof PLACEMENT_OUTCOMES)[number];
 /** the kernel rule ids decision 7 and 8 add */
 export const EXECUTION_PROFILE_RULE_ID = "execution-profile" as const;
 export const DELEGATION_ISOLATION_RULE_ID = "delegation-isolation" as const;
+
+/** the refusal envelope every isolation refusal answers with (decision 7; OWNER DECISION B) */
+export const EXECUTION_PROFILE_UNAVAILABLE = "execution_profile_unavailable" as const;
+export interface ExecutionProfileUnavailable {
+  statusCode: 409;
+  error: typeof EXECUTION_PROFILE_UNAVAILABLE;
+  ruleId: typeof EXECUTION_PROFILE_RULE_ID;
+  reason: ExecutionRefusalReason;
+}
+export function executionProfileUnavailable(reason: ExecutionRefusalReason): ExecutionProfileUnavailable {
+  return { statusCode: 409, error: EXECUTION_PROFILE_UNAVAILABLE, ruleId: EXECUTION_PROFILE_RULE_ID, reason };
+}
+
+/** a policy fact a placement depends on */
+export type PlacementPolicyFact = "workloadKind" | "requiredClass" | "requiredBy" | "profileMinClass";
+
+/**
+ * Amendment item 15 with OWNER DECISION B: the policy facts a placement
+ * depends on, checked BEFORE any offer. Returns the first fact that is missing
+ * or outside its fixed vocabulary, or null when every fact resolves. A missing
+ * fact is never coerced to a class, never dropped from the MAX and never
+ * defaulted: the caller refuses `policy_unresolved`. (Decision 7 item 5's
+ * unknown agent is not a missing fact; it resolves to the most restrictive
+ * profile before this point.) `profileMinClass` is checked only when given.
+ */
+export function unresolvedPlacementFact(facts: {
+  workloadKind?: unknown;
+  requiredClass?: unknown;
+  requiredBy?: unknown;
+  profileMinClass?: unknown;
+}): PlacementPolicyFact | null {
+  const known = (list: readonly string[], v: unknown) => typeof v === "string" && list.includes(v);
+  if (!known(ISOLABLE_WORKLOAD_KINDS, facts.workloadKind)) return "workloadKind";
+  if (!known(REQUIRABLE_ISOLATION_CLASSES, facts.requiredClass)) return "requiredClass";
+  if (!known(REQUIRED_CLASS_SOURCES, facts.requiredBy)) return "requiredBy";
+  if ("profileMinClass" in facts && !known(REQUIRABLE_ISOLATION_CLASSES, facts.profileMinClass)) return "profileMinClass";
+  return null;
+}
 
 /** decision 13: the audit actions (written by later slices; named here so the vocabulary is one list) */
 export const ISOLATION_AUDIT_ACTIONS = [
