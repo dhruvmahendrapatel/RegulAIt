@@ -46,10 +46,12 @@ import {
   isBomDottedOid,
   isBomExportEndpoint,
   isBomSpiffeId,
+  bomSpiffeSchema,
   parseTrainingDatasetChecksum,
   projectBomRow,
   type DecisionBomBody,
 } from "./contract.js";
+import { isSpiffeId } from "../identity/contract.js";
 import { bomExpiresAt, decisionBomFinality, reportedFinality, type FinalityInput } from "./finality.js";
 import { BOM_STRICT_DEFAULTS, bomOrgSettingsFields, bomSettingLooser, bomSettingRelaxed } from "./settings.js";
 
@@ -499,5 +501,79 @@ describe("receipt payload v2 (R34, R42, R48): verified, never emitted by this bu
     expect(isDecisionReceiptPayload({ ...r!.payload, factsStatus: "capture_off" })).toBe(false);
     expect(isDecisionReceiptPayloadV1(r!.payload)).toBe(false);
     expect(isDecisionReceiptPayload(r!.payload)).toBe(true);
+  });
+});
+
+/**
+ * ADR-0191: the SPIFFE ID shape follows the SPIFFE-ID standard §2.1 (trust domain)
+ * and §2.2 (path). Each rule's refusals sit beside a nearest-neighbour positive
+ * control, so a refusal cannot pass because the whole check is broken.
+ */
+describe("SPIFFE ID shape (SPIFFE-ID §2.1, §2.2)", () => {
+  const ok = (v: string) => {
+    expect(isBomSpiffeId(v), v).toBe(true);
+    expect(bomSpiffeSchema.safeParse(v).success, v).toBe(true);
+  };
+  const no = (v: string) => {
+    expect(isBomSpiffeId(v), v).toBe(false);
+    expect(bomSpiffeSchema.safeParse(v).success, v).toBe(false);
+  };
+  it("allows `_` in the trust domain", () => {
+    ok("spiffe://td_x.example/a");
+    ok("spiffe://_/a");
+  });
+  it("refuses an upper-case trust domain", () => {
+    ok("spiffe://td.example/a");
+    no("spiffe://Td.example/a");
+    no("spiffe://TD.EXAMPLE/a");
+  });
+  it("refuses a trust domain character outside a-z 0-9 . - _ (port, userinfo, others)", () => {
+    ok("spiffe://td-1.example/a");
+    for (const v of ["spiffe://td:443/a", "spiffe://u@td/a", "spiffe://td+x/a", "spiffe://td~x/a", "spiffe://td%41/a"]) no(v);
+  });
+  it("refuses a path segment character outside A-Z a-z 0-9 . - _", () => {
+    ok("spiffe://td/a.b-c_D9");
+    for (const c of [":", "@", "~", "!", "$", "&", "'", "(", ")", "*", "+", ",", ";", "=", " "]) no(`spiffe://td/a${c}b`);
+  });
+  it("refuses an empty path segment", () => {
+    ok("spiffe://td/a/b");
+    no("spiffe://td//a");
+    no("spiffe://td/a//b");
+    no("spiffe://td");
+    no("SPIFFE://td/a"); // the scheme is case-sensitive
+    no("spiffe:///a"); // an empty trust domain
+  });
+  it("refuses `.` and `..` segments, but not dots inside a segment", () => {
+    for (const v of ["spiffe://td/.a", "spiffe://td/..a", "spiffe://td/a..", "spiffe://td/...", "spiffe://td/a/.b/c"]) ok(v);
+    for (const v of ["spiffe://td/.", "spiffe://td/..", "spiffe://td/a/./b", "spiffe://td/a/../b", "spiffe://td/a/..", "spiffe://td/./a"]) no(v);
+  });
+  it("refuses percent-encoding", () => {
+    ok("spiffe://td/a20b");
+    no("spiffe://td/a%20b");
+    no("spiffe://td/%2e%2e");
+    no("spiffe://td/%41");
+  });
+  it("refuses a query or a fragment", () => {
+    ok("spiffe://td/a/b");
+    for (const v of ["spiffe://td/a?b=c", "spiffe://td/a?", "spiffe://td/a#f", "spiffe://td/a#", "spiffe://td/a/b?x#y"]) no(v);
+  });
+  it("refuses a trailing `/`", () => {
+    ok("spiffe://td/a/b");
+    no("spiffe://td/a/b/");
+    no("spiffe://td/");
+  });
+  it("caps the trust domain at 255 characters, as ADR-0188's isSpiffeId does", () => {
+    const at = "spiffe://" + "t".repeat(255) + "/a";
+    const over = "spiffe://" + "t".repeat(256) + "/a";
+    ok(at);
+    no(over);
+    expect(isSpiffeId(at)).toBe(true);
+    expect(isSpiffeId(over)).toBe(false);
+  });
+  it("keeps the 2048-character maximum", () => {
+    const at = "spiffe://td/" + "a".repeat(2048 - "spiffe://td/".length);
+    expect(at.length).toBe(2048);
+    ok(at);
+    no(at + "a");
   });
 });
