@@ -79,6 +79,7 @@ import {
   AI_BOM_INSTALL_SUBJECT_ID,
   AI_BOM_VERSION,
   aiBomSerialNumber,
+  BOM_B4_ROUTES,
   BOM_ROUTES,
   BOM_ROW_PROJECTIONS,
   BOM_SETTING_COLUMNS,
@@ -933,28 +934,37 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: verified, ne
 });
 
 // ---------------------------------------------------------------------------
-describe("ADR-0189 §9: every route is a 501 stub under the admin route class", () => {
+describe("ADR-0189 §9: every route is registered under its route class", () => {
   const url = (p: string) => p.replace(":subjectKind", "agent").replace(/:[A-Za-z]+/g, randomUUID());
+  // slice B4's five routes are gated in the handler by bom_export_roles (route class `user`); the B3 ones stay admin
+  const B4 = new Set<string>(BOM_B4_ROUTES);
   it("the route classes, stability and tags agree with BOM_ROUTES", () => {
     for (const r of BOM_ROUTES) {
       const [method, p] = r.split(" ") as [string, string];
-      expect(routeAuthClass(method, p), r).toBe("admin");
+      expect(routeAuthClass(method, p), r).toBe(B4.has(r) ? "user" : "admin");
       expect(ROUTE_STABILITY[r], r).toBe("internal");
       expect(ROUTE_TAGS[r], r).toBe("audit");
     }
   });
-  it("each answers 501 not_built to an admin, 403 to a member and 401 with no credential", async () => {
+  it("each answers an admin, refuses a member (403) and anyone with no credential (401)", async () => {
     for (const r of BOM_ROUTES) {
       const [method, p] = r.split(" ") as [Method, string];
       const body = method === "POST" ? {} : undefined;
       const ok = await inject(method, url(p), users.admin.auth, body);
-      // slice B3 built three of them (zz-adr0189-b3-ai-bom.test.ts); the snapshot freeze stays 501 until R17
-      const built: Partial<Record<string, [number, string | null]>> = {
+      // slice B3 built three of them (zz-adr0189-b3-ai-bom.test.ts); the snapshot freeze stays 501 until R17.
+      // Slice B4 built the other five (zz-adr0189-b4-decision-bom.test.ts); an unknown id is a 404, and with no
+      // export key configured here a bundle is refused 409 before anything is read (R6)
+      const built: Record<string, [number, string | null]> = {
         "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": [501, "bom_snapshots_not_released"],
         "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": [200, null],
         "GET /v1/ai-bom/:subjectKind/:subjectId/drift": [404, "ai_bom_subject_not_found"],
+        "GET /v1/ai-bom/snapshots/:snapshotId": [404, "ai_bom_snapshot_not_found"],
+        "GET /v1/ai-bom/snapshots/:snapshotId/bundle": [404, "ai_bom_snapshot_not_found"],
+        "GET /v1/decisions/:auditId/bom": [404, "bom_decision_not_found"],
+        "GET /v1/decisions/:auditId/bom/bundle": process.env.REGULAIT_EXPORT_SIGNING_KEY ? [404, "bom_decision_not_found"] : [409, "bom_signing_unavailable"],
+        "POST /v1/boms/verify": [400, "invalid_bom_verify_request"],
       };
-      const [status, error] = built[r] ?? [501, "not_built"];
+      const [status, error] = built[r]!;
       expect(ok.statusCode, `${r}: ${ok.body}`).toBe(status);
       if (error) expect(ok.json().error, r).toBe(error);
       expect((await inject(method, url(p), users.member.auth, body)).statusCode, r).toBe(403);
