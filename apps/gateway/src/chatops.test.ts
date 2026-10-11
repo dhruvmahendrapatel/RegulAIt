@@ -38,6 +38,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  agents,
   approvals,
   auditLog,
   chatIdentityLinks,
@@ -51,6 +52,7 @@ import {
   egressAllowHosts,
   eq,
   inArray,
+  modelCards,
   projects,
   runMigrations,
   sql,
@@ -487,6 +489,36 @@ describe("the chat user id is an assertion, not authorization", () => {
     expect(res2.statusCode).toBe(403);
     expect(res2.json().error).toBe("chatops_step_up_required");
     expect((await approvalRow(stepUp)).status).toBe("pending");
+  });
+
+  it("ADR-0189 R25: a sign-off refused for want of a receipt key is an ordinary decide-path refusal, audited", async () => {
+    // a model-card sign-off owes a signed AI BOM snapshot; with no key under the strict
+    // default the one decide path refuses it (409) — chat must audit that refusal like any other
+    const [agent] = await db.insert(agents).values({ name: `chatops-r25-agent-${process.pid}-${Date.now()}`, provider: "mock", tier: 1 }).returning({ id: agents.id });
+    const [card] = await db.insert(modelCards).values({ agentId: agent!.id, intendedUse: `chatops r25 ${Date.now()}` }).returning({ id: modelCards.id });
+    const requested = await post(`/v1/mrm/cards/${card!.id}/sign-off`, {
+      approverUserId: danaId,
+      validUntil: new Date(Date.now() + 90 * 86_400_000).toISOString(),
+      reason: "chatops r25",
+    });
+    expect(requested.statusCode, requested.body).toBe(201);
+    const approvalId = requested.json().approvalId as string;
+    const keyEnv = ["REGULAIT_RECEIPT_SIGNING_KEY", "REGULAIT_RECEIPT_SIGNING_KEY_ID"] as const;
+    const saved = keyEnv.map((k) => process.env[k]);
+    for (const k of keyEnv) delete process.env[k];
+    let res;
+    try {
+      const body = slackBody(approvalId);
+      res = await callback(body, signedHeaders(body));
+    } finally {
+      keyEnv.forEach((k, i) => (saved[i] === undefined ? delete process.env[k] : (process.env[k] = saved[i])));
+    }
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toBe("bom_signing_unavailable");
+    expect((await approvalRow(approvalId)).status).toBe("pending");
+    const refused = (await auditRows(CHATOPS_RULE_IDS.decideRefusedByDecidePath)).filter((r) => String(r.detail?.["approvalId"]) === approvalId);
+    expect(refused).toHaveLength(1);
+    expect((refused[0]!.detail["refusal"] as { error?: string }).error).toBe("bom_signing_unavailable");
   });
 
   it("an identity link binds an EXISTING principal and never creates one", async () => {

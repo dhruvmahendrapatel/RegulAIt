@@ -48,9 +48,12 @@ set. Without it, the live pipeline chain stops at its checks stage with "waiting
 
 Then the **export-signing key** for beat 3E (ADR-0116: the deployment, not the product, holds it —
 without it "Download signed bundle" answers 409): run
-`pnpm --filter @regulait/gateway demo:export-key` and set the two variables it prints
-(`REGULAIT_EXPORT_SIGNING_KEY`, `REGULAIT_EXPORT_SIGNING_KEY_ID`) in the same terminal. It
-creates the key under `~/.regulait-demo-keys` once and reuses it, so the fingerprint it prints is
+`pnpm --filter @regulait/gateway demo:export-key` and set the four variables it prints
+(`REGULAIT_EXPORT_SIGNING_KEY`, `REGULAIT_EXPORT_SIGNING_KEY_ID`, and the **receipt signing key**
+`REGULAIT_RECEIPT_SIGNING_KEY`, `REGULAIT_RECEIPT_SIGNING_KEY_ID`) in the same terminal. Without
+the receipt key every sign-off in `demo:prepare` (use-case and model-card approvals) is refused 409
+`bom_signing_unavailable`, because each sign-off takes a signed AI BOM snapshot (ADR-0189 R25). It
+creates the keys under `~/.regulait-demo-keys` once and reuses them, so the fingerprint it prints is
 stable across rehearsal and demo. (bash shortcut: `eval "$(pnpm -s --filter @regulait/gateway
 demo:export-key -- --env)"`.)
 

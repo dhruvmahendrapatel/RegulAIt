@@ -248,12 +248,15 @@ describe("docker-start.sh: demo prep (the Docker demo is prepared like `demo:pre
     }
   });
 
-  it("demo-export-key --env writes only the two `export` lines to stdout (the start script evals them); the fingerprint goes to stderr", () => {
+  it("demo-export-key --env writes only the four `export` lines to stdout (the start script evals them); the fingerprint goes to stderr", () => {
     const src = readFileSync(path.join(here, "demo-export-key.ts"), "utf8");
     const envBranch = src.slice(src.indexOf('if (process.argv.includes("--env"))'), src.indexOf("} else {"));
-    expect(envBranch.match(/console\.log\(/g)).toHaveLength(2);
+    // the export key (ADR-0116) and the receipt key (ADR-0189 R25: a keyless demo's sign-offs are refused)
+    expect(envBranch.match(/console\.log\(/g)).toHaveLength(4);
     expect(envBranch).toMatch(/console\.log\(`export REGULAIT_EXPORT_SIGNING_KEY='/);
     expect(envBranch).toMatch(/console\.log\(`export REGULAIT_EXPORT_SIGNING_KEY_ID='/);
+    expect(envBranch).toMatch(/console\.log\(`export REGULAIT_RECEIPT_SIGNING_KEY='/);
+    expect(envBranch).toMatch(/console\.log\(`export REGULAIT_RECEIPT_SIGNING_KEY_ID='/);
     expect(envBranch).toContain("console.error(");
     expect(envBranch).not.toMatch(/readFileSync|privateKey/);
   });

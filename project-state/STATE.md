@@ -21,6 +21,11 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-11 (morning) - AI BOM snapshots released on demand; R25 settled.** PR #350 merged. It sets
+`AI_BOM_SNAPSHOTS_RELEASED` and keeps the public Rekor publication off (repo variable `RELEASE_AI_BOM_PUBLISH_APPROVED`
+unset, by owner decision). ADR-0189's "Amendments settling R25" fixes the sign-off trigger design; the R25 slice is being
+built on branch `r25-signoff-triggers`.
+
 **2026-10-11 - owner decisions.** The owner accepted the open recommendations:
 - ADR-0190 A: `warn` retired. B: an unresolved policy fact answers `409 execution_profile_unavailable` with reason
   `policy_unresolved`. Both are recorded in the ADR-0190 amendment; the code follow-up is queued.

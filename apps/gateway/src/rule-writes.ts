@@ -112,6 +112,7 @@ import {
   type DbOrTxDeep,
 } from "./config-versions.js";
 import { settingTransitions } from "./setting-transitions.js";
+import type { AiBomSignoff } from "./ai-bom-signoff.js";
 import { assertRuleLooseningStepUp, ruleLooseningCovers } from "./rule-loosening.js";
 import {
   approvalRuleShape,
@@ -142,6 +143,9 @@ export interface RuleEditSuccess<T> {
   /** the sentence the API and the audit row both use, so a caller can never be
    * told something different from what was recorded */
   note: string;
+  /** ADR-0189 R25: the AI BOM sign-off the activation owes (an agent's config only); the
+   * caller runs it with `runAiBomSignoffs` once its outermost transaction commits */
+  aiBomSignoff: AiBomSignoff | null;
 }
 
 export type RuleEditResult<T> = RuleEditSuccess<T> | RuleEditRefusal;
@@ -333,6 +337,7 @@ async function applyRuleEditLocked<T>(
   }
 
   let mintedVersion: number | null = null;
+  let aiBomSignoff: AiBomSignoff | null = null;
 
   if (plan.kind === "mint") {
     const res = await newVersion(db, {
@@ -346,6 +351,7 @@ async function applyRuleEditLocked<T>(
       stepUp: args.stepUp,
     });
     mintedVersion = res.version.version;
+    aiBomSignoff = res.aiBomSignoff;
     // `activateVersion` wrote the enforcing columns as the read-model, inside
     // its transaction. Anything left in `rowPatch` is a SELECTION column, which
     // no version may carry, so it is written separately and only here.
@@ -415,5 +421,5 @@ async function applyRuleEditLocked<T>(
     reason: `${args.label}: ${plan.reason}`,
   });
 
-  return { ok: true, row: after, plan, mintedVersion, note };
+  return { ok: true, row: after, plan, mintedVersion, note, aiBomSignoff };
 }

@@ -67,6 +67,10 @@ import {
   resolveReportPeriod,
 } from "@regulait/shared";
 import { resolveAnchorSink, type AnchorSink } from "./audit-chain.js";
+import { AI_BOM_GAP_RULE_IDS, AI_BOM_SNAPSHOT_RULE_IDS } from "./ai-bom.js";
+
+/** ADR-0189 R25 item 9: how many owed-but-missing snapshots the posture report lists (the count is exact) */
+export const AI_BOM_POSTURE_OWED_SAMPLE = 20;
 import { evaluatePack } from "./compliance-packs.js";
 // ADR-0089 (gap L20): the ONE ownership-flag computation, shared with the
 // inventory so the two surfaces can never disagree about what "orphaned" is.
@@ -458,20 +462,74 @@ export async function computePostureReport(
     total: useCaseCounts.reduce((a, r) => a + r.n, 0),
   };
 
-  // --- ADR-0189 R25: AI BOM sign-off snapshot triggers ----------------------
-  // Stated outright: the strict setting may say `sign_off_events`, but no sign-off
-  // takes a snapshot until the R25 slice wires the triggers. Read-only (no
-  // singleton insert); a missing row reads as the strict default.
+  // --- ADR-0189 R25: AI BOM sign-off snapshots -----------------------------
+  // The setting as stored (read-only; a missing row reads as the strict
+  // default), the snapshots taken and the GAPS recorded in the window (items 4
+  // and 7), and every snapshot a sign-off in the window was OWED (its
+  // triggering row's `aiBomSnapshotsDue`) that has neither a taken row nor a
+  // gap row (item 9) — a snapshot lost to a crash between commit and capture
+  // is counted here, never silent. A snapshot still being taken counts until
+  // it lands.
   const [bomRow] = await db
-    .select({ triggers: orgSettings.aiBomSnapshotTriggers })
+    .select({ triggers: orgSettings.aiBomSnapshotTriggers, withoutKey: orgSettings.aiBomSnapshotWithoutKey })
     .from(orgSettings)
     .where(eq(orgSettings.id, ORG_SETTINGS_ID));
   const triggerPosture = aiBomSnapshotTriggerPosture(bomRow?.triggers ?? BOM_STRICT_DEFAULTS.aiBomSnapshotTriggers);
+  const snapshotRows = await db
+    .select({ ruleId: auditLog.ruleId, n: count() })
+    .from(auditLog)
+    .where(and(windowAudit, inArray(auditLog.ruleId, [AI_BOM_SNAPSHOT_RULE_IDS.taken, ...AI_BOM_GAP_RULE_IDS])))
+    .groupBy(auditLog.ruleId);
+  const snapshotCount = (ruleId: string) => snapshotRows.find((r) => r.ruleId === ruleId)?.n ?? 0;
+  const owedRows = (
+    (await db.execute(sql`
+      select t.id as "auditId", t.at as "at", t.rule_id as "ruleId", t.detail->>'aiBomSignoffId' as "aiBomSignoffId",
+             d->>'subjectKind' as "subjectKind", d->>'subjectId' as "subjectId",
+             count(*) over ()::int as "total"
+        from ${auditLog} t
+        cross join lateral jsonb_array_elements(
+          case when jsonb_typeof(t.detail->'aiBomSnapshotsDue') = 'array' then t.detail->'aiBomSnapshotsDue' else '[]'::jsonb end
+        ) d
+       where t.at >= ${windowStart.toISOString()}::timestamptz and t.at < ${now.toISOString()}::timestamptz
+         and t.detail ? 'aiBomSnapshotsDue'
+         and not exists (
+           -- bounded (migration 0192, audit_log_ai_bom_signoff_subject_idx): one sign-off's row
+           -- for one subject, never older than its triggering row (both take the database clock)
+           select 1 from ${auditLog} g
+            where g.rule_id in (${AI_BOM_SNAPSHOT_RULE_IDS.taken}, ${AI_BOM_SNAPSHOT_RULE_IDS.skippedNoKey}, ${AI_BOM_SNAPSHOT_RULE_IDS.failed})
+              and (g.detail->>'aiBomSignoffId') = (t.detail->>'aiBomSignoffId')
+              and (g.detail->>'subjectKind') = (d->>'subjectKind')
+              and (g.detail->>'subjectId') = (d->>'subjectId')
+              and g.at >= t.at)
+       order by t.at desc
+       limit ${AI_BOM_POSTURE_OWED_SAMPLE}`)) as unknown as {
+      rows: Array<{ auditId: string; at: Date | string; ruleId: string; aiBomSignoffId: string | null; subjectKind: string; subjectId: string; total: number }>;
+    }
+  ).rows;
   const aiBom = {
     ai_bom_signoff_triggers: triggerPosture.signOffTriggers,
     snapshotTriggerSetting: triggerPosture.configured,
     effectiveSnapshotTriggers: triggerPosture.effective,
-    note: triggerPosture.note ?? "sign-off events take a signed AI BOM snapshot as the setting says",
+    snapshotWithoutKeySetting: bomRow?.withoutKey ?? BOM_STRICT_DEFAULTS.aiBomSnapshotWithoutKey,
+    snapshotsTakenInWindow: snapshotCount(AI_BOM_SNAPSHOT_RULE_IDS.taken),
+    gapsInWindow: {
+      skippedNoKey: snapshotCount(AI_BOM_SNAPSHOT_RULE_IDS.skippedNoKey),
+      failed: snapshotCount(AI_BOM_SNAPSHOT_RULE_IDS.failed),
+    },
+    owedButMissing: owedRows[0]?.total ?? 0,
+    owedButMissingSample: owedRows.map((r) => ({
+      triggeringAuditId: r.auditId,
+      at: new Date(r.at).toISOString(),
+      triggeringRuleId: r.ruleId,
+      aiBomSignoffId: r.aiBomSignoffId,
+      subjectKind: r.subjectKind,
+      subjectId: r.subjectId,
+    })),
+    note:
+      triggerPosture.effective === "sign_off_events"
+        ? "each sign-off takes a signed AI BOM snapshot of its subjects after it commits; gaps and owed-but-missing " +
+          "snapshots are counted over the report window, and an admin can take any of them on demand"
+        : "snapshots are taken on demand only (an audited relaxation): a sign-off records no snapshot of what was signed off",
   };
 
   return {

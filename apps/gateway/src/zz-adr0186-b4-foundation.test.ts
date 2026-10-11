@@ -785,7 +785,17 @@ describe("ADR-0186 seams: §4.9 routes, sweeps, the anchor timestamper, the moni
       const def = registry.get(name);
       expect(def, name).toBeDefined();
       expect(def!.adr).toBe("ADR-0186");
-      const out = await def!.run({ db, actorUserId: null, now: new Date(), runId: `a186-${RUN}` });
+      // the unconfigured state: no receipt key (the suite holds one for ADR-0189 R25; put back below)
+      const savedKey = { file: process.env.REGULAIT_RECEIPT_SIGNING_KEY, id: process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID };
+      delete process.env.REGULAIT_RECEIPT_SIGNING_KEY;
+      delete process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID;
+      let out: Awaited<ReturnType<NonNullable<typeof def>["run"]>>;
+      try {
+        out = await def!.run({ db, actorUserId: null, now: new Date(), runId: `a186-${RUN}` });
+      } finally {
+        if (savedKey.file !== undefined) process.env.REGULAIT_RECEIPT_SIGNING_KEY = savedKey.file;
+        if (savedKey.id !== undefined) process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID = savedKey.id;
+      }
       expect(out.itemsProcessed, name).toBe(0);
       // One map of each implemented sweep's honest unconfigured state (X21 receipts, X22 timestamps).
       const unconfiguredState: Record<string, string> = {

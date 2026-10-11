@@ -144,6 +144,7 @@ import {
 } from "./redteam-agentic.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
 import { refuseRunStartWithoutLiteracy } from "./ai-literacy.js";
+import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs } from "./ai-bom-signoff.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -1695,44 +1696,58 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
           and(eq(modelCardEvidence.cardId, body.cardId), eq(modelCardEvidence.evalRunId, run.evalRunId)),
         );
       if (dupe) return reply.status(409).send({ error: "evidence_already_attached" });
-      const [row] = await db
-        .insert(modelCardEvidence)
-        .values({
-          cardId: body.cardId,
-          kind: "eval_run",
-          evalRunId: run.evalRunId,
-          externalRef: null,
-          label:
-            body.label ??
-            `red-team '${run.libraryName}' v${run.libraryVersion}: ${run.defeated}/${run.probes} probe(s) defeated`,
-          note:
-            body.note ??
-            `${run.gateReason ?? ""} — ${RED_TEAM_COVERAGE_DISCLOSURE}`.trim(),
-          attachedByUserId: req.authCtx.userId ?? null,
-        })
-        .returning();
-      await db.insert(auditLog).values({
-        userId: req.authCtx.userId ?? NIL_UUID,
-        objectType: "model_card",
-        objectId: body.cardId,
-        detail: {
-          phase: "evidence",
-          action: "attached",
-          evidenceId: row!.id,
-          kind: "eval_run",
-          evalRunId: run.evalRunId,
-          redteamRunId: run.id,
-          defeated: run.defeated,
-          probes: run.probes,
-        },
-        effect: "allow",
-        ruleId: "mrm-evidence-attached",
-        ruleChain: [],
-        reason:
-          `an ADR-0057 red-team run ('${run.libraryName}' v${run.libraryVersion}, ${run.defeated} of ${run.probes} ` +
-          "probes defeated) was attached as measured evidence behind this risk position",
+      // ADR-0189 R25: the attach, its audit row and the AI BOM sign-off it owes commit together; with
+      // no signing key under the strict default the attach is refused (409) and nothing is saved
+      const attached = await db.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Db;
+        const [row] = await tx
+          .insert(modelCardEvidence)
+          .values({
+            cardId: body.cardId,
+            kind: "eval_run",
+            evalRunId: run.evalRunId,
+            externalRef: null,
+            label:
+              body.label ??
+              `red-team '${run.libraryName}' v${run.libraryVersion}: ${run.defeated}/${run.probes} probe(s) defeated`,
+            note:
+              body.note ??
+              `${run.gateReason ?? ""} — ${RED_TEAM_COVERAGE_DISCLOSURE}`.trim(),
+            attachedByUserId: req.authCtx.userId ?? null,
+          })
+          .returning();
+        const prepared = await prepareAiBomSignoff(tx, {
+          trigger: "evidence_attached",
+          triggeringObjectId: body.cardId,
+          actorUserId: req.authCtx.userId ?? null,
+          subjects: await modelCardSignoffSubjects(tx, card),
+        });
+        await tx.insert(auditLog).values({
+          userId: req.authCtx.userId ?? NIL_UUID,
+          objectType: "model_card",
+          objectId: body.cardId,
+          detail: {
+            ...prepared.auditDetail,
+            phase: "evidence",
+            action: "attached",
+            evidenceId: row!.id,
+            kind: "eval_run",
+            evalRunId: run.evalRunId,
+            redteamRunId: run.id,
+            defeated: run.defeated,
+            probes: run.probes,
+          },
+          effect: "allow",
+          ruleId: "mrm-evidence-attached",
+          ruleChain: [],
+          reason:
+            `an ADR-0057 red-team run ('${run.libraryName}' v${run.libraryVersion}, ${run.defeated} of ${run.probes} ` +
+            "probes defeated) was attached as measured evidence behind this risk position",
+        });
+        return { row: row!, signoff: prepared.signoff };
       });
-      return reply.status(201).send({ evidence: row });
+      const aiBomSnapshotWarning = await runAiBomSignoffs(db, [attached.signoff], req.log);
+      return reply.status(201).send({ evidence: attached.row, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
     });
 
     /** the posture view the admin screen opens on: what got through recently,

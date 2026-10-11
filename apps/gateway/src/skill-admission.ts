@@ -62,6 +62,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { requireStepUp } from "./step-up.js";
+import { prepareAiBomSignoff, runAiBomSignoffs } from "./ai-bom-signoff.js";
 import {
   admissionFindingSummary,
   admitSkillSchema,
@@ -517,7 +518,7 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
       return reply;
     }
     // X15-H01: the hold is re-checked inside the admission's own transaction, serialised with hold creation
-    const row = await withAgentEvidenceHold(db, req, reply, releases.map((r) => r.agentId), `admission of skill ${id} (pinned by this agent)`, async (db) => {
+    const admitted = await withAgentEvidenceHold(db, req, reply, releases.map((r) => r.agentId), `admission of skill ${id} (pinned by this agent)`, async (db) => {
       const [row] = await db
         .update(builderSkills)
         .set({
@@ -530,6 +531,20 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
         .where(and(eq(builderSkills.id, id), eq(builderSkills.admissionState, "held"), eq(builderSkills.contentDigest, body.digest)))
         .returning();
       if (!row) return null;
+      // ADR-0189 R25 (skill admission): each builder agent whose pinned copy this admission
+      // releases owes a signed AI BOM snapshot (none when no agent pins the skill); read
+      // here, under the hold lock, from the same rows the update below admits
+      const released = await db
+        .select({ agentId: builderAgentSkills.agentId })
+        .from(builderAgentSkills)
+        .where(and(eq(builderAgentSkills.skillId, id), eq(builderAgentSkills.snapshotDigest, s.contentDigest), eq(builderAgentSkills.snapshotAdmissionState, "held")));
+      // with no signing key under the strict default this throws 409 and the admission rolls back
+      const prepared = await prepareAiBomSignoff(db, {
+        trigger: "skill_admission",
+        triggeringObjectId: id,
+        actorUserId: req.authCtx.userId ?? null,
+        subjects: released.map((r) => ({ kind: "builder_agent" as const, id: r.agentId })),
+      });
       // attachments pinned to this exact body are admitted with it
       await db
         .update(builderAgentSkills)
@@ -546,6 +561,7 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
         objectType: "builder_skill",
         objectId: id,
         detail: {
+          ...prepared.auditDetail,
           phase: "skill-admit",
           digest: s.contentDigest,
           version: s.version,
@@ -560,14 +576,19 @@ export function registerSkillAdmissionRoutes(app: FastifyInstance, db: Db) {
           `skill '${s.name}' v${s.version} admitted despite admission findings — reason: ${body.reason}. The admission ` +
           `is pinned to digest ${s.contentDigest.slice(0, 16)}; a changed body is scanned from scratch.`,
       });
-      return row;
+      return { row, signoff: prepared.signoff };
     });
-    if (row === EVIDENCE_HOLD_REFUSED) return reply;
-    if (!row) {
+    if (admitted === EVIDENCE_HOLD_REFUSED) return reply;
+    if (!admitted) {
       const [now] = await db.select({ d: builderSkills.contentDigest }).from(builderSkills).where(eq(builderSkills.id, id));
       return reply.status(409).send(now && now.d !== body.digest ? changed : { error: "not_held" });
     }
-    return reply.send({ skill: { id: row.id, admissionState: row.admissionState, admittedDigest: row.admittedDigest } });
+    const { row } = admitted;
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [admitted.signoff], req.log);
+    return reply.send({
+      skill: { id: row.id, admissionState: row.admissionState, admittedDigest: row.admittedDigest },
+      ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
+    });
   });
 
   /** the decision on a pending widening of visibility */
