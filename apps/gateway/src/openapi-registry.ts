@@ -852,6 +852,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "internal",
   "PATCH /v1/use-cases/:useCaseId": "internal",
   "POST /v1/use-cases/:useCaseId/retire": "internal",
+  // ADR-0189 R25 item 13 follow-up: re-sync a use case left behind its completed instance (admin)
+  "POST /v1/use-cases/:useCaseId/resync": "internal",
   // ADR-0168 — mark an approval condition met (owner/use-case owner/admin)
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met": "internal",
   // ADR-0168 amendment — review policy and recertification sweep
@@ -1800,6 +1802,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/servers/:serverId/tools/:toolName/unhalt": "servers",
   "PATCH /v1/use-cases/:useCaseId": "use-cases",
   "POST /v1/use-cases/:useCaseId/retire": "use-cases",
+  "POST /v1/use-cases/:useCaseId/resync": "use-cases",
   "POST /v1/use-cases/:useCaseId/conditions/:conditionId/met": "use-cases",
   "GET /v1/governance/review-policy": "use-cases",
   "PUT /v1/governance/review-policy": "use-cases",

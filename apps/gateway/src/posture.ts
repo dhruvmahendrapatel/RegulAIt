@@ -87,6 +87,8 @@ import { sodPostureSection } from "./sod.js";
 // "none" and "not assessable" stated outright rather than implied by zeros.
 import { recommendationsPostureSection } from "./access-recommendations.js";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
+// ADR-0189 R25 item 13 follow-up: use cases left behind a completed instance
+import { useCasesBehindCompletedInstance } from "./use-cases.js";
 
 /** the rolling activity window the posture view reads (denials, PII blocks,
  * pack evidence, eval runs). Spend uses the current calendar month, because
@@ -453,6 +455,11 @@ export async function computePostureReport(
     .from(aiUseCases)
     .groupBy(aiUseCases.status);
   const ucByStatus = new Map(useCaseCounts.map((r) => [r.status, r.n]));
+  // ADR-0189 R25 item 13 follow-up: an instance that completed (approving
+  // terminal state) while its use case was never approved — the approval was
+  // refused for want of a signing key after an executor completed the
+  // instance. Informational: it blocks nothing; the action recovers each one.
+  const behind = await useCasesBehindCompletedInstance(db);
   const useCases = {
     proposed: ucByStatus.get("proposed") ?? 0,
     underReview: ucByStatus.get("under_review") ?? 0,
@@ -460,6 +467,15 @@ export async function computePostureReport(
     rejected: ucByStatus.get("rejected") ?? 0,
     retired: ucByStatus.get("retired") ?? 0,
     total: useCaseCounts.reduce((a, r) => a + r.n, 0),
+    instanceCompletedNotApproved: {
+      count: behind.count,
+      sampleUseCaseIds: behind.sampleUseCaseIds,
+      action:
+        behind.count === 0
+          ? "none: every use case whose intake workflow completed is approved"
+          : "make sure a receipt signing key is usable (receiptSigningKey on GET /v1/org/posture), then re-sync each use case " +
+            "with POST /v1/use-cases/:useCaseId/resync (admin); it approves the use case and takes its signed AI BOM snapshot",
+    },
   };
 
   // --- ADR-0189 R25: AI BOM sign-off snapshots -----------------------------

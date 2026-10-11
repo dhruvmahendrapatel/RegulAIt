@@ -114,7 +114,16 @@ interface PostureDoc {
     totalNotAssessable: number;
     note: string;
   };
-  useCases: { proposed: number; underReview: number; approved: number; rejected: number; retired: number; total: number };
+  useCases: {
+    proposed: number;
+    underReview: number;
+    approved: number;
+    rejected: number;
+    retired: number;
+    total: number;
+    /** ADR-0189 R25 item 13 follow-up: intake workflow completed, use case never approved */
+    instanceCompletedNotApproved?: { count: number; sampleUseCaseIds: string[]; action: string };
+  };
   note: string;
 }
 
@@ -479,6 +488,16 @@ export default function PosturePage() {
                     </>
                   )}
                 </div>
+                {(d.useCases.instanceCompletedNotApproved?.count ?? 0) > 0 && (
+                  <div className={v.stack}>
+                    <div className={p.oneLiner}>
+                      <Badge tone="warn">needs a re-sync</Badge> {d.useCases.instanceCompletedNotApproved!.count} use case(s) whose
+                      intake workflow completed were never approved:{" "}
+                      {d.useCases.instanceCompletedNotApproved!.sampleUseCaseIds.join(", ")}
+                    </div>
+                    <div className={v.faint}>{d.useCases.instanceCompletedNotApproved!.action}</div>
+                  </div>
+                )}
               </Card>
             </div>
 
