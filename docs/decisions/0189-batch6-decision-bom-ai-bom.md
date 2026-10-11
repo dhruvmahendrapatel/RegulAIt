@@ -2060,8 +2060,32 @@ fixes were rechecked. These are the details the build settled:
           - the EU tier would change under the current ruleset (`eu_tier_changed_since_completion`).
         - It locks the instance and then the use case, the same order the workflow uses.
         - Posture shows `useCases.instanceCompletedNotApproved` (count, sample ids, action).
-      - **Prevention (open follow-up):** a lookahead check in the executor would refuse, before any external effect, a
-        stage that would complete an instance with no usable key.
+      - **Prevention (PR #357).** An executor stage whose success would complete the instance, and so approve a
+        governed use case, is refused before its external effect when no key is usable. Under the relaxed setting
+        nothing changes.
+        - **Where the guard runs.**
+          - Git, deploy and nested-run stages, and check stages that would start paid evals, are guarded in the
+            executor's claim transaction. The kernel lookahead decides whether the stage would complete the
+            instance, and it fails closed on any error except "not executable".
+          - Check stages with only reported results are guarded at commit, after evaluation. A failing check
+            therefore still ends at `blocked_on_check` and is never reported as a key problem.
+          - The guard is per stage: in an automated tail, earlier stages (branch, PR) still run, and only the
+            completing stage is held.
+        - **What a refusal leaves behind.**
+          - The instance stays `awaiting_execution`.
+          - `lastError` and a `signoffRefused` marker are set.
+          - One `workflow:executor-signoff-refused` audit row is written.
+          - Routes answer `executorRefusal`. `/advance` answers 409, or 503 for an unusable key, when the held stage
+            was its only action. Decide answers `executionWarning`.
+          - Recovery is `/advance` or the same request. An Idempotency-Key replay only reports the standing
+            refusal.
+          - The engine hand-off stays unnotified, and the sweep retries at most once every 10 minutes.
+        - **Mirrored at once.** An approval's post-commit completion, a nested run's completion, an engine
+          re-evaluation, an intake completing at start, and a vendor assessment completing at start now update the
+          use case or vendor immediately.
+        - **Still possible.** A key lost between a passed claim-time guard and the stage's commit can still strand a
+          use case. The re-sync above recovers it. A second guard at commit for git and deploy stages was not added,
+          because it would have to roll back the record of an external effect that has already happened.
       - The deploy-override, `/recheck` and `/checks` routes now sync the use case as well (PR #355). Deploy-override
         also checks the key inside its transaction.
 14. **Bulk and chat decisions refuse one item at a time.** A refused item is reported and audited as refused, and the
