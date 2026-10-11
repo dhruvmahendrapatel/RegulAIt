@@ -375,8 +375,14 @@ export function registerVendorRoutes(
       ruleChain: [],
       reason: `AI vendor '${body.name}' proposed — assessment instance ${started.instance.id} started on the pillar-2 rails`,
     });
+    // ADR-0189 R25 item 13 / PR #357 review 8: an assessment that moved while it
+    // started (completed at start, say) is mirrored now; the vendor row did not
+    // exist when the start ran its stages. No key is needed: a vendor owes no
+    // snapshot. Idempotent: a vendor already in step is left as it is.
+    await syncVendorForInstance(db, started.instance.id, userId);
+    const [current] = await db.select().from(aiVendors).where(eq(aiVendors.id, row!.id));
     return reply.status(201).send({
-      ...row,
+      ...(current ?? row),
       instance: started.instance,
       questionnaireTemplate: VENDOR_QUESTIONNAIRE_TEMPLATE,
       note:

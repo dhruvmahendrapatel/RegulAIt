@@ -2165,7 +2165,12 @@ export function registerUseCaseRoutes(
           const [fresh] = await tx.select().from(aiUseCases).where(eq(aiUseCases.id, row!.id));
           if (fresh) bound = fresh;
         }
-        const created = { ...createdBody(bound, started.instance), ...(signoffWarning ? { useCaseSignoffWarning: signoffWarning } : {}) };
+        const created = {
+          ...createdBody(bound, started.instance),
+          ...(signoffWarning ? { useCaseSignoffWarning: signoffWarning } : {}),
+          // PR #357 review 5: an intake stage held at start says so
+          ...(started.executorRefusal ? { executorRefusal: started.executorRefusal } : {}),
+        };
         if (idemKey) {
           // ADR-0179 review item 3: the claim keeps a reference, not the body;
           // a replay rebuilds the same shape from the use case (useCaseReplayBody)

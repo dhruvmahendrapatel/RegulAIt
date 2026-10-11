@@ -34,9 +34,11 @@ import { tmpdir } from "node:os";
 import {
   aiBomSnapshots,
   aiUseCases,
+  aiVendors,
   and,
   approvals,
   auditLog,
+  engineRuns,
   eq,
   orchestrationRuns,
   orgSettings,
@@ -57,7 +59,8 @@ import {
   workflowTestHooks,
 } from "./workflows.js";
 import { AI_BOM_SNAPSHOT_RULE_IDS } from "./ai-bom.js";
-import { AI_USE_CASE_INTAKE_TEMPLATE_NAME } from "./template-gallery.js";
+import { runEngineRunSweep } from "./engine-runs.js";
+import { AI_USE_CASE_INTAKE_TEMPLATE_NAME, VENDOR_AI_ASSESSMENT_TEMPLATE_NAME } from "./template-gallery.js";
 
 const KEY_ENV = ["REGULAIT_RECEIPT_SIGNING_KEY", "REGULAIT_RECEIPT_SIGNING_KEY_ID"] as const;
 const savedEnv = Object.fromEntries(KEY_ENV.map((k) => [k, process.env[k]]));
@@ -247,6 +250,15 @@ describe("an executor stage after a committed route: the effect waits for a usab
     expect(await externalEffects(f.instanceId)).toEqual([]);
     await expectRefusedAt(f.instanceId, f.useCaseId, "branch", "proposed");
 
+    // PR #357 review 4: /advance whose only action is the refused stage answers
+    // the refusal, as the route-level refusals do — and still runs nothing
+    const again = await withoutKey(() => advance(f.instanceId, "branch"));
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json()).toMatchObject({ error: "bom_signing_unavailable", status: "awaiting_execution" });
+    expect(again.json().executorRefusal).toMatchObject({ stageId: "branch", code: "bom_signing_unavailable" });
+    expect(branchExists(f.instanceId)).toBe(false);
+    expect(await refusals(f.instanceId)).toHaveLength(2);
+
     const retried = await advance(f.instanceId, "branch");
     expect(retried.statusCode, retried.body).toBe(200);
     expect(retried.json().status).toBe("completed");
@@ -254,6 +266,34 @@ describe("an executor stage after a committed route: the effect waits for a usab
     expect(retried.json().useCaseSignoffWarning).toBeUndefined();
     expect(branchExists(f.instanceId)).toBe(true);
     expect(await externalEffects(f.instanceId)).toEqual(["external-effect:git.create_branch"]);
+    await expectCompletedAndApproved(f.instanceId, f.useCaseId);
+  }, 180_000);
+
+  it("an Idempotency-Key replay of a held submit re-drives nothing (ADR-0179) and carries the standing refusal", async () => {
+    const f = await startInstance("idem", [
+      { id: "intake", type: "trigger" },
+      { id: "questionnaire", type: "artifact_generation", output: "look_idem" },
+      BRANCH_STAGE(),
+    ]);
+    const headers = { ...owner.auth, "idempotency-key": `look-idem-${k.RUN}` };
+    const payload = { stageId: "questionnaire", content: "look answers" };
+    const first = await withoutKey(() => k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, headers, payload));
+    expect(first.statusCode, first.body).toBe(201);
+    expect(first.json().executorRefusal).toMatchObject({ stageId: "branch", code: "bom_signing_unavailable" });
+    // the replay, even WITH a key now: a pure read — the stage is not run, nothing new is audited
+    const replay = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, headers, payload);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.headers["idempotent-replay"]).toBe("true");
+    expect(replay.json()).toMatchObject({ version: 1, status: "awaiting_execution" });
+    expect(replay.json().executorRefusal).toMatchObject({ stageId: "branch", code: "bom_signing_unavailable" });
+    expect(replay.json().executorRefusal.detail).toEqual(expect.stringContaining("would complete this workflow instance"));
+    expect(branchExists(f.instanceId)).toBe(false);
+    expect(await refusals(f.instanceId)).toHaveLength(1);
+    // the recovery is /advance; once the stage ran, a replay carries no refusal
+    expect((await advance(f.instanceId, "branch")).statusCode).toBe(200);
+    const after = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, headers, payload);
+    expect(after.json()).toMatchObject({ status: "completed" });
+    expect(after.json().executorRefusal).toBeUndefined();
     await expectCompletedAndApproved(f.instanceId, f.useCaseId);
   }, 180_000);
 
@@ -325,6 +365,8 @@ describe("an approval's post-commit step (decide) running a completing git stage
     expect(await useCaseStatus(f.useCaseId)).toBe("under_review");
     const decided = await withoutKey(() => decide(f.instanceId));
     expect(decided.statusCode, decided.body).toBe(200);
+    // PR #357 review 6: the decide answer says the executor held the stage
+    expect(decided.json().executionWarning?.executorRefusal).toMatchObject({ stageId: "branch", code: "bom_signing_unavailable" });
     expect(branchExists(f.instanceId)).toBe(false);
     expect(await externalEffects(f.instanceId)).toEqual([]);
     await expectRefusedAt(f.instanceId, f.useCaseId, "branch", "under_review");
@@ -340,6 +382,7 @@ describe("an approval's post-commit step (decide) running a completing git stage
     expect((await submit(f.instanceId)).statusCode).toBe(201);
     const decided = await decide(f.instanceId);
     expect(decided.statusCode, decided.body).toBe(200);
+    expect(decided.json().executionWarning).toBeUndefined();
     expect(branchExists(f.instanceId)).toBe(true);
     expect(await refusals(f.instanceId)).toEqual([]);
     await expectCompletedAndApproved(f.instanceId, f.useCaseId);
@@ -390,20 +433,64 @@ describe("a check stage evaluated by a report (/checks)", () => {
     await expectCompletedAndApproved(f.instanceId, f.useCaseId);
   }, 180_000);
 
-  it("no key while a report would be deferred: there is no running executor to defer to — each report is refused, nothing completes; a key completes it", async () => {
-    const f = await startInstance("checks-202-nokey", CHECK_STAGES("checks_202_nokey", ["ci", "lint"]));
+  it("no key, a check still pending: the stage only waits — no refusal, nothing shown as a key problem", async () => {
+    const f = await startInstance("checks-pending", CHECK_STAGES("checks_pending", ["ci", "lint"]));
     expect((await submit(f.instanceId)).json().status).toBe("awaiting_execution");
-    const a = await withoutKey(() => reportPass(f.instanceId, "ci"));
-    const b = await withoutKey(() => reportPass(f.instanceId, "lint"));
-    for (const res of [a, b]) {
-      expect(res.statusCode, res.body).toBe(200);
-      expect(res.json().evaluation).toBe("refused_signoff_unavailable");
+    const res = await withoutKey(() => reportPass(f.instanceId, "ci"));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ status: "awaiting_execution", evaluation: "evaluated" });
+    expect(res.json().executorRefusal).toBeUndefined();
+    expect(await refusals(f.instanceId)).toEqual([]);
+    const ctx = (await instanceRow(f.instanceId)).context as Record<string, unknown>;
+    expect((ctx["checks:ci-gate"] as Array<{ check: string; status: string }>).map((r) => r.status)).toEqual(["passed", "pending"]);
+  }, 180_000);
+
+  it("no key, a CI failure: recorded as the failure it is (blocked_on_check), never as a key problem", async () => {
+    const f = await startInstance("checks-fail", CHECK_STAGES("checks_fail", ["ci"]));
+    expect((await submit(f.instanceId)).json().status).toBe("awaiting_execution");
+    const round = (await instanceRow(f.instanceId)).round;
+    const res = await withoutKey(() =>
+      k.req("POST", `/v1/workflows/instances/${f.instanceId}/checks`, owner.auth, {
+        round,
+        stageId: "ci-gate",
+        results: [{ check: "ci", status: "failed" }],
+        reason: "look: the CI run failed",
+      }),
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ status: "blocked_on_check", evaluation: "evaluated" });
+    expect(res.json().executorRefusal).toBeUndefined();
+    expect(await refusals(f.instanceId)).toEqual([]);
+    expect(await useCaseStatus(f.useCaseId)).toBe("proposed");
+  }, 180_000);
+
+  it("no key, the completing report lands while an executor that saw a pending check runs: refused at its commit, nothing completes; a key completes it", async () => {
+    const f = await startInstance("checks-commit", CHECK_STAGES("checks_commit", ["ci", "lint"]));
+    expect((await submit(f.instanceId)).json().status).toBe("awaiting_execution");
+    useKey(false);
+    let first;
+    try {
+      const park = parkFirstCommit(f.instanceId, "ci-gate");
+      const pending = reportPass(f.instanceId, "ci"); // lint pending at its claim: the guard waits for the commit
+      await park.arrived;
+      const second = await reportPass(f.instanceId, "lint");
+      expect(second.statusCode, second.body).toBe(202);
+      park.release();
+      first = await pending;
+    } finally {
+      useKey(true);
     }
-    expect(await refusals(f.instanceId)).toHaveLength(2);
+    expect(first.statusCode, first.body).toBe(200);
+    // the verdict read the reports stored at the commit (both passed), and the commit held it
+    expect(first.json()).toMatchObject({ status: "awaiting_execution", evaluation: "refused_signoff_unavailable" });
+    expect(first.json().executorRefusal).toMatchObject({ stageId: "ci-gate", code: "bom_signing_unavailable" });
+    expect(await refusals(f.instanceId)).toHaveLength(1);
     expect(await succeededEvents(f.instanceId)).toBe(0);
     await expectRefusedAt(f.instanceId, f.useCaseId, "ci-gate", "proposed");
-    const retried = await reportPass(f.instanceId, "lint");
-    expect(retried.json()).toMatchObject({ status: "completed", evaluation: "evaluated" });
+
+    const retried = await advance(f.instanceId, "ci-gate");
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(retried.json().status).toBe("completed");
     await expectCompletedAndApproved(f.instanceId, f.useCaseId);
   }, 180_000);
 });
@@ -503,6 +590,8 @@ describe("an intake that would complete while its use case is being created (ins
     const useCaseId = created.json().id as string;
     const instanceId = created.json().workflowInstanceId as string;
     expect(created.json().status).toBe("proposed");
+    // PR #357 review 5: the creation answer says the intake stage was held
+    expect(created.json().executorRefusal).toMatchObject({ stageId: "branch", code: "bom_signing_unavailable" });
     expect(branchExists(instanceId)).toBe(false);
     expect(await externalEffects(instanceId)).toEqual([]);
     await expectRefusedAt(instanceId, useCaseId, "branch", "proposed");
@@ -519,8 +608,90 @@ describe("an intake that would complete while its use case is being created (ins
     const useCaseId = created.json().id as string;
     const instanceId = created.json().workflowInstanceId as string;
     expect(created.json().status).toBe("approved");
+    expect(created.json().executorRefusal).toBeUndefined();
     expect(branchExists(instanceId)).toBe(true);
     expect(await refusals(instanceId)).toEqual([]);
     await expectCompletedAndApproved(instanceId, useCaseId);
+  }, 180_000);
+});
+
+describe("an engine run's hand-off to a stage held for a refused sign-off (PR #357 review 3)", () => {
+  /** FIXTURE: the refusal marker as if it were written `minutes` ago (the sweep's back-off reads it on the database clock) */
+  async function ageRefusal(instanceId: string, minutes: number) {
+    await db.execute(sql`
+      update workflow_instances
+         set context = jsonb_set(context, '{signoffRefused,at}', to_jsonb(now() - make_interval(mins => ${minutes})))
+       where id = ${instanceId}::uuid`);
+  }
+  async function notifiedAt(runId: string) {
+    const [r] = await db.select({ at: engineRuns.workflowNotifiedAt }).from(engineRuns).where(eq(engineRuns.id, runId));
+    return r!.at;
+  }
+
+  it("stays unnotified while refused, is left alone inside the back-off, and lands once a key is usable", async () => {
+    const f = await startInstance("engine", [
+      { id: "intake", type: "trigger" },
+      { id: "questionnaire", type: "artifact_generation", output: "look_engine" },
+      { id: "ci-gate", type: "automated_check", checks: ["ci"] },
+    ]);
+    expect((await submit(f.instanceId)).json().status).toBe("awaiting_execution");
+    // the CI result is in, but the completing evaluation is held: no key
+    expect((await withoutKey(() => reportPass(f.instanceId, "ci"))).json().evaluation).toBe("refused_signoff_unavailable");
+    expect(await refusals(f.instanceId)).toHaveLength(1);
+    // FIXTURE: an engine run bound to this stage, ended, its hand-off not yet landed
+    const round = (await instanceRow(f.instanceId)).round;
+    const [run] = await db.insert(engineRuns).values({
+      engineId: "modelscan", engineVersion: "0.8.8", status: "completed", trigger: "workflow", targetKind: "artifact",
+      config: { sets: ["scan"], params: {} } as never, configHash: `look-${k.RUN}`, budgetUsd: 1, timeoutSeconds: 600,
+      queueExpiresAt: new Date(Date.now() + 3_600_000), finishedAt: new Date(),
+      workflowInstanceId: f.instanceId, workflowStageId: "ci-gate", workflowCheckName: "ci", workflowRound: round,
+    } as never).returning({ id: engineRuns.id });
+
+    // inside the back-off (the refusal is fresh): the sweep leaves it alone — no attempt, no new refusal row
+    await withoutKey(() => runEngineRunSweep(db));
+    expect(await refusals(f.instanceId)).toHaveLength(1);
+    expect(await notifiedAt(run!.id)).toBeNull();
+
+    // past the back-off, still no key: tried once, refused again, still unnotified (retried later)
+    await ageRefusal(f.instanceId, 11);
+    await withoutKey(() => runEngineRunSweep(db));
+    expect(await refusals(f.instanceId)).toHaveLength(2);
+    expect(await notifiedAt(run!.id)).toBeNull();
+    expect((await instanceRow(f.instanceId)).status).toBe("awaiting_execution");
+    // ...and the fresh refusal starts a new back-off: the next tick does not try again
+    await withoutKey(() => runEngineRunSweep(db));
+    expect(await refusals(f.instanceId)).toHaveLength(2);
+
+    // past the back-off with a key: the hand-off lands, completes the instance and approves the use case
+    await ageRefusal(f.instanceId, 11);
+    await runEngineRunSweep(db);
+    expect(await notifiedAt(run!.id)).not.toBeNull();
+    await expectCompletedAndApproved(f.instanceId, f.useCaseId);
+  }, 180_000);
+});
+
+describe("a vendor assessment that completes while the vendor is being proposed (PR #357 review 8)", () => {
+  it("the vendor is mirrored at once — approved, with no key needed (a vendor owes no snapshot)", async () => {
+    // FIXTURE: the assessment template, a git stage that completes at start. The
+    // name is unique; nothing in this scratch database proposed a vendor before.
+    const tpl = await createWorkflowTemplateValidated(db, {
+      name: VENDOR_AI_ASSESSMENT_TEMPLATE_NAME,
+      definition: { workflow: `look-vendor-${k.RUN}`, stages: [{ id: "intake", type: "trigger" }, BRANCH_STAGE()] },
+    });
+    if (!tpl.ok) throw new Error(`template refused: ${JSON.stringify(tpl.body)}`);
+    try {
+      const res = await withoutKey(() =>
+        k.req("POST", "/v1/vendors", owner.auth, { name: `look-vendor-${k.RUN}`, description: "look synthetic vendor", category: "model_provider" }),
+      );
+      expect(res.statusCode, res.body).toBe(201);
+      const instanceId = res.json().workflowInstanceId as string;
+      expect((await instanceRow(instanceId)).status).toBe("completed");
+      expect(branchExists(instanceId)).toBe(true);
+      expect(res.json().status).toBe("approved");
+      const [vendor] = await db.select({ status: aiVendors.status }).from(aiVendors).where(eq(aiVendors.id, res.json().id as string));
+      expect(vendor!.status).toBe("approved");
+    } finally {
+      await db.update(workflowTemplates).set({ retiredAt: new Date() }).where(eq(workflowTemplates.id, tpl.row.id));
+    }
   }, 180_000);
 });

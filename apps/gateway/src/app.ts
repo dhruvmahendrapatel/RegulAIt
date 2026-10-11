@@ -4467,8 +4467,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       // Post-commit steps, IN ORDER, each run once the decision is durable. A list, so
       // one hook's step never overwrites another's (ADR-0189 R25 item 5).
-      const postCommit: Array<(d: Db) => Promise<void>> = [];
-      const addPostCommit = (step: ((d: Db) => Promise<void>) | null | undefined) => {
+      const postCommit: Array<(d: Db) => Promise<unknown>> = [];
+      const addPostCommit = (step: ((d: Db) => Promise<unknown>) | null | undefined) => {
         if (step) postCommit.push(step);
       };
       // ADR-0189 R25: the AI BOM snapshots this decision's sign-offs owe, taken after commit
@@ -4699,9 +4699,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // the response (and the execution machinery's own failure events), never
     // as a failed decide.
     let executionError: string | null = null;
+    // PR #357 review 6: what a workflow step's executor and mirror report
+    // (an executor refusal, a use-case sign-off refused, a failed snapshot)
+    let executionWarning: Record<string, unknown> | null = null;
     for (const step of outcome.postCommit) {
       try {
-        await step(db);
+        const extra = await step(db);
+        const w = extra && typeof extra === "object" ? (extra as { executionWarning?: Record<string, unknown> }).executionWarning : undefined;
+        if (w) executionWarning = { ...(executionWarning ?? {}), ...w };
       } catch (err) {
         executionError ??= err instanceof Error ? err.message : String(err);
       }
@@ -4722,6 +4727,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ...(selfReview ? { selfReview: true } : {}),
       ...(pmMirror ? { pmMirror } : {}),
       ...(executionError ? { executionError } : {}),
+      ...(executionWarning ? { executionWarning } : {}),
       ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
       },
     };

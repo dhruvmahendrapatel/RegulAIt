@@ -250,6 +250,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
     // ADR-0180 A2: the decide body also accepts measured conditions
     body: decideApprovalWithMeasuredSchema,
+    responseNote:
+      "When a workflow sign-off runs an executor stage after the decision commits, `executionWarning` reports what it could not do: `executorRefusal` (ADR-0189 R25 item 13 — the stage would complete the instance and approve its AI use case, but no receipt signing key is usable, so it was held; `/advance` runs it once a key is), `useCaseSignoffWarning` and `aiBomSnapshotWarning`. The decision itself stands.",
   },
 
   "GET /v1/projects": { summary: "Projects visible to the caller." },
@@ -283,7 +285,7 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
   "POST /v1/workflows/instances/:instanceId/advance": {
     summary: "Advance a workflow instance past its current stage, subject to that stage's gates.",
     responseNote:
-      "ADR-0189 R25 item 13: an executor stage (git, deploy, nested build, checks) that would complete the instance and approve its AI use case is not run while no receipt signing key is usable (strict setting). The instance stays at that stage, nothing external happens, and the answer carries `executorRefusal` (`stageId`, `code`, `detail`); the artifact, check report, recheck and deploy-override routes answer the same field. Retry once a key is usable.",
+      "ADR-0189 R25 item 13: an executor stage (git, deploy, nested build, checks) that would complete the instance and approve its AI use case is not run while no receipt signing key is usable (strict setting). The instance stays at that stage and nothing external happens. When the held stage is the one this call asked to run, the answer is 409 (503 for an unusable key) with `error`, `detail` and `executorRefusal` (`stageId`, `code`, `detail`), as the route-level refusals are; when it follows a transition this call made, the answer is 200 and carries `executorRefusal`. The artifact, check report, recheck and deploy-override routes carry the same field, and an Idempotency-Key replay of an artifact submit carries the refusal the instance still stands on. Retry once a key is usable.",
   },
 
   // ADR-0181 (security review): internal (rendered only with ?include=all), but
