@@ -8,6 +8,8 @@
  *  - `relaxed` (REGULAIT_DATABASE_SSL=disable, as the local demo and
  *    docker-compose set it): the stat reads relaxed and the page says
  *    "database TLS: relaxed" in words, with what it means;
+ *  - the ADR-0190 isolation settings card renders on the same page (one
+ *    component, also shown under Engines), measured from a valid envelope;
  *  - axe (WCAG 2.x A/AA) over the relaxed page in BOTH themes.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -37,6 +39,18 @@ function posture(dbTls: "required" | "relaxed") {
   };
 }
 
+/** the eight ADR-0190 isolation settings at their strict defaults */
+const ISOLATION_SETTINGS = {
+  isolationEnforcement: "enforce",
+  isolationFloorPublic: "user_space_kernel",
+  isolationFloorInternal: "user_space_kernel",
+  isolationFloorConfidential: "user_space_kernel",
+  isolationFloorRegulated: "microvm",
+  isolationFloorMcpStdio: "user_space_kernel",
+  isolationFloorEngineWorker: "user_space_kernel",
+  executorAttestationMaxAgeMinutes: 120,
+};
+
 async function mockApi(page: Page, dbTls: "required" | "relaxed") {
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
@@ -45,6 +59,7 @@ async function mockApi(page: Page, dbTls: "required" | "relaxed") {
     if (p === "/auth/me") return json(route, { userId: "ada", isAdmin: true, via: "session", user: { id: "ada", email: "ada@example.test", displayName: "Ada Admin" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false });
     if (p === "/v1/me") return json(route, { userId: "ada", isAdmin: true, user: { id: "ada", email: "ada@example.test", displayName: "Ada Admin" } });
     if (p === "/v1/org/posture") return json(route, posture(dbTls));
+    if (p === "/v1/org/settings" && route.request().method() === "GET") return json(route, { settings: ISOLATION_SETTINGS });
     return json(route, {});
   });
 }
@@ -87,6 +102,13 @@ test.describe("ADR-0181: database TLS on the Enforcement posture page", () => {
     await expect(page.getByText("database TLS: relaxed")).toBeVisible();
     await expect(page.getByText(/REGULAIT_DATABASE_SSL=disable is set/)).toBeVisible();
     await expect(page.getByText("relaxed", { exact: true }).first()).toBeVisible();
+    // ADR-0190: the isolation settings card is on this page too, measured and editable
+    const isolation = page.locator("section[data-rg-card]").filter({ has: page.getByRole("button", { name: "Save isolation settings" }) });
+    await expect(isolation).toHaveCount(1);
+    await expect(isolation.getByText("Isolation settings", { exact: true })).toBeVisible();
+    await expect(isolation.getByText("Always on")).toBeVisible();
+    await expect(isolation.getByLabel("Isolation floor: regulated projects")).toHaveValue("microvm");
+    await expect(isolation.getByRole("button", { name: "Save isolation settings" })).toBeEnabled();
     await expectAxeClean(page, "Enforcement posture (database TLS relaxed)");
   });
 });

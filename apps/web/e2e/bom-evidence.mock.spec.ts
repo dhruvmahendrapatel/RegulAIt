@@ -98,6 +98,9 @@ async function mockApi(page: Page, over: Partial<Scenario> = {}): Promise<Scenar
     settings: {
       decisionFactsCapture: "on", decisionBomFinality: "anchored", bomExportRoles: "admins_only", bomPersonIdentifiers: "id_only", aiBomSnapshotTriggers: "sign_off_events",
       aiBomSnapshotWithoutKey: "refuse", cyclonedxExportVersions: ["1.7"], bomExportRateLimitPerMinute: 30, decisionBomFiniteLockFinality: "refuse",
+      // ADR-0190: the isolation settings card shares this envelope on the posture page
+      isolationEnforcement: "enforce", isolationFloorPublic: "user_space_kernel", isolationFloorInternal: "user_space_kernel", isolationFloorConfidential: "user_space_kernel",
+      isolationFloorRegulated: "microvm", isolationFloorMcpStdio: "user_space_kernel", isolationFloorEngineWorker: "user_space_kernel", executorAttestationMaxAgeMinutes: 120,
     },
     receiptKey: { state: "missing", keyId: null, publicKeyFingerprint: null, publicKeys: "/v1/receipts/keys", note: "No receipt signing key, so sign-offs are refused (409 bom_signing_unavailable)." },
     calls: [],
