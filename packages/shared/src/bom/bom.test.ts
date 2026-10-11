@@ -540,6 +540,8 @@ describe("SPIFFE ID shape (SPIFFE-ID §2.1, §2.2)", () => {
     no("spiffe://td//a");
     no("spiffe://td/a//b");
     no("spiffe://td");
+    no("SPIFFE://td/a"); // the scheme is case-sensitive
+    no("spiffe:///a"); // an empty trust domain
   });
   it("refuses `.` and `..` segments, but not dots inside a segment", () => {
     for (const v of ["spiffe://td/.a", "spiffe://td/..a", "spiffe://td/a..", "spiffe://td/...", "spiffe://td/a/.b/c"]) ok(v);
