@@ -460,7 +460,7 @@ import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 // ADR-0188 (batch 6 item 1) S1 — every identity route, a 501 stub until its slice lands
 import { registerIdentityRoutes } from "./identity-routes.js";
-import { lockPersonForRevocation, lockRoleForGrantInsert } from "./workload-identity-admin.js";
+import { auditRoleNotFound, insertRoleGrantLocked, lockPersonForRevocation, RoleNotFoundError, roleNotFoundBody } from "./workload-identity-admin.js";
 // ADR-0189 (batch 6 item 2) B1 — every Decision BOM / AI BOM route, a 501 stub until its slice lands
 import { registerBomRoutes } from "./bom-routes.js";
 import { registerAiBomSpdxFieldRoutes } from "./ai-bom-spdx-fields.js";
@@ -2261,14 +2261,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     if (sod) return reply.status(409).send(sod);
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
-    const [row] = await db.transaction(async (tx) => {
-      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
-      return tx
-        .insert(roleToolGrants)
-        .values({ roleId, serverId: body.serverId, toolName: body.toolName })
-        .returning();
-    });
-    return reply.status(201).send(row);
+    // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
+    const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/tools" }, (tx) =>
+      tx.insert(roleToolGrants).values({ roleId, serverId: body.serverId, toolName: body.toolName }).returning(),
+    );
+    if (!rows) return reply.status(404).send(roleNotFoundBody(roleId));
+    return reply.status(201).send(rows[0]);
   });
 
   app.post("/v1/roles/:roleId/grants/servers", async (req, reply) => {
@@ -2283,14 +2281,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     if (sod) return reply.status(409).send(sod);
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
-    const [row] = await db.transaction(async (tx) => {
-      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
-      return tx
-        .insert(roleServerGrants)
-        .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
-        .returning();
-    });
-    return reply.status(201).send(row);
+    // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
+    const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/servers" }, (tx) =>
+      tx.insert(roleServerGrants).values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll }).returning(),
+    );
+    if (!rows) return reply.status(404).send(roleNotFoundBody(roleId));
+    return reply.status(201).send(rows[0]);
   });
 
   // §5 role-bundled AGENT/CONNECTOR grants (ADR-0014) — the agent/connector
@@ -2306,14 +2302,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     if (sod) return reply.status(409).send(sod);
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
-    const [row] = await db.transaction(async (tx) => {
-      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
-      return tx
-        .insert(roleAgentGrants)
-        .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
-        .returning();
-    });
-    return reply.status(201).send(row);
+    // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
+    const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/agents" }, (tx) =>
+      tx.insert(roleAgentGrants).values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null }).returning(),
+    );
+    if (!rows) return reply.status(404).send(roleNotFoundBody(roleId));
+    return reply.status(201).send(rows[0]);
   });
 
   app.post("/v1/roles/:roleId/grants/connectors", async (req, reply) => {
@@ -2327,19 +2321,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     if (sod) return reply.status(409).send(sod);
     // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
-    const [row] = await db.transaction(async (tx) => {
-      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
-      return tx
+    // review follow-up: a missing role is refused by name (404, audited), not by the foreign key
+    const rows = await insertRoleGrantLocked(db, roleId, { actorUserId: req.authCtx.userId, via: "POST /v1/roles/:roleId/grants/connectors" }, (tx) =>
+      tx
         .insert(roleConnectorGrants)
-        .values({
-          roleId,
-          connectorId: body.connectorId,
-          mode: body.mode,
-          allowedObjects: body.allowedObjects ?? null,
-        })
-        .returning();
-    });
-    return reply.status(201).send(row);
+        .values({ roleId, connectorId: body.connectorId, mode: body.mode, allowedObjects: body.allowedObjects ?? null })
+        .returning(),
+    );
+    if (!rows) return reply.status(404).send(roleNotFoundBody(roleId));
+    return reply.status(201).send(rows[0]);
   });
 
   // §5 admin read-back: every grant this role bundles, across all four object
@@ -4642,7 +4632,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         );
       }
       return { updated, postCommit, refusal: null };
+    }).catch((err: unknown) => {
+      // review follow-up: an SoD override whose role went away after the precheck rolls the decision back
+      if (err instanceof RoleNotFoundError) return err;
+      throw err;
     });
+    if (outcome instanceof RoleNotFoundError) {
+      await auditRoleNotFound(db, { actorUserId: deciderUserId, roleId: outcome.roleId, via: "sod-override-decide", detail: { approvalId } });
+      return fail(404, roleNotFoundBody(outcome.roleId));
+    }
     if (outcome.refusal) return fail(409, outcome.refusal);
     if (!outcome.updated) {
       // raced: re-read so the refusal names what actually happened
