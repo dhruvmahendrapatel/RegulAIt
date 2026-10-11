@@ -2026,9 +2026,15 @@ fixes were rechecked. These are the details the build settled:
     - The workflow artifact and advance routes check inside their transaction, once the event is applied, whether the
       transition would approve a use case. If it would and no key is usable, they answer 409, and the transition, the
       artifact and any git effect all roll back.
-    - An instance that completes later, through an executor stage, is not covered by that check. There the use-case
-      sync refuses inside its own savepoint, the vendor sync still runs, and the response carries
-      `useCaseSignoffWarning`. The use case stays in review until the instance is driven again with a key.
+    - An instance that completes later, through an executor stage, is not covered by that check.
+      - There the use-case sync runs in its own transaction and refuses. The vendor sync still runs, and the response
+        carries `useCaseSignoffWarning`.
+      - The use case is left at `proposed` or `under_review` while its instance is completed. A completed instance
+        cannot be advanced, so **nothing recovers it today**. This fails closed: nothing is approved without a snapshot.
+      - Open follow-up: an admin re-sync route for such use cases, and a posture item "instance completed, use case
+        not approved".
+      - The deploy-override route also runs git executions that can complete an instance without the use-case sync.
+        That predates R25 and is in the same follow-up.
 14. **Bulk and chat decisions refuse one item at a time.** A refused item is reported and audited as refused, and the
     rest of the batch carries on.
 15. **A configured key that cannot be used** is refused with 503 `receipt_signing_key_invalid`. Under the relaxed
