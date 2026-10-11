@@ -49,6 +49,8 @@ import {
   isNotNull,
   isNull,
   lt,
+  orgSettings,
+  ORG_SETTINGS_ID,
   projects,
   redteamRuns,
   sql,
@@ -58,6 +60,8 @@ import {
 } from "@regulait/db";
 import {
   AI_RISK_REGISTER_DISCLAIMER,
+  aiBomSnapshotTriggerPosture,
+  BOM_STRICT_DEFAULTS,
   REPORT_ESTIMATE_DISCLAIMER,
   RISK_CATEGORY_EVIDENCE,
   resolveReportPeriod,
@@ -454,6 +458,22 @@ export async function computePostureReport(
     total: useCaseCounts.reduce((a, r) => a + r.n, 0),
   };
 
+  // --- ADR-0189 R25: AI BOM sign-off snapshot triggers ----------------------
+  // Stated outright: the strict setting may say `sign_off_events`, but no sign-off
+  // takes a snapshot until the R25 slice wires the triggers. Read-only (no
+  // singleton insert); a missing row reads as the strict default.
+  const [bomRow] = await db
+    .select({ triggers: orgSettings.aiBomSnapshotTriggers })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  const triggerPosture = aiBomSnapshotTriggerPosture(bomRow?.triggers ?? BOM_STRICT_DEFAULTS.aiBomSnapshotTriggers);
+  const aiBom = {
+    ai_bom_signoff_triggers: triggerPosture.signOffTriggers,
+    snapshotTriggerSetting: triggerPosture.configured,
+    effectiveSnapshotTriggers: triggerPosture.effective,
+    note: triggerPosture.note ?? "sign-off events take a signed AI BOM snapshot as the setting says",
+  };
+
   return {
     generatedAt: now.toISOString(),
     window: { start: windowStart.toISOString(), end: now.toISOString(), days: POSTURE_WINDOW_DAYS },
@@ -475,6 +495,7 @@ export async function computePostureReport(
     sod,
     accessRecommendations,
     useCases,
+    aiBom,
     note:
       "computed live from this deployment's own ledgers at request time — no rollup table, no " +
       "stored snapshot (ADR-0047's principle). This is a window over what the ledgers hold, not " +

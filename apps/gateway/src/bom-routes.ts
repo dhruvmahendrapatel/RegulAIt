@@ -12,13 +12,13 @@
  * grant while an admin has relaxed the setting; 403 `bom_export_forbidden` for
  * anyone else.
  *
- * R17 (the master's ruling on #344): `AI_BOM_SNAPSHOTS_RELEASED` stays false in
- * B4 and is flipped in its own PR right after #344 merges. Until then the
- * snapshot freeze AND the two snapshot DOWNLOAD routes answer 501
- * `bom_snapshots_not_released` (after the role check). The online verifier may
- * still verify a stored snapshot: verifying needs no release.
+ * R17 (the master's ruling on #344): `AI_BOM_SNAPSHOTS_RELEASED` is true now
+ * that B4 and B5 have both merged, so the snapshot freeze and the two snapshot
+ * DOWNLOAD routes are live. Every download is an `export-bundle/3` (R7); the
+ * download routes keep the `bom_export_roles` gate (admins only by default,
+ * 403 `bom_export_forbidden`), and the freeze stays admin-only by route class.
  *
- *   POST /v1/ai-bom/:subjectKind/:subjectId/snapshots   freeze and sign (B3; 501 bom_snapshots_not_released until R17)
+ *   POST /v1/ai-bom/:subjectKind/:subjectId/snapshots   freeze and sign (B3; released by R17)
  *   GET  /v1/ai-bom/:subjectKind/:subjectId/snapshots   the subject's snapshot list (B3; the B6 tab)
  *   GET  /v1/ai-bom/:subjectKind/:subjectId/drift       change list, `evidence: false` (B3, R8)
  *   GET  /v1/ai-bom/snapshots/:snapshotId               signed snapshot, by format, as a bundle (B4, R7)
@@ -91,16 +91,6 @@ const installId = (): string | null => {
   return v ? v : null;
 };
 
-/**
- * R17: the downloads follow `AI_BOM_SNAPSHOTS_RELEASED`. A test may open them for its own app (the switch itself is a
- * code constant and is never changed by a test); production code never calls this.
- */
-let downloadsReleasedForTest = false;
-export function releaseAiBomDownloadsForTest(on: boolean): void {
-  downloadsReleasedForTest = on;
-}
-const aiBomDownloadsReleased = (): boolean => AI_BOM_SNAPSHOTS_RELEASED || downloadsReleasedForTest;
-
 export function registerBomRoutes(app: FastifyInstance, db: Db): void {
   const limiter = new SharedRateLimitStore(db);
 
@@ -130,8 +120,6 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
   };
 
   app.post("/v1/ai-bom/:subjectKind/:subjectId/snapshots", async (req, reply) => {
-    // R2 / R17: disabled IN CODE until every v1 renderer and export-bundle/3 exist (B4 and B5)
-    if (!AI_BOM_SNAPSHOTS_RELEASED) return reply.status(501).send({ error: "bom_snapshots_not_released", detail: "AI BOM snapshots are enabled once the SPDX renderer (B5) and export bundles (B4) have shipped." });
     const subject = subjectOf(req);
     if (!subject) return reply.status(400).send({ error: "invalid_ai_bom_subject" });
     if (await rateLimited(req, reply)) return reply;
@@ -205,6 +193,13 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
     const [s] = await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.id, row.aiBomSnapshotId));
     return s ? { body: s.body, bodySha256: s.bodySha256, signature: s.signature, keyId: s.keyId } : null;
   };
+  /** the subject's previous snapshot, for the `supersedes` check ("pruned" when it no longer exists) */
+  const previousSnapshotOf = async (snap: { subjectKind: string; subjectId: string; version: number }): Promise<{ id: string } | "pruned" | null> => {
+    if (snap.version <= 1) return null;
+    const [prev] = await db.select({ id: aiBomSnapshots.id }).from(aiBomSnapshots)
+      .where(and(eq(aiBomSnapshots.subjectKind, snap.subjectKind as AiBomSubjectKind), eq(aiBomSnapshots.subjectId, snap.subjectId), eq(aiBomSnapshots.version, snap.version - 1)));
+    return prev ? { id: prev.id } : "pruned";
+  };
   const b4Params = <T>(schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } }, value: unknown): T | null => {
     const r = schema.safeParse(value);
     return r.success ? r.data : null;
@@ -259,10 +254,6 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
 
   /** one snapshot, as a bundle of the native body and one format (or every rendered format) */
   const aiBomBundleRoute = async (req: FastifyRequest, reply: FastifyReply, request: { kind: "format"; format: AiBomDownloadFormat } | { kind: "bundle" }) => {
-    // R17: disabled IN CODE until the release switch flips (its own PR, after B4)
-    if (!aiBomDownloadsReleased()) {
-      return reply.status(501).send({ error: "bom_snapshots_not_released", detail: "AI BOM snapshot downloads are enabled with the AI BOM snapshot release (ADR-0189 R17)." });
-    }
     const params = b4Params(aiBomSnapshotParamsSchema, req.params);
     if (!params) return reply.status(400).send({ error: "invalid_bom_snapshot_id" });
     try {
@@ -274,6 +265,14 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
       if (request.kind === "format" && !available.includes(request.format)) {
         // R2: a format not rendered for this snapshot is never produced afterwards
         return reply.status(404).send({ error: "format_not_rendered_for_snapshot", formats: available });
+      }
+      // R7 review of #350: the stored signature, body hash and every rendering hash are re-checked against the
+      // deployment's recorded keys BEFORE the export key signs anything; any invalid check refuses, fail closed
+      const recheck = await verifyStoredAiBom({ body: snap.body, bodySha256: snap.bodySha256, signature: snap.signature, keyId: snap.keyId, renderings, previous: await previousSnapshotOf(snap) }, await onlineBomTrust(db));
+      if (recheck.outcome === "invalid") {
+        const failed = recheck.checks.filter((c) => c.status === "invalid").map((c) => c.check);
+        req.log.error({ snapshotId: snap.id, failed }, "AI BOM snapshot failed its integrity re-check; download refused");
+        return reply.status(500).send({ error: "bom_integrity_failure", detail: `The stored snapshot failed its integrity re-check (${[...new Set(failed)].join(", ")}); nothing was exported.` });
       }
       const env = await bomBundleEnvelope(db, actorOf(req));
       const built = buildAiBomBundle({ row: snap, renderings, request }, env);
@@ -328,12 +327,7 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
         const [snap] = await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.id, body.snapshotId));
         if (!snap) return reply.status(404).send({ error: "ai_bom_snapshot_not_found" });
         const renderings = await db.select({ format: bomRenderings.format, bytes: bomRenderings.bytes }).from(bomRenderings).where(eq(bomRenderings.aiBomSnapshotId, snap.id));
-        let previous: { id: string } | "pruned" | null = null;
-        if (snap.version > 1) {
-          const [prev] = await db.select({ id: aiBomSnapshots.id }).from(aiBomSnapshots)
-            .where(and(eq(aiBomSnapshots.subjectKind, snap.subjectKind), eq(aiBomSnapshots.subjectId, snap.subjectId), eq(aiBomSnapshots.version, snap.version - 1)));
-          previous = prev ? { id: prev.id } : "pruned";
-        }
+        const previous = await previousSnapshotOf(snap);
         report = await verifyStoredAiBom({ body: snap.body, bodySha256: snap.bodySha256, signature: snap.signature, keyId: snap.keyId, renderings, previous }, trust);
       }
       const subjectId = report.identity?.subject === "decision-bom" ? report.identity.auditId : report.identity?.subject === "ai-bom" ? report.identity.snapshotId : null;

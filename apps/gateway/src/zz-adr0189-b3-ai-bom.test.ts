@@ -21,8 +21,9 @@
  *  - Signing (OWNER DECISION 2): the stored body is the exact signed bytes; the
  *    signature verifies with the receipt key; no key → 409
  *    `bom_signing_unavailable` and nothing is written.
- *  - R2/R17: POST answers 501 `bom_snapshots_not_released` (and 403/401 for
- *    non-admins); the trigger gate does nothing.
+ *  - R2/R17 (released): POST freezes and signs for an admin (201, audited),
+ *    refuses 409 `bom_signing_unavailable` with no key and writes nothing, and
+ *    is 403/401 for non-admins; the trigger gate captures.
  *  - R8: drift is 409 without a snapshot, then a change list with
  *    `evidence: false`, audited; the list route is audited; both rate-limited.
  */
@@ -75,7 +76,7 @@ import {
   workloadIdentities,
   type Db,
 } from "@regulait/db";
-import { AI_BOM_INSTALL_SUBJECT_ID, aiBomNativeBodySchema, validateCycloneDx, warmCycloneDxValidators, type AiBomSubjectKind } from "@regulait/shared";
+import { AI_BOM_INSTALL_SUBJECT_ID, AI_BOM_SIGNOFF_TRIGGERS_WIRED, aiBomNativeBodySchema, validateCycloneDx, warmCycloneDxValidators, type AiBomSubjectKind } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomSnapshotTriggerGate, captureAiBomSnapshotInTx, loadAiBomRecords, takeAiBomSnapshot } from "./ai-bom.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -398,14 +399,25 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
     }
   });
 
-  it("R2: the trigger gate does nothing while snapshots are not released", async () => {
-    expect(AI_BOM_SNAPSHOTS_RELEASED).toBe(false);
+  it("R25 not wired: the sign-off trigger gate refuses and captures nothing, writes nothing (even released, with a key)", async () => {
+    expect(AI_BOM_SNAPSHOTS_RELEASED).toBe(true);
+    expect(AI_BOM_SIGNOFF_TRIGGERS_WIRED).toBe(false);
     withKey(true);
     try {
-      const before = rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from ai_bom_snapshots`))[0]!.n;
-      const r = await db.transaction((tx) => aiBomSnapshotTriggerGate(tx as unknown as Db, { subject: { kind: "agent", id: ids.agent! }, trigger: "model_card_approval", actorUserId: null }), { isolationLevel: "repeatable read" });
-      expect(r).toEqual({ status: "not_released" });
-      expect(rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from ai_bom_snapshots`))[0]!.n).toBe(before);
+      const counts = async () =>
+        rowsOf<{ s: number; r: number; a: number }>(await db.execute(sql`select
+          (select count(*)::int from ai_bom_snapshots) as s,
+          (select count(*)::int from bom_renderings) as r,
+          (select count(*)::int from audit_log) as a`))[0]!;
+      const before = await counts();
+      const e = await db
+        .transaction((tx) => aiBomSnapshotTriggerGate(tx as unknown as Db, { subject: { kind: "agent", id: ids.agent2! }, trigger: "model_card_approval", actorUserId: null }), { isolationLevel: "repeatable read" })
+        .catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(AiBomError);
+      expect(e).toMatchObject({ status: 501, code: "ai_bom_signoff_triggers_not_wired" });
+      expect((e as Error).message).toMatch(/not wired/);
+      expect(await counts()).toEqual(before);
+      expect((await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.trigger, "model_card_approval"))).length).toBe(0);
     } finally {
       withKey(false);
     }
@@ -413,15 +425,26 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
 });
 
 describe("routes (R2, R8, R17, §7)", () => {
-  it("POST snapshots: 501 bom_snapshots_not_released to an admin, even with a key; 403 member; 401 anonymous", async () => {
+  it("POST snapshots (R17 released): an admin with a key freezes (201, audited); no key is 409 and writes nothing; 403 member; 401 anonymous", async () => {
+    const url = `/v1/ai-bom/agent/${ids.agent2}/snapshots`;
+    const count = async () => rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from ai_bom_snapshots`))[0]!.n;
+    const before = await count();
+    // OWNER DECISION 12 / ADR-0180: never stored unsigned
+    const none = await inject("POST", url, users.admin.auth, {});
+    expect(none.statusCode, none.body).toBe(409);
+    expect(none.json().error).toBe("bom_signing_unavailable");
+    expect(await count()).toBe(before);
     withKey(true);
     try {
-      const url = `/v1/ai-bom/use_case/${ids.useCase}/snapshots`;
-      const r = await inject("POST", url, users.admin.auth, {});
-      expect(r.statusCode, r.body).toBe(501);
-      expect(r.json().error).toBe("bom_snapshots_not_released");
       expect((await inject("POST", url, users.member.auth, {})).statusCode).toBe(403);
       expect((await inject("POST", url, {}, {})).statusCode).toBe(401);
+      expect(await count()).toBe(before);
+      const r = await inject("POST", url, users.admin.auth, {});
+      expect(r.statusCode, r.body).toBe(201);
+      const taken = r.json() as { id: string; version: number };
+      const [row] = await db.select({ trigger: aiBomSnapshots.trigger, version: aiBomSnapshots.version }).from(aiBomSnapshots).where(eq(aiBomSnapshots.id, taken.id));
+      expect(row).toEqual({ trigger: "on_demand", version: taken.version });
+      expect((await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "ai-bom-snapshot-taken"), eq(auditLog.objectId, taken.id)))).length).toBe(1);
     } finally {
       withKey(false);
     }
@@ -447,7 +470,7 @@ describe("routes (R2, R8, R17, §7)", () => {
     expect(rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from audit_log where rule_id = 'ai-bom-drift-viewed'`))[0]!.n).toBe(before + 1);
     const list = await inject("GET", `/v1/ai-bom/use_case/${ids.useCase}/snapshots`, users.admin.auth);
     expect(list.statusCode, list.body).toBe(200);
-    expect(list.json()).toMatchObject({ released: false, snapshots: [expect.objectContaining({ version: 1, formats: ["cyclonedx-1.7"] })] });
+    expect(list.json()).toMatchObject({ released: true, snapshots: [expect.objectContaining({ version: 1, formats: ["cyclonedx-1.7"] })] });
     expect((await db.select().from(auditLog).where(eq(auditLog.ruleId, "ai-bom-snapshots-listed"))).length).toBeGreaterThan(0);
     expect((await inject("GET", `/v1/ai-bom/use_case/${ids.useCase}/drift`, users.member.auth)).statusCode).toBe(403);
   }, 60_000);

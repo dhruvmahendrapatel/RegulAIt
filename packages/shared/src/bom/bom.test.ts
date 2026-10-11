@@ -53,7 +53,16 @@ import {
 } from "./contract.js";
 import { isSpiffeId } from "../identity/contract.js";
 import { bomExpiresAt, decisionBomFinality, reportedFinality, type FinalityInput } from "./finality.js";
-import { BOM_STRICT_DEFAULTS, bomOrgSettingsFields, bomSettingLooser, bomSettingRelaxed } from "./settings.js";
+import {
+  AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE,
+  AI_BOM_SIGNOFF_TRIGGERS_WIRED,
+  aiBomSnapshotTriggerPosture,
+  BOM_SETTING_COPY,
+  BOM_STRICT_DEFAULTS,
+  bomOrgSettingsFields,
+  bomSettingLooser,
+  bomSettingRelaxed,
+} from "./settings.js";
 
 const U = (n: number) => `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`;
 const H = (c: string) => c.repeat(64);
@@ -445,6 +454,25 @@ describe("the strict BOM settings (§7)", () => {
     expect(bomOrgSettingsFields.cyclonedxExportVersions.parse(["1.6", "1.7"])).toEqual(["1.7", "1.6"]);
     expect(bomOrgSettingsFields.bomExportRateLimitPerMinute.safeParse(601).success).toBe(false);
     expect(bomOrgSettingsFields.bomExportRateLimitPerMinute.safeParse(0).success).toBe(false);
+  });
+  it("R25 not wired: the snapshot-trigger setting keeps its strict default and says snapshots are on-demand only", () => {
+    expect(BOM_STRICT_DEFAULTS.aiBomSnapshotTriggers).toBe("sign_off_events");
+    expect(bomSettingRelaxed("aiBomSnapshotTriggers", "on_demand_only")).toBe(true);
+    expect(AI_BOM_SIGNOFF_TRIGGERS_WIRED).toBe(false);
+    expect(AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE).toMatch(/not wired yet/);
+    expect(AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE).toMatch(/on-demand only/);
+    // the schema help text, the copy an admin reads, and the posture helper all say it
+    expect(bomOrgSettingsFields.aiBomSnapshotTriggers.unwrap().description).toContain(AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE);
+    expect(BOM_SETTING_COPY.aiBomSnapshotTriggers.strict).toMatch(/NOT WIRED YET/);
+    expect(BOM_SETTING_COPY.aiBomSnapshotTriggers.strict).toMatch(/on-demand only/);
+    for (const configured of ["sign_off_events", "on_demand_only"] as const) {
+      expect(aiBomSnapshotTriggerPosture(configured)).toEqual({
+        configured,
+        signOffTriggers: "not_wired",
+        effective: "on_demand_only",
+        note: AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE,
+      });
+    }
   });
   it("routes: every §9 route, no live draft route (R8)", () => {
     expect(BOM_ROUTES).toHaveLength(8);

@@ -14,9 +14,9 @@ import * as gatewayAiBom from "./ai-bom.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 describe("ADR-0189 B7: one R17 switch", () => {
-  it("the gateway's AI_BOM_SNAPSHOTS_RELEASED is the shared binding, and it is off", () => {
+  it("the gateway's AI_BOM_SNAPSHOTS_RELEASED is the shared binding, and it is released (R17)", () => {
     expect(gatewayAiBom.AI_BOM_SNAPSHOTS_RELEASED).toBe(shared.AI_BOM_SNAPSHOTS_RELEASED);
-    expect(shared.AI_BOM_SNAPSHOTS_RELEASED).toBe(false);
+    expect(shared.AI_BOM_SNAPSHOTS_RELEASED).toBe(true);
   });
   it("the gateway re-exports the shared constant and declares no switch of its own", () => {
     const src = readFileSync(path.join(here, "ai-bom.ts"), "utf8");
@@ -24,6 +24,6 @@ describe("ADR-0189 B7: one R17 switch", () => {
     expect(src).toContain("export { AI_BOM_SNAPSHOTS_RELEASED };");
     expect(src).not.toMatch(/const AI_BOM_SNAPSHOTS_RELEASED\b/);
     const sharedSrc = readFileSync(path.join(here, "../../../packages/shared/src/bom/release-switch.ts"), "utf8");
-    expect(sharedSrc).toContain("export const AI_BOM_SNAPSHOTS_RELEASED = false as boolean;");
+    expect(sharedSrc).toContain("export const AI_BOM_SNAPSHOTS_RELEASED = true as boolean;");
   });
 });

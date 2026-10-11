@@ -23,10 +23,15 @@ name: Release AI BOM
 # checkout is the triggering run's head commit, which is a push to main). No
 # event value is ever expanded inside `run:`; each one goes through `env:`.
 #
-# INERT until the R17 switch (`AI_BOM_SNAPSHOTS_RELEASED`,
-# packages/shared/src/bom/release-switch.ts) flips (R28): `build` validates the
-# inventory, reads the switch and writes one summary line; every producing step
-# is gated on it, and `sign` does not run at all.
+# INERT until BOTH the R17 switch (`AI_BOM_SNAPSHOTS_RELEASED`,
+# packages/shared/src/bom/release-switch.ts) is on (R28) AND the owner has
+# approved external publication: signing is keyless cosign, which writes a
+# PUBLIC Rekor transparency-log entry. That approval is the repository variable
+# `RELEASE_AI_BOM_PUBLISH_APPROVED`, which is unset (off) by default; only the
+# exact value `true` turns it on, and setting it needs the owner's explicit
+# sign-off. Until both hold, `build` validates the inventory, reads the gate and
+# writes one summary line; every producing step is gated on it, and `sign` does
+# not run at all.
 
 on:
   workflow_run:
@@ -83,13 +88,23 @@ jobs:
       - name: Validate the AI dev-stack inventory
         run: node scripts/release-ai-bom.mjs check-inventory
 
-      - name: Read the R17 switch
+      - name: Read the R17 switch and the owner's publication approval
         id: switch
-        run: node scripts/release-ai-bom.mjs switch >> "$GITHUB_OUTPUT"
+        env:
+          # default off: an unset or any other value keeps the workflow inert (owner sign-off required)
+          PUBLISH_APPROVED: ${{ vars.RELEASE_AI_BOM_PUBLISH_APPROVED }}
+        run: |
+          set -euo pipefail
+          switch="$(node scripts/release-ai-bom.mjs switch)"
+          if [ "$switch" = "released=true" ] && [ "${PUBLISH_APPROVED:-}" = "true" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Inert until the R17 switch flips (R28)
+      - name: Inert until the R17 switch flips and the owner approves publication (R28)
         if: steps.switch.outputs.released != 'true'
-        run: echo "Release AI BOM is inert (ADR-0189 R28); nothing built, signed or published." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Release AI BOM is inert (ADR-0189 R28, or publication not approved by the owner); nothing built, signed or published." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download this commit's SBOMs
         if: steps.switch.outputs.released == 'true'

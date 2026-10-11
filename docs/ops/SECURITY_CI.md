@@ -152,8 +152,10 @@ dev-stack tools as `formulation`. SPDX 3.0.1 can express neither, so the signed 
 cosign: it signs every file keylessly and verifies it against this workflow's identity, the GitHub OIDC issuer and the
 workflow commit (`--certificate-github-workflow-sha`), then keeps them as the `release-ai-bom` artifact (90 days).
 
-**Inert today.** While the switch is `false`, `build` writes one summary line after validating the inventory; it
-downloads, builds and uploads nothing, and `sign` does not run. A shared test fails if a producing step is ungated,
+**Inert today.** The R17 switch is on (the release PR, #350), but keyless signing writes a **public** Rekor
+transparency-log entry, so publication also needs the owner's explicit sign-off: the repository variable
+`RELEASE_AI_BOM_PUBLISH_APPROVED` set to exactly `true`. It is unset by default. Until both hold, `build` writes one
+summary line after validating the inventory; it downloads, builds and uploads nothing, and `sign` does not run. A shared test fails if a producing step is ungated,
 if `build` gains `id-token` or `sign` gains anything but cosign. The switch, the builder, the CLI and the workflow are
 in this workflow's WATCHED list and in `CODEOWNERS`.
 
