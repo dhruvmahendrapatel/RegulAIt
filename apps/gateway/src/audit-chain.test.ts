@@ -79,7 +79,7 @@ const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url
 
 const BOOT = "audit-chain-bootstrap";
 const AUTH = { authorization: `Bearer ${BOOT}` };
-const ACTOR = "00000000-0000-0000-0000-0000000000aa";
+const ACTOR = "00000000-0000-4000-8000-0000000000aa";
 
 let admin: Db;
 let db: Db;

@@ -121,7 +121,7 @@ describe("B7 AI dev-stack inventory (security/ai-dev-stack.json)", () => {
   it("an enum refusal never echoes the received value", () => {
     const inv = checkedIn();
     inv.tools[0]!.category = "XFIELDCANARY";
-    expect(() => parseAiDevStackInventory(inv)).toThrow(/invalid_enum_value/);
+    expect(() => parseAiDevStackInventory(inv)).toThrow(/invalid_value/);
     expect(() => parseAiDevStackInventory(inv)).not.toThrow(/XFIELD/);
   });
 });

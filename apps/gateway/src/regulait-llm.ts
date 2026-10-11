@@ -1046,7 +1046,7 @@ const createJobSchema = z
     /** the registry agent this customisation is anchored to. REQUIRED, because
      * it is what the entitlement check is made against. */
     baseAgentId: z.string().uuid(),
-    hyperparameters: z.record(z.unknown()).default({}),
+    hyperparameters: z.record(z.string(), z.unknown()).default({}),
     projectId: z.string().uuid().nullable().optional(),
     /** who decides, if the estimate crosses the org threshold. Falls back to
      * the org's default infra approver. */
@@ -1118,7 +1118,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
         baseUrl: z.string().url().max(2000).nullable().optional(),
         apiKey: z.string().min(1).max(4000).nullable().optional(),
         allowPlaintextHttp: z.boolean().optional(),
-        settings: z.record(z.unknown()).optional(),
+        settings: z.record(z.string(), z.unknown()).optional(),
       })
       .strict()
       .parse(req.body ?? {});
@@ -1496,7 +1496,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
       .object({
         method: z.enum(TRAINING_METHODS),
         backend: z.enum(TRAINING_BACKEND_KINDS).default("local"),
-        hyperparameters: z.record(z.unknown()).default({}),
+        hyperparameters: z.record(z.string(), z.unknown()).default({}),
         pricePerMTokUsd: z.number().min(0).max(10_000).optional(),
       })
       .strict()

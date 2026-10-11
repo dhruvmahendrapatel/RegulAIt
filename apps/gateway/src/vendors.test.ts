@@ -513,7 +513,7 @@ describe("visibility (owner + admin, per the existing self-scoping patterns)", (
         name: "vnd-bad-provider",
         description: "d",
         category: "model_provider",
-        linkedCustomProviderIds: ["00000000-0000-0000-0000-0000000000aa"],
+        linkedCustomProviderIds: ["00000000-0000-4000-8000-0000000000aa"],
       },
     });
     expect(res.statusCode).toBe(400);
@@ -785,7 +785,7 @@ describe("the register's third_party_ai evidence is a QUERY over real vendor row
         category: "third_party_ai",
         likelihood: "low",
         impact: "low",
-        vendorId: "00000000-0000-0000-0000-0000000000ab",
+        vendorId: "00000000-0000-4000-8000-0000000000ab",
       },
     });
     expect(bad.statusCode).toBe(400);

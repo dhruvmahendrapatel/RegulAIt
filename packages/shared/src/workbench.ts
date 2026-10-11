@@ -303,7 +303,7 @@ export const bulkDecideApprovalsSchema = z.object({
 
 export const createApprovalSavedViewSchema = z.object({
   name: z.string().min(1).max(200),
-  filters: z.record(z.unknown()).default({}),
+  filters: z.record(z.string(), z.unknown()).default({}),
   sort: z.string().min(1).max(64).default("requested_at_desc"),
   /** admin-only: publish for everyone instead of owning it privately */
   shared: z.boolean().default(false),

@@ -168,7 +168,7 @@ describe("the signature catalogue is data, not code", () => {
       kind: "hostname",
       value: "example-not-real.invalid",
       matchType: "exact_host",
-      replacementAgentId: "00000000-0000-0000-0000-000000000123",
+      replacementAgentId: "00000000-0000-4000-8000-000000000123",
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("invalid_reference");
@@ -500,7 +500,7 @@ describe("the inventory is actionable and states its own coverage", () => {
     const res = await get("/v1/shadow-ai/findings");
     const finding = res.json().findings[0];
     const bad = await post(`/v1/shadow-ai/findings/${finding.id}/remediate`, {
-      instanceId: "00000000-0000-0000-0000-0000000000ff",
+      instanceId: "00000000-0000-4000-8000-0000000000ff",
     });
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error).toBe("invalid_reference");

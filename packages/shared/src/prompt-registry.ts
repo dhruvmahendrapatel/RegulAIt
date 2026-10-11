@@ -73,7 +73,7 @@ const jsonSized = (max: number) => (v: unknown) => JSON.stringify(v).length <= m
 
 /** a JSON Schema object: the shape is checked by the gateway's validator */
 export const promptJsonSchemaSchema = z
-  .record(z.unknown())
+  .record(z.string(), z.unknown())
   .refine(jsonSized(PROMPT_LIMITS.schemaChars), { message: `at most ${PROMPT_LIMITS.schemaChars} characters as JSON` });
 
 export const promptToolSchema = z
@@ -212,7 +212,7 @@ export function promptPromotionDigest(binding: { promptId: string; tag: string; 
 // playground
 // ---------------------------------------------------------------------------
 
-const variableValues = z.record(z.string().max(PROMPT_LIMITS.variableValueChars)).refine(
+const variableValues = z.record(z.string(), z.string().max(PROMPT_LIMITS.variableValueChars)).refine(
   (v) => Object.keys(v).length <= PROMPT_LIMITS.variables,
   { message: `at most ${PROMPT_LIMITS.variables} variables` },
 );

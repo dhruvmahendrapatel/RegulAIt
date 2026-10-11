@@ -191,7 +191,7 @@ export interface MetricSpec {
 export const metricSpecSchema = z
   .object({
     metric: z.enum(ASSURANCE_METRIC_IDS),
-    params: z.record(z.unknown()).default({}),
+    params: z.record(z.string(), z.unknown()).default({}),
     operator: z.enum(CONDITION_OPERATORS),
     threshold: z.number().finite(),
     windowDays: z.number().int().min(1).max(ASSURANCE_LIMITS.maxWindowDays),
@@ -254,7 +254,7 @@ export const measuredConditionInputSchema = z
     dueAt: conditionDueAtSchema.optional(),
     blocking: z.boolean(),
     metric: z.enum(ASSURANCE_METRIC_IDS),
-    params: z.record(z.unknown()).default({}),
+    params: z.record(z.string(), z.unknown()).default({}),
     operator: z.enum(CONDITION_OPERATORS),
     threshold: z.number().finite(),
     windowDays: z.number().int().min(1).max(ASSURANCE_LIMITS.maxWindowDays),

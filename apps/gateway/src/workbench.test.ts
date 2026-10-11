@@ -569,7 +569,7 @@ describe("BULK — same per-item authorization, same per-item audit", () => {
       url: "/v1/approvals/bulk",
       headers: alexAuth,
       payload: {
-        approvalIds: Array.from({ length: 30 }, (_, i) => `00000000-0000-0000-0000-0000000000${String(i).padStart(2, "0")}`),
+        approvalIds: Array.from({ length: 30 }, (_, i) => `00000000-0000-4000-8000-0000000000${String(i).padStart(2, "0")}`),
         decision: "approved",
         reason: "too many",
       },
@@ -684,7 +684,7 @@ describe("BULK — same per-item authorization, same per-item audit", () => {
       url: "/v1/approvals/bulk",
       headers: alexAuth,
       payload: {
-        approvalIds: ["00000000-0000-0000-0000-0000000000ff"],
+        approvalIds: ["00000000-0000-4000-8000-0000000000ff"],
         decision: "approved",
         reason: "ghost",
       },

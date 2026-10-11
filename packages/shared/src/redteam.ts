@@ -1402,7 +1402,7 @@ export const createRedTeamLibrarySchema = z.object({
 export const redTeamProbeToolSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(1000).optional(),
-  inputSchema: z.record(z.unknown()).optional(),
+  inputSchema: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const redTeamAgenticVectorSchema = z.object({

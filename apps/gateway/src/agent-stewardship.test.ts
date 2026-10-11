@@ -233,7 +233,7 @@ describe("stewardship — steward, successor and the orphan flag", () => {
 
   it("people must be real and active", async () => {
     const id = await mkAgent("st-people");
-    const unknown = await patch(id, { successorUserId: "00000000-0000-0000-0000-0000000000cd" });
+    const unknown = await patch(id, { successorUserId: "00000000-0000-4000-8000-0000000000cd" });
     expect(unknown.statusCode).toBe(400);
     expect(unknown.json()).toMatchObject({ error: "invalid_reference", field: "successorUserId" });
     const gone = await makeUser("st-gone@example.com");

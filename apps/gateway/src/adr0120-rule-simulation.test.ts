@@ -349,7 +349,7 @@ describe("what it refuses rather than approximates", () => {
       method: "POST",
       url: "/v1/policy-simulations",
       headers: AUTH,
-      payload: { ruleVersionId: "00000000-0000-0000-0000-0000000000ff", windowDays: 1 },
+      payload: { ruleVersionId: "00000000-0000-4000-8000-0000000000ff", windowDays: 1 },
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error).toBe("unknown_rule_version");

@@ -1182,7 +1182,7 @@ export const copilotProposalSchema = z
     title: z.string().min(1).max(300),
     rationale: z.string().min(1).max(4000),
     /** the concrete, reviewable change — recorded, never applied here */
-    diff: z.record(z.unknown()),
+    diff: z.record(z.string(), z.unknown()),
     approverUserId: z.string().uuid(),
   })
   .strict();
@@ -1312,7 +1312,7 @@ export const copilotPolicyTighteningDiffSchema = z
   .object({
     ruleKind: z.enum(["approvals", "rate-limits", "data-scopes"]),
     ruleId: z.string().uuid(),
-    patch: z.record(z.unknown()),
+    patch: z.record(z.string(), z.unknown()),
   })
   .strict();
 
@@ -1337,7 +1337,7 @@ export const copilotRuleToApprovalDiffSchema = z
   .object({
     sourceRuleKind: z.enum(COPILOT_RULE_TO_APPROVAL_SOURCE_KINDS),
     sourceRuleId: z.string().uuid(),
-    create: z.record(z.unknown()),
+    create: z.record(z.string(), z.unknown()),
   })
   .strict();
 
@@ -1366,6 +1366,6 @@ export const COPILOT_BUDGET_ADJUSTMENT_FIELDS = [
 export const copilotBudgetAdjustmentDiffSchema = z
   .object({
     projectId: z.string().uuid(),
-    patch: z.record(z.unknown()),
+    patch: z.record(z.string(), z.unknown()),
   })
   .strict();

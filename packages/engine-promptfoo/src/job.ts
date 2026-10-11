@@ -31,7 +31,7 @@ export const promptfooJobSchema = z
     /** the run-scoped virtual key (never the runner token) */
     apiKey: z.string().min(1).max(512),
     /** the generated promptfoo config (re-checked by `assertGatewayOnly` before promptfoo starts) */
-    config: z.record(z.unknown()),
+    config: z.record(z.string(), z.unknown()),
     deadlineAt: z.string().datetime(),
   })
   .strict();

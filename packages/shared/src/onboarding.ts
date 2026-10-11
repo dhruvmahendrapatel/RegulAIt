@@ -122,7 +122,7 @@ export const updateOnboardingStepSchema = z
     /** free-form evidence the console shows next to the step (which provider,
      * which file). Never a secret — the routes reject anything that smells of
      * one before it is stored. */
-    detail: z.record(z.unknown()).optional(),
+    detail: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 

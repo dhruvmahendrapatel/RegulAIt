@@ -625,7 +625,7 @@ describe("ADR-0073 — honest refusals on the authoring surface", () => {
   it("refuses a version of a rule that does not exist", async () => {
     const res = await newVersionOf(
       "approval_rule",
-      "00000000-0000-0000-0000-0000000000ff",
+      "00000000-0000-4000-8000-0000000000ff",
       { toolName: "x" },
       "ghost",
     );
