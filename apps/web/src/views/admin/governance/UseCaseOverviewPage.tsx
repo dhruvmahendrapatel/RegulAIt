@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -77,7 +77,11 @@ const TABS = [
   { id: "decisions", label: "Decision records" },
   { id: "incidents", label: "Incidents" },
   { id: "feedback", label: "Feedback" },
+  // ADR-0189 B6: the use case's signed AI BOM snapshots, drift and gaps
+  { id: "ai-bom", label: "AI BOM" },
 ];
+
+const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
 
 export default function UseCaseOverviewPage() {
   const { id = "" } = useParams();
@@ -183,6 +187,11 @@ export default function UseCaseOverviewPage() {
             {/* ADR-0182 (D4): each tab is its slice's own component file */}
             {tab === "decisions" ? <DecisionRecordTab useCaseId={id} /> : null}
             {tab === "incidents" ? <IncidentsTab useCaseId={id} /> : null}
+            {tab === "ai-bom" ? (
+              <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
+                <AiBomPanel key={id} subject={{ kind: "use_case", id }} />
+              </Suspense>
+            ) : null}
             {tab === "feedback" ? <FeedbackTab useCaseId={id} /> : null}
           </div>
         </>

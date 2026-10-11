@@ -5,7 +5,7 @@
  * agent grants, the per-user agent policy (default, cost ceiling, routing,
  * run budget), and the per-user entitlement view.
  */
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
@@ -32,11 +32,16 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 const CLEAR = "__clear__";
 
+const AiBomPanel = lazy(() => import("../governance/BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
+
 export default function AgentsPage() {
   const agents = useAgents();
   const users = useUsers();
   const customProviders = useCustomProviders();
   const act = useAction();
+  // ADR-0189 B6: the agent whose AI BOM is open below the catalog
+  const [bomAgentId, setBomAgentId] = useState<string | null>(null);
+  const bomAgent = (agents.data?.agents ?? []).find((x) => x.id === bomAgentId) ?? null;
 
   // `#agent-<id>` deep links (dependency graph, governance alerts): once the
   // list has loaded, scroll that agent's row into view and mark it, so the
@@ -133,6 +138,16 @@ export default function AgentsPage() {
                 render: (x) => (x.enabled ? <Badge tone="ok">enabled</Badge> : <Badge tone="danger">disabled</Badge>),
               },
               {
+                // ADR-0189 B6: the agent's signed AI BOM snapshots, drift and gaps
+                key: "ai-bom",
+                header: "Evidence",
+                render: (x) => (
+                  <Button size="sm" variant="ghost" aria-label={`AI BOM for ${x.name}`} aria-pressed={bomAgentId === x.id} onClick={() => setBomAgentId(bomAgentId === x.id ? null : x.id)}>
+                    AI BOM
+                  </Button>
+                ),
+              },
+              {
                 key: "actions",
                 header: "",
                 align: "right",
@@ -159,6 +174,20 @@ export default function AgentsPage() {
             empty={<EmptyState title="No agents registered" body="Register the first agent below." />}
           />
         </Card>
+
+        {bomAgent && (
+          <section aria-label={`AI BOM for ${bomAgent.name}`} className={v.stack}>
+            <div className={v.row}>
+              <span className={v.sectionTitle}>AI BOM: {bomAgent.name}</span>
+              <Button size="sm" variant="ghost" onClick={() => setBomAgentId(null)}>
+                Close
+              </Button>
+            </div>
+            <Suspense fallback={<p role="status">Loading the AI BOM…</p>}>
+              <AiBomPanel key={bomAgent.id} subject={{ kind: "agent", id: bomAgent.id }} />
+            </Suspense>
+          </section>
+        )}
 
         <RegisterAgentCard />
         <ModelPricingCard agents={agents.data?.agents ?? []} />

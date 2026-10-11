@@ -16,7 +16,7 @@
  */
 import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
@@ -29,6 +29,16 @@ import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminK
 import k from "../../../ui/kit.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+
+// ADR-0189 B6: a decision's Decision BOM, opened from its audit row
+const DecisionBomPanel = lazy(() => import("./DecisionBomPanel").then((m) => ({ default: m.DecisionBomPanel })));
+/**
+ * The object types a receipt-eligible decision can have (`RECEIPT_OBJECT_TYPES`
+ * in @regulait/shared). Eligibility also needs `detail.receiptClass =
+ * "decision"`, which this list does not carry, so the gateway has the last
+ * word (422 `bom_decision_not_eligible`, shown as such).
+ */
+const RECEIPT_OBJECT_TYPES = new Set(["mcp_tool", "agent", "connector", "approval"]);
 
 const effectTone = (effect: string): Tone =>
   effect === "allow" ? "ok" : effect === "deny" ? "danger" : effect === "require_approval" ? "warn" : "neutral";
@@ -58,6 +68,7 @@ export default function AuditLogPage() {
   const [userId, setUserId] = useState("");
   const [deployMode, setDeployMode] = useState("");
   const [confirmPrune, setConfirmPrune] = useState(false);
+  const [bomAuditId, setBomAuditId] = useState<string | null>(null);
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
@@ -234,6 +245,16 @@ export default function AuditLogPage() {
                   ),
               },
               { key: "reason", header: "Reason", render: (e) => <span className={`${v.dim} ${k.clamp2}`} title={e.reason ?? undefined}>{e.reason ?? "—"}</span> },
+              {
+                key: "bom",
+                header: "Evidence",
+                render: (e) =>
+                  e.id && e.objectType && RECEIPT_OBJECT_TYPES.has(e.objectType) ? (
+                    <Button size="sm" variant="ghost" aria-label={`Decision BOM for audit row ${e.id}`} onClick={() => setBomAuditId(e.id!)}>
+                      Decision BOM
+                    </Button>
+                  ) : null,
+              },
             ]}
             rows={rows}
             rowKey={(e) => e.rowKey}
@@ -266,6 +287,11 @@ export default function AuditLogPage() {
             </div>
           )}
         </Card>
+        {bomAuditId && (
+          <Suspense fallback={<p role="status">Loading the Decision BOM…</p>}>
+            <DecisionBomPanel key={bomAuditId} auditId={bomAuditId} onClose={() => setBomAuditId(null)} />
+          </Suspense>
+        )}
       </div>
 
       <ConfirmModal
