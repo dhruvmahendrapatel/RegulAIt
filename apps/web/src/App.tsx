@@ -49,6 +49,7 @@ import ScimPage from "./views/admin/identity/ScimPage";
 import CredentialsPage from "./views/admin/identity/CredentialsPage";
 import GroupMappingsPage from "./views/admin/identity/GroupMappingsPage";
 import VirtualKeysPage from "./views/admin/identity/VirtualKeysPage";
+import WorkloadIdentitiesPage from "./views/admin/identity/WorkloadIdentitiesPage";
 import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
 import SimulationPage from "./views/admin/governance/SimulationPage";
 import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
@@ -220,6 +221,10 @@ function ApplicationRoutes() {
                 <Route path="virtual-keys" element={<VirtualKeysPage />} />
                 {/* ADR-0175 A7 */}
                 <Route path="credentials" element={<CredentialsPage />} />
+                {/* ADR-0188 S6 preview: routed but deliberately NOT in the navigation
+                    (suites.tsx) until creating/revoking an identity and binding a
+                    credential stop answering 501 — see the page's header comment */}
+                <Route path="workload-identities" element={<WorkloadIdentitiesPage />} />
                 <Route path="rules" element={<RulesEnginePage />} />
                 <Route path="simulation" element={<SimulationPage />} />
                 <Route path="abac-policies" element={<AbacPoliciesPage />} />
