@@ -193,6 +193,13 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
     const [s] = await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.id, row.aiBomSnapshotId));
     return s ? { body: s.body, bodySha256: s.bodySha256, signature: s.signature, keyId: s.keyId } : null;
   };
+  /** the subject's previous snapshot, for the `supersedes` check ("pruned" when it no longer exists) */
+  const previousSnapshotOf = async (snap: { subjectKind: string; subjectId: string; version: number }): Promise<{ id: string } | "pruned" | null> => {
+    if (snap.version <= 1) return null;
+    const [prev] = await db.select({ id: aiBomSnapshots.id }).from(aiBomSnapshots)
+      .where(and(eq(aiBomSnapshots.subjectKind, snap.subjectKind as AiBomSubjectKind), eq(aiBomSnapshots.subjectId, snap.subjectId), eq(aiBomSnapshots.version, snap.version - 1)));
+    return prev ? { id: prev.id } : "pruned";
+  };
   const b4Params = <T>(schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } }, value: unknown): T | null => {
     const r = schema.safeParse(value);
     return r.success ? r.data : null;
@@ -259,6 +266,14 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
         // R2: a format not rendered for this snapshot is never produced afterwards
         return reply.status(404).send({ error: "format_not_rendered_for_snapshot", formats: available });
       }
+      // R7 review of #350: the stored signature, body hash and every rendering hash are re-checked against the
+      // deployment's recorded keys BEFORE the export key signs anything; any invalid check refuses, fail closed
+      const recheck = await verifyStoredAiBom({ body: snap.body, bodySha256: snap.bodySha256, signature: snap.signature, keyId: snap.keyId, renderings, previous: await previousSnapshotOf(snap) }, await onlineBomTrust(db));
+      if (recheck.outcome === "invalid") {
+        const failed = recheck.checks.filter((c) => c.status === "invalid").map((c) => c.check);
+        req.log.error({ snapshotId: snap.id, failed }, "AI BOM snapshot failed its integrity re-check; download refused");
+        return reply.status(500).send({ error: "bom_integrity_failure", detail: `The stored snapshot failed its integrity re-check (${[...new Set(failed)].join(", ")}); nothing was exported.` });
+      }
       const env = await bomBundleEnvelope(db, actorOf(req));
       const built = buildAiBomBundle({ row: snap, renderings, request }, env);
       await audit(req, "ai-bom-exported", "AI BOM snapshot bundle exported", snap.id, { format: request.kind === "bundle" ? "bundle" : request.format, manifestSha256: built.manifestSha256 });
@@ -312,12 +327,7 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
         const [snap] = await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.id, body.snapshotId));
         if (!snap) return reply.status(404).send({ error: "ai_bom_snapshot_not_found" });
         const renderings = await db.select({ format: bomRenderings.format, bytes: bomRenderings.bytes }).from(bomRenderings).where(eq(bomRenderings.aiBomSnapshotId, snap.id));
-        let previous: { id: string } | "pruned" | null = null;
-        if (snap.version > 1) {
-          const [prev] = await db.select({ id: aiBomSnapshots.id }).from(aiBomSnapshots)
-            .where(and(eq(aiBomSnapshots.subjectKind, snap.subjectKind), eq(aiBomSnapshots.subjectId, snap.subjectId), eq(aiBomSnapshots.version, snap.version - 1)));
-          previous = prev ? { id: prev.id } : "pruned";
-        }
+        const previous = await previousSnapshotOf(snap);
         report = await verifyStoredAiBom({ body: snap.body, bodySha256: snap.bodySha256, signature: snap.signature, keyId: snap.keyId, renderings, previous }, trust);
       }
       const subjectId = report.identity?.subject === "decision-bom" ? report.identity.auditId : report.identity?.subject === "ai-bom" ? report.identity.snapshotId : null;

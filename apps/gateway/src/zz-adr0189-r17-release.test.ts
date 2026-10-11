@@ -101,16 +101,31 @@ function verifyScript(name: string, archive: Buffer) {
   const report = r.stdout ? (JSON.parse(r.stdout) as { outcome: string; checks: Array<{ check: string; status: string; reason?: string }> }) : null;
   return { status: r.status, stderr: r.stderr, outcome: report?.outcome ?? null, notValid: report?.checks.filter((c) => c.status !== "valid") ?? [] };
 }
-/** the offset of an entry's data in a ustar archive (the name may be split into the prefix field) */
-function tarDataOffset(tar: Buffer, suffix: string): number {
+/** an entry's data in a ustar archive (the name may be split into the prefix field), as a view that can be edited */
+function tarEntry(tar: Buffer, suffix: string): Buffer | null {
   const field = (from: number, len: number) => tar.subarray(from, from + len).toString("utf8").replace(/\0.*$/s, "");
   for (let h = 0; h + 512 <= tar.length && tar[h] !== 0; ) {
     const [name, prefix] = [field(h, 100), field(h + 345, 155)];
     const size = parseInt(field(h + 124, 12).trim(), 8);
-    if ((prefix ? `${prefix}/${name}` : name).endsWith(`/${suffix}`)) return h + 512;
+    if ((prefix ? `${prefix}/${name}` : name).endsWith(`/${suffix}`)) return tar.subarray(h + 512, h + 512 + size);
     h += 512 + Math.ceil(size / 512) * 512;
   }
-  return -1;
+  return null;
+}
+/** change ONE character (a hex or base64url digit) right after `marker` in an entry; the tar stays well formed */
+function flipAfter(tar: Buffer, entry: string, marker: string): void {
+  const data = tarEntry(tar, entry);
+  expect(data, entry).not.toBeNull();
+  const at = data!.indexOf(marker);
+  expect(at, `${entry} ${marker}`).toBeGreaterThanOrEqual(0);
+  const i = at + marker.length;
+  data![i] = data![i] === 0x61 ? 0x62 : 0x61;
+}
+async function expectInvalidEverywhere(name: string, tampered: Buffer) {
+  const offline = await verifyBomBundle(tampered, await offlineTrust());
+  expect(offline.outcome, name).toBe("invalid");
+  expect(verifyScript(`r17-tampered-${name}`, tampered), name).toMatchObject({ status: 1, outcome: "invalid" });
+  expect((await verifyOnline(tampered)).outcome, name).toBe("invalid");
 }
 async function verifyOnline(archive: Buffer) {
   const res = await inject("POST", "/v1/boms/verify", AUTH, { source: "bundle", bundleBase64: archive.toString("base64") });
@@ -260,15 +275,94 @@ describe("ADR-0189 R17 / R7: every format downloads as a verified export-bundle/
       // the first byte of a rendering's payload (its opening brace) becomes a space: the tar stays well formed,
       // and only the content's hash is wrong
       const entry = format === "bundle" ? "content/ai-bom.spdx-3.0.1.json" : `content/ai-bom.${format}.json`;
-      const at = tarDataOffset(tar, entry);
-      expect(at, entry).toBeGreaterThan(0);
-      expect(tar[at], entry).toBe(0x7b);
-      tar[at] = 0x20;
-      const tampered = gzipSync(tar);
-      const offline = await verifyBomBundle(tampered, await offlineTrust());
-      expect(offline.outcome, format).toBe("invalid");
-      expect(verifyScript(`r17-tampered-${format}`, tampered), format).toMatchObject({ status: 1, outcome: "invalid" });
-      expect((await verifyOnline(tampered)).outcome, format).toBe("invalid");
+      const data = tarEntry(tar, entry);
+      expect(data?.[0], entry).toBe(0x7b);
+      data![0] = 0x20;
+      await expectInvalidEverywhere(format, gzipSync(tar));
+    }
+  });
+
+  it("NEGATIVE: tampering with the native body, its .sig or the manifest is invalid to all three verifiers", async () => {
+    const cases: Array<[string, string, string]> = [
+      ["native-body", "content/ai-bom.json", '"serialNumber":"urn:uuid:'],
+      ["native-sig", "content/ai-bom.json.sig", '"signature":"'],
+      ["manifest", "manifest.json", '"sha256":"'],
+    ];
+    for (const [name, entry, marker] of cases) {
+      // each case edits a fresh copy of the native download, which verified valid above (the positive control)
+      const tar = gunzipSync(archives.get("native")!);
+      flipAfter(tar, entry, marker);
+      await expectInvalidEverywhere(name, gzipSync(tar));
+    }
+  });
+});
+
+describe("R7 review of #350: a download re-checks the stored snapshot, and needs the export key", () => {
+  const exported = async () => (await db.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.ruleId, "ai-bom-exported"))).length;
+  /** a stored row edited around its append-only trigger (only in this file's scratch database) */
+  const editStored = (statement: ReturnType<typeof sql>, table: "ai_bom_snapshots" | "bom_renderings") =>
+    db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`ALTER TABLE ${table} DISABLE TRIGGER USER`));
+      await tx.execute(statement);
+      await tx.execute(sql.raw(`ALTER TABLE ${table} ENABLE TRIGGER USER`));
+    });
+
+  it("no export key: the download answers 409 bom_signing_unavailable and writes no audit row", async () => {
+    const before = await exported();
+    const [key, keyId] = [process.env.REGULAIT_EXPORT_SIGNING_KEY, process.env.REGULAIT_EXPORT_SIGNING_KEY_ID];
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY;
+    delete process.env.REGULAIT_EXPORT_SIGNING_KEY_ID;
+    try {
+      for (const url of [`/v1/ai-bom/snapshots/${ids.snapshot}?format=cyclonedx-1.7`, `/v1/ai-bom/snapshots/${ids.snapshot}/bundle`]) {
+        const res = await inject("GET", url);
+        expect(res.statusCode, res.body).toBe(409);
+        expect(res.json()).toMatchObject({ error: "bom_signing_unavailable", missingKey: "export" });
+      }
+    } finally {
+      process.env.REGULAIT_EXPORT_SIGNING_KEY = key;
+      process.env.REGULAIT_EXPORT_SIGNING_KEY_ID = keyId;
+    }
+    expect(await exported()).toBe(before);
+    // POSITIVE CONTROL: with the key back, the same download is served and audited
+    await download(`/v1/ai-bom/snapshots/${ids.snapshot}?format=cyclonedx-1.7`);
+    expect(await exported()).toBe(before + 1);
+  });
+
+  it("a stored rendering whose bytes no longer match the signed body refuses 500 bom_integrity_failure, fail closed", async () => {
+    const res = await inject("POST", "/v1/ai-bom/install/00000000-0000-0000-0000-000000000000/snapshots", AUTH, {});
+    expect(res.statusCode, res.body).toBe(201);
+    const install = res.json().id as string;
+    // POSITIVE CONTROL: untouched, it downloads
+    await download(`/v1/ai-bom/snapshots/${install}?format=cyclonedx-1.7`);
+    // the row's own CHECK keeps sha256 consistent with bytes, so a forger updates both; only the SIGNED body's
+    // commitment then disagrees, which is what the download re-check must catch
+    const forged = `replace(bytes, '"specVersion":"1.7"', '"specVersion":"1.8"')`;
+    await editStored(sql`update bom_renderings set bytes = ${sql.raw(forged)}, sha256 = encode(sha256(convert_to(${sql.raw(forged)}, 'UTF8')), 'hex') where ai_bom_snapshot_id = ${install} and format = 'cyclonedx-1.7'`, "bom_renderings");
+    const before = await exported();
+    for (const url of [`/v1/ai-bom/snapshots/${install}?format=cyclonedx-1.7`, `/v1/ai-bom/snapshots/${install}/bundle`]) {
+      const r = await inject("GET", url);
+      expect(r.statusCode, r.body).toBe(500);
+      expect(r.json()).toMatchObject({ error: "bom_integrity_failure" });
+    }
+    expect(await exported()).toBe(before);
+  });
+
+  it("a stored signature that no longer verifies refuses 500 bom_integrity_failure on every format", async () => {
+    // POSITIVE CONTROL: the first snapshot is intact and downloads
+    await download(`/v1/ai-bom/snapshots/${ids.snapshot}?format=native`);
+    const [row] = await db.select({ signature: aiBomSnapshots.signature }).from(aiBomSnapshots).where(eq(aiBomSnapshots.id, ids.snapshot));
+    const forged = (row!.signature[0] === "A" ? "B" : "A") + row!.signature.slice(1);
+    await editStored(sql`update ai_bom_snapshots set signature = ${forged} where id = ${ids.snapshot}`, "ai_bom_snapshots");
+    const before = await exported();
+    try {
+      for (const format of AI_BOM_DOWNLOAD_FORMATS) {
+        const r = await inject("GET", `/v1/ai-bom/snapshots/${ids.snapshot}?format=${format}`);
+        expect(r.statusCode, `${format} ${r.body}`).toBe(500);
+        expect(r.json()).toMatchObject({ error: "bom_integrity_failure" });
+      }
+      expect(await exported()).toBe(before);
+    } finally {
+      await editStored(sql`update ai_bom_snapshots set signature = ${row!.signature} where id = ${ids.snapshot}`, "ai_bom_snapshots");
     }
   });
 });
