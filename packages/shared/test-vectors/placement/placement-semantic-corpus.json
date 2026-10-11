@@ -1676,6 +1676,49 @@
       "origin": "X50"
     },
     {
+      "id": "refusal-policy_unresolved",
+      "adrSections": [
+        "Decision 7",
+        "Test strategy: Fail closed"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "unresolvedPolicyLookup": "sensitivityFloor",
+        "sensitivity": "public"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
+        "upstreamContacts": 0,
+        "minimumSelectableClass": null
+      },
+      "note": "Owner decision B: the sixth fixed reason. The project's sensitivity is known but its floor setting did not resolve; the call is refused policy_unresolved before any offer, and the audit row tells this configuration fault from a capacity fault.",
+      "origin": "claude-new",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
+    },
+    {
       "id": "no-fallback-initial",
       "adrSections": [
         "Decision 7 first Then bullet",
@@ -2750,13 +2793,19 @@
         ]
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-sensitivity",
@@ -2787,13 +2836,19 @@
         ]
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-complianceFloors",
@@ -2826,13 +2881,19 @@
         ]
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-autonomyFloor",
@@ -2863,13 +2924,19 @@
         ]
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-ownProfileFloor",
@@ -2900,13 +2967,19 @@
         ]
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-parentRequiredClass",
@@ -2937,13 +3010,19 @@
         ]
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Never coerce missing/unknown policy facts to L0, ignore them, or expose a selectable profile before resolution.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "attestation-missing",
@@ -3154,13 +3233,22 @@
         ]
       },
       "expectedProjection": {
-        "outcome": "contract_gap",
-        "gap": "warn_conflict",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "class_below_required",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "enforcementRead": "enforce",
+        "settingWriteStatus": 400,
         "fallbackAllowed": false,
-        "minimumSelectableClass": "L3"
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0
       },
-      "note": "Warning prose permits available placement while invariant prohibits below-required placement; owner must resolve. No positive shortfall fixture.",
-      "origin": "X50"
+      "note": "Owner decision A retires warn: it can no longer be configured (a PUT that sets it is a 400) and a stored warn reads as enforce. The regulated L3 call with only an L2 executor is therefore refused class_below_required, as under enforce. Kept as a pinned refusal so the legacy value stays covered.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): A"
     },
     {
       "id": "audited-l1-floors-still-profile-l2",
@@ -3366,13 +3454,19 @@
         "unresolvedPolicyLookup": "workloadKind"
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-missing-sensitivity",
@@ -3403,13 +3497,19 @@
         "unresolvedPolicyLookup": "sensitivity"
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-missing-autonomyFloor",
@@ -3440,13 +3540,19 @@
         "unresolvedPolicyLookup": "autonomyFloor"
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-missing-ownProfileFloor",
@@ -3477,13 +3583,19 @@
         "unresolvedPolicyLookup": "ownProfileFloor"
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-missing-complianceFloors",
@@ -3514,13 +3626,19 @@
         "unresolvedPolicyLookup": "complianceFloors"
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "id": "unknown-missing-parentRequiredClass",
@@ -3552,13 +3670,19 @@
         "delegatedCall": true
       },
       "expectedProjection": {
-        "outcome": "fail_closed_pending_contract",
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "policy_unresolved",
+        "auditAction": "execution-refused",
+        "offersMade": 0,
         "upstreamContacts": 0,
-        "minimumSelectableClass": null,
-        "gap": "missing_fact_refusal"
+        "minimumSelectableClass": null
       },
-      "note": "Policy lookup is unresolved, not an explicitly absent optional profile/tag/parent. Resolve before selecting a profile; exact refusal wire envelope unspecified.",
-      "origin": "X50"
+      "note": "Amendment item 15 with owner decision B: a missing or unresolvable policy fact is refused before any offer with 409 execution_profile_unavailable, reason policy_unresolved, audited execution-refused. Never coerced to a class, dropped from the MAX or defaulted.",
+      "origin": "X50",
+      "decidedBy": "ADR-0190 owner decisions A and B (accepted 2026-10-11, PR #345): B"
     },
     {
       "origin": "claude-new",
