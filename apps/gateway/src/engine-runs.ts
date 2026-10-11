@@ -64,6 +64,7 @@ import {
   usageEvents,
   users,
   virtualKeys,
+  workflowInstances,
   type Db,
   type EngineRunRow,
 } from "@regulait/db";
@@ -881,6 +882,10 @@ export const engineRunTestHooks: {
  * (or is no longer the current one); a failure, or another executor holding
  * the stage, leaves it unset and the engine sweep tries again, so an ended run
  * can never leave its workflow waiting for ever.
+ *
+ * ADR-0189 R25 item 13 / PR #357 review 3: a stage held because completing it
+ * would approve a use case whose sign-off is refused (no usable receipt key)
+ * throws too, so the hand-off stays unset and is retried once a key is usable.
  */
 async function notifyWorkflowOfEngineRun(db: Db, run: Pick<EngineRunRow, "id" | "workflowInstanceId" | "workflowStageId">): Promise<boolean> {
   if (!run.workflowInstanceId || !run.workflowStageId) return true;
@@ -1068,11 +1073,31 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
     );
     if (done) out.queueExpired += 1;
   }
-  // PR #203 review [5]: workflow hand-offs that did not land are retried
+  // PR #203 review [5]: workflow hand-offs that did not land are retried.
+  // PR #357 review 3: an instance whose stage was held for a refused sign-off
+  // (workflows.ts SIGNOFF_REFUSED_KEY, `at` on the database clock) is left alone
+  // for SIGNOFF_REFUSAL_RETRY_MINUTES, then tried once more: the retry is
+  // bounded, and held hand-offs never take the batch's slots from others.
   const unnotified = await db
     .select({ id: engineRuns.id, workflowInstanceId: engineRuns.workflowInstanceId, workflowStageId: engineRuns.workflowStageId })
     .from(engineRuns)
-    .where(and(isNotNull(engineRuns.workflowInstanceId), isNotNull(engineRuns.finishedAt), isNull(engineRuns.workflowNotifiedAt)))
+    .leftJoin(workflowInstances, eq(workflowInstances.id, engineRuns.workflowInstanceId))
+    .where(
+      and(
+        isNotNull(engineRuns.workflowInstanceId),
+        isNotNull(engineRuns.finishedAt),
+        isNull(engineRuns.workflowNotifiedAt),
+        // #357 recheck: the marker holds back only the run of the stage it names
+        // (L-a), and is read without any cast a malformed value could fail — a
+        // non-number `atEpoch` is no back-off at all, and a jsonb number always
+        // casts to numeric (L-c), so one bad row cannot fail the sweep
+        sql`(case
+          when coalesce(jsonb_typeof(${workflowInstances.context} -> 'signoffRefused' -> 'atEpoch'), 'null') <> 'number' then true
+          when (${workflowInstances.context} -> 'signoffRefused' ->> 'stageId') is distinct from ${engineRuns.workflowStageId} then true
+          else (${workflowInstances.context} -> 'signoffRefused' ->> 'atEpoch')::numeric < extract(epoch from now()) - ${SIGNOFF_REFUSAL_RETRY_MINUTES * 60}
+        end)`,
+      ),
+    )
     .orderBy(asc(engineRuns.finishedAt))
     .limit(100);
   for (const r of unnotified) if (await notifyWorkflowOfEngineRun(db, r)) out.workflowsNotified += 1;
@@ -1096,6 +1121,11 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
   out.rawReportsPurged = purged.length;
   return out;
 }
+
+/** PR #357 review 3: how long the sweep leaves an instance alone after a
+ * refused sign-off held its stage (mirrors workflows.ts, which imports this
+ * module and so cannot be imported back statically) */
+const SIGNOFF_REFUSAL_RETRY_MINUTES = 10;
 
 /** due schedules: each run executes as the person who configured it, or is skipped with a stated reason */
 export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) {

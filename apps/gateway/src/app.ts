@@ -409,6 +409,7 @@ import {
   registerUseCaseRoutes,
   syncUseCaseForInstance,
   assertUseCaseSignoffPossibleForInstance,
+  mirrorInstanceTransition,
   useCaseArtifactRefusal,
   useCaseForIntakeApproval,
 } from "./use-cases.js";
@@ -4466,8 +4467,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       // Post-commit steps, IN ORDER, each run once the decision is durable. A list, so
       // one hook's step never overwrites another's (ADR-0189 R25 item 5).
-      const postCommit: Array<(d: Db) => Promise<void>> = [];
-      const addPostCommit = (step: ((d: Db) => Promise<void>) | null | undefined) => {
+      const postCommit: Array<(d: Db) => Promise<unknown>> = [];
+      const addPostCommit = (step: ((d: Db) => Promise<unknown>) | null | undefined) => {
         if (step) postCommit.push(step);
       };
       // ADR-0189 R25: the AI BOM snapshots this decision's sign-offs owe, taken after commit
@@ -4698,9 +4699,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // the response (and the execution machinery's own failure events), never
     // as a failed decide.
     let executionError: string | null = null;
+    // PR #357 review 6: what a workflow step's executor and mirror report
+    // (an executor refusal, a use-case sign-off refused, a failed snapshot)
+    let executionWarning: Record<string, unknown> | null = null;
     for (const step of outcome.postCommit) {
       try {
-        await step(db);
+        const extra = await step(db);
+        const w = extra && typeof extra === "object" ? (extra as { executionWarning?: Record<string, unknown> }).executionWarning : undefined;
+        if (w) executionWarning = { ...(executionWarning ?? {}), ...w };
       } catch (err) {
         executionError ??= err instanceof Error ? err.message : String(err);
       }
@@ -4721,6 +4727,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ...(selfReview ? { selfReview: true } : {}),
       ...(pmMirror ? { pmMirror } : {}),
       ...(executionError ? { executionError } : {}),
+      ...(executionWarning ? { executionWarning } : {}),
       ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
       },
     };
@@ -5093,39 +5100,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // questionnaire submitted -> under review/assessment, aborted ->
     // rejected); mirror both. The decide path is handled inside the one
     // approvals transaction above.
-    onInstanceTransition: async (d, instanceId, actorUserId) => {
-      // ADR-0189 R25: a use-case approval that cannot take its signed snapshot is
-      // refused inside its own sync transaction (the routes refuse it earlier,
-      // through `assertTransitionAllowed`; this covers a move made some other way,
-      // such as a git stage completing the instance). The instance has already
-      // moved, so the refusal is reported, not thrown: the vendor mirror still runs
-      // and the caller learns the use case stayed behind its instance.
-      let useCaseSignoff: AiBomSignoff | null = null;
-      let useCaseSignoffRefused: { code: string; detail: string } | null = null;
-      try {
-        useCaseSignoff = await syncUseCaseForInstance(d, instanceId, actorUserId);
-      } catch (err) {
-        if (!(err instanceof AiBomError)) throw err;
-        app.log.warn({ instanceId, code: err.code }, "use-case approval refused: its AI BOM snapshot cannot be signed");
-        useCaseSignoffRefused = {
-          code: err.code,
-          detail:
-            `${err.message} The workflow instance has moved, but its AI use case was not approved; it stays where it was ` +
-            "until a receipt signing key is configured and the instance is driven again (the mirror is idempotent).",
-        };
-      }
-      await syncVendorForInstance(d, instanceId, actorUserId);
-      // ADR-0189 R25: the routes call this after their own commit, so the snapshot runs here
-      const aiBomSnapshotWarning = await runAiBomSignoffs(d, [useCaseSignoff], app.log);
-      const extra = {
-        ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
-        ...(useCaseSignoffRefused ? { useCaseSignoffWarning: useCaseSignoffRefused } : {}),
-      };
-      return Object.keys(extra).length ? extra : undefined;
-    },
+    // ADR-0189 R25: the one mirror (use-cases.ts), shared with the executor runs
+    // no route mirrors; a use-case approval refused there is reported, not thrown
+    onInstanceTransition: (d, instanceId, actorUserId) => mirrorInstanceTransition(d, instanceId, actorUserId, app.log),
     // ADR-0189 R25 item 6: a submission or advance that would approve a use case
-    // whose snapshot cannot be signed is refused 409 before anything commits
-    assertTransitionAllowed: (tx, instanceId) => assertUseCaseSignoffPossibleForInstance(tx as unknown as Db, instanceId),
+    // whose snapshot cannot be signed is refused 409 before anything commits.
+    // Item 13 prevention: the executors call it too, with the status a stage
+    // would complete the instance to, before any external effect.
+    assertTransitionAllowed: (tx, instanceId, prospectiveStatus) =>
+      assertUseCaseSignoffPossibleForInstance(tx as unknown as Db, instanceId, prospectiveStatus),
     // ADR-0171 / AER-053: an intake questionnaire with an inconsistent
     // "Not sure" answer is refused before it is stored
     validateArtifact: useCaseArtifactRefusal,

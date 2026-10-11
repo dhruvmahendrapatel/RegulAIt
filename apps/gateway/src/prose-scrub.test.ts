@@ -63,6 +63,7 @@ import {
 } from "@regulait/db";
 import { CREDENTIAL_MATERIAL_RULES, scrubAuditText } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -263,10 +264,19 @@ beforeAll(async () => {
   ({ auth: initiatorAuth } = await mkUser("ps-initiator@example.com"));
 });
 
+// M-068: the upsert test's allow entry is global state on the shared database; afterAll removes it
+let upsertAllowHostId: string | undefined;
+
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  await app.close();
-  await db.$client.end();
+  // removed first, while the app is open; asserted only after every other restore has run
+  const allowEntry = await removeEgressAllowEntry(app, AUTH, { id: upsertAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    await app.close();
+    await db.$client.end();
+  } finally {
+    allowEntry.assertRemoved();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -379,6 +389,7 @@ describe("3. the siting: no route, no helper, and a third write shape", () => {
 
     const first = await post("initial registration, reviewed by security");
     expect(first.statusCode).toBeLessThan(300);
+    upsertAllowHostId = first.json().id;
     // the INSERT branch left ordinary prose byte-identical …
     const created = await raw("egress_allow_hosts", first.json().id);
     expect(created.note).toBe("initial registration, reviewed by security");

@@ -61,6 +61,7 @@ import { installLicenseFixture, removeLicenseFixture } from "./testing/license-f
 import { spEntityId } from "./saml.js";
 import { normalizeAssertedGroups } from "./group-roles.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -453,6 +454,9 @@ const scimSetMembers = async (groupId: string, displayName: string, members: str
 
 // ---------------------------------------------------------------------------
 
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -475,7 +479,8 @@ beforeAll(async () => {
       note: "group-role-mapping suite: local fake OIDC IdP",
     },
   });
-  expect([201, 409]).toContain(egress.statusCode);
+  expect(egress.statusCode, egress.body).toBe(201);
+  loopbackAllowHostId = egress.json().id;
 
   const server = await app.inject({
     method: "POST", headers: AUTH, url: "/v1/servers",
@@ -500,20 +505,27 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  // The whole gateway suite shares ONE database (vitest.config.ts turns file
-  // parallelism off for exactly that reason), so this file cleans up the global
-  // state it created: enabled SSO providers would change what a LATER file's
-  // sso_only lockout guard counts, and leftover mappings would change the
-  // `mappedGroups` figure other files read. Per-user rows are scoped to
-  // freshly-minted users and are harmless.
-  await db.delete(groupRoleMappings);
-  await db.delete(assertedGroups);
-  await db.execute(sql`delete from oidc_providers where name like 'grm-%'`);
-  await db.execute(sql`delete from saml_providers where name like 'grm-%'`);
-  await removeLicenseFixture(db);
-  await app?.close();
-  await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    // The whole gateway suite shares ONE database (vitest.config.ts turns file
+    // parallelism off for exactly that reason), so this file cleans up the global
+    // state it created: enabled SSO providers would change what a LATER file's
+    // sso_only lockout guard counts, and leftover mappings would change the
+    // `mappedGroups` figure other files read. Per-user rows are scoped to
+    // freshly-minted users and are harmless.
+    await db.delete(groupRoleMappings);
+    await db.delete(assertedGroups);
+    await db.execute(sql`delete from oidc_providers where name like 'grm-%'`);
+    await db.execute(sql`delete from saml_providers where name like 'grm-%'`);
+    await removeLicenseFixture(db);
+    await app?.close();
+    await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 // ===========================================================================

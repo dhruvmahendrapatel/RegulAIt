@@ -18,6 +18,7 @@
  * Ada, stepped up with her authenticator (`steppedUpAs`).
  */
 import { expect, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
+import { randomBytes } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +56,21 @@ export function preparedCredentials(): PreparedCredentials | null {
   }
   const uri = /admin TOTP \(shown ONCE[^)]*\): (otpauth:\/\/totp\/\S+)/.exec(out)?.[1];
   return { oneTime, adminTotpSecret: uri ? new URL(uri).searchParams.get("secret") : null };
+}
+
+/**
+ * The new password a journey sets in place of a one-time password: never a literal in source. `envName`
+ * names an optional override (at least 12 characters, the strict policy default); otherwise a fresh random
+ * one per run, which `signInPrepared` records in the git-ignored store so a later journey can sign in.
+ * The fixed affixes guarantee all four character classes; the 24 random bytes carry the strength.
+ */
+export function disposablePassword(envName: string): string {
+  const given = process.env[envName];
+  if (given !== undefined && given !== "") {
+    if (given.length < 12 || given.length > 128) throw new Error(`${envName} must be 12 to 128 characters`);
+    return given;
+  }
+  return `Rg-${randomBytes(24).toString("base64url")}-7z`;
 }
 
 type PasswordStore = Record<string, { password: string; replaced: string }>;

@@ -70,6 +70,7 @@ import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -191,6 +192,9 @@ function markerIn(s: string | null | undefined): string | null {
 }
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -204,7 +208,7 @@ beforeAll(async () => {
   upstream = await startUpstream();
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
-  await app.inject({
+  const egressAllowed = await app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -215,6 +219,8 @@ beforeAll(async () => {
       note: "f04 suite: local upstream MCP server",
     },
   });
+  expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   const u = await app.inject({
     method: "POST",
@@ -244,12 +250,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  await restoreSb1Posture?.();
-  app.server.closeAllConnections();
-  await restoreSb2Gates();
-  await app.close();
-  await upstream.close();
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    await restoreSb1Posture?.();
+    app.server.closeAllConnections();
+    await restoreSb2Gates();
+    await app.close();
+    await upstream.close();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 // ---------------------------------------------------------------------------

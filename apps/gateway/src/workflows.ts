@@ -49,6 +49,8 @@ import {
 } from "@regulait/git-provider";
 import { resolveDeployProvider, liveDeployClients, DeployProviderError, deploySeed } from "./deploy.js";
 import { ExternalEffectBlockedError, runExternalWrite, type ExternalWriteAudit } from "./external-effects.js";
+// ADR-0189 R25 item 13 prevention: the refusal a completion guard throws
+import { AiBomError } from "./ai-bom.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import {
@@ -571,9 +573,19 @@ export async function applyWorkflowApprovalDecision(
   );
   if (r.skipped) return null;
   // an approval can unblock straight into a git stage (e.g. merge gate →
-  // merge) — executed post-commit, against the real Db
+  // merge) — executed post-commit, against the real Db.
+  // ADR-0189 R25 item 13: the executor checks, before its effect, that a
+  // completion could approve the governed use case; a completion it does make
+  // is mirrored here (the decide transaction's own sync ran before it).
+  // PR #357 review 6: what the executor and the mirror report reaches the
+  // decide answer as `executionWarning` (an executor refusal, a use-case
+  // sign-off refused after commit, an AI BOM snapshot that failed)
   return async (db) => {
-    await runGitExecutions(db, instanceId, r.effects, deciderUserId, dataKey);
+    if (!r.effects.some((e) => e.kind === "execute_stage")) return;
+    const run = await runGitExecutions(db, instanceId, r.effects, deciderUserId, dataKey);
+    const extra = await mirrorAfterExecutor(db, instanceId, deciderUserId);
+    const warning = { ...(run.refused ? { executorRefusal: run.refused } : {}), ...(extra ?? {}) };
+    return Object.keys(warning).length ? { executionWarning: warning } : undefined;
   };
 }
 
@@ -632,6 +644,207 @@ export async function reopenWorkflowInstance(
   };
 }
 
+/** a dependent object's refusal of a transition: it throws to refuse */
+export type TransitionGuard = (tx: DbOrTx, instanceId: string, prospectiveStatus?: string) => Promise<void>;
+
+/**
+ * ADR-0189 R25 item 13, PREVENTION. What an executor run is given about the
+ * objects that depend on its instance.
+ *
+ * `assertTransitionAllowed` runs in the executor's claim transaction (its own,
+ * committed before any provider call), and only when the stage it is about to
+ * run would COMPLETE the instance on success — the move that approves a
+ * governed use case. When it throws a sign-off refusal (`AiBomError`: no
+ * usable receipt signing key under the strict `refuse` setting), the stage is
+ * not claimed and no external effect runs (no git push or merge, no deploy, no
+ * nested run planned, no check evaluated). The instance stays at
+ * `awaiting_execution` on that stage — the same recoverable rest a stopped
+ * deploy takes — with the reason in `context.lastError` and a
+ * `workflow:executor-signoff-refused` audit row; the same request (or
+ * `/advance` on the stage) runs it once a key is configured. Under the relaxed
+ * `skip_and_record` setting the guard does not throw, and nothing changes.
+ *
+ * Omitted, the default guard is the use-case sign-off check — strict by
+ * default, so an executor path nobody wired is still covered.
+ */
+export interface ExecutorHooks {
+  assertTransitionAllowed?: TransitionGuard;
+}
+
+/** the executor's refusal, as routes report it (`executorRefusal`) */
+export interface ExecutorRefusal {
+  stageId: string;
+  code: string;
+  detail: string;
+}
+
+/** what an executor run did: the last effects, and a refusal when it stopped on one */
+export interface ExecutorOutcome {
+  effects: Effect[];
+  refused: ExecutorRefusal | null;
+}
+
+/** the default completion guard: the governed use case's sign-off check.
+ * Loaded lazily — use-cases.ts imports this module. */
+const defaultCompletionGuard: TransitionGuard = async (tx, instanceId, prospectiveStatus) => {
+  const { assertUseCaseSignoffPossibleForInstance } = await import("./use-cases.js");
+  await assertUseCaseSignoffPossibleForInstance(tx as Db, instanceId, prospectiveStatus);
+};
+
+/** would this event complete the instance? The kernel is pure, so the
+ * lookahead is the transition itself, applied to nothing. Only the kernel's
+ * own refusal (`WorkflowStateError`: the stage is not executable here, which
+ * the executor's own checks then refuse) means "does not complete"; any other
+ * error is rethrown, so a broken lookahead fails closed instead of skipping
+ * the guard (PR #357 review 1). */
+export function completesOnEvent(def: WorkflowDefinition, state: InstanceState, event: WorkflowEvent): boolean {
+  try {
+    return transition(def, state, event).state.status === "completed";
+  } catch (err) {
+    if (err instanceof WorkflowStateError) return false;
+    throw err;
+  }
+}
+
+function completesOnSuccess(def: WorkflowDefinition, state: InstanceState, stageId: string): boolean {
+  return completesOnEvent(def, state, { kind: "execution_succeeded", stageId });
+}
+
+/** the context key a sign-off refusal leaves on the instance until the stage
+ * is next claimed: `{ at, stageId, stageEntry, code }`, `at` on the database
+ * clock. The engine sweep backs off on it for its SIGNOFF_REFUSAL_RETRY_MINUTES
+ * (engine-runs.ts reads this literal), and an idempotent replay reads it back
+ * as the standing `executorRefusal`. */
+export const SIGNOFF_REFUSED_KEY = "signoffRefused";
+
+/**
+ * PR #357 review 2: WHEN a check stage's completion is guarded. Reported
+ * results are read first, so a real CI failure is never shown as a key problem:
+ *  - a reported failure cannot complete the stage (the verdict is the CI's) —
+ *    guarded at commit, should a later report replace it before then;
+ *  - paid work (eval datasets, engine runs) starts after the claim — guarded at
+ *    the claim, before any of it is spent;
+ *  - otherwise every reported check passed (or is offline-auto-passed) —
+ *    guarded at the claim; while any is still pending the stage only waits —
+ *    guarded at commit, if a report completes it meanwhile.
+ */
+export function checkStageGuardsAtClaim(
+  stage: WorkflowDefinition["stages"][number],
+  ctx: Record<string, unknown>,
+  round: number,
+): boolean {
+  const bound = new Set([...(stage.evals ?? []).map((e) => e.check), ...(stage.engines ?? []).map((e) => e.check)]);
+  const reported = new Map(
+    normalizeCheckReports(ctx[`reported:${stage.id}`])
+      .filter((r) => r.round === undefined || r.round === round)
+      .map((r) => [r.check, r] as const),
+  );
+  const autoPass = stage.offlineAutoPass === true && offlineAutoPassRefusal(process.env) === null;
+  let pending = false;
+  for (const name of stage.checks ?? []) {
+    if (bound.has(name)) continue;
+    const rep = reported.get(name);
+    if (rep?.status === "failed") return false;
+    if (!rep && !autoPass) pending = true;
+  }
+  if (bound.size > 0) return true;
+  return !pending;
+}
+
+/** PR #357 review 7: the refusal an instance still stands on (a pure read, for
+ * an idempotent replay): the marker names the stage and entry it is waiting at */
+export function standingExecutorRefusal(row: Pick<InstanceRow, "status" | "stageEntry" | "context">): ExecutorRefusal | null {
+  if (row.status !== "awaiting_execution") return null;
+  const ctx = row.context as Record<string, unknown>;
+  const m = ctx[SIGNOFF_REFUSED_KEY] as { stageId?: unknown; stageEntry?: unknown; code?: unknown } | undefined;
+  if (!m || typeof m.stageId !== "string" || typeof m.code !== "string" || m.stageEntry !== row.stageEntry) return null;
+  const lastError = typeof ctx.lastError === "string" ? ctx.lastError : "";
+  const prefix = `${m.stageId}: `;
+  return { stageId: m.stageId, code: m.code, detail: lastError.startsWith(prefix) ? lastError.slice(prefix.length) : lastError };
+}
+
+/** the refused stage's HTTP answer, as the route-level refusals give it */
+export function executorRefusalStatus(r: ExecutorRefusal): number {
+  return r.code === "receipt_signing_key_invalid" ? 503 : 409;
+}
+
+/** thrown by `reevaluateCheckStage` when the stage it re-evaluated was refused:
+ * the engine run's hand-off has NOT landed, so the sweep retries it */
+export class ExecutorSignoffRefusedError extends Error {
+  constructor(readonly refusal: ExecutorRefusal) {
+    super(`stage '${refusal.stageId}' held: ${refusal.code}`);
+    this.name = "ExecutorSignoffRefusedError";
+  }
+}
+
+/**
+ * THE LOOKAHEAD, inside a transaction holding the instance row lock. When the
+ * stage's success would complete the instance and the guard refuses, the
+ * refusal is recorded (a key-level `lastError` merge and an audit row, in this
+ * same transaction) and returned; the caller then runs nothing. Any other
+ * error the guard throws propagates.
+ */
+async function refuseCompletionIfNotAllowed(
+  tx: DbOrTx,
+  row: InstanceRow,
+  stageId: string,
+  actorUserId: string | null,
+  guard: TransitionGuard,
+  path: "executor" | "nested_run_completion",
+): Promise<ExecutorRefusal | null> {
+  if (!completesOnSuccess(row.definition as WorkflowDefinition, row.state as InstanceState, stageId)) return null;
+  try {
+    await guard(tx, row.id, "completed");
+    return null;
+  } catch (err) {
+    if (!(err instanceof AiBomError)) throw err;
+    const detail =
+      `${err.message} Stage '${stageId}' would complete this workflow instance and approve its governed AI use case, ` +
+      "so it was held: nothing external ran for it and the instance stays at this stage. It runs on the same " +
+      "request (or POST /advance on this stage) once a receipt signing key is usable.";
+    // the marker's time is the database clock (M-075): the engine sweep compares it with now()
+    const marker = JSON.stringify({ stageId, stageEntry: row.stageEntry, code: err.code });
+    await tx
+      .update(workflowInstances)
+      .set({
+        // `at` for people; `atEpoch` (a jsonb number) for the sweep, which can
+        // read it without a cast that a malformed value could fail (#357 L-c)
+        context: sql`${workflowInstances.context} || jsonb_build_object('lastError', ${`${stageId}: ${detail}`}::text, ${SIGNOFF_REFUSED_KEY}::text, ${marker}::jsonb || jsonb_build_object('at', now(), 'atEpoch', extract(epoch from now())))`,
+      })
+      .where(eq(workflowInstances.id, row.id));
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? SYSTEM_IDENTITY,
+      objectType: "workflow",
+      objectId: row.id,
+      detail: { stageId, code: err.code, path, stageEntry: row.stageEntry, round: row.round, status: row.status },
+      effect: "deny",
+      ruleId: "workflow:executor-signoff-refused",
+      ruleChain: [],
+      reason: `stage '${stageId}' not run: completing the instance would approve its AI use case, whose sign-off is refused (${err.code})`,
+    });
+    return { stageId, code: err.code, detail };
+  }
+}
+
+/**
+ * The use-case and vendor mirror after an executor run nobody else mirrors
+ * (an approval's post-commit step, a nested run's completion, an engine run's
+ * re-evaluation). Post-commit: a failure is logged, never thrown — the
+ * transition is durable, and posture counts a use case left behind.
+ */
+async function mirrorAfterExecutor(db: Db, instanceId: string, actorUserId: string | null): Promise<Record<string, unknown> | undefined> {
+  try {
+    const { mirrorInstanceTransition } = await import("./use-cases.js");
+    return await mirrorInstanceTransition(db, instanceId, actorUserId, {
+      warn: (obj, msg) => console.warn(msg ?? "", obj),
+      error: (obj, msg) => console.error(msg ?? "", obj),
+    });
+  } catch (err) {
+    console.error(`use-case mirror after the executor of ${instanceId} failed: ${(err as Error).message}`);
+    return undefined;
+  }
+}
+
 export interface WorkflowRouteOptions {
   /** hex AES-256 key for git-connection tokens; absent = git features refused */
   dataKey?: string;
@@ -653,8 +866,14 @@ export interface WorkflowRouteOptions {
    * advance). A dependent object refuses a move it could not complete — an
    * approval whose signed AI BOM snapshot cannot be taken — by throwing (the
    * global handler answers its status); the transition, the artifact row and
-   * every git effect then never happen. */
-  assertTransitionAllowed?: (tx: DbOrTx, instanceId: string) => Promise<void>;
+   * every git effect then never happen.
+   *
+   * R25 item 13 prevention: the executor also calls it, in its claim
+   * transaction and BEFORE any external effect, with `prospectiveStatus`
+   * "completed" when the stage it is about to run would complete the instance
+   * (see `ExecutorHooks`). Without `prospectiveStatus` it judges the status the
+   * instance stands at. */
+  assertTransitionAllowed?: TransitionGuard;
   /** ADR-0171 / AER-053: a pre-check on an artifact submission, run BEFORE
    * anything is stored or transitioned. A dependent object refuses content it
    * can name a reason for (the use-case questionnaire's inconsistent "Not
@@ -676,6 +895,7 @@ export async function handleNestedRunCompletion(
   dataKey: string | undefined,
   run: { id: string; workflowInstanceId: string | null; status: string },
   actorUserId: string | null,
+  hooks: ExecutorHooks = {},
 ): Promise<void> {
   if (!run.workflowInstanceId) return;
   const [instance] = await db
@@ -695,23 +915,36 @@ export async function handleNestedRunCompletion(
   // waiting on THIS run at THIS stage — a re-open (which clears runId:<stage>)
   // or a retry that planned a newer run committed in between makes this a
   // stale notification, and it changes nothing.
-  const stillWaitingOnThisRun = async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]): Promise<boolean> => {
+  const waitingRow = async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]): Promise<InstanceRow | null> => {
     const [row] = await tx.select().from(workflowInstances).where(eq(workflowInstances.id, instance.id));
-    if (!row || row.status !== "awaiting_execution") return false;
+    if (!row || row.status !== "awaiting_execution") return null;
     const cur = (row.definition as WorkflowDefinition).stages[(row.state as InstanceState).currentStageIndex];
-    return cur?.id === stage.id && (row.context as Record<string, unknown>)[`runId:${stage.id}`] === run.id;
+    return cur?.id === stage.id && (row.context as Record<string, unknown>)[`runId:${stage.id}`] === run.id ? row : null;
   };
+  const stillWaitingOnThisRun = async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]): Promise<boolean> =>
+    (await waitingRow(tx)) !== null;
   if (run.status === "completed") {
     const r = await applyEvent(
       db,
       instance.id,
       { kind: "execution_succeeded", stageId: stage.id },
       actorUserId,
-      stillWaitingOnThisRun,
+      async (tx) => {
+        const row = await waitingRow(tx);
+        if (!row) return false;
+        // ADR-0189 R25 item 13 prevention: the run is done, but a success that
+        // would complete the instance is not applied while its use-case
+        // approval would be refused. The stage stays awaiting this (completed)
+        // run, so `/advance` on it completes the instance once a key is usable.
+        const guard = hooks.assertTransitionAllowed ?? defaultCompletionGuard;
+        return (await refuseCompletionIfNotAllowed(tx, row, stage.id, actorUserId, guard, "nested_run_completion")) === null;
+      },
     );
     if (r.skipped) return;
     // completion can flow straight into a downstream git stage
-    await runGitExecutions(db, instance.id, r.effects, actorUserId, dataKey);
+    await runGitExecutions(db, instance.id, r.effects, actorUserId, dataKey, 0, hooks);
+    // no route mirrors a nested run's completion: it is mirrored here
+    await mirrorAfterExecutor(db, instance.id, actorUserId);
   } else {
     // AER-048: a key-level merge under the same lock, never a write-back of
     // the (unlocked) context read above
@@ -739,8 +972,9 @@ export async function handleNestedRunCompletion(
  * stage, or a stage no longer current, is fine: they own it now.
  */
 export async function reevaluateCheckStage(db: Db, instanceId: string, stageId: string, dataKey: string | undefined): Promise<void> {
+  let outcome: ExecutorOutcome;
   try {
-    await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId }], null, dataKey);
+    outcome = await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId }], null, dataKey);
   } catch (err) {
     // another executor holds the stage: it may have read the run as pending, so
     // this is NOT done — the caller retries (PR #203 review [5])
@@ -749,6 +983,12 @@ export async function reevaluateCheckStage(db: Db, instanceId: string, stageId: 
     if (err instanceof WorkflowStateError) return;
     throw err;
   }
+  // ADR-0189 R25 item 13 / PR #357 review 3: a refusal of THIS stage is not a
+  // landed hand-off — thrown, so the engine run stays unnotified and the sweep
+  // retries it (backing off on the instance's refusal marker) once a key is usable
+  if (outcome.refused?.stageId === stageId) throw new ExecutorSignoffRefusedError(outcome.refused);
+  // an engine run's verdict can complete the instance, and no route mirrors it
+  await mirrorAfterExecutor(db, instanceId, null);
 }
 
 /** AER-047: the detail every auto-passed (opt-in, offline) check carries */
@@ -951,9 +1191,13 @@ async function runGitExecutions(
    * executor that ended WITHOUT committing runs when reports arrived during
    * its claim — never more than one level */
   reevalDepth = 0,
-): Promise<Effect[]> {
+  /** ADR-0189 R25 item 13 prevention: the completion guard (`ExecutorHooks`) */
+  hooks: ExecutorHooks = {},
+): Promise<ExecutorOutcome> {
+  const completionGuard = hooks.assertTransitionAllowed ?? defaultCompletionGuard;
   let pending = effects.filter((e) => e.kind === "execute_stage");
   let lastEffects = effects;
+  let refused: ExecutorRefusal | null = null;
   while (pending.length > 0) {
     const effect = pending[0]! as Extract<Effect, { kind: "execute_stage" }>;
 
@@ -975,6 +1219,18 @@ async function runGitExecutions(
       const ctx = { ...(row.context as Record<string, unknown>) };
       const held = stageClaimState(ctx, effect.stageId, Date.now(), stageClaimTtlMs(), row.stageEntry);
       if (held.heldLive) return "held" as const; // another executor holds it
+      // ADR-0189 R25 item 13 prevention: a stage whose success would complete
+      // the instance (and so approve its governed use case) is not claimed —
+      // and so never reaches a provider — when that approval would be refused.
+      // A check stage whose reports cannot yet complete it is guarded at its
+      // commit instead (`checkStageGuardsAtClaim`, PR #357 review 2).
+      const guardAtClaim = current.type !== "automated_check" || checkStageGuardsAtClaim(current, ctx, row.round);
+      if (guardAtClaim) {
+        const refusal = await refuseCompletionIfNotAllowed(tx, row, effect.stageId, actorUserId, completionGuard, "executor");
+        if (refusal) return { refused: refusal } as const;
+      }
+      // the stage is claimed: an earlier refusal no longer stands (the sweep's back-off ends)
+      delete ctx[SIGNOFF_REFUSED_KEY];
       // AER-048: the claim names the stage ENTRY it was taken under and carries
       // a unique id, so this executor's completion can prove it is still the
       // one the instance is waiting on (commitStageResult)
@@ -988,6 +1244,7 @@ async function runGitExecutions(
         instance: { ...row, context: ctx },
         expiredClaimSince: held.expiredSince,
         guard: { instanceId: row.id, stageId: effect.stageId, entry: row.stageEntry, round: row.round, claimId },
+        guardAtCommit: !guardAtClaim,
       };
     });
     if (claimed === "held") throw new StageClaimHeldError(effect.stageId);
@@ -995,6 +1252,10 @@ async function runGitExecutions(
       throw new WorkflowStateError(
         `stage '${effect.stageId}' is not currently executable for this instance`,
       );
+    }
+    if ("refused" in claimed) {
+      refused = claimed.refused ?? null;
+      break;
     }
     const instance = claimed.instance;
     const guard = claimed.guard;
@@ -1053,7 +1314,7 @@ async function runGitExecutions(
       const stored = (now.context as Record<string, unknown>)[key];
       if (JSON.stringify(stored ?? null) === JSON.stringify(snapshot[key] ?? null)) return;
       try {
-        await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId: stage.id }], actorUserId, dataKey, 1);
+        await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId: stage.id }], actorUserId, dataKey, 1, hooks);
       } catch (err) {
         if (!(err instanceof WorkflowStateError)) {
           console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${(err as Error).message}`);
@@ -1093,7 +1354,9 @@ async function runGitExecutions(
           .where(eq(orchestrationRuns.id, existingId));
         if (existing && existing.status !== "aborted") {
           // replay after a missed completion notification, or (planned/
-          // running) the stage simply waits for the run
+          // running) the stage simply waits for the run. A completed run's
+          // replay clears an earlier refusal's lastError (R25 item 13).
+          if (existing.status === "completed") delete context.lastError;
           const r = await finish(
             existing.status === "completed" ? { kind: "execution_succeeded", stageId: stage.id } : null,
           );
@@ -1324,9 +1587,15 @@ async function runGitExecutions(
             ? { discardedEvals: Object.fromEntries([...evalOutcomes].map(([name, x]) => [name, x.status])) }
             : {}),
         },
+        undefined,
+        claimed.guardAtCommit ? completionGuard : undefined,
       );
       if (!r.committed) {
         await reevaluateIfReportsArrived();
+        break;
+      }
+      if (r.refused) {
+        refused = r.refused;
         break;
       }
       if (waited) break;
@@ -1766,7 +2035,7 @@ ${latestArtifact.content}`
       throw err;
     }
   }
-  return lastEffects;
+  return { effects: lastEffects, refused };
 }
 
 /** REL-06: how long an execution claim may go unreleased before another
@@ -1868,7 +2137,9 @@ interface StageGuard {
   claimId: string;
 }
 
-type StageCommit = { committed: true; effects: Effect[] } | { committed: false; reason: string };
+type StageCommit =
+  | { committed: true; effects: Effect[]; refused?: ExecutorRefusal }
+  | { committed: false; reason: string };
 
 /** AER-048 (review item 1): context keys that RECORD an external effect an
  * executor performed — and that the executors read back to stay idempotent
@@ -2072,6 +2343,11 @@ async function commitStageResult(
   /** the executor's claim-time snapshot and its working context — from which
    * a DISCARD still salvages the external-effect records (review item 1) */
   local?: { snapshot: Record<string, unknown>; context: Record<string, unknown> },
+  /** ADR-0189 R25 item 13 / PR #357 review 2: a completion guard deferred from
+   * the claim (a check stage, which runs nothing external): a completing event
+   * it refuses is not applied — the verdict and the refusal are recorded, and
+   * the instance stays at the stage */
+  completionGuard?: TransitionGuard,
 ): Promise<StageCommit> {
   if (workflowTestHooks.beforeStageCommit) {
     await workflowTestHooks.beforeStageCommit({ instanceId: guard.instanceId, stageId: guard.stageId });
@@ -2205,6 +2481,10 @@ async function commitStageResult(
     await tx.update(workflowInstances).set({ context: fresh }).where(eq(workflowInstances.id, row.id));
     for (const a of decision.audits ?? []) await tx.insert(auditLog).values(a);
     if (!decision.event) return { committed: true, effects: [] };
+    if (completionGuard && completesOnEvent(row.definition as WorkflowDefinition, row.state as InstanceState, decision.event)) {
+      const refusal = await refuseCompletionIfNotAllowed(tx, row, guard.stageId, actorUserId, completionGuard, "executor");
+      if (refusal) return { committed: true, effects: [], refused: refusal };
+    }
     const r = await applyEvent(tx, row.id, decision.event, actorUserId, undefined, decision.deployMode ?? null, {
       deferSpan: true,
     });
@@ -2212,7 +2492,11 @@ async function commitStageResult(
   });
   // review item 6: the span is written only once the result is durable
   if (out.committed) await recordDeferredSpan(db, out.span);
-  return out.committed ? { committed: true, effects: out.effects } : { committed: false, reason: out.reason };
+  // PR #357 recheck H1: a commit-time refusal must reach the executor (and so
+  // the route answer, the decide warning and the engine hand-off)
+  return out.committed
+    ? { committed: true, effects: out.effects, ...(out.refused ? { refused: out.refused } : {}) }
+    : { committed: false, reason: out.reason };
 }
 
 /**
@@ -2300,9 +2584,14 @@ export async function startWorkflowInstanceWithTemplates(
     change: Record<string, unknown>;
     projectId?: string | null;
     isAdmin?: boolean;
+    /** ADR-0189 R25 item 13 prevention: the completion guard for the stages
+     * the start runs into. A caller binding a dependent object AFTER the start
+     * (the use-case registry) passes its own, since the default looks the
+     * object up by instance and finds nothing yet. */
+    executor?: ExecutorHooks;
   },
 ): Promise<
-  | { ok: true; instance: { id: string; status: string; state: unknown } }
+  | { ok: true; instance: { id: string; status: string; state: unknown }; executorRefusal: ExecutorRefusal | null }
   | { ok: false; status: number; body: Record<string, unknown> }
 > {
   const { templateIds, initiatorUserId, change } = input;
@@ -2372,15 +2661,22 @@ export async function startWorkflowInstanceWithTemplates(
     .returning();
 
   const first = await applyEvent(db, instance!.id, { kind: "start" }, initiatorUserId);
-  await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey);
+  const executed = await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey, 0, input.executor ?? {});
   const [fresh] = await db
     .select()
     .from(workflowInstances)
     .where(eq(workflowInstances.id, instance!.id));
-  return { ok: true, instance: { id: instance!.id, status: fresh!.status, state: fresh!.state } };
+  return { ok: true, instance: { id: instance!.id, status: fresh!.status, state: fresh!.state }, executorRefusal: executed.refused };
 }
 
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
+  // ADR-0189 R25 item 13 prevention: every executor a route runs gets the same
+  // completion guard the route's own transition does (the strict default when
+  // none is given), and a refusal is answered as `executorRefusal`
+  const executorHooks: ExecutorHooks = opts.assertTransitionAllowed ? { assertTransitionAllowed: opts.assertTransitionAllowed } : {};
+  const runExecutors = (instanceId: string, effects: Effect[], actorUserId: string): Promise<ExecutorOutcome> =>
+    runGitExecutions(db, instanceId, effects, actorUserId, opts.dataKey, 0, executorHooks);
+  const refusalField = (o: ExecutorOutcome | null) => (o?.refused ? { executorRefusal: o.refused } : {});
   // Git connections: admin-only; tokens encrypted at rest, never returned.
   app.post("/v1/git/connections", async (req, reply) => {
     const body = createGitConnectionSchema.parse(req.body);
@@ -2818,9 +3114,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // idempotent (it moves an object only when the instance's status says so,
     // and a compare-and-swap keeps a racing pair to one move), so running it
     // on every replay is safe.
+    // PR #357 review 7: the replay re-drives nothing (ADR-0179). The stored
+    // response is written before the executor runs, so it never holds the
+    // refusal; the replay reads the refusal the instance still stands on.
     const replayed = async (body: Record<string, unknown>) => {
       const extra = await opts.onInstanceTransition?.(db, instance.id, actorUserId);
-      return reply.status(200).header("Idempotent-Replay", "true").send({ ...body, ...(extra ?? {}), status: await currentStatus() });
+      const [now] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, instance.id));
+      const standing = now ? standingExecutorRefusal(now) : null;
+      return reply
+        .status(200)
+        .header("Idempotent-Replay", "true")
+        .send({ ...body, ...(extra ?? {}), ...(standing ? { executorRefusal: standing } : {}), status: now?.status ?? (await currentStatus()) });
     };
     if (claim) {
       const prior = await idempotentReplay(db, claim);
@@ -2870,9 +3174,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       written = await inTransaction(db, (tx) => submit(tx));
     }
     await recordDeferredSpan(db, written.deferredSpan);
-    await runGitExecutions(db, instance.id, written.effects, actorUserId, opts.dataKey);
+    const executed = await runExecutors(instance.id, written.effects, actorUserId);
     const extra = await opts.onInstanceTransition?.(db, instance.id, actorUserId);
-    return reply.status(201).send({ ...(extra ?? {}), version: written.version, status: await currentStatus() });
+    return reply.status(201).send({ ...(extra ?? {}), ...refusalField(executed), version: written.version, status: await currentStatus() });
   });
 
   app.post("/v1/workflows/instances/:instanceId/advance", async (req, reply) => {
@@ -2887,6 +3191,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // bypassing the run or the checks).
     const def = loaded.instance.definition as WorkflowDefinition;
     const targetStage = def.stages.find((st) => st.id === body.stageId);
+    let executed: ExecutorOutcome;
     if (
       targetStage?.type === "git_operation" ||
       targetStage?.type === "deployment" ||
@@ -2894,13 +3199,20 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       (targetStage?.type === "automated_build" && targetStage.run !== undefined) ||
       (targetStage?.type === "automated_check" && (targetStage.checks?.length ?? 0) > 0)
     ) {
-      await runGitExecutions(
-        db,
-        loaded.instance.id,
-        [{ kind: "execute_stage", stageId: body.stageId }],
-        req.authCtx.userId,
-        opts.dataKey,
-      );
+      executed = await runExecutors(loaded.instance.id, [{ kind: "execute_stage", stageId: body.stageId }], req.authCtx.userId);
+      // PR #357 review 4: nothing moved — the one action asked for was refused,
+      // answered as the route-level refusals are (409, or 503 for an unusable key)
+      if (executed.refused?.stageId === body.stageId) {
+        const [held] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, loaded.instance.id));
+        return reply.status(executorRefusalStatus(executed.refused)).send({
+          error: executed.refused.code,
+          detail: executed.refused.detail,
+          executorRefusal: executed.refused,
+          status: held!.status,
+          state: held!.state,
+          context: held!.context,
+        });
+      }
     } else {
       // ADR-0189 R25: the transition and the dependent-object check share one
       // transaction, so a refused approval (409) leaves the instance where it was
@@ -2911,14 +3223,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         return applied;
       });
       await recordDeferredSpan(db, r.deferredSpan);
-      await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
+      executed = await runExecutors(loaded.instance.id, r.effects, req.authCtx.userId);
     }
     const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, loaded.instance.id));
-    return { ...(extra ?? {}), status: fresh!.status, state: fresh!.state, context: fresh!.context };
+    return { ...(extra ?? {}), ...refusalField(executed), status: fresh!.status, state: fresh!.state, context: fresh!.context };
   });
 
   // §2 report per-check results into an automated_check stage. A real CI posts
@@ -3100,17 +3412,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     ];
     // AER-048: the response says what happened to the report, so a caller can
     // tell "it was evaluated" from "it is waiting for someone else to"
-    let evaluation: "evaluated" | "stored_for_later" | "deferred_to_running_executor" = "stored_for_later";
+    // ADR-0189 R25 item 13 prevention: `refused_signoff_unavailable` — the
+    // report is stored, but the stage was not evaluated, because passing it
+    // would complete the instance and its use-case approval would be refused.
+    // The next report (or /advance) evaluates it once a key is usable.
+    let evaluation: "evaluated" | "stored_for_later" | "deferred_to_running_executor" | "refused_signoff_unavailable" = "stored_for_later";
+    let executed: ExecutorOutcome | null = null;
     if (afterWrite!.status === "awaiting_execution" && cur?.id === body.stageId) {
       try {
-        await runGitExecutions(
-          db,
-          instanceId,
-          [{ kind: "execute_stage", stageId: body.stageId }],
-          req.authCtx.userId,
-          opts.dataKey,
-        );
-        evaluation = "evaluated";
+        executed = await runExecutors(instanceId, [{ kind: "execute_stage", stageId: body.stageId }], req.authCtx.userId);
+        evaluation = executed.refused?.stageId === body.stageId ? "refused_signoff_unavailable" : "evaluated";
       } catch (err) {
         // AER-048: another executor is mid-evaluation of this very stage. The
         // report is committed; that executor decides its verdict from the
@@ -3130,6 +3441,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .where(eq(workflowInstances.id, instanceId));
     return reply.status(evaluation === "deferred_to_running_executor" ? 202 : 200).send({
       ...(extra ?? {}),
+      ...refusalField(executed),
       status: fresh!.status,
       state: fresh!.state,
       context: fresh!.context,
@@ -3153,7 +3465,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       { kind: "recheck", stageId: body.stageId },
       req.authCtx.userId,
     );
-    await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
+    const executed = await runExecutors(loaded.instance.id, r.effects, req.authCtx.userId);
     // ADR-0189 R25 item 13 follow-up: a passing re-run can complete the instance;
     // its use case and vendor mirror it, as on every other driving route
     const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
@@ -3161,7 +3473,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, loaded.instance.id));
-    return { ...(extra ?? {}), status: fresh!.status, state: fresh!.state, context: fresh!.context };
+    return { ...(extra ?? {}), ...refusalField(executed), status: fresh!.status, state: fresh!.state, context: fresh!.context };
   });
 
   // §2 resolve a deploy stage parked at blocked_on_deploy — the operator confirms
@@ -3225,14 +3537,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       return applied;
     });
     await recordDeferredSpan(db, r.deferredSpan);
-    await runGitExecutions(db, loaded.instance.id, r.effects, actorUserId, opts.dataKey);
+    const executed = await runExecutors(loaded.instance.id, r.effects, actorUserId);
     // the dependent objects (use case, vendor) mirror the instance, as on every other driving route
     const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, actorUserId);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, loaded.instance.id));
-    return { ...(extra ?? {}), status: fresh!.status, state: fresh!.state, context: fresh!.context };
+    return { ...(extra ?? {}), ...refusalField(executed), status: fresh!.status, state: fresh!.state, context: fresh!.context };
   });
 
   app.post("/v1/workflows/instances/:instanceId/abort", async (req, reply) => {
