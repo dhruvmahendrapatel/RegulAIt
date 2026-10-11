@@ -773,7 +773,7 @@ addPositive("P25", {
   title: "v2 receipt naming an actor identity and grant equal to facts.actors (receipt chain and actorChain are not compared)",
   build: {
     receiptActor: { chain: [EX.identity1], delegationGrantId: EX.grant1, identityId: EX.identity1 },
-    facts: makeFacts({ actors: { actorChain: ["spiffe://TEST-ONLY-CANARY.example/regulait/agent/c1000000-0000-4000-8000-000000000001"], actorIdentityId: EX.identity1, delegationGrantId: EX.grant1, sponsorUserId: EX.sponsor } }),
+    facts: makeFacts({ actors: { actorChain: ["spiffe://test-only.example/TEST-ONLY-CANARY/regulait/agent/c1000000-0000-4000-8000-000000000001"], actorIdentityId: EX.identity1, delegationGrantId: EX.grant1, sponsorUserId: EX.sponsor } }),
   },
   checks: positiveChecks(),
 });

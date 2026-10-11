@@ -8,6 +8,11 @@ export * from "./settings.js";
 export * from "./facts-capture.js";
 // slice B4 API contract (frozen for B6; B4 implements it exactly)
 export * from "./contract-b4.js";
+// slice B4: the Decision BOM projection and assembly, the strict archive reader and the pure verifier
+export * from "./decision-bom-assembly.js";
+export * from "./bom-archive.js";
+export * from "./verify.js";
+export * from "./bom-bundle.js";
 // slice B3: the AI BOM record set, builder, CycloneDX renderer and validator
 export * from "./ai-bom-records.js";
 export * from "./ai-bom-cyclonedx.js";
