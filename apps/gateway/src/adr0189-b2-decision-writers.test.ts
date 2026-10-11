@@ -35,9 +35,10 @@ const DECISION_WRITERS = [
   "decompose.ts", // orchestration lead entitlement
   "delegated-evaluate.ts", // ADR-0188 delegated dispatch
   "engine-runs.ts",
+  "governed-evaluate.ts", // the `governance-policy-changed` refusal row of the MCP tool, MCP protocol and connector paths
   "guardrails.ts",
   "mcp-protocol.ts", // MCP protocol methods
-  "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the row)
+  "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
   "outbound-audience.ts",
   "playground.ts",
   "redteam.ts",
