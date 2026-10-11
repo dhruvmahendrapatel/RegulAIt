@@ -490,6 +490,23 @@ describe("the MCP decision commit re-checks the epoch and the kill switch it was
     return () => ran;
   };
   const decisionsSince = async (from: number, userId: string) => (await auditSince(from)).filter((r) => r.userId === userId && isReceiptEligibleAuditRow(r));
+  /**
+   * Review follow-up (2026-10-10): the refusal leaves exactly ONE decision row of its own, written after the refused
+   * transaction, through the shared writer (marker + facts). It records no epoch as "decided under": its facts have
+   * `policy: null`, and the stale generation is kept only as `decidedPolicyEpoch`. Nothing else is recorded.
+   */
+  const expectOnlyRefusalRow = async (from: number, userId: string, staleEpoch: number) => {
+    const recorded = await decisionsSince(from, userId);
+    expect(recorded.map((r) => [r.effect, r.ruleId]), "only the refusal's own row; no decision under the stale epoch").toEqual([["deny", GOVERNANCE_POLICY_CHANGED_RULE_ID]]);
+    const detail = recorded[0]!.detail as Record<string, unknown>;
+    expect(detail).toMatchObject({ receiptClass: "decision", phase: "decision-commit", decidedPolicyEpoch: staleEpoch });
+    expect(detail.policyEpoch, "the refusal claims no epoch it was decided under").toBeUndefined();
+    const captured = (await assertCaptured(from)).filter((x) => x.row.id === recorded[0]!.id);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.facts.policy).toBeNull();
+    expect(captured[0]!.facts.outcome.effect).toBe("deny");
+    return recorded[0]!;
+  };
 
   for (const path of paths) {
     it(`${path.name}: the epoch moving between evaluation and commit refuses the call, and nothing is recorded with the stale epoch`, async () => {
@@ -518,7 +535,7 @@ describe("the MCP decision commit re-checks the epoch and the kill switch it was
         expect(await currentEpoch()).toBeGreaterThan(epochBefore);
         expect(refused.kind).toBe("denied");
         expect(refused.decision?.ruleId).toBe(GOVERNANCE_POLICY_CHANGED_RULE_ID);
-        expect(await decisionsSince(from, u.id), "no decision is recorded under the stale epoch").toEqual([]);
+        await expectOnlyRefusalRow(from, u.id, epochBefore);
 
         // re-submitted, it is decided afresh under the current epoch
         setDecisionRecheckHookForTest(null);
@@ -554,12 +571,12 @@ describe("the MCP decision commit re-checks the epoch and the kill switch it was
       expect(await currentEpoch(), "the halt is a policy write (0120 trigger)").toBeGreaterThan(epochBefore);
       expect(refused.kind).toBe("denied");
       expect(refused.kind === "denied" && refused.decision.ruleId).toBe(GOVERNANCE_POLICY_CHANGED_RULE_ID);
-      expect(await decisionsSince(from, u.id)).toEqual([]);
+      const refusalRow = await expectOnlyRefusalRow(from, u.id, epochBefore);
       // re-submitted under the halt: decided afresh, refused, recorded with the kill switch engaged
       setDecisionRecheckHookForTest(null);
       const again = await executeGovernedToolCall(db, undefined, { userId: u.id, serverId, toolName: "get_time", arguments: {} });
       expect(again.kind).toBe("denied");
-      const [row] = await decisionsSince(from, u.id);
+      const [row] = (await decisionsSince(from, u.id)).filter((r) => r.id !== refusalRow.id);
       expect(((await factsOf(row!.id))!.facts as DecisionFacts).policy).toMatchObject({ governancePolicyEpoch: await currentEpoch(), killSwitch: "engaged" });
     } finally {
       setDecisionRecheckHookForTest(null);
@@ -590,11 +607,46 @@ describe("the MCP decision commit re-checks the epoch and the kill switch it was
       expect(await currentEpoch(), "the halt is a policy write (0120 trigger)").toBeGreaterThan(epochBefore);
       expect(refused.kind).toBe("denied");
       expect(refused.kind === "denied" && refused.decision.ruleId).toBe(GOVERNANCE_POLICY_CHANGED_RULE_ID);
-      expect(await decisionsSince(from, u.id)).toEqual([]);
+      await expectOnlyRefusalRow(from, u.id, epochBefore);
     } finally {
       setDecisionRecheckHookForTest(null);
       await setMode("normal");
       await db.update(orgSettings).set({ mcpProtocolMethods: org!.m }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+  });
+
+  it("connector invoke: the epoch moving between admission and the decision commit refuses the call (409) and records the refusal's own row", async () => {
+    const u = await mkUser("recheck-connector");
+    const other = await mkUser("recheck-connector-other");
+    const c = await inject("POST", "/v1/connectors", AUTH, { name: `b2_recheck_connector_${RUN}`, kind: "data", providerKind: "http", baseUrl: connectorUpstream.url, pricePerCallUsd: 0.01 });
+    expect(c.statusCode, c.body).toBe(201);
+    const connectorId = c.json().id as string;
+    expect((await inject("POST", "/v1/grants/connectors", AUTH, { userId: u.id, connectorId, mode: "read", allowedObjects: ["records"] })).statusCode).toBe(201);
+    const invoke = () => inject("POST", `/v1/connectors/${connectorId}/invoke`, u.auth, { operation: "read", object: "records", payload: {} });
+    // CONTROL: nothing moves; the call is allowed and its decision records the epoch it ran under
+    let from = await tipSeq();
+    const ok = await invoke();
+    expect(ok.statusCode, ok.body).toBe(200);
+    const [allowed] = await decisionsSince(from, u.id);
+    expect(allowed!.effect).toBe("allow");
+    expect((allowed!.detail as { policyEpoch?: number }).policyEpoch).toBe(await currentEpoch());
+
+    from = await tipSeq();
+    const epochBefore = await currentEpoch();
+    const fired = between(async () => {
+      const g = await inject("POST", "/v1/grants/tools", AUTH, { userId: other.id, serverId, toolName: "write_note" });
+      expect(g.statusCode).toBeLessThan(300);
+    });
+    try {
+      const refused = await invoke();
+      expect(fired()).toBe(true);
+      expect(await currentEpoch()).toBeGreaterThan(epochBefore);
+      expect(refused.statusCode, refused.body).toBe(409);
+      expect(refused.json()).toMatchObject({ error: "connector_policy_changed", externalRequests: 0, mayHaveExecuted: false });
+      const row = await expectOnlyRefusalRow(from, u.id, epochBefore);
+      expect(row).toMatchObject({ objectType: "connector", objectId: connectorId });
+    } finally {
+      setDecisionRecheckHookForTest(null);
     }
   });
 });

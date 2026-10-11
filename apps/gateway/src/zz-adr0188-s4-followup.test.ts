@@ -15,6 +15,7 @@ import {
   agentGrants,
   agentRevocations,
   and,
+  approvals,
   auditLog,
   authSessions,
   connectorGrants,
@@ -33,6 +34,8 @@ import {
   roleToolGrants,
   runMigrations,
   serverGrants,
+  sodOverrideRequests,
+  sodRules,
   sql,
   stepUpGrants,
   toolGrants,
@@ -44,10 +47,11 @@ import { stepUpActionDigest, type PutAgentGrants } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { listEntitledModels, modelListingGrantId } from "./compat-models.js";
 import { agentScopeItem, ensureIdentityFor, startInProcessChain } from "./in-process-delegation.js";
+import { applySodOverrideDecision, precheckSodOverrideDecision } from "./sod.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { hashToken } from "./token-hash.js";
-import { firstItemNoStewardHolds, getIdentityGrants, grantSetDigest, identityGrantsStepUp, identityUpdateStepUp, putIdentityGrants, stewardCheckTestHooks } from "./workload-identity-admin.js";
+import { firstItemNoStewardHolds, getIdentityGrants, grantSetDigest, identityGrantsStepUp, identityUpdateStepUp, putIdentityGrants, RoleNotFoundError, stewardCheckTestHooks } from "./workload-identity-admin.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import type { VirtualKeyContext } from "./virtual-keys.js";
 
@@ -1035,6 +1039,110 @@ describe("S4+S5 follow-up: role bundles (L3), revocation serialization (L5), for
     expect(await settledWithin(raw, 2000), "an unlocked role-grant insert slips past the open check").toBe(true);
     paused.release();
     await paused.done; // committed with a role that already bundled a tool its steward had lost: the race the lock closes
+  });
+
+  /** a stored SoD override of a refused role_tool mint, with its queue row (the escalation route's two inserts) */
+  async function mkRoleToolOverride(roleId: string, toolName: string, label: string) {
+    const requester = await mkUser(`ov-req-${label}`);
+    const [rule] = await db
+      .insert(sodRules)
+      .values({ name: `s4f-ov-${label}-${RUN}`, reason: "review follow-up probe", aKind: "agent", aObjectId: randomUUID(), bKind: "agent", bObjectId: randomUUID() })
+      .returning({ id: sodRules.id });
+    const [request] = await db
+      .insert(sodOverrideRequests)
+      .values({ ruleId: rule!.id, mintKind: "role_tool", mintPayload: { roleId, serverId, toolName }, conflictDetail: {}, label: `s4f override ${label}`, requestedByUserId: requester.id })
+      .returning({ id: sodOverrideRequests.id });
+    const [approval] = await db
+      .insert(approvals)
+      .values({ userId: requester.id, objectType: "sod_override", approverUserId: (await mkUser(`ov-appr-${label}`)).id, stageId: `__sod_override__:${request!.id}` })
+      .returning({ id: approvals.id });
+    await db.update(sodOverrideRequests).set({ approvalId: approval!.id }).where(eq(sodOverrideRequests.id, request!.id));
+    return { approvalId: approval!.id, requestId: request!.id };
+  }
+
+  it("review follow-up item 1: a role grant minted by an approved SoD override waits for a grant-set write whose check read that role", async () => {
+    const p = await mkUser("ov-steward");
+    const role = await mkRole("ov");
+    await db.insert(roleToolGrants).values({ roleId: role, serverId, toolName: "rd" });
+    await db.insert(roleAssignments).values({ userId: p.id, roleId: role });
+    // the steward has lost "wr"; the role does not bundle it yet, so the steward holds the whole role
+    await db.insert(revocations).values({ userId: p.id, serverId, toolName: "wr" });
+    const subject = await mkAgent("ov-subject");
+    const ident = await ensureIdentityFor(db, { kind: "agent", id: subject });
+    await db.update(workloadIdentities).set({ sponsorUserIds: [p.id] }).where(eq(workloadIdentities.id, ident.id));
+    const set = { ...emptySet, agents: [], revision: 0, roleIds: [role] };
+    const ov = await mkRoleToolOverride(role, "wr", "lock");
+    const decider = await mkUser("ov-decider");
+
+    const { done, release } = await pausedCheck(() => putIdentityGrants(db, ident.id, set, null));
+    // the approved override mints "wr" into the role inside the decision's transaction (`executeOverriddenMint`),
+    // which takes the role's row first and must wait for the open check
+    const order: string[] = [];
+    const mint = db2
+      .transaction((tx) => applySodOverrideDecision(tx as unknown as Db, { id: ov.approvalId }, "approved", decider.id))
+      .then(() => order.push("override-mint"));
+    expect(await settledWithin(mint, 750), "the override minted into the role while the steward check was open").toBe(false);
+    release();
+    const written = await done.then((r) => {
+      order.push("identity-grant");
+      return r;
+    });
+    await mint;
+    expect(written.revision).toBe(1);
+    expect(order).toEqual(["identity-grant", "override-mint"]); // serial: the role was whole for the steward at the write
+    const [request] = await db.select().from(sodOverrideRequests).where(eq(sodOverrideRequests.id, ov.requestId));
+    expect(request!.status).toBe("approved");
+    expect(await db.select().from(roleToolGrants).where(and(eq(roleToolGrants.roleId, role), eq(roleToolGrants.toolName, "wr")))).toHaveLength(1);
+    // the other order: with "wr" in the role, the next write of the same set is refused
+    await expect(putIdentityGrants(db, ident.id, { ...set, revision: 1 }, null)).rejects.toMatchObject({ code: "grant_exceeds_stewards" });
+  });
+
+  it("review follow-up item 2: a role grant to a missing role is refused 404 role_not_found and audited, on every role-grant route and the SoD override", async () => {
+    const agentId = await mkAgent("rnf-agent");
+    const refusals = async (roleId: string) =>
+      db.select().from(auditLog).where(and(eq(auditLog.ruleId, "role-grant-refused"), eq(auditLog.objectId, roleId)));
+    const routes: Array<[string, Record<string, unknown>]> = [
+      ["tools", { serverId, toolName: "rd" }],
+      ["servers", { serverId, readOnlyAll: true }],
+      ["agents", { agentId }],
+      ["connectors", { connectorId, mode: "read" }],
+    ];
+    for (const [kind, payload] of routes) {
+      // CONTROL: the same grant to a role that exists is minted
+      const real = await mkRole(`rnf-${kind}`);
+      const ok = await inject("POST", `/v1/roles/${real}/grants/${kind}`, AUTH, payload);
+      expect(ok.statusCode, `${kind}: control ${ok.body}`).toBe(201);
+      expect(await refusals(real)).toHaveLength(0);
+      // a role that does not exist: refused by name (not a foreign-key 500), audited once, nothing written
+      const missing = randomUUID();
+      const res = await inject("POST", `/v1/roles/${missing}/grants/${kind}`, AUTH, payload);
+      expect(res.statusCode, `${kind}: ${res.body}`).toBe(404);
+      expect(res.json()).toMatchObject({ error: "role_not_found" });
+      const rows = await refusals(missing);
+      expect(rows, `${kind}: one deny row`).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ effect: "deny", objectType: "role" });
+      expect(rows[0]!.detail).toMatchObject({ code: "role_not_found", via: `POST /v1/roles/:roleId/grants/${kind}` });
+    }
+
+    // the SoD override decision: refused before anything is written (precheck), audited
+    const decider = await mkUser("rnf-decider");
+    const real = await mkRole("rnf-ov");
+    const control = await mkRoleToolOverride(real, "wr", "rnf-control");
+    expect(await precheckSodOverrideDecision(db, { id: control.approvalId }, decider.id, "approved")).toBeNull();
+    const missing = randomUUID();
+    const ov = await mkRoleToolOverride(missing, "wr", "rnf");
+    const refused = await precheckSodOverrideDecision(db, { id: ov.approvalId }, decider.id, "approved");
+    expect(refused).toMatchObject({ status: 404, body: { error: "role_not_found" } });
+    const rows = await refusals(missing);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.detail).toMatchObject({ code: "role_not_found", via: "sod-override-decide", approvalId: ov.approvalId, overrideRequestId: ov.requestId });
+    // ... and if the role goes after the precheck, the mint itself refuses by name and the decision rolls back
+    const err = await db
+      .transaction((tx) => applySodOverrideDecision(tx as unknown as Db, { id: ov.approvalId }, "approved", decider.id))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RoleNotFoundError);
+    const [request] = await db.select().from(sodOverrideRequests).where(eq(sodOverrideRequests.id, ov.requestId));
+    expect(request!.status).toBe("pending");
   });
 
   it("deadlock: a force role delete during the steward check waits on the role row; both finish, no 40P01", async () => {

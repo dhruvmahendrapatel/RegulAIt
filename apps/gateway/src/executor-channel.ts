@@ -66,6 +66,7 @@ import {
   executorReportDigest,
   executorSelfTestSchema,
   isolationClassRank,
+  unresolvedPlacementFact,
   type AppliedIsolationKind,
   type ExecutionOffer,
   type ExecutionProfileBody,
@@ -262,9 +263,16 @@ async function withdrawOpenOffers(db: Db, executorId: string): Promise<void> {
 // Placement rows
 // ---------------------------------------------------------------------------
 
+/**
+ * Every offer and placement is written `enforce`, the only mode (ADR-0190 OWNER DECISION A). Migration 0191
+ * rewrote stored offers; an older placement keeps the mode it was recorded under, and nothing here copies the
+ * mode from a stored row.
+ */
+const ENFORCEMENT = "enforce" as const;
+
 async function refusedPlacement(
   db: Db,
-  o: Pick<ExecutionOfferRow, "id" | "workloadKind" | "requiredClass" | "requiredBy" | "enforcement" | "profileDigest"> & { executorId: string | null },
+  o: Pick<ExecutionOfferRow, "id" | "workloadKind" | "requiredClass" | "requiredBy" | "profileDigest"> & { executorId: string | null },
   code: ExecutionRefusalReason,
 ): Promise<string> {
   const auditId = await auditExecutor(db, {
@@ -278,7 +286,7 @@ async function refusedPlacement(
   });
   const [row] = await db
     .insert(executionPlacements)
-    .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: o.enforcement, profileDigest: o.profileDigest, outcome: "refused", refusalCode: code })
+    .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, outcome: "refused", refusalCode: code })
     .returning({ id: executionPlacements.id });
   return row!.id;
 }
@@ -290,7 +298,7 @@ function offerView(o: ExecutionOfferRow): ExecutionOffer {
     workloadKind: o.workloadKind,
     requiredClass: o.requiredClass,
     requiredBy: o.requiredBy,
-    enforcement: o.enforcement,
+    enforcement: ENFORCEMENT,
     profileDigest: o.profileDigest,
     imageDigest: o.imageDigest,
     expiresAt: o.expiresAt.toISOString(),
@@ -305,7 +313,6 @@ export interface OfferPlacementInput {
   workloadKind: IsolableWorkloadKind;
   requiredClass: RequirableIsolationClass;
   requiredBy: RequiredClassSource;
-  enforcement: "enforce" | "warn";
   profileDigest: string;
   imageDigest: string;
   /** how long the offer waits to be accepted (default EXECUTION_OFFER_TTL_SECONDS) */
@@ -325,6 +332,34 @@ export type OfferPlacementOutcome =
  * before any sandbox starts. Nothing here lowers the class.
  */
 export async function offerPlacement(db: Db, input: OfferPlacementInput): Promise<OfferPlacementOutcome> {
+  // Amendment item 15 with OWNER DECISION B: a policy fact that is missing or outside its vocabulary refuses
+  // `policy_unresolved` before anything else is looked at, and before any executor is offered work. There is
+  // no placement row (the row's own columns would have to hold the unresolved fact); the audit row records it.
+  // Every fact the INSERTs below depend on is named here, so a malformed one is a refusal, never a CHECK error.
+  const unresolved = unresolvedPlacementFact({
+    workloadKind: input.workloadKind,
+    requiredClass: input.requiredClass,
+    requiredBy: input.requiredBy,
+    profileDigest: input.profileDigest,
+    imageDigest: input.imageDigest,
+  });
+  if (unresolved) {
+    await auditExecutor(db, {
+      userId: NO_IDENTITY,
+      objectType: "execution_placement",
+      objectId: null,
+      ruleId: "execution-refused",
+      effect: "deny",
+      // only well-formed values are echoed: a malformed one is caller input of unbounded shape
+      detail: {
+        unresolvedFact: unresolved,
+        profileDigest: typeof input.profileDigest === "string" && /^[0-9a-f]{64}$/.test(input.profileDigest) ? input.profileDigest : null,
+        code: "policy_unresolved",
+      },
+      reason: `placement refused (policy_unresolved): the policy fact ${unresolved} did not resolve (ADR-0190 decision 7, amendment item 15; never defaulted)`,
+    });
+    return { kind: "refused", code: "policy_unresolved", placementId: null };
+  }
   const now = await databaseNow(db);
   const refuse = async (code: ExecutionRefusalReason): Promise<OfferPlacementOutcome> => ({
     kind: "refused",
@@ -345,6 +380,10 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
     return { kind: "refused", code: "profile_retired", placementId: null };
   }
   if (profile.retiredAt) return refuse("profile_retired");
+  // the profile's own floor is a policy fact too: one that does not resolve is never dropped from the MAX
+  if (unresolvedPlacementFact({ workloadKind: input.workloadKind, requiredClass: input.requiredClass, requiredBy: input.requiredBy, profileMinClass: profile.minClass })) {
+    return refuse("policy_unresolved");
+  }
   if (isolationClassRank(profile.minClass) > isolationClassRank(input.requiredClass)) {
     // the profile's own floor is part of the requirement (decision 7 item 5)
     input = { ...input, requiredClass: profile.minClass, requiredBy: "configured_profile" };
@@ -387,7 +426,7 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
       workloadKind: input.workloadKind,
       requiredClass: input.requiredClass,
       requiredBy: input.requiredBy,
-      enforcement: input.enforcement,
+      enforcement: ENFORCEMENT,
       profileDigest: input.profileDigest,
       imageDigest: input.imageDigest,
       expiresAt: sql`now() + make_interval(secs => ${ttl})`,
@@ -684,6 +723,24 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       return e ?? null;
     }
 
+    /**
+     * Review follow-up (2026-10-10): a take or a report refused because the executor is no longer active leaves its
+     * own deny row, as a mismatch does. Written on `db` AFTER the deciding transaction has ended, so it commits
+     * whatever that transaction did (the PUT routes' pattern for an audited refusal).
+     */
+    async function auditQuarantinedRefusal(step: "accept" | "report", executor: ExecutorRow | null, authed: ExecutorRow, offerId: string): Promise<void> {
+      const ex = executor ?? authed;
+      await auditExecutor(db, {
+        userId: NO_IDENTITY,
+        objectType: "execution_placement",
+        objectId: offerId,
+        ruleId: "executor-channel-refused",
+        effect: "deny",
+        detail: { phase: `offer-${step}`, code: "executor_quarantined", offerId, executorId: ex.id, executorName: ex.name, status: executor?.status ?? null, quarantineCode: executor?.quarantineCode ?? null },
+        reason: `executor ${ex.name} may not ${step === "accept" ? "take" : "report on"} offer ${offerId}: it is ${executor?.status ?? "gone"}, not active; nothing was placed (ADR-0190 decision 6)`,
+      });
+    }
+
     /** the offer named by the route, locked, if it belongs to this executor */
     async function lockedOffer(tx: Db, executorId: string, offerId: string): Promise<ExecutionOfferRow | null> {
       const [o] = await tx
@@ -701,8 +758,8 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       const row = auth.executor!;
       const p = uuidParam.safeParse(req.params);
       if (!p.success) return refused(reply, 400, "invalid_offer", row);
-      if (row.status !== "active") return refused(reply, 409, "executor_quarantined", row);
-      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status)
+      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status);
+      // an executor that is not active is refused there, once, and audited below
       let current: ExecutorRow | null = row;
       const out = await db.transaction(async (tx) => {
         const ex = await lockedExecutor(tx as unknown as Db, row.id);
@@ -721,7 +778,10 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         await tx.update(executionOffers).set({ status: "accepted", acceptedAt: sql`now()` }).where(eq(executionOffers.id, o.id));
         return { status: 200, offer: offerView(o) } as const;
       });
-      if (out.status !== 200) return refused(reply, out.status, out.code, current);
+      if (out.status !== 200) {
+        if (out.code === "executor_quarantined") await auditQuarantinedRefusal("accept", current, row, p.data.offerId);
+        return refused(reply, out.status, out.code, current);
+      }
       return reply.status(200).send({ offer: out.offer, next: nextFor(current) });
     });
 
@@ -757,9 +817,9 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       if (signed.report.kind !== "placement" || signed.report.offerId !== p.data.offerId) return refused(reply, 400, "report_offer_mismatch", row);
       if (signed.report.executor.identifier !== auth.client.identity.identifier) return refused(reply, 400, "report_identifier", row);
       if (!(await verifyReportSignature(auth, signed))) return refused(reply, 401, "report_signature_invalid", row);
-      if (row.status !== "active") return refused(reply, 409, "executor_quarantined", row);
 
-      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status)
+      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status);
+      // an executor that is not active is refused there, once, and audited below
       let current: ExecutorRow | null = row;
       const out = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -782,7 +842,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         else failures.push(...evaluateExecutorReport(signed.report, { profile: profile.parsed, profileDigest: profile.digest, backend: ex.backend, classesDeclared: ex.classesDeclared, requiredClass: o.requiredClass }).failures);
         if (signed.report.imageDigest !== o.imageDigest) failures.push({ probe: "report", code: "image_digest_mismatch" });
         // the class actually applied must also satisfy the requirement through the customer mapping, if that is what it is.
-        // In EVERY enforcement mode (ADR-0190 amendment item 14): `warn` never places a call below its required class.
+        // Never below the required class (ADR-0190 decision 7; enforcement is the only mode, OWNER DECISION A).
         const effective = signed.report.class === "customer_declared" ? ex.declaredClass : signed.report.class;
         if (!effective || isolationClassRank(effective) < isolationClassRank(o.requiredClass)) {
           if (!failures.some((f) => f.code === "class_below_required")) failures.push({ probe: "report", code: "class_below_required" });
@@ -801,7 +861,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
           });
           const [pl] = await tx
             .insert(executionPlacements)
-            .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: o.enforcement, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "mismatch", refusalCode: "execution_profile_mismatch" })
+            .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "mismatch", refusalCode: "execution_profile_mismatch" })
             .returning({ id: executionPlacements.id });
           await tx.update(executionOffers).set({ status: "mismatch", reportedAt: sql`now()`, placementId: pl!.id }).where(eq(executionOffers.id, o.id));
           return { status: 409, code: "execution_profile_mismatch", failures, placementId: pl!.id } as const;
@@ -816,7 +876,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         });
         const [pl] = await tx
           .insert(executionPlacements)
-          .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: o.enforcement, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "placed" })
+          .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "placed" })
           .returning({ id: executionPlacements.id });
         await tx.update(executionOffers).set({ status: "placed", reportedAt: sql`now()`, placementId: pl!.id }).where(eq(executionOffers.id, o.id));
         return { status: 200, placementId: pl!.id, reportSha256 } as const;
@@ -826,7 +886,10 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         await quarantineExecutor(db, row.id, "execution_profile_mismatch", { detail: { offerId: p.data.offerId, placementId: out.placementId, failures: out.failures } });
         return reply.status(409).send({ error: out.code, next: "quarantined", failures: out.failures });
       }
-      if (out.status !== 200) return refused(reply, out.status, out.code, current);
+      if (out.status !== 200) {
+        if (out.code === "executor_quarantined") await auditQuarantinedRefusal("report", current, row, p.data.offerId);
+        return refused(reply, out.status, out.code, current);
+      }
       return reply.status(200).send({ release: true, placementId: out.placementId, reportSha256: out.reportSha256, next: nextFor(current) });
     });
 

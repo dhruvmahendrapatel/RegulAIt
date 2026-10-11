@@ -150,14 +150,25 @@ export const bomIntSchema = z.number().int().safe();
  * delimiter and one flat, anchored character-class test per part, after a
  * length cap. No nested or overlapping quantifier is applied to caller input.
  */
-const SPIFFE_HOST = /^[a-z0-9.-]+$/;
-const SPIFFE_SEGMENT = /^[A-Za-z0-9._~:@!$&'()*+,;=-]+$/;
+/**
+ * A SPIFFE ID per the SPIFFE-ID standard §2.1 and §2.2 (ADR-0191): a lower-case
+ * trust domain of `a-z 0-9 . - _`; then one or more path segments of
+ * `A-Z a-z 0-9 . - _`, none empty, `.` or `..`. So no percent-encoding, query,
+ * fragment, userinfo, port or trailing `/` (each needs a character outside the
+ * classes, or an empty segment). At most 2048 characters, and the trust domain
+ * at most 255 (§2.3; the same cap as ADR-0188's `isSpiffeId`).
+ */
+const SPIFFE_TRUST_DOMAIN = /^[a-z0-9._-]+$/;
+const SPIFFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
 export function isBomSpiffeId(value: string): boolean {
   if (value.length > 2048 || !value.startsWith("spiffe://")) return false;
   const rest = value.slice("spiffe://".length);
   const slash = rest.indexOf("/");
-  if (slash < 1 || !SPIFFE_HOST.test(rest.slice(0, slash))) return false;
-  return rest.slice(slash + 1).split("/").every((segment) => SPIFFE_SEGMENT.test(segment));
+  if (slash < 1 || slash > 255 || !SPIFFE_TRUST_DOMAIN.test(rest.slice(0, slash))) return false;
+  return rest
+    .slice(slash + 1)
+    .split("/")
+    .every((segment) => segment !== "." && segment !== ".." && SPIFFE_SEGMENT.test(segment));
 }
 const OID_ARC = /^[0-9]+$/;
 /** a dotted OID: `0`, `1` or `2`, then one or more numeric arcs */
@@ -274,20 +285,30 @@ export function hasEmailShape(text: string): boolean {
 
 /** every JSON path whose key or string value holds an email shape; empty means clean */
 export function findEmailShapes(value: unknown, at = "$"): string[] {
+  // ITERATIVE (an explicit stack, document order kept): a deeply nested crafted value cannot overflow the call
+  // stack of the verifier or the export scan (ADR-0191 review of #344, item 2)
   const out: string[] = [];
-  const walk = (v: unknown, p: string) => {
+  const stack: Array<{ v: unknown; p: string } | { key: string; p: string }> = [{ v: value, p: at }];
+  while (stack.length) {
+    const item = stack.pop()!;
+    if ("key" in item) {
+      if (hasEmailShape(item.key)) out.push(`${item.p}{key}`);
+      continue;
+    }
+    const { v, p } = item;
     if (typeof v === "string") {
       if (hasEmailShape(v)) out.push(p);
     } else if (Array.isArray(v)) {
-      v.forEach((x, i) => walk(x, `${p}[${i}]`));
+      for (let i = v.length - 1; i >= 0; i--) stack.push({ v: v[i], p: `${p}[${i}]` });
     } else if (v !== null && typeof v === "object") {
-      for (const [k, x] of Object.entries(v)) {
-        if (hasEmailShape(k)) out.push(`${p}{key}`);
-        walk(x, `${p}.${k}`);
+      const entries = Object.entries(v);
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const [k, x] = entries[i]!;
+        stack.push({ v: x, p: `${p}.${k}` });
+        stack.push({ key: k, p });
       }
     }
-  };
-  walk(value, at);
+  }
   return out;
 }
 

@@ -1268,6 +1268,13 @@
       "when": 1785125000000,
       "tag": "0190_delegation_depth_limit_signed",
       "breakpoints": true
+    },
+    {
+      "idx": 191,
+      "version": "7",
+      "when": 1785126000000,
+      "tag": "0191_isolation_enforce_only",
+      "breakpoints": true
     }
   ]
 }

@@ -1846,7 +1846,10 @@ at 74e533e returned fix-then-merge, rechecks were run at 4d9b5ea and e1c45f6, an
    canonicalise and hash differently. B2 writes `inputs: null`. A path never writes `[]` for a list it did not record.
 4. **Policy facts by path (§4).** The MCP tool, MCP protocol and connector paths record the policy epoch and the
    kill-switch state from one locked read in the decision transaction. If the epoch or the kill switch moved after
-   evaluation, the call is refused `governance-policy-changed` and nothing is written. Every other decision writer
+   evaluation, the call is refused `governance-policy-changed`: nothing is written under the stale epoch, and the
+   refusal records its own deny decision row afterwards (`receiptClass: "decision"`, with its facts and marker, and
+   `policy: null` because no policy was in force for it; the stale epoch is kept as `decidedPolicyEpoch`, PR #343).
+   Every other decision writer
    records `policy` as not captured by path (`not_captured_by_path`, as the contract allows). ABAC, config and rule-id
    versions are not yet recorded on any path.
 5. **"Kill switch engaged" means halted.** It is true only when the deployment or the decision's subject is halted.
@@ -1860,6 +1863,48 @@ at 74e533e returned fix-then-merge, rechecks were run at 4d9b5ea and e1c45f6, an
    - A database superuser can bypass the 0189 trigger with `session_replication_role = replica`, as with every
      existing guard. The deployment's application role must not be a superuser. The CI role is a superuser.
    - Capture costs about 3–10 ms per decision inside the global audit lock. The test pins a ceiling.
+
+### Amendments from the B4 build and its review (2026-10-11)
+
+B4 (Decision BOM assembler, signer, bundle and verifier) is PR #344. It needed no migration. Under ADR-0191 it had an
+independent review at 0ea73df (fix-then-merge), and a recheck at 0363543 returned merge.
+
+1. **Erratum to G3.** G3's sentence "no `(table, id)` is bound twice across `facts.rows` and every addendum's `rows`"
+   is too broad. It contradicts B4.4's approval row ("every binding is kept; an approval re-bound by an addendum appears
+   twice") and vector P11. It now reads: **no `usage_events` or `trace_spans` id is bound twice** across `facts.rows`
+   and the addenda. That is the duplicate rule G15 and B4.4 already state. Other tables may be re-bound by an addendum.
+2. **R17 ruling.** B5 merged first (#297), so under R17 B4 is the PR that flips `AI_BOM_SNAPSHOTS_RELEASED`. The master
+   session ruled that the flip lands in **its own small PR immediately after #344**, reviewed on its own, so that a
+   release switch is never buried in a large diff. Until that PR merges, the switch stays false. Both snapshot download
+   routes answer 501 `bom_snapshots_not_released` after the role check, which matches R17 literally.
+3. **The bundle envelope is canonical.** The B4.1 tar writer is shared (`writeBomTar`). The verifier rebuilds the
+   archive from its own entries and requires a byte-exact match. It also requires:
+   - exactly one gzip member, with no flags, MTIME 0, and a matching CRC and length;
+   - RFC 8785 canonical JSON for every `.json` entry.
+
+   No tar header, padding or order can therefore carry data outside the signed content. That closes the R21 scan gap
+   the review found. The gzip XFL and OS bytes and the deflate encoding carry no file data, and B4.1 makes no claim
+   about them.
+4. **The verifier never throws.** The scan walks iteratively. Costs must match R23 (at most 32 characters, no
+   exponent), and are checked before any arithmetic. Every entry point turns an unexpected fault into `invalid` with
+   a fixed check: the online route answers 200, and `scripts/verify-bom.mjs` exits 1.
+5. **Our own tar reader (an ADR-0176 exception).** The maintained tar libraries merge PAX and GNU long-name headers
+   silently when they extract, so they cannot enforce B4.1's exact-bytes envelope. B4.1 also mandates no tar
+   dependency. The reader is narrow (B4.1 entries only), and it is re-checked whenever the ecosystem changes.
+   `bignumber.js` 11.1.5 (MIT, pinned, listed in `THIRD_PARTY.md`) handles R23 decimal sums.
+6. **Export route class.** The five B4 routes are `NON_ADMIN_ROUTES`, and each handler is gated by `bom_export_roles`
+   before any data is read. The strict default is admins only. An auditor grant works only while that setting is
+   relaxed, and relaxing it goes through B1's audited `PUT /v1/org/settings` with a step-up (ADR-0180). Everyone else
+   gets 403 `bom_export_forbidden`.
+7. **Vector P25 corrected.** Its actor's SPIFFE trust domain was upper case, which the SPIFFE ID standard does not
+   allow. The contract was right. P25 now uses `spiffe://test-only.example/TEST-ONLY-CANARY/...`, and the derived
+   N-R13 and N-R14 now fail only on the actor reason. This was a reviewed correction under ADR-0191: the vector was
+   wrong, not the verifier. All 33 positive vectors pass.
+8. **Follow-ups.**
+   - The SPIFFE contract schema is tightened in its own reviewed PR: allow `_` in the host, limit path segments to
+     `[A-Za-z0-9._-]`, and refuse `.` and `..` segments.
+   - The verifier catch-all logs the fault it caught. A fault that comes from the trust root answers 500, not
+     `body_schema`.
 
 ## Further design review happens at slice level
 

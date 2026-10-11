@@ -204,8 +204,8 @@ function fromBatches(): Record<string, StrictnessRule> {
   for (const k of BOM_SETTING_KEYS) {
     out[k] = rule(BOM_STRICT_DEFAULTS[k], (v) => bomSettingRelaxed(k, v as never), (v, b) => bomSettingLooser(k, v, b));
   }
-  // ADR-0190 (batch 6 item 3): warn mode, a lower class floor and a longer attestation lifetime are looser than the
-  // default; a floor an admin raised is lowered back (or a shortened lifetime lengthened) only with the step-up
+  // ADR-0190 (batch 6 item 3): a lower class floor and a longer attestation lifetime are looser than the default
+  // (enforcement has one value, `enforce`: OWNER DECISION A); a floor an admin raised is lowered back (or a shortened lifetime lengthened) only with the step-up
   for (const k of ISOLATION_SETTING_KEYS) {
     out[k] = rule(ISOLATION_STRICT_DEFAULTS[k], (v) => isolationSettingRelaxed(k, v as never), (v, b) => isolationSettingLooser(k, v, b));
   }

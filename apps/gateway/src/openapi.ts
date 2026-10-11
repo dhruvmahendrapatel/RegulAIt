@@ -167,15 +167,15 @@ export interface RouteDoc {
 }
 
 /**
- * ADR-0189 slice B4: the FROZEN contract of the five §9 routes B1 registered as
- * 501 stubs (`@regulait/shared` `contract-b4.ts`). Internal stability, so they
- * render only with `?include=all`; the routes still answer 501 `not_built`
- * until B4 implements exactly these shapes.
+ * ADR-0189 slice B4: the FROZEN contract of the five §9 routes
+ * (`@regulait/shared` `contract-b4.ts`), implemented in `bom-routes.ts`.
+ * Internal stability, so they render only with `?include=all`. The gate is
+ * `bom_export_roles`, checked in the handler (403 `bom_export_forbidden`).
  */
 const BOM_B4_DOCS: Record<string, RouteDoc> = Object.fromEntries(
   Object.entries(BOM_B4_ROUTE_CONTRACT).map(([key, c]) => {
     const doc: RouteDoc = {
-      summary: `${c.summary} Not built yet: answers 501 \`not_built\` until ADR-0189 slice B4.`,
+      summary: `${c.summary} Admins, or an explicit auditor grant while \`bom_export_roles\` allows it (403 \`bom_export_forbidden\` otherwise).`,
       errors: c.errors,
       errorBody: bomErrorEnvelopeSchema,
     };

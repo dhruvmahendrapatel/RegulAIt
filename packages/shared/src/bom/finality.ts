@@ -103,11 +103,22 @@ function strongest(i: FinalityInput): { state: DecisionBomFinalityState; shortOf
 }
 
 export function decisionBomFinality(i: FinalityInput): FinalityDecision {
+  const d = decisionBomFinalityDetail(i);
+  return d.freeze ? { freeze: true, state: d.state } : d;
+}
+
+/**
+ * ADR-0189 B4.5 / B4.9 G11: the same decision, also naming why a frozen state is short of `anchored` (the first
+ * condition that holds, in `strongest()`'s order). The B4 assembler uses it; the finality-emission vectors test it.
+ */
+export function decisionBomFinalityDetail(
+  i: FinalityInput,
+): { freeze: true; state: DecisionBomFinalityState; shortOf: DecisionBomPendingReason | null } | { freeze: false; reason: DecisionBomPendingReason | "receipt_unsigned" } {
   if (!i.receiptSigned) return { freeze: false, reason: "receipt_unsigned" };
   const { state, shortOf } = strongest(i);
-  if (RANK[state] >= FLOOR[i.setting]) return { freeze: true, state };
+  if (RANK[state] >= FLOOR[i.setting]) return { freeze: true, state, shortOf };
   // only reached under `accept` (strongest() never returns it under `refuse`)
-  if (state === "anchored_finite_lock") return { freeze: true, state };
+  if (state === "anchored_finite_lock") return { freeze: true, state, shortOf };
   return { freeze: false, reason: shortOf ?? "anchor_not_flushed" };
 }
 

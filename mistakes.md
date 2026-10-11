@@ -1521,3 +1521,23 @@ agents, credential windows, current entitlements).
 Rule: any timestamp written to, or compared with, a database row uses the database clock (`now()`), and each "is it
 live" question has one shared predicate used by every path. Ask for a sweep of both classes after the first such
 finding, not after the fourth.
+
+### M-076 (2026-10-11) - I removed a builder's worktree before its review returned
+
+I removed the worktree of the agent that built PR #339 as soon as it reported, before the independent review came back.
+The review asked for fixes, and the builder could no longer be resumed: its worktree was gone. A fresh agent had to take
+over the fix round without the builder's context.
+
+Rule: keep a builder's worktree until its PR merges. Remove a reviewer's worktree only after its findings are fixed and
+rechecked.
+
+### M-077 (2026-10-11) - A subagent overwrote the master merge loop through the shared scratchpad
+
+A test-repeat agent wrote its own `loop.sh` into the session scratchpad, over the master merge loop's `loop.sh`. The
+running loop had already read the old file, so nothing showed until the 00:05 restart, when the loop exited at once.
+The merge loop was down for a few minutes and had to be rebuilt.
+
+Rule: the master session's operational scripts carry a `master-` prefix (`master-merge-loop.sh`, `master-run.sh`).
+Every agent brief that may write to the scratchpad names a file prefix for that agent. A restarted long-running script
+is checked to be running before the restart is reported.
+

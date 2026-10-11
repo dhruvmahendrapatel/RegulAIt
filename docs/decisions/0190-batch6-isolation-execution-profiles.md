@@ -312,7 +312,7 @@ Then:
 
 | Setting | Default (strict) | Relaxable to | Notes |
 |---|---|---|---|
-| `isolation_enforcement` | `enforce` | `warn` (place at what is available, record the shortfall as a gate warning) | audited, `settings_relax` step-up; posture page shows "Isolation: not enforced"; never relaxes the invariants below |
+| `isolation_enforcement` | `enforce` | none: `enforce` is the only value (owner decision A, 2026-10-11). To run where a class is unavailable, an admin lowers the requirement itself through the floor relaxations below | not relaxable; a request to set any other value is refused 400 |
 | Sensitivity floors | public/internal/confidential L2, regulated L3 | down to L1 per sensitivity, never below | audited, step-up |
 | `mcp_stdio` floor | L2 | L1 | audited, step-up |
 | `engine_worker` floor | L2 | L1 (OWNER DECISION 4) | audited, step-up |
@@ -611,7 +611,7 @@ are left to the owner at the end. None of these items relaxes a strict default (
     decision 7 item 5's unknown agent, which defaults to the most restrictive profile. The envelope is open item B
     below. Vectors `unknown-*`.
 
-**Open for the owner.**
+**Open for the owner** (decided 2026-10-11; see "Owner decisions on A and B" below).
 
 - **A. What `warn` means.** *Recommended:* retire `warn` as a value of `isolation_enforcement`. An admin who cannot
   provide a class lowers the requirement itself, through the relaxations decision 11 already audits (each
@@ -624,6 +624,38 @@ are left to the owner at the end. None of these items relaxes a strict default (
   sees the same refusal family as every other isolation refusal, and the audit row can tell a configuration fault
   from a capacity fault. Alternative: answer with a server-side error (`503`), treating the fact as a fault in our own
   data rather than a policy outcome.
+
+## Owner decisions on A and B (accepted 2026-10-11)
+
+The owner accepted both recommendations ("go with your recommendations", master session, 2026-10-11).
+
+- **A. `warn` is retired.** `warn` is removed as a value of `isolation_enforcement`. The only value is `enforce`
+  (ADR-0180). An admin who cannot provide a class lowers the requirement itself, through the relaxations decision 11
+  already audits: each sensitivity floor down to L1, and the `mcp_stdio` and `engine_worker` floors down to L1, each
+  with a step-up. The requirement and the placement therefore never disagree, and no call is placed below what its own
+  record says it required (PR #340 already enforces this in every mode).
+  - **Code follow-up:** the setting, its schema, the UI control and its help text lose `warn`. A stored `warn` value is
+    read as `enforce` (no grandfathering). The decision 11 row and the Fail closed line of the Test strategy are
+    rewritten to match.
+  - **Vectors:** `warn-shortfall` is pinned as a refusal, or retired as a case that can no longer be configured.
+- **B. An unresolved policy fact answers `409 execution_profile_unavailable`.** Rule id `execution-profile`, with a
+  sixth fixed reason `policy_unresolved` added to decision 7's list. The caller sees the same refusal family as every
+  other isolation refusal, and the audit row tells a configuration fault from a capacity fault.
+  - **Code follow-up:** the placement path maps every unresolved or missing policy fact to this envelope, and the
+    `unknown-*` vectors are pinned to it.
+
+**As built (PR #346, migration 0191; reviewed under ADR-0191).**
+- **Stored values are rewritten.** A stored `warn` in `org_settings` and `execution_offers` is rewritten to `enforce`.
+  Each rewritten row gets a `migration_audit_outbox` row (ADR-0181 FX2) carrying the old value, the new value and the
+  reason. The migration is safe to run twice.
+- **Historic placements keep their mode.** `execution_placements` is append-only evidence, so its rows keep the mode
+  they were recorded under. The `enforce`-only and no-fallback CHECKs are added `NOT VALID`: they bind every new row,
+  and history is not rewritten. No reader re-validates the old rows.
+- **B's scope today.** `policy_unresolved` is enforced at the placement broker boundary. It covers a missing required
+  class, a missing or malformed image digest, and a missing or malformed profile digest, each refused and audited
+  before any offer. The gateway resolvers for sensitivity, compliance floors, autonomy and parent lookups arrive with
+  slice I2, and they must call `unresolvedPlacementFact` before computing the MAX. Until I2 no route answers the HTTP
+  409 envelope.
 
 ## Rollout: slices (one PR each)
 
@@ -653,8 +685,9 @@ counter that must stay at zero for every refusal (the `pillar7-inheritance.test.
 
 - **Fail closed.** A regulated project's stdio call with only an L2 executor → `409 execution_profile_unavailable`
   (`class_below_required`), zero sandboxes started. With no executor, a stale attestation, a quarantined executor or a
-  retired profile → refused with each reason. `isolation_enforcement` relaxed to `warn` → placed, gate warning,
-  audited relaxation; the invariants still hold (no in-gateway stdio, no L0 for `mcp_stdio`).
+  retired profile → refused with each reason. An unresolved policy fact → `409 execution_profile_unavailable`
+  (`policy_unresolved`), audited, no offer made. Setting `isolation_enforcement` to anything but `enforce` → 400
+  (owner decision A); the invariants always hold (no in-gateway stdio, no L0 for `mcp_stdio`).
 - **No fallback.** An L3 requirement while an L2 executor is idle is never placed on it, including after a retry, a
   queue, or a restart.
 - **Mismatch.** An executor that claims L2 but whose per-placement report shows the host kernel (a fake backend
