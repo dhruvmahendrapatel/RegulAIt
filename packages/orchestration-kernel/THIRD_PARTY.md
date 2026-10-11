@@ -5,6 +5,6 @@ ISC; maintained; pinned; works air-gapped). npm dependencies are pinned exactly 
 
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
-| `zod` (npm, github.com/colinhacks/zod, © Colin McDonnell) | `3.25.76` (exact) | MIT | Runtime schemas for the task graph (`taskNodeSchema` and related DAG contracts) in `src/index.ts`. |
+| `zod` (npm, github.com/colinhacks/zod, © Colin McDonnell) | `4.6.5` (exact; ADR-0192) | MIT | Runtime schemas for the task graph (`taskNodeSchema` and related DAG contracts) in `src/index.ts`. |
 | `@types/node` (npm, github.com/DefinitelyTyped/DefinitelyTyped) | `26.1.1` (exact devDependency) | MIT | Type definitions for the Node.js standard library used by the sources and tests; test/build-only, never in a shipped bundle. |
 | `vitest` (npm, github.com/vitest-dev/vitest, © Anthony Fu and contributors) | `4.1.11` (exact devDependency) | MIT | Test runner for the `*.test.ts` files in `src/`; test-only, never in a shipped bundle. |

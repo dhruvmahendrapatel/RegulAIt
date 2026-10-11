@@ -130,7 +130,7 @@ const transportSchema = z
   .object({
     type: z.string().optional(),
     url: z.string().optional(),
-    variables: z.record(z.unknown()).optional(),
+    variables: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
 

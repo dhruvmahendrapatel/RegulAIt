@@ -34,19 +34,15 @@
  * deployment should not have to read our source. It is admin-gated and it is
  * not the published artifact.
  *
- * ONE DEPENDENCY WAS ADDED: `zod-to-json-schema` (3.25.2, zero runtime
- * dependencies of its own, already resolved in this workspace's lockfile as a
- * transitive dependency of the OpenAI SDK). It is the difference between bodies
- * DERIVED from the schemas the handlers enforce and bodies re-typed by hand
- * beside them — which is the exact drift this ADR exists to prevent. Under
- * ADR-0012's dependency scrutiny that trade is worth one small, pinned,
- * dependency-free package.
+ * Bodies are DERIVED from the schemas the handlers enforce, never re-typed by
+ * hand beside them — which is the exact drift this ADR exists to prevent. Zod 4
+ * renders JSON Schema natively (`z.toJSONSchema`), so the `zod-to-json-schema`
+ * package this file used to depend on was removed (ADR-0192).
  */
 import { decideApprovalWithMeasuredSchema } from "./condition-metrics.js";
 import { putOverrideSchema } from "./guardrails.js";
 import type { FastifyInstance } from "fastify";
-import type { ZodTypeAny } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { z } from "zod";
 import {
   assignRoleSchema,
   BOM_B4_ROUTE_CONTRACT,
@@ -154,20 +150,20 @@ export const DEPRECATIONS: Readonly<Record<string, DeprecationEntry>> = {};
 export interface RouteDoc {
   summary: string;
   /** the zod schema the HANDLER parses the body with — not a copy of it */
-  body?: ZodTypeAny;
+  body?: z.ZodType;
   /** a named response shape, when one is worth stating */
   responseNote?: string;
   /** the query-string schema (a zod object), rendered as `in: query` parameters */
-  query?: ZodTypeAny;
+  query?: z.ZodType;
   /** the path-parameter schema (a zod object keyed by parameter name); unnamed parameters stay plain strings */
-  params?: ZodTypeAny;
+  params?: z.ZodType;
   /** the 2XX JSON body schema, when the route's contract freezes one */
-  response?: ZodTypeAny;
+  response?: z.ZodType;
   /** a 2XX that is bytes, not JSON (ADR-0189 bundles): its content type and the headers it carries */
-  responseBinary?: { contentType: string; headers: ZodTypeAny };
+  responseBinary?: { contentType: string; headers: z.ZodType };
   /** refusal statuses and their `error` codes; each body is `errorBody` */
   errors?: Readonly<Record<number, readonly string[]>>;
-  errorBody?: ZodTypeAny;
+  errorBody?: z.ZodType;
 }
 
 /**
@@ -365,8 +361,11 @@ function securityFor(auth: RouteAuthClass): Array<Record<string, string[]>> {
   }
 }
 
-function jsonSchemaFor(schema: ZodTypeAny): Record<string, unknown> {
-  const out = zodToJsonSchema(schema, { $refStrategy: "none", target: "openApi3" }) as Record<string, unknown>;
+function jsonSchemaFor(schema: z.ZodType, io: "input" | "output" = "input"): Record<string, unknown> {
+  // a request is what the caller sends, so it renders the INPUT side (a defaulted field is optional); a
+  // response is what we send, the OUTPUT side (a defaulted field is always present). Refinements and
+  // transforms have no JSON Schema form and render as their base type.
+  const out = z.toJSONSchema(schema, { target: "openapi-3.0", io, unrepresentable: "any" }) as Record<string, unknown>;
   delete out.$schema;
   return out;
 }
@@ -429,7 +428,9 @@ export function buildOpenApiDocument(
       operation["x-regulait-deprecation"] = deprecation;
     }
 
-    const paramShape = doc?.params ? ((jsonSchemaFor(doc.params) as { properties?: Record<string, Record<string, unknown>> }).properties ?? {}) : {};
+    // path parameters render their OUTPUT side: a case-folding pipe (`bomPathUuidSchema`) would otherwise show only
+    // its pre-transform string, and a path segment has no defaults for the two sides to disagree on
+    const paramShape = doc?.params ? ((jsonSchemaFor(doc.params, "output") as { properties?: Record<string, Record<string, unknown>> }).properties ?? {}) : {};
     const params = pathParams(entry.url).map((name) => ({
       name,
       in: "path",
@@ -458,15 +459,15 @@ export function buildOpenApiDocument(
     }
 
     const success: Record<string, unknown> = { description: doc?.responseNote ?? "Success." };
-    if (doc?.response) success.content = { "application/json": { schema: jsonSchemaFor(doc.response) } };
+    if (doc?.response) success.content = { "application/json": { schema: jsonSchemaFor(doc.response, "output") } };
     if (doc?.responseBinary) {
       success.content = { [doc.responseBinary.contentType]: { schema: { type: "string", format: "binary" } } };
-      const headers = jsonSchemaFor(doc.responseBinary.headers) as { properties?: Record<string, unknown> };
+      const headers = jsonSchemaFor(doc.responseBinary.headers, "output") as { properties?: Record<string, unknown> };
       success.headers = Object.fromEntries(Object.entries(headers.properties ?? {}).map(([name, schema]) => [name, { schema }]));
     }
     const refusals: Record<string, unknown> = {};
     if (doc?.errors && doc.errorBody) {
-      const body = jsonSchemaFor(doc.errorBody);
+      const body = jsonSchemaFor(doc.errorBody, "output");
       for (const [status, codes] of Object.entries(doc.errors)) {
         refusals[status] = {
           description: codes.length ? `Refused: ${codes.map((c) => `\`${c}\``).join(", ")}.` : "Refused.",

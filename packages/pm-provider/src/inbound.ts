@@ -473,11 +473,11 @@ const adoPayloadSchema = z
       .object({
         id: z.union([z.string(), z.number()]).optional(),
         workItemId: z.union([z.string(), z.number()]).optional(),
-        fields: z.record(z.unknown()).optional(),
+        fields: z.record(z.string(), z.unknown()).optional(),
         revision: z
           .object({
             id: z.union([z.string(), z.number()]).optional(),
-            fields: z.record(z.unknown()).optional(),
+            fields: z.record(z.string(), z.unknown()).optional(),
           })
           .passthrough()
           .nullish(),

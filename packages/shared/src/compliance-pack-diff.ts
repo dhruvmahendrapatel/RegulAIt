@@ -63,7 +63,7 @@ const diffValueSchema = z.union([
   z.string(),
   z.number(),
   z.boolean(),
-  z.record(z.unknown()),
+  z.record(z.string(), z.unknown()),
   z.null(),
 ]);
 export type PackDiffValue = z.infer<typeof diffValueSchema>;

@@ -225,13 +225,13 @@ describe("bulk fences", () => {
   it("a bulk request must carry a reason — an unexplained mass decision is the failure mode", () => {
     expect(
       bulkDecideApprovalsSchema.safeParse({
-        approvalIds: ["11111111-1111-1111-1111-111111111111"],
+        approvalIds: ["11111111-1111-4111-8111-111111111111"],
         decision: "approved",
       }).success,
     ).toBe(false);
     expect(
       bulkDecideApprovalsSchema.safeParse({
-        approvalIds: ["11111111-1111-1111-1111-111111111111"],
+        approvalIds: ["11111111-1111-4111-8111-111111111111"],
         decision: "approved",
         reason: "reviewed as a batch of identical low-risk reads",
       }).success,
@@ -268,14 +268,14 @@ describe("policy and rule shapes refuse the dangerous cases", () => {
       createApprovalSlaPolicySchema.safeParse({
         ...base,
         escalateToKind: "team",
-        escalateToId: "11111111-1111-1111-1111-111111111111",
+        escalateToId: "11111111-1111-4111-8111-111111111111",
       }).success,
     ).toBe(false);
     expect(
       createApprovalSlaPolicySchema.safeParse({
         ...base,
         escalateToKind: "user",
-        escalateToId: "11111111-1111-1111-1111-111111111111",
+        escalateToId: "11111111-1111-4111-8111-111111111111",
       }).success,
     ).toBe(true);
   });
@@ -289,7 +289,7 @@ describe("policy and rule shapes refuse the dangerous cases", () => {
           breachAfterMinutes: 20,
           escalateAction: action,
           escalateToKind: "user",
-          escalateToId: "11111111-1111-1111-1111-111111111111",
+          escalateToId: "11111111-1111-4111-8111-111111111111",
         }).success,
         action,
       ).toBe(false);
@@ -300,7 +300,7 @@ describe("policy and rule shapes refuse the dangerous cases", () => {
     const assignee = {
       name: "everything",
       assigneeKind: "team" as const,
-      assigneeId: "11111111-1111-1111-1111-111111111111",
+      assigneeId: "11111111-1111-4111-8111-111111111111",
     };
     expect(createApprovalAssignmentRuleSchema.safeParse(assignee).success).toBe(false);
     expect(

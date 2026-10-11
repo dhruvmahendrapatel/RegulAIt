@@ -77,6 +77,14 @@ paragraph supersedes the queue and number plan in the dated paragraphs below, wh
 - Builder: Claude only ([ADR-0191](../docs/decisions/0191-claude-sole-builder.md)); Codex is retired and
   `codexInputs.md` is frozen, appended only as history.
 
+**2026-10-10 (evening) - zod 3.25.76 -> 4.6.5 across the workspace (ADR-0192).** Full record:
+[sessions/2026-10-10-session-02-zod4.md](sessions/2026-10-10-session-02-zod4.md).
+- Direct move to the zod 4 API in one PR, because the gateway composes shared's schemas. `zod/v3` was rejected (a
+  frozen copy). `zod-to-json-schema` was removed in favour of the native `z.toJSONSchema`.
+- Rule for new code: zod 4 applies a `.default()` inside `.optional()`/`.partial()`, so build PATCH schemas from
+  default-free fields. Enum-keyed records are `z.partialRecord`. `.uuid()` is strict RFC 9562, so test fixtures
+  use RFC ids.
+
 **2026-10-10 (helper session) - CI sharding measured on runners; `dhruv/active` repaired; repo review #309.** Full
 record: [sessions/2026-10-10-session-02.md](sessions/2026-10-10-session-02.md).
 - Merged #291: the sharded gateway suite measured on five runs against six single-job runs. Whole-run wall clock

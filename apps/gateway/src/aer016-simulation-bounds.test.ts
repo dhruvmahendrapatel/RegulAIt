@@ -282,7 +282,7 @@ describe("AER-016: concurrency is bounded per caller and per replica", () => {
       method: "POST",
       url: "/v1/policy-simulations",
       headers: asCaller(),
-      payload: { ruleVersionId: "00000000-0000-0000-0000-0000000000ff", windowDays: 1 },
+      payload: { ruleVersionId: "00000000-0000-4000-8000-0000000000ff", windowDays: 1 },
     });
     expect(bad.statusCode).toBe(404);
     const ok = await app.inject({

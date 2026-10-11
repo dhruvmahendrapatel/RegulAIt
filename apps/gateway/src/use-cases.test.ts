@@ -492,7 +492,7 @@ describe("input validation", () => {
         description: "d",
         businessContext: "b",
         dataSensitivity: "internal",
-        projectId: "00000000-0000-0000-0000-0000000000aa",
+        projectId: "00000000-0000-4000-8000-0000000000aa",
       },
     });
     expect(badProject.statusCode).toBe(400);
@@ -507,7 +507,7 @@ describe("input validation", () => {
         description: "d",
         businessContext: "b",
         dataSensitivity: "internal",
-        intendedAgentIds: ["00000000-0000-0000-0000-0000000000ab"],
+        intendedAgentIds: ["00000000-0000-4000-8000-0000000000ab"],
       },
     });
     expect(badAgent.statusCode).toBe(400);

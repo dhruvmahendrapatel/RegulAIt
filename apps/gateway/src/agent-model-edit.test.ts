@@ -210,7 +210,7 @@ describe("PATCH /v1/agents/:agentId — versioned agent_config edit surface", ()
       { enabled: false },
       { name: "renamed" },
       { systemPrompt: "x" },
-      { customProviderId: "00000000-0000-0000-0000-000000000001" },
+      { customProviderId: "00000000-0000-4000-8000-000000000001" },
     ]) {
       const res = await app.inject({
         method: "PATCH",
@@ -229,7 +229,7 @@ describe("PATCH /v1/agents/:agentId — versioned agent_config edit surface", ()
     const missing = await app.inject({
       method: "PATCH",
       headers: AUTH,
-      url: "/v1/agents/00000000-0000-0000-0000-0000000000aa",
+      url: "/v1/agents/00000000-0000-4000-8000-0000000000aa",
       payload: { model: "x" },
     });
     expect(missing.statusCode).toBe(404);

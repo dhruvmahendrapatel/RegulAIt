@@ -406,7 +406,7 @@ describe("B4S-07: a fresh SSO sign-in is a step-up method only over https", () =
 
 describe("B4S-04: relaxing ANY strict org setting needs a settings_relax step-up", () => {
   const writable = Object.keys(
-    (updateOrgSettingsSchema as unknown as { _def: { schema: { shape: Record<string, unknown> } } })._def.schema.shape,
+    (updateOrgSettingsSchema as unknown as { shape: Record<string, unknown> }).shape,
   ).filter((k) => k !== "confirmIpLockout");
   const registry = ORG_SETTING_STRICTNESS as Record<string, { kind: string; strict?: unknown; relaxed?: (v: unknown) => boolean; reason?: string }>;
   /** strict defaults that are NOT org settings (they live on another route, which guards them itself) */

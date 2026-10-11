@@ -302,20 +302,20 @@ describe("input shapes refuse the ambiguous cases", () => {
     expect(
       createModelCardSchema.safeParse({
         intendedUse: "x",
-        agentId: "11111111-1111-1111-1111-111111111111",
-        customProviderId: "22222222-2222-2222-2222-222222222222",
+        agentId: "11111111-1111-4111-8111-111111111111",
+        customProviderId: "22222222-2222-4222-8222-222222222222",
       }).success,
     ).toBe(false);
     expect(
       createModelCardSchema.safeParse({
         intendedUse: "x",
-        agentId: "11111111-1111-1111-1111-111111111111",
+        agentId: "11111111-1111-4111-8111-111111111111",
       }).success,
     ).toBe(true);
   });
 
   it("a sign-off must carry a recertification date, or explicitly accept having none", () => {
-    const approver = { approverUserId: "11111111-1111-1111-1111-111111111111" };
+    const approver = { approverUserId: "11111111-1111-4111-8111-111111111111" };
     expect(requestModelCardSignOffSchema.safeParse(approver).success).toBe(false);
     expect(
       requestModelCardSignOffSchema.safeParse({ ...approver, validUntil: "2027-01-01T00:00:00.000Z" })
@@ -341,7 +341,7 @@ describe("input shapes refuse the ambiguous cases", () => {
     expect(
       attachModelCardEvidenceSchema.safeParse({
         kind: "eval_run",
-        evalRunId: "11111111-1111-1111-1111-111111111111",
+        evalRunId: "11111111-1111-4111-8111-111111111111",
       }).success,
     ).toBe(true);
     expect(attachModelCardEvidenceSchema.safeParse({ kind: "external", externalRef: "report-7" }).success).toBe(

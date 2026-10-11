@@ -1325,7 +1325,7 @@ export const genericEvidenceConfigSchema = z
   .object({
     kind: z.enum(EVIDENCE_KINDS),
     /** column name per evidence field. Omit to attempt inference. */
-    mapping: z.record(z.string().min(1).max(200)).optional(),
+    mapping: z.record(z.string(), z.string().min(1).max(200)).optional(),
   })
   .strict();
 

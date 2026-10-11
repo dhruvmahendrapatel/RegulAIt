@@ -92,7 +92,7 @@ const openaiRequestSchema = z.object({
           function: z.object({
             name: z.string(),
             description: z.string().optional(),
-            parameters: z.record(z.unknown()).optional(),
+            parameters: z.record(z.string(), z.unknown()).optional(),
           }),
         })
         .passthrough(),
@@ -116,7 +116,7 @@ const openaiRequestSchema = z.object({
         .object({
           name: z.string().optional(),
           description: z.string().optional(),
-          schema: z.record(z.unknown()).optional(),
+          schema: z.record(z.string(), z.unknown()).optional(),
           strict: z.boolean().nullable().optional(),
         })
         .passthrough()

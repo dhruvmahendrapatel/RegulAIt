@@ -363,15 +363,15 @@ export function evalScorerRegistry(): EvalScorerInfo[] {
 // Scorer configuration (zod, per kind)
 // ---------------------------------------------------------------------------
 
-const matchConfig = z.object({
+const matchFields = {
   /** substrings that must be present */
-  needles: z.array(z.string().min(1)).default([]),
+  needles: z.array(z.string().min(1)),
   /** true = any needle is enough; false (default) = all of them */
-  anyOf: z.boolean().default(false),
+  anyOf: z.boolean(),
   /** substrings whose presence forces a zero, regardless of the needles */
-  forbidden: z.array(z.string().min(1)).default([]),
-  caseSensitive: z.boolean().default(false),
-});
+  forbidden: z.array(z.string().min(1)),
+  caseSensitive: z.boolean(),
+};
 
 export const evalScorerConfigSchema = z
   .object({
@@ -389,14 +389,15 @@ export const evalScorerConfigSchema = z
     flags: z.string().max(8).optional(),
     negate: z.boolean().optional(),
     // json_schema
-    schema: z.record(z.unknown()).optional(),
+    schema: z.record(z.string(), z.unknown()).optional(),
     // numeric
     tolerance: z.number().min(0).optional(),
     relative: z.boolean().optional(),
     // rubric
     criteria: z
       .array(
-        matchConfig.partial().extend({
+        // no defaults here: zod 4 fills a default inside partial(), and an omitted criterion field stays omitted
+        z.object(matchFields).partial().extend({
           id: z.string().min(1),
           weight: z.number().positive().default(1),
           pattern: z.string().min(1).optional(),
@@ -1221,8 +1222,8 @@ export const createEvalCaseSchema = z.object({
   /** what is sent to the agent under test */
   input: z.string().min(1).max(100_000),
   /** the reference answer: a string, a number, or a JSON object/array */
-  expected: z.union([z.string(), z.number(), z.record(z.unknown()), z.array(z.unknown())]).nullish(),
-  rubric: z.union([z.string(), z.record(z.unknown())]).nullish(),
+  expected: z.union([z.string(), z.number(), z.record(z.string(), z.unknown()), z.array(z.unknown())]).nullish(),
+  rubric: z.union([z.string(), z.record(z.string(), z.unknown())]).nullish(),
   /**
    * ADR-0067 — THE RETRIEVED/REFERENCE CONTEXT this answer is supposed to be
    * grounded in. One entry per retrieved chunk: chunk boundaries are load-
@@ -1331,7 +1332,7 @@ export const evaluateTracesSchema = z
     scorerKind: evalScorerKindSchema,
     scorerConfig: evalScorerConfigSchema.default({}),
     /** the reference, for the scorers that need one (exact, numeric, …) */
-    expected: z.union([z.string(), z.number(), z.record(z.unknown()), z.array(z.unknown())]).nullish(),
+    expected: z.union([z.string(), z.number(), z.record(z.string(), z.unknown()), z.array(z.unknown())]).nullish(),
     spanIds: z.array(z.string().uuid()).min(1).max(EVAL_TRACE_ROWS_MAX),
     /** the trace-score name the results are recorded under */
     scoreName: z.string().regex(/^[a-z0-9_.-]{1,64}$/).optional(),
