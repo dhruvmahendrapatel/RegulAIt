@@ -150,14 +150,10 @@ describe("first-boot generation", () => {
     utimesSync(stale, old, old);
     utimesSync(unrelated, old, old);
     expect(removeStaleInstallKeyTemps(dir)).toBe(1);
-    expect(existsSync(stale)).toBe(false);
-    expect(existsSync(fresh)).toBe(true);
-    expect(existsSync(unrelated)).toBe(true);
-    expect(existsSync(path.join(dir, INSTALL_RECEIPT_KEY_FILE))).toBe(true);
-    // and the boot path sweeps them too
-    utimesSync(fresh, old, old);
-    expect(ensureInstallReceiptKey(installEnv(dir)).outcome).toBe("reused");
-    expect(existsSync(fresh)).toBe(false);
+    expect(readdirSync(dir).sort()).toEqual([`.${INSTALL_RECEIPT_KEY_FILE}.4243.ba9876543210.tmp`, INSTALL_RECEIPT_KEY_FILE, "notes.tmp"].sort());
+    // and the boot path sweeps them too: an hour from now the fresh one is stale
+    expect(ensureInstallReceiptKey(installEnv(dir), { now: () => Date.now() + 3_600_000 }).outcome).toBe("reused");
+    expect(readdirSync(dir).sort()).toEqual([INSTALL_RECEIPT_KEY_FILE, "notes.tmp"].sort());
   });
 
   it("does nothing while the operator variables are set (a test or demo that sets its own key generates nothing)", () => {

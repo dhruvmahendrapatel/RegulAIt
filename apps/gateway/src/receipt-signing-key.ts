@@ -33,7 +33,7 @@
  * Open source first (ADR-0176): Node's built-in `crypto.generateKeyPairSync("ed25519")`; no library.
  */
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export const RECEIPT_KEY_FILE_ENV = "REGULAIT_RECEIPT_SIGNING_KEY";
@@ -114,12 +114,20 @@ function pause(ms: number): void {
  */
 function loadInstallKey(file: string): ResolvedReceiptKey | null {
   if (POSIX) {
-    let dir;
-    try { dir = lstatSync(path.dirname(file)); } catch (err) {
+    // checked on an open handle (O_NOFOLLOW|O_DIRECTORY), never by a separate path stat
+    let dfd: number;
+    try {
+      dfd = openSync(path.dirname(file), fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw new ReceiptKeyError();
     }
-    if (!dir.isDirectory() || (dir.mode & 0o077) !== 0 || dir.uid !== process.getuid!()) throw new ReceiptKeyError();
+    try {
+      const dir = fstatSync(dfd);
+      if (!dir.isDirectory() || (dir.mode & 0o077) !== 0 || dir.uid !== process.getuid!()) throw new ReceiptKeyError();
+    } finally {
+      closeSync(dfd);
+    }
   }
   let fd: number;
   try {
@@ -176,7 +184,9 @@ const defaultGenerate = () => ({
   privateKeyPem: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
 });
 
-const TMP_RE = new RegExp(`^\\.${INSTALL_RECEIPT_KEY_FILE.replace(/\./g, "\\.")}\\.\\d+\\.[0-9a-f]{12}\\.tmp$`);
+/** `.receipt-signing-key.pem.<pid>.<12 hex>.tmp` — a literal, so no escaping is built at run time (CodeQL js/incomplete-sanitization) */
+const TMP_RE = /^\.receipt-signing-key\.pem\.\d+\.[0-9a-f]{12}\.tmp$/;
+if (!TMP_RE.test(`.${INSTALL_RECEIPT_KEY_FILE}.1.000000000000.tmp`)) throw new Error("TMP_RE no longer matches INSTALL_RECEIPT_KEY_FILE");
 /** a generator's temporary file older than this was left by a crash, never by a generation in flight (milliseconds) */
 export const STALE_TMP_MS = 60_000;
 
@@ -188,10 +198,15 @@ export function removeStaleInstallKeyTemps(dir: string, now: number = Date.now()
   for (const name of names) {
     if (!TMP_RE.test(name)) continue;
     const p = path.join(dir, name);
+    let fd: number | null = null;
     try {
-      const st = lstatSync(p);
+      fd = openSync(p, POSIX ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW : "r");
+      const st = fstatSync(fd);
+      closeSync(fd);
+      fd = null;
       if (st.isFile() && now - st.mtimeMs > STALE_TMP_MS) { unlinkSync(p); removed++; }
-    } catch { /* gone already, or not ours to remove */ }
+    } catch { /* gone already, a symlink, or not ours to remove */ }
+    finally { if (fd !== null) try { closeSync(fd); } catch { /* closed */ } }
   }
   return removed;
 }
@@ -229,12 +244,10 @@ export function ensureInstallReceiptKey(env: NodeJS.ProcessEnv = process.env, de
       }
     }
   };
-  try {
-    lstatSync(file);
-    return reused();
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { outcome: "failed", reason: `cannot inspect the key file (${(err as NodeJS.ErrnoException).code ?? "error"})`, path: file };
-  }
+  // one load attempt, no separate existence check: null means there is no key file yet
+  let present = true;
+  try { present = loadInstallKey(file) !== null; } catch { /* present but refused: reused() retries, then reports it */ }
+  if (present) return reused();
   const tmp = path.join(dir, `.${INSTALL_RECEIPT_KEY_FILE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let fd: number | null = null;
   try {
