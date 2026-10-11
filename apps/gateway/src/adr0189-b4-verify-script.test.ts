@@ -25,8 +25,9 @@ const VERIFY_BOM = path.join(ROOT, "scripts/verify-bom.mjs");
 const VERIFY_SH = path.join(ROOT, "scripts/verify-export-bundle.sh");
 const corpus = JSON.parse(readFileSync(path.join(ROOT, "packages/shared/test-vectors/decision-bom/b4-vectors.json"), "utf8"));
 type Entry = { name: string; type: string; text: string; linkname?: string };
-const positives = new Map<string, { bundle: { entries: Entry[] } }>(corpus.positives.map((p: { id: string }) => [p.id, p]));
-const all = new Map<string, { bundle: { entries?: Entry[]; base?: string; replace?: Record<string, string> } }>([...corpus.positives, ...corpus.negatives].map((p: { id: string }) => [p.id, p]));
+type Vector = { id: string; bundle: { entries?: Entry[]; base?: string; replace?: Record<string, string> } };
+const positives = new Map<string, Vector>((corpus.positives as Vector[]).map((p) => [p.id, p]));
+const all = new Map<string, Vector>(([...corpus.positives, ...corpus.negatives] as Vector[]).map((p) => [p.id, p]));
 const EXPORT_FPR = "sha256:3133075a6bffc999dede86075e66ac42685946d768c1ffbfdacb7c7009096b20";
 const RECEIPT_FPR = "sha256:505e806bf46aedd490d099490e7e8d69bd2dec822045e37703cfb4749c746deb";
 
@@ -66,7 +67,7 @@ const entriesOf = (id: string): Entry[] => {
   const v = all.get(id)!;
   if (v.bundle.entries) return v.bundle.entries;
   const r = v.bundle.replace ?? {};
-  return positives.get(v.bundle.base!)!.bundle.entries.map((e) => (e.name in r ? { ...e, text: r[e.name]! } : e));
+  return positives.get(v.bundle.base!)!.bundle.entries!.map((e) => (e.name in r ? { ...e, text: r[e.name]! } : e));
 };
 
 let dir: string;

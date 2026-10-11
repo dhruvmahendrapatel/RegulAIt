@@ -191,13 +191,13 @@ export async function freezeDecisionBom(db: Db, auditId: string, actorUserId: st
 
     // 2. the receipt and every addendum must be signed (R15)
     const [receipt] = await tx.select().from(decisionReceipts).where(eq(decisionReceipts.auditId, auditId));
-    const key = receiptKeyOrNull();
-    if (!receipt) throw key ? pending("receipt_unsigned", "The decision's receipt has not been signed yet; the receipt sweep signs it shortly.") : noReceiptKey();
+    // the key is read only where it is needed (R6: returning an already-frozen version never needs it)
+    if (!receipt) throw receiptKeyOrNull() ? pending("receipt_unsigned", "The decision's receipt has not been signed yet; the receipt sweep signs it shortly.") : noReceiptKey();
     const addenda = factsRow ? await tx.select().from(decisionFactAddenda).where(eq(decisionFactAddenda.auditId, auditId)).orderBy(asc(decisionFactAddenda.n)) : [];
     const signatures = addenda.length ? await tx.select().from(decisionFactAddendumSignatures).where(eq(decisionFactAddendumSignatures.auditId, auditId)) : [];
     const signatureOf = new Map(signatures.map((s) => [s.n, s]));
     if (addenda.some((a) => !signatureOf.has(a.n) || signatureOf.get(a.n)!.factsHash !== a.factsHash)) {
-      throw key ? pending("receipt_unsigned", "A late fact for this decision has not been signed yet; the receipt sweep signs it shortly.") : noReceiptKey();
+      throw receiptKeyOrNull() ? pending("receipt_unsigned", "A late fact for this decision has not been signed yet; the receipt sweep signs it shortly.") : noReceiptKey();
     }
     if (marker?.status === "captured" && !factsRow) throw new BomRouteError(500, { error: "bom_integrity_failure", detail: "The decision's capture marker says captured, but its facts row is missing." });
 
@@ -278,6 +278,7 @@ export async function freezeDecisionBom(db: Db, auditId: string, actorUserId: st
     const emails = findEmailShapes(assembled.body);
     if (emails.length) throw new BomRouteError(422, { error: "bom_export_refused", reason: "email_shape", file: "body", path: emails[0]!.slice(0, 1024) });
     if (!decisionBomBodySchema.safeParse(assembled.body).success) throw new BomRouteError(500, { error: "bom_integrity_failure", detail: "The assembled body does not meet regulait.decision-bom.v1." });
+    const key = receiptKeyOrNull();
     if (!key) throw noReceiptKey();
     const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId));
     if (recorded && (!sameReceiptPublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt)) throw noReceiptKey();
