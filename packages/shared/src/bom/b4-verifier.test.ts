@@ -27,6 +27,9 @@ import { assembleDecisionBom, bomDecimalSum, DecisionBomAssemblyError, type Deci
 import { decisionBomFinalityDetail } from "./finality.js";
 import { BomExportKeyringError, bomOnlineExportTrust, verifyBomBundle, type BomVerifyReport, type BomVerifyTrust } from "./verify.js";
 import { BomExportRefusal, buildAiBomBundle, buildDecisionBomBundle, type BomBundleEnvelope, type BuiltBomBundle } from "./bom-bundle.js";
+import { buildAiBom } from "./ai-bom-builder.js";
+import { AI_BOM_INSTALL_SUBJECT_ID } from "./contract.js";
+import type { AiBomRecordSet } from "./ai-bom-records.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const corpus = JSON.parse(readFileSync(path.resolve(here, "../../test-vectors/decision-bom/b4-vectors.json"), "utf8"));
@@ -360,6 +363,45 @@ const decisionRowOf = (v: Vector) => {
   const b = JSON.parse(body);
   return { ...rowOf(body, fileOf(v, "content/decision-bom.json.sig")!), id: b.id as string, auditId: b.auditId as string, version: b.version as number, finality: b.finality };
 };
+
+describe("ADR-0189 B4.9 G12: the AI BOM worked example is what buildAiBom writes (the build requirement)", () => {
+  /** the fenced `b4-ai-example:<name>` blocks of the ADR (a line scan) */
+  const adr = readFileSync(path.resolve(here, "../../../../docs/decisions/0189-batch6-decision-bom-ai-bom.md"), "utf8").split("\n");
+  const block = (name: string) => {
+    const i = adr.indexOf(`\`\`\`text b4-ai-example:${name}`);
+    expect(i, name).toBeGreaterThanOrEqual(0);
+    const out: string[] = [];
+    for (let j = i + 1; adr[j] !== "```"; j++) out.push(adr[j]!);
+    return out.join("\n");
+  };
+  const install = { kind: "install" as const, id: AI_BOM_INSTALL_SUBJECT_ID };
+  const empty = (): AiBomRecordSet => ({
+    subject: install, install: { installId: null }, useCases: [], agents: [], customProviders: [], modelCards: [], modelCardApprovals: [], modelCardEvidence: [],
+    evalRuns: [], evalDatasets: [], trainingDatasets: [], trainingJobs: [], trainingArtifacts: [], modelArtifacts: [], artifactScans: [], engineRuns: [], engines: [],
+    promptTags: [], configVersions: [], mcpServers: [], mcpTools: [], connectors: [], grants: [], builderAgents: [], builderSkills: [], memoryStores: [],
+  });
+  /**
+   * KNOWN DRIFT, reported and not changed here: the ADR's blocks were written from `buildAiBom` on main @ b19a6dc,
+   * before slice B9 (R51) added `records.spdxFields` to every native body. Today's builder writes the same bytes
+   * plus `"spdxFields":[]` in `records`; the renderings are byte-identical. The vectors A01 to A03 are self-consistent
+   * signed bundles and verify either way. This pins that the ONLY difference is that one key.
+   */
+  const withoutSpdxFields = (bytes: string) => {
+    const body = JSON.parse(bytes) as { records: Record<string, unknown> };
+    expect(body.records.spdxFields).toEqual([]);
+    delete body.records.spdxFields;
+    return bomCanonicalBytes(body);
+  };
+  it("rebuilds A01's body and CycloneDX 1.7 rendering, and A03's body, byte for byte (apart from B9's spdxFields)", () => {
+    const meta = { subjectKind: "install" as const, subjectId: AI_BOM_INSTALL_SUBJECT_ID, trigger: "on_demand" as const };
+    const v1 = buildAiBom(empty(), { ...meta, id: "ab000000-0000-4000-8000-000000000001", version: 1, supersedes: null, createdAt: "2026-10-10T11:00:00.000Z" }, { cyclonedxVersions: ["1.7"] });
+    expect(v1.bodyBytes).not.toBe(block("v1/content/ai-bom.json"));
+    expect(withoutSpdxFields(v1.bodyBytes)).toBe(block("v1/content/ai-bom.json"));
+    expect(v1.renderings.find((r) => r.format === "cyclonedx-1.7")!.bytes).toBe(block("v1/content/ai-bom.cyclonedx-1.7.json"));
+    const v2 = buildAiBom(empty(), { ...meta, id: "ab000000-0000-4000-8000-000000000002", version: 2, supersedes: "ab000000-0000-4000-8000-000000000001", createdAt: "2026-10-10T11:30:00.000Z" }, { cyclonedxVersions: ["1.7"] });
+    expect(withoutSpdxFields(v2.bodyBytes)).toBe(block("v2/content/ai-bom.json"));
+  });
+});
 
 describe("ADR-0189 B4.1: the bundle builder", () => {
   it("rebuilds every Decision BOM positive's archive byte for byte from its frozen rows", () => {

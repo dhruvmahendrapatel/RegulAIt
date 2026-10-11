@@ -39,6 +39,14 @@
 #
 # There is deliberately no --force.
 #
+# ADR-0189 B4.7-5: this script also checks the ENVELOPE of an
+# export-bundle/3 (a Decision BOM or AI BOM bundle): the signed manifest, every
+# listed file, nothing unlisted, and a Decision BOM's hash-only chain segment.
+# A /3 bundle carries NO audit row payloads (R39), so no row content is
+# rehashed here. The signed BOM body, the receipt, the facts and the renderings
+# are checked by `scripts/verify-bom.mjs`; the export key alone can forge an
+# envelope, never a body (R19).
+#
 # Usage:
 #   scripts/verify-export-bundle.sh bundle.tar.gz --fingerprint sha256:ab12...
 #   scripts/verify-export-bundle.sh bundle.tar.gz --keyring /etc/regulait/export-keys
@@ -196,10 +204,17 @@ INSTALL_ID="$(jfield installId || true)"
 SUBJECT_KIND="$(jfield kind || true)"
 PAYLOAD_SCOPE="$(jfield payloadScope || true)"
 
-[ "$SCHEMA" = "regulait.export-bundle/1" ] || [ "$SCHEMA" = "regulait.export-bundle/2" ] || refuse \
+[ "$SCHEMA" = "regulait.export-bundle/1" ] || [ "$SCHEMA" = "regulait.export-bundle/2" ] || [ "$SCHEMA" = "regulait.export-bundle/3" ] || refuse \
   "unknown manifest schema: '${SCHEMA:-<none>}'" \
-  "This verifier understands regulait.export-bundle/1 and /2 only."
-if [ "$SCHEMA" = "regulait.export-bundle/2" ]; then
+  "This verifier understands regulait.export-bundle/1, /2 and /3 only."
+if [ "$SCHEMA" = "regulait.export-bundle/3" ]; then
+  # ADR-0189 B4.1: a BOM bundle; a Decision BOM's chain segment is hash-only (payloadScope none), an AI BOM has none
+  case "$SUBJECT_KIND" in
+    decision-bom) [ "$PAYLOAD_SCOPE" = "none" ] || refuse "schema /3 (decision-bom) requires audit payloadScope=none" ;;
+    ai-bom) [ -z "$PAYLOAD_SCOPE" ] || refuse "schema /3 (ai-bom) carries no audit segment" ;;
+    *) refuse "schema /3 names an unknown subject kind: '${SUBJECT_KIND:-<none>}'" ;;
+  esac
+elif [ "$SCHEMA" = "regulait.export-bundle/2" ]; then
   [ "$PAYLOAD_SCOPE" = "subject" ] || refuse "schema /2 requires audit payloadScope=subject"
 else
   [ -z "$PAYLOAD_SCOPE" ] || [ "$PAYLOAD_SCOPE" = "full" ] || refuse "schema /1 requires full audit payloads"
@@ -349,6 +364,11 @@ pass "bundle contains nothing the manifest does not list"
 
 # --- 7. the audit chain ----------------------------------------------------
 CHAIN="$ROOT/audit/chain.tsv"
+if [ "$SCHEMA" = "regulait.export-bundle/3" ] && [ "$SUBJECT_KIND" = "ai-bom" ]; then
+  [ ! -e "$CHAIN" ] || refuse "an AI BOM bundle carries no audit chain segment (ADR-0189 B4.1)"
+  : >"$WORK/no-chain.tsv"; CHAIN="$WORK/no-chain.tsv"
+  note "AI BOM bundle: no audit chain segment is carried (ADR-0189 B4.1)."
+fi
 [ -f "$CHAIN" ] || refuse "audit/chain.tsv is missing" \
   "The chain is what ties this export to a tamper-evident record. Without it" \
   "the signature covers a file nobody can place in a history."
@@ -361,7 +381,9 @@ TRUNCATED="$(grep -m1 -oE '"segmentTruncated"[[:space:]]*:[[:space:]]*(true|fals
 EXPECTED_PAYLOADS="$WORK/expected-payloads.txt"
 : >"$EXPECTED_PAYLOADS"
 
-if [ ! -s "$CHAIN" ]; then
+if [ ! -s "$CHAIN" ] && [ "$SCHEMA" = "regulait.export-bundle/3" ]; then
+  [ "$SUBJECT_KIND" = "ai-bom" ] || refuse "CHAIN SEGMENT IS EMPTY: a Decision BOM bundle carries the decision row at least"
+elif [ ! -s "$CHAIN" ]; then
   if [ -n "$HEAD_ROWHASH" ]; then
     refuse "CHAIN SEGMENT IS EMPTY but the signed manifest records a chain head" \
       "The manifest says the deployment's audit chain reaches seq ${HEAD_SEQ:-?}," \
@@ -377,6 +399,10 @@ else
     printf '%s' "$seq" | grep -qE '^[0-9]+$' || refuse "invalid audit sequence in chain.tsv"
     if [ "$SCHEMA" = "regulait.export-bundle/2" ]; then
       [ "$disclosure" = "payload" ] || [ "$disclosure" = "commitment" ] || refuse "invalid audit disclosure at seq $seq"
+    elif [ "$SCHEMA" = "regulait.export-bundle/3" ]; then
+      # ADR-0189 R39: four hash columns, and never a payload
+      [ -z "${disclosure:-}" ] || refuse "unexpected audit disclosure at seq $seq"
+      disclosure="commitment"
     else
       [ -z "${disclosure:-}" ] || refuse "unexpected audit disclosure at seq $seq"
       disclosure="payload"
@@ -483,6 +509,9 @@ else
     note "subject-scoped audit proof: undisclosed rows have signed hash commitments only;"
     note "their source bytes cannot be independently rehashed from this bundle."
   fi
+  if [ "$SCHEMA" = "regulait.export-bundle/3" ]; then
+    note "BOM bundle (ADR-0189 R39): the chain segment is hash-only; no audit row content is disclosed."
+  fi
 fi
 # A disclosed payload is named by its decimal sequence number and NOTHING
 # else: audit/rows/<seq>.payload, written exactly as chain.tsv writes <seq> —
@@ -527,6 +556,10 @@ if [ -n "$EXTRACT_TO" ]; then
   pass "verified bundle extracted to $EXTRACT_TO"
 fi
 
+if [ "$SCHEMA" = "regulait.export-bundle/3" ] && [ "$QUIET" != "1" ]; then
+  note "ENVELOPE ONLY: the signed BOM body, the receipt and any renderings are checked by"
+  note "scripts/verify-bom.mjs with your receipt-key trust root (ADR-0189 R19)."
+fi
 if [ "$QUIET" != "1" ]; then
   printf '\n%s[VERIFIED]%s regulait export — subject %s, install %s\n' \
     "$C_GRN" "$C_RST" "${SUBJECT_KIND:-?}" "${INSTALL_ID:-<none recorded>}"
