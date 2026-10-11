@@ -30,6 +30,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
 import { decodeProtectedHeader, importJWK, jwtVerify, SignJWT, type JWK, type JWTPayload } from "jose";
 import { and, auditLog, eq, projectMembers, projects, workloadIdentities, type Db } from "@regulait/db";
 import {
@@ -85,6 +86,20 @@ export async function createDelegationProofRoute(db: Db, req: FastifyRequest, re
   const ctx = req.authCtx;
   // OWNER DECISION 4: a person, by session or by their own API key, and nothing else
   if (!ctx.userId || (ctx.via !== "session" && ctx.via !== "api-key")) {
+    // ADR-0188 gap item 5 (#337): this refusal is an audited deny like every other refusal of the route; the
+    // body is not trusted (or parsed) yet, so only ids that parse as uuids are recorded
+    const raw = (req.body ?? {}) as Record<string, unknown>;
+    const uuidOrNull = (v: unknown) => (typeof v === "string" && z.string().uuid().safeParse(v).success ? v : null);
+    await db.insert(auditLog).values({
+      userId: ctx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "delegation_grant",
+      objectId: null,
+      detail: { phase: "delegation-proof", code: "delegation_proof_credential", agentIdentityId: uuidOrNull(raw.agentIdentityId), projectId: uuidOrNull(raw.projectId), via: ctx.via ?? null },
+      effect: "deny",
+      ruleId: "delegation-proof-refused",
+      ruleChain: [],
+      reason: "a delegation proof was refused: delegation_proof_credential (ADR-0188 owner decision 4: only a person may start a delegation)",
+    });
     return reply.status(403).send({ error: "delegation_proof_credential", detail: "a delegation is started by a signed-in person or their own API key" });
   }
   const issuer = identityIssuer();

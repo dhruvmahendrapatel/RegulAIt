@@ -12,9 +12,11 @@
  *    assertion, stale and future proofs, wrong htm/htu, replay across pools.
  *  - CHILD EXCHANGE (decision 23): substitutions are refused WITHOUT
  *    consuming A's authorization; a child resource other than the parent's.
- *    S5 review item 1: until the signed root depth is persisted and enforced
- *    (S4 follow-up), EVERY external child exchange is refused
- *    `delegation_depth_unenforced`, before any claim (the reviewer's probe).
+ *    S5 review item 1, closed by the S4+S5 follow-up: the root stores the
+ *    SIGNED `max_depth` (narrowed to the org limit) as its `depth_limit`; the
+ *    reviewer's probe (`max_depth: 0` → child refused `delegation_depth`,
+ *    before any claim) and its positive control (`max_depth: 1` → one child,
+ *    the grandchild refused).
  *  - S5 REVIEW: steward and project checks on proofs (item 2), strict root
  *    caps and lifetimes (item 6), the timeout race (item 5), introspection's
  *    single-string `aud` (item 7).
@@ -24,8 +26,11 @@
  *  - REVOCATION AND INTROSPECTION: authentication required; a client sees and
  *    revokes only its own tokens.
  *  - THE RESOURCE: delegated tokens on `/mcp/:serverId` and the compat routes
- *    are verified (dead chain → 401) and then held back (403) until S4 wires
- *    the governed paths; nowhere else; schemes case-insensitive.
+ *    are verified (dead chain → 401), bound to the grant's project, and the
+ *    call is governed under the grant (S4+S5 follow-up: tools/list, tools/call,
+ *    the compat dispatch and `/v1/models` narrowed to the chain, against a
+ *    real upstream; the sponsor's own key is the positive control); nowhere
+ *    else; schemes case-insensitive.
  *  - GRANT ADMIN: list/tree, detail, cascade revoke behind the step-up.
  *  - CLOCK SKEW: the process clock ±500 ms changes nothing (database clock).
  *
@@ -41,20 +46,24 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { calculateJwkThumbprint, decodeJwt, SignJWT, type JWK } from "jose";
 import * as oauth from "oauth4webapi";
-import { auditLog, createDb, delegationGrants, eq, identitySigningKeys, issuedTokens, orgSettings, replayClaims, runMigrations, sql, and, desc, type Db } from "@regulait/db";
+import { auditLog, createDb, delegationGrants, eq, identitySigningKeys, issuedTokens, orgSettings, replayClaims, runMigrations, sql, and, desc, traceSpans, usageEvents, type Db } from "@regulait/db";
 import { canonicalDelegationBody, IDENTITY_SIGNING_KEY_ENV, type DelegationBody } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { deriveIdentitySecrets, issueDpopNonce } from "./delegated-token.js";
+import { deriveIdentitySecrets, issueDpopNonce, mintDelegatedToken } from "./delegated-token.js";
 import { configuredIdentitySigningKeys, rotateIdentitySigningKey } from "./identity-signing-keys.js";
 import { COMPAT_ANTHROPIC_ROUTE, COMPAT_MODELS_ROUTE, COMPAT_OPENAI_ROUTE, MCP_PROXY_ROUTE } from "./compat-core.js";
 import { WORKLOAD_ROUTES } from "./oauth/resource.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { setTokenRequestTimeoutForTest, tokenEndpointTestHooks } from "./oauth/token-endpoint.js";
-import { admitChildGrant } from "./delegation.js";
+import { admitChildGrant, createRootGrant } from "./delegation.js";
 import { makeCert, type TestCert } from "./testing/x509-fixtures.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import http from "node:http";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -120,7 +129,7 @@ interface Agent {
 }
 const agents: Agent[] = [];
 
-async function newAgent(name: string, opts: { grants?: string[]; jwk?: boolean; sponsors?: string[] } = {}): Promise<Agent> {
+async function newAgent(name: string, opts: { grants?: string[]; jwk?: boolean; sponsors?: string[]; server?: string } = {}): Promise<Agent> {
   const a = rows<{ id: string }>(await db.execute(sql`insert into agents (name, provider, tier) values (${`s5-${name}-${RUN}`}, 'mock', 1) returning id`))[0]!.id;
   const clientId = SPIFFE(name);
   const id = rows<{ id: string }>(
@@ -128,7 +137,7 @@ async function newAgent(name: string, opts: { grants?: string[]; jwk?: boolean; 
       values ('agent', ${a}, ${clientId}, ${`{${(opts.sponsors ?? [sponsorId]).join(",")}}`}::uuid[], ARRAY[${ENV}]) returning id`),
   )[0]!.id;
   for (const t of opts.grants ?? [T.read, T.write]) {
-    await db.execute(sql`insert into identity_tool_grants (identity_id, server_id, tool_name) values (${id}, ${serverId}, ${t})`);
+    await db.execute(sql`insert into identity_tool_grants (identity_id, server_id, tool_name) values (${id}, ${opts.server ?? serverId}, ${t})`);
   }
   const key = wkey();
   let credId = "";
@@ -208,10 +217,10 @@ const rootForm = async (a: Agent, proof: string, o: { scope?: unknown; resource?
 });
 
 /** a full root exchange; returns the token and the DPoP key it is bound to */
-async function rootToken(a: Agent, o: { cap?: number; maxDepth?: number; scope?: unknown } = {}) {
+async function rootToken(a: Agent, o: { cap?: number; maxDepth?: number; scope?: unknown; resource?: string } = {}) {
   const bind = wkey();
-  const proof = await makeProof(a, { cnf: await jkt(bind), ...(o.cap !== undefined ? { cap: o.cap } : {}), ...(o.maxDepth !== undefined ? { maxDepth: o.maxDepth } : {}), ...(o.scope ? { scope: o.scope } : {}) });
-  const r = await token(await rootForm(a, proof, o.scope ? { scope: o.scope } : {}), await dpop(bind));
+  const proof = await makeProof(a, { cnf: await jkt(bind), ...(o.cap !== undefined ? { cap: o.cap } : {}), ...(o.maxDepth !== undefined ? { maxDepth: o.maxDepth } : {}), ...(o.scope ? { scope: o.scope } : {}), ...(o.resource ? { resource: o.resource } : {}) });
+  const r = await token(await rootForm(a, proof, { ...(o.scope ? { scope: o.scope } : {}), ...(o.resource ? { resource: o.resource } : {}) }), await dpop(bind));
   expect(r.statusCode, r.body).toBe(200);
   const t = r.json().access_token as string;
   return { token: t, bind, grantId: decodeJwt(t).grant_id as string };
@@ -285,6 +294,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxStrictAdmissionForTest(db));
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
+  restores.push(await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false }));
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   app2 = buildApp(db2, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
@@ -544,13 +554,13 @@ describe("S5 — child exchange (decision 23)", () => {
   const lastRefusal = async () =>
     (await db.select().from(auditLog).where(eq(auditLog.ruleId, "token-exchange-refused")).orderBy(desc(auditLog.seq)).limit(1))[0]!;
 
-  it("substitutions are refused WITHOUT consuming A's authorization; the intended request is then refused delegation_depth_unenforced, still unconsumed", async () => {
+  it("substitutions are refused WITHOUT consuming A's authorization; the intended request then succeeds once", async () => {
     const A = agents[3]!;
     const B = agents[4]!;
     const C = agents[5]!;
     const parent = await rootToken(A);
     const bBind = wkey();
-    const body = childBody();
+    const body = childBody({ cap_micros: 1000 });
     const idem = `idem-${randomUUID()}`;
     const actor = await authz(parent, A, B.id, await jkt(bBind), body, idem);
     // a different authenticated child (C) with A's genuine authorization
@@ -560,7 +570,7 @@ describe("S5 — child exchange (decision 23)", () => {
     const wrongKey = await token(await childForm(B, parent.token, actor, body, idem), await dpop(wkey()));
     expect([wrongKey.statusCode, wrongKey.json().error]).toEqual([400, "invalid_grant"]);
     // a changed cap / depth / scope
-    for (const changed of [childBody({ cap_micros: 5 }), childBody({ max_depth: 1 }), childBody({ authorization_details: scope([T.read, T.write]) as DelegationBody["authorization_details"] })]) {
+    for (const changed of [childBody({ cap_micros: 5 }), childBody({ cap_micros: 1000, max_depth: 1 }), childBody({ cap_micros: 1000, authorization_details: scope([T.read, T.write]) as DelegationBody["authorization_details"] })]) {
       const r = await token(await childForm(B, parent.token, actor, { ...changed, expires_at: body.expires_at }, idem), await dpop(bBind));
       expect(r.statusCode, r.body).toBe(400);
     }
@@ -568,31 +578,117 @@ describe("S5 — child exchange (decision 23)", () => {
     const thief = { ...parent, bind: wkey() };
     const stolen = await token(await childForm(B, parent.token, await authz(thief, A, B.id, await jkt(bBind), body, idem), body, idem), await dpop(bBind));
     expect([stolen.statusCode, stolen.json().error]).toEqual([400, "invalid_grant"]);
-    // S5 review item 1: the intended request passes every check above and is refused for depth, before any claim,
-    // so a second identical attempt is refused the same way (not as a replay) and no child grant exists
-    for (let i = 0; i < 2; i++) {
-      const r = await token(await childForm(B, parent.token, actor, body, idem), await dpop(bBind));
-      expect(r.json(), r.body).toMatchObject({ error: "invalid_grant", error_code: "delegation_depth_unenforced" });
-    }
+    // none of those consumed A's authorization: the intended request succeeds, exactly once
     expect(await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, parent.grantId))).toHaveLength(0);
+    const ok = await token(await childForm(B, parent.token, actor, body, idem), await dpop(bBind));
+    expect(ok.statusCode, ok.body).toBe(200);
+    const again = await token(await childForm(B, parent.token, actor, body, idem), await dpop(bBind));
+    expect([again.statusCode, again.json().error], again.body).toEqual([400, "invalid_grant"]);
+    expect((await lastRefusal()).detail).toMatchObject({ code: "authz_replayed" });
+    const kids = await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, parent.grantId));
+    expect(kids).toHaveLength(1);
+    expect(kids[0]).toMatchObject({ actorIdentityId: B.id, depth: 1, depthLimit: 1 });
   });
 
-  it("the reviewer's probe: a person signs max_depth 0, the root exchange succeeds, A authorises child B → refused and audited", async () => {
+  it("the reviewer's probe: a person signs max_depth 0, the root exchange stores it, A authorises child B → refused delegation_depth before any claim, audited", async () => {
     const A = agents[3]!;
     const B = agents[4]!;
     const parent = await rootToken(A, { maxDepth: 0 });
+    const [root] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, parent.grantId));
+    expect(root).toMatchObject({ depth: 0, depthLimit: 0 }); // the SIGNED depth, not the org's 3
     const bBind = wkey();
-    const body = childBody({ max_depth: 0 });
-    const r = await token(await childForm(B, parent.token, await authz(parent, A, B.id, await jkt(bBind), body, "d1"), body, "d1"), await dpop(bBind));
-    expect([r.statusCode, r.json().error, r.json().error_code]).toEqual([400, "invalid_grant", "delegation_depth_unenforced"]);
+    const body = childBody({ cap_micros: 1000, max_depth: 0 });
+    const idem = `d0-${randomUUID()}`;
+    const actor = await authz(parent, A, B.id, await jkt(bBind), body, idem);
+    for (let i = 0; i < 2; i++) {
+      // refused before the claim, so the second attempt is refused the same way (not as a replay)
+      const r = await token(await childForm(B, parent.token, actor, body, idem), await dpop(bBind));
+      expect([r.statusCode, r.json().error, r.json().error_code], r.body).toEqual([400, "invalid_grant", "delegation_depth"]);
+    }
     const audit = await lastRefusal();
-    expect(audit.detail).toMatchObject({ phase: "token-exchange", code: "delegation_depth_unenforced", status: 400 });
+    expect(audit.detail).toMatchObject({ phase: "token-exchange", code: "delegation_depth", status: 400 });
     expect(await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, parent.grantId))).toHaveLength(0);
-    // and with the org's full depth signed, the same: no external child until the signed depth is enforced (S4)
-    const deep = await rootToken(A, { maxDepth: 3 });
-    const body3 = childBody({ max_depth: 2 });
-    const r3 = await token(await childForm(B, deep.token, await authz(deep, A, B.id, await jkt(bBind), body3, "d3"), body3, "d3"), await dpop(bBind));
-    expect(r3.json()).toMatchObject({ error: "invalid_grant", error_code: "delegation_depth_unenforced" });
+  });
+
+  it("positive control: max_depth 1 lets one child through and refuses the grandchild; the org limit narrows a signed depth", async () => {
+    const A = agents[3]!;
+    const B = agents[4]!;
+    const C = agents[5]!;
+    const parent = await rootToken(A, { maxDepth: 1 });
+    const bBind = wkey();
+    const body = childBody({ cap_micros: 1000, max_depth: 0 });
+    const r = await token(await childForm(B, parent.token, await authz(parent, A, B.id, await jkt(bBind), body, "d1b"), body, "d1b"), await dpop(bBind));
+    expect(r.statusCode, r.body).toBe(200);
+    const child = { token: r.json().access_token as string, bind: bBind, grantId: decodeJwt(r.json().access_token).grant_id as string };
+    const [row] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, child.grantId));
+    expect(row).toMatchObject({ depth: 1, depthLimit: 1, parentGrantId: parent.grantId });
+    // B (depth 1, limit 1) authorises grandchild C: refused for depth
+    const cBind = wkey();
+    const gBody = childBody({ cap_micros: 100, max_depth: 0 });
+    const g = await token(await childForm(C, child.token, await authz(child, B, C.id, await jkt(cBind), gBody, "d1c"), gBody, "d1c"), await dpop(cBind));
+    expect([g.statusCode, g.json().error_code], g.body).toEqual([400, "delegation_depth"]);
+    expect(await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, child.grantId))).toHaveLength(0);
+
+    // the signed depth is narrowed to the org's limit at the root exchange (a setting tightened after signing)
+    const proofBind = wkey();
+    const proof = await makeProof(A, { cnf: await jkt(proofBind), maxDepth: 2 });
+    const [before] = await db.select({ d: orgSettings.delegationMaxDepth }).from(orgSettings);
+    await db.update(orgSettings).set({ delegationMaxDepth: 1 });
+    try {
+      const t = await token(await rootForm(A, proof), await dpop(proofBind));
+      expect(t.statusCode, t.body).toBe(200);
+      const [narrowed] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, decodeJwt(t.json().access_token).grant_id as string));
+      expect(narrowed!.depthLimit).toBe(1);
+    } finally {
+      await db.update(orgSettings).set({ delegationMaxDepth: before!.d });
+    }
+  });
+
+  it("PR #339 review item 3: a root minted without the signed-depth marker (as before migration 0190) refuses a child, audited, before any claim; a new root admits one", async () => {
+    const A = agents[3]!;
+    const B = agents[4]!;
+    // a root as the exchange made it before 0190: the org's limit stored, no marker. Made through the same
+    // createRootGrant with the same binding, only without `depthLimitSigned`
+    const bind = wkey();
+    const old = await createRootGrant(db, {
+      sponsorUserId: sponsorId,
+      actorIdentityId: A.id,
+      scope: scope() as never,
+      capMicros: 5000,
+      expiresAt: new Date(Date.now() + 600_000),
+      environment: ENV,
+      projectId,
+      binding: { kind: "dpop", thumbprint: await jkt(bind), authCredentialId: A.credId, audience: resource },
+    });
+    expect(old).toMatchObject({ depth: 0, depthLimitSigned: false });
+    expect(old.depthLimit).toBeGreaterThan(0); // the org's limit would have admitted a child
+    const minted = await mintDelegatedToken(db, { grantId: old.id, issuer: ISSUER, secrets: SECRETS });
+    const parent = { token: minted.accessToken, bind, grantId: old.id };
+    const bBind = wkey();
+    const body = childBody({ cap_micros: 1000, max_depth: 0 });
+    const idem = `unsigned-${randomUUID()}`;
+    const actor = await authz(parent, A, B.id, await jkt(bBind), body, idem);
+    for (let i = 0; i < 2; i++) {
+      // refused before the claim: the second attempt is refused the same way, not as a replay
+      const r = await token(await childForm(B, parent.token, actor, body, idem), await dpop(bBind));
+      expect([r.statusCode, r.json().error, r.json().error_code], r.body).toEqual([400, "invalid_grant", "delegation_depth_unenforced"]);
+    }
+    expect((await lastRefusal()).detail).toMatchObject({ phase: "token-exchange", code: "delegation_depth_unenforced", status: 400 });
+    expect(await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, old.id))).toHaveLength(0);
+
+    // control: a root from today's exchange carries the marker and admits the same child request
+    const fresh = await rootToken(A, { maxDepth: 1 });
+    const [freshRow] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, fresh.grantId));
+    expect(freshRow).toMatchObject({ depth: 0, depthLimit: 1, depthLimitSigned: true });
+    const idem2 = `signed-${randomUUID()}`;
+    const ok = await token(await childForm(B, fresh.token, await authz(fresh, A, B.id, await jkt(bBind), body, idem2), body, idem2), await dpop(bBind));
+    expect(ok.statusCode, ok.body).toBe(200);
+    const kids = await db.select().from(delegationGrants).where(eq(delegationGrants.parentGrantId, fresh.grantId));
+    expect(kids).toHaveLength(1);
+    expect(kids[0]).toMatchObject({ depth: 1, depthLimitSigned: false }); // the marker is the root's only
+
+    // the marker is never set after the insert (the guard trigger; on a child the CHECK refuses it too)
+    await expect(db.execute(sql`update delegation_grants set depth_limit_signed = true where id = ${kids[0]!.id}`)).rejects.toThrow();
   });
 
   it("another resource than the parent's → invalid_target (decided before the depth guard)", async () => {
@@ -633,25 +729,46 @@ describe("S5 — revocation and introspection (RFC 7009 / 7662)", () => {
 });
 
 describe("S5 — delegated tokens at the resource", () => {
-  const call = async (t: { token: string; bind: WKey }, o: { url?: string; method?: "POST" | "GET"; scheme?: string; proof?: string; nonce?: string | null } = {}) => {
+  const call = async (t: { token: string; bind: WKey }, o: { url?: string; method?: "POST" | "GET"; scheme?: string; proof?: string; nonce?: string | null; project?: string | null; payload?: unknown } = {}) => {
     const url = o.url ?? `/mcp/${serverId}`;
     const method = o.method ?? "POST";
     const proof = o.proof ?? (await dpop(t.bind, { htm: method, htu: `${ISSUER}${url}`, ath: b64sha(t.token), ...(o.nonce !== undefined ? { nonce: o.nonce } : {}) }));
-    return app.inject({ method, url, headers: { authorization: `${o.scheme ?? "DPoP"} ${t.token}`, dpop: proof, "content-type": "application/json" }, ...(method === "POST" ? { payload: { jsonrpc: "2.0", id: 1, method: "tools/list" } } : {}) });
+    return app.inject({
+      method,
+      url,
+      headers: { authorization: `${o.scheme ?? "DPoP"} ${t.token}`, dpop: proof, "content-type": "application/json", accept: "application/json, text/event-stream", ...(o.project === null ? {} : { "x-regulait-project-id": o.project ?? projectId }) },
+      ...(method === "POST" ? { payload: o.payload ?? { jsonrpc: "2.0", id: 1, method: "tools/list" } } : {}),
+    });
+  };
+  /** the request passed authentication and reached the governed route (this server's upstream does not answer) */
+  const reachedRoute = (r: { statusCode: number; body: string }) => {
+    expect(r.statusCode, r.body).not.toBe(401);
+    expect(r.statusCode, r.body).not.toBe(403);
+    expect(r.body).not.toContain("delegated_route_not_wired");
   };
 
-  it("a live token is VERIFIED and then held back until S4 wires the governed paths (403, not 401); any scheme case", async () => {
+  it("a live token is VERIFIED and reaches the governed route (the switch is on); any scheme case", async () => {
     const t = await rootToken(agents[0]!);
-    for (const scheme of ["DPoP", "dpop", "DPOP"]) {
-      const r = await call(t, { scheme });
-      expect([r.statusCode, r.json().error], r.body).toEqual([403, "delegated_route_not_wired"]);
+    for (const scheme of ["DPoP", "dpop", "DPOP"]) reachedRoute(await call(t, { scheme }));
+  });
+
+  it("a workload call names exactly its grant's project: none or another is refused 403 and audited; the right one passes", async () => {
+    const t = await rootToken(agents[0]!);
+    const other = rows<{ id: string }>(await db.execute(sql`insert into projects (name) values (${`s5-other-${RUN}`}) returning id`))[0]!.id;
+    for (const project of [null, other]) {
+      const r = await call(t, { project });
+      expect([r.statusCode, r.json().error], r.body).toEqual([403, "delegation_project_mismatch"]);
     }
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "delegated-token-refused"), eq(auditLog.objectId, t.grantId))).orderBy(desc(auditLog.seq)).limit(1);
+    expect(audit!.detail).toMatchObject({ code: "delegation_project_mismatch" });
+    reachedRoute(await call(t)); // positive control: the grant's own project
+    reachedRoute(await call(t, { project: projectId.toUpperCase() }));
   });
 
   it("refused 401 when the chain is not live, the proof is replayed, stale, nonce-less, or for another URL", async () => {
     const t = await rootToken(agents[0]!);
     const proof = await dpop(t.bind, { htm: "POST", htu: resource, ath: b64sha(t.token) });
-    expect((await call(t, { proof })).statusCode).toBe(403);
+    reachedRoute(await call(t, { proof }));
     expect((await call(t, { proof })).json()).toMatchObject({ error: "invalid_dpop_proof", code: "dpop_proof_replayed" });
     const noNonce = await call(t, { nonce: null });
     expect(noNonce.statusCode).toBe(401);
@@ -668,9 +785,11 @@ describe("S5 — delegated tokens at the resource", () => {
     const t = await rootToken(agents[0]!);
     const proof = await dpop(t.bind, { htm: "POST", htu: resource, ath: b64sha(t.token) });
     const req = (on: ReturnType<typeof buildApp>) =>
-      on.inject({ method: "POST", url: `/mcp/${serverId}`, headers: { authorization: `DPoP ${t.token}`, dpop: proof, "content-type": "application/json" }, payload: { jsonrpc: "2.0", id: 1, method: "tools/list" } });
+      on.inject({ method: "POST", url: `/mcp/${serverId}`, headers: { authorization: `DPoP ${t.token}`, dpop: proof, "content-type": "application/json", accept: "application/json, text/event-stream", "x-regulait-project-id": projectId }, payload: { jsonrpc: "2.0", id: 1, method: "tools/list" } });
     const [r1, r2] = await Promise.all([req(app), req(app2)]);
-    expect([r1.statusCode, r2.statusCode].sort()).toEqual([401, 403]);
+    const [won, lost] = r1.statusCode === 401 ? [r2, r1] : [r1, r2];
+    expect(lost.statusCode).toBe(401);
+    reachedRoute(won);
   });
 
   it("the compat routes take a token for THEIR resource only; any other route refuses a workload token", async () => {
@@ -680,7 +799,9 @@ describe("S5 — delegated tokens at the resource", () => {
     const r = await token(await rootForm(a, await makeProof(a, { cnf: await jkt(bind), resource: compat }), { resource: compat }), await dpop(bind));
     expect(r.statusCode, r.body).toBe(200);
     const t = { token: r.json().access_token as string, bind };
-    expect((await call(t, { url: "/v1/chat/completions" })).json().error).toBe("delegated_route_not_wired");
+    // it reaches the compat dispatch, which names its own refusal (no agent serves this model)
+    const compatCall = await call(t, { url: "/v1/chat/completions", payload: { model: `s5-none-${RUN}`, messages: [{ role: "user", content: "hi" }] } });
+    expect(compatCall.json().error?.code, compatCall.body).toBe("model_not_mapped");
     // the MCP route is another audience
     expect((await call(t)).statusCode).toBe(401);
     // a route outside the allow-list
@@ -737,8 +858,10 @@ describe("S5 — mTLS and SPIFFE (decision 21)", () => {
     expect(r.json().token_type).toBe("Bearer");
     const t = r.json().access_token as string;
     expect(decodeJwt(t).cnf).toEqual({ "x5t#S256": b64sha2(mtlsLeaf.der) });
-    const at = (headers: Record<string, string>) => app.inject({ method: "POST", url: `/mcp/${serverId}`, headers: { authorization: `Bearer ${t}`, "content-type": "application/json", ...headers }, payload: { jsonrpc: "2.0", id: 1, method: "tools/list" } });
-    expect((await at(fwd(mtlsLeaf.der))).json().error).toBe("delegated_route_not_wired");
+    const at = (headers: Record<string, string>) => app.inject({ method: "POST", url: `/mcp/${serverId}`, headers: { authorization: `Bearer ${t}`, "content-type": "application/json", accept: "application/json, text/event-stream", "x-regulait-project-id": projectId, ...headers }, payload: { jsonrpc: "2.0", id: 1, method: "tools/list" } });
+    const okAt = await at(fwd(mtlsLeaf.der));
+    expect(okAt.statusCode, okAt.body).not.toBe(401);
+    expect(okAt.body).not.toContain("delegated_route_not_wired");
     expect((await at({})).json()).toMatchObject({ error: "invalid_token", code: "client_certificate_required" });
     // forged header: the right certificate, but the proxy did not authenticate (wrong secret) → stripped → no certificate
     expect((await at(fwd(mtlsLeaf.der, "x".repeat(48)))).json().code).toBe("client_certificate_required");
@@ -955,7 +1078,7 @@ describe("S5 — delegation grant admin backend", () => {
     const B = agents[4]!;
     const parent = await rootToken(A, { cap: 10_000 });
     const bBind = wkey();
-    // external child exchanges are refused until S4 (review item 1), so the child is admitted in-process (decision 6)
+    // the child is admitted in-process (decision 6); the external child exchange is covered above
     const body = childBody({ cap_micros: 100 });
     const admitted = await admitChildGrant(db, {
       parentGrantId: parent.grantId,
@@ -989,5 +1112,236 @@ describe("S5 — delegation grant admin backend", () => {
     } finally {
       await restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S4+S5 follow-up: with DELEGATED_ROUTES_WIRED on, every route a workload caller reaches decides the call with
+// its grant (S4 amendment item 7). Each case runs the same request with the sponsor's own key as the positive
+// control, so a refusal is the grant's doing and not the sponsor's.
+// ---------------------------------------------------------------------------
+describe("S4+S5 — a workload caller is governed by its grant on the routes it reaches", () => {
+  const U = { a: `s5_ua_${RUN}`, b: `s5_ub_${RUN}` };
+  const upstreamRuns: string[] = [];
+  let upstream: http.Server;
+  let s2 = "";
+  let mcpResource = "";
+  let wl: Agent;
+
+  /** the JSON-RPC message of a proxy reply (plain JSON or one SSE `data:` line) */
+  const rpc = (body: string): { result?: { tools?: Array<{ name: string }>; content?: Array<{ text?: string }>; isError?: boolean }; error?: { message: string } } => {
+    const trimmed = body.trim();
+    if (trimmed.startsWith("{")) return JSON.parse(trimmed);
+    const line = trimmed.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) throw new Error(`no JSON-RPC message in: ${body.slice(0, 200)}`);
+    return JSON.parse(line.slice(5));
+  };
+
+  beforeAll(async () => {
+    upstream = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        void (async () => {
+          const mcp = new McpServer({ name: `s5-up-${RUN}`, version: "0.0.1" });
+          for (const name of [U.a, U.b]) {
+            mcp.registerTool(name, { description: name, inputSchema: {}, annotations: { readOnlyHint: true } }, async () => {
+              upstreamRuns.push(name);
+              return { content: [{ type: "text", text: `${name}-ok` }] };
+            });
+          }
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          await mcp.connect(transport);
+          await transport.handleRequest(req, res, body ? JSON.parse(body) : undefined);
+        })().catch(() => {
+          if (!res.headersSent) res.writeHead(500).end();
+        });
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const addr = upstream.address();
+    if (typeof addr !== "object" || !addr) throw new Error("no upstream address");
+    const s = await app.inject({ method: "POST", url: "/v1/servers", headers: AUTH, payload: { name: `s5-up-${RUN}`, url: `http://127.0.0.1:${addr.port}/` } });
+    expect(s.statusCode, s.body).toBe(201);
+    s2 = s.json().id;
+    // a capped grant buys only priced calls (an unknown cost never buys free authority)
+    await db.execute(sql`update mcp_servers set price_per_call_usd = 0.0001 where id = ${s2}`);
+    mcpResource = `${ISSUER}/mcp/${s2}`;
+    for (const name of [U.a, U.b]) {
+      expect((await app.inject({ method: "POST", url: `/v1/servers/${s2}/tools`, headers: AUTH, payload: { name, kind: "read", description: name } })).statusCode).toBe(201);
+      expect((await app.inject({ method: "POST", url: "/v1/grants/tools", headers: AUTH, payload: { userId: sponsorId, serverId: s2, toolName: name } })).statusCode).toBe(201);
+    }
+    // the agent itself holds BOTH tools, and so does its sponsor: only the grant's scope (U.a) narrows it
+    wl = await newAgent("wl", { server: s2, grants: [U.a, U.b] });
+  });
+
+  afterAll(async () => {
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  });
+
+  const asWorkload = async (t: { token: string; bind: WKey }, url: string, method: "POST" | "GET", payload?: unknown) =>
+    app.inject({
+      method,
+      url,
+      headers: {
+        authorization: `DPoP ${t.token}`,
+        dpop: await dpop(t.bind, { htm: method, htu: `${ISSUER}${url}`, ath: b64sha(t.token) }),
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "x-regulait-project-id": projectId,
+      },
+      ...(payload !== undefined ? { payload: payload as object } : {}),
+    });
+  const asSponsor = (url: string, method: "POST" | "GET", payload?: unknown) =>
+    app.inject({
+      method,
+      url,
+      headers: { ...sponsorAuth, "content-type": "application/json", accept: "application/json, text/event-stream", "x-regulait-project-id": projectId },
+      ...(payload !== undefined ? { payload: payload as object } : {}),
+    });
+  const list = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
+  const callTool = (name: string) => ({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: {} } });
+
+  it("/mcp tools/list and tools/call: the grant's scope, not the sponsor's or the agent's own rights, decides", async () => {
+    const t = await rootToken(wl, { resource: mcpResource, scope: [{ type: "mcp_tool", serverId: s2, toolNames: [U.a], kind: "read" }] });
+    const url = `/mcp/${s2}`;
+
+    const listed = await asWorkload(t, url, "POST", list);
+    expect(listed.statusCode, listed.body).toBe(200);
+    expect(rpc(listed.body).result!.tools!.map((x) => x.name)).toEqual([U.a]);
+    // positive control: the sponsor's own key lists both
+    const sponsorList = await asSponsor(url, "POST", list);
+    expect(rpc(sponsorList.body).result!.tools!.map((x) => x.name).sort()).toEqual([U.a, U.b].sort());
+
+    const inScope = await asWorkload(t, url, "POST", callTool(U.a));
+    expect(rpc(inScope.body).result?.content?.[0]?.text, inScope.body).toBe(`${U.a}-ok`);
+    const outOfScope = await asWorkload(t, url, "POST", callTool(U.b));
+    const refused = rpc(outOfScope.body);
+    expect(refused.result?.content?.[0]?.text ?? "").not.toBe(`${U.b}-ok`);
+    expect(refused.error?.message ?? JSON.stringify(refused.result), outOfScope.body).toMatch(/denied|delegation/i);
+    expect(upstreamRuns).not.toContain(U.b); // never reached the upstream
+    // positive control: the sponsor calls the same tool
+    const sponsorCall = await asSponsor(url, "POST", callTool(U.b));
+    expect(rpc(sponsorCall.body).result?.content?.[0]?.text, sponsorCall.body).toBe(`${U.b}-ok`);
+
+    // every audit row of the workload call is stamped with its chain (decision 9): in the actor columns past the
+    // v2 boundary, in `detail.delegation` before it; the sponsor's own calls carry no stamp (the control)
+    const stampOf = (r: typeof auditLog.$inferSelect) =>
+      r.delegationGrantId ?? (r.detail as { delegation?: { delegationGrantId?: string } } | null)?.delegation?.delegationGrantId ?? null;
+    const rowsFor = await db.select().from(auditLog).where(and(eq(auditLog.serverId, s2), eq(auditLog.toolName, U.a)));
+    const workloadRows = rowsFor.filter((r) => stampOf(r) === t.grantId);
+    expect(workloadRows.length, "an audit row of the workload call carries its grant").toBeGreaterThan(0);
+    const chainOf = (r: typeof auditLog.$inferSelect) =>
+      r.actorChain ?? (r.detail as { delegation?: { actorChain?: string[] } }).delegation?.actorChain;
+    expect(chainOf(workloadRows[0]!)).toEqual([wl.id]);
+    const sponsorRows = (await db.select().from(auditLog).where(and(eq(auditLog.serverId, s2), eq(auditLog.toolName, U.b)))).filter((r) => r.effect === "allow");
+    expect(sponsorRows.length).toBeGreaterThan(0);
+    expect(sponsorRows.every((r) => stampOf(r) === null)).toBe(true);
+
+    // PR #339 review item 4: the same stamp in the actor columns of the call's trace span and usage row (the
+    // preHandler's audit-actor context; control: removing that hook leaves both NULL and fails here). The sponsor's
+    // own call of U.b is the unstamped control.
+    const spanStamp = async (toolName: string) =>
+      (await db.select().from(traceSpans).where(and(eq(traceSpans.kind, "tool"), eq(traceSpans.mcpServerId, s2), eq(traceSpans.name, toolName))))
+        .map((r) => ({ status: r.status, actorIdentityId: r.actorIdentityId, delegationGrantId: r.delegationGrantId }))
+        .sort((a, b) => a.status.localeCompare(b.status));
+    const usageStamp = async (toolName: string) =>
+      (await db.select().from(usageEvents).where(and(eq(usageEvents.objectType, "mcp_tool"), eq(usageEvents.operation, toolName), eq(usageEvents.userId, sponsorId)))).map((r) => ({
+        actorIdentityId: r.actorIdentityId,
+        delegationGrantId: r.delegationGrantId,
+      }));
+    const stamped = { actorIdentityId: wl.id, delegationGrantId: t.grantId };
+    const unstamped = { actorIdentityId: null, delegationGrantId: null };
+    expect(await spanStamp(U.a), "the workload call's tool span carries its chain").toEqual([{ status: "ok", ...stamped }]);
+    expect(await usageStamp(U.a), "the workload call's usage row carries its chain").toEqual([stamped]);
+    // U.b: the workload's refused call (stamped, denied) and the sponsor's own call (unstamped, ok); only the
+    // sponsor's executed call bills
+    expect(await spanStamp(U.b)).toEqual([
+      { status: "denied", ...stamped },
+      { status: "ok", ...unstamped },
+    ]);
+    expect(await usageStamp(U.b)).toEqual([unstamped]);
+
+    // revoke the grant: the very next call is refused at authentication, no cache
+    await db.execute(sql`update delegation_grants set revoked_at = now(), revoked_reason = 'admin' where id = ${t.grantId}`);
+    expect((await asWorkload(t, url, "POST", callTool(U.a))).statusCode).toBe(401);
+  });
+
+  it("the compat dispatch and /v1/models are decided with the grant (sponsor's own key: both models)", async () => {
+    const mk = async (label: string) => {
+      const r = await app.inject({ method: "POST", url: "/v1/agents", headers: AUTH, payload: { name: `s5-${label}-${RUN}`, provider: "mock", tier: 1, costPerMTokIn: 1, costPerMTokOut: 1, model: `s5-${label}-model-${RUN}` } });
+      expect(r.statusCode, r.body).toBe(201);
+      const id = r.json().id as string;
+      expect((await app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: sponsorId, agentId: id } })).statusCode).toBe(201);
+      return { id, model: `s5-${label}-model-${RUN}` };
+    };
+    const x = await mk("x");
+    const y = await mk("y");
+    const wc = await newAgent("wc", { grants: [] });
+    for (const a of [x, y]) await db.execute(sql`insert into identity_agent_grants (identity_id, agent_id, allowed_modes) values (${wc.id}, ${a.id}, '["execute"]'::jsonb)`);
+    const scopeX = [{ type: "agent", agentId: x.id, modes: ["execute"], kind: "write" }];
+
+    // /v1/models: the chain's intersection
+    const listT = await rootToken(wc, { resource: `${ISSUER}/v1/models`, scope: scopeX });
+    const models = await asWorkload(listT, "/v1/models", "GET");
+    expect(models.statusCode, models.body).toBe(200);
+    const ids = (models.json().data as Array<{ id: string }>).map((m) => m.id);
+    expect(ids).toContain(x.model);
+    expect(ids).not.toContain(y.model);
+    const sponsorModels = (await asSponsor("/v1/models", "GET")).json().data as Array<{ id: string }>;
+    expect(sponsorModels.map((m) => m.id)).toEqual(expect.arrayContaining([x.model, y.model]));
+
+    // the compat dispatch: X is in the grant, Y is not (though the sponsor and the agent both hold Y)
+    const chatT = await rootToken(wc, { resource: `${ISSUER}/v1/chat/completions`, scope: scopeX });
+    const chat = (model: string) => ({ model, messages: [{ role: "user", content: "hello" }] });
+    const okX = await asWorkload(chatT, "/v1/chat/completions", "POST", chat(x.model));
+    expect(okX.statusCode, okX.body).toBe(200);
+    const noY = await asWorkload(chatT, "/v1/chat/completions", "POST", chat(y.model));
+    expect(noY.statusCode, noY.body).toBe(403);
+    const sponsorY = await asSponsor("/v1/chat/completions", "POST", chat(y.model));
+    expect(sponsorY.statusCode, sponsorY.body).toBe(200);
+
+    // PR #339 review item 4: the dispatch's usage row and trace spans carry the workload's chain in their actor
+    // columns (control: removing the preHandler stamp leaves them NULL and fails here); the sponsor's own dispatch of
+    // Y is the unstamped control
+    const usageFor = async (agentId: string) =>
+      (await db.select().from(usageEvents).where(eq(usageEvents.agentId, agentId))).map((r) => ({ actorIdentityId: r.actorIdentityId, delegationGrantId: r.delegationGrantId }));
+    const spansFor = async (agentId: string) =>
+      (await db.select().from(traceSpans).where(eq(traceSpans.agentId, agentId))).map((r) => ({ actorIdentityId: r.actorIdentityId, delegationGrantId: r.delegationGrantId }));
+    const stamped = { actorIdentityId: wc.id, delegationGrantId: chatT.grantId };
+    const unstamped = { actorIdentityId: null, delegationGrantId: null };
+    expect(await usageFor(x.id), "the workload dispatch's usage row carries its chain").toEqual([stamped]);
+    const xSpans = await spansFor(x.id);
+    expect(xSpans.length, "the workload dispatch wrote a span naming its agent").toBeGreaterThan(0);
+    expect(xSpans).toEqual(xSpans.map(() => stamped));
+    expect(await usageFor(y.id)).toEqual([unstamped]);
+    const ySpans = (await spansFor(y.id)).filter((r) => r.delegationGrantId === null);
+    expect(ySpans.length, "the sponsor's own dispatch wrote unstamped spans").toBeGreaterThan(0);
+  });
+
+  it("the RFC 9728 document now names the gateway's own issuer (never an identity provider's)", async () => {
+    const doc = (await app.inject({ method: "GET", url: "/.well-known/oauth-protected-resource" })).json();
+    expect(doc.authorization_servers).toEqual([ISSUER]);
+    expect(doc.dpop_signing_alg_values_supported).toEqual(["EdDSA", "ES256"]);
+  });
+});
+
+describe("#337 gap item 5: a bootstrap-token proof refusal is audited", () => {
+  it("delegation_proof_credential writes a delegation-proof-refused deny row; a person's proof writes none", async () => {
+    const refusals = async () =>
+      (await db.select().from(auditLog).where(eq(auditLog.ruleId, "delegation-proof-refused"))).filter(
+        (r) => (r.detail as { code?: string }).code === "delegation_proof_credential" && (r.detail as { agentIdentityId?: string }).agentIdentityId === agents[0]!.id,
+      ).length;
+    const before = await refusals();
+    const r = await app.inject({ method: "POST", url: "/v1/delegations/proofs", headers: AUTH, payload: { agentIdentityId: agents[0]!.id, authorizationDetails: scope(), resource, projectId, env: ENV } });
+    expect([r.statusCode, r.json().error]).toEqual([403, "delegation_proof_credential"]);
+    expect(await refusals()).toBe(before + 1);
+    const [row] = await db.select().from(auditLog).where(eq(auditLog.ruleId, "delegation-proof-refused")).orderBy(desc(auditLog.seq)).limit(1);
+    expect(row).toMatchObject({ effect: "deny", objectType: "delegation_grant" });
+    expect(row!.detail).toMatchObject({ phase: "delegation-proof", code: "delegation_proof_credential", projectId });
+    // positive control: the same request from the person succeeds and writes no refusal
+    expect((await proofRequest(agents[0]!)).statusCode).toBe(201);
+    expect(await refusals()).toBe(before + 1);
   });
 });

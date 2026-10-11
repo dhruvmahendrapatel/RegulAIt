@@ -148,6 +148,8 @@ export interface AuthContext {
    * `WORKLOAD_ROUTES`. */
   workloadIdentityId?: string;
   delegationGrantId?: string;
+  /** S4+S5 follow-up: every identity on the grant's stored path, root first (decision 25), for the audit stamp */
+  actorChain?: string[];
   /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
    * it to apply the key's allow-list and budget, and the ledger stamps it. */
   virtualKeyId?: string;

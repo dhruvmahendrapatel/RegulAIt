@@ -12951,6 +12951,12 @@ export const delegationGrants = pgTable(
      * decision 23 `max_depth`. Root: the org's `delegation_max_depth`; child: min(parent.depthLimit, depth + max_depth).
      */
     depthLimit: integer("depth_limit").notNull(),
+    /**
+     * ADR-0188 S4+S5 (migration 0190): true only on a ROOT whose `depth_limit` was set from the person's SIGNED
+     * `max_depth` (the token endpoint's root exchange). The token endpoint admits an external child only under such
+     * a root; every other row, including every row made before 0190, is false (secure default, ADR-0180).
+     */
+    depthLimitSigned: boolean("depth_limit_signed").notNull().default(false),
     sponsorUserId: uuid("sponsor_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
@@ -12990,6 +12996,7 @@ export const delegationGrants = pgTable(
   (t) => [
     check("delegation_grants_depth_check", sql`${t.depth} = cardinality(${t.path}) AND ${t.depth} BETWEEN 0 AND 8`),
     check("delegation_grants_depth_limit_check", sql`${t.depthLimit} BETWEEN ${t.depth} AND 8`),
+    check("delegation_grants_depth_limit_signed_check", sql`NOT ${t.depthLimitSigned} OR ${t.depth} = 0`),
     check(
       "delegation_grants_parent_check",
       sql`(${t.depth} = 0 AND ${t.parentGrantId} IS NULL AND ${t.rootGrantId} = ${t.id}) OR (${t.depth} > 0 AND ${t.parentGrantId} IS NOT NULL AND ${t.path}[cardinality(${t.path})] = ${t.parentGrantId} AND ${t.path}[1] = ${t.rootGrantId})`,
