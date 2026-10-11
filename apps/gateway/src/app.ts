@@ -4638,7 +4638,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       throw err;
     });
     if (outcome instanceof RoleNotFoundError) {
-      await auditRoleNotFound(db, { actorUserId: deciderUserId, roleId: outcome.roleId, via: "sod-override-decide", detail: { approvalId } });
+      await auditRoleNotFound(db, { actorUserId: deciderUserId, roleId: outcome.roleId, via: "sod-override-decide", detail: { approvalId, ...outcome.context } });
       return fail(404, roleNotFoundBody(outcome.roleId));
     }
     if (outcome.refusal) return fail(409, outcome.refusal);

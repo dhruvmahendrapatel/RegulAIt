@@ -263,6 +263,8 @@ export async function lockRoleForGrantInsert(tx: Db, roleId: string): Promise<bo
  */
 export class RoleNotFoundError extends Error {
   readonly code = "role_not_found" as const;
+  /** what the refused write was for, recorded on the refusal's audit row (e.g. the SoD override request) */
+  context: Record<string, unknown> = {};
   constructor(readonly roleId: string) {
     super(`role ${roleId} does not exist`);
     this.name = "RoleNotFoundError";
