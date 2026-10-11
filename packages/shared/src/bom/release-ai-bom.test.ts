@@ -316,6 +316,15 @@ describe("B7 release workflow shape (F1, F5)", () => {
     }
     for (const s of steps.slice(0, switchAt)) expect(s).not.toMatch(/upload-artifact|download-artifact/);
   });
+  it("R17 release review: publication (keyless cosign, a public Rekor entry) also needs the owner's approval variable, off by default", () => {
+    const sw = job("build").split("\n      - ").find((s) => s.includes("id: switch"))!;
+    expect(sw).toContain("PUBLISH_APPROVED: ${{ vars.RELEASE_AI_BOM_PUBLISH_APPROVED }}");
+    // released only when the code switch is on AND the variable is exactly "true"; anything else is inert
+    expect(sw).toContain('if [ "$switch" = "released=true" ] && [ "${PUBLISH_APPROVED:-}" = "true" ]; then');
+    expect(sw).toMatch(/else\n\s+echo "released=false" >> "\$GITHUB_OUTPUT"/);
+    // NEGATIVE CONTROL: the switch's own output is never written straight to $GITHUB_OUTPUT
+    expect(sw).not.toContain('release-ai-bom.mjs switch >> "$GITHUB_OUTPUT"');
+  });
   it("sign is gated on the switch, holds only id-token, runs cosign only and pins this workflow's identity", () => {
     const s = job("sign");
     expect(s).toContain("if: needs.build.outputs.released == 'true'");
