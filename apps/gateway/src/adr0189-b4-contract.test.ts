@@ -1,7 +1,7 @@
 /**
  * ADR-0189 slice B4 — the frozen contract is bound into the OpenAPI document.
  * Pure (no database): builds the document from the BOM route inventory.
- * `zz-adr0189-b1-foundation.test.ts` still pins that the routes answer 501.
+ * `zz-adr0189-b4-decision-bom.test.ts` drives the built routes end to end.
  *
  * Reads `@regulait/shared` through its dist: run `pnpm -r build` first.
  */
@@ -33,11 +33,12 @@ describe("ADR-0189 B4 contract in the OpenAPI document", () => {
     expect(Object.keys(published.paths as object)).toEqual([]);
   });
 
-  it("every B4 route states it is not built yet and binds the frozen schemas", () => {
+  it("every B4 route states its in-handler gate and binds the frozen schemas", () => {
     for (const r of BOM_B4_ROUTES) {
       expect(ROUTE_DOCS[r], r).toBeDefined();
       const op = operation(all, r);
-      expect(op.summary, r).toContain("501 `not_built`");
+      expect(op.summary, r).toContain("`bom_export_forbidden`");
+      expect(op.summary, r).not.toContain("not_built");
       const c = BOM_B4_ROUTE_CONTRACT[r];
       const ok = op.responses["2XX"]!;
       if (c.response.kind === "json") {
@@ -62,11 +63,12 @@ describe("ADR-0189 B4 contract in the OpenAPI document", () => {
     expect(operation(all, "GET /v1/ai-bom/snapshots/:snapshotId").parameters?.map((p) => `${p.in}:${p.name}`)).toEqual(["path:snapshotId", "query:format"]);
   });
 
-  it("review item 3: the 403 keeps the generic admin and MFA text and adds the contract's codes", () => {
+  it("review item 3: the 403 keeps the generic MFA text and adds the contract's codes", () => {
     for (const r of BOM_B4_ROUTES) {
       const forbidden = operation(all, r).responses["403"] as { description: string; "x-regulait-error-codes"?: string[] };
       expect(forbidden.description, r).toContain("ADR-0181");
-      expect(forbidden.description, r).toContain("`admin_only`");
+      // B4 moved the routes behind the in-handler bom_export_roles check (route class `user`)
+      expect(forbidden.description, r).toContain("`mfa_enrollment_required`");
       expect(forbidden["x-regulait-error-codes"], r).toEqual(["bom_export_forbidden", "admin_only", "mfa_enrollment_required"]);
     }
   });

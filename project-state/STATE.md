@@ -21,6 +21,14 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-11 - owner decisions.** The owner accepted the open recommendations:
+- ADR-0190 A: `warn` retired. B: an unresolved policy fact answers `409 execution_profile_unavailable` with reason
+  `policy_unresolved`. Both are recorded in the ADR-0190 amendment; the code follow-up is queued.
+- R14 is recorded as **ADR-0193 content provenance**: Option B; P0 and P1 first; both byte sets digested, keyed for
+  `pii`; anchor timestamp and receipt key reused; C2PA deferred; three admin-set trust tiers, default `untrusted`.
+- Still open: the EU AI Act Art. 50 marking duty (needs legal review), and uninstalling the Codex GitHub review app,
+  which the owner does in GitHub settings.
+
 **2026-10-11 (early hours) - the batch 6 migration chain is merged through 0190; delegated workload access is live.** This
 paragraph supersedes the queue in the 2026-10-10 evening paragraph below. Full record:
 [sessions/2026-10-11-session-01.md](sessions/2026-10-11-session-01.md).

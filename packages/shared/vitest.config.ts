@@ -19,6 +19,8 @@ export const TIMING_FILES = [
   "src/batch4.test.ts",
   "src/detection-content/vendor.test.ts",
   "src/detection-content/scrub-dense.test.ts",
+  // ADR-0189 B4 hardening: crafted-input verifier runs are bounded at 1 s
+  "src/bom/b4-hardening.test.ts",
   // no explicit budget, but 40k-string measurements bounded by the default 5 s test timeout: under a parallel
   // run on a loaded 4-core host it took 8.3 s and timed out (2026-10-10)
   "src/pii-conformance.test.ts",

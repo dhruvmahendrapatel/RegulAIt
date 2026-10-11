@@ -766,6 +766,20 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/delegations/proofs",
   // ADR-0190 I3 — the executor channel (auth-exempt above too; in-route proof)
   ...EXECUTOR_CHANNEL_ROUTES,
+
+  // ADR-0189 slice B4 — the Decision BOM and AI BOM reads, bundles and the
+  // online verifier. The gate is `bom_export_roles` (§7, §9), checked IN THE
+  // HANDLER on every request (`bom-export.ts` `bomAccessOf`): admins, or a
+  // person with an active `bom_auditor_grants` row while an admin has relaxed
+  // the setting to `admins_and_auditors` (audited). Anyone else gets 403
+  // `bom_export_forbidden`; the strict default is admins only. The B3 snapshot
+  // list, drift and freeze routes are DELIBERATELY ABSENT, so they stay
+  // ADMIN-ONLY (R8: drift is admins only, never auditors).
+  "GET /v1/decisions/:auditId/bom",
+  "GET /v1/decisions/:auditId/bom/bundle",
+  "GET /v1/ai-bom/snapshots/:snapshotId",
+  "GET /v1/ai-bom/snapshots/:snapshotId/bundle",
+  "POST /v1/boms/verify",
 ]);
 
 /**
