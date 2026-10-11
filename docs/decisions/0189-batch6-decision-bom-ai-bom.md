@@ -1934,6 +1934,80 @@ PR #350 sets `AI_BOM_SNAPSHOTS_RELEASED` to true. Under ADR-0191 it had an indep
    - decide which evidence kinds count as "evidence attached";
    - decide where the `snapshot_skipped_no_key` and `snapshot_failed` gap records live.
 
+### Amendments settling R25 (2026-10-11)
+
+These answers settle the four questions left open in item 4 of the R17 amendments. They were checked against main after
+#350. The owner had told the master session to "go with your recommendations", so items 9 to 11 are master-set
+defaults; the owner can overrule any of them.
+
+1. **Each sign-off event snapshots these subjects. Every hook runs on the approved branch only; a rejection takes no
+   snapshot.**
+
+   | Event | Hook | Subjects |
+   | --- | --- | --- |
+   | Use case approval | `syncUseCaseForInstance`, on its move to `approved` | that use case |
+   | Model card approval | `applyModelCardApprovalDecision` | see the model-card subject set below |
+   | Evidence attached | MRM card evidence route and red-team run evidence route (both write sites) | same as model card approval |
+   | Prompt promotion | `applyPromptPromotionDecision` | `modelConfig.agentId` and the use cases that list that agent |
+   | Config promotion | `activateVersion` (promote, activate, rollback), for `agent_system_prompt` and `agent_config` only | the `artifactId` agent and the use cases that list it |
+   | Server admission | see item 2 | the install snapshot |
+   | Skill admission | skill admission | each builder agent in the skill's `releases`, as `builder_agent` (none if no agent pins the skill) |
+
+   **Model-card subject set.**
+   - An agent card snapshots its agent, the use cases whose `intendedAgentIds` include that agent, and the builder
+     agents whose `modelAgentId` is that agent.
+   - A custom-provider card does the same for every agent that uses that provider.
+
+   **Not sign-offs.** These never trigger a snapshot:
+   - direct non-production prompt tag moves;
+   - starting a config canary;
+   - scanner verdicts;
+   - server registration.
+2. **The "server admission" code path is the admin clear route**, `POST /v1/servers/:serverId/admission/clear`.
+   - It is the only human sign-off on a server.
+   - The route currently writes its update and its audit row outside a transaction. This slice wraps both in one.
+3. **Every evidence kind counts as "evidence attached"** (`eval_run`, `external`, `engine_scan`).
+   - R25 says "evidence attached". The review amendments supersede owner decision 8's earlier wording ("engine-scan
+     evidence").
+   - R12 puts every evidence kind into the BOM, so any attach changes it.
+4. **Gap records are `audit_log` rows; there is no new table.**
+   - Rule ids: `ai-bom-snapshot-skipped-no-key` and `ai-bom-snapshot-failed`.
+   - Each row's detail carries `{subjectKind, subjectId, trigger, triggeringObjectId, code}`.
+   - Posture shows gap counts.
+   - Drift lists gaps, including where it now answers 409 because the subject has no snapshot.
+5. **Snapshots are taken after commit, through `takeAiBomSnapshot`**, which holds the per-subject lock and writes the
+   `ai-bom-snapshot-taken` audit row.
+   - `captureAiBomSnapshotInTx` has no lock and no audit row, and is removed.
+   - The decide path's single `postCommit` callback becomes a list, so hooks no longer overwrite one another.
+6. **A missing key fails closed.**
+   - When `sign_off_events` names the event and no snapshot key is configured, the sign-off is refused with 409
+     `bom_signing_unavailable` inside its own transaction, so nothing commits.
+   - If an admin has relaxed that setting, the sign-off proceeds and writes `ai-bom-snapshot-skipped-no-key` in the same
+     transaction.
+7. **A snapshot failure after commit does not undo the sign-off.**
+   - It writes `ai-bom-snapshot-failed`.
+   - The response carries a warning naming the subjects that failed.
+8. **Release.**
+   - `AI_BOM_SIGNOFF_TRIGGERS_WIRED` becomes true.
+   - The 501 gate, the `not_wired` posture and the "on demand only" help text are removed.
+   - The stored default `sign_off_events` takes effect.
+9. **Crash between commit and snapshot.**
+   - The triggering audit row's detail records the snapshots it is owed (`aiBomSnapshotsDue`: subject kind and id).
+   - Posture reports any snapshot that was owed but has neither an `ai-bom-snapshot-taken` row nor a gap row, so a lost
+     snapshot is visible and not silent.
+   - There is no outbox table. A durable retry is revisited if posture shows this happening.
+10. **Fan-out cap.**
+    - One sign-off snapshots at most 100 subjects, one after another.
+    - Past the cap, the sign-off still stands. Each remaining subject gets an `ai-bom-snapshot-failed` row with code
+      `fanout_exceeded`, so an admin can take them on demand.
+    - The cap is a constant, not a setting.
+11. **Changes that stay drift-only.** These are not sign-offs under R25, so they take no snapshot:
+    - evidence detach;
+    - card revocation;
+    - an approved use case whose agents' BOMs change through flows.
+
+    Drift reports them. Whether revocation should snapshot is left as an open follow-up.
+
 ## Further design review happens at slice level
 
 From the seventh review round on, this ADR is complete as a design record. Later design findings are not added here
