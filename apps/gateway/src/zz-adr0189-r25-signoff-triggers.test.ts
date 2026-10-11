@@ -28,7 +28,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
@@ -39,6 +39,7 @@ import {
   builderAgentSkills,
   builderAgents,
   builderSkills,
+  evalDatasets,
   evalRuns,
   eq,
   mcpServers,
@@ -244,7 +245,9 @@ describe("item 1: each sign-off snapshots the subjects it names, after commit", 
 
   it("evidence attached (red-team run route): the same subject set, one transaction with the attach", async () => {
     const [lib] = await db.insert(redteamLibraries).values({ name: `r25-lib-${k.RUN}` }).returning({ id: redteamLibraries.id });
-    const [er] = await db.insert(evalRuns).values({ datasetId: randomUUID(), datasetVersion: 1, agentId: ids.agentA, agentName: "r25 agent a", trigger: "manual" }).returning({ id: evalRuns.id });
+    // the run names a real dataset version (eval_runs_dataset_version_fk)
+    const [ds] = await db.insert(evalDatasets).values({ name: `r25-ds-${k.RUN}`, version: 1 }).returning({ id: evalDatasets.id, version: evalDatasets.version });
+    const [er] = await db.insert(evalRuns).values({ datasetId: ds!.id, datasetVersion: ds!.version, agentId: ids.agentA, agentName: "r25 agent a", trigger: "manual" }).returning({ id: evalRuns.id });
     const [run] = await db.insert(redteamRuns).values({ libraryId: lib!.id, libraryName: `r25-lib-${k.RUN}`, libraryVersion: 1, evalRunId: er!.id, agentId: ids.agentA, agentName: "r25 agent a" }).returning({ id: redteamRuns.id });
     const res = await k.req("POST", `/v1/redteam/runs/${run!.id}/evidence`, k.BOOT, { cardId: ids.cardA });
     expect(res.statusCode, res.body).toBe(201);
@@ -326,22 +329,26 @@ describe("item 1: each sign-off snapshots the subjects it names, after commit", 
   }, 120_000);
 
   it("skill admission: each builder agent whose pinned copy it releases (none when no agent pins it)", async () => {
+    // a skill digest is a real SHA-256 (it is rendered as a CycloneDX SHA-256 hash, which the validator checks)
+    const digestOf = (label: string) => createHash("sha256").update(`r25-${label}-${k.RUN}`).digest("hex");
     const mkSkill = async (label: string) => {
-      const [s] = await db.insert(builderSkills).values({ name: `r25-skill-${label}-${k.RUN}`, ownerUserId: owner.id, contentDigest: `r25-${label}-digest`, admissionState: "held" }).returning({ id: builderSkills.id });
+      const [s] = await db.insert(builderSkills).values({ name: `r25-skill-${label}-${k.RUN}`, ownerUserId: owner.id, contentDigest: digestOf(label), admissionState: "held" }).returning({ id: builderSkills.id });
       return s!.id;
     };
     const pinned = await mkSkill("pinned");
-    await db.insert(builderAgentSkills).values({ agentId: ids.builderA, skillId: pinned, snapshotDigest: "r25-pinned-digest", snapshotAdmissionState: "held" } as never);
-    const res = await k.req("POST", `/v1/admission/skills/${pinned}/admit`, k.BOOT, { digest: "r25-pinned-digest", reason: "r25 reviewed" });
+    await db.insert(builderAgentSkills).values({ agentId: ids.builderA, skillId: pinned, snapshotDigest: digestOf("pinned"), snapshotAdmissionState: "held" } as never);
+    const res = await k.req("POST", `/v1/admission/skills/${pinned}/admit`, k.BOOT, { digest: digestOf("pinned"), reason: "r25 reviewed" });
     expect(res.statusCode, res.body).toBe(200);
     const row = await triggeringRow("builder-skill-admitted", pinned);
     expect(dueOf(row)).toEqual([subj("builder_agent", ids.builderA)]);
-    await expectEveryOwedSubjectAccounted(row);
+    expect(res.json().aiBomSnapshotWarning).toBeUndefined();
+    const done = await expectEveryOwedSubjectAccounted(row);
+    expect(done.map((d) => d.ruleId)).toEqual([AI_BOM_SNAPSHOT_RULE_IDS.taken]);
     expect((await snapshotsOf("builder_agent", ids.builderA, "skill_admission")).length).toBeGreaterThanOrEqual(1);
 
     const lone = await mkSkill("lone");
     const before = await ledger();
-    const res2 = await k.req("POST", `/v1/admission/skills/${lone}/admit`, k.BOOT, { digest: "r25-lone-digest", reason: "r25 reviewed" });
+    const res2 = await k.req("POST", `/v1/admission/skills/${lone}/admit`, k.BOOT, { digest: digestOf("lone"), reason: "r25 reviewed" });
     expect(res2.statusCode, res2.body).toBe(200);
     expect(dueOf(await triggeringRow("builder-skill-admitted", lone))).toBeNull();
     expect(await ledger()).toEqual(before);
