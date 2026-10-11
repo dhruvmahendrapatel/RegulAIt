@@ -1,10 +1,10 @@
 ---
 phase: batch-6-identity-bom-isolation-slices
-last_updated: 2026-10-10
+last_updated: 2026-10-11
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-10-session-02.md
+last_session: sessions/2026-10-11-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,36 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-11 (early hours) - the batch 6 migration chain is merged through 0190; delegated workload access is live.** This
+paragraph supersedes the queue in the 2026-10-10 evening paragraph below. Full record:
+[sessions/2026-10-11-session-01.md](sessions/2026-10-11-session-01.md).
+- Merged on `main`, in migration order:
+  - **0184** S4 (#326);
+  - **0185** guard hardening (#285);
+  - **0186** B9 SPDX fields (#322);
+  - **0187 + 0188** I3 together with S5 (#323). I3 already carried an older S5, so both landed in one PR and #302 then
+    showed as merged;
+  - **0189** B2 decision fact capture (#341);
+  - **0190** the S4+S5 flip (#339): signed delegation depth enforced, delegated routes wired, and roots minted before
+    the flip refused.
+- Also merged: the S4 follow-up (#336; grants bounded by stewards, PATCH stewards), the B4.10 contract (#335), the
+  ADR-0188/0190 test vectors (#334), the spec-gap amendments (#337), the B9 UI (#330), the warn-mode placement fix
+  (#340; no call below its class in any mode, executor re-read under lock) and #338.
+- Release switches:
+  - `SIGNED_ROOT_DEPTH_PERSISTED` and `DELEGATED_ROUTES_WIRED` are now **true**.
+  - `RECEIPT_EMITTER_SUPPORTS_V2` stays **false** until the receipt cutover slice (ADR-0189 B2 amendment 2).
+  - `AI_BOM_SNAPSHOTS_RELEASED` stays **false**.
+- Every security PR had an independent fresh-context review under ADR-0191, and a recheck after its fix round. The
+  ADR-0188 and ADR-0189 amendments record the outcomes.
+- In progress:
+  - B4 (Decision BOM assembler, signer, bundle and verifier; migration **0191** reserved);
+  - a follow-up PR for the Low review findings (audit rows on three refusals, `role_not_found`, an SoD lock test).
+- Owner decisions open:
+  - ADR-0190 A: retire `warn` (recommended);
+  - ADR-0190 B: `409 execution_profile_unavailable` with reason `policy_unresolved` (recommended);
+  - the R14 provenance questions;
+  - whether to uninstall the Codex GitHub review app.
 
 **2026-10-10 (evening) - current merge state and migration queue (documentation drift fix after audit #325).** This
 paragraph supersedes the queue and number plan in the dated paragraphs below, which are kept as history.
