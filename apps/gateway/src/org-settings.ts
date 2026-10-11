@@ -51,6 +51,7 @@ import { relaxedOrgSettingKeys, type RelaxationFacts, type WritableOrgSettingKey
 import {
   ACCOUNTABILITY_SETTING_KEYS,
   accountabilitySettingRelaxed,
+  aiBomSnapshotTriggerPosture,
   alertTicketSettingsProblem,
   composeAuditRetentionDays,
   type AccountabilitySettingKey,
@@ -704,7 +705,13 @@ export function relaxedAccountabilityKeys(changed: Record<string, unknown>): Acc
 export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string } = {}) {
   app.get("/v1/org/settings", async () => {
     const settings = await loadOrgSettings(db);
-    return { settings: redactSettings(settings), approvalTtlPosture: approvalTtlPosture(settings), envKeys: envKeyPresence() };
+    return {
+      settings: redactSettings(settings),
+      approvalTtlPosture: approvalTtlPosture(settings),
+      // ADR-0189 R25: what `aiBomSnapshotTriggers` does today (sign-off triggers not wired: on-demand only)
+      aiBomSnapshotTriggerPosture: aiBomSnapshotTriggerPosture(settings.aiBomSnapshotTriggers),
+      envKeys: envKeyPresence(),
+    };
   });
 
   app.put("/v1/org/settings", async (req, reply) => {
@@ -966,7 +973,11 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db, opts: { 
     });
     if ("status" in out) return reply.status(out.status).send(out.body);
     const { after } = out;
-    return reply.send({ settings: redactSettings(after), approvalTtlPosture: approvalTtlPosture(after) });
+    return reply.send({
+      settings: redactSettings(after),
+      approvalTtlPosture: approvalTtlPosture(after),
+      aiBomSnapshotTriggerPosture: aiBomSnapshotTriggerPosture(after.aiBomSnapshotTriggers),
+    });
   });
 
   // -------------------------------------------------------------------------

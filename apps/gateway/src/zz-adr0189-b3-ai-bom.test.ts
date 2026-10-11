@@ -76,7 +76,7 @@ import {
   workloadIdentities,
   type Db,
 } from "@regulait/db";
-import { AI_BOM_INSTALL_SUBJECT_ID, aiBomNativeBodySchema, validateCycloneDx, warmCycloneDxValidators, type AiBomSubjectKind } from "@regulait/shared";
+import { AI_BOM_INSTALL_SUBJECT_ID, AI_BOM_SIGNOFF_TRIGGERS_WIRED, aiBomNativeBodySchema, validateCycloneDx, warmCycloneDxValidators, type AiBomSubjectKind } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomSnapshotTriggerGate, captureAiBomSnapshotInTx, loadAiBomRecords, takeAiBomSnapshot } from "./ai-bom.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -399,16 +399,25 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
     }
   });
 
-  it("R2/R17: with the switch released, the trigger gate captures inside the triggering transaction", async () => {
+  it("R25 not wired: the sign-off trigger gate refuses and captures nothing, writes nothing (even released, with a key)", async () => {
     expect(AI_BOM_SNAPSHOTS_RELEASED).toBe(true);
+    expect(AI_BOM_SIGNOFF_TRIGGERS_WIRED).toBe(false);
     withKey(true);
     try {
-      const before = rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from ai_bom_snapshots`))[0]!.n;
-      const r = await db.transaction((tx) => aiBomSnapshotTriggerGate(tx as unknown as Db, { subject: { kind: "agent", id: ids.agent2! }, trigger: "model_card_approval", actorUserId: null }), { isolationLevel: "repeatable read" });
-      expect(r.status).toBe("taken");
-      const [row] = await db.select({ trigger: aiBomSnapshots.trigger }).from(aiBomSnapshots).where(eq(aiBomSnapshots.id, (r as { snapshot: { id: string } }).snapshot.id));
-      expect(row!.trigger).toBe("model_card_approval");
-      expect(rowsOf<{ n: number }>(await db.execute(sql`select count(*)::int as n from ai_bom_snapshots`))[0]!.n).toBe(before + 1);
+      const counts = async () =>
+        rowsOf<{ s: number; r: number; a: number }>(await db.execute(sql`select
+          (select count(*)::int from ai_bom_snapshots) as s,
+          (select count(*)::int from bom_renderings) as r,
+          (select count(*)::int from audit_log) as a`))[0]!;
+      const before = await counts();
+      const e = await db
+        .transaction((tx) => aiBomSnapshotTriggerGate(tx as unknown as Db, { subject: { kind: "agent", id: ids.agent2! }, trigger: "model_card_approval", actorUserId: null }), { isolationLevel: "repeatable read" })
+        .catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(AiBomError);
+      expect(e).toMatchObject({ status: 501, code: "ai_bom_signoff_triggers_not_wired" });
+      expect((e as Error).message).toMatch(/not wired/);
+      expect(await counts()).toEqual(before);
+      expect((await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.trigger, "model_card_approval"))).length).toBe(0);
     } finally {
       withKey(false);
     }

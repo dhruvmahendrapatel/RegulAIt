@@ -32,6 +32,8 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { agents, aiBomSnapshots, and, auditLog, createDb, eq, modelCards, runMigrations, sql, type Db } from "@regulait/db";
 import {
   AI_BOM_DOWNLOAD_FORMATS,
+  AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE,
+  AI_BOM_SIGNOFF_TRIGGERS_WIRED,
   AI_BOM_SNAPSHOTS_RELEASED,
   bomBundleHeadersSchema,
   bomSpkiFingerprint,
@@ -41,6 +43,7 @@ import {
   type BomVerifyTrust,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { ORG_SETTING_STRICTNESS } from "./org-setting-strictness.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
@@ -398,5 +401,49 @@ describe("ADR-0189 R8: the drift route is live against the released snapshot", (
     expect((await inject("GET", `/v1/ai-bom/agent/${ids.agent}/drift`, users.member.auth)).statusCode).toBe(403);
     expect((await db.select().from(auditLog).where(eq(auditLog.ruleId, "ai-bom-drift-viewed"))).length).toBeGreaterThanOrEqual(2);
     expect(await snapshotCount()).toBe(before);
+  });
+});
+
+describe("ADR-0189 R25 not wired: the snapshot-trigger setting says so wherever it is exposed", () => {
+  it("GET /v1/org/settings keeps the strict stored default and states that sign-off triggers are not wired (on-demand only)", async () => {
+    const res = await inject("GET", "/v1/org/settings");
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json();
+    expect(body.settings.aiBomSnapshotTriggers).toBe("sign_off_events");
+    expect(body.aiBomSnapshotTriggerPosture).toEqual({
+      configured: "sign_off_events",
+      signOffTriggers: "not_wired",
+      effective: "on_demand_only",
+      note: AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE,
+    });
+    expect(body.aiBomSnapshotTriggerPosture.note).toMatch(/not wired yet/);
+    expect(body.aiBomSnapshotTriggerPosture.note).toMatch(/on-demand only/);
+  });
+
+  it("the posture report carries ai_bom_signoff_triggers: not_wired", async () => {
+    const res = await inject("GET", "/v1/reports/posture");
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().aiBom).toEqual({
+      ai_bom_signoff_triggers: "not_wired",
+      snapshotTriggerSetting: "sign_off_events",
+      effectiveSnapshotTriggers: "on_demand_only",
+      note: AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE,
+    });
+  }, 60_000);
+
+  it("the strictness registry keeps sign_off_events as the strict value (on_demand_only is still a relaxation) and notes it is not wired", () => {
+    const entry = ORG_SETTING_STRICTNESS.aiBomSnapshotTriggers;
+    expect(entry.kind).toBe("rule");
+    if (entry.kind !== "rule") return;
+    expect(entry.strict).toBe("sign_off_events");
+    expect(entry.relaxed("on_demand_only")).toBe(true);
+    expect(entry.relaxed("sign_off_events")).toBe(false);
+    expect(entry.note).toBe(AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE);
+  });
+
+  it("only on-demand snapshots exist: no sign-off trigger has taken one", async () => {
+    expect(AI_BOM_SIGNOFF_TRIGGERS_WIRED).toBe(false);
+    const triggers = rowsOf<{ trigger: string }>(await db.execute(sql`select distinct trigger from ai_bom_snapshots`)).map((r) => r.trigger);
+    expect(triggers).toEqual(["on_demand"]);
   });
 });

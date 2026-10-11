@@ -59,6 +59,7 @@ import {
   BATCH5_SETTING_KEYS,
   BATCH5_STRICT_DEFAULTS,
   identitySettingLooser,
+  AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE,
   bomSettingLooser,
   bomSettingRelaxed,
   BOM_SETTING_KEYS,
@@ -84,6 +85,8 @@ export interface StrictnessRule {
   readonly relaxed: (value: unknown) => boolean;
   /** an ordered setting: is `value` looser than `base` (the stored value)? */
   readonly looser?: (value: unknown, base: unknown) => boolean;
+  /** what the setting does NOT do yet, stated where the rule is (ADR-0189 R25: sign-off triggers not wired) */
+  readonly note?: string;
 }
 export interface StrictnessExemption {
   readonly kind: "exempt";
@@ -204,6 +207,8 @@ function fromBatches(): Record<string, StrictnessRule> {
   for (const k of BOM_SETTING_KEYS) {
     out[k] = rule(BOM_STRICT_DEFAULTS[k], (v) => bomSettingRelaxed(k, v as never), (v, b) => bomSettingLooser(k, v, b));
   }
+  // R25 not wired: the strict value is stored and judged as strict, but no sign-off takes a snapshot yet
+  out.aiBomSnapshotTriggers = { ...out.aiBomSnapshotTriggers!, note: AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE };
   // ADR-0190 (batch 6 item 3): a lower class floor and a longer attestation lifetime are looser than the default
   // (enforcement has one value, `enforce`: OWNER DECISION A); a floor an admin raised is lowered back (or a shortened lifetime lengthened) only with the step-up
   for (const k of ISOLATION_SETTING_KEYS) {

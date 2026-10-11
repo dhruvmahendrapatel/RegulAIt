@@ -25,9 +25,14 @@
  *
  * RELEASED (R2, R17): `AI_BOM_SNAPSHOTS_RELEASED` is true IN CODE (not a
  * setting) now that every v1 renderer (B3, B5) and `export-bundle/3` (B4)
- * exist, so the snapshot route freezes and `aiBomSnapshotTriggerGate` captures.
- * No sign-off path calls the gate yet: the OWNER DECISION 8 / R25 trigger wiring
- * is not built (see the TODO on `captureAiBomSnapshotInTx`).
+ * exist, so the on-demand snapshot route freezes.
+ *
+ * SIGN-OFF TRIGGERS ARE NOT WIRED (OWNER DECISION 8 / R25): R25 leaves the
+ * event-to-subject mapping open, so the R25 slice wires them later. Until then
+ * snapshots are on-demand only, whatever `ai_bom_snapshot_triggers` says, and
+ * `aiBomSnapshotTriggerGate` refuses (`ai_bom_signoff_triggers_not_wired`)
+ * instead of capturing with no per-subject lock and no audit row. The settings
+ * API and the posture report say so (`AI_BOM_SIGNOFF_TRIGGERS_WIRED`).
  */
 import { createHash, sign } from "node:crypto";
 import {
@@ -97,6 +102,7 @@ import {
   type CycloneDxSpecVersion,
 } from "@regulait/shared";
 import { AI_BOM_SNAPSHOTS_RELEASED } from "@regulait/shared";
+import { AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE } from "@regulait/shared";
 import { loadReceiptSigningKey, ReceiptKeyError, sameReceiptPublicKey } from "./decision-receipts.js";
 import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
@@ -519,8 +525,8 @@ async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSn
  * read a stale chain tip after its lock wait). Both are settled when the
  * PR that wires the R25 triggers: the triggering transaction must take the
  * session lock first and append its audit row through a READ COMMITTED step.
- * The R17 release did not wire them, so no production path calls this or
- * `aiBomSnapshotTriggerGate` yet.
+ * The R17 release did not wire them, so no production path calls this, and
+ * `aiBomSnapshotTriggerGate` refuses.
  */
 export async function captureAiBomSnapshotInTx(tx: Tx, input: TakeSnapshotInput): Promise<TakenSnapshot> {
   return insertPreparedSnapshot(tx, await prepareAiBomSnapshot(tx, input), input, { audit: false });
@@ -551,14 +557,14 @@ export async function takeAiBomSnapshot(db: Db, input: TakeSnapshotInput): Promi
 }
 
 /**
- * OWNER DECISION 8 / R25: the sign-off trigger hook. It follows the R17 switch
- * (R2: "triggers do nothing before the switch"); with the switch released it
- * takes the snapshot inside the triggering REPEATABLE READ transaction
- * (#280 4237493034). No sign-off path calls it yet (see above).
+ * OWNER DECISION 8 / R25: the sign-off trigger hook. NOT WIRED: it refuses and
+ * captures nothing (no snapshot, no rendering, no audit row) until the R25
+ * slice settles the event-to-subject mapping, takes the per-subject lock
+ * before the capture and appends the audit row (see the TODO on
+ * `captureAiBomSnapshotInTx`). The R25 slice replaces this body.
  */
-export async function aiBomSnapshotTriggerGate(tx: Tx, input: TakeSnapshotInput): Promise<{ status: "not_released" } | { status: "taken"; snapshot: TakenSnapshot }> {
-  if (!AI_BOM_SNAPSHOTS_RELEASED) return { status: "not_released" };
-  return { status: "taken", snapshot: await captureAiBomSnapshotInTx(tx, input) };
+export async function aiBomSnapshotTriggerGate(_tx: Tx, _input: TakeSnapshotInput): Promise<never> {
+  throw new AiBomError(501, "ai_bom_signoff_triggers_not_wired", AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE);
 }
 
 // ---------------------------------------------------------------------------
