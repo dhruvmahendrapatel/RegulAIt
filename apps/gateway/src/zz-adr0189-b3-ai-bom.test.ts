@@ -346,7 +346,7 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
     const [orig] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, subject.id));
     const renamed = `b3-renamed-${RUN}`;
     try {
-      const [prev] = await db.select({ v: aiBomSnapshots.version }).from(aiBomSnapshots).where(and(eq(aiBomSnapshots.subjectKind, "agent"), eq(aiBomSnapshots.subjectId, subject.id))).orderBy(desc(aiBomSnapshots.version)).limit(1);
+      const [prev] = await db.select({ id: aiBomSnapshots.id, v: aiBomSnapshots.version }).from(aiBomSnapshots).where(and(eq(aiBomSnapshots.subjectKind, "agent"), eq(aiBomSnapshots.subjectId, subject.id))).orderBy(desc(aiBomSnapshots.version)).limit(1);
       // another writer (another replica) holds the subject: it takes the lock FIRST, changes the subject and commits slowly
       let locked!: () => void;
       const holding = new Promise<void>((r) => { locked = r; });
@@ -360,6 +360,9 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
       const waiter = takeAiBomSnapshot(db, { subject, trigger: "on_demand", actorUserId: users.admin.id });
       const [, w] = await Promise.all([holder, waiter]);
       expect(w.version).toBe((prev?.v ?? 0) + 1);
+      // and it supersedes exactly the version it followed (none when it is the first)
+      const [row] = await db.select({ s: aiBomSnapshots.supersedesId }).from(aiBomSnapshots).where(eq(aiBomSnapshots.id, w.id));
+      expect(row!.s).toBe(prev?.id ?? null);
       // the capture ran after the holder committed, so it reads the renamed agent, never the state before it
       expect(w.build.bodyBytes).toContain(renamed);
       // in-process single-flight: a burst for one subject gets one freeze and fast 409s, never a queue of parked connections
