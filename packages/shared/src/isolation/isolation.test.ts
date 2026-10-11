@@ -17,7 +17,12 @@ import {
   executionProfileDigest,
   executionProfileRelaxations,
   EXECUTION_PROFILE_SCHEMA,
+  EXECUTION_REFUSAL_REASONS,
+  executionOfferSchema,
+  executionProfileUnavailable,
   ISOLATION_CLASSES,
+  ISOLATION_ENFORCEMENT_MODES,
+  unresolvedPlacementFact,
   isExactHost,
   isSandboxPath,
   ISOLATION_ROUTES,
@@ -263,8 +268,10 @@ describe("decision 11: the isolation org settings", () => {
     expect(Object.keys(ISOLATION_SETTING_COLUMNS).sort()).toEqual([...ISOLATION_SETTING_KEYS].sort());
   });
 
-  it("relaxed: warn, a lower floor, a longer lifetime; never relaxed: the defaults themselves or tightening", () => {
-    expect(isolationSettingRelaxed("isolationEnforcement", "warn")).toBe(true);
+  it("relaxed: a lower floor, a longer lifetime; never relaxed: the defaults themselves or tightening; enforcement has one value", () => {
+    // OWNER DECISION A: `warn` is retired; enforce is the only mode and nothing is looser than it
+    expect(ISOLATION_ENFORCEMENT_MODES).toEqual(["enforce"]);
+    expect(isolationSettingLooser("isolationEnforcement", "enforce", "enforce")).toBe(false);
     expect(isolationSettingRelaxed("isolationFloorRegulated", "user_space_kernel")).toBe(true);
     expect(isolationSettingRelaxed("isolationFloorPublic", "hardened_container")).toBe(true);
     expect(isolationSettingRelaxed("isolationFloorPublic", "microvm")).toBe(false);
@@ -277,16 +284,20 @@ describe("decision 11: the isolation org settings", () => {
     expect(isolationSettingLooser("executorAttestationMaxAgeMinutes", 120, 60)).toBe(true);
   });
 
-  it("the warn copy never promises a placement below the required class (ADR-0190 amendment item 14)", () => {
-    const warn = ISOLATION_SETTING_COPY.isolationEnforcement.relaxed;
-    expect(warn).not.toMatch(/best isolation available/);
-    expect(warn).toContain("never placed below its required isolation, in any mode");
+  it("the enforcement copy offers no warn mode and points at the audited floors instead (OWNER DECISION A)", () => {
+    const copy = ISOLATION_SETTING_COPY.isolationEnforcement;
+    expect(`${copy.strict} ${copy.relaxed}`).not.toMatch(/best isolation available|\bwarn\b/i);
+    expect(copy.relaxed).toMatch(/^Not relaxable/);
+    expect(copy.relaxed).toContain("never placed below its required isolation");
+    expect(copy.relaxed).toContain("isolation floor");
   });
 
-  it("PUT /v1/org/settings accepts the isolation keys within bounds; never L0, never outside 60–1440", () => {
+  it("PUT /v1/org/settings accepts the isolation keys within bounds; never L0, never outside 60–1440; never warn", () => {
     expect(updateOrgSettingsSchema.safeParse({ isolationFloorPublic: "hardened_container" }).success).toBe(true);
-    expect(updateOrgSettingsSchema.safeParse({ isolationEnforcement: "warn" }).success).toBe(true);
+    // positive control: the one value is accepted
+    expect(updateOrgSettingsSchema.safeParse({ isolationEnforcement: "enforce" }).success).toBe(true);
     for (const body of [
+      { isolationEnforcement: "warn" },
       { isolationFloorPublic: "in_gateway" },
       { isolationFloorMcpStdio: "customer_declared" },
       { isolationEnforcement: "off" },
@@ -321,5 +332,69 @@ describe("the path and host validators (split, then a linear pattern per piece)"
     for (const h of ["", "*.example.com", "-a.com", "a-.com", "a..com", ".a", "A.com", "a_b.com", "[]", "[::1", "a".repeat(64), `${"a".repeat(63)}.`.repeat(5)]) {
       expect(isExactHost(h), h).toBe(false);
     }
+  });
+});
+
+describe("OWNER DECISION B: an unresolved policy fact refuses 409 execution_profile_unavailable (policy_unresolved)", () => {
+  const resolved = { workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "data_sensitivity" } as const;
+
+  it("policy_unresolved is the sixth fixed reason, and the envelope is the same refusal family as the other five", () => {
+    expect(EXECUTION_REFUSAL_REASONS).toEqual([
+      "no_executor",
+      "attestation_stale",
+      "class_below_required",
+      "executor_quarantined",
+      "profile_retired",
+      "policy_unresolved",
+    ]);
+    for (const reason of EXECUTION_REFUSAL_REASONS) {
+      expect(executionProfileUnavailable(reason)).toEqual({ statusCode: 409, error: "execution_profile_unavailable", ruleId: "execution-profile", reason });
+    }
+  });
+
+  it("every fact that is missing or outside its vocabulary is named; nothing is coerced, dropped or defaulted", () => {
+    // positive control: every fact resolves (with and without the profile's floor)
+    expect(unresolvedPlacementFact(resolved)).toBeNull();
+    expect(unresolvedPlacementFact({ ...resolved, profileMinClass: "microvm" })).toBeNull();
+    expect(unresolvedPlacementFact({ ...resolved, profileDigest: "a".repeat(64), imageDigest: `sha256:${"b".repeat(64)}` })).toBeNull();
+    for (const [facts, fact] of [
+      [{ ...resolved, workloadKind: undefined }, "workloadKind"],
+      [{ ...resolved, workloadKind: "future_kind" }, "workloadKind"],
+      // a non-isolable kind is never placed, so it does not resolve to a placement
+      [{ ...resolved, workloadKind: "model_call" }, "workloadKind"],
+      [{ ...resolved, requiredClass: undefined }, "requiredClass"],
+      [{ ...resolved, requiredClass: null }, "requiredClass"],
+      [{ ...resolved, requiredClass: "L9" }, "requiredClass"],
+      // L0 is never a requirement, and customer_declared is a claim, not a class
+      [{ ...resolved, requiredClass: "in_gateway" }, "requiredClass"],
+      [{ ...resolved, requiredClass: "customer_declared" }, "requiredClass"],
+      [{ ...resolved, requiredBy: undefined }, "requiredBy"],
+      [{ ...resolved, requiredBy: "sensitivity_lookup_failed" }, "requiredBy"],
+      [{ ...resolved, profileDigest: undefined }, "profileDigest"],
+      [{ ...resolved, profileDigest: "A".repeat(64) }, "profileDigest"],
+      [{ ...resolved, profileDigest: "a".repeat(65) }, "profileDigest"],
+      [{ ...resolved, imageDigest: undefined }, "imageDigest"],
+      [{ ...resolved, imageDigest: "b".repeat(64) }, "imageDigest"],
+      [{ ...resolved, imageDigest: `sha256:${"b".repeat(64)}\n` }, "imageDigest"],
+      [{ ...resolved, profileMinClass: undefined }, "profileMinClass"],
+      [{ ...resolved, profileMinClass: "L9" }, "profileMinClass"],
+    ] as const) {
+      expect(unresolvedPlacementFact(facts as Parameters<typeof unresolvedPlacementFact>[0]), JSON.stringify(facts)).toBe(fact);
+    }
+  });
+
+  it("an offer on the executor channel carries only enforce (OWNER DECISION A)", () => {
+    const offer = {
+      id: "4b0c1a3e-6a1e-4a4b-9a2c-0f4e5d6c7b8a",
+      workloadKind: "mcp_stdio",
+      requiredClass: "user_space_kernel",
+      requiredBy: "workload_kind",
+      enforcement: "enforce",
+      profileDigest: "a".repeat(64),
+      imageDigest: `sha256:${"b".repeat(64)}`,
+      expiresAt: new Date().toISOString(),
+    };
+    expect(executionOfferSchema.safeParse(offer).success).toBe(true);
+    expect(executionOfferSchema.safeParse({ ...offer, enforcement: "warn" }).success).toBe(false);
   });
 });

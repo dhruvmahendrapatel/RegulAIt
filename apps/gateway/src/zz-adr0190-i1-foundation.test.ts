@@ -68,9 +68,8 @@ const STRICT_SQL = sql`UPDATE org_settings SET isolation_enforcement = 'enforce'
   isolation_floor_mcp_stdio = 'user_space_kernel', isolation_floor_engine_worker = 'user_space_kernel',
   executor_attestation_max_age_minutes = 120`;
 
-/** one relaxed value per setting */
-const RELAXED: Record<IsolationSettingKey, unknown> = {
-  isolationEnforcement: "warn",
+/** one relaxed value per relaxable setting (enforcement has none: `warn` is retired, OWNER DECISION A) */
+const RELAXED: Record<Exclude<IsolationSettingKey, "isolationEnforcement">, unknown> = {
   isolationFloorPublic: "hardened_container",
   isolationFloorInternal: "hardened_container",
   isolationFloorConfidential: "hardened_container",
@@ -423,13 +422,14 @@ describe("ADR-0190 migration 0183's invariants refuse their bad rows", () => {
       await tx.execute(ins(refusedOk));
       await tx.execute(ins({ outcome: "placed", required: "user_space_kernel", applied: "microvm" }));
       await tx.execute(ins({ outcome: "mismatch", applied: null, code: "execution_profile_mismatch" }));
-      // warn mode records the shortfall instead of refusing (decision 11's relaxation)
-      const warned = await one<{ id: string }>(
-        tx,
-        sql`${ins({ outcome: "placed", required: "microvm", applied: "user_space_kernel", enforcement: "warn" })} returning id`,
-      );
-      await expectRefused(inSavepoint(tx, sql`update execution_placements set enforcement = 'enforce' where id = ${warned.id}`), /execution_placements is append-only/);
-      await expectRefused(inSavepoint(tx, sql`delete from execution_placements where id = ${warned.id}`), /execution_placements is append-only/);
+      // `warn` is retired (OWNER DECISION A, migration 0191): no new row may say it, and it exempts nothing from
+      // the no-fallback CHECK; a refusal may carry the sixth reason, policy_unresolved (OWNER DECISION B)
+      await expectRefused(inSavepoint(tx, ins({ outcome: "placed", required: "microvm", applied: "microvm", enforcement: "warn" })), /execution_placements_enforcement_check/);
+      await expectRefused(inSavepoint(tx, ins({ ...refusedOk, enforcement: "warn" })), /execution_placements_enforcement_check/);
+      await tx.execute(ins({ ...refusedOk, code: "policy_unresolved" }));
+      const placed = await one<{ id: string }>(tx, sql`${ins({ outcome: "placed", required: "microvm", applied: "microvm" })} returning id`);
+      await expectRefused(inSavepoint(tx, sql`update execution_placements set enforcement = 'enforce' where id = ${placed.id}`), /execution_placements is append-only/);
+      await expectRefused(inSavepoint(tx, sql`delete from execution_placements where id = ${placed.id}`), /execution_placements is append-only/);
     });
   });
 });
@@ -504,7 +504,12 @@ describe("ADR-0190 secure by default: the isolation org settings", () => {
   });
 
   it("refuses a value outside its bounds (400); the database holds the same bounds", async () => {
+    // positive control: `enforce` itself is accepted (the strict value needs no step-up)
+    const ok = await inject("PUT", "/v1/org/settings", users.admin.auth, { isolationEnforcement: "enforce" });
+    expect(ok.statusCode, ok.body).toBe(200);
     for (const body of [
+      // `warn` is retired (OWNER DECISION A): a validation error, not a relaxation
+      { isolationEnforcement: "warn" },
       { isolationEnforcement: "off" },
       { isolationFloorPublic: "in_gateway" },
       { isolationFloorRegulated: "customer_declared" },
@@ -515,6 +520,7 @@ describe("ADR-0190 secure by default: the isolation org settings", () => {
       expect(r.statusCode, JSON.stringify(body)).toBe(400);
     }
     for (const [stmt, constraint] of [
+      [sql`UPDATE org_settings SET isolation_enforcement = 'warn'`, "org_settings_isolation_enforcement_check"],
       [sql`UPDATE org_settings SET isolation_enforcement = 'off'`, "org_settings_isolation_enforcement_check"],
       [sql`UPDATE org_settings SET isolation_floor_regulated = 'in_gateway'`, "org_settings_isolation_floors_check"],
       [sql`UPDATE org_settings SET isolation_floor_mcp_stdio = 'in_gateway'`, "org_settings_isolation_floors_check"],

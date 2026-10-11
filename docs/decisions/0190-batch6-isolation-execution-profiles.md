@@ -312,7 +312,7 @@ Then:
 
 | Setting | Default (strict) | Relaxable to | Notes |
 |---|---|---|---|
-| `isolation_enforcement` | `enforce` | `warn` (place at what is available, record the shortfall as a gate warning) | audited, `settings_relax` step-up; posture page shows "Isolation: not enforced"; never relaxes the invariants below |
+| `isolation_enforcement` | `enforce` | none: `enforce` is the only value (owner decision A, 2026-10-11). To run where a class is unavailable, an admin lowers the requirement itself through the floor relaxations below | not relaxable; a request to set any other value is refused 400 |
 | Sensitivity floors | public/internal/confidential L2, regulated L3 | down to L1 per sensitivity, never below | audited, step-up |
 | `mcp_stdio` floor | L2 | L1 | audited, step-up |
 | `engine_worker` floor | L2 | L1 (OWNER DECISION 4) | audited, step-up |
@@ -644,6 +644,19 @@ The owner accepted both recommendations ("go with your recommendations", master 
   - **Code follow-up:** the placement path maps every unresolved or missing policy fact to this envelope, and the
     `unknown-*` vectors are pinned to it.
 
+**As built (PR #346, migration 0191; reviewed under ADR-0191).**
+- **Stored values are rewritten.** A stored `warn` in `org_settings` and `execution_offers` is rewritten to `enforce`.
+  Each rewritten row gets a `migration_audit_outbox` row (ADR-0181 FX2) carrying the old value, the new value and the
+  reason. The migration is safe to run twice.
+- **Historic placements keep their mode.** `execution_placements` is append-only evidence, so its rows keep the mode
+  they were recorded under. The `enforce`-only and no-fallback CHECKs are added `NOT VALID`: they bind every new row,
+  and history is not rewritten. No reader re-validates the old rows.
+- **B's scope today.** `policy_unresolved` is enforced at the placement broker boundary. It covers a missing required
+  class, a missing or malformed image digest, and a missing or malformed profile digest, each refused and audited
+  before any offer. The gateway resolvers for sensitivity, compliance floors, autonomy and parent lookups arrive with
+  slice I2, and they must call `unresolvedPlacementFact` before computing the MAX. Until I2 no route answers the HTTP
+  409 envelope.
+
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches (`schema.ts`, migrations, `app.ts`, `route-classes.ts`, `openapi-registry.ts`, the
@@ -672,8 +685,9 @@ counter that must stay at zero for every refusal (the `pillar7-inheritance.test.
 
 - **Fail closed.** A regulated project's stdio call with only an L2 executor → `409 execution_profile_unavailable`
   (`class_below_required`), zero sandboxes started. With no executor, a stale attestation, a quarantined executor or a
-  retired profile → refused with each reason. `isolation_enforcement` relaxed to `warn` → placed, gate warning,
-  audited relaxation; the invariants still hold (no in-gateway stdio, no L0 for `mcp_stdio`).
+  retired profile → refused with each reason. An unresolved policy fact → `409 execution_profile_unavailable`
+  (`policy_unresolved`), audited, no offer made. Setting `isolation_enforcement` to anything but `enforce` → 400
+  (owner decision A); the invariants always hold (no in-gateway stdio, no L0 for `mcp_stdio`).
 - **No fallback.** An L3 requirement while an L2 executor is idle is never placed on it, including after a retry, a
   queue, or a restart.
 - **Mismatch.** An executor that claims L2 but whose per-placement report shows the host kernel (a fake backend
