@@ -1906,6 +1906,34 @@ independent review at 0ea73df (fix-then-merge), and a recheck at 0363543 returne
    - The verifier catch-all logs the fault it caught. A fault that comes from the trust root answers 500, not
      `body_schema`.
 
+### Amendments from the R17 release (2026-10-11)
+
+PR #350 sets `AI_BOM_SNAPSHOTS_RELEASED` to true. Under ADR-0191 it had an independent review at 56623e9
+(fix-then-merge) and a recheck at 80b0189 (merge).
+
+1. **Snapshots are released, on demand only.** The snapshot freeze and both download routes are live, behind
+   `bom_export_roles` (admins only by default). A download re-runs the stored-snapshot verifier before it signs: the
+   body hash, signature, rendering hashes and supersedes chain. Any mismatch fails closed with 500
+   `bom_integrity_failure`, and nothing is exported or audited. With no export key the download answers 409, again with
+   no audit row.
+2. **The R25 sign-off triggers are not wired yet.** R17 says the release enables routes *and* triggers. R25 leaves open
+   which subject each sign-off event snapshots, so wiring them is its own slice. Until it lands:
+   - `aiBomSnapshotTriggerGate` refuses with 501 `ai_bom_signoff_triggers_not_wired` and captures nothing;
+   - the settings help, the strictness registry, the org-settings response (`aiBomSnapshotTriggerPosture`) and the
+     posture report (`ai_bom_signoff_triggers: not_wired`) all say snapshots are on demand only;
+   - the stored default `sign_off_events` is unchanged, so it takes effect when R25 lands. No setting claims a
+     behaviour that doesn't happen (ADR-0180).
+3. **Public release publication is off (owner decision, 2026-10-11).** `release-ai-bom.yml` signs our own AI BOM with
+   keyless cosign and writes a permanent public Rekor entry. The owner chose to keep it off. It runs only when the code
+   switch is on **and** the repo variable `RELEASE_AI_BOM_PUBLISH_APPROVED` is exactly `true`, and that variable is
+   unset. GitHub merges variables from the org, repository and environment levels, so the variable must not be set at
+   any level until the owner approves publication.
+4. **Open for the R25 slice:**
+   - map each sign-off event to its subject;
+   - name the "server admission" code path;
+   - decide which evidence kinds count as "evidence attached";
+   - decide where the `snapshot_skipped_no_key` and `snapshot_failed` gap records live.
+
 ## Further design review happens at slice level
 
 From the seventh review round on, this ADR is complete as a design record. Later design findings are not added here
