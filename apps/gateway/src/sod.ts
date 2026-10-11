@@ -92,6 +92,7 @@ import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { MODEL_PROVIDER_KINDS } from "@regulait/model-provider";
 import { z } from "zod";
 import { buildAgentHolderIndex } from "./inventory.js";
+import { lockRoleForGrantInsert } from "./workload-identity-admin.js";
 
 /** the `approvals.stageId` sentinel carrying the override-request id — the
  * same slot the model-card / infra / grant-cert rows use, because riding the
@@ -948,6 +949,11 @@ async function executeOverriddenMint(
     const rows = await run();
     return { table, grantId: rows[0]?.id ?? null, alreadyExisted: rows.length === 0 };
   };
+  // PR #339 review: a role-grant insert takes the role's row FOR NO KEY UPDATE first, serialized with the
+  // workload-identity steward check (see `lockRoleForGrantInsert`)
+  if (kind === "role_agent" || kind === "role_connector" || kind === "role_tool" || kind === "role_server") {
+    await lockRoleForGrantInsert(tx, body.roleId as string);
+  }
   switch (kind) {
     case "agent":
       return insert("agent_grants", () =>

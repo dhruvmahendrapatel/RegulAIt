@@ -224,13 +224,48 @@ export async function putIdentityGrants(db: Db, identityId: string, body: PutAge
 }
 
 /**
+ * Test-only pause points of the steward check (the L5 and deadlock tests hold a check open here while another
+ * transaction runs). Unset in production; never changes what the check decides.
+ */
+export const stewardCheckTestHooks: { afterStewardReads?: (() => Promise<void>) | undefined } = {};
+
+/**
+ * Serialization point for the steward check (S4+S5 follow-up, review L5). A revocation is an INSERT, which no
+ * `FOR SHARE` read can block, so a revocation committed while a check was running could leave a grant written
+ * for an item its steward no longer held. Every revocation insert therefore first takes this person's `users` row
+ * `FOR NO KEY UPDATE`, which conflicts with the `FOR SHARE` the steward check holds on each steward's row: a
+ * revocation waits for a check in flight, and a check that starts after a revocation waits for it and then sees it.
+ * `NO KEY UPDATE` (not `UPDATE`) so rows that merely reference the person (their `FOR KEY SHARE` foreign-key
+ * checks) are not blocked. Call it inside the revocation's own transaction, before the insert.
+ */
+export async function lockPersonForRevocation(tx: Db, userId: string): Promise<boolean> {
+  const rows = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for("no key update");
+  return rows.length > 0;
+}
+
+/**
+ * The role-row twin of `lockPersonForRevocation` (PR #339 review). Adding an item to a role is an INSERT into a
+ * `role_*_grants` table, whose foreign-key check takes only `FOR KEY SHARE` on the role's row; that does not
+ * conflict with the `FOR SHARE` the steward check holds on every role it reads, so an item a steward has had
+ * revoked could join the role while the check is open. Every role-grant insert therefore first takes the role's
+ * row `FOR NO KEY UPDATE`: it waits for a check in flight, and a check that starts later waits for it and then
+ * sees the new item. Call it inside the insert's own transaction, before the insert.
+ */
+export async function lockRoleForGrantInsert(tx: Db, roleId: string): Promise<boolean> {
+  const rows = await tx.select({ id: roles.id }).from(roles).where(eq(roles.id, roleId)).for("no key update");
+  return rows.length > 0;
+}
+
+/**
  * What one steward holds, read in the caller's transaction with `FOR SHARE` on every grant, assignment and
  * revocation row (review L5): a concurrent revoke of a row this check relied on waits for the write that relied
- * on it, and a revoke that commits first is seen.
+ * on it, and a revoke that commits first is seen. Role-derived rows are read only for `lockedRoleIds`, the roles
+ * the caller has already locked (deadlock fix: a role's own row is locked before any row that cascades from it).
  */
-async function stewardHoldings(tx: Db, userId: string) {
+async function stewardHoldings(tx: Db, userId: string, lockedRoleIds: ReadonlySet<string>) {
   const assignments = await tx.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId)).for("share");
-  const roleIds = [...new Set(assignments.map((r) => r.roleId))];
+  // a role assigned after the roles were locked is not counted (stricter, never wider)
+  const roleIds = [...new Set(assignments.map((r) => r.roleId))].filter((r) => lockedRoleIds.has(r));
   const byRole = roleIds.length > 0;
   return {
     roleIds,
@@ -258,6 +293,16 @@ async function stewardHoldings(tx: Db, userId: string) {
   };
 }
 
+/** everything a role bundles, read `FOR SHARE` (the role's own row is already locked by the caller) */
+async function roleItems(tx: Db, roleId: string) {
+  return {
+    tools: await tx.select({ serverId: roleToolGrants.serverId, toolName: roleToolGrants.toolName }).from(roleToolGrants).where(eq(roleToolGrants.roleId, roleId)).for("share"),
+    servers: await tx.select({ serverId: roleServerGrants.serverId }).from(roleServerGrants).where(eq(roleServerGrants.roleId, roleId)).for("share"),
+    agents: await tx.select({ agentId: roleAgentGrants.agentId }).from(roleAgentGrants).where(eq(roleAgentGrants.roleId, roleId)).for("share"),
+    connectors: await tx.select({ connectorId: roleConnectorGrants.connectorId }).from(roleConnectorGrants).where(eq(roleConnectorGrants.roleId, roleId)).for("share"),
+  };
+}
+
 /**
  * S4 amendment 1 (N1): the first item of `set` that NONE of `stewards` holds (a label), or null. A steward holds
  * an item when one of their own grants, direct or through a role, reaches it and their revocations do not take it
@@ -268,16 +313,34 @@ async function stewardHoldings(tx: Db, userId: string) {
  * - an agent: in every listed mode;
  * - a connector: in its mode and for every listed object, by ONE grant;
  * - a server: a server grant, read-only-all when the item asks for it;
- * - a role: assigned to the steward.
- * A disabled or unknown steward holds nothing; the system principal is no person and holds nothing. Must run
- * inside the caller's transaction, because the reads lock with `FOR SHARE`.
+ * - a role (S4+S5 follow-up, review L3): assigned to the steward AND none of what the role bundles is revoked for
+ *   that steward. A tool revocation (or a whole-server one) on a role tool, a whole-server revocation on a role
+ *   server (the same rule as a server item), an agent revocation on a role agent, or a connector revocation on a
+ *   role connector each mean that steward does not hold the whole role.
+ * A disabled or unknown steward holds nothing; the system principal is no person and holds nothing.
+ *
+ * Locking (review L5 and the force role-delete deadlock): the stewards' `users` rows `FOR SHARE` in id order
+ * first (the serialization point with `lockPersonForRevocation`), then every role the check may read through
+ * `FOR SHARE` in id order, and only then the grant, assignment and revocation rows. `DELETE /v1/roles/:id` locks
+ * the role's row before it cascades, so the two meet on the role row first and wait instead of deadlocking (40P01).
+ * Must run inside the caller's transaction.
  */
 export async function firstItemNoStewardHolds(tx: Db, stewardIds: readonly string[], set: PutAgentGrants): Promise<string | null> {
   const live = stewardIds.length
-    ? (await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, [...stewardIds]), isNull(users.disabledAt))).for("share")).map((r) => r.id)
+    ? (await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, [...stewardIds]), isNull(users.disabledAt))).orderBy(asc(users.id)).for("share")).map((r) => r.id)
     : [];
+  // the roles this check may read through: the stewards' assignments (read unlocked here, re-read locked below)
+  // and the roles being granted; their own rows are locked before any row that cascades from them
+  const assigned = live.length ? await tx.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(inArray(roleAssignments.userId, live)) : [];
+  const toLock = [...new Set([...assigned.map((a) => a.roleId), ...set.roleIds])];
+  const lockedRoles = new Set(
+    toLock.length ? (await tx.select({ id: roles.id }).from(roles).where(inArray(roles.id, toLock)).orderBy(asc(roles.id)).for("share")).map((r) => r.id) : [],
+  );
   const held: Array<Awaited<ReturnType<typeof stewardHoldings>>> = [];
-  for (const s of live) held.push(await stewardHoldings(tx, s));
+  for (const s of live) held.push(await stewardHoldings(tx, s, lockedRoles));
+  const bundles = new Map<string, Awaited<ReturnType<typeof roleItems>>>();
+  for (const r of set.roleIds) if (lockedRoles.has(r)) bundles.set(r, await roleItems(tx, r));
+  await stewardCheckTestHooks.afterStewardReads?.();
   const toolKinds = new Map<string, string>();
   for (const t of set.tools) {
     const [row] = await tx.select({ kind: mcpTools.kind }).from(mcpTools).where(and(eq(mcpTools.serverId, t.serverId), eq(mcpTools.name, t.toolName)));
@@ -318,7 +381,21 @@ export async function firstItemNoStewardHolds(tx: Db, stewardIds: readonly strin
     );
     if (!ok) return `connector ${c.connectorId} (${c.mode})`;
   }
-  for (const r of set.roleIds) if (!held.some((h) => h.roleIds.includes(r))) return `role ${r}`;
+  for (const r of set.roleIds) {
+    const bundle = bundles.get(r);
+    // a role deleted while this check waited is held by nobody
+    const ok =
+      !!bundle &&
+      held.some(
+        (h) =>
+          h.roleIds.includes(r) &&
+          !bundle.tools.some((t) => h.toolRevocations.some((rv) => rv.serverId === t.serverId && (rv.toolName === null || rv.toolName === t.toolName))) &&
+          !bundle.servers.some((v) => serverRevoked(h, v.serverId)) &&
+          !bundle.agents.some((a) => h.agentRevocations.some((rv) => rv.agentId === a.agentId)) &&
+          !bundle.connectors.some((c) => h.connectorRevocations.some((rv) => rv.connectorId === c.connectorId)),
+      );
+    if (!ok) return `role ${r}`;
+  }
   return null;
 }
 
@@ -388,7 +465,7 @@ export async function updateWorkloadIdentity(db: Db, identityId: string, body: U
     if (!ident) return refuse(new IdentityGrantsError("identity_not_found", 404, `no workload identity ${identityId}`));
     if (ident.status === "revoked") return refuse(new IdentityGrantsError("identity_not_active", 409, `identity ${identityId} is revoked`));
     if (change.sponsorUserIds) {
-      const found = await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, change.sponsorUserIds), isNull(users.disabledAt))).for("share");
+      const found = await tx.select({ id: users.id }).from(users).where(and(inArray(users.id, change.sponsorUserIds), isNull(users.disabledAt))).orderBy(asc(users.id)).for("share");
       if (found.length !== change.sponsorUserIds.length) {
         const missing = change.sponsorUserIds.filter((id) => !found.some((f) => f.id === id));
         return refuse(new IdentityGrantsError("steward_not_found", 404, "every steward is an existing, enabled user"), { missing });
