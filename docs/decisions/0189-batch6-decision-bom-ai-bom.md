@@ -2064,7 +2064,7 @@ fixes were rechecked. These are the details the build settled:
         governed use case, is refused before its external effect when no key is usable. Under the relaxed setting
         nothing changes.
         - **Where the guard runs.**
-          - Git, deploy and nested-run stages, and check stages that would start paid evals, are guarded in the
+          - Git, deploy and nested-run stages, and check stages that would start paid evals or engine runs (unless a reported check has already failed), are guarded in the
             executor's claim transaction. The kernel lookahead decides whether the stage would complete the
             instance, and it fails closed on any error except "not executable".
           - Check stages with only reported results are guarded at the claim when every reported check has
