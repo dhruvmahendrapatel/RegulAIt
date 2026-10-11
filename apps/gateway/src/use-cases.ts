@@ -82,6 +82,7 @@ import {
   useCaseConditions,
   useCaseIdempotencyKeys,
   workflowArtifacts,
+  workflowEvents,
   workflowInstances,
   workflowTemplates,
   type AiUseCaseRow,
@@ -628,23 +629,37 @@ export function resyncVerdict(useCaseStatus: string, instanceStatus: string): Re
 /** the audit row `applyEvent` writes for the transition into `completed`: its
  * chain position, its time (the database clock) and who drove that step */
 export async function instanceCompletion(
-  db: Pick<Db, "select">,
+  db: Pick<Db, "select" | "execute">,
   instanceId: string,
 ): Promise<{ seq: number | null; at: Date; actorUserId: string | null } | null> {
   const [hit] = await db
-    .select({ seq: auditLog.seq, at: auditLog.at, userId: auditLog.userId })
+    .select({ id: auditLog.id, seq: auditLog.seq, at: auditLog.at })
     .from(auditLog)
     .where(
       and(
         eq(auditLog.objectType, "workflow"),
         eq(auditLog.objectId, instanceId),
-        sql`${auditLog.detail} ? 'event'`,
+        sql`jsonb_typeof(${auditLog.detail}->'event') = 'object'`,
         sql`${auditLog.reason} like ${"%(status → completed)"}`,
       ),
     )
     .orderBy(sql`${auditLog.seq} desc nulls last`, desc(auditLog.at))
     .limit(1);
-  return hit ? { seq: hit.seq ?? null, at: hit.at, actorUserId: hit.userId } : null;
+  if (!hit) return null;
+  // WHO DROVE THE COMPLETING STEP comes from the kernel's own event row, never from
+  // the audit row: `applyEvent` audits an actor-less (system) event under the
+  // instance's INITIATOR, which would credit the requester with the decision. The
+  // event row is written in the same transaction as the audit row (same `now()`)
+  // with the same event, and carries the real actor, or null for a system step.
+  const rows = (await db.execute(sql`
+    select we.actor_user_id as "actorUserId"
+      from ${workflowEvents} we
+      join ${auditLog} a on a.id = ${hit.id}
+     where we.instance_id = ${instanceId}
+       and we.at = a.at
+       and (we.event->>'kind') = (a.detail->'event'->>'kind')
+     limit 1`)) as unknown as { rows: Array<{ actorUserId: string | null }> };
+  return { seq: hit.seq ?? null, at: hit.at, actorUserId: rows.rows[0]?.actorUserId ?? null };
 }
 
 /** "row is after the completion" in commit order (see the note above) */
@@ -700,7 +715,19 @@ export async function roundGrant(
   const [roundStart] = await db
     .select({ seq: auditLog.seq, at: auditLog.at })
     .from(auditLog)
-    .where(and(onInstance, sql`${auditLog.detail} ? 'round'`, sql`${auditLog.detail} ? 'event'`))
+    // only the TRANSITION row of a re-open: it carries `round` and the kernel event as
+    // an object. The effects-archived rows (a re-open's archive, and a late
+    // old-round executor's `executor-result-discarded` archive) also carry `round`,
+    // with `event` as a string, and can be written AFTER the re-open: matching
+    // them would move the round start past the real grant
+    .where(
+      and(
+        onInstance,
+        sql`${auditLog.detail} ? 'round'`,
+        sql`jsonb_typeof(${auditLog.detail}->'event') = 'object'`,
+        sql`${auditLog.ruleId} <> 'workflow:effects-archived'`,
+      ),
+    )
     .orderBy(sql`${auditLog.seq} desc nulls last`, desc(auditLog.at))
     .limit(1);
   const inRound = roundStart
@@ -730,19 +757,29 @@ export async function roundGrant(
     .limit(1);
   if (!granted) return { kind: "none" };
   const stageId = String(((granted.detail as { event?: { stageId?: unknown } } | null)?.event?.stageId) ?? "");
+  // WHICH APPROVAL ROW, AND WHY A CLOCK HERE WHEN THE REST IS `seq`. An approval
+  // row has no chain position of its own. The gate (its stage) and the fact that
+  // it granted in THIS round before the completion are both established above, in
+  // commit order. What is left is to pick that gate's row among the rows earlier
+  // rounds left for the same stage: it is the newest REQUEST for the stage
+  // (`requested_at`, the `now()` of the transaction that requested it). Requests
+  // for one stage are a whole round apart (a re-open and a fresh walk to the gate
+  // separate them), so ordering them by their own request time is safe. No
+  // cross-transaction bound is drawn against the re-open's or the completion's
+  // `at` (a transaction can start before another commits while it waits on the
+  // instance lock), and never against the process clock (`decided_at`). Several
+  // rows in the newest batch (one per review role) are one gate: the approved one
+  // decided last stands for it.
+  const sameStage = and(eq(approvals.instanceId, instanceId), eq(approvals.objectType, "workflow"), eq(approvals.stageId, stageId));
   const [approval] = await db
     .select({ id: approvals.id, decidedBy: approvals.decidedBy, decidedAt: approvals.decidedAt })
     .from(approvals)
     .where(
       and(
-        eq(approvals.instanceId, instanceId),
-        eq(approvals.objectType, "workflow"),
-        eq(approvals.stageId, stageId),
+        sameStage,
+        sql`${approvals.requestedAt} = (select max(a2.requested_at) from ${approvals} a2 where a2.instance_id = ${instanceId} and a2.object_type = 'workflow' and a2.stage_id = ${stageId})`,
         inArray(approvals.status, ["approved", "consumed"]),
         sql`${approvals.decidedAt} is not null`,
-        // requested in this round, and before the completion (both the database clock)
-        ...(roundStart ? [sql`${approvals.requestedAt} >= ${roundStart.at.toISOString()}::timestamptz`] : []),
-        sql`${approvals.requestedAt} <= ${completion.at.toISOString()}::timestamptz`,
       ),
     )
     .orderBy(desc(approvals.decidedAt), desc(approvals.id))
@@ -768,7 +805,7 @@ function editedAfterCompletionBody(edit: { at: Date; auditId: string }): Record<
  * under the re-sync's locks.
  */
 export async function resyncDecision(
-  db: Pick<Db, "select">,
+  db: Pick<Db, "select" | "execute">,
   instanceId: string,
   useCaseId: string,
 ): Promise<
@@ -2743,25 +2780,49 @@ export function registerUseCaseRoutes(
     if (!req.authCtx.isAdmin) {
       return reply.status(403).send({ error: "forbidden", detail: "only an admin can re-sync a use case with its workflow instance" });
     }
+    // EVERY refusal from here on is on the record: one `use-case-resync-refused` row
+    // with the refusal code, written on the root handle, so never inside a
+    // transaction the refusal rolled back
+    const context: { from?: string; workflowInstanceId?: string; instanceStatus?: string } = {};
+    const auditRefusal = async (code: string) => {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "ai_use_case",
+        objectId: useCaseId,
+        detail: { phase: "resync", ...context, code },
+        effect: "deny",
+        ruleId: "use-case-resync-refused",
+        ruleChain: [],
+        reason: `AI use case ${useCaseId} was not re-synced with its intake workflow (${code})`,
+      });
+    };
+    const refuse = async (status: number, body: Record<string, unknown>) => {
+      await auditRefusal(String(body.error));
+      return reply.status(status).send(body);
+    };
     if (!req.authCtx.userId) {
-      return reply.status(403).send({
+      return refuse(403, {
         error: "bootstrap_cannot_drive",
         detail: "the bootstrap credential names no person, so it cannot apply an approval: sign in as an administrator and re-sync from there",
       });
     }
     const actorUserId = req.authCtx.userId;
     const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+    // nothing to put on the record against: there is no such use case
     if (!row) return reply.status(404).send({ error: "not_found" });
+    context.from = row.status;
     const instanceId = row.workflowInstanceId;
     const [instance] = instanceId
       ? await db.select({ status: workflowInstances.status }).from(workflowInstances).where(eq(workflowInstances.id, instanceId))
       : [];
     if (!instanceId || !instance) {
-      return reply.status(409).send({
+      return refuse(409, {
         error: "no_governing_instance",
         detail: "this use case has no intake workflow instance, so there is nothing to re-sync it with",
       });
     }
+    context.workflowInstanceId = instanceId;
+    context.instanceStatus = instance.status;
     const inStepBody = (status: string, instanceStatus: string) => ({
       useCaseId,
       workflowInstanceId: instanceId,
@@ -2771,30 +2832,17 @@ export function registerUseCaseRoutes(
     });
     const first = resyncVerdict(row.status, instance.status);
     if (first.kind === "in_step") return reply.send(inStepBody(row.status, instance.status));
-    if (first.kind === "refuse") return reply.status(409).send(first.body);
+    if (first.kind === "refuse") return refuse(409, first.body);
     // the decision must be establishable from the record: its completion, no edit
     // committed after it (defence in depth for edits made before PATCH refused
     // them), and the person who decided it
     const decision = await resyncDecision(db, instanceId, useCaseId);
-    if (decision.kind === "refuse") return reply.status(409).send(decision.body);
-    const refused = async (err: AiBomError) => {
-      // the re-sync did not happen; the refusal itself goes on the record
-      await db.insert(auditLog).values({
-        userId: actorUserId,
-        objectType: "ai_use_case",
-        objectId: useCaseId,
-        detail: { phase: "resync", from: row.status, workflowInstanceId: instanceId, instanceStatus: instance.status, code: err.code },
-        effect: "deny",
-        ruleId: "use-case-resync-refused",
-        ruleChain: [],
-        reason: `AI use case '${row.name}' was not re-synced: its approval cannot take a signed AI BOM snapshot (${err.code})`,
-      });
-    };
+    if (decision.kind === "refuse") return refuse(409, decision.body);
     // a missing key is refused BEFORE the step-up, so it never spends the admin's grant
     try {
       await assertAiBomSignoffPossible(db);
     } catch (err) {
-      if (err instanceof AiBomError) await refused(err);
+      if (err instanceof AiBomError) await auditRefusal(err.code);
       throw err;
     }
     // the step-up an approval decision asks for: this applies an approval
@@ -2802,7 +2850,11 @@ export function registerUseCaseRoutes(
       kind: "approval_decide",
       facts: { op: "use_case_resync", useCaseId, workflowInstanceId: instanceId },
     });
-    if (!su.ok) return reply;
+    if (!su.ok) {
+      // requireStepUp has sent its own refusal; its status names which one
+      await auditRefusal(`step_up_${reply.statusCode}`);
+      return reply;
+    }
     type Out =
       | { kind: "in_step"; status: string; instanceStatus: string }
       | { kind: "refuse"; body: Record<string, unknown> }
@@ -2895,12 +2947,13 @@ export function registerUseCaseRoutes(
         return { kind: "done", from, to, signoff, approvedUntil: after?.approvedUntil ?? null, expired: after?.expired === true };
       });
     } catch (err) {
-      if (err instanceof AiBomError) await refused(err);
-      if (err instanceof CreateRefused) return reply.status(err.status).send(err.body);
+      // the transaction has rolled back; the refusal is recorded after it
+      if (err instanceof AiBomError) await auditRefusal(err.code);
+      if (err instanceof CreateRefused) return refuse(err.status, err.body);
       throw err;
     }
     if (out.kind === "in_step") return reply.send(inStepBody(out.status, out.instanceStatus));
-    if (out.kind === "refuse") return reply.status(out.body.error === "not_found" ? 404 : 409).send(out.body);
+    if (out.kind === "refuse") return refuse(out.body.error === "not_found" ? 404 : 409, out.body);
     // R25 item 5: the snapshot is taken after commit
     const aiBomSnapshotWarning = await runAiBomSignoffs(db, [out.signoff], req.log);
     return reply.send({

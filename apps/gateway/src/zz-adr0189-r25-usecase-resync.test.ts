@@ -45,6 +45,23 @@ import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixt
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { createWorkflowTemplateValidated, startWorkflowInstanceWithTemplates } from "./workflows.js";
 import { useCaseDispatchGate } from "./use-case-gate.js";
+import { USE_CASE_QUESTIONNAIRE_OUTPUT } from "./use-cases.js";
+import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
+
+/** SYNTHETIC: EU AI Act answers that fire no rule (as use-cases-eu-tier.test.ts's baseline) */
+const BASELINE_ANSWERS: EuAiActAnswers = {
+  purposeDomain: "general-business",
+  affectedPersons: [],
+  decisionAutonomy: "informs-human",
+  biometricUse: "none",
+  emotionRecognition: false,
+  socialScoring: false,
+  manipulativeTechniques: false,
+  profilesNaturalPersons: false,
+  safetyComponent: false,
+  interactsWithHumans: false,
+  generatesSyntheticContent: false,
+};
 
 const KEY_ENV = ["REGULAIT_RECEIPT_SIGNING_KEY", "REGULAIT_RECEIPT_SIGNING_KEY_ID"] as const;
 const savedEnv = Object.fromEntries(KEY_ENV.map((k) => [k, process.env[k]]));
@@ -358,6 +375,7 @@ describe("POST /v1/use-cases/:useCaseId/resync", () => {
     const asBoot = await resync(f.useCaseId, k.BOOT);
     expect(asBoot.statusCode, asBoot.body).toBe(403);
     expect(asBoot.json()).toMatchObject({ error: "bootstrap_cannot_drive" });
+    expect((await auditRows("use-case-resync-refused", f.useCaseId)).map((r) => (r.detail as { code: string }).code)).toContain("bootstrap_cannot_drive");
     expect(await useCaseStatus(f.useCaseId)).toBe("proposed");
     // under the strict step-up policy: a missing key is refused FIRST (no step-up is
     // asked for, so none is spent), and an admin's API key cannot confirm who is acting
@@ -502,27 +520,47 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     const holding = new Promise<void>((r) => (held = r));
     let release!: () => void;
     const released = new Promise<void>((r) => (release = r));
+    let holderPid = 0;
     const transition = db.transaction(async (tx) => {
+      // a failure below can never leave this lock held: the server ends this
+      // transaction itself if it sits idle (or any statement runs) past 30 s
+      await tx.execute(sql`set local idle_in_transaction_session_timeout = '30s'`);
+      await tx.execute(sql`set local statement_timeout = '30s'`);
+      holderPid = rowsOf<{ pid: number }>(await tx.execute(sql`select pg_backend_pid() as pid`))[0]!.pid;
       await tx.select({ id: workflowInstances.id }).from(workflowInstances).where(eq(workflowInstances.id, f.instanceId)).for("update");
       held();
       await released;
       await tx.update(aiUseCases).set({ updatedAt: new Date() }).where(eq(aiUseCases.id, f.useCaseId));
     });
-    await holding;
-    const pending = resync(f.useCaseId);
-    // the re-sync is now blocked on the instance lock (and, in this order, holds nothing on the use case)
-    const deadline = Date.now() + 15_000;
-    for (;;) {
-      const waiting = rowsOf<{ n: number }>(
-        await db.execute(sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`),
-      )[0]!.n;
-      if (waiting >= 1) break;
-      if (Date.now() > deadline) throw new Error("the re-sync never waited on the instance lock");
-      await new Promise((r) => setTimeout(r, 50));
+    // a holder that fails before taking the lock must not leave the wait below hanging
+    void transition.catch(() => held());
+    let pending: Promise<Awaited<ReturnType<typeof resync>>> | undefined;
+    try {
+      await holding;
+      pending = resync(f.useCaseId);
+      // the re-sync is blocked BY THE HOLDER (pg_blocking_pids names its backend), and
+      // in this order it holds nothing on the use case yet
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const blocked = rowsOf<{ n: number }>(
+          await db.execute(sql`select count(*)::int as n from pg_stat_activity where ${holderPid}::int = any(pg_blocking_pids(pid))`),
+        )[0]!.n;
+        if (blocked >= 1) break;
+        if (Date.now() > deadline) throw new Error("the re-sync never waited on the instance lock the transition holds");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      release();
     }
-    release();
     await transition; // with the old order (use case, then instance) this is a 40P01 deadlock
-    const res = await pending;
+    // the re-sync answers once the lock is free; bounded, so a regression fails here instead of hanging
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const res = await Promise.race([
+      pending!,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("the re-sync did not answer within 30 s of the lock being released")), 30_000);
+      }),
+    ]).finally(() => clearTimeout(timer));
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json()).toMatchObject({ status: "approved", resynced: true });
   }, 180_000);
@@ -542,8 +580,115 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     expect(await useCaseStatus(uc!.id)).toBe("under_review");
     expect(await auditRows("use-case-approved", uc!.id)).toEqual([]);
     expect(await decisionRecords(uc!.id)).toEqual([]);
+    // the pre-check refusal is on the record too
+    expect((await auditRows("use-case-resync-refused", uc!.id)).map((r) => (r.detail as { code: string }).code)).toEqual(["no_completion_record"]);
     // it stays behind by design; retire it so it does not crowd the posture sample
     await db.update(aiUseCases).set({ status: "retired", retiredReason: "r25rs cleanup", retiredAt: new Date() }).where(eq(aiUseCases.id, uc!.id));
+  }, 180_000);
+
+  it("a completion no person drove, with no approval: refused 409 no_decider_record (the requester is never credited)", async () => {
+    const f = await strandUseCase("no-decider");
+    // FIXTURE: what a system completion leaves — the kernel's event row carries no
+    // actor. Its audit row still names a person (applyEvent audits an actor-less
+    // event under the initiator), which is exactly what must NOT be credited.
+    await db.update(workflowEvents).set({ actorUserId: null }).where(eq(workflowEvents.instanceId, f.instanceId));
+    expect((await completionRow(f.instanceId)).userId).toBe(owner.id);
+    const res = await resync(f.useCaseId);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ error: "no_decider_record" });
+    expect(await useCaseStatus(f.useCaseId)).toBe("proposed");
+    expect(await decisionRecords(f.useCaseId)).toEqual([]);
+    expect((await auditRows("use-case-resync-refused", f.useCaseId)).map((r) => (r.detail as { code: string }).code)).toEqual(["no_decider_record"]);
+    await db.update(aiUseCases).set({ status: "retired", retiredReason: "r25rs cleanup", retiredAt: new Date() }).where(eq(aiUseCases.id, f.useCaseId));
+  }, 180_000);
+
+  it("a sign-off on record with no approval row behind it: refused 409 approval_record_missing", async () => {
+    const f = await strandSignedOff("no-approval-row");
+    // FIXTURE: the gate granted (its transition is on the record), but its approval row no longer reads approved
+    await db.update(approvals).set({ status: "superseded" }).where(eq(approvals.id, f.approvalId));
+    const res = await resync(f.useCaseId);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ error: "approval_record_missing" });
+    expect(res.json().detail).toContain("'signoff'");
+    expect(await useCaseStatus(f.useCaseId)).toBe("under_review");
+    expect((await auditRows("use-case-resync-refused", f.useCaseId)).map((r) => (r.detail as { code: string }).code)).toEqual(["approval_record_missing"]);
+    await db.update(aiUseCases).set({ status: "retired", retiredReason: "r25rs cleanup", retiredAt: new Date() }).where(eq(aiUseCases.id, f.useCaseId));
+  }, 180_000);
+
+  it("a re-screen under the current rule set that changes the tier: refused 409 eu_tier_changed_since_completion, and the whole re-sync rolls back", async () => {
+    const f = await startInstance("tier", [
+      { id: "intake", type: "trigger" },
+      { id: "questionnaire", type: "artifact_generation", output: USE_CASE_QUESTIONNAIRE_OUTPUT },
+      { id: "ci-gate", type: "automated_check", checks: ["ci"] },
+    ]);
+    const content = `# AI use-case intake questionnaire\n\n## 1. Purpose\nr25rs.\n\n## 9. EU AI Act risk screening\n\n${renderEuAiActAnswersBlock(BASELINE_ANSWERS)}`;
+    const submitted = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content });
+    expect(submitted.statusCode, submitted.body).toBe(201);
+    const reported = await withoutKey(() => reportPass(f.instanceId));
+    expect(reported.json().status).toBe("completed");
+    const [screened] = await db.select({ tier: aiUseCases.euAiActTier }).from(aiUseCases).where(eq(aiUseCases.id, f.useCaseId));
+    expect(screened!.tier, "screened when the questionnaire went in").not.toBeNull();
+    // FIXTURE: the tier the completion carried was different from what today's rule
+    // set computes (a rule-set change since): stored as the other tier
+    const atCompletion = screened!.tier === "high" ? "minimal" : "high";
+    await db.update(aiUseCases).set({ euAiActTier: atCompletion }).where(eq(aiUseCases.id, f.useCaseId));
+    const res = await resync(f.useCaseId);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ error: "eu_tier_changed_since_completion", tierAtCompletion: atCompletion, tierNow: screened!.tier });
+    // rolled back: still behind, still the completion's tier, no decision, no approval row
+    const [after] = await db.select({ status: aiUseCases.status, tier: aiUseCases.euAiActTier, approvedAt: aiUseCases.approvedAt }).from(aiUseCases).where(eq(aiUseCases.id, f.useCaseId));
+    expect(after).toEqual({ status: "proposed", tier: atCompletion, approvedAt: null });
+    expect(await auditRows("use-case-approved", f.useCaseId)).toEqual([]);
+    expect(await decisionRecords(f.useCaseId)).toEqual([]);
+    expect((await auditRows("use-case-resync-refused", f.useCaseId)).map((r) => (r.detail as { code: string }).code)).toEqual(["eu_tier_changed_since_completion"]);
+    await db.update(aiUseCases).set({ status: "retired", retiredReason: "r25rs cleanup", retiredAt: new Date() }).where(eq(aiUseCases.id, f.useCaseId));
+  }, 180_000);
+
+  it("a re-opened intake: the approval of the EARLIER round is skipped, even when it was decided later", async () => {
+    const f = await startInstance("reopen", [
+      { id: "intake", type: "trigger" },
+      { id: "questionnaire", type: "artifact_generation", output: "r25rs_reopen" },
+      { id: "signoff", type: "human_approval", approvers: [approver.id, admin.id] },
+      { id: "ci-gate", type: "automated_check", checks: ["ci"] },
+    ]);
+    const submit = async (content: string) => {
+      const res = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content });
+      expect(res.statusCode, res.body).toBe(201);
+    };
+    // one approval row per named approver: the one the decider holds
+    const pendingApproval = async (approverUserId: string) => {
+      const [p] = await db
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(and(eq(approvals.instanceId, f.instanceId), eq(approvals.status, "pending"), eq(approvals.approverUserId, approverUserId)));
+      expect(p, "a pending sign-off").toBeTruthy();
+      return p!.id;
+    };
+    // round 0: the approver signs off; the instance moves on to its check
+    await submit("r25rs answers v1");
+    const round0 = await pendingApproval(approver.id);
+    const d0 = await k.req("POST", `/v1/approvals/${round0}/decide`, approver.auth, { decision: "approved", reason: "r25rs round 0" });
+    expect(d0.statusCode, d0.body).toBe(200);
+    expect((await instanceRow(f.instanceId)).status).toBe("awaiting_execution");
+    // the questionnaire is resubmitted: the intake re-opens into round 1 and asks again
+    await submit("r25rs answers v2");
+    expect((await instanceRow(f.instanceId)).round).toBe(1);
+    const round1 = await pendingApproval(admin.id);
+    expect(round1).not.toBe(round0);
+    const d1 = await k.req("POST", `/v1/approvals/${round1}/decide`, admin.auth, { decision: "approved", reason: "r25rs round 1" });
+    expect(d1.statusCode, d1.body).toBe(200);
+    // FIXTURE: round 1's decision carries an EARLIER decided_at than round 0's (a skewed
+    // clock), so "the newest decided approval" would wrongly pick round 0's
+    await db.update(approvals).set({ decidedAt: new Date(Date.now() - 86_400_000) }).where(eq(approvals.id, round1));
+    const reported = await withoutKey(() => reportPass(f.instanceId));
+    expect(reported.json().status).toBe("completed");
+
+    const res = await resync(f.useCaseId);
+    expect(res.statusCode, res.body).toBe(200);
+    const [resynced] = await auditRows("use-case-resynced", f.useCaseId);
+    expect(resynced!.detail).toMatchObject({ approvalId: round1, originalApprover: admin.id });
+    const [record] = await decisionRecords(f.useCaseId);
+    expect(record).toMatchObject({ approvalId: round1, decidedBy: admin.id });
   }, 180_000);
 });
 
