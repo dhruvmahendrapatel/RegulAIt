@@ -3,7 +3,8 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { signInPrepared } from "./demo-credentials";
+import { disposableDatabase, psqlInvocation } from "../../../scripts/disposable-db.mjs";
+import { disposablePassword, signInPrepared } from "./demo-credentials";
 import { nextCode } from "./totp-sign-in";
 import { activate, expectDialogTrap, escapeToTrigger, tabTo } from "./keyboard-audit";
 
@@ -28,23 +29,32 @@ import { activate, expectDialogTrap, escapeToTrigger, tabTo } from "./keyboard-a
  *     refuses any other database, so it can never touch a shared one;
  *   - the gateway started on that database with REGULAIT_MODEL_ARTIFACT_DIR set
  *     (the same value exported here), at E2E_BASE_URL (default :3148);
- *   - E2E_DEMO_PREPARE_LOG (the captured demo:prepare output) and `psql`.
+ *   - E2E_DEMO_PREPARE_LOG (the captured demo:prepare output) and `psql`;
+ *   - optionally E2E_X38_ADMIN_PASSWORD, else a random password is made per run.
+ * The four tests run serially in file order (the later ones use the earlier ones' artifacts).
  *   pnpm --filter @regulait/web exec playwright test -c playwright.x38-real.config.ts
  *
  * The SQL only installs explicit synthetic states (a scan row, a cited model
  * card, a queued run, quota settings, a temporary admin demotion) and restores
  * them in `finally`; it never admits a scanner or claims a real scan occurred.
  */
+// the quota and retention journeys use the artifacts the delete journeys leave behind: run in
+// file order, and skip the rest once one fails rather than report a misleading second failure
+test.describe.configure({ mode: "serial" });
 const email = "admin@regulait.local";
 const raw = "X38_SYNTHETIC_MODEL_BYTES_NEVER_IN_THE_DOM";
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+// a fresh random password per run (or E2E_X38_ADMIN_PASSWORD); signInPrepared keeps it in the git-ignored store
+const password = disposablePassword("E2E_X38_ADMIN_PASSWORD");
+/**
+ * Fixture SQL, only ever on this spec's own disposable database: the WHOLE URL is
+ * allow-listed (no query string, second host, socket or escape) and psql gets the
+ * checked values as flags with every PG* variable removed (scripts/disposable-db.mjs,
+ * unit-tested there without a database).
+ */
 function sql(query: string): string {
-  const database = process.env.DATABASE_URL;
-  const url = database ? new URL(database) : null;
-  if (!database || !url || !LOOPBACK.has(url.hostname) || !/^\/regulait_(review_)?x38[a-z0-9_]*$/.test(url.pathname)) {
-    throw new Error("X38 requires its own loopback disposable database (regulait_review_x38*)");
-  }
-  return execFileSync("psql", [database, "-X", "-v", "ON_ERROR_STOP=1", "-At", "-c", query], { encoding: "utf8" }).trim();
+  const target = disposableDatabase(process.env.DATABASE_URL, /^regulait_(review_)?x38[a-z0-9_]*$/);
+  const { args, env } = psqlInvocation(target, query, process.env);
+  return execFileSync("psql", args, { encoding: "utf8", env }).trim();
 }
 /** the gateway's filesystem artifact store; required, so an "object is gone" check can never pass vacuously */
 function storedObject(sha256: string): string {
@@ -58,7 +68,7 @@ function id(value: string) {
   return value;
 }
 async function signIn(page: Page) {
-  expect(await signInPrepared(page, email, "X38-Disposable-Admin!", page.getByRole("heading", { name: /Welcome back/ }))).toBe(true);
+  expect(await signInPrepared(page, email, password, page.getByRole("heading", { name: /Welcome back/ }))).toBe(true);
 }
 function errorsOf(page: Page) {
   const errors: string[] = [];
