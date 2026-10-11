@@ -13,6 +13,7 @@ import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { platformEnvKey } from "./agents-connectors.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -175,20 +176,22 @@ beforeAll(async () => {
 beforeEach(clearEnv);
 
 afterAll(async () => {
-  await restoreSb1Posture?.();
-  // M-068: remove the loopback allow entry this file created
-  if (loopbackAllowHostId) {
-    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
-    expect(gone.statusCode).toBe(200);
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreSb1Posture?.();
+    // leave the shared DB and the process env exactly as they were found
+    await db.delete(userModelCredentials).where(eq(userModelCredentials.userId, userId));
+    await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
+    clearEnv();
+    for (const name of PROVIDER_ENV_VARS) {
+      if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
+    }
+    await restoreSb2Gates();
+  } finally {
+    loopback.assertRemoved();
   }
-  // leave the shared DB and the process env exactly as they were found
-  await db.delete(userModelCredentials).where(eq(userModelCredentials.userId, userId));
-  await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
-  clearEnv();
-  for (const name of PROVIDER_ENV_VARS) {
-    if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
-  }
-  await restoreSb2Gates();
 });
 
 describe("platformEnvKey helper", () => {

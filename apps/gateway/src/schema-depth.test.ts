@@ -26,6 +26,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -347,22 +348,24 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  // M-068: remove the loopback allow entry this file created
-  if (loopbackAllowHostId) {
-    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
-    expect(gone.statusCode).toBe(200);
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    // restore the shipped interception defaults for later suites on this DB
+    await db
+      .update(interceptionSettings)
+      .set({ anthropicCompatEnabled: false })
+      .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
+    app.server.closeAllConnections();
+    await restoreSb2Gates();
+    await app.close();
+    await mcpUpstream.close();
+    await snowUpstream.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  // restore the shipped interception defaults for later suites on this DB
-  await db
-    .update(interceptionSettings)
-    .set({ anthropicCompatEnabled: false })
-    .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
-  app.server.closeAllConnections();
-  await restoreSb2Gates();
-  await app.close();
-  await mcpUpstream.close();
-  await snowUpstream.close();
 });
 
 // =========================================================================

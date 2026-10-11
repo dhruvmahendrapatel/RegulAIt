@@ -43,6 +43,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 // resetOrg/resetInterception drop the singletons (strict defaults come back), so
@@ -212,19 +213,21 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await resetOrg();
-  await resetInterception();
-  await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, "orgset-block"));
-  await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, "orgset-ret"));
-  if (ORIG_ANTHROPIC !== undefined) process.env.ANTHROPIC_API_KEY = ORIG_ANTHROPIC;
-  if (ORIG_ANTHROPIC_BASE !== undefined) process.env.ANTHROPIC_BASE_URL = ORIG_ANTHROPIC_BASE;
-  // M-068: remove the loopback allow entry this file created
-  if (loopbackAllowHostId) {
-    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
-    expect(gone.statusCode).toBe(200);
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await resetOrg();
+    await resetInterception();
+    await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, "orgset-block"));
+    await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, "orgset-ret"));
+    if (ORIG_ANTHROPIC !== undefined) process.env.ANTHROPIC_API_KEY = ORIG_ANTHROPIC;
+    if (ORIG_ANTHROPIC_BASE !== undefined) process.env.ANTHROPIC_BASE_URL = ORIG_ANTHROPIC_BASE;
+    await restoreSb2Gates();
+    await app.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  await restoreSb2Gates();
-  await app.close();
 });
 
 describe("settings endpoint — admin-only, partial update, audited", () => {

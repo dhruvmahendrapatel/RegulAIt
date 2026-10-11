@@ -27,6 +27,7 @@ import {
 import { buildApp } from "./app.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 /**
  * GET /v1/setup/status — the guided "connect your first real provider"
@@ -172,26 +173,28 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  await restoreSb1Posture?.();
-  // M-068: remove the loopback allow entry this file created
-  if (loopbackAllowHostId) {
-    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
-    expect(gone.statusCode).toBe(200);
-  }
-  if (reactivateIds.length) {
-    await db
-      .update(users)
-      .set({ disabledAt: null })
-      .where(inArray(users.id, reactivateIds));
-  }
-  await db.delete(modelCredentials); // leave the shared anthropic slot clean
-  app.server.closeAllConnections();
-  await app.close();
-  await closeAll([async () => db.$client.end(), async () => dropScratchDatabase(scratchAdmin, SCRATCH), async () => scratchAdmin.$client.end()]);
-  clearEnv();
-  for (const name of PROVIDER_ENV_VARS) {
-    if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    await restoreSb1Posture?.();
+    if (reactivateIds.length) {
+      await db
+        .update(users)
+        .set({ disabledAt: null })
+        .where(inArray(users.id, reactivateIds));
+    }
+    await db.delete(modelCredentials); // leave the shared anthropic slot clean
+    app.server.closeAllConnections();
+    await app.close();
+    await closeAll([async () => db.$client.end(), async () => dropScratchDatabase(scratchAdmin, SCRATCH), async () => scratchAdmin.$client.end()]);
+    clearEnv();
+    for (const name of PROVIDER_ENV_VARS) {
+      if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
+    }
+  } finally {
+    loopback.assertRemoved();
   }
 });
 

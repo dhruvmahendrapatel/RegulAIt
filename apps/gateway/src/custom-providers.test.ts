@@ -23,6 +23,7 @@ import { customProviderDisabledRefusal } from "./custom-providers.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -122,11 +123,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreSb1Posture?.();
-  await removeLicenseFixture(db);
-  srv.closeAllConnections();
-  await new Promise<void>((r) => srv.close(() => r()));
-  await restoreSb2Gates();
+  // M-068: the lifecycle tests withdraw and re-add the 127.0.0.1 entry, so it is
+  // removed by host. It goes first, while the app is open; its outcome is asserted
+  // only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" });
+  try {
+    await restoreSb1Posture?.();
+    await removeLicenseFixture(db);
+    srv.closeAllConnections();
+    await new Promise<void>((r) => srv.close(() => r()));
+    await restoreSb2Gates();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 const baseUrlFor = () => `http://127.0.0.1:${port}/v1`;

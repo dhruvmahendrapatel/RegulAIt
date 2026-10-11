@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { and, createDb, eq, modelCredentials, runMigrations, userModelCredentials, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -445,10 +446,12 @@ describe("/admin agent-policy editor", () => {
 });
 
 afterAll(async () => {
-  // M-068: remove the loopback allow entry this file created
-  if (loopbackAllowHostId) {
-    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
-    expect(gone.statusCode).toBe(200);
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreSb2Gates();
+  } finally {
+    loopback.assertRemoved();
   }
-  await restoreSb2Gates();
 });

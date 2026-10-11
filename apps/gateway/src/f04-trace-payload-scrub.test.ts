@@ -70,6 +70,7 @@ import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
 let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -249,17 +250,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  await restoreSb1Posture?.();
-  // M-068: remove the loopback allow entry this file created
-  if (loopbackAllowHostId) {
-    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
-    expect(gone.statusCode).toBe(200);
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    await restoreSb1Posture?.();
+    app.server.closeAllConnections();
+    await restoreSb2Gates();
+    await app.close();
+    await upstream.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  app.server.closeAllConnections();
-  await restoreSb2Gates();
-  await app.close();
-  await upstream.close();
 });
 
 // ---------------------------------------------------------------------------
