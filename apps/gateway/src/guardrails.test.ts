@@ -29,6 +29,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -273,6 +274,9 @@ async function startUpstream() {
 }
 
 let restoreDataPosture: () => Promise<void>;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -291,7 +295,7 @@ beforeAll(async () => {
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   gwUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
-  await app.inject({
+  const egressAllowed = await app.inject({
     method: "POST",
     url: "/v1/egress-allow-hosts",
     headers: AUTH,
@@ -302,6 +306,8 @@ beforeAll(async () => {
       note: "guardrail suite: local upstream MCP server",
     },
   });
+  expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   const u = await app.inject({
     method: "POST",
@@ -413,16 +419,23 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  // SHARED SINGLETON RESTORED. Every row this file wrote to guardrail_configs
-  // goes, so a suite running after it sees the shipped default posture again
-  // and cannot fail because of an org-wide `block` this file left behind.
-  await db.delete(guardrailConfigs);
-  await restoreDataPosture();
-  app.server.closeAllConnections();
-  await restoreSb2Gates();
-  await app.close();
-  await mcpUpstream.close();
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    // SHARED SINGLETON RESTORED. Every row this file wrote to guardrail_configs
+    // goes, so a suite running after it sees the shipped default posture again
+    // and cannot fail because of an org-wide `block` this file left behind.
+    await db.delete(guardrailConfigs);
+    await restoreDataPosture();
+    app.server.closeAllConnections();
+    await restoreSb2Gates();
+    await app.close();
+    await mcpUpstream.close();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 // ===========================================================================

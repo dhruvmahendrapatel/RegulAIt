@@ -33,6 +33,7 @@ import { buildApp } from "./app.js";
 import { scrapeMetricsText } from "./metrics.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -108,6 +109,8 @@ let serverId: string;
 let priorMethods: string[] = [];
 let restoreGates: () => Promise<void> = async () => {};
 let restoreAdmission: (() => Promise<void>) | undefined;
+// M-068: the loopback allow entry is global state on the shared database; afterAll removes it
+let loopbackAllowHostId: string | undefined;
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
@@ -126,13 +129,17 @@ beforeAll(async () => {
     url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "int-observe: local MCP double" },
   });
-  expect([201, 409]).toContain(allow.statusCode);
+  expect(allow.statusCode, allow.body).toBe(201);
+  loopbackAllowHostId = allow.json().id;
   const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `int-observe-${Date.now()}`, url: up.url } });
   expect(s.statusCode).toBe(201);
   serverId = s.json().id;
 });
 
 afterAll(async () => {
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
   try {
     // M-068: the org-wide method list this file changed goes back
     if (db) await db.update(orgSettings).set({ mcpProtocolMethods: priorMethods as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
@@ -142,6 +149,7 @@ afterAll(async () => {
     await app?.close();
   } finally {
     await up?.close();
+    loopback.assertRemoved();
   }
 });
 

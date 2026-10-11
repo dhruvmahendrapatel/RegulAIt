@@ -45,6 +45,7 @@ import { buildApp } from "./app.js";
 import { hashToken, totpCode, totpStep } from "./auth.js";
 import { enrolTotpForTest } from "./testing/identity-posture.js";
 import { forgetStepUpMethodsForTest, relaxStepUpForTest } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -272,6 +273,9 @@ const oidcRoundTrip = async (
  */
 const createdOidcProviderIds = new Set<string>();
 let orgSettingsSnapshot: OrgSettingsRow | null = null;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 
 const mkProvider = async (payload: Record<string, unknown>) => {
   const r = await app.inject({
@@ -313,6 +317,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
   // snapshot the shared singleton so whatever this file flips is handed back
   // exactly as it was found (see the SUITE-ORDER ISOLATION note above)
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
@@ -326,23 +331,30 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await restoreStepUp?.();
-  // B4S-06 (M-068): the admins this suite enrolled leave no step-up method behind
-  const suiteUsers = await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${"%@auth-test.example"}`);
-  await forgetStepUpMethodsForTest(db, suiteUsers.map((u) => u.id));
-  // Providers first, settings second: the rows go out through the DB (not the
-  // API), so the no-lockout guard can never refuse this file's own cleanup.
-  if (createdOidcProviderIds.size > 0) {
-    await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdOidcProviderIds]));
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStepUp?.();
+    // B4S-06 (M-068): the admins this suite enrolled leave no step-up method behind
+    const suiteUsers = await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${"%@auth-test.example"}`);
+    await forgetStepUpMethodsForTest(db, suiteUsers.map((u) => u.id));
+    // Providers first, settings second: the rows go out through the DB (not the
+    // API), so the no-lockout guard can never refuse this file's own cleanup.
+    if (createdOidcProviderIds.size > 0) {
+      await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdOidcProviderIds]));
+    }
+    if (orgSettingsSnapshot) {
+      await db
+        .update(orgSettings)
+        .set(orgSettingsSnapshot)
+        .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+    await app.close();
+    await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
+  } finally {
+    loopback.assertRemoved();
   }
-  if (orgSettingsSnapshot) {
-    await db
-      .update(orgSettings)
-      .set(orgSettingsSnapshot)
-      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  }
-  await app.close();
-  await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
 });
 
 // ===========================================================================

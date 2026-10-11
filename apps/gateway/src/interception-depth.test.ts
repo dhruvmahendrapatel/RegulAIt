@@ -28,6 +28,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -224,6 +225,9 @@ const NOT_FOUND_MESSAGES = {
   statusCode: 404,
 };
 
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -249,6 +253,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   upstream = await startUpstream();
   const server = await app.inject({
@@ -331,28 +336,35 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreStrictAdmission?.();
-  // restore the shipped defaults + clear scope rules so a later suite sharing
-  // this database sees a pristine posture
-  await db
-    .update(interceptionSettings)
-    .set({
-      anthropicCompatEnabled: false,
-      openaiCompatEnabled: false,
-      mcpInterceptionEnabled: true,
-      resolutionMode: "map_by_model",
-      // ADR-0181: the shipped defaults are strict
-      enforcementPosture: "managed",
-      requireProjectAttribution: true,
-      requireMcpAttribution: true,
-      keyCustodyEnforced: true,
-    })
-    .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
-  await db.delete(interceptionScopeRules);
-  app.server.closeAllConnections();
-  await restoreSb2Gates();
-  await app.close();
-  await upstream.close();
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreStrictAdmission?.();
+    // restore the shipped defaults + clear scope rules so a later suite sharing
+    // this database sees a pristine posture
+    await db
+      .update(interceptionSettings)
+      .set({
+        anthropicCompatEnabled: false,
+        openaiCompatEnabled: false,
+        mcpInterceptionEnabled: true,
+        resolutionMode: "map_by_model",
+        // ADR-0181: the shipped defaults are strict
+        enforcementPosture: "managed",
+        requireProjectAttribution: true,
+        requireMcpAttribution: true,
+        keyCustodyEnforced: true,
+      })
+      .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
+    await db.delete(interceptionScopeRules);
+    app.server.closeAllConnections();
+    await restoreSb2Gates();
+    await app.close();
+    await upstream.close();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 // ===========================================================================
