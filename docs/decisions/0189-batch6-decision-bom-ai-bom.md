@@ -2035,9 +2035,18 @@ fixes were rechecked. These are the details the build settled:
         Re-sync action on the Posture page.
         - The route requires an admin and an `approval_decide` step-up, and refuses the bootstrap credential.
         - It runs the same key check and post-commit snapshot as any other sign-off.
-        - The decision keeps the original approver, approval id and decision time. With no approval stage, it takes
-          the completing event's actor and time. The re-syncing admin is recorded separately, in the
-          `use-case-resynced` row.
+        - The decision keeps the original decider and decision time. The decider is chosen in this order:
+          1. **The approver,** when this round was let through by a sign-off. That is the approved or consumed
+             approval in the newest request batch for the granting stage; the gate and the round are fixed by audit
+             `seq`.
+          2. **Otherwise, the person whose request committed the completing transition**, as the kernel records it
+             on that `workflow_events` row. Examples: the submitter of the artifact, or the user who reported the
+             check that let the executor finish.
+          3. **A pure system completion** (no event actor) is refused with `no_decider_record`. It is never credited
+             to the initiator.
+
+          The re-syncing admin is recorded separately, in the `use-case-resynced` row. Every refusal after the admin
+          check writes a `use-case-resync-refused` row.
         - The approval's lifetime runs from the original decision, so a long-stranded use case can come back already
           expired. The response reports this as `approvedUntil` and `approvalExpired`, and recertification then
           applies.
