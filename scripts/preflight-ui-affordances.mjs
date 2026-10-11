@@ -38,9 +38,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  */
 const DELIBERATELY_API_ONLY = new Map([
   // TEMPORARY (M-053): ADR-0188 S1 registers revoking a workload credential as
-  // a 501 stub; its button belongs to the agent identities page, Codex's X33
-  // (slice S6). Deleting this entry is part of X33's acceptance.
-  ["/v1/workload-identities/:x/credentials/:x", "ADR-0188 S1: revoke a workload credential — the agent identities page button is X33 (Codex, S6); remove this entry when it lands"],
+  // a 501 stub. The workload identities page (S6 preview, adopted from X33)
+  // shows the credentials section disabled, because listing, adding and
+  // revoking credentials are all still 501. Delete this entry when the S6
+  // credential routes go live and the page gains the per-credential Revoke.
+  ["/v1/workload-identities/:x/credentials/:x", "ADR-0188 S1: revoke a workload credential — still a 501 stub; the S6 page's credentials section is disabled until the credential routes are built; remove this entry then"],
 ]);
 
 const walk = (dir, out = []) => {
@@ -98,6 +100,43 @@ export function uiCallPaths(src, verb) {
     }
   }
   return out;
+}
+
+/**
+ * Routes the gateway registers but answers 501 `not_built` (the ADR-0188 S1
+ * stubs: `app.post("/v1/…", notBuilt)`), as `"POST /v1/x/:x"`. The same regex
+ * as the web drift test (`workloadIdentityModel.test.ts`). A stub creates
+ * nothing, so a UI that lists the collection but cannot yet add to it is not
+ * an add gap: the screen shows that control disabled with the reason, and the
+ * gap reappears here the moment the stub is replaced by a real handler.
+ */
+export function notBuiltRoutes(src) {
+  const out = new Set();
+  for (const m of src.matchAll(/app\.(get|post|put|patch|delete)\(\s*"([^"]+)",\s*notBuilt\)/g)) {
+    out.add(`${m[1].toUpperCase()} ${norm(m[2])}`);
+  }
+  return out;
+}
+
+/** segment-wise match with `:x` as a wildcard on either side */
+const segmentMatch = (route, set) => {
+  if (set.has(route)) return true;
+  const want = route.split("/");
+  for (const u of set) {
+    const got = u.split("/");
+    if (got.length === want.length && got.every((seg, i) => seg === want[i] || seg === ":x" || want[i] === ":x")) return true;
+  }
+  return false;
+};
+
+/**
+ * Collections the UI lists (a GET it calls) and cannot add to (a POST it never
+ * calls), skipping POSTs that are still `notBuilt` stubs.
+ */
+export function findAddGaps({ posted, gotten, uiPost, uiGet, notBuilt = new Set() }) {
+  return [...posted]
+    .filter((p) => !notBuilt.has(`POST ${p}`) && !segmentMatch(p, uiPost) && gotten.has(p) && segmentMatch(p, uiGet))
+    .sort();
 }
 
 function main() {
@@ -172,20 +211,9 @@ function main() {
   };
   const uiPost = uiVerb("post");
   const uiGet = uiVerb("get");
-  const anyMatch = (route, set) => {
-    if (set.has(route)) return true;
-    const want = route.split("/");
-    for (const u of set) {
-      const got = u.split("/");
-      if (got.length === want.length && got.every((seg, i) => seg === want[i] || seg === ":x" || want[i] === ":x")) {
-        return true;
-      }
-    }
-    return false;
-  };
-  const addGaps = [...posted]
-    .filter((p) => !anyMatch(p, uiPost) && gotten.has(p) && anyMatch(p, uiGet))
-    .sort();
+  const notBuilt = new Set();
+  for (const f of walk(gatewaySrc)) for (const r of notBuiltRoutes(readFileSync(f, "utf8"))) notBuilt.add(r);
+  const addGaps = findAddGaps({ posted, gotten, uiPost, uiGet, notBuilt });
   if (served.size === 0) {
     console.error("preflight-ui-affordances: found no DELETE routes — the scan is broken, not the app");
     return 2;

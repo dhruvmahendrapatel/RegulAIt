@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { uiCallPaths } from "./preflight-ui-affordances.mjs";
+import { findAddGaps, notBuiltRoutes, uiCallPaths } from "./preflight-ui-affordances.mjs";
 
 describe("affordance census: which web calls count as reaching a route", () => {
   it("counts the shared client in every shape it is written in", () => {
@@ -30,5 +30,31 @@ describe("affordance census: which web calls count as reaching a route", () => {
   it("does not count a lookalike: a Map's .get, another object's .del, or a client nested in some other object", () => {
     expect([...uiCallPaths("cache.get('/v1/x'); byPath.delete(`/v1/y`); foo.api.del('/v1/z'); myapi.del('/v1/w')", "del")]).toEqual([]);
     expect([...uiCallPaths("cache.get('/v1/x'); headers.get(\"/v1/y\"); foo.api.get('/v1/z')", "get")]).toEqual([]);
+  });
+});
+
+describe("affordance census: the add side skips routes that are still 501 stubs", () => {
+  it("reads the notBuilt registrations, verb and normalized path, and nothing else", () => {
+    const src = [
+      'app.post("/v1/things", notBuilt);',
+      'app.delete("/v1/things/:thingId/parts/:partId", notBuilt);',
+      'app.get("/v1/things", s4.list);',
+      'app.post("/v1/other", async (req, reply) => notBuilt);',
+    ].join("\n");
+    expect([...notBuiltRoutes(src)].sort()).toEqual(["DELETE /v1/things/:x/parts/:x", "POST /v1/things"]);
+  });
+
+  it("a listed collection whose POST is a stub is not a gap; once the stub is a real handler it is", () => {
+    const sets = { posted: new Set(["/v1/things"]), gotten: new Set(["/v1/things"]), uiPost: new Set(), uiGet: new Set(["/v1/things"]) };
+    expect(findAddGaps({ ...sets, notBuilt: new Set(["POST /v1/things"]) })).toEqual([]);
+    expect(findAddGaps(sets)).toEqual(["/v1/things"]);
+    // a stub on another verb does not excuse the POST
+    expect(findAddGaps({ ...sets, notBuilt: new Set(["GET /v1/things"]) })).toEqual(["/v1/things"]);
+  });
+
+  it("a POST the UI calls, or a collection the UI does not list, is never a gap", () => {
+    const base = { posted: new Set(["/v1/a/:x/b"]), gotten: new Set(["/v1/a/:x/b"]) };
+    expect(findAddGaps({ ...base, uiPost: new Set(["/v1/a/:x/b"]), uiGet: new Set(["/v1/a/:x/b"]) })).toEqual([]);
+    expect(findAddGaps({ ...base, uiPost: new Set(), uiGet: new Set() })).toEqual([]);
   });
 });
