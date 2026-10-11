@@ -2067,8 +2067,11 @@ fixes were rechecked. These are the details the build settled:
           - Git, deploy and nested-run stages, and check stages that would start paid evals, are guarded in the
             executor's claim transaction. The kernel lookahead decides whether the stage would complete the
             instance, and it fails closed on any error except "not executable".
-          - Check stages with only reported results are guarded at commit, after evaluation. A failing check
-            therefore still ends at `blocked_on_check` and is never reported as a key problem.
+          - Check stages with only reported results are guarded at the claim when every reported check has
+            already passed. When a check failed or is still pending, the guard moves to the commit and runs after
+            evaluation. A failing check therefore still ends at `blocked_on_check` and is never reported as a key
+            problem.
+          - A commit-time refusal reaches every caller, the same as a claim-time one.
           - The guard is per stage: in an automated tail, earlier stages (branch, PR) still run, and only the
             completing stage is held.
         - **What a refusal leaves behind.**
@@ -2079,7 +2082,7 @@ fixes were rechecked. These are the details the build settled:
             was its only action. Decide answers `executionWarning`.
           - Recovery is `/advance` or the same request. An Idempotency-Key replay only reports the standing
             refusal.
-          - The engine hand-off stays unnotified, and the sweep retries at most once every 10 minutes.
+          - The engine hand-off stays unnotified, and the sweep retries at most once every 10 minutes, for the refused stage only. A malformed marker is treated as no back-off.
         - **Mirrored at once.** An approval's post-commit completion, a nested run's completion, an engine
           re-evaluation, an intake completing at start, and a vendor assessment completing at start now update the
           use case or vendor immediately.
