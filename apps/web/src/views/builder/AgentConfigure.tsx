@@ -21,6 +21,7 @@ import { bk, builderApi, useAgents, useDirectory, useMyModelTiles, useMyProjects
 import { AGENT_COLORS, bundleFileName, parseLimitInput, scheduleSummary, skillPrivateOnSharedAgentCopy, skillWithheldCopy, spendState } from "./builderLogic";
 import { AgentAvatar, Icon, Section, Segmented, Switch, ToolLogo } from "./BuilderUi";
 import { AutonomyPanel } from "./AutonomyPanel";
+import { ExecutionProfileSelector } from "../admin/integrations/isolation/IsolationPanel";
 import s from "./builder.module.css";
 
 export const CHANNELS: Array<{ provider: BuilderChannelProvider; name: string; logo: string | null; sub: string }> = [
@@ -664,6 +665,8 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
       {!ro && (
         <Section title="Autonomy" icon={Icon.check()} defaultOpen={false}>
           <AutonomyPanel agent={agent} />
+          {/* ADR-0190 I9: the agent's execution profile (decision 7 item 5) */}
+          <ExecutionProfileSelector context="agent" />
         </Section>
       )}
 

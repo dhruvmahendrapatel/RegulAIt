@@ -15,6 +15,7 @@
 import { useState } from "react";
 import { McpCoverage, StdioArguments } from "./Batch3Mcp";
 import { IntegrationOwnership } from "./IntegrationOwnership";
+import { ExecutionProfileSelector } from "./isolation/IsolationPanel";
 import { api } from "../../../api/client";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
@@ -100,6 +101,8 @@ export default function McpServersPage() {
 
         <IntegrationOwnership kind="servers" rows={servers.data?.servers ?? []} />
         <McpCoverage servers={servers.data?.servers ?? []} />
+
+        {selectedId && <McpExecutionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
 
         {selectedId && (
           <ToolsCard
@@ -667,5 +670,28 @@ function ServerGrantForm(props: { users: ReturnType<typeof useUsers>; servers: M
         </span>
       )}
     </form>
+  );
+}
+
+/**
+ * ADR-0190 I9: where a server runs. A local (stdio) server runs in a sandbox an
+ * executor starts; a remote one runs on its own host, which we cannot isolate
+ * (decision 3: recorded as `external`, never as a class).
+ */
+function McpExecutionCard(props: { server: McpServer | undefined }) {
+  const { server } = props;
+  return (
+    <Card title="Execution isolation">
+      {server?.transport === "stdio" ? (
+        <ExecutionProfileSelector context={server.name} />
+      ) : server?.transport === "streamable_http" || server?.transport === "sse" ? (
+        <p>
+          This is a remote MCP server: it runs on its own host, which RegulAIt does not isolate. Its evidence records the execution as
+          external, never as an isolation class.
+        </p>
+      ) : (
+        <p>The server&apos;s transport is not reported, so no execution isolation can be shown for it.</p>
+      )}
+    </Card>
   );
 }
