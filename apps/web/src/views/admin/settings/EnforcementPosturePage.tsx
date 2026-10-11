@@ -44,6 +44,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import { BomPostureCard, type ReceiptSigningKeyPosture } from "./BomPostureCard";
+import { IsolationSettingsCard } from "../integrations/isolation/IsolationSettings";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -287,6 +288,9 @@ export default function EnforcementPosturePage() {
 
           {/* ADR-0189 §7 / §10: the receipt key and the BOM settings */}
           <BomPostureCard receiptKey={report?.receiptSigningKey} />
+
+          {/* ADR-0190 decision 11 (owner decision A, enforce-only): the isolation settings, the same card as under Engines */}
+          <IsolationSettingsCard />
         </QueryGate>
       </div>
     </>
