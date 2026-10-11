@@ -122,6 +122,7 @@ import {
 } from "./approval-pool.js";
 import { assertRuleLooseningStepUp, ruleLooseningCovers } from "./rule-loosening.js";
 import { approvalRuleStepUp } from "./step-up.js";
+import { agentSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 
 /**
  * A `Db` OR a transaction handle. Drizzle's transaction type is not assignable
@@ -404,7 +405,7 @@ export async function newVersion(
     /** ADR-0180: the route's settings_relax step-up, used when activating loosens an approval rule */
     stepUp?: ApprovalRuleStepUp | null;
   },
-): Promise<{ version: ConfigVersionRow; activated: boolean }> {
+): Promise<{ version: ConfigVersionRow; activated: boolean; aiBomSignoff: AiBomSignoff | null }> {
   return db.transaction(async (tx) => mintVersionLocked(tx, args));
 }
 
@@ -421,7 +422,7 @@ async function mintVersionLocked(
     /** ADR-0180: the route's settings_relax step-up, used when activating loosens an approval rule */
     stepUp?: ApprovalRuleStepUp | null;
   },
-): Promise<{ version: ConfigVersionRow; activated: boolean }> {
+): Promise<{ version: ConfigVersionRow; activated: boolean; aiBomSignoff: AiBomSignoff | null }> {
   // FIRST STATEMENT. Everything below reads state that a concurrent writer of
   // the same artifact could otherwise move underneath it.
   await lockRuleArtifact(db, args.artifactType, args.artifactId);
@@ -521,7 +522,7 @@ async function mintVersionLocked(
       `serves until this one is explicitly activated or canaried`,
     { artifactType: args.artifactType, version: next, parentVersion: parent, label: args.label ?? null },
   );
-  if (!args.activate) return { version: row!, activated: false };
+  if (!args.activate) return { version: row!, activated: false, aiBomSignoff: null };
   const activated = await activateVersion(db, {
     artifactType: args.artifactType,
     artifactId: args.artifactId,
@@ -530,7 +531,8 @@ async function mintVersionLocked(
     reason: args.reason ?? null,
     stepUp: args.stepUp,
   });
-  return { version: activated.target, activated: true };
+  // ADR-0189 R25: the caller runs the owed snapshot after ITS commit (this may be a savepoint)
+  return { version: activated.target, activated: true, aiBomSignoff: activated.aiBomSignoff };
 }
 
 /**
@@ -563,7 +565,7 @@ export async function activateVersion(
      * (absent → such an activation is refused while the policy asks for one) */
     stepUp?: ApprovalRuleStepUp | null;
   },
-): Promise<{ target: ConfigVersionRow; previous: ConfigVersionRow | null; rollback: boolean }> {
+): Promise<{ target: ConfigVersionRow; previous: ConfigVersionRow | null; rollback: boolean; aiBomSignoff: AiBomSignoff | null }> {
   const outcome = await db.transaction(async (tx) => {
     // FIRST STATEMENT — see `lockRuleArtifact`. Everything read below is read
     // under it, so the pointer move is decided from state nobody else can move.
@@ -663,41 +665,60 @@ export async function activateVersion(
     // kernel resolves through `config_versions`, so a rollback would change
     // evaluation even if this write had never happened.
     await writeRuleReadModel(tx, args.artifactType, args.artifactId, row!.body);
-    return { updated: row!, target, previous, rollback, inFlightCanary, seamNote };
+
+    // ADR-0189 R25 (config promotion): activating, promoting or rolling back an
+    // agent's system prompt or config owes a signed AI BOM snapshot of that agent
+    // and the use cases that list it. With no signing key under the strict default
+    // this throws 409 and the activation rolls back. A canary START is not a
+    // sign-off and never reaches here.
+    const prepared =
+      (args.artifactType === "agent_system_prompt" || args.artifactType === "agent_config") && previous?.id !== target.id
+        ? await prepareAiBomSignoff(tx as unknown as Db, {
+            trigger: "config_promotion",
+            triggeringObjectId: args.artifactId,
+            actorUserId: args.actorUserId,
+            subjects: await agentSignoffSubjects(tx, [args.artifactId], { builderAgents: false }),
+          })
+        : { signoff: null, auditDetail: {} };
+
+    // The activation's audit row commits WITH the activation (ADR-0189 R25 item 9:
+    // it carries the snapshots the activation is owed, so a crash after commit
+    // leaves a visible debt rather than nothing).
+    await auditConfig(
+      tx,
+      args.actorUserId,
+      args.artifactId,
+      args.promotion ? args.promotion.ruleId : rollback ? "config-version-rolled-back" : "config-version-activated",
+      args.promotion
+        ? `canary version ${target.version} of ${args.artifactType} PROMOTED to active — ${args.promotion.reason}`
+        : rollback
+          ? `admin rolled ${args.artifactType} back from version ${previous!.version} to version ${target.version} — ` +
+            `version ${previous!.version} still exists and can be re-activated; nothing was rewritten` +
+            (args.reason ? `: ${args.reason}` : "")
+          : `admin activated version ${target.version} of ${args.artifactType} — every subsequent dispatch resolves ` +
+            `to it, and the ledger row of each such dispatch records which version served it` +
+            (args.reason ? `: ${args.reason}` : "") +
+            seamNote,
+      {
+        ...prepared.auditDetail,
+        artifactType: args.artifactType,
+        to: target.version,
+        from: previous?.version ?? null,
+        rollback,
+        ...(inFlightCanary
+          ? { canaryBaselineMoved: { candidateVersion: inFlightCanary.version, canaryPct: inFlightCanary.canaryPct } }
+          : {}),
+        ...(args.promotion
+          ? { promotion: true, evalRunId: args.promotion.evalRunId, override: args.promotion.override }
+          : {}),
+      },
+      rollback ? "deny" : "allow",
+    );
+    return { updated: row!, target, previous, rollback, aiBomSignoff: prepared.signoff };
   });
 
-  const { updated, target, previous, rollback, inFlightCanary, seamNote } = outcome;
-
-  await auditConfig(
-    db,
-    args.actorUserId,
-    args.artifactId,
-    args.promotion ? args.promotion.ruleId : rollback ? "config-version-rolled-back" : "config-version-activated",
-    args.promotion
-      ? `canary version ${target.version} of ${args.artifactType} PROMOTED to active — ${args.promotion.reason}`
-      : rollback
-        ? `admin rolled ${args.artifactType} back from version ${previous!.version} to version ${target.version} — ` +
-          `version ${previous!.version} still exists and can be re-activated; nothing was rewritten` +
-          (args.reason ? `: ${args.reason}` : "")
-        : `admin activated version ${target.version} of ${args.artifactType} — every subsequent dispatch resolves ` +
-          `to it, and the ledger row of each such dispatch records which version served it` +
-          (args.reason ? `: ${args.reason}` : "") +
-          seamNote,
-    {
-      artifactType: args.artifactType,
-      to: target.version,
-      from: previous?.version ?? null,
-      rollback,
-      ...(inFlightCanary
-        ? { canaryBaselineMoved: { candidateVersion: inFlightCanary.version, canaryPct: inFlightCanary.canaryPct } }
-        : {}),
-      ...(args.promotion
-        ? { promotion: true, evalRunId: args.promotion.evalRunId, override: args.promotion.override }
-        : {}),
-    },
-    rollback ? "deny" : "allow",
-  );
-  return { target: updated, previous, rollback };
+  const { updated, target, previous, rollback, aiBomSignoff } = outcome;
+  return { target: updated, previous, rollback, aiBomSignoff };
 }
 
 // ---------------------------------------------------------------------------
@@ -1387,7 +1408,8 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       });
     const res = body.activate ? await agentHeldWrite(req, reply, artifactType, artifactId, "create and activate a version", create) : await create(db);
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
-    return reply.status(201).send({ version: res.version, activated: res.activated });
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [res.aiBomSignoff], req.log);
+    return reply.status(201).send({ version: res.version, activated: res.activated, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 
   app.post("/v1/config-versions/:artifactType/:artifactId/activate", async (req, reply) => {
@@ -1409,10 +1431,12 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       }),
     );
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [res.aiBomSignoff], req.log);
     return {
       activeVersion: res.target.version,
       previousVersion: res.previous?.version ?? null,
       rollback: res.rollback,
+      ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
     };
   });
 
@@ -1455,10 +1479,12 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       }),
     );
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [res.aiBomSignoff], req.log);
     return {
       activeVersion: res.target.version,
       rolledBackFrom: res.previous?.version ?? null,
       note: "the rolled-back version's row still exists and can be re-activated — nothing was rewritten",
+      ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
     };
   });
 
@@ -1677,7 +1703,9 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       },
     }));
     if (res === EVIDENCE_HOLD_REFUSED) return reply;
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [res.aiBomSignoff], req.log);
     return {
+      ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
       activeVersion: res.target.version,
       gate: decision.ruleId,
       baselineGate: freshness.ruleId,

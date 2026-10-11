@@ -56,6 +56,7 @@
  */
 import { recordRiskAcceptance } from "./risk-tolerance.js";
 import { writeUseCaseDecisionRecord } from "./decision-regression.js";
+import { prepareAiBomSignoff, type AiBomSignoff } from "./ai-bom-signoff.js";
 import type { FastifyInstance } from "fastify";
 import {
   agents,
@@ -355,13 +356,17 @@ function statusForInstance(instanceStatus: string): AiUseCaseRow["status"] | nul
  * `onInstanceTransition`. Decided and retired statuses are terminal here:
  * once a use case is approved, rejected, or retired, no instance movement
  * rewrites history — re-proposing is a new use case.
+ *
+ * ADR-0189 R25: a move to `approved` returns the AI BOM sign-off it owes. The
+ * caller runs it (`runAiBomSignoffs`) once its OUTERMOST transaction has
+ * committed; the triggering audit row already records the debt.
  */
 export async function syncUseCaseForInstance(
   db: Db,
   instanceId: string | null,
   actorUserId: string | null,
-): Promise<void> {
-  if (!instanceId) return;
+): Promise<AiBomSignoff | null> {
+  if (!instanceId) return null;
   // ADR-0109 (migration 0108): `ai_use_cases_instance_uq` UNIQUE
   // (workflow_instance_id) WHERE workflow_instance_id IS NOT NULL. One pillar-2
   // instance governs ONE use case, so this is single-row by constraint —
@@ -370,9 +375,9 @@ export async function syncUseCaseForInstance(
     .select()
     .from(aiUseCases)
     .where(eq(aiUseCases.workflowInstanceId, instanceId));
-  if (!useCase) return;
+  if (!useCase) return null;
   if (useCase.status === "approved" || useCase.status === "rejected" || useCase.status === "retired") {
-    return;
+    return null;
   }
   // ADR-0085: the screening rides the same sync — BEFORE the no-status-change
   // early return below, because a questionnaire re-submission (versioned
@@ -394,13 +399,13 @@ export async function syncUseCaseForInstance(
     .select({ status: workflowInstances.status })
     .from(workflowInstances)
     .where(eq(workflowInstances.id, instanceId));
-  if (!instance) return;
+  if (!instance) return null;
   const next = statusForInstance(instance.status);
-  if (next === null || next === useCase.status) return;
+  if (next === null || next === useCase.status) return null;
   // ADR-0168: sent back for information — the instance rests at its
   // questionnaire stage (blocked_on_artifact) and the use case STAYS
   // needs_info until a new version re-requests the sign-off (→ under_review).
-  if (useCase.status === "needs_info" && next === "proposed") return;
+  if (useCase.status === "needs_info" && next === "proposed") return null;
 
   const decided = next === "approved" || next === "rejected";
   // ADR-0168 — an approval has a lifetime, from the tier as it stands at the
@@ -421,6 +426,9 @@ export async function syncUseCaseForInstance(
   // decide path's transaction; a transaction of its own from the workflow
   // routes). The record is not best-effort: no record, no decision.
   const decidedAt = new Date();
+  // ADR-0189 R25: an approval owes a signed AI BOM snapshot of the use case,
+  // taken by the caller AFTER the outermost commit (a rejection takes none)
+  let signoff: AiBomSignoff | null = null;
   await db.transaction(async (tx) => {
     // compare-and-swap on the status this sync read: two syncs racing for the
     // same move (an artifact submission and its idempotent replay, ADR-0179)
@@ -437,11 +445,24 @@ export async function syncUseCaseForInstance(
       .where(and(eq(aiUseCases.id, useCase.id), eq(aiUseCases.status, useCase.status)))
       .returning({ id: aiUseCases.id });
     if (moved.length === 0) return;
+    // R25 item 6: with no signing key under the strict default this throws 409
+    // `bom_signing_unavailable`, and the move (and the decision around it) rolls back
+    const prepared =
+      next === "approved"
+        ? await prepareAiBomSignoff(tx as unknown as Db, {
+            trigger: "use_case_approval",
+            triggeringObjectId: useCase.id,
+            actorUserId,
+            subjects: [{ kind: "use_case", id: useCase.id }],
+          })
+        : null;
+    signoff = prepared?.signoff ?? null;
     await tx.insert(auditLog).values({
       userId: actorUserId ?? useCase.ownerUserId,
       objectType: "ai_use_case",
       objectId: useCase.id,
       detail: {
+        ...(prepared?.auditDetail ?? {}),
         phase: "lifecycle",
         from: useCase.status,
         to: next,
@@ -476,6 +497,7 @@ export async function syncUseCaseForInstance(
       });
     }
   });
+  return signoff;
 }
 
 // ---------------------------------------------------------------------------

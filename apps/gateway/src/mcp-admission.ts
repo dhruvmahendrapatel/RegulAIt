@@ -77,6 +77,7 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { loadOrgSettings } from "./org-settings.js";
+import { INSTALL_SIGNOFF_SUBJECTS, prepareAiBomSignoff, runAiBomSignoffs } from "./ai-bom-signoff.js";
 import {
   carryRegistrationOverride,
   firstSighting,
@@ -636,48 +637,65 @@ export function registerMcpAdmissionRoutes(app: FastifyInstance, db: Db) {
       facts: { serverId, values: { admissionCleared: before.admissionManifestDigest ?? null } },
     });
     if (!su.ok) return reply;
-    const [row] = await db
-      .update(mcpServers)
-      .set({
-        admissionState: "cleared",
-        admissionClearedBy: req.authCtx.userId ?? null,
-        admissionClearedAt: new Date(),
-        admissionClearReason: body.reason,
-      })
-      // and on the digest the step-up names (Class A)
-      .where(
-        and(
-          eq(mcpServers.id, serverId),
-          eq(mcpServers.admissionState, "held"),
-          sql`${mcpServers.admissionManifestDigest} IS NOT DISTINCT FROM ${before.admissionManifestDigest}`,
-        ),
-      )
-      .returning();
-    if (!row) return reply.status(409).send({ error: "not_held" });
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NIL_USER,
-      serverId,
-      objectType: "mcp_server",
-      objectId: serverId,
-      detail: {
-        phase: "admission-clear",
-        via: req.authCtx.via,
-        previousState: before.admissionState,
-        severity: before.admissionSeverity,
-        digest: before.admissionManifestDigest,
-        scannerVersion: before.admissionScannerVersion,
-        findings,
-        reason: body.reason,
-      },
-      effect: "allow",
-      ruleId: "mcp-admission-cleared",
-      ruleChain: [],
-      reason:
-        `MCP server '${before.name}' admitted despite admission findings ` +
-        `[${admissionFindingSummary(findings)}] — reason: ${body.reason}. The clearance is pinned ` +
-        `to manifest digest ${before.admissionManifestDigest ?? "unknown"}; a changed manifest is ` +
-        `re-scanned and can re-hold the server.`,
+    // ADR-0189 R25 item 2: the clear and its audit row commit together (they used to be two writes)
+    const cleared = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      const [row] = await tx
+        .update(mcpServers)
+        .set({
+          admissionState: "cleared",
+          admissionClearedBy: req.authCtx.userId ?? null,
+          admissionClearedAt: new Date(),
+          admissionClearReason: body.reason,
+        })
+        // and on the digest the step-up names (Class A)
+        .where(
+          and(
+            eq(mcpServers.id, serverId),
+            eq(mcpServers.admissionState, "held"),
+            sql`${mcpServers.admissionManifestDigest} IS NOT DISTINCT FROM ${before.admissionManifestDigest}`,
+          ),
+        )
+        .returning();
+      if (!row) return null;
+      // ADR-0189 R25 (server admission): the clear owes a signed snapshot of the install
+      // AI BOM; with no signing key under the strict default this throws 409 and the
+      // clear rolls back
+      const prepared = await prepareAiBomSignoff(tx, {
+        trigger: "server_admission",
+        triggeringObjectId: serverId,
+        actorUserId: req.authCtx.userId ?? null,
+        subjects: INSTALL_SIGNOFF_SUBJECTS,
+      });
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL_USER,
+        serverId,
+        objectType: "mcp_server",
+        objectId: serverId,
+        detail: {
+          ...prepared.auditDetail,
+          phase: "admission-clear",
+          via: req.authCtx.via,
+          previousState: before.admissionState,
+          severity: before.admissionSeverity,
+          digest: before.admissionManifestDigest,
+          scannerVersion: before.admissionScannerVersion,
+          findings,
+          reason: body.reason,
+        },
+        effect: "allow",
+        ruleId: "mcp-admission-cleared",
+        ruleChain: [],
+        reason:
+          `MCP server '${before.name}' admitted despite admission findings ` +
+          `[${admissionFindingSummary(findings)}] — reason: ${body.reason}. The clearance is pinned ` +
+          `to manifest digest ${before.admissionManifestDigest ?? "unknown"}; a changed manifest is ` +
+          `re-scanned and can re-hold the server.`,
+      });
+      return { row, signoff: prepared.signoff };
     });
-    return reply.send(row);
+    if (!cleared) return reply.status(409).send({ error: "not_held" });
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [cleared.signoff], req.log);
+    return reply.send({ ...cleared.row, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 }

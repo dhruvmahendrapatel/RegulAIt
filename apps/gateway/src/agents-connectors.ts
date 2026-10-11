@@ -123,6 +123,7 @@ import { auditDelegatedAgentRefusal, evaluateDelegatedAgentCall } from "./delega
 import { settleDelegationCharge } from "./delegation.js";
 import { actorColumns, usdToMicros } from "./in-process-delegation.js";
 import { loadVersions, newVersion, resolveAgentPromptVersion } from "./config-versions.js";
+import { runAiBomSignoffs } from "./ai-bom-signoff.js";
 // B1.5 — the agent model/pricing edit goes through ADR-0074's ONE choke point,
 // so a versioned agent's edit mints + activates an agent_config version.
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
@@ -2976,7 +2977,9 @@ export function registerAgentConnectorRoutes(
     if (isRuleEditRefusal(res)) {
       return reply.status(res.status).send({ error: res.error, detail: res.detail });
     }
-    return reply.send({ ...(res.row as Record<string, unknown>), versionMinted: res.mintedVersion, note: res.note });
+    // ADR-0189 R25 (config promotion): the owed AI BOM snapshot, after the commit
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [res.aiBomSignoff], req.log);
+    return reply.send({ ...(res.row as Record<string, unknown>), versionMinted: res.mintedVersion, note: res.note, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 
   // ADR-0023: set/clear an agent's admin-authored BASE system prompt — a
@@ -3009,8 +3012,10 @@ export function registerAgentConnectorRoutes(
       activate: true,
     }));
     if (created === EVIDENCE_HOLD_REFUSED) return reply;
+    // ADR-0189 R25 (config promotion): the owed AI BOM snapshot, after the commit
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [created.aiBomSignoff], req.log);
     const [row] = await db.select().from(agents).where(eq(agents.id, agentId));
-    return { ...row!, configVersion: created.version.version };
+    return { ...row!, configVersion: created.version.version, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) };
   });
 
   // --- model credentials (admin-only via the global gate) ---
