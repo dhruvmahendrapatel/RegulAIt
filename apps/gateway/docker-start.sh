@@ -22,9 +22,10 @@
 # one"): when the switch is honoured, this script also builds the SAME demo
 # environment as `pnpm --filter @regulait/gateway demo:prepare`:
 #   - REGULAIT_OFFLINE_CHECKS=1 for every step and the gateway (no CI in a demo);
-#   - the export-signing key for the signed export (beat 3E), made once in the
-#     demo volume (/app/demo-license-keys/export-signing) and reused; only its
-#     path and fingerprint are logged, never the key;
+#   - the export-signing key for the signed export (beat 3E), and the receipt
+#     signing key (ADR-0189 R25: without it every sign-off is refused), made once
+#     in the demo volume (/app/demo-license-keys/export-signing) and reused; only
+#     their paths and the fingerprint are logged, never a key;
 #   - the demo MCP server (demo-mcp-server.js, 127.0.0.1/127.0.0.2:8931) in the
 #     background for the life of the container — the demo's tool calls hit it;
 #   - after the seed: demo:setup → demo:intake → demo:traffic → demo:check,
@@ -55,11 +56,11 @@ fi
 if [ "$demo" = "1" ]; then
   export REGULAIT_OFFLINE_CHECKS=1
   export REGULAIT_DEMO_KEY_DIR="${REGULAIT_LICENSE_KEYRING}/export-signing"
-  # stdout is exactly two `export REGULAIT_EXPORT_SIGNING_KEY…` lines (a path and a key id); the fingerprint is on stderr
+  # stdout is exactly four `export` lines (the export and receipt keys: a path and a key id each); the fingerprint is on stderr
   if key_env="$(node apps/gateway/dist/demo-export-key.js --env)" && [ -n "$key_env" ]; then
     eval "$key_env"
   else
-    echo "*** DEMO PREP FAILED at step demo:export-key: no export-signing key, so the signed export (beat 3E) answers 409" >&2
+    echo "*** DEMO PREP FAILED at step demo:export-key: no export-signing or receipt key, so the signed export (beat 3E) answers 409 and every sign-off is refused" >&2
   fi
   node apps/gateway/dist/demo-mcp-server.js &
   echo "demo: MCP server started in the background (pid $!) on 127.0.0.1 and 127.0.0.2, port ${REGULAIT_DEMO_MCP_PORT:-8931}"
