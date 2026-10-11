@@ -18,8 +18,10 @@
  * Print-friendly with CSS only (posture.module.css hides the app chrome
  * under @media print) — the ADR-0047 PDF dependency stays unresolved.
  */
-import { useQuery } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { resyncOutcomeText, resyncRefusalText, resyncUseCase } from "./useCaseResync";
 import { api } from "../../../api/client";
 import { fmtUsd, ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -209,6 +211,70 @@ function ColumnTrend(props: {
           {pts[pts.length - 1]?.label}
         </text>
       </svg>
+    </div>
+  );
+}
+
+/**
+ * ADR-0189 R25 item 13 follow-up: use cases whose intake workflow completed but
+ * which were never approved (no signing key when it completed). Each example
+ * links to its use case and can be re-synced here; the re-sync asks for a
+ * step-up, which only a signed-in browser session can give.
+ */
+function BehindCompletedInstance(props: { item: { count: number; sampleUseCaseIds: string[]; action: string } }) {
+  const queryClient = useQueryClient();
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [outcome, setOutcome] = useState<string | null>(null);
+  const outcomeRef = useRef<HTMLDivElement>(null);
+  const run = async (id: string) => {
+    setBusyId(id);
+    setErrors((e) => ({ ...e, [id]: "" }));
+    try {
+      const r = await resyncUseCase(id);
+      setOutcome(resyncOutcomeText(r));
+      // the row this button sat in leaves the list: focus moves to the result
+      requestAnimationFrame(() => outcomeRef.current?.focus());
+      await queryClient.invalidateQueries({ queryKey: ["admin", "posture"] });
+    } catch (e) {
+      setErrors((prev) => ({ ...prev, [id]: resyncRefusalText(e) }));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  // stays mounted after the last one is re-synced, so the result line keeps its focus
+  if (props.item.count === 0 && !outcome) return null;
+  return (
+    <div className={v.stack}>
+      {props.item.count > 0 && (
+        <div className={p.oneLiner}>
+          <Badge tone="warn">needs a re-sync</Badge> {props.item.count} use case(s) whose intake workflow completed were never
+          approved.
+        </div>
+      )}
+      <ul className={v.stack} aria-label="Use cases to re-sync">
+        {props.item.sampleUseCaseIds.map((id) => (
+          <li key={id} className={v.listRow}>
+            <Link className={v.grow} to={`/admin/governance/use-cases/${id}`}>
+              {id}
+            </Link>
+            <span className={p.noPrint}>
+              <Button size="sm" onClick={() => void run(id)} disabled={busyId !== null} aria-label={`Re-sync use case ${id}`}>
+                {busyId === id ? "Re-syncing…" : "Re-sync"}
+              </Button>
+            </span>
+            {errors[id] ? (
+              <div role="alert" className={v.faint}>
+                {errors[id]}
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      <div ref={outcomeRef} tabIndex={-1} role="status" aria-live="polite" className={v.faint}>
+        {outcome ?? ""}
+      </div>
+      {props.item.count > 0 && <div className={v.faint}>{props.item.action}</div>}
     </div>
   );
 }
@@ -488,15 +554,8 @@ export default function PosturePage() {
                     </>
                   )}
                 </div>
-                {(d.useCases.instanceCompletedNotApproved?.count ?? 0) > 0 && (
-                  <div className={v.stack}>
-                    <div className={p.oneLiner}>
-                      <Badge tone="warn">needs a re-sync</Badge> {d.useCases.instanceCompletedNotApproved!.count} use case(s) whose
-                      intake workflow completed were never approved:{" "}
-                      {d.useCases.instanceCompletedNotApproved!.sampleUseCaseIds.join(", ")}
-                    </div>
-                    <div className={v.faint}>{d.useCases.instanceCompletedNotApproved!.action}</div>
-                  </div>
+                {d.useCases.instanceCompletedNotApproved && (
+                  <BehindCompletedInstance item={d.useCases.instanceCompletedNotApproved} />
                 )}
               </Card>
             </div>

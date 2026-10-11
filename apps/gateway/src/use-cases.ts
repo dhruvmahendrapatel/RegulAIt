@@ -392,6 +392,11 @@ export async function syncUseCaseForInstance(
   db: Db,
   instanceId: string | null,
   actorUserId: string | null,
+  /** ADR-0189 R25 item 13 follow-up, the admin re-sync ONLY: the decision as the
+   * workflow made it, so a late mirror records the original approver and starts
+   * the approval's lifetime when it was decided, not when it was re-synced.
+   * Omitted on every other path, which keeps its behaviour. */
+  original?: { decidedBy: string | null; decidedAt: Date; approvalId: string | null },
 ): Promise<AiBomSignoff | null> {
   if (!instanceId) return null;
   // ADR-0109 (migration 0108): `ai_use_cases_instance_uq` UNIQUE
@@ -443,7 +448,7 @@ export async function syncUseCaseForInstance(
       .select({ tier: aiUseCases.euAiActTier })
       .from(aiUseCases)
       .where(eq(aiUseCases.id, useCase.id));
-    const approvedAt = new Date();
+    const approvedAt = original ? new Date(original.decidedAt.getTime()) : new Date();
     // ADR-0168 amendment: the review policy may set the tier's lifetime
     const months = policyValidityMonths(policy, fresh?.tier ?? null) ?? approvalLifetimeMonths(fresh?.tier ?? null);
     lifetime = { approvedAt, approvedUntil: addMonthsUtc(approvedAt, months), months, tier: fresh?.tier ?? null };
@@ -452,7 +457,7 @@ export async function syncUseCaseForInstance(
   // decision — its decision record commit together (a savepoint inside the
   // decide path's transaction; a transaction of its own from the workflow
   // routes). The record is not best-effort: no record, no decision.
-  const decidedAt = new Date();
+  const decidedAt = original && decided ? new Date(original.decidedAt.getTime()) : new Date();
   // ADR-0189 R25: an approval owes a signed AI BOM snapshot of the use case,
   // taken by the caller AFTER the outermost commit (a rejection takes none)
   let signoff: AiBomSignoff | null = null;
@@ -518,9 +523,9 @@ export async function syncUseCaseForInstance(
         useCase,
         outcome: next as "approved" | "rejected",
         decidedAt,
-        decidedBy: actorUserId,
+        decidedBy: original ? original.decidedBy : actorUserId,
         // an aborted intake was decided by no approval
-        ...(instance.status === "aborted" ? { approvalId: null } : {}),
+        ...(instance.status === "aborted" ? { approvalId: null } : original ? { approvalId: original.approvalId } : {}),
       });
     }
   });
@@ -569,6 +574,98 @@ export async function useCasesBehindCompletedInstance(
     .orderBy(aiUseCases.updatedAt, aiUseCases.id)
     .limit(sampleSize);
   return { count: total?.n ?? 0, sampleUseCaseIds: sample.map((r) => r.id) };
+}
+
+export type ResyncVerdict = { kind: "in_step" } | { kind: "refuse"; body: Record<string, unknown> } | { kind: "go" };
+
+/** what the re-sync route does with a use case and its instance, as they stand */
+export function resyncVerdict(useCaseStatus: string, instanceStatus: string): ResyncVerdict {
+  const target = statusForInstance(instanceStatus);
+  const terminal = useCaseStatus === "approved" || useCaseStatus === "rejected" || useCaseStatus === "retired";
+  if (terminal || target === null || target === useCaseStatus || (useCaseStatus === "needs_info" && target === "proposed")) {
+    return { kind: "in_step" };
+  }
+  if (instanceStatus === "completed") return { kind: "go" };
+  const said = instanceStatus.replace(/_/g, " ");
+  if (instanceStatus === "denied" || instanceStatus === "aborted") {
+    return {
+      kind: "refuse",
+      body: {
+        error: "instance_not_completed",
+        detail:
+          `the intake workflow ended ${said}. That is final: the instance can't be driven again, and a re-sync only ` +
+          "applies an approval, which a completed instance carries and this one does not. If the change is still wanted, " +
+          "propose it as a new use case.",
+        instanceStatus,
+      },
+    };
+  }
+  return {
+    kind: "refuse",
+    body: {
+      error: "instance_not_completed",
+      detail:
+        `the intake workflow is ${said}, not completed. A re-sync only recovers a use case left behind an instance ` +
+        "that completed; drive this instance through its workflow instead.",
+      instanceStatus,
+    },
+  };
+}
+
+/** when the instance completed, and who drove that last step: the audit row
+ * `applyEvent` writes for the transition into `completed` (the database clock) */
+export async function instanceCompletion(
+  db: Pick<Db, "select">,
+  instanceId: string,
+): Promise<{ at: Date; actorUserId: string | null } | null> {
+  const [hit] = await db
+    .select({ at: auditLog.at, userId: auditLog.userId })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.objectType, "workflow"),
+        eq(auditLog.objectId, instanceId),
+        sql`${auditLog.detail} ? 'event'`,
+        sql`${auditLog.reason} like ${"%(status → completed)"}`,
+      ),
+    )
+    .orderBy(desc(auditLog.at))
+    .limit(1);
+  return hit ? { at: hit.at, actorUserId: hit.userId } : null;
+}
+
+/** an edit (PATCH) of the use case recorded at or after the instance completed;
+ * with no completion row on record, any edit counts (fail closed) */
+export async function editAfterCompletion(
+  db: Pick<Db, "select">,
+  useCaseId: string,
+  completion: { at: Date } | null,
+): Promise<{ at: Date; auditId: string } | null> {
+  const [hit] = await db
+    .select({ at: auditLog.at, id: auditLog.id })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.objectType, "ai_use_case"),
+        eq(auditLog.objectId, useCaseId),
+        eq(auditLog.ruleId, "use-case-updated"),
+        ...(completion ? [sql`${auditLog.at} >= ${completion.at.toISOString()}::timestamptz`] : []),
+      ),
+    )
+    .orderBy(desc(auditLog.at))
+    .limit(1);
+  return hit ? { at: hit.at, auditId: hit.id } : null;
+}
+
+function editedAfterCompletionBody(edit: { at: Date; auditId: string }): Record<string, unknown> {
+  return {
+    error: "use_case_edited_after_completion",
+    detail:
+      "this use case was edited after its intake workflow completed, so approving it now would approve something no " +
+      "reviewer saw. It is not re-synced: propose the edited use case as a new one and take it through intake.",
+    editedAt: edit.at.toISOString(),
+    editAuditId: edit.auditId,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2107,9 +2204,32 @@ export function registerUseCaseRoutes(
     }
     // X15-H01: a use case's intended agents are covered by its incidents' evidence holds, so changing them can
     // widen a hold — that write takes the hold lock exclusively, as its transaction's first lock
-    const [updated] = await db.transaction(async (rawTx) => {
+    let updatedRows: AiUseCaseRow[];
+    try {
+      updatedRows = await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as Db;
       if (body.intendedAgentIds !== undefined) await lockEvidenceHoldsExclusive(tx);
+      // ADR-0189 R25 item 13 follow-up: once the intake workflow has COMPLETED, the
+      // use case is what it approved, even while the mirror has not caught up (no
+      // signing key when it completed). An edit now would be approved by the re-sync
+      // as edited, so it is refused. Read under a share lock, so a completion in
+      // flight is waited for and then seen.
+      if (row.workflowInstanceId) {
+        const [inst] = await tx
+          .select({ status: workflowInstances.status })
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, row.workflowInstanceId))
+          .for("share");
+        if (inst?.status === "completed") {
+          throw new CreateRefused(409, {
+            error: "use_case_locked_instance_completed",
+            detail:
+              "this use case's intake workflow has completed, so the use case is what it approved and can't be edited. " +
+              "If it is not shown as approved yet, an admin re-syncs it (POST /v1/use-cases/:useCaseId/resync); " +
+              "a change after that is a new use case.",
+          });
+        }
+      }
       return tx
           .update(aiUseCases)
           .set({
@@ -2132,7 +2252,12 @@ export function registerUseCaseRoutes(
           })
           .where(eq(aiUseCases.id, useCaseId))
           .returning();
-    });
+      });
+    } catch (err) {
+      if (err instanceof CreateRefused) return reply.status(err.status).send(err.body);
+      throw err;
+    }
+    const [updated] = updatedRows;
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "ai_use_case",
@@ -2449,12 +2574,15 @@ export function registerUseCaseRoutes(
   // -------------------------------------------------------------------------
   // ADR-0189 R25 item 13 follow-up — RE-SYNC a use case left behind its
   // completed instance. Admin-only through the default gate (deliberately not in
-  // NON_ADMIN_ROUTES), checked here as well. It decides nothing new: the
+  // NON_ADMIN_ROUTES), checked here as well, and never the bootstrap credential
+  // (it names no person, as on the workflow routes). It decides nothing new: the
   // workflow already approved. It re-runs the one mirror
   // (`syncUseCaseForInstance`, then the vendor mirror) with the full R25
   // sign-off semantics: no usable key under the strict default is refused 409
-  // `bom_signing_unavailable` (503 `receipt_signing_key_invalid`) and nothing
-  // commits; the signed AI BOM snapshot is taken after commit. Idempotent: a use
+  // `bom_signing_unavailable` (503 `receipt_signing_key_invalid`), checked
+  // before the step-up is spent, and nothing commits; the signed AI BOM
+  // snapshot is taken after commit. The decision keeps its original approver,
+  // and the approval's lifetime starts when it was decided. Idempotent: a use
   // case already in step with its instance is a 200 no-op.
   // -------------------------------------------------------------------------
   app.post("/v1/use-cases/:useCaseId/resync", async (req, reply) => {
@@ -2462,6 +2590,13 @@ export function registerUseCaseRoutes(
     if (!req.authCtx.isAdmin) {
       return reply.status(403).send({ error: "forbidden", detail: "only an admin can re-sync a use case with its workflow instance" });
     }
+    if (!req.authCtx.userId) {
+      return reply.status(403).send({
+        error: "bootstrap_cannot_drive",
+        detail: "the bootstrap credential names no person, so it cannot apply an approval: sign in as an administrator and re-sync from there",
+      });
+    }
+    const actorUserId = req.authCtx.userId;
     const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
     if (!row) return reply.status(404).send({ error: "not_found" });
     const instanceId = row.workflowInstanceId;
@@ -2474,21 +2609,40 @@ export function registerUseCaseRoutes(
         detail: "this use case has no intake workflow instance, so there is nothing to re-sync it with",
       });
     }
-    const target = statusForInstance(instance.status);
-    const terminal = row.status === "approved" || row.status === "rejected" || row.status === "retired";
-    const inStep =
-      terminal || target === null || target === row.status || (row.status === "needs_info" && target === "proposed");
-    if (inStep) {
-      return reply.send({ useCaseId, workflowInstanceId: instanceId, instanceStatus: instance.status, status: row.status, resynced: false });
-    }
-    if (instance.status !== "completed") {
-      return reply.status(409).send({
-        error: "instance_not_completed",
-        detail:
-          `the workflow instance is ${instance.status.replace(/_/g, " ")}, not completed. A re-sync only recovers a use case ` +
-          "left behind an instance that completed; drive the instance through its workflow instead.",
-        instanceStatus: instance.status,
+    const inStepBody = (status: string, instanceStatus: string) => ({
+      useCaseId,
+      workflowInstanceId: instanceId,
+      instanceStatus,
+      status,
+      resynced: false,
+    });
+    const first = resyncVerdict(row.status, instance.status);
+    if (first.kind === "in_step") return reply.send(inStepBody(row.status, instance.status));
+    if (first.kind === "refuse") return reply.status(409).send(first.body);
+    // defence in depth: an edit that landed after the instance completed (before
+    // PATCH refused such edits) would otherwise be approved as edited
+    const completion = await instanceCompletion(db, instanceId);
+    const edit = await editAfterCompletion(db, useCaseId, completion);
+    if (edit) return reply.status(409).send(editedAfterCompletionBody(edit));
+    const refused = async (err: AiBomError) => {
+      // the re-sync did not happen; the refusal itself goes on the record
+      await db.insert(auditLog).values({
+        userId: actorUserId,
+        objectType: "ai_use_case",
+        objectId: useCaseId,
+        detail: { phase: "resync", from: row.status, workflowInstanceId: instanceId, instanceStatus: instance.status, code: err.code },
+        effect: "deny",
+        ruleId: "use-case-resync-refused",
+        ruleChain: [],
+        reason: `AI use case '${row.name}' was not re-synced: its approval cannot take a signed AI BOM snapshot (${err.code})`,
       });
+    };
+    // a missing key is refused BEFORE the step-up, so it never spends the admin's grant
+    try {
+      await assertAiBomSignoffPossible(db);
+    } catch (err) {
+      if (err instanceof AiBomError) await refused(err);
+      throw err;
     }
     // the step-up an approval decision asks for: this applies an approval
     const su = await requireStepUp(db, req, reply, {
@@ -2496,61 +2650,97 @@ export function registerUseCaseRoutes(
       facts: { op: "use_case_resync", useCaseId, workflowInstanceId: instanceId },
     });
     if (!su.ok) return reply;
-    const actorUserId = req.authCtx.userId ?? null;
-    let out: { from: string; to: string; signoff: AiBomSignoff | null };
+    type Out =
+      | { kind: "in_step"; status: string; instanceStatus: string }
+      | { kind: "refuse"; body: Record<string, unknown> }
+      | { kind: "done"; from: string; to: string; signoff: AiBomSignoff | null };
+    let out: Out;
     try {
-      out = await db.transaction(async (rawTx) => {
+      out = await db.transaction(async (rawTx): Promise<Out> => {
         const tx = rawTx as unknown as Db;
-        // serialise on the use case: two re-syncs (or a re-sync racing a route's
-        // mirror) move it, and audit the move, once
-        const [locked] = await tx
+        // serialise on the use case (two re-syncs, or a re-sync racing a route's
+        // mirror, move it once) and hold the instance still: a completed
+        // instance can be re-opened (AER-049), so its status is re-read here,
+        // under the lock, for the decision and the audit row
+        const [lockedCase] = await tx
           .select({ status: aiUseCases.status })
           .from(aiUseCases)
           .where(eq(aiUseCases.id, useCaseId))
           .for("update");
-        const from = locked?.status ?? row.status;
-        const signoff = await syncUseCaseForInstance(tx, instanceId, actorUserId);
+        const [lockedInstance] = await tx
+          .select({ status: workflowInstances.status, updatedAt: workflowInstances.updatedAt })
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, instanceId))
+          .for("share");
+        if (!lockedCase || !lockedInstance) return { kind: "refuse", body: { error: "not_found" } };
+        const verdict = resyncVerdict(lockedCase.status, lockedInstance.status);
+        if (verdict.kind === "in_step") return { kind: "in_step", status: lockedCase.status, instanceStatus: lockedInstance.status };
+        if (verdict.kind === "refuse") return verdict;
+        const done = await instanceCompletion(tx, instanceId);
+        const lateEdit = await editAfterCompletion(tx, useCaseId, done);
+        if (lateEdit) return { kind: "refuse", body: editedAfterCompletionBody(lateEdit) };
+        // the decision as the workflow made it: its approval when it has one,
+        // otherwise the event that completed it
+        const [approval] = await tx
+          .select({ id: approvals.id, decidedBy: approvals.decidedBy, decidedAt: approvals.decidedAt })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.instanceId, instanceId),
+              eq(approvals.objectType, "workflow"),
+              inArray(approvals.status, ["approved", "consumed"]),
+              sql`${approvals.decidedAt} is not null`,
+            ),
+          )
+          .orderBy(desc(approvals.decidedAt), desc(approvals.id))
+          .limit(1);
+        const original = approval?.decidedAt
+          ? { decidedBy: approval.decidedBy, decidedAt: approval.decidedAt, approvalId: approval.id }
+          : { decidedBy: done?.actorUserId ?? null, decidedAt: done?.at ?? lockedInstance.updatedAt, approvalId: null };
+        const from = lockedCase.status;
+        const signoff = await syncUseCaseForInstance(tx, instanceId, actorUserId, original);
         await syncVendorForInstance(tx, instanceId, actorUserId);
         const [after] = await tx.select({ status: aiUseCases.status }).from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
         const to = after?.status ?? from;
         if (to !== from) {
           await tx.insert(auditLog).values({
-            userId: actorUserId ?? NO_IDENTITY,
+            userId: actorUserId,
             objectType: "ai_use_case",
             objectId: useCaseId,
-            detail: { phase: "resync", from, to, workflowInstanceId: instanceId, instanceStatus: instance.status, via: req.authCtx.via },
+            detail: {
+              phase: "resync",
+              from,
+              to,
+              workflowInstanceId: instanceId,
+              instanceStatus: lockedInstance.status,
+              resyncedBy: actorUserId,
+              approvalId: original.approvalId,
+              originalApprover: original.decidedBy,
+              originalDecidedAt: original.decidedAt.toISOString(),
+              via: req.authCtx.via,
+            },
             effect: "allow",
             ruleId: "use-case-resynced",
             ruleChain: [],
             reason:
               `AI use case '${row.name}' re-synced by an admin with its completed intake workflow: ` +
-              `${from.replace(/_/g, " ")} to ${to.replace(/_/g, " ")}`,
+              `${from.replace(/_/g, " ")} to ${to.replace(/_/g, " ")}; the decision keeps its original approver and time`,
           });
         }
-        return { from, to, signoff };
+        return { kind: "done", from, to, signoff };
       });
     } catch (err) {
-      if (err instanceof AiBomError) {
-        // the re-sync rolled back; the refusal itself goes on the record
-        await db.insert(auditLog).values({
-          userId: actorUserId ?? NO_IDENTITY,
-          objectType: "ai_use_case",
-          objectId: useCaseId,
-          detail: { phase: "resync", from: row.status, workflowInstanceId: instanceId, instanceStatus: instance.status, code: err.code },
-          effect: "deny",
-          ruleId: "use-case-resync-refused",
-          ruleChain: [],
-          reason: `AI use case '${row.name}' was not re-synced: its approval cannot take a signed AI BOM snapshot (${err.code})`,
-        });
-      }
+      if (err instanceof AiBomError) await refused(err);
       throw err;
     }
+    if (out.kind === "in_step") return reply.send(inStepBody(out.status, out.instanceStatus));
+    if (out.kind === "refuse") return reply.status(out.body.error === "not_found" ? 404 : 409).send(out.body);
     // R25 item 5: the snapshot is taken after commit
     const aiBomSnapshotWarning = await runAiBomSignoffs(db, [out.signoff], req.log);
     return reply.send({
       useCaseId,
       workflowInstanceId: instanceId,
-      instanceStatus: instance.status,
+      instanceStatus: "completed",
       from: out.from,
       status: out.to,
       resynced: out.to !== out.from,
