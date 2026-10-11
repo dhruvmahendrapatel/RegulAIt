@@ -678,6 +678,18 @@ checked against the specification rather than against themselves.
 | **I8 evidence** | Claude | `decision_facts.execution`, the Decision BOM section, AI BOM executor and profile components | I2; ADR-0189 B2/B3 merged | **Yes**, with I5–I7 |
 | **I9 web UI** | Codex | Execution profile option on the agent builder and the MCP server page (ADR-0177 §3: no new navigation group); profiles and executors under the existing Engines page (Integrations); placement refusals with their reason; attestation chips; posture rows | I1 stubs | **Yes** (web only); merges after I2–I4's real routes |
 
+**I9 lands early as a preview (2026-10-11, PR #361).** ADR-0191 moved I9 to Claude, and the owner's branch cleanup
+asked that Codex's I9 work (Codex PR #303) be kept rather than lost. So I9 merges before I2–I4's real routes, in place
+of the "merges after I2–I4" rule above, under three conditions that keep the preview honest:
+1. A screen whose route is still a 501 stub says so plainly and refuses a success response from that route; it never
+   shows sample data. The profiles and placements cards and the agent-builder and MCP-server profile selector stay in
+   this state, disabled with the reason shown, until their routes are built.
+2. Only routes that exist today are driven: `GET /v1/executors` with the gateway's own freshness verdict, executor
+   registration with the strict schema, and the isolation settings (enforce-only per decision A, step-up on save,
+   audited relaxation per ADR-0180).
+3. Each later slice (I2–I4, I8) that turns a stub into a real route also switches its card from the stub state to
+   the live state in the same PR, with that card's tests. A merged stub screen is not counted as I9 being done.
+
 ## Test strategy
 
 Every rule gets a red proof (fails with the control removed, then passes), through the real app, with an upstream
