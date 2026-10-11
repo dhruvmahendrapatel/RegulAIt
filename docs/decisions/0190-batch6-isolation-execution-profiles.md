@@ -611,7 +611,7 @@ are left to the owner at the end. None of these items relaxes a strict default (
     decision 7 item 5's unknown agent, which defaults to the most restrictive profile. The envelope is open item B
     below. Vectors `unknown-*`.
 
-**Open for the owner.**
+**Open for the owner** (decided 2026-10-11; see "Owner decisions on A and B" below).
 
 - **A. What `warn` means.** *Recommended:* retire `warn` as a value of `isolation_enforcement`. An admin who cannot
   provide a class lowers the requirement itself, through the relaxations decision 11 already audits (each
@@ -624,6 +624,25 @@ are left to the owner at the end. None of these items relaxes a strict default (
   sees the same refusal family as every other isolation refusal, and the audit row can tell a configuration fault
   from a capacity fault. Alternative: answer with a server-side error (`503`), treating the fact as a fault in our own
   data rather than a policy outcome.
+
+## Owner decisions on A and B (accepted 2026-10-11)
+
+The owner accepted both recommendations ("go with your recommendations", master session, 2026-10-11).
+
+- **A. `warn` is retired.** `warn` is removed as a value of `isolation_enforcement`. The only value is `enforce`
+  (ADR-0180). An admin who cannot provide a class lowers the requirement itself, through the relaxations decision 11
+  already audits: each sensitivity floor down to L1, and the `mcp_stdio` and `engine_worker` floors down to L1, each
+  with a step-up. The requirement and the placement therefore never disagree, and no call is placed below what its own
+  record says it required (PR #340 already enforces this in every mode).
+  - **Code follow-up:** the setting, its schema, the UI control and its help text lose `warn`. A stored `warn` value is
+    read as `enforce` (no grandfathering). The decision 11 row and the Fail closed line of the Test strategy are
+    rewritten to match.
+  - **Vectors:** `warn-shortfall` is pinned as a refusal, or retired as a case that can no longer be configured.
+- **B. An unresolved policy fact answers `409 execution_profile_unavailable`.** Rule id `execution-profile`, with a
+  sixth fixed reason `policy_unresolved` added to decision 7's list. The caller sees the same refusal family as every
+  other isolation refusal, and the audit row tells a configuration fault from a capacity fault.
+  - **Code follow-up:** the placement path maps every unresolved or missing policy fact to this envelope, and the
+    `unknown-*` vectors are pinned to it.
 
 ## Rollout: slices (one PR each)
 
