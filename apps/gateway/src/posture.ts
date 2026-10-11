@@ -490,14 +490,17 @@ export async function computePostureReport(
         cross join lateral jsonb_array_elements(
           case when jsonb_typeof(t.detail->'aiBomSnapshotsDue') = 'array' then t.detail->'aiBomSnapshotsDue' else '[]'::jsonb end
         ) d
-       where t.at >= ${windowStart.toISOString()}::timestamptz and t.at <= now()
+       where t.at >= ${windowStart.toISOString()}::timestamptz and t.at < ${now.toISOString()}::timestamptz
          and t.detail ? 'aiBomSnapshotsDue'
          and not exists (
+           -- bounded (migration 0192, audit_log_ai_bom_signoff_subject_idx): one sign-off's row
+           -- for one subject, never older than its triggering row (both take the database clock)
            select 1 from ${auditLog} g
             where g.rule_id in (${AI_BOM_SNAPSHOT_RULE_IDS.taken}, ${AI_BOM_SNAPSHOT_RULE_IDS.skippedNoKey}, ${AI_BOM_SNAPSHOT_RULE_IDS.failed})
-              and g.detail->>'aiBomSignoffId' = t.detail->>'aiBomSignoffId'
-              and g.detail->>'subjectKind' = d->>'subjectKind'
-              and g.detail->>'subjectId' = d->>'subjectId')
+              and (g.detail->>'aiBomSignoffId') = (t.detail->>'aiBomSignoffId')
+              and (g.detail->>'subjectKind') = (d->>'subjectKind')
+              and (g.detail->>'subjectId') = (d->>'subjectId')
+              and g.at >= t.at)
        order by t.at desc
        limit ${AI_BOM_POSTURE_OWED_SAMPLE}`)) as unknown as {
       rows: Array<{ auditId: string; at: Date | string; ruleId: string; aiBomSignoffId: string | null; subjectKind: string; subjectId: string; total: number }>;
