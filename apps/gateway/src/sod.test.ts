@@ -52,8 +52,10 @@ import {
   count,
   createDb,
   eq,
+  approvals,
   roleAgentGrants,
   roleAssignments,
+  roles,
   runMigrations,
   sodRules,
   and,
@@ -61,7 +63,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { sodPostureSection } from "./sod.js";
+import { sodOverrideTestHooks, sodPostureSection } from "./sod.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
@@ -824,6 +826,53 @@ describe("override — through the one approvals queue, arm's-length only", () =
     )!;
     expect(mine.status).toBe("denied");
     expect(mine.minted).toBeNull();
+  });
+
+  it("review follow-up: a role deleted after the decide precheck is refused 404 role_not_found by the decide route, audited, nothing minted", async () => {
+    // a fresh role held by uRole (who holds agentPay): bundling agentVendor into it is refused by rule 1, so escalated
+    const role = await app.inject({ method: "POST", headers: AUTH, url: "/v1/roles", payload: { name: "sod-role-gone" } });
+    expect(role.statusCode).toBe(201);
+    const goneRoleId = role.json().id as string;
+    expect((await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${uRoleId}/roles`, payload: { roleId: goneRoleId } })).statusCode).toBe(201);
+    const esc = await app.inject({
+      method: "POST",
+      headers: adminAuth,
+      url: "/v1/sod/overrides",
+      payload: { mintKind: "role_agent", payload: { roleId: goneRoleId, agentId: agentVendor }, approverUserId: approverId },
+    });
+    expect(esc.statusCode, esc.body).toBe(201);
+    const approvalId = esc.json().approvalId as string;
+    const overrideRequestId = esc.json().id as string;
+    const mintedBefore = await auditCount("sod-override-minted");
+
+    // the role goes after the precheck passed and before the decision's transaction takes its row
+    let fired = false;
+    sodOverrideTestHooks.afterApprovePrecheck = async () => {
+      sodOverrideTestHooks.afterApprovePrecheck = undefined; // this one decision only
+      fired = true;
+      await db.delete(roles).where(eq(roles.id, goneRoleId));
+    };
+    try {
+      const res = await decide(approverAuth, approvalId, "approved");
+      expect(fired, "the role was deleted between the precheck and the transaction").toBe(true);
+      // refused by name by the in-transaction re-check (without it: the role-grant foreign key, a generic 400 invalid_reference)
+      expect(res.statusCode, res.body).toBe(404);
+      expect(res.json()).toMatchObject({ error: "role_not_found" });
+    } finally {
+      sodOverrideTestHooks.afterApprovePrecheck = undefined;
+    }
+    // the deny row names the request, as the precheck's row does
+    const refusals = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "role-grant-refused"), eq(auditLog.objectId, goneRoleId)));
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]).toMatchObject({ effect: "deny", objectType: "role", userId: approverId });
+    expect(refusals[0]!.detail).toMatchObject({ code: "role_not_found", via: "sod-override-decide", approvalId, overrideRequestId, mintKind: "role_agent" });
+    // nothing minted, nothing decided: the decision rolled back whole
+    expect(await db.select().from(roleAgentGrants).where(eq(roleAgentGrants.roleId, goneRoleId))).toHaveLength(0);
+    expect(await auditCount("sod-override-minted")).toBe(mintedBefore);
+    const [request] = await db.select().from(sodOverrideRequests).where(eq(sodOverrideRequests.id, overrideRequestId));
+    expect(request).toMatchObject({ status: "pending", mintDetail: null });
+    const [approval] = await db.select({ status: approvals.status }).from(approvals).where(eq(approvals.id, approvalId));
+    expect(approval!.status).toBe("pending");
   });
 });
 

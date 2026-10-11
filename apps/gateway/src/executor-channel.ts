@@ -684,6 +684,24 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       return e ?? null;
     }
 
+    /**
+     * Review follow-up (2026-10-10): a take or a report refused because the executor is no longer active leaves its
+     * own deny row, as a mismatch does. Written on `db` AFTER the deciding transaction has ended, so it commits
+     * whatever that transaction did (the PUT routes' pattern for an audited refusal).
+     */
+    async function auditQuarantinedRefusal(step: "accept" | "report", executor: ExecutorRow | null, authed: ExecutorRow, offerId: string): Promise<void> {
+      const ex = executor ?? authed;
+      await auditExecutor(db, {
+        userId: NO_IDENTITY,
+        objectType: "execution_placement",
+        objectId: offerId,
+        ruleId: "executor-channel-refused",
+        effect: "deny",
+        detail: { phase: `offer-${step}`, code: "executor_quarantined", offerId, executorId: ex.id, executorName: ex.name, status: executor?.status ?? null, quarantineCode: executor?.quarantineCode ?? null },
+        reason: `executor ${ex.name} may not ${step === "accept" ? "take" : "report on"} offer ${offerId}: it is ${executor?.status ?? "gone"}, not active; nothing was placed (ADR-0190 decision 6)`,
+      });
+    }
+
     /** the offer named by the route, locked, if it belongs to this executor */
     async function lockedOffer(tx: Db, executorId: string, offerId: string): Promise<ExecutionOfferRow | null> {
       const [o] = await tx
@@ -701,8 +719,8 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       const row = auth.executor!;
       const p = uuidParam.safeParse(req.params);
       if (!p.success) return refused(reply, 400, "invalid_offer", row);
-      if (row.status !== "active") return refused(reply, 409, "executor_quarantined", row);
-      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status)
+      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status);
+      // an executor that is not active is refused there, once, and audited below
       let current: ExecutorRow | null = row;
       const out = await db.transaction(async (tx) => {
         const ex = await lockedExecutor(tx as unknown as Db, row.id);
@@ -721,7 +739,10 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         await tx.update(executionOffers).set({ status: "accepted", acceptedAt: sql`now()` }).where(eq(executionOffers.id, o.id));
         return { status: 200, offer: offerView(o) } as const;
       });
-      if (out.status !== 200) return refused(reply, out.status, out.code, current);
+      if (out.status !== 200) {
+        if (out.code === "executor_quarantined") await auditQuarantinedRefusal("accept", current, row, p.data.offerId);
+        return refused(reply, out.status, out.code, current);
+      }
       return reply.status(200).send({ offer: out.offer, next: nextFor(current) });
     });
 
@@ -757,9 +778,9 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       if (signed.report.kind !== "placement" || signed.report.offerId !== p.data.offerId) return refused(reply, 400, "report_offer_mismatch", row);
       if (signed.report.executor.identifier !== auth.client.identity.identifier) return refused(reply, 400, "report_identifier", row);
       if (!(await verifyReportSignature(auth, signed))) return refused(reply, 401, "report_signature_invalid", row);
-      if (row.status !== "active") return refused(reply, 409, "executor_quarantined", row);
 
-      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status)
+      // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status);
+      // an executor that is not active is refused there, once, and audited below
       let current: ExecutorRow | null = row;
       const out = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
@@ -826,7 +847,10 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         await quarantineExecutor(db, row.id, "execution_profile_mismatch", { detail: { offerId: p.data.offerId, placementId: out.placementId, failures: out.failures } });
         return reply.status(409).send({ error: out.code, next: "quarantined", failures: out.failures });
       }
-      if (out.status !== 200) return refused(reply, out.status, out.code, current);
+      if (out.status !== 200) {
+        if (out.code === "executor_quarantined") await auditQuarantinedRefusal("report", current, row, p.data.offerId);
+        return refused(reply, out.status, out.code, current);
+      }
       return reply.status(200).send({ release: true, placementId: out.placementId, reportSha256: out.reportSha256, next: nextFor(current) });
     });
 

@@ -280,10 +280,49 @@ export function policyChangedDecision(): Decision {
     reason: "governance policy or the kill switch changed while this call was being decided; nothing ran. Re-submit the call to have it decided under the current policy.",
   };
 }
+/**
+ * The refusal's own audit row (review follow-up, 2026-10-10): the refused decision transaction wrote nothing, so
+ * the refusal is recorded here, on the caller's connection AFTER that transaction ended, as every other governed
+ * refusal is: a `receiptClass: "decision"` deny row through the chained writer, so it gets its capture-status
+ * marker and facts like any decision. It deliberately does NOT carry `policyEpoch`/`killSwitch`: the refusal was
+ * not decided under the stale epoch, so its facts have `policy: null` (not captured by this path) and the stale
+ * generation is kept only as `decidedPolicyEpoch` for the investigator.
+ */
+export async function auditPolicyChangedRefusal(
+  db: Db,
+  row: {
+    userId: string;
+    serverId?: string;
+    toolName?: string;
+    objectType?: "connector";
+    objectId?: string;
+    decidedPolicyEpoch: number | null;
+    detail: Record<string, unknown>;
+  },
+): Promise<Decision> {
+  const decision = policyChangedDecision();
+  await db.insert(auditLog).values({
+    userId: row.userId,
+    ...(row.serverId ? { serverId: row.serverId } : {}),
+    ...(row.toolName ? { toolName: row.toolName } : {}),
+    objectType: row.objectType,
+    objectId: row.objectId,
+    detail: { ...row.detail, phase: "decision-commit", decidedPolicyEpoch: row.decidedPolicyEpoch, receiptClass: "decision" },
+    effect: decision.effect,
+    ruleId: decision.ruleId,
+    ruleChain: decision.ruleChain,
+    reason: decision.reason,
+  });
+  return decision;
+}
 let decisionRecheckHookForTest: (() => Promise<void>) | null = null;
 /** TEST ONLY: run `fn` at the start of the next re-checks (between evaluation and the decision's commit); null clears it */
 export function setDecisionRecheckHookForTest(fn: (() => Promise<void>) | null): void {
   decisionRecheckHookForTest = fn;
+}
+/** the connector path's decision commit runs the same test hook (its re-check is inline in connector-call.ts) */
+export async function runDecisionRecheckHookForTest(): Promise<void> {
+  if (decisionRecheckHookForTest) await decisionRecheckHookForTest();
 }
 export async function decisionPolicyStillCurrent(
   tx: Db,

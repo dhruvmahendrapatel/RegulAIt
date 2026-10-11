@@ -79,7 +79,7 @@ import {
   type McpProtocolMethod,
   type PiiHit,
 } from "@regulait/shared";
-import { approvalTargetForServer, decisionPolicyStillCurrent, governedEvaluate, policyChangedDecision } from "./governed-evaluate.js";
+import { approvalTargetForServer, auditPolicyChangedRefusal, decisionPolicyStillCurrent, governedEvaluate } from "./governed-evaluate.js";
 import { recordDecision } from "./metrics.js";
 import { loadOrgSettings } from "./org-settings.js";
 import {
@@ -416,8 +416,16 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     return true;
   });
   if (!recorded) {
+    // the refused transaction wrote nothing: the refusal's own row, committed on its own (review follow-up)
+    const refusal = await auditPolicyChangedRefusal(db, {
+      userId,
+      serverId,
+      toolName: grant,
+      decidedPolicyEpoch: policyEpoch,
+      detail: { method, projectId, target: auditTarget(serverRow) },
+    });
     recordDecision({ surface: "mcp_protocol", effect: "deny" });
-    return { kind: "denied", decision: policyChangedDecision() };
+    return { kind: "denied", decision: refusal };
   }
   recordDecision({ surface: "mcp_protocol", effect: decision.effect });
   if (decision.effect === "deny") return { kind: "denied", decision };

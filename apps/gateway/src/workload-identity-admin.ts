@@ -257,6 +257,69 @@ export async function lockRoleForGrantInsert(tx: Db, roleId: string): Promise<bo
 }
 
 /**
+ * Review follow-up (2026-10-10): a role-grant insert whose role does not exist is refused by name
+ * (`404 role_not_found`, audited) instead of falling through to the role-grant table's foreign-key error.
+ * Thrown inside the insert's transaction by `lockRoleOrRefuse`, so nothing is written.
+ */
+export class RoleNotFoundError extends Error {
+  readonly code = "role_not_found" as const;
+  /** what the refused write was for, recorded on the refusal's audit row (e.g. the SoD override request) */
+  context: Record<string, unknown> = {};
+  constructor(readonly roleId: string) {
+    super(`role ${roleId} does not exist`);
+    this.name = "RoleNotFoundError";
+  }
+}
+
+/** `lockRoleForGrantInsert`, refusing a missing role with `RoleNotFoundError` (the caller's transaction rolls back) */
+export async function lockRoleOrRefuse(tx: Db, roleId: string): Promise<void> {
+  if (!(await lockRoleForGrantInsert(tx, roleId))) throw new RoleNotFoundError(roleId);
+}
+
+export function roleNotFoundBody(roleId: string) {
+  return { error: "role_not_found" as const, detail: `role ${roleId} does not exist; nothing was granted` };
+}
+
+/** the refusal's deny row, written on `db` after the refused transaction has rolled back (as other refusals are) */
+export async function auditRoleNotFound(
+  db: Db,
+  args: { actorUserId: string | null | undefined; roleId: string; via: string; detail?: Record<string, unknown> },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: args.actorUserId ?? "00000000-0000-0000-0000-000000000000",
+    objectType: "role",
+    objectId: args.roleId,
+    detail: { phase: "role-grant", code: "role_not_found", via: args.via, ...(args.detail ?? {}) },
+    effect: "deny",
+    ruleId: "role-grant-refused",
+    ruleChain: [],
+    reason: `a grant to role ${args.roleId} was refused: the role does not exist (${args.via})`,
+  });
+}
+
+/**
+ * Run a role-grant insert under the role's lock. A missing role: the transaction rolls back, the refusal is
+ * audited, and `null` is returned for the route to answer `404 role_not_found`.
+ */
+export async function insertRoleGrantLocked<T>(
+  db: Db,
+  roleId: string,
+  audit: { actorUserId: string | null | undefined; via: string },
+  insert: (tx: Db) => Promise<T>,
+): Promise<T | null> {
+  try {
+    return await db.transaction(async (tx) => {
+      await lockRoleOrRefuse(tx as unknown as Db, roleId);
+      return insert(tx as unknown as Db);
+    });
+  } catch (err) {
+    if (!(err instanceof RoleNotFoundError)) throw err;
+    await auditRoleNotFound(db, { ...audit, roleId });
+    return null;
+  }
+}
+
+/**
  * What one steward holds, read in the caller's transaction with `FOR SHARE` on every grant, assignment and
  * revocation row (review L5): a concurrent revoke of a row this check relied on waits for the write that relied
  * on it, and a revoke that commits first is seen. Role-derived rows are read only for `lockedRoleIds`, the roles

@@ -657,6 +657,7 @@ describe("a change committed between authentication and the decision (accept, re
       expect(res.status, seen[0]!.body).toBe(200);
       expect(["placed", "ended"]).toContain(o.status);
       expect(await audits("execution-placed", offerId)).toHaveLength(1);
+      expect(await audits("executor-channel-refused", offerId), "nothing refused, nothing audited as refused").toHaveLength(0);
       return;
     }
     // never placed, never released, whatever the route
@@ -670,6 +671,11 @@ describe("a change committed between authentication and the decision (accept, re
       expect(res.json.error).toBe("executor_quarantined");
       expect((await executorRow(r.executorId)).status).toBe("quarantined");
       if (route === "report") expect(o.status).toBe("accepted");
+      // review follow-up (2026-10-10): the refusal leaves its own deny row, committed after the deciding transaction
+      const refusedRows = await audits("executor-channel-refused", offerId);
+      expect(refusedRows, "the in-transaction executor_quarantined refusal is audited once").toHaveLength(1);
+      expect(refusedRows[0]).toMatchObject({ effect: "deny", objectType: "execution_placement" });
+      expect(refusedRows[0]!.detail).toMatchObject({ phase: `offer-${route}`, code: "executor_quarantined", offerId, executorId: r.executorId, status: "quarantined", quarantineCode: "admin" });
     } else if (route === "accept") {
       expect(res.json.error).toBe("class_below_required");
     } else {
