@@ -15,24 +15,18 @@
  *    builds, validates, signs (the receipt key, OWNER DECISION 2) and inserts
  *    the snapshot and its renderings. The audit row follows in its own
  *    transaction while the lock is still held.
- *  - `captureAiBomSnapshotInTx(tx, …)`: the same capture inside an EXISTING
- *    transaction (the shape a sign-off trigger needs, #280 4237493034: capture
- *    inside the triggering transaction). It refuses a transaction that is not
- *    REPEATABLE READ or SERIALIZABLE. A stale version allocation fails on the
- *    contiguous-version guard and the unique constraint and never forks.
  *  - `aiBomDrift(db, …)`: the change list of the live state against the last
- *    signed snapshot (R8). It is not a BOM document.
+ *    signed snapshot (R8), plus the subject's snapshot gaps (R25 item 4). It is
+ *    not a BOM document.
  *
  * RELEASED (R2, R17): `AI_BOM_SNAPSHOTS_RELEASED` is true IN CODE (not a
  * setting) now that every v1 renderer (B3, B5) and `export-bundle/3` (B4)
  * exist, so the on-demand snapshot route freezes.
  *
- * SIGN-OFF TRIGGERS ARE NOT WIRED (OWNER DECISION 8 / R25): R25 leaves the
- * event-to-subject mapping open, so the R25 slice wires them later. Until then
- * snapshots are on-demand only, whatever `ai_bom_snapshot_triggers` says, and
- * `aiBomSnapshotTriggerGate` refuses (`ai_bom_signoff_triggers_not_wired`)
- * instead of capturing with no per-subject lock and no audit row. The settings
- * API and the posture report say so (`AI_BOM_SIGNOFF_TRIGGERS_WIRED`).
+ * SIGN-OFF TRIGGERS (OWNER DECISION 8, R25, settled 2026-10-11): each
+ * sign-off event takes its snapshot AFTER its transaction commits, through
+ * `takeAiBomSnapshot` (`ai-bom-signoff.ts`). There is no in-transaction capture:
+ * it could hold no per-subject lock and write no audit row.
  */
 import { createHash, sign } from "node:crypto";
 import {
@@ -102,7 +96,6 @@ import {
   type CycloneDxSpecVersion,
 } from "@regulait/shared";
 import { AI_BOM_SNAPSHOTS_RELEASED } from "@regulait/shared";
-import { AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE } from "@regulait/shared";
 import { loadReceiptSigningKey, ReceiptKeyError, sameReceiptPublicKey } from "./decision-receipts.js";
 import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
@@ -115,8 +108,23 @@ import { retentionFloorDays } from "./org-settings.js";
  */
 export { AI_BOM_SNAPSHOTS_RELEASED };
 
+/** ADR-0116: the operator-set install id (`REGULAIT_INSTALL_ID`), or null */
+export const aiBomInstallId = (): string | null => {
+  const v = process.env.REGULAIT_INSTALL_ID?.trim();
+  return v ? v : null;
+};
+
+/** R25 item 4: the snapshot rows of the audit trail (the gap rows have no table of their own) */
+export const AI_BOM_SNAPSHOT_RULE_IDS = {
+  taken: "ai-bom-snapshot-taken",
+  skippedNoKey: "ai-bom-snapshot-skipped-no-key",
+  failed: "ai-bom-snapshot-failed",
+} as const;
+export const AI_BOM_GAP_RULE_IDS = [AI_BOM_SNAPSHOT_RULE_IDS.skippedNoKey, AI_BOM_SNAPSHOT_RULE_IDS.failed] as const;
+
 export class AiBomError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
+  /** `extra`: further response fields (drift's 409 carries the subject's gaps) */
+  constructor(readonly status: number, readonly code: string, message: string, readonly extra?: Record<string, unknown>) {
     super(message);
     this.name = "AiBomError";
   }
@@ -430,6 +438,8 @@ export interface TakeSnapshotInput {
   trigger: AiBomSnapshotTrigger;
   actorUserId: string | null;
   installId?: string | null;
+  /** R25: the sign-off this snapshot was owed to (its id and triggering object), recorded on the taken row */
+  signoff?: { id: string; triggeringObjectId: string };
 }
 export interface TakenSnapshot {
   id: string;
@@ -491,8 +501,8 @@ async function prepareAiBomSnapshot(tx: Tx, input: TakeSnapshotInput): Promise<P
   return { id, version, prevId: prev?.id ?? null, createdAt, expiresAt, build, signature, key, keyRecorded: !!recorded };
 }
 
-/** FREEZE: the key row (first use), the snapshot and its renderings, and (when given) the audit row, in the caller's transaction */
-async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSnapshotInput, opts: { audit: boolean }): Promise<TakenSnapshot> {
+/** FREEZE: the key row (first use), the snapshot and its renderings, and the audit row, in the caller's transaction */
+async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSnapshotInput): Promise<TakenSnapshot> {
   if (!p.keyRecorded) await tx.insert(receiptSigningKeys).values({ keyId: p.key.keyId, publicJwk: p.key.jwk, firstUsedAt: new Date(p.createdAt) }).onConflictDoNothing();
   await tx.insert(aiBomSnapshots).values({
     id: p.id, subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, serialNumber: p.build.body.serialNumber.slice("urn:uuid:".length), supersedesId: p.prevId,
@@ -502,38 +512,19 @@ async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSn
   for (const r of p.build.renderings) {
     await tx.insert(bomRenderings).values({ aiBomSnapshotId: p.id, format: r.format, bytes: r.bytes, sha256: r.sha256, validator: r.validator } as never);
   }
-  if (opts.audit) {
-    await tx.insert(auditLog).values({
-      userId: input.actorUserId ?? "00000000-0000-0000-0000-000000000000", objectType: "audit_export", objectId: p.id, effect: "allow",
-      ruleId: "ai-bom-snapshot-taken", ruleChain: [], reason: "AI BOM snapshot frozen and signed",
-      detail: { subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, trigger: input.trigger, bodySha256: p.build.bodySha256 },
-    });
-  }
+  await tx.insert(auditLog).values({
+    userId: input.actorUserId ?? "00000000-0000-0000-0000-000000000000", objectType: "audit_export", objectId: p.id, effect: "allow",
+    ruleId: AI_BOM_SNAPSHOT_RULE_IDS.taken, ruleChain: [], reason: "AI BOM snapshot frozen and signed",
+    detail: {
+      subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, trigger: input.trigger, bodySha256: p.build.bodySha256,
+      ...(input.signoff ? { aiBomSignoffId: input.signoff.id, triggeringObjectId: input.signoff.triggeringObjectId } : {}),
+    },
+  });
   return { id: p.id, version: p.version, serialNumber: p.build.body.serialNumber, bodySha256: p.build.bodySha256, build: p.build };
 }
 
 /**
- * Capture, build, sign and insert one snapshot inside the CALLER's
- * transaction, which must be REPEATABLE READ or SERIALIZABLE (R22): the shape
- * a sign-off trigger needs (#280 4237493034). A stale version allocation is
- * refused by the contiguous-version guard and the unique constraint; it never
- * forks.
- *
- * TODO(ADR-0189 R50, R17): this in-transaction path cannot take the
- * per-subject lock BEFORE its snapshot (the caller's transaction already has
- * one), and it writes no audit row (an audit append under REPEATABLE READ can
- * read a stale chain tip after its lock wait). Both are settled when the
- * PR that wires the R25 triggers: the triggering transaction must take the
- * session lock first and append its audit row through a READ COMMITTED step.
- * The R17 release did not wire them, so no production path calls this, and
- * `aiBomSnapshotTriggerGate` refuses.
- */
-export async function captureAiBomSnapshotInTx(tx: Tx, input: TakeSnapshotInput): Promise<TakenSnapshot> {
-  return insertPreparedSnapshot(tx, await prepareAiBomSnapshot(tx, input), input, { audit: false });
-}
-
-/**
- * THE ON-DEMAND FREEZE (R50, 4237346650, PR #287): session lock first (bounded
+ * THE FREEZE, on demand and after a sign-off (R50, R25, 4237346650, PR #287): session lock first (bounded
  * wait, single-flight); the capture in one REPEATABLE READ READ ONLY
  * transaction; then ONE write transaction holding the snapshot, its
  * renderings AND its audit row, so neither exists without the other; then
@@ -548,7 +539,7 @@ export async function takeAiBomSnapshot(db: Db, input: TakeSnapshotInput): Promi
     return await withAiBomSubjectSessionLock(db, input.subject.kind, input.subject.id, async (bound) => {
       const b = bound as unknown as Db;
       const prepared = await b.transaction((tx) => prepareAiBomSnapshot(tx as unknown as Db, input), { isolationLevel: "repeatable read", accessMode: "read only" });
-      return b.transaction((tx) => insertPreparedSnapshot(tx as unknown as Db, prepared, input, { audit: true }), { isolationLevel: "read committed" });
+      return b.transaction((tx) => insertPreparedSnapshot(tx as unknown as Db, prepared, input), { isolationLevel: "read committed" });
     });
   } catch (e) {
     if (e instanceof BomSubjectBusyError) throw new AiBomError(409, "bom_snapshot_busy", e.message);
@@ -556,26 +547,59 @@ export async function takeAiBomSnapshot(db: Db, input: TakeSnapshotInput): Promi
   }
 }
 
-/**
- * OWNER DECISION 8 / R25: the sign-off trigger hook. NOT WIRED: it refuses and
- * captures nothing (no snapshot, no rendering, no audit row) until the R25
- * slice settles the event-to-subject mapping, takes the per-subject lock
- * before the capture and appends the audit row (see the TODO on
- * `captureAiBomSnapshotInTx`). The R25 slice replaces this body.
- */
-export async function aiBomSnapshotTriggerGate(_tx: Tx, _input: TakeSnapshotInput): Promise<never> {
-  throw new AiBomError(501, "ai_bom_signoff_triggers_not_wired", AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE);
-}
-
 // ---------------------------------------------------------------------------
 // drift (R8)
 // ---------------------------------------------------------------------------
+
+/** one recorded snapshot gap of a subject (R25 item 4): a skipped or failed sign-off snapshot */
+export interface AiBomGap {
+  auditId: string;
+  at: string;
+  kind: "skipped_no_key" | "failed";
+  trigger: string | null;
+  triggeringObjectId: string | null;
+  code: string | null;
+}
+export const AI_BOM_DRIFT_GAP_LIMIT = 50;
 
 export interface AiBomDrift {
   evidence: false;
   subject: AiBomSubject;
   baseline: { snapshotId: string; version: number; createdAt: string; serialNumber: string };
   changes: AiBomDriftChange[];
+  /** gaps recorded after the baseline snapshot, newest first (at most `AI_BOM_DRIFT_GAP_LIMIT`) */
+  gaps: AiBomGap[];
+  gapsTruncated: boolean;
+}
+
+/** the subject's gap rows, newest first, optionally only those after `after` */
+async function loadAiBomGaps(tx: Tx, subject: AiBomSubject, after: Date | null): Promise<{ gaps: AiBomGap[]; gapsTruncated: boolean }> {
+  const rows = await tx
+    .select({ id: auditLog.id, at: auditLog.at, ruleId: auditLog.ruleId, detail: auditLog.detail })
+    .from(auditLog)
+    .where(and(
+      inArray(auditLog.ruleId, [...AI_BOM_GAP_RULE_IDS]),
+      sql`${auditLog.detail}->>'subjectKind' = ${subject.kind}`,
+      sql`${auditLog.detail}->>'subjectId' = ${subject.id}`,
+      after ? sql`${auditLog.at} > ${after.toISOString()}::timestamptz` : undefined,
+    ))
+    .orderBy(desc(auditLog.at))
+    .limit(AI_BOM_DRIFT_GAP_LIMIT + 1);
+  const str = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    gapsTruncated: rows.length > AI_BOM_DRIFT_GAP_LIMIT,
+    gaps: rows.slice(0, AI_BOM_DRIFT_GAP_LIMIT).map((r) => {
+      const d = (r.detail ?? {}) as Record<string, unknown>;
+      return {
+        auditId: r.id,
+        at: new Date(r.at).toISOString(),
+        kind: r.ruleId === AI_BOM_SNAPSHOT_RULE_IDS.skippedNoKey ? "skipped_no_key" as const : "failed" as const,
+        trigger: str(d.trigger),
+        triggeringObjectId: str(d.triggeringObjectId),
+        code: str(d.code),
+      };
+    }),
+  };
 }
 
 /**
@@ -591,7 +615,7 @@ export async function aiBomDrift(db: Db, subject: AiBomSubject, installId: strin
       const [snap] = await tx.select({ id: aiBomSnapshots.id, version: aiBomSnapshots.version, createdAt: aiBomSnapshots.createdAt, serialNumber: aiBomSnapshots.serialNumber }).from(aiBomSnapshots)
         .where(and(eq(aiBomSnapshots.subjectKind, subject.kind), eq(aiBomSnapshots.subjectId, subject.id))).orderBy(desc(aiBomSnapshots.version)).limit(1);
       // R8: drift needs a signed snapshot to compare with; there is no unsigned draft to fall back on
-      if (!snap) throw new AiBomError(409, "ai_bom_no_snapshot", "This subject has no signed AI BOM snapshot to compare with.");
+      if (!snap) throw new AiBomError(409, "ai_bom_no_snapshot", "This subject has no signed AI BOM snapshot to compare with.", await loadAiBomGaps(tx, subject, null));
       const [rendering] = await tx.select({ bytes: bomRenderings.bytes, sha256: bomRenderings.sha256 }).from(bomRenderings)
         .where(and(eq(bomRenderings.aiBomSnapshotId, snap.id), eq(bomRenderings.format, "cyclonedx-1.7")));
       if (!rendering || createHash("sha256").update(rendering.bytes, "utf8").digest("hex") !== rendering.sha256) {
@@ -605,6 +629,7 @@ export async function aiBomDrift(db: Db, subject: AiBomSubject, installId: strin
         subject,
         baseline: { snapshotId: snap.id, version: snap.version, createdAt: new Date(snap.createdAt).toISOString(), serialNumber: `urn:uuid:${snap.serialNumber}` },
         changes: diffAiBomInventory(aiBomInventoryIndex(JSON.parse(rendering.bytes)), aiBomInventoryIndex(liveDoc)),
+        ...(await loadAiBomGaps(tx, subject, new Date(snap.createdAt))),
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },

@@ -371,7 +371,7 @@ describe("separation of duties covers every commit the promotion carries (no lau
     expect(req.statusCode, req.body).toBe(202);
     const [ap] = await k.db.select().from(approvals).where(eq(approvals.id, req.json().promotion.approvalId));
     // reach the hook directly, as a path that skipped the precheck would
-    await applyPromptPromotionDecision(k.db, ap!, "approved", alice.id, "a".repeat(64));
+    await applyPromptPromotionDecision(k.db, ap!, "approved", alice.id, "a".repeat(64), []);
     expect(await tagOf(p, "prod")).toBeNull();
     const [after] = await k.db.select().from(promptPromotions).where(eq(promptPromotions.approvalId, ap!.id));
     expect(after!.status).toBe("stale");

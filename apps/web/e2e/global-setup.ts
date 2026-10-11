@@ -7,7 +7,9 @@
  * State (pid, passwords) is handed to the tests via a JSON file.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, createWriteStream } from "node:fs";
+import { generateKeyPairSync } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync, createWriteStream } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { recordTotpSecret, resetTotpStore } from "./totp-sign-in";
@@ -60,8 +62,21 @@ export default async function globalSetup() {
   // read is refused, correctly, and would look like the install silently
   // failing.
   const licenseKeyring = path.join(here, ".e2e-license-keys");
+  // ADR-0189 R25: under the strict defaults every sign-off (a use-case or
+  // model-card approval, a promotion, an admission) takes a signed AI BOM
+  // snapshot and is REFUSED 409 while no receipt signing key is configured. A
+  // deployment holds that key (ADR-0116), so this suite's gateway does too: an
+  // ephemeral one, outside the source tree, unless the caller set one.
+  const receiptKey: Record<string, string> = {};
+  if (!process.env.REGULAIT_RECEIPT_SIGNING_KEY && !process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID) {
+    const file = path.join(mkdtempSync(path.join(tmpdir(), "regulait-e2e-receipt-")), "receipt.pem");
+    writeFileSync(file, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+    receiptKey.REGULAIT_RECEIPT_SIGNING_KEY = file;
+    receiptKey.REGULAIT_RECEIPT_SIGNING_KEY_ID = `e2e-receipt-${process.pid}-${Date.now()}`;
+  }
   const env = {
     ...process.env,
+    ...receiptKey,
     REGULAIT_EPHEMERAL_LICENSE: "1",
     REGULAIT_LICENSE_KEYRING: licenseKeyring,
     DATABASE_URL,

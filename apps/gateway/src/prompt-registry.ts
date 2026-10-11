@@ -75,6 +75,7 @@ import {
 import { assertProjectAttribution } from "./projects.js";
 import { enqueueWebhookEvent, kickWebhookDeliveries } from "./outbound-webhooks.js";
 import { validateJsonSchemaShape } from "./playground.js";
+import { agentSignoffSubjects, prepareAiBomSignoff, type AiBomSignoff } from "./ai-bom-signoff.js";
 
 export const PROMPT_PROMOTION_PREFIX = "__prompt_promotion__:";
 
@@ -407,12 +408,14 @@ export async function applyPromptPromotionDecision(
   decision: "approved" | "denied",
   deciderUserId: string,
   dataKey: string | undefined,
+  /** ADR-0189 R25: an APPLIED promotion pushes the AI BOM sign-off it owes; the decide path runs it after commit */
+  aiBomSignoffs: AiBomSignoff[],
 ): Promise<((d: Db) => Promise<void>) | null> {
   const [p] = await tx.select().from(promptPromotions).where(eq(promptPromotions.approvalId, approval.id)).for("update");
   if (!p || p.status !== "pending_approval") return null;
   const [prompt] = await tx.select().from(prompts).where(eq(prompts.id, p.promptId));
   const now = new Date();
-  const finish = async (status: "applied" | "denied" | "stale", result: Record<string, unknown>) => {
+  const finish = async (status: "applied" | "denied" | "stale", result: Record<string, unknown>, auditExtra: Record<string, unknown> = {}) => {
     await tx
       .update(promptPromotions)
       .set({ status, result, decidedByUserId: deciderUserId, decidedAt: now })
@@ -429,7 +432,7 @@ export async function applyPromptPromotionDecision(
         : status === "denied"
           ? `promotion of prompt '${prompt?.name ?? p.promptId}' to '${p.tag}' denied; the tag did not move`
           : `promotion of prompt '${prompt?.name ?? p.promptId}' to '${p.tag}' approved but stale (${String(result.reason)}); the tag did not move`,
-      { promotionId: p.id, approvalId: approval.id, tag: p.tag, commitHash: p.commitHash, previousCommitHash: p.previousCommitHash, ...result },
+      { ...auditExtra, promotionId: p.id, approvalId: approval.id, tag: p.tag, commitHash: p.commitHash, previousCommitHash: p.previousCommitHash, ...result },
       status === "applied" ? "allow" : "deny",
     );
     return status;
@@ -474,7 +477,18 @@ export async function applyPromptPromotionDecision(
           target: [promptTags.promptId, promptTags.name],
           set: { commitId: commit!.id, movedByUserId: deciderUserId, movedAt: now },
         });
-      outcome = await finish("applied", {});
+      // ADR-0189 R25: the promoted commit's agent and the use cases that list it owe a
+      // snapshot; with no signing key under the strict default this throws 409 and the
+      // decision (and the tag move) rolls back
+      const agentId = commit!.modelConfig?.agentId ?? null;
+      const prepared = await prepareAiBomSignoff(tx, {
+        trigger: "prompt_promotion",
+        triggeringObjectId: p.promptId,
+        actorUserId: deciderUserId,
+        subjects: agentId ? await agentSignoffSubjects(tx, [agentId], { builderAgents: false }) : [],
+      });
+      if (prepared.signoff) aiBomSignoffs.push(prepared.signoff);
+      outcome = await finish("applied", {}, prepared.auditDetail);
     }
   }
   const ids = await enqueueWebhookEvent(tx, "prompt.promotion.decided", {

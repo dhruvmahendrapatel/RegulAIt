@@ -300,7 +300,7 @@ async function runDemoCheckRun(
       "3 Evidence",
       "FAIL",
       `no usable export signing key (${signing.body.ruleId ?? signing.body.error ?? signing.status}) — "Download signed bundle" would answer 409`,
-      "run `pnpm --filter @regulait/gateway demo:export-key`, set the two variables it prints in this terminal, then re-run (and start the gateway from the same terminal)",
+      "run `pnpm --filter @regulait/gateway demo:export-key`, set the variables it prints in this terminal, then re-run (and start the gateway from the same terminal)",
     );
   }
 

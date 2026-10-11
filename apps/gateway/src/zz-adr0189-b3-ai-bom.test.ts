@@ -49,6 +49,7 @@ import {
   connectorCredentials,
   connectors,
   createDb,
+  desc,
   customModelProviders,
   engineRuns,
   eq,
@@ -76,9 +77,9 @@ import {
   workloadIdentities,
   type Db,
 } from "@regulait/db";
-import { AI_BOM_INSTALL_SUBJECT_ID, AI_BOM_SIGNOFF_TRIGGERS_WIRED, aiBomNativeBodySchema, validateCycloneDx, warmCycloneDxValidators, type AiBomSubjectKind } from "@regulait/shared";
+import { AI_BOM_INSTALL_SUBJECT_ID, aiBomNativeBodySchema, validateCycloneDx, warmCycloneDxValidators, type AiBomSubjectKind } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomSnapshotTriggerGate, captureAiBomSnapshotInTx, loadAiBomRecords, takeAiBomSnapshot } from "./ai-bom.js";
+import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, loadAiBomRecords, takeAiBomSnapshot } from "./ai-bom.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
 import { buildAiBom, validateSpdx } from "@regulait/shared";
@@ -338,27 +339,32 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
     }
   }, 60_000);
 
-  it("4237346650: a freeze that waits behind another writer of the subject captures AFTER it (fresh snapshot, next version)", async () => {
+  it("4237346650: a freeze that waits behind another writer of the subject captures AFTER it (fresh state, next version)", async () => {
     withKey(true);
     const other = createDb(urlFor(SCRATCH));
+    const subject = { kind: "agent" as const, id: ids.agent2! };
+    const [orig] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, subject.id));
+    const renamed = `b3-renamed-${RUN}`;
     try {
-      const subject = { kind: "agent" as const, id: ids.agent2! };
-      // another writer (another replica) holds the subject: it takes the lock FIRST, then captures and commits slowly
+      const [prev] = await db.select({ id: aiBomSnapshots.id, v: aiBomSnapshots.version }).from(aiBomSnapshots).where(and(eq(aiBomSnapshots.subjectKind, "agent"), eq(aiBomSnapshots.subjectId, subject.id))).orderBy(desc(aiBomSnapshots.version)).limit(1);
+      // another writer (another replica) holds the subject: it takes the lock FIRST, changes the subject and commits slowly
       let locked!: () => void;
       const holding = new Promise<void>((r) => { locked = r; });
       const holder = other.transaction(async (tx) => {
         await lockAiBomSubject(tx, subject.kind, subject.id);
         locked();
-        const t = await captureAiBomSnapshotInTx(tx as unknown as Db, { subject, trigger: "on_demand", actorUserId: null });
+        await tx.update(agents).set({ name: renamed }).where(eq(agents.id, subject.id));
         await new Promise((r) => setTimeout(r, 1_000));
-        return t;
-      }, { isolationLevel: "repeatable read" });
+      });
       await holding;
       const waiter = takeAiBomSnapshot(db, { subject, trigger: "on_demand", actorUserId: users.admin.id });
-      const [h, w] = await Promise.all([holder, waiter]);
-      expect(w.version).toBe(h.version + 1);
+      const [, w] = await Promise.all([holder, waiter]);
+      expect(w.version).toBe((prev?.v ?? 0) + 1);
+      // and it supersedes exactly the version it followed (none when it is the first)
       const [row] = await db.select({ s: aiBomSnapshots.supersedesId }).from(aiBomSnapshots).where(eq(aiBomSnapshots.id, w.id));
-      expect(row!.s).toBe(h.id);
+      expect(row!.s).toBe(prev?.id ?? null);
+      // the capture ran after the holder committed, so it reads the renamed agent, never the state before it
+      expect(w.build.bodyBytes).toContain(renamed);
       // in-process single-flight: a burst for one subject gets one freeze and fast 409s, never a queue of parked connections
       const burst = await Promise.allSettled([1, 2, 3].map(() => takeAiBomSnapshot(db, { subject, trigger: "on_demand", actorUserId: users.admin.id })));
       expect(burst.filter((r) => r.status === "fulfilled").length).toBe(1);
@@ -366,61 +372,17 @@ describe("the freeze (R50, OWNER DECISIONS 2 and 12)", () => {
       const versions = (await db.select({ v: aiBomSnapshots.version }).from(aiBomSnapshots).where(and(eq(aiBomSnapshots.subjectKind, "agent"), eq(aiBomSnapshots.subjectId, ids.agent2!)))).map((x) => x.v).sort((x, y) => x - y);
       expect(versions).toEqual(versions.map((_, i) => i + 1));
     } finally {
+      await db.update(agents).set({ name: orig!.name }).where(eq(agents.id, subject.id));
       await (other.$client as { end: () => Promise<void> }).end();
       withKey(false);
     }
   }, 120_000);
 
-  it("NEGATIVE CONTROL: the transaction-scoped lock inside REPEATABLE READ lets a stale capture race, and the database refuses it", async () => {
-    withKey(true);
-    try {
-      const subject = { kind: "builder_agent" as const, id: ids.builder! };
-      const xactOnly = () =>
-        db.transaction(async (tx) => {
-          await lockAiBomSubject(tx, subject.kind, subject.id); // the snapshot is fixed BEFORE this wait
-          return captureAiBomSnapshotInTx(tx as unknown as Db, { subject, trigger: "on_demand", actorUserId: null });
-        }, { isolationLevel: "repeatable read" });
-      const results = await Promise.allSettled([xactOnly(), xactOnly(), xactOnly()]);
-      expect(results.filter((r) => r.status === "rejected").length).toBeGreaterThan(0);
-      const reasons = results.filter((r): r is PromiseRejectedResult => r.status === "rejected").map((r) => `${String((r.reason as Error).message)} ${String((r.reason as { cause?: Error }).cause?.message ?? "")}`);
-      for (const m of reasons) expect(m).toMatch(/must be \d+ and supersede|duplicate key|could not serialize/);
-    } finally {
-      withKey(false);
-    }
-  }, 120_000);
-
-  it("a capture outside REPEATABLE READ is refused", async () => {
-    withKey(true);
-    try {
-      const e = await db.transaction((tx) => captureAiBomSnapshotInTx(tx as unknown as Db, { subject: { kind: "agent", id: ids.agent! }, trigger: "on_demand", actorUserId: null })).catch((x: unknown) => x);
-      expect(e).toMatchObject({ code: "ai_bom_capture_isolation" });
-    } finally {
-      withKey(false);
-    }
-  });
-
-  it("R25 not wired: the sign-off trigger gate refuses and captures nothing, writes nothing (even released, with a key)", async () => {
+  it("R25 item 5: there is no in-transaction capture any more; the snapshot path is takeAiBomSnapshot only", async () => {
     expect(AI_BOM_SNAPSHOTS_RELEASED).toBe(true);
-    expect(AI_BOM_SIGNOFF_TRIGGERS_WIRED).toBe(false);
-    withKey(true);
-    try {
-      const counts = async () =>
-        rowsOf<{ s: number; r: number; a: number }>(await db.execute(sql`select
-          (select count(*)::int from ai_bom_snapshots) as s,
-          (select count(*)::int from bom_renderings) as r,
-          (select count(*)::int from audit_log) as a`))[0]!;
-      const before = await counts();
-      const e = await db
-        .transaction((tx) => aiBomSnapshotTriggerGate(tx as unknown as Db, { subject: { kind: "agent", id: ids.agent2! }, trigger: "model_card_approval", actorUserId: null }), { isolationLevel: "repeatable read" })
-        .catch((x: unknown) => x);
-      expect(e).toBeInstanceOf(AiBomError);
-      expect(e).toMatchObject({ status: 501, code: "ai_bom_signoff_triggers_not_wired" });
-      expect((e as Error).message).toMatch(/not wired/);
-      expect(await counts()).toEqual(before);
-      expect((await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.trigger, "model_card_approval"))).length).toBe(0);
-    } finally {
-      withKey(false);
-    }
+    const mod = (await import("./ai-bom.js")) as Record<string, unknown>;
+    expect(mod.captureAiBomSnapshotInTx).toBeUndefined();
+    expect(mod.aiBomSnapshotTriggerGate).toBeUndefined();
   });
 });
 

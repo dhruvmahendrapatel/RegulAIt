@@ -1563,6 +1563,21 @@ export const auditLog = pgTable(
     index("audit_log_guardrail_hits_idx")
       .on(t.ruleId, t.at)
       .where(sql`${t.ruleId} IN ('guardrail-blocked', 'guardrail-warned', 'guardrail-logged')`),
+    // migration 0192 (ADR-0189 R25 review): the AI BOM sign-off rows only, so the
+    // posture report's owed-but-missing and gap counts and drift's gap list never
+    // scan the trail
+    index("audit_log_ai_bom_signoff_subject_idx")
+      .on(sql`(${t.detail} ->> 'aiBomSignoffId')`, sql`(${t.detail} ->> 'subjectKind')`, sql`(${t.detail} ->> 'subjectId')`)
+      .where(sql`${t.ruleId} IN ('ai-bom-snapshot-taken', 'ai-bom-snapshot-skipped-no-key', 'ai-bom-snapshot-failed')`),
+    index("audit_log_ai_bom_gap_subject_at_idx")
+      .on(sql`(${t.detail} ->> 'subjectKind')`, sql`(${t.detail} ->> 'subjectId')`, t.at)
+      .where(sql`${t.ruleId} IN ('ai-bom-snapshot-skipped-no-key', 'ai-bom-snapshot-failed')`),
+    index("audit_log_ai_bom_due_at_idx")
+      .on(t.at)
+      .where(sql`${t.detail} ? 'aiBomSnapshotsDue'`),
+    index("audit_log_ai_bom_snapshot_rows_idx")
+      .on(t.ruleId, t.at)
+      .where(sql`${t.ruleId} IN ('ai-bom-snapshot-taken', 'ai-bom-snapshot-skipped-no-key', 'ai-bom-snapshot-failed')`),
   ],
 );
 

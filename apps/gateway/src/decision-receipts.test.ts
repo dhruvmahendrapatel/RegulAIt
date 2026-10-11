@@ -92,6 +92,7 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
   });
 
   it("reports no_key and off truthfully without signing or registering a key", async () => {
+    clearKey(); // the suite's own receipt key (testing/receipt-signing-key.ts) is put back in afterAll
     await decision();
     expect(await runDecisionReceiptSignSweep(db)).toEqual({ signed: 0, state: "no_key" });
     expect((await get("/v1/receipts/status")).json()).toMatchObject({ state: "no_key", lastSeq: 0, lagRows: 1 });

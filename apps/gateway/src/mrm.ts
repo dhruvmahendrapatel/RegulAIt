@@ -87,6 +87,7 @@ import {
   type MrmGateDecision,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { summarizeGroundedness } from "./evals.js";
 import { pinnedVersionProblem } from "@regulait/shared";
@@ -374,6 +375,8 @@ export async function applyModelCardApprovalDecision(
   approvalRow: { id: string; decisionReason: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
+  /** ADR-0189 R25: an approval pushes the AI BOM sign-off it owes; the decide path runs it after commit */
+  aiBomSignoffs: AiBomSignoff[],
 ): Promise<void> {
   // ADR-0109 (migration 0108): `model_card_approvals_approval_uq` UNIQUE
   // (approval_id) WHERE approval_id IS NOT NULL makes this single-row. ADR-0107
@@ -424,11 +427,27 @@ export async function applyModelCardApprovalDecision(
       );
   }
 
+  // ADR-0189 R25: the approved branch owes a snapshot of the card's agent (or
+  // every agent on its custom provider), the use cases that list them and the
+  // builder agents that run on them. With no signing key under the strict
+  // default this throws 409 and the whole decision rolls back.
+  const prepared =
+    decision === "approved" && cardRow
+      ? await prepareAiBomSignoff(tx, {
+          trigger: "model_card_approval",
+          triggeringObjectId: updated.cardId,
+          actorUserId: deciderUserId,
+          subjects: await modelCardSignoffSubjects(tx, cardRow),
+        })
+      : null;
+  if (prepared?.signoff) aiBomSignoffs.push(prepared.signoff);
+
   await tx.insert(auditLog).values({
     userId: deciderUserId,
     objectType: "model_card",
     objectId: updated.cardId,
     detail: {
+      ...(prepared?.auditDetail ?? {}),
       phase: "sign_off",
       modelCardApprovalId: updated.id,
       approvalId: approvalRow.id,
@@ -1013,56 +1032,76 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
         .where(and(eq(modelCardEvidence.cardId, id), eq(modelCardEvidence.evalRunId, body.evalRunId!)));
       if (dupe) return reply.status(409).send({ error: "evidence_already_attached" });
     }
-    // PR #212 review [4234946093]: the read above is a fast path; the unique index decides a race
-    const inserted = await db
-      .insert(modelCardEvidence)
-      .values({
-        cardId: id,
-        kind: body.kind,
-        evalRunId: body.kind === "eval_run" ? body.evalRunId! : null,
-        externalRef: body.kind === "external" ? body.externalRef! : null,
-        artifactScanId: body.kind === "engine_scan" ? body.artifactScanId! : null,
-        label: body.label ?? null,
-        note: body.note ?? null,
-        attachedByUserId: req.authCtx.userId ?? null,
-      })
-      .returning()
-      .then(
-        (rows) => rows,
-        (e: { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } }) => {
-          const code = e?.code ?? e?.cause?.code;
-          const name = e?.constraint ?? e?.cause?.constraint;
-          if (code === "23505" && name === "model_card_evidence_card_scan_unique") return null;
-          throw e;
+    // ADR-0189 R25: the attach, its audit row and the AI BOM sign-off it owes
+    // (every evidence kind counts, item 3) commit together. With no signing key
+    // under the strict default the attach is refused (409) and nothing is saved.
+    const attached = await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Db;
+      // PR #212 review [4234946093]: the read above is a fast path; the unique index decides a race.
+      // A savepoint, so a lost race leaves the transaction usable.
+      const inserted = await tx
+        .transaction((sp) =>
+          sp
+            .insert(modelCardEvidence)
+            .values({
+              cardId: id,
+              kind: body.kind,
+              evalRunId: body.kind === "eval_run" ? body.evalRunId! : null,
+              externalRef: body.kind === "external" ? body.externalRef! : null,
+              artifactScanId: body.kind === "engine_scan" ? body.artifactScanId! : null,
+              label: body.label ?? null,
+              note: body.note ?? null,
+              attachedByUserId: req.authCtx.userId ?? null,
+            })
+            .returning(),
+        )
+        .then(
+          (rows) => rows,
+          (e: { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } }) => {
+            const code = e?.code ?? e?.cause?.code;
+            const name = e?.constraint ?? e?.cause?.constraint;
+            if (code === "23505" && name === "model_card_evidence_card_scan_unique") return null;
+            throw e;
+          },
+        );
+      if (inserted === null) return null;
+      const [row] = inserted;
+      const prepared = await prepareAiBomSignoff(tx, {
+        trigger: "evidence_attached",
+        triggeringObjectId: id,
+        actorUserId: req.authCtx.userId ?? null,
+        subjects: await modelCardSignoffSubjects(tx, card),
+      });
+      await tx.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "model_card",
+        objectId: id,
+        detail: {
+          ...prepared.auditDetail,
+          phase: "evidence",
+          action: "attached",
+          evidenceId: row!.id,
+          kind: row!.kind,
+          evalRunId: row!.evalRunId,
+          externalRef: row!.externalRef,
+          artifactScanId: row!.artifactScanId,
+          ...(scan ? { artifactScanVerdict: scan.verdict, artifactSha256: scan.artifactSha256 } : {}),
         },
-      );
-    if (inserted === null) return reply.status(409).send({ error: "evidence_already_attached" });
-    const [row] = inserted;
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "model_card",
-      objectId: id,
-      detail: {
-        phase: "evidence",
-        action: "attached",
-        evidenceId: row!.id,
-        kind: row!.kind,
-        evalRunId: row!.evalRunId,
-        externalRef: row!.externalRef,
-        artifactScanId: row!.artifactScanId,
-        ...(scan ? { artifactScanVerdict: scan.verdict, artifactSha256: scan.artifactSha256 } : {}),
-      },
-      effect: "allow",
-      ruleId: "mrm-evidence-attached",
-      ruleChain: [],
-      reason:
-        row!.kind === "eval_run"
-          ? "an ADR-0044 eval run was attached as measured evidence behind this risk position"
-          : row!.kind === "engine_scan"
-            ? `a model-artifact scan was attached as evidence behind this risk position (${scan ? ARTIFACT_SCAN_CHIP[scan.verdict as keyof typeof ARTIFACT_SCAN_CHIP] : "scan"})`
-            : "an external report was referenced as evidence behind this risk position",
+        effect: "allow",
+        ruleId: "mrm-evidence-attached",
+        ruleChain: [],
+        reason:
+          row!.kind === "eval_run"
+            ? "an ADR-0044 eval run was attached as measured evidence behind this risk position"
+            : row!.kind === "engine_scan"
+              ? `a model-artifact scan was attached as evidence behind this risk position (${scan ? ARTIFACT_SCAN_CHIP[scan.verdict as keyof typeof ARTIFACT_SCAN_CHIP] : "scan"})`
+              : "an external report was referenced as evidence behind this risk position",
+      });
+      return { row: row!, signoff: prepared.signoff };
     });
-    return reply.status(201).send({ evidence: row });
+    if (attached === null) return reply.status(409).send({ error: "evidence_already_attached" });
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [attached.signoff], req.log);
+    return reply.status(201).send({ evidence: attached.row, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 
   app.delete("/v1/mrm/cards/:id/evidence/:evidenceId", async (req, reply) => {

@@ -640,8 +640,17 @@ export interface WorkflowRouteOptions {
    * abort — so a dependent object (the AI use-case registry) can mirror the
    * instance's status. The DECIDE path is covered separately inside the one
    * approvals transaction in app.ts; this hook exists because those three
-   * routes live here and app.ts composes the modules (no import cycle). */
-  onInstanceTransition?: (db: Db, instanceId: string, actorUserId: string | null) => Promise<void>;
+   * routes live here and app.ts composes the modules (no import cycle).
+   * ADR-0189 R25: it may return extra response fields (an AI BOM snapshot
+   * warning), which each route adds to its answer. */
+  onInstanceTransition?: (db: Db, instanceId: string, actorUserId: string | null) => Promise<Record<string, unknown> | undefined | void>;
+  /** ADR-0189 R25 item 6: run INSIDE the transition's transaction, after the
+   * transition is applied and before anything commits (artifact submit,
+   * advance). A dependent object refuses a move it could not complete — an
+   * approval whose signed AI BOM snapshot cannot be taken — by throwing (the
+   * global handler answers its status); the transition, the artifact row and
+   * every git effect then never happen. */
+  assertTransitionAllowed?: (tx: DbOrTx, instanceId: string) => Promise<void>;
   /** ADR-0171 / AER-053: a pre-check on an artifact submission, run BEFORE
    * anything is stored or transitioned. A dependent object refuses content it
    * can name a reason for (the use-case questionnaire's inconsistent "Not
@@ -2806,8 +2815,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // and a compare-and-swap keeps a racing pair to one move), so running it
     // on every replay is safe.
     const replayed = async (body: Record<string, unknown>) => {
-      await opts.onInstanceTransition?.(db, instance.id, actorUserId);
-      return reply.status(200).header("Idempotent-Replay", "true").send({ ...body, status: await currentStatus() });
+      const extra = await opts.onInstanceTransition?.(db, instance.id, actorUserId);
+      return reply.status(200).header("Idempotent-Replay", "true").send({ ...body, ...(extra ?? {}), status: await currentStatus() });
     };
     if (claim) {
       const prior = await idempotentReplay(db, claim);
@@ -2829,6 +2838,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         { deferSpan: true },
       );
       const version = state.artifactVersions[stage.output!]!;
+      // ADR-0189 R25: refused here, nothing of this submission commits
+      await opts.assertTransitionAllowed?.(tx, instance.id);
       // The artifact row must exist BEFORE any git stage runs — an open_pr
       // directly downstream links this very version into the PR body.
       await tx.insert(workflowArtifacts).values({
@@ -2856,8 +2867,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     }
     await recordDeferredSpan(db, written.deferredSpan);
     await runGitExecutions(db, instance.id, written.effects, actorUserId, opts.dataKey);
-    await opts.onInstanceTransition?.(db, instance.id, actorUserId);
-    return reply.status(201).send({ version: written.version, status: await currentStatus() });
+    const extra = await opts.onInstanceTransition?.(db, instance.id, actorUserId);
+    return reply.status(201).send({ ...(extra ?? {}), version: written.version, status: await currentStatus() });
   });
 
   app.post("/v1/workflows/instances/:instanceId/advance", async (req, reply) => {
@@ -2887,20 +2898,23 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         opts.dataKey,
       );
     } else {
-      const r = await applyEvent(
-        db,
-        loaded.instance.id,
-        { kind: "human_trigger", stageId: body.stageId },
-        req.authCtx.userId,
-      );
+      // ADR-0189 R25: the transition and the dependent-object check share one
+      // transaction, so a refused approval (409) leaves the instance where it was
+      const actorUserId = req.authCtx.userId;
+      const r = await inTransaction(db, async (tx) => {
+        const applied = await applyEvent(tx, loaded.instance.id, { kind: "human_trigger", stageId: body.stageId }, actorUserId, undefined, undefined, { deferSpan: true });
+        await opts.assertTransitionAllowed?.(tx, loaded.instance.id);
+        return applied;
+      });
+      await recordDeferredSpan(db, r.deferredSpan);
       await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     }
-    await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
+    const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, loaded.instance.id));
-    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+    return { ...(extra ?? {}), status: fresh!.status, state: fresh!.state, context: fresh!.context };
   });
 
   // §2 report per-check results into an automated_check stage. A real CI posts
@@ -3201,8 +3215,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const { state } = await applyEvent(db, loaded.instance.id, { kind: "abort" }, req.authCtx.userId);
-    await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
-    return { status: state.status };
+    const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
+    return { ...(extra ?? {}), status: state.status };
   });
 
   // §5 dashboard: one instance in full…

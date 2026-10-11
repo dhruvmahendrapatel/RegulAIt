@@ -165,6 +165,8 @@ import { registerPolicySimulationRoutes } from "./policy-simulation.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
+import { AiBomError } from "./ai-bom.js";
+import { runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
@@ -406,6 +408,7 @@ import {
   precheckRiskAcceptance,
   registerUseCaseRoutes,
   syncUseCaseForInstance,
+  assertUseCaseSignoffPossibleForInstance,
   useCaseArtifactRefusal,
   useCaseForIntakeApproval,
 } from "./use-cases.js";
@@ -875,6 +878,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     if (err instanceof ExternalEffectBlockedError) {
       return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
+    }
+    // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be
+    // signed (409 bom_signing_unavailable); its transaction has already rolled back
+    if (err instanceof AiBomError) {
+      return reply.status(err.status).send({ ...(err.extra ?? {}), error: err.code, detail: err.message });
     }
     const pgCode = (err as { cause?: { code?: string } }).cause?.code;
     if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
@@ -4002,7 +4010,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
    * a future change adds a check here, bulk inherits it for free; there is no
    * second place to remember.
    */
-  async function decideOneApproval(input: {
+  /**
+   * ADR-0189 R25 item 6: a decision refused because its sign-off cannot take its
+   * signed AI BOM snapshot (409 `bom_signing_unavailable`, or 503 for an unusable
+   * key) throws `AiBomError` from inside the decision's transaction, which has
+   * rolled back. Every channel gets that refusal as an ordinary `{ ok: false }`
+   * outcome rather than an exception: a bulk decision keeps deciding the other
+   * items, and a chat decision writes its refusal audit row.
+   */
+  async function decideOneApproval(input: Parameters<typeof decideOneApprovalUnguarded>[0]): ReturnType<typeof decideOneApprovalUnguarded> {
+    try {
+      return await decideOneApprovalUnguarded(input);
+    } catch (err) {
+      if (!(err instanceof AiBomError)) throw err;
+      return { ok: false as const, status: err.status, body: { ...(err.extra ?? {}), error: err.code, detail: err.message } };
+    }
+  }
+
+  async function decideOneApprovalUnguarded(input: {
     approvalId: string;
     deciderUserId: string | null;
     isAdmin: boolean;
@@ -4035,7 +4060,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         // ADR-0170 §8: this sync runs BEFORE the caller is authorized, so
         // what it writes is attributed to the system (null), never to a
         // caller who may yet be refused.
-        await syncUseCaseForInstance(db, row.instanceId, null);
+        // ADR-0189 R25: this sync committed on its own, so any sign-off it owes runs now
+        await runAiBomSignoffs(db, [await syncUseCaseForInstance(db, row.instanceId, null)], app.log);
         [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
         if (!row) return fail(404, { error: "unknown_approval" });
       }
@@ -4348,7 +4374,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         if (already) {
           return {
             updated: null,
-            postCommit: null,
+            postCommit: [],
+            aiBomSignoffs: [],
             refusal: {
               error: "reviewer_already_decided_round",
               detail: `you already decided the ${already.reviewRoleName ?? "other"} review in this round; each required review must be decided by a different person`,
@@ -4370,7 +4397,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         })
         .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
         .returning();
-      if (!updated) return { updated: null, postCommit: null, refusal: null };
+      if (!updated) return { updated: null, postCommit: [], aiBomSignoffs: [], refusal: null };
       if (adminOverride) {
         await tx.insert(auditLog).values({
           userId: deciderUserId,
@@ -4437,7 +4464,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           reason: `decided on behalf of the named approver under an active delegation${delegation.reason ? ` (${delegation.reason})` : ""}`,
         });
       }
-      let postCommit: ((d: Db) => Promise<void>) | null = null;
+      // Post-commit steps, IN ORDER, each run once the decision is durable. A list, so
+      // one hook's step never overwrites another's (ADR-0189 R25 item 5).
+      const postCommit: Array<(d: Db) => Promise<void>> = [];
+      const addPostCommit = (step: ((d: Db) => Promise<void>) | null | undefined) => {
+        if (step) postCommit.push(step);
+      };
+      // ADR-0189 R25: the AI BOM snapshots this decision's sign-offs owe, taken after commit
+      const aiBomSignoffs: AiBomSignoff[] = [];
       // Workflow sign-offs advance their instance through the same one inbox (§5).
       if (updated.objectType === "workflow") {
         // ADR-0168 amendment: each role of a review round is ONE REQUIRED
@@ -4463,9 +4497,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             );
           holdForSiblings = siblings.length > 0;
         }
-        postCommit = holdForSiblings
+        addPostCommit(holdForSiblings
           ? null
-          : await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+          : await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey));
         // ADR-0080: if this instance governs an AI use case, its terminal
         // decision flips the use case (completed -> approved, denied ->
         // rejected) HERE, inside the decision's own transaction — so
@@ -4482,7 +4516,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             deciderUserId,
           );
         }
-        await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
+        const useCaseSignoff = await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
+        if (useCaseSignoff) aiBomSignoffs.push(useCaseSignoff);
         // ADR-0168: conditions commit or roll back WITH the approval.
         // ADR-0180 A2: a measured condition carries its metric spec (stored
         // kind `metric`/`test_class`/`autonomy_floor`); with no due date it is
@@ -4536,7 +4571,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       // Orchestration escalations (§3): approve = another attempt, deny = abort.
       if (updated.objectType === "run") {
-        postCommit = await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey);
+        addPostCommit(await applyRunApprovalDecision(tx, updated, binaryDecision, deciderUserId, opts.dataKey));
       }
       // ADR-0173 §1 / batch 2b: the builder resume after an MCP tool or
       // connector-write approval now runs in the tool-call branch above
@@ -4561,6 +4596,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           updated,
           binaryDecision,
           deciderUserId,
+          aiBomSignoffs,
         );
       }
       // ADR-0065 RegulAIt-LLM: an over-threshold training job. Same reasoning
@@ -4576,15 +4612,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // queued for a runner, denied = not_run (a workflow-bound run then fails
       // its check, post-commit).
       if (updated.objectType === "engine_run") {
-        postCommit = await applyEngineRunApprovalDecision(tx as unknown as Parameters<typeof applyEngineRunApprovalDecision>[0], updated, binaryDecision, deciderUserId);
+        addPostCommit(await applyEngineRunApprovalDecision(tx as unknown as Parameters<typeof applyEngineRunApprovalDecision>[0], updated, binaryDecision, deciderUserId));
       }
       if (updated.objectType === "training_job") {
-        postCommit = await applyTrainingJobApprovalDecision(
+        addPostCommit(await applyTrainingJobApprovalDecision(
           tx as unknown as Db,
           updated,
           binaryDecision,
           deciderUserId,
-        );
+        ));
       }
       // ADR-0090 grant certification: approved = keep (attested), denied =
       // revoke — and the revoke EXECUTES the same per-kind grant removal the
@@ -4613,9 +4649,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "remediation") {
         const applied = await applyRemediationDecision(tx as unknown as Db, updated, binaryDecision, deciderUserId);
         if (applied) {
-          postCommit = async (d: Db) => {
+          addPostCommit(async (d: Db) => {
             await runGovernanceMonitor(d, { actorUserId: deciderUserId });
-          };
+          });
         }
       }
       // ADR-0173 batch 2b — a prompt promotion: approved = the tag moves HERE,
@@ -4623,15 +4659,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // (prompt, tag, commit hash) binding still matches; denied = nothing
       // moves. Post-commit: the webhook deliveries it enqueued are kicked.
       if (updated.objectType === "prompt_promotion") {
-        postCommit = await applyPromptPromotionDecision(
+        addPostCommit(await applyPromptPromotionDecision(
           tx as unknown as Db,
           updated,
           binaryDecision,
           deciderUserId,
           opts.dataKey,
-        );
+          aiBomSignoffs,
+        ));
       }
-      return { updated, postCommit, refusal: null };
+      return { updated, postCommit, aiBomSignoffs, refusal: null };
     }).catch((err: unknown) => {
       // review follow-up: an SoD override whose role went away after the precheck rolls the decision back
       if (err instanceof RoleNotFoundError) return err;
@@ -4661,13 +4698,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // the response (and the execution machinery's own failure events), never
     // as a failed decide.
     let executionError: string | null = null;
-    if (outcome.postCommit) {
+    for (const step of outcome.postCommit) {
       try {
-        await outcome.postCommit(db);
+        await step(db);
       } catch (err) {
-        executionError = err instanceof Error ? err.message : String(err);
+        executionError ??= err instanceof Error ? err.message : String(err);
       }
     }
+    // ADR-0189 R25 items 5 and 7: the owed AI BOM snapshots, after commit; a failure
+    // is audited and surfaces as a warning, never as a failed decide
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, outcome.aiBomSignoffs, app.log);
     // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
     // never a second decision point; a mirror failure never unwinds the
     // decision, it is surfaced in the response.
@@ -4681,6 +4721,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ...(selfReview ? { selfReview: true } : {}),
       ...(pmMirror ? { pmMirror } : {}),
       ...(executionError ? { executionError } : {}),
+      ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
       },
     };
   }
@@ -5053,9 +5094,38 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // rejected); mirror both. The decide path is handled inside the one
     // approvals transaction above.
     onInstanceTransition: async (d, instanceId, actorUserId) => {
-      await syncUseCaseForInstance(d, instanceId, actorUserId);
+      // ADR-0189 R25: a use-case approval that cannot take its signed snapshot is
+      // refused inside its own sync transaction (the routes refuse it earlier,
+      // through `assertTransitionAllowed`; this covers a move made some other way,
+      // such as a git stage completing the instance). The instance has already
+      // moved, so the refusal is reported, not thrown: the vendor mirror still runs
+      // and the caller learns the use case stayed behind its instance.
+      let useCaseSignoff: AiBomSignoff | null = null;
+      let useCaseSignoffRefused: { code: string; detail: string } | null = null;
+      try {
+        useCaseSignoff = await syncUseCaseForInstance(d, instanceId, actorUserId);
+      } catch (err) {
+        if (!(err instanceof AiBomError)) throw err;
+        app.log.warn({ instanceId, code: err.code }, "use-case approval refused: its AI BOM snapshot cannot be signed");
+        useCaseSignoffRefused = {
+          code: err.code,
+          detail:
+            `${err.message} The workflow instance has moved, but its AI use case was not approved; it stays where it was ` +
+            "until a receipt signing key is configured and the instance is driven again (the mirror is idempotent).",
+        };
+      }
       await syncVendorForInstance(d, instanceId, actorUserId);
+      // ADR-0189 R25: the routes call this after their own commit, so the snapshot runs here
+      const aiBomSnapshotWarning = await runAiBomSignoffs(d, [useCaseSignoff], app.log);
+      const extra = {
+        ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
+        ...(useCaseSignoffRefused ? { useCaseSignoffWarning: useCaseSignoffRefused } : {}),
+      };
+      return Object.keys(extra).length ? extra : undefined;
     },
+    // ADR-0189 R25 item 6: a submission or advance that would approve a use case
+    // whose snapshot cannot be signed is refused 409 before anything commits
+    assertTransitionAllowed: (tx, instanceId) => assertUseCaseSignoffPossibleForInstance(tx as unknown as Db, instanceId),
     // ADR-0171 / AER-053: an intake questionnaire with an inconsistent
     // "Not sure" answer is refused before it is stored
     validateArtifact: useCaseArtifactRefusal,

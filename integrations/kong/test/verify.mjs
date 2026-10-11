@@ -43,7 +43,7 @@
  * by DIGEST (AER-034) and logs the digests the job ran against.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -133,6 +133,7 @@ const created = {
   boot: null,
   scratchDir: null,
   secretDir: null,
+  receiptKeyDir: null,
 };
 
 /**
@@ -366,8 +367,25 @@ async function main() {
   execFileSync("psql", [`${PG}/postgres`, "-v", "ON_ERROR_STOP=1", "-c",
     `COMMENT ON DATABASE ${DB} IS '${DB_MARK}'`], { stdio: "pipe" });
 
+  // ADR-0189 R25: under the strict defaults every sign-off the demo seed makes (an
+  // agent config edit, a model-card approval, an admission) takes a signed AI BOM
+  // snapshot and is REFUSED 409 `bom_signing_unavailable` while no receipt signing
+  // key is configured. A deployment holds that key (ADR-0116), so this run's
+  // gateway does too: an ephemeral, TEST-ONLY Ed25519 key made here, outside the
+  // source tree, and removed at teardown — unless the caller set one.
+  const receiptKey = {};
+  if (!process.env.REGULAIT_RECEIPT_SIGNING_KEY && !process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID) {
+    beforeCreating("the receipt signing key");
+    const keyDir = mkdtempSync(path.join(tmpdir(), `kong-e2e-receipt-${RUN_ID}-`));
+    created.receiptKeyDir = keyDir;
+    const file = path.join(keyDir, "receipt.pem");
+    writeFileSync(file, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+    receiptKey.REGULAIT_RECEIPT_SIGNING_KEY = file;
+    receiptKey.REGULAIT_RECEIPT_SIGNING_KEY_ID = `kong-e2e-receipt-${RUN_ID}`;
+  }
   const env = {
     ...process.env,
+    ...receiptKey,
     DATABASE_URL: `${PG}/${DB}`,
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
     REGULAIT_DATA_KEY: DATA_KEY,
@@ -1401,7 +1419,7 @@ async function teardown(why) {
   gateway?.kill("SIGKILL");
   upstream?.kill("SIGKILL");
   // 4. the scratch and key directories
-  for (const d of [created.scratchDir, created.secretDir]) {
+  for (const d of [created.scratchDir, created.secretDir, created.receiptKeyDir]) {
     if (!d) continue;
     try {
       rmSync(d, { recursive: true, force: true });
