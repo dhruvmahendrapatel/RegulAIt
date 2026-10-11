@@ -21,6 +21,16 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-11 (evening) - stranded use cases can be recovered.** PR #355 adds an admin re-sync for a use case whose
+workflow instance completed while no receipt key was usable.
+- **Route:** `POST /v1/use-cases/:id/resync`, also offered as a Re-sync action on the Posture page. It needs an admin and an
+  `approval_decide` step-up.
+- **Decider:** the original approver, or the person who completed the instance. A pure system completion is never credited.
+- **Refusals:** an edit after completion or a changed EU tier is refused. Every refusal is audited.
+- **Posture:** `useCases.instanceCompletedNotApproved`.
+- **Workflow routes:** deploy-override, `/recheck` and `/checks` now sync the use case.
+- **Next:** stop stranding at its source. Branch `signoff-lookahead` checks before any executor effect.
+
 **2026-10-11 (afternoon) - R25 sign-off snapshots live; receipt keys are generated at install.**
 - **PR #352** wires ADR-0189 R25. Approved sign-offs take a signed AI BOM snapshot after commit, and that covers:
   - use-case approval;
