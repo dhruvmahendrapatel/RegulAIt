@@ -59,7 +59,7 @@ import {
   runGuardrails,
   type DispatchGuardrails,
 } from "./guardrails.js";
-import { approvalTargetForServer, decisionPolicyStillCurrent, governedEvaluate, policyChangedDecision, type RetiredApproval } from "./governed-evaluate.js";
+import { approvalTargetForServer, auditPolicyChangedRefusal, decisionPolicyStillCurrent, governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
 import { decodeMcpBlobs, prepareMcpPiiAction, redactMcpResult, scannableMcpText } from "./mcp-pii.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import {
@@ -1005,7 +1005,17 @@ async function executeGovernedToolCallInner(
       });
       return true;
     });
-    if (!recorded) return { kind: "denied", decision: policyChangedDecision() };
+    if (!recorded) {
+      // the refused transaction wrote nothing: the refusal's own row, committed on its own (review follow-up)
+      const refusal = await auditPolicyChangedRefusal(db, {
+        userId,
+        serverId,
+        toolName,
+        decidedPolicyEpoch: policyEpoch,
+        detail: { ...(args.detail ?? {}), projectId, target: auditTarget(serverRow) },
+      });
+      return { kind: "denied", decision: refusal };
+    }
 
     if (decision.effect === "deny") return { kind: "denied", decision };
 

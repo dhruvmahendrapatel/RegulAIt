@@ -1846,7 +1846,10 @@ at 74e533e returned fix-then-merge, rechecks were run at 4d9b5ea and e1c45f6, an
    canonicalise and hash differently. B2 writes `inputs: null`. A path never writes `[]` for a list it did not record.
 4. **Policy facts by path (§4).** The MCP tool, MCP protocol and connector paths record the policy epoch and the
    kill-switch state from one locked read in the decision transaction. If the epoch or the kill switch moved after
-   evaluation, the call is refused `governance-policy-changed` and nothing is written. Every other decision writer
+   evaluation, the call is refused `governance-policy-changed`: nothing is written under the stale epoch, and the
+   refusal records its own deny decision row afterwards (`receiptClass: "decision"`, with its facts and marker, and
+   `policy: null` because no policy was in force for it; the stale epoch is kept as `decidedPolicyEpoch`, PR #343).
+   Every other decision writer
    records `policy` as not captured by path (`not_captured_by_path`, as the contract allows). ABAC, config and rule-id
    versions are not yet recorded on any path.
 5. **"Kill switch engaged" means halted.** It is true only when the deployment or the decision's subject is halted.

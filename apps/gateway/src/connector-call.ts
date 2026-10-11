@@ -84,7 +84,7 @@ import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { signatureRecheckDenial, spendBoundApproval, supersedeStaleConsent } from "./mcp-proxy.js";
 import { auditQuorumUnsatisfiableAtQueue, reusePendingToolApproval, toolApprovalRequirements } from "./approval-signatures.js";
 import { loadOrgSettings } from "./org-settings.js";
-import type { RetiredApproval } from "./governed-evaluate.js";
+import { auditPolicyChangedRefusal, runDecisionRecheckHookForTest, type RetiredApproval } from "./governed-evaluate.js";
 import {
   flattenFindings,
   guardrailOutcome,
@@ -506,6 +506,7 @@ export async function executeGovernedConnectorCall(
 
     // Order evidence containing routing identity against policy activation.
     const audited = await db.transaction(async (tx) => {
+      await runDecisionRecheckHookForTest();
       const [current] = await tx.select().from(governancePolicyEpoch).for("share");
       if (!admissionGeneration || current?.epoch !== admissionGeneration.epoch) return false;
       await tx.insert(auditLog).values({
@@ -539,7 +540,18 @@ export async function executeGovernedConnectorCall(
       });
       return true;
     });
-    if (!audited) { policyChanged = true; return out.status(409).send(policyChangedBody()); }
+    if (!audited) {
+      // the refused transaction wrote nothing: the refusal's own row, committed on its own (review follow-up)
+      await auditPolicyChangedRefusal(db, {
+        userId,
+        objectType: "connector",
+        objectId: connectorId,
+        decidedPolicyEpoch: admissionGeneration?.epoch ?? null,
+        detail: { operation: body.operation, ...(body.object ? { object: body.object } : {}), projectId: projectId ?? null, ...(args.detail ?? {}) },
+      });
+      policyChanged = true;
+      return out.status(409).send(policyChangedBody());
+    }
 
     // A DENIED call bills nothing and executes nothing (mirror the model path).
     if (decision.effect === "deny") {

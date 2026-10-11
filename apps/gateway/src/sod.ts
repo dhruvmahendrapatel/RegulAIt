@@ -92,7 +92,7 @@ import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { MODEL_PROVIDER_KINDS } from "@regulait/model-provider";
 import { z } from "zod";
 import { buildAgentHolderIndex } from "./inventory.js";
-import { lockRoleForGrantInsert } from "./workload-identity-admin.js";
+import { auditRoleNotFound, lockRoleOrRefuse, RoleNotFoundError, roleNotFoundBody } from "./workload-identity-admin.js";
 
 /** the `approvals.stageId` sentinel carrying the override-request id — the
  * same slot the model-card / infra / grant-cert rows use, because riding the
@@ -916,6 +916,16 @@ export async function precheckSodOverrideDecision(
     };
   }
   if (decision === "approved") {
+    // review follow-up: a role-grant override whose role is gone is refused by name, audited, before anything
+    // is written (`executeOverriddenMint` refuses the same way if the role goes between here and the mint)
+    const roleId = (request.mintPayload as { roleId?: unknown } | null)?.roleId;
+    if (request.mintKind.startsWith("role_") && request.mintKind !== "role_assignment" && typeof roleId === "string") {
+      const [role] = await db.select({ id: roles.id }).from(roles).where(eq(roles.id, roleId));
+      if (!role) {
+        await auditRoleNotFound(db, { actorUserId: deciderUserId, roleId, via: "sod-override-decide", detail: { approvalId: approval.id, overrideRequestId: request.id, mintKind: request.mintKind } });
+        return { status: 404, body: roleNotFoundBody(roleId) };
+      }
+    }
     const mint = mintFromPayload(request.mintKind, request.mintPayload);
     const conflict = await checkSodMint(db, mint, { excludeRuleId: request.ruleId });
     if (conflict) {
@@ -930,9 +940,16 @@ export async function precheckSodOverrideDecision(
         },
       };
     }
+    if (sodOverrideTestHooks.afterApprovePrecheck) await sodOverrideTestHooks.afterApprovePrecheck();
   }
   return null;
 }
+
+/**
+ * Test-only pause point: runs once an approve has passed its precheck, before the decision's transaction (the
+ * route test deletes the role here to reach the in-transaction refusal). Unset in production.
+ */
+export const sodOverrideTestHooks: { afterApprovePrecheck?: (() => Promise<void>) | undefined } = {};
 
 /** the per-kind execution of an approved override — the same INSERT the
  * refused endpoint would have run, now with the override recorded */
@@ -952,7 +969,9 @@ async function executeOverriddenMint(
   // PR #339 review: a role-grant insert takes the role's row FOR NO KEY UPDATE first, serialized with the
   // workload-identity steward check (see `lockRoleForGrantInsert`)
   if (kind === "role_agent" || kind === "role_connector" || kind === "role_tool" || kind === "role_server") {
-    await lockRoleForGrantInsert(tx, body.roleId as string);
+    // review follow-up: a missing role is refused by name (RoleNotFoundError rolls the decision back, and the
+    // decide route answers 404 role_not_found, audited), not by the role-grant table's foreign key
+    await lockRoleOrRefuse(tx, body.roleId as string);
   }
   switch (kind) {
     case "agent":
@@ -1061,7 +1080,13 @@ export async function applySodOverrideDecision(
     .where(eq(sodOverrideRequests.approvalId, approval.id));
   if (!request || request.status !== "pending") return;
   const approved = decision === "approved";
-  const mintDetail = approved ? await executeOverriddenMint(tx, request.mintKind, request.mintPayload) : null;
+  const mintDetail = approved
+    ? await executeOverriddenMint(tx, request.mintKind, request.mintPayload).catch((err: unknown) => {
+        // the refusal's audit row (written by the decide route after rollback) names the request, as the precheck's does
+        if (err instanceof RoleNotFoundError) err.context = { overrideRequestId: request.id, mintKind: request.mintKind };
+        throw err;
+      })
+    : null;
   await tx
     .update(sodOverrideRequests)
     .set({
