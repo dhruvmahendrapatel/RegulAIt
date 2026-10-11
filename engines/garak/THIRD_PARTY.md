@@ -34,6 +34,29 @@ build log.
   `nltk>=3.10.3`, so a fixed release can be taken by bumping the pin and its hash here, with no change to garak.
 Re-check all three at each garak or nltk release.
 
+**Re-checked 2026-10-11 for Dependabot PR #347 (datasets 3.6.0 to 5.0.1, fsspec 2025.3.0 to 2026.6.0), which is
+superseded, not merged.** The PR cannot build: garak 0.17.0 declares `datasets>=3.0.0,<4.0`, so `pip check` in the
+Dockerfile fails. Evidence for keeping the pins:
+- No fix inside garak's range: OSV lists GHSA-379c-qx7v-6h59 (CVE-2026-66007) as fixed only in datasets 5.0.1 and
+  GHSA-27vj-qcqg-25rc (CVE-2026-104851) as fixed only in fsspec 2026.6.0, and every datasets 3.x caps fsspec at or
+  below 2025.3.0.
+- No garak release allows them: 0.17.0 is still the latest on PyPI, and garak's development branch
+  (0.17.1.pre1) still declares `datasets>=3.0.0,<4.0`.
+- The gate reads the pins as decision 160 does: the pinned Trivy 0.74.0 over this `requirements.txt` reports datasets
+  as MEDIUM (severity source ghsa, so not gated), fsspec as HIGH (allow-listed), and nltk as HIGH with no fix (not
+  gated). `security-gate.mjs --kind trivy` passes with the current allow-list. An entry for the datasets advisory
+  would match no gated finding and fail the gate as stale, so it is recorded here and not in the allow-list.
+- The datasets flaw cannot be reached in this image. It needs a folder-based builder (imagefolder, audiofolder and
+  the like) that reads attacker-supplied `file_name` metadata, and the leaked file only leaves through `save_to_disk`
+  or `push_to_hub`. garak 0.17.0 calls `load_dataset` only in `detectors/packagehallucination`,
+  `probes/sysprompt_extraction`, `probes/audio` and `probes/goat`, and never calls `save_to_disk` or `push_to_hub`.
+  The only one that could use a folder-based builder is `audio.AudioAchillesHeel`, and it and `goat.GOATAttack` are
+  never planned (`excluded_licence`, `packages/shared/src/engines/garak.ts`). The two planned callers read the
+  pre-seeded TSV, JSON Lines and JSON files (the csv and json builders), each pinned by sha256, offline and
+  read-only.
+The Dependabot alerts for these two advisories should be dismissed as "no bump available" with a link to this
+section. The fix path is unchanged: pin the first garak release that allows datasets 5.x.
+
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | `garak` (PyPI, github.com/NVIDIA/garak) | `0.17.0` (released 2026-09-09; wheel sha256 `9a67e629…db145`, the hash R10 checked independently) | Apache-2.0 (`LICENSE`, SPDX headers; its METADATA names no licence) | The engine (ADR-0187 B5-G). Only the probes in the shared catalogue run (`packages/shared/src/engines/garak.ts`); 23 data paths whose licence or provenance is excluded are DELETED from the image (`excluded-data.txt`, decisions 145 and 197). Its probe metadata (`plugin_cache.json`, sha256 `25484e24…134a52`) is what the catalogue's detector and OWASP columns are generated from; the build refuses another. |
