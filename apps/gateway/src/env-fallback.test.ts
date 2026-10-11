@@ -95,6 +95,9 @@ async function invokeAnthropic(auth: { authorization: string }) {
 }
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   clearEnv();
   db = createDb(DATABASE_URL);
@@ -122,6 +125,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   // start from a known-clean anthropic platform slot (another suite may have left
   // its own; this file owns the anthropic 409/fallback story while it runs)
@@ -172,6 +176,11 @@ beforeEach(clearEnv);
 
 afterAll(async () => {
   await restoreSb1Posture?.();
+  // M-068: remove the loopback allow entry this file created
+  if (loopbackAllowHostId) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
+  }
   // leave the shared DB and the process env exactly as they were found
   await db.delete(userModelCredentials).where(eq(userModelCredentials.userId, userId));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));

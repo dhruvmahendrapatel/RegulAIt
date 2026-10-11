@@ -191,6 +191,9 @@ function markerIn(s: string | null | undefined): string | null {
 }
 
 let restoreSb1Posture: (() => Promise<void>) | undefined;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -204,7 +207,7 @@ beforeAll(async () => {
   upstream = await startUpstream();
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
-  await app.inject({
+  const egressAllowed = await app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -215,6 +218,8 @@ beforeAll(async () => {
       note: "f04 suite: local upstream MCP server",
     },
   });
+  expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   const u = await app.inject({
     method: "POST",
@@ -246,6 +251,11 @@ beforeAll(async () => {
 afterAll(async () => {
   await restoreStrictAdmission?.();
   await restoreSb1Posture?.();
+  // M-068: remove the loopback allow entry this file created
+  if (loopbackAllowHostId) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
+  }
   app.server.closeAllConnections();
   await restoreSb2Gates();
   await app.close();

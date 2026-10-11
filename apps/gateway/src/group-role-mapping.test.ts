@@ -453,6 +453,9 @@ const scimSetMembers = async (groupId: string, displayName: string, members: str
 
 // ---------------------------------------------------------------------------
 
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -476,6 +479,7 @@ beforeAll(async () => {
     },
   });
   expect([201, 409]).toContain(egress.statusCode);
+  if (egress.statusCode === 201) loopbackAllowHostId = egress.json().id;
 
   const server = await app.inject({
     method: "POST", headers: AUTH, url: "/v1/servers",
@@ -512,6 +516,11 @@ afterAll(async () => {
   await db.execute(sql`delete from oidc_providers where name like 'grm-%'`);
   await db.execute(sql`delete from saml_providers where name like 'grm-%'`);
   await removeLicenseFixture(db);
+  // M-068: remove the loopback allow entry this file created
+  if (loopbackAllowHostId && app) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
+  }
   await app?.close();
   await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
 });

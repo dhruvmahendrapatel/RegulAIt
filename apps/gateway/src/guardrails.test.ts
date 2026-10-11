@@ -273,6 +273,9 @@ async function startUpstream() {
 }
 
 let restoreDataPosture: () => Promise<void>;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -291,7 +294,7 @@ beforeAll(async () => {
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   gwUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
-  await app.inject({
+  const egressAllowed = await app.inject({
     method: "POST",
     url: "/v1/egress-allow-hosts",
     headers: AUTH,
@@ -302,6 +305,8 @@ beforeAll(async () => {
       note: "guardrail suite: local upstream MCP server",
     },
   });
+  expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   const u = await app.inject({
     method: "POST",
@@ -414,6 +419,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await restoreStrictAdmission?.();
+  // M-068: remove the loopback allow entry this file created
+  if (loopbackAllowHostId) {
+    const gone = await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${loopbackAllowHostId}` });
+    expect(gone.statusCode).toBe(200);
+  }
   // SHARED SINGLETON RESTORED. Every row this file wrote to guardrail_configs
   // goes, so a suite running after it sees the shipped default posture again
   // and cannot fail because of an org-wide `block` this file left behind.
