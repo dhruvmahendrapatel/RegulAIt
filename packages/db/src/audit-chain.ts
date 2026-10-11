@@ -77,6 +77,7 @@ import {
   type AuditChainFields,
 } from "@regulait/shared";
 import { auditLog } from "./schema.js";
+import { captureDecisionFacts } from "./decision-facts.js";
 
 /**
  * The advisory-lock key every append serializes on. A single global key,
@@ -185,6 +186,17 @@ export async function appendChainedAuditRows(
   returning?: unknown,
 ): Promise<unknown> {
   if (values.length === 0) return returning === undefined ? undefined : [];
+  // A handle that already chains (a transaction of another `createDb` handle) chains and captures on its
+  // own `insert(auditLog)`: hand the rows over ONCE rather than appending them here and again inside it,
+  // which would chain them twice and (ADR-0189 B2) capture the decision's facts twice.
+  if ((tx as unknown as Record<symbol, unknown>)[CHAINED]) {
+    const builder = tx.insert(auditLog).values(values) as unknown as Promise<unknown> & { returning: (sel?: unknown) => Promise<unknown> };
+    if (returning === undefined) {
+      await builder;
+      return undefined;
+    }
+    return returning === ALL_COLUMNS ? builder.returning() : builder.returning(returning);
+  }
 
   // Serialize at the tip. Everything from here to COMMIT is the critical
   // section; it is deliberately as short as possible.
@@ -269,9 +281,17 @@ export async function appendChainedAuditRows(
   };
   // `.returning()` with no argument means "every column", which is drizzle's
   // own signature; callers that ask for a projection get exactly that.
-  if (returning !== undefined) return returning === ALL_COLUMNS ? insert.returning() : insert.returning(returning);
-  await insert;
-  return undefined;
+  let out: unknown = undefined;
+  if (returning === undefined) await insert;
+  else out = await (returning === ALL_COLUMNS ? insert.returning() : insert.returning(returning));
+  // ADR-0189 B2 — every receipt-eligible row gets its capture-status marker and
+  // (capture on) its decision facts HERE: in the same transaction, still under
+  // the chain lock, from the row exactly as stored. This is the one shared
+  // writer every `receiptClass: "decision"` writer goes through; a rollback of
+  // the decision takes its facts with it, and migration 0189 refuses a decision
+  // row committed without its marker.
+  await captureDecisionFacts(tx as never, rows);
+  return out;
 }
 
 /**

@@ -79,7 +79,7 @@ import {
   type PiiHit,
 } from "@regulait/shared";
 import { ConnectorPolicyChangedError, prepareConnectorPiiAction } from "./connector-pii.js";
-import { loadExecutionDial, postureOf } from "./execution-posture.js";
+import { killSwitchState, loadExecutionDial, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js"; // ADR-0182 A14
 import { signatureRecheckDenial, spendBoundApproval, supersedeStaleConsent } from "./mcp-proxy.js";
 import { auditQuorumUnsatisfiableAtQueue, reusePendingToolApproval, toolApprovalRequirements } from "./approval-signatures.js";
@@ -525,6 +525,11 @@ export async function executeGovernedConnectorCall(
           // digests, whenever the write was under the dial's hold
           ...(binding ? { argumentsDigest: binding.argumentsDigest, approvalScope: "action", contextDigest: binding.contextDigest } : {}),
           ...(args.detail ?? {}),
+          // ADR-0189 B2: the approved queue row this decision relied on (R5), and the policy generation (checked
+          // equal to the current one in this transaction) and kill-switch state it was decided under (§4)
+          ...(binding?.approvedApprovalId ? { approvedApprovalId: binding.approvedApprovalId } : {}),
+          policyEpoch: admissionGeneration.epoch,
+          killSwitch: killSwitchState(postureOf(dial.mode, null)),
           receiptClass: "decision",
         },
         effect: decision.effect,

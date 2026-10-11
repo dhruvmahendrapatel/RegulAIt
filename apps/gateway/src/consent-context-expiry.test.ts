@@ -624,14 +624,23 @@ describe("F14 — atomicity", () => {
 
     // and however it resolved, the consent is no longer spendable: consumed by
     // the single winner, or superseded because the policy moved under it.
+    // ADR-0189 B2: or BOTH calls were refused at the decision commit because the
+    // epoch moved under them (`governance-policy-changed`), which runs before the
+    // consent is touched; then the consent is still `approved`, and the retry
+    // below must supersede it rather than spend it.
     const [after] = await db.select().from(approvals).where(eq(approvals.id, signed));
-    expect(["consumed", "superseded"]).toContain(after!.status);
+    const bothRefusedAtCommit = [a, b].every(
+      (r) => r.kind === "denied" && (r as { decision: { ruleId: string } }).decision.ruleId === "governance-policy-changed",
+    );
+    expect(bothRefusedAtCommit ? ["approved"] : ["consumed", "superseded"]).toContain(after!.status);
 
     // a fresh retry under the NEW policy can never spend it either
     const beforeToolRetry = upstreamHits.tool;
     const retry = await call(RACE, args);
     expect(retry.kind).not.toBe("allowed");
     expect(upstreamHits.tool).toBe(beforeToolRetry);
+    const [final] = await db.select().from(approvals).where(eq(approvals.id, signed));
+    expect(["consumed", "superseded"]).toContain(final!.status);
   });
 });
 

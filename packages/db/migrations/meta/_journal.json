@@ -1258,6 +1258,13 @@
     {
       "idx": 189,
       "version": "7",
+      "when": 1785124000000,
+      "tag": "0189_decision_fact_capture_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 190,
+      "version": "7",
       "when": 1785125000000,
       "tag": "0190_delegation_depth_limit_signed",
       "breakpoints": true

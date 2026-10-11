@@ -184,6 +184,15 @@ export function toolHaltOf(
 }
 
 /** Compose a dial reading and a resolved subject halt into one posture. */
+/**
+ * ADR-0189 B2 — the kill-switch fact a decision records (`policy.killSwitch`): `engaged` when the deployment is
+ * halted or the decided subject is halted; `off` otherwise. The safe modes (`read_only`, `require_approval`) are
+ * not the kill switch and read `off` here; the decision itself carries their effect.
+ */
+export function killSwitchState(posture: Pick<ExecutionPosture, "mode" | "subjectHalt">): "off" | "engaged" {
+  return posture.mode === "halted" || posture.subjectHalt ? "engaged" : "off";
+}
+
 export function postureOf(mode: ExecutionMode, halt: SubjectHalt | null): ExecutionPosture {
   return halt ? { mode, subjectHalt: halt } : { mode };
 }
