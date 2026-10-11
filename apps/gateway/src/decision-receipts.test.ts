@@ -95,6 +95,8 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     await decision();
     expect(await runDecisionReceiptSignSweep(db)).toEqual({ signed: 0, state: "no_key" });
     expect((await get("/v1/receipts/status")).json()).toMatchObject({ state: "no_key", lastSeq: 0, lagRows: 1 });
+    // ADR-0189 R25 item 12: the status names the key's source (no install secrets dir in the suite: missing)
+    if (!process.env.REGULAIT_INSTALL_SECRETS_DIR) expect((await get("/v1/receipts/status")).json().signingKey).toMatchObject({ state: "missing", keyId: null });
     await db.update(orgSettings).set({ decisionReceiptsMode: "off" });
     useKey("fixture-1");
     expect(await runDecisionReceiptSignSweep(db)).toEqual({ signed: 0, state: "off" });

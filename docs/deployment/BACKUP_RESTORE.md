@@ -83,6 +83,7 @@ You no longer have to *hope* the key you filed away is the right one.
 | --- | --- | --- |
 | **Postgres** (`regulait_pgdata`) | verified `pg_dump`, below | everything that matters |
 | **`<install-dir>/.env`** | copy to your secret store | holds the data key and the DB password |
+| **`regulait_install_secrets`** | copy the volume (`receipt-signing-key.pem`, mode 0600) to your secret store | the install-generated receipt signing key (ADR-0189 R25). Losing it is recoverable: the next boot makes a new key under a new key id, and receipts signed with the old one still verify against its recorded public key. An operator-managed key (`--receipt-key-file`) lives wherever you keep it. |
 | **Caddy's `regulait_caddy_data`** | optional | the ACME account key and issued certificates. Losing it re-issues, which is cheap but rate-limited (5 duplicate certs/week). Not worth engineering around; worth knowing. |
 
 Nothing else on the box is state. The install directory is configuration, and the application is

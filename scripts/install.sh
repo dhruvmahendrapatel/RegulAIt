@@ -100,6 +100,13 @@ Secrets
                                    first admin. Generated if absent.
   --db-password <pw>               Postgres password. Generated on a first
                                    install; preserved on every re-run.
+  --receipt-key-file <host path>   ADR-0189 R25: a receipt signing key YOU
+  --receipt-key-id <id>            manage (PKCS#8 Ed25519 PEM, readable by uid
+                                   1000) and its key id; both or neither.
+                                   Mounted read-only into the gateway and
+                                   preserved on every re-run. Omitted: the
+                                   install generates its own key (see
+                                   docs/deployment/INSTALL.md).
 
 Air-gapped
   --image-bundle <path.tar>        `docker load` this image bundle before
@@ -137,6 +144,10 @@ SAML_CLOCK_SKEW="${REGULAIT_SAML_CLOCK_SKEW_MINUTES-}"
 DATA_KEY="${REGULAIT_DATA_KEY:-}"
 ADMIN_TOKEN="${REGULAIT_BOOTSTRAP_TOKEN:-}"
 DB_PASSWORD="${REGULAIT_DB_PASSWORD:-}"
+# ADR-0189 R25 item 12: an operator-managed receipt key (host path + key id). Empty = install-generated.
+RECEIPT_KEY_FILE="${REGULAIT_RECEIPT_KEY_HOST_FILE:-}"
+RECEIPT_KEY_ID="${REGULAIT_RECEIPT_KEY_HOST_ID:-}"
+RECEIPT_KEY_CONTAINER_PATH="/run/secrets/regulait-receipt-signing-key"
 IMAGE_BUNDLE=""
 INSTALL_DIR=""
 CHECK_ONLY=0
@@ -164,6 +175,8 @@ while [ $# -gt 0 ]; do
     --data-key)      DATA_KEY="${2:-}"; shift 2 ;;
     --admin-token)   ADMIN_TOKEN="${2:-}"; shift 2 ;;
     --db-password)   DB_PASSWORD="${2:-}"; shift 2 ;;
+    --receipt-key-file) RECEIPT_KEY_FILE="${2:-}"; shift 2 ;;
+    --receipt-key-id)   RECEIPT_KEY_ID="${2:-}"; shift 2 ;;
     --image-bundle)  IMAGE_BUNDLE="${2:-}"; shift 2 ;;
     --dir)           INSTALL_DIR="${2:-}"; shift 2 ;;
     --check|--dry-run) CHECK_ONLY=1; shift ;;
@@ -337,6 +350,10 @@ if [ -f "$ENV_FILE" ]; then
   [ -n "$DATA_KEY" ]     || DATA_KEY="$(env_get "$ENV_FILE" REGULAIT_DATA_KEY)"
   [ -n "$ADMIN_TOKEN" ]  || ADMIN_TOKEN="$(env_get "$ENV_FILE" REGULAIT_BOOTSTRAP_TOKEN)"
   [ -n "$DB_PASSWORD" ]  || DB_PASSWORD="$(env_get "$ENV_FILE" REGULAIT_DB_PASSWORD)"
+  if [ -z "$RECEIPT_KEY_FILE" ] && [ -z "$RECEIPT_KEY_ID" ]; then
+    RECEIPT_KEY_FILE="$(env_get "$ENV_FILE" REGULAIT_RECEIPT_KEY_HOST_FILE)"
+    RECEIPT_KEY_ID="$(env_get "$ENV_FILE" REGULAIT_RECEIPT_SIGNING_KEY_ID)"
+  fi
   [ -n "$MODE" ]         || MODE="$PRIOR_MODE"
   [ -n "$DOMAIN" ]       || DOMAIN="$PRIOR_DOMAIN"
   [ -n "$OIDC_ISSUER" ]  || OIDC_ISSUER="$PRIOR_OIDC"
@@ -520,6 +537,38 @@ if [ -z "$DB_PASSWORD" ]; then
   fi
 fi
 
+# ADR-0189 R25 item 12 — THE RECEIPT SIGNING KEY. Without a key every sign-off is
+# refused (409 bom_signing_unavailable). By default the install generates its own
+# (the gateway's first boot, and the step after "Bringing the stack up"), on the
+# install_secrets volume, mode 0600, never overwritten. --receipt-key-file /
+# --receipt-key-id switch to a key the operator manages; the key itself is never
+# read into this script, printed or copied — only mounted read-only.
+step "Receipt signing key"
+if [ -n "$RECEIPT_KEY_FILE" ] || [ -n "$RECEIPT_KEY_ID" ]; then
+  [ -n "$RECEIPT_KEY_FILE" ] && [ -n "$RECEIPT_KEY_ID" ] || die "--receipt-key-file and --receipt-key-id go together: pass both (a key you manage) or neither (the install generates one)."
+  case "$RECEIPT_KEY_FILE" in
+    /*) ;;
+    *) die "--receipt-key-file must be an absolute host path (it is bind-mounted into the gateway): $RECEIPT_KEY_FILE" ;;
+  esac
+  case "$RECEIPT_KEY_FILE" in
+    *:*|*\"*|*"'"*|*" "*) die "--receipt-key-file may not contain ':', quotes or spaces (it is written into a compose volume entry): $RECEIPT_KEY_FILE" ;;
+  esac
+  printf '%s' "$RECEIPT_KEY_ID" | grep -Eq '^[A-Za-z0-9._:-]{1,128}$' || die "--receipt-key-id must be 1-128 characters of A-Z a-z 0-9 . _ : - (the gateway refuses anything else)."
+  [ -f "$RECEIPT_KEY_FILE" ] || die "--receipt-key-file $RECEIPT_KEY_FILE is not a regular file on this host."
+  if have openssl; then
+    openssl pkey -in "$RECEIPT_KEY_FILE" -noout -text_pub 2>/dev/null | grep -q 'ED25519' \
+      || die "--receipt-key-file $RECEIPT_KEY_FILE is not a readable PKCS#8 Ed25519 private key. Make one OFF this host with: openssl genpkey -algorithm ed25519 -out receipt-signing-key.pem"
+  fi
+  perm="$(stat -c '%a' "$RECEIPT_KEY_FILE" 2>/dev/null || true)"
+  case "$perm" in
+    ""|?00|600|400) ;;
+    *) warn "$RECEIPT_KEY_FILE has mode $perm; a signing key should be 0600 (or 0400), owned by uid 1000 so the gateway's node user can read it" ;;
+  esac
+  ok "operator-managed receipt key: $RECEIPT_KEY_FILE (key id $RECEIPT_KEY_ID), mounted read-only at $RECEIPT_KEY_CONTAINER_PATH"
+else
+  ok "install-generated: the gateway creates one on first boot in the ${PROJECT}_install_secrets volume (never overwritten)"
+fi
+
 # ===========================================================================
 # 3. PREFLIGHT
 # ===========================================================================
@@ -683,6 +732,22 @@ REGULAIT_DATA_KEY=$DATA_KEY
 REGULAIT_BOOTSTRAP_TOKEN=$ADMIN_TOKEN
 REGULAIT_DB_PASSWORD=$DB_PASSWORD
 REGULAIT_DATABASE_URL=postgres://regulait:$DB_PASSWORD@db:5432/regulait
+ENV
+  # ADR-0189 R25 item 12: the receipt signing key. Absent = install-generated
+  # (the gateway creates it in the install_secrets volume on first boot).
+  if [ -n "$RECEIPT_KEY_FILE" ]; then
+    cat <<ENV
+
+# ---- receipt signing key: OPERATOR-MANAGED (ADR-0189 R25) ------------------
+# The host file is bind-mounted read-only at the container path below. Remove
+# these three lines and re-run without --receipt-key-file to go back to the
+# install-generated key.
+REGULAIT_RECEIPT_KEY_HOST_FILE=$RECEIPT_KEY_FILE
+REGULAIT_RECEIPT_SIGNING_KEY=$RECEIPT_KEY_CONTAINER_PATH
+REGULAIT_RECEIPT_SIGNING_KEY_ID=$RECEIPT_KEY_ID
+ENV
+  fi
+  cat <<ENV
 
 # ---- application -----------------------------------------------------------
 SEED_DEMO=$SEED_DEMO
@@ -770,6 +835,10 @@ YML
   [ -z "$HSTS" ]            || printf '      REGULAIT_HSTS: "%s"\n' "$HSTS"
   [ -z "$SAML_ENTITY_ID" ]  || printf '      REGULAIT_SAML_ENTITY_ID: "%s"\n' "$SAML_ENTITY_ID"
   [ -z "$SAML_CLOCK_SKEW" ] || printf '      REGULAIT_SAML_CLOCK_SKEW_MINUTES: "%s"\n' "$SAML_CLOCK_SKEW"
+  if [ -n "$RECEIPT_KEY_FILE" ]; then
+    # ADR-0189 R25 item 12: the operator-managed receipt key, read-only
+    printf '    volumes:\n      - "%s:%s:ro"\n' "$RECEIPT_KEY_FILE" "$RECEIPT_KEY_CONTAINER_PATH"
+  fi
   if [ "$MODE" = "air_gapped" ]; then
     cat <<YML
     # AIR-GAPPED: run the pre-seeded image, never pull, never build.
@@ -861,6 +930,20 @@ else
   warn "curl is not installed — skipping the readiness probe. Check: docker compose -p $PROJECT ps"
 fi
 
+# ADR-0189 R25 item 12: the installer's half of the install-generated receipt key.
+# The gateway's first boot normally made it already; this runs the SAME idempotent,
+# create-exclusive generator (it reuses an existing key, never overwrites one, and
+# does nothing for an operator-managed key) and prints the key id and public-key
+# fingerprint only, never the key.
+step "Receipt signing key (install-generated unless you passed --receipt-key-file)"
+RECEIPT_KEY_LINE=""
+if RECEIPT_KEY_LINE="$(docker compose "${COMPOSE_ARGS[@]}" exec -T gateway node apps/gateway/dist/receipt-key-init.js 2>&1)"; then
+  ok "$RECEIPT_KEY_LINE"
+else
+  warn "${RECEIPT_KEY_LINE:-the gateway could not be reached to check the receipt key}"
+  warn "until a receipt signing key exists every sign-off is refused (409 bom_signing_unavailable). Check: docker compose -p $PROJECT logs gateway | grep 'receipt key'"
+fi
+
 # ===========================================================================
 # 6. POST-INSTALL SUMMARY
 # ===========================================================================
@@ -941,6 +1024,10 @@ cat <<SUMMARY
       docs/deployment/BACKUP_RESTORE.md and ADR-0035 for the verified
       nightly pg_dump.
     * $ENV_FILE (it holds the data key).
+    * The ${PROJECT}_install_secrets volume: the install-generated receipt
+      signing key. Losing it is recoverable (the next boot makes a new key
+      under a new key id; signed receipts stay verifiable through
+      GET /v1/receipts/keys), but back it up with pgdata.
     * NOT backed up by anything today: the ${PROJECT}_caddy_data volume, which
       holds the ACME account key and issued certificates. Losing it re-issues,
       which is cheap but rate-limited.

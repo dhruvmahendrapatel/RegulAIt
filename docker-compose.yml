@@ -309,6 +309,15 @@ services:
       REGULAIT_DATABASE_SSL: ${REGULAIT_DATABASE_SSL:-disable}
       REGULAIT_DATA_KEY: ${REGULAIT_DATA_KEY:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
       REGULAIT_BOOTSTRAP_TOKEN: ${REGULAIT_BOOTSTRAP_TOKEN:-dev-bootstrap}
+      # ADR-0189 R25 item 12: WHERE THE INSTALL-GENERATED RECEIPT SIGNING KEY LIVES. With no
+      # REGULAIT_RECEIPT_SIGNING_KEY / _ID set, the gateway's first boot (and scripts/install.sh)
+      # creates one Ed25519 key here, mode 0600, create-exclusive and never overwritten, on the
+      # named volume below. Without any key every sign-off is refused (409 bom_signing_unavailable).
+      # Setting REGULAIT_RECEIPT_SIGNING_KEY and REGULAIT_RECEIPT_SIGNING_KEY_ID (a key you manage,
+      # mounted into the container) always wins; GET /v1/org/posture names which one is in use.
+      REGULAIT_INSTALL_SECRETS_DIR: ${REGULAIT_INSTALL_SECRETS_DIR:-/app/install-secrets}
+      REGULAIT_RECEIPT_SIGNING_KEY: ${REGULAIT_RECEIPT_SIGNING_KEY:-}
+      REGULAIT_RECEIPT_SIGNING_KEY_ID: ${REGULAIT_RECEIPT_SIGNING_KEY_ID:-}
       # ADR-0181 FX3: the demo seed (demo users, keys and demo-only
       # relaxations) is OFF by default. `REGULAIT_DEMO_LICENSE=1` below is the
       # demo switch and seeds by itself; SEED_DEMO=1 seeds without the licence.
@@ -430,6 +439,11 @@ services:
       # `docker compose restart gateway` and `down` / `up`; `down -v` drops it
       # together with the database that holds the licence.
       - demo_license_keys:/app/demo-license-keys
+      # ADR-0189 R25 item 12: the install secrets the gateway generates itself (today only the
+      # receipt signing key). Named, so it survives `down` / `up`; BACK IT UP with pgdata. Losing it
+      # is not fatal: the next boot makes a new key under a new key id, and receipts already signed
+      # stay verifiable under the public key the database recorded.
+      - install_secrets:/app/install-secrets
     # ADR-0167 (CFG-07): see the note on `db`. The image carries the same
     # HEALTHCHECK; it is restated here so `depends_on: condition:
     # service_healthy` works for anything stacked on the gateway, and so a
@@ -886,6 +900,8 @@ volumes:
   objectstore_data:
   # ADR-0174 amendment: the demo licence keyring (see the gateway's volumes).
   demo_license_keys:
+  # ADR-0189 R25 item 12: the install-generated receipt signing key (see the gateway's volumes).
+  install_secrets:
   # ADR-0187 decision 49: the promptfoo runner's own state (its runner token only)
   engine-promptfoo-state:
   # ADR-0187 B5-P2: the two tmpfs-backed exchange volumes between the promptfoo

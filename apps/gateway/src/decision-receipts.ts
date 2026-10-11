@@ -1,10 +1,10 @@
-import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { createHash, sign, type KeyObject } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { and, asc, auditLog, decisionCaptureStatus, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
 import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2, receiptCanonicalBytes, receiptPayloadHash, receiptVersionForAuditSeq, type AnyDecisionReceiptPayload, type DecisionReceiptPayloadV2, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
+import { ReceiptKeyError, receiptSigningKeyPosture, resolveReceiptSigningKey } from "./receipt-signing-key.js";
 
 /** ADR-0186 R: one-writer, append-only receipts for chained governed decisions. */
 export const DECISION_RECEIPT_SIGN_JOB_NAME = "decision-receipt-sign-sweep";
@@ -13,23 +13,15 @@ const SWEEP_LIMIT = 500;
 const EXPORT_LIMIT = 5000;
 export interface DecisionReceiptSweepResult { signed: number; state: ReceiptSigningState }
 
-class ReceiptKeyError extends Error { constructor() { super("Receipt signing key configuration is invalid or conflicts with its recorded public key."); } }
 interface SigningKey { keyId: string; privateKey: KeyObject; jwk: ReceiptPublicKey["jwk"] }
+/**
+ * ADR-0186 receipt key, ADR-0189 R25 item 12: the operator key (REGULAIT_RECEIPT_SIGNING_KEY +
+ * _ID) when set, else the install-generated key (receipt-signing-key.ts), else null. Throws
+ * ReceiptKeyError when a configured key is unusable.
+ */
 function signingKey(): SigningKey | null {
-  const file = process.env.REGULAIT_RECEIPT_SIGNING_KEY?.trim();
-  const keyId = process.env.REGULAIT_RECEIPT_SIGNING_KEY_ID?.trim();
-  if (!file && !keyId) return null;
-  if (!file || !keyId) throw new ReceiptKeyError();
-  try {
-    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(keyId) || !statSync(file).isFile() || statSync(file).size > 16384) throw new ReceiptKeyError();
-    const pem = readFileSync(file);
-    if (pem.length > 16384 || !pem.toString("utf8").startsWith("-----BEGIN PRIVATE KEY-----")) throw new ReceiptKeyError();
-    const privateKey = createPrivateKey({ key: pem, format: "pem", type: "pkcs8" });
-    if (privateKey.asymmetricKeyType !== "ed25519") throw new ReceiptKeyError();
-    const publicKey = createPublicKey(pem).export({ format: "jwk" });
-    if (publicKey.kty !== "OKP" || publicKey.crv !== "Ed25519" || !publicKey.x || publicKey.d) throw new ReceiptKeyError();
-    return { keyId, privateKey, jwk: { kty: "OKP", crv: "Ed25519", x: publicKey.x } };
-  } catch { throw new ReceiptKeyError(); }
+  const key = resolveReceiptSigningKey(process.env);
+  return key ? { keyId: key.keyId, privateKey: key.privateKey, jwk: key.jwk } : null;
 }
 const samePublicKey = (a: ReceiptPublicKey["jwk"], b: ReceiptPublicKey["jwk"]) => a.kty === b.kty && a.crv === b.crv && a.x === b.x;
 const envelope = (row: typeof decisionReceipts.$inferSelect): SignedDecisionReceipt => ({ receiptSeq: row.receiptSeq, payload: row.payload as DecisionReceiptPayload, signature: row.signature, keyId: row.keyId });
@@ -195,7 +187,8 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
     const [oldest]=await db.select({at:auditLog.at}).from(auditLog).where(eligibleAfter(last?.auditSeq??0)).orderBy(asc(auditLog.seq)).limit(1);
     const stalled=state==="signing"&&(job?.lastOutcome==="failed"||job?.enabled===false|| (!!oldest&&oldest.at.getTime()<Date.now()-120000));
     if(stalled)state="stalled";
-    return { state, lastSweep:job?{at:job.lastFinishedAt?.toISOString()??null,outcome:job.lastOutcome}:null, lastSeq: last?.receiptSeq ?? 0, lagRows: counts[0]?.n ?? 0 };
+    // ADR-0189 R25 item 12: where the key came from (install_generated | operator_managed | missing | invalid), never the key
+    return { state, lastSweep:job?{at:job.lastFinishedAt?.toISOString()??null,outcome:job.lastOutcome}:null, lastSeq: last?.receiptSeq ?? 0, lagRows: counts[0]?.n ?? 0, signingKey: receiptSigningKeyPosture(process.env) };
   });
   app.get("/v1/receipts/keys", async () => ({ keys: await publicKeys(db) }));
   app.get("/v1/receipts/export", async (req, reply) => {
@@ -224,3 +217,4 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
 
 /** ADR-0189 B3: the AI BOM snapshot signer reuses the receipt key (OWNER DECISION 2), read the same way */
 export { signingKey as loadReceiptSigningKey, ReceiptKeyError, samePublicKey as sameReceiptPublicKey };
+export { receiptSigningKeyPosture };

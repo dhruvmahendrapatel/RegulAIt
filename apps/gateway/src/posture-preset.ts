@@ -36,6 +36,7 @@ import { publicUrlPosture } from "./public-url.js";
 import { metricsPosture } from "./metrics.js";
 import { approvalSigningPosture } from "./approval-signatures.js";
 import { bootstrapStepUpPosture } from "./step-up.js";
+import { receiptSigningKeyPosture } from "./receipt-signing-key.js";
 import type { FastifyInstance } from "fastify";
 import {
   auditLog,
@@ -361,6 +362,9 @@ export function registerPosturePresetRoutes(
       approvalSigning: approvalSigningPosture(settings.approvalSignatureMode),
       // B4S-06: the bootstrap credential passes a step-up only during first-admin setup
       bootstrap: await bootstrapStepUpPosture(db, opts.bootstrapConfigured === true),
+      // ADR-0189 R25 item 12: where the receipt signing key came from. Reported, never a control:
+      // it does not count toward `hardened` and blocks nothing (a missing key already refuses sign-offs).
+      receiptSigningKey: receiptSigningKeyPosture(process.env),
     };
   });
 

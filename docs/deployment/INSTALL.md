@@ -201,7 +201,11 @@ The installer converges. It never destroys.
 - Rendered files are compared before writing; unchanged files are left alone and reported as
   `unchanged`.
 - All state lives in Docker named volumes (`regulait_pgdata`, `regulait_caddy_data`,
-  `regulait_caddy_config`). The install directory holds configuration only.
+  `regulait_caddy_config`, `regulait_install_secrets`). The install directory holds configuration
+  only.
+- The install-generated receipt signing key is never regenerated or overwritten; an operator key
+  passed with `--receipt-key-file` / `--receipt-key-id` is read back from `.env` like every other
+  setting.
 
 Reconfiguring is therefore just another run:
 
@@ -269,6 +273,63 @@ the only thing standing between you and losing it.
 ### 4. Know what leaves the box
 
 [DATA_BOUNDARY.md](DATA_BOUNDARY.md), per mode, with the greps to verify it yourself.
+
+### 5. The receipt signing key (ADR-0189 R25)
+
+Every sign-off takes a signed AI BOM snapshot, so a sign-off is refused (409
+`bom_signing_unavailable`) while no receipt signing key exists. The install creates one for you:
+
+- **First boot** of the gateway generates an Ed25519 key when no key is configured. It is written to
+  `REGULAIT_INSTALL_SECRETS_DIR` (`/app/install-secrets` in the image, on the named volume
+  `regulait_install_secrets`) as `receipt-signing-key.pem`, mode `0600`, owned by the gateway's
+  `node` user. The installer runs the same generator after the stack is up and prints the result.
+- It is **idempotent and never overwrites**: a second boot, or the installer, reuses the existing
+  key. Two gateways booting at once end with one key (the file is published with a create-exclusive
+  link). An existing key file that is unusable — not a regular file, readable by group or others, or
+  not a PKCS#8 Ed25519 key — is left untouched, reported as `invalid`, and sign-offs stay refused.
+- The private key is **never** logged or returned by any API. The boot log, the installer and the
+  posture read show only the key id (`install-ed25519-<hex>`, derived from the public key) and the
+  public-key fingerprint (`sha256:` over the SPKI DER).
+- If generation fails (an unwritable volume, for example) the boot log says
+  `INSTALL KEY GENERATION FAILED`, the gateway still starts, and sign-offs stay refused until a key
+  exists.
+
+Check which key is in use:
+
+```sh
+curl -sS https://your-host/v1/org/posture -H "Authorization: Bearer $ADMIN_KEY" | jq .receiptSigningKey
+curl -sS https://your-host/v1/receipts/status -H "Authorization: Bearer $ADMIN_KEY" | jq .signingKey
+```
+
+`state` is one of `install_generated`, `operator_managed`, `missing` or `invalid`. It is reported
+beside the posture controls, not as one of them: it never counts toward `hardened` and blocks
+nothing by itself.
+
+**Verifiers** fetch the public keys from `GET /v1/receipts/keys` (every key that ever signed,
+with `firstUsedAt` and `retiredAt`); `GET /v1/receipts/export` carries the same keys with the
+receipts, and `scripts/verify-receipts.mjs` checks a bundle offline.
+
+**Switching to a key you manage.** Generate the key off the gateway host, make it readable by
+uid 1000 (the container's `node` user), and re-run the installer with both flags:
+
+```sh
+openssl genpkey -algorithm ed25519 -out /etc/regulait/receipt-signing-key.pem
+chown 1000:1000 /etc/regulait/receipt-signing-key.pem && chmod 600 /etc/regulait/receipt-signing-key.pem
+./scripts/install.sh --dir /opt/regulait --yes \
+  --receipt-key-file /etc/regulait/receipt-signing-key.pem --receipt-key-id acme-receipts-2026
+```
+
+The installer bind-mounts the file read-only at `/run/secrets/regulait-receipt-signing-key` and
+writes `REGULAIT_RECEIPT_SIGNING_KEY` and `REGULAIT_RECEIPT_SIGNING_KEY_ID` into `.env`. Those two
+variables always win over the install-generated key (without the installer, set them yourself; both
+or neither). Receipts already signed stay verifiable: the old key's public half stays recorded and
+listed at `GET /v1/receipts/keys`. To go back, delete the three `REGULAIT_RECEIPT_*` lines from
+`.env` and re-run without the flags. A hardware-backed (HSM) key is a separate decision (ADR-0183)
+and not offered here.
+
+**Back it up** with `regulait_pgdata` (see [BACKUP_RESTORE.md](BACKUP_RESTORE.md)). Losing it is
+recoverable: the next boot makes a new key under a new key id, and the receipts signed with the old
+one still verify against its recorded public key.
 
 ### 5. Read the logs (ADR-0167)
 
