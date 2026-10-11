@@ -2038,8 +2038,18 @@ fixes were rechecked. These are the details the build settled:
         - The decision keeps the original approver, approval id and decision time. With no approval stage, it takes
           the completing event's actor and time. The re-syncing admin is recorded separately, in the
           `use-case-resynced` row.
-        - It refuses a use case edited after its instance completed (`use_case_edited_after_completion`). PATCH also
-          refuses such an edit (`use_case_locked_instance_completed`).
+        - The approval's lifetime runs from the original decision, so a long-stranded use case can come back already
+          expired. The response reports this as `approvedUntil` and `approvalExpired`, and recertification then
+          applies.
+        - It refuses a use case edited after its instance completed (`use_case_edited_after_completion`). Edits and
+          completion are ordered by audit `seq`, which is commit order. PATCH also refuses such an edit
+          (`use_case_locked_instance_completed`).
+        - It also refuses, each with its own code, when:
+          - the completion record is missing (`no_completion_record`);
+          - no decider can be resolved (`no_decider_record`);
+          - the approval record is missing (`approval_record_missing`);
+          - the EU tier would change under the current ruleset (`eu_tier_changed_since_completion`).
+        - It locks the instance and then the use case, the same order the workflow uses.
         - Posture shows `useCases.instanceCompletedNotApproved` (count, sample ids, action).
       - **Prevention (open follow-up):** a lookahead check in the executor would refuse, before any external effect, a
         stage that would complete an instance with no usable key.
