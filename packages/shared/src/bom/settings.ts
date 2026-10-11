@@ -24,29 +24,21 @@ export const BOM_PERSON_IDENTIFIER_MODES = ["id_only", "display_name"] as const;
 export const AI_BOM_SNAPSHOT_TRIGGER_MODES = ["sign_off_events", "on_demand_only"] as const;
 
 /**
- * OWNER DECISION 8 / R25: the sign-off snapshot triggers are NOT WIRED. R25
- * leaves the event-to-subject mapping open, so wiring them is its own later
- * slice. Until it lands no sign-off event takes a snapshot, whatever
- * `ai_bom_snapshot_triggers` holds: snapshots are on-demand only. The stored
- * strict default (`sign_off_events`) is unchanged, so the R25 slice starts
- * strict. The settings API, the strictness registry and the posture report
- * all state this; the R25 slice flips this constant when it wires them.
+ * OWNER DECISION 8 / R25 (settled 2026-10-11): the sign-off snapshot triggers are WIRED. Under the strict
+ * default `sign_off_events`, each sign-off (use-case approval, model-card approval, evidence attached, prompt
+ * promotion, config promotion, server admission, skill admission) takes a signed AI BOM snapshot of its
+ * subjects after it commits.
  */
-export const AI_BOM_SIGNOFF_TRIGGERS_WIRED = false as boolean;
-export const AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE =
-  "Sign-off triggers are not wired yet (ADR-0189 R25): no approval, promotion, admission or evidence event takes an " +
-  "AI BOM snapshot. Snapshots are on-demand only until the R25 slice lands, whatever this setting says.";
+export const AI_BOM_SIGNOFF_TRIGGERS_WIRED = true as const;
 
-/** what the snapshot-trigger setting does TODAY, for the settings API and the posture report */
+/** what the snapshot-trigger setting does, for the settings API and the posture report */
 export function aiBomSnapshotTriggerPosture(configured: (typeof AI_BOM_SNAPSHOT_TRIGGER_MODES)[number]): {
   configured: (typeof AI_BOM_SNAPSHOT_TRIGGER_MODES)[number];
-  signOffTriggers: "wired" | "not_wired";
+  signOffTriggers: "wired";
   effective: (typeof AI_BOM_SNAPSHOT_TRIGGER_MODES)[number];
-  note: string | null;
+  note: null;
 } {
-  return AI_BOM_SIGNOFF_TRIGGERS_WIRED
-    ? { configured, signOffTriggers: "wired", effective: configured, note: null }
-    : { configured, signOffTriggers: "not_wired", effective: "on_demand_only", note: AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE };
+  return { configured, signOffTriggers: "wired", effective: configured, note: null };
 }
 /** OWNER DECISION 12 / R25: no queue */
 export const AI_BOM_SNAPSHOT_WITHOUT_KEY_MODES = ["refuse", "skip_and_record"] as const;
@@ -119,18 +111,15 @@ export const BOM_SETTING_COPY: Readonly<Record<BomSettingKey, { label: string; s
   aiBomSnapshotTriggers: {
     label: "Automatic AI BOM snapshots",
     strict:
-      "Sign-off events (approvals, promotions, admissions, evidence) are meant to take a signed snapshot. NOT WIRED " +
-      "YET: until the ADR-0189 R25 slice lands, no sign-off takes a snapshot and snapshots are on-demand only.",
-    relaxed:
-      "Snapshots are taken only on demand, so a sign-off can pass with no record of what was signed off. Today this " +
-      "is also what the strict value does, because sign-off triggers are not wired yet (R25).",
+      "Sign-off events: each approval, promotion, admission and evidence attachment takes a signed snapshot of what " +
+      "was signed off, after it commits.",
+    relaxed: "Snapshots are taken only on demand, so a sign-off can pass with no record of what was signed off.",
   },
   aiBomSnapshotWithoutKey: {
     label: "Sign-off with no signing key",
     strict:
       "Refuse: an approval or promotion that would take a snapshot is refused while no receipt signing key is " +
-      "configured. Sign-off triggers are not wired yet (R25), so today this governs only on-demand snapshots, " +
-      "which always refuse without a key.",
+      "configured, and nothing it would have changed is saved.",
     relaxed: "Skip and record: it proceeds, and an audited gap records that no snapshot was taken. No snapshot is taken later.",
   },
   cyclonedxExportVersions: {
@@ -192,7 +181,7 @@ export const bomOrgSettingsFields = {
   bomPersonIdentifiers: z.enum(BOM_PERSON_IDENTIFIER_MODES).optional(),
   aiBomSnapshotTriggers: z
     .enum(AI_BOM_SNAPSHOT_TRIGGER_MODES)
-    .describe(`When AI BOM snapshots are taken. ${AI_BOM_SIGNOFF_TRIGGERS_NOT_WIRED_NOTE}`)
+    .describe("When AI BOM snapshots are taken: on every sign-off event (strict), or only on demand.")
     .optional(),
   aiBomSnapshotWithoutKey: z.enum(AI_BOM_SNAPSHOT_WITHOUT_KEY_MODES).optional(),
   /** 1.7 is always rendered; 1.6 may be added */

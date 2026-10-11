@@ -63,7 +63,7 @@ import {
   type AiBomSubjectKind,
   type BomVerifyReport,
 } from "@regulait/shared";
-import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomDrift, listAiBomSnapshots, loadAiBomSettings, takeAiBomSnapshot, type AiBomSubject } from "./ai-bom.js";
+import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomDrift, aiBomInstallId, listAiBomSnapshots, loadAiBomSettings, takeAiBomSnapshot, type AiBomSubject } from "./ai-bom.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { bomAccessOf, bomBundleEnvelope, bomCapabilitiesOf, onlineBomTrust, sendBomBundle, type BomAccess } from "./bom-export.js";
 import { BomRouteError, freezeDecisionBom, listDecisionBomVersions, readDecisionBomVersion, type DecisionBomRow } from "./decision-bom.js";
@@ -86,10 +86,7 @@ function subjectOf(req: FastifyRequest): AiBomSubject | null {
   return { kind, id };
 }
 
-const installId = (): string | null => {
-  const v = process.env.REGULAIT_INSTALL_ID?.trim();
-  return v ? v : null;
-};
+const installId = aiBomInstallId;
 
 export function registerBomRoutes(app: FastifyInstance, db: Db): void {
   const limiter = new SharedRateLimitStore(db);
@@ -110,7 +107,7 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
     db.insert(auditLog).values({ userId: req.authCtx.userId ?? BOOT_USER, objectType: "audit_export", objectId, effect: "allow", ruleId, ruleChain: [], reason, detail });
 
   const refuse = (reply: FastifyReply, e: unknown) => {
-    if (e instanceof AiBomError) return reply.status(e.status).send({ error: e.code, detail: e.message });
+    if (e instanceof AiBomError) return reply.status(e.status).send({ ...(e.extra ?? {}), error: e.code, detail: e.message });
     if (e instanceof AiBomBuildError || e instanceof AiBomRecordError || e instanceof TrainingChecksumError) {
       // fail closed and say which field and rule (an email shape, userinfo, an unsafe value); the
       // messages name fields and rules only and never echo a record value (PR #287)

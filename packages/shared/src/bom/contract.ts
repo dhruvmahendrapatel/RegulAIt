@@ -43,8 +43,7 @@ export const AI_BOM_INSTALL_SUBJECT_ID = "00000000-0000-0000-0000-000000000000";
 export const AI_BOM_SUBJECT_KINDS = ["use_case", "agent", "builder_agent", "install"] as const;
 export type AiBomSubjectKind = (typeof AI_BOM_SUBJECT_KINDS)[number];
 
-/** OWNER DECISION 8: the sign-off events that will take an automatic snapshot once R25 is wired, plus on demand.
- * Until then sign-off triggers are not wired and snapshots are on demand only (ADR-0189 R17 release amendment). */
+/** OWNER DECISION 8 / R25: the sign-off events that take an automatic snapshot (wired 2026-10-11), plus on demand */
 export const AI_BOM_SNAPSHOT_TRIGGERS = [
   "on_demand",
   "use_case_approval",
