@@ -1,9 +1,52 @@
-import { useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { Button, Card, Field, Input } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
+import { UUID } from "./bomModel";
 import v from "../../views.module.css";
+
+// ADR-0189 B6: a decision's Decision BOM, by its audit row id (not its receipt sequence)
+const DecisionBomPanel = lazy(() => import("./DecisionBomPanel").then((m) => ({ default: m.DecisionBomPanel })));
+
+function DecisionBomOpener() {
+  const [draft, setDraft] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className={v.stack}>
+      <form
+        className={v.stack}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const id = draft.trim().toLowerCase();
+          if (!UUID.test(id)) {
+            setError("Enter the decision's audit row ID (a UUID). It is not the receipt sequence.");
+            return;
+          }
+          setError(null);
+          setOpen(id);
+        }}
+      >
+        <Field label="Audit row ID for a Decision BOM">
+          <Input value={draft} onChange={(event) => setDraft(event.target.value)} aria-describedby="decision-bom-opener-help" />
+        </Field>
+        <p id="decision-bom-opener-help" className={v.faint}>
+          The first read of a final decision freezes its Decision BOM; the read is audited.
+        </p>
+        <div>
+          <Button type="submit" size="sm">Open Decision BOM</Button>
+        </div>
+        {error && <p className={v.errLine} role="alert">{error}</p>}
+      </form>
+      {open && (
+        <Suspense fallback={<p role="status">Loading the Decision BOM…</p>}>
+          <DecisionBomPanel key={open} auditId={open} onClose={() => setOpen(null)} />
+        </Suspense>
+      )}
+    </div>
+  );
+}
 interface ReceiptStatus { state: "signing" | "no_key" | "off" | "stalled"; lastSeq: number; lagRows: number }
 interface Verification { results: Array<{ receiptSeq: number | null; status: "valid" | "invalid" | "unverifiable"; reason: string }>; cannotProve: string[] }
 
@@ -23,6 +66,7 @@ export function DecisionReceiptsPanel() {
         <p>Last receipt sequence: {status.data!.lastSeq}. Decision rows awaiting signing: {status.data!.lagRows}.</p>
       </> : status.data ? <p>Receipt signing state is not reported by this gateway.</p> : null}
     </QueryGate>
+    <DecisionBomOpener />
     <form className={v.stack} onSubmit={(event) => {
       event.preventDefault();
       const first = Number(from), last = Number(to || status.data?.lastSeq);

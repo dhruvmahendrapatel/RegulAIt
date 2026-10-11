@@ -43,6 +43,7 @@ import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
+import { BomPostureCard, type ReceiptSigningKeyPosture } from "./BomPostureCard";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -74,6 +75,8 @@ interface PostureReport {
     restricted: boolean;
     note: string;
   };
+  /** ADR-0189 R25 item 19: where the receipt key comes from, or that there is none; informational, blocks nothing */
+  receiptSigningKey?: ReceiptSigningKeyPosture;
 }
 
 /**
@@ -281,6 +284,9 @@ export default function EnforcementPosturePage() {
               columns={columns("What turning it on changes")}
             />
           </Card>
+
+          {/* ADR-0189 §7 / §10: the receipt key and the BOM settings */}
+          <BomPostureCard receiptKey={report?.receiptSigningKey} />
         </QueryGate>
       </div>
     </>

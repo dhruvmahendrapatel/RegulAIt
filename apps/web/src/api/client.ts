@@ -322,7 +322,25 @@ async function parseBody(res: Response): Promise<ApiErrorPayload | null> {
   }
 }
 
+/**
+ * A binary GET (an export bundle): the bytes and the response headers, never
+ * JSON-decoded. A refusal answers JSON and gets the same handling as every
+ * call above (session loss, step-up, the refusal as an ApiError).
+ */
+async function getBlob(path: string, extraHeaders?: Record<string, string>): Promise<{ body: Blob; headers: Headers }> {
+  let res: Response;
+  try {
+    res = await fetch(path, { method: "GET", credentials: "include", headers: { [CSRF_HEADER]: "1", ...(extraHeaders ?? {}) } });
+  } catch (cause) {
+    throw new Error(CODE_SENTENCES.network, { cause });
+  }
+  if (!res.ok) throw apiErrorFrom("GET", path, res.status, await parseBody(res));
+  return { body: await res.blob(), headers: res.headers };
+}
+
 export const api = {
+  /** GET a binary download (export bundles), with the response headers */
+  getBlob,
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body ?? {}),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body ?? {}),
