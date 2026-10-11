@@ -1541,3 +1541,31 @@ Rule: the master session's operational scripts carry a `master-` prefix (`master
 Every agent brief that may write to the scratchpad names a file prefix for that agent. A restarted long-running script
 is checked to be running before the restart is reported.
 
+### M-078 (2026-10-06) - A ledger rule was applied to the spec that produced it, not to the pattern it names
+
+Written 2026-10-06 as M-070 on `dhruv/amazing-mayer-f42t40`, whose PR #128 merged into `strict-int` and never reached
+main. Main had meanwhile used M-070 for a different entry, so it was renumbered when ported on 2026-10-11.
+
+M-068's rule (a spec that creates global state removes it before it ends) was written from `phase2.spec.ts` and
+applied there. The gateway suite carried the same pattern in 13 files: each created the shared `127.0.0.1` egress
+allow entry in `beforeAll` (`POST /v1/egress-allow-hosts` upserts by host, so the whole suite shares ONE row) and
+none removed it. Under ADR-0181's `mcpPrivateRangesDefault=false` that leftover row was the only reason 15 suites
+that register an MCP double on loopback passed - in the file orders where a leaver had already run. vitest's order is
+not fixed (largest files first with no results cache, failed-then-slowest first with one), so the dependency showed
+up as order-dependent failures on `strict-int`; the 15 dependents were given their own relaxation (baad6c9) before
+the leak itself was closed (PR #128 on `strict-int`).
+
+The pattern repeated in the port. By the time it reached main (PR #358), main had grown more leaking files than the
+13, and a first grep for them matched `host: "127.0.0.1"` in `app.listen(...)` calls as well as in allow entries.
+PR #358 closes the leak on main in every gateway file that creates an entry on the shared database (three that use
+a scratch database they drop are exempt). `scripts/preflight-egress-allow-cleanup.mjs` now fails CI when a file
+creates an entry and no `afterAll` removes it. The empty-table proof on a real database was not run for the port:
+Postgres was down.
+
+Rule: when a ledger rule names a pattern, grep for every instance of that pattern before the entry is closed, and fix
+or list them - here, the files that POST an allow entry minus the files that DELETE one, where the grep matches the
+call (the route or the table) rather than a literal that also appears elsewhere. Where the pattern can come back,
+turn the grep into a check that CI runs. A file that creates shared state is proven clean by running it LAST on a
+fresh database (`vitest.run-last.config.ts`, `REGULAIT_VITEST_LAST=<file>`) and checking the table afterwards, not
+by a green run in whatever order vitest chose.
+

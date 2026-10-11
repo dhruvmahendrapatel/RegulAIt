@@ -29,6 +29,7 @@ import { grantOwnGrantsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
 // and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
@@ -141,6 +142,8 @@ let bareId: string;
 let squatId: string;
 let restoreGates: () => Promise<void> = async () => {};
 let restoreAdmission: (() => Promise<void>) | undefined;
+// M-068: the loopback allow entry is global state on the shared database; afterAll removes it
+let loopbackAllowHostId: string | undefined;
 let priorMethods: string[] = [];
 
 async function setMethods(methods: readonly string[]) {
@@ -201,7 +204,8 @@ beforeAll(async () => {
     url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "g3 suite: local MCP doubles" },
   });
-  expect([201, 409]).toContain(allow.statusCode);
+  expect(allow.statusCode, allow.body).toBe(201);
+  loopbackAllowHostId = allow.json().id;
   const f = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `g3-full-${Date.now()}`, url: full.url } });
   fullId = f.json().id;
   const b = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `g3-bare-${Date.now()}`, url: bare.url } });
@@ -211,8 +215,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreApprovalSigning?.();
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
   try {
+    await restoreApprovalSigning?.();
     // M-068: global state this file changed goes back
     if (db) await setMethods(priorMethods);
     await restoreGates();
@@ -223,6 +230,7 @@ afterAll(async () => {
     await full?.close();
     await bare?.close();
     await squat?.close();
+    loopback.assertRemoved();
   }
 });
 

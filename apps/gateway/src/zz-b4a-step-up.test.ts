@@ -68,6 +68,7 @@ import { EVIDENCE_HOLD_OVERRIDE_HEADER, incidentEvidenceHoldRefused } from "./in
 import { totpCode, totpStep } from "./totp.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -87,6 +88,8 @@ const PROXY = "10.20.30.41";
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
+// M-068: the loopback allow entry is global state on the shared database; afterAll removes it
+let loopbackAllowHostId: string | undefined;
 let restoreIdentity: (() => Promise<void>) | undefined;
 const created = {
   users: [] as string[],
@@ -358,29 +361,37 @@ beforeAll(async () => {
     allowPlaintextHttp: true,
     note: "b4a suite: local fake OIDC IdP",
   });
-  expect([201, 409]).toContain(egress.statusCode);
+  expect(egress.statusCode, egress.body).toBe(201);
+  loopbackAllowHostId = egress.json().id;
 }, 120_000);
 
 afterAll(async () => {
-  await db.execute(STRICT_STEP_UP);
-  await restoreIdentity?.();
-  if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
-  else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;
-  if (created.users.length) {
-    await db.delete(stepUpGrants).where(inArray(stepUpGrants.userId, created.users));
-    await db.delete(webauthnChallenges).where(inArray(webauthnChallenges.userId, created.users));
-    await db.delete(webauthnCredentials).where(inArray(webauthnCredentials.userId, created.users));
-    await db.delete(federatedIdentities).where(inArray(federatedIdentities.userId, created.users));
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await db.execute(STRICT_STEP_UP);
+    await restoreIdentity?.();
+    if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+    else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;
+    if (created.users.length) {
+      await db.delete(stepUpGrants).where(inArray(stepUpGrants.userId, created.users));
+      await db.delete(webauthnChallenges).where(inArray(webauthnChallenges.userId, created.users));
+      await db.delete(webauthnCredentials).where(inArray(webauthnCredentials.userId, created.users));
+      await db.delete(federatedIdentities).where(inArray(federatedIdentities.userId, created.users));
+    }
+    if (created.oidc.length) await db.delete(oidcProviders).where(inArray(oidcProviders.id, created.oidc));
+    if (created.saml.length) await db.delete(samlProviders).where(inArray(samlProviders.id, created.saml));
+    if (created.servers.length) await db.delete(mcpServers).where(inArray(mcpServers.id, created.servers));
+    if (created.connectors.length) await db.delete(connectors).where(inArray(connectors.id, created.connectors));
+    if (created.agents.length) await db.delete(agents).where(inArray(agents.id, created.agents));
+    if (created.sessions.length) await db.delete(authSessions).where(inArray(authSessions.id, created.sessions));
+    await new Promise<void>((r) => (idp.server ? idp.server.close(() => r()) : r()));
+    app.server.closeAllConnections();
+    await app.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  if (created.oidc.length) await db.delete(oidcProviders).where(inArray(oidcProviders.id, created.oidc));
-  if (created.saml.length) await db.delete(samlProviders).where(inArray(samlProviders.id, created.saml));
-  if (created.servers.length) await db.delete(mcpServers).where(inArray(mcpServers.id, created.servers));
-  if (created.connectors.length) await db.delete(connectors).where(inArray(connectors.id, created.connectors));
-  if (created.agents.length) await db.delete(agents).where(inArray(agents.id, created.agents));
-  if (created.sessions.length) await db.delete(authSessions).where(inArray(authSessions.id, created.sessions));
-  await new Promise<void>((r) => (idp.server ? idp.server.close(() => r()) : r()));
-  app.server.closeAllConnections();
-  await app.close();
 });
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ let restoreStrictAdmission: (() => Promise<void>) | undefined;
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { relaxApprovalSigningForTest } from "./testing/approval-signing-posture.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 // ADR-0186 A2+B: this suite pins pre-0186 single-approver tool-call approvals (decided
 // through API keys, unsigned); signing and the sensitive quorum are relaxed for its run
 // and restored after (M-068). Dual control and signing are proved in zz-b4ab-*.
@@ -156,6 +157,9 @@ afterAll(() => {
   else process.env.REGULAIT_OFFLINE_CHECKS = priorOfflineChecks;
 });
 
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
@@ -192,6 +196,7 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  loopbackAllowHostId = egressAllowed.json().id;
 
   const alice = await app.inject({
     method: "POST",
@@ -219,38 +224,45 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restoreApprovalSigning?.();
-  await restoreStrictAdmission?.();
-  // SHARED-STATE DISCIPLINE (PENDING S8, diagnosed 2026-10-03). This file
-  // upserts a PLATFORM credential for anthropic, openai, google and xai, each
-  // pointing at a loopback fake it closes on the way out and each encrypted
-  // under THIS file's data key. Left behind, the next file to dispatch on one
-  // of those providers under a different key finds a stored credential it
-  // cannot decrypt — `decryptSecret` throws, nothing maps that to a status —
-  // and gets a 500 where it asserted 409 `no_model_credential`
-  // (compat-longtail.test.ts, "THE ASYMMETRY, provider side"). Whether that
-  // happened depended on whether one of the four files that wipe the slot ran
-  // in between, which is why it was intermittent. Take exactly these slots
-  // back; the file owns them while it runs, the same way env-fallback does.
-  //
-  // The take-back runs LAST and in a `finally`: a close that throws (or a
-  // beforeAll that failed before `app`/`upstream` were assigned) must not be
-  // able to skip it, and it must not be able to skip the closes either. The
-  // `db` guard covers a beforeAll that failed before the pool existed.
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
   try {
+    await restoreApprovalSigning?.();
+    await restoreStrictAdmission?.();
+    // SHARED-STATE DISCIPLINE (PENDING S8, diagnosed 2026-10-03). This file
+    // upserts a PLATFORM credential for anthropic, openai, google and xai, each
+    // pointing at a loopback fake it closes on the way out and each encrypted
+    // under THIS file's data key. Left behind, the next file to dispatch on one
+    // of those providers under a different key finds a stored credential it
+    // cannot decrypt — `decryptSecret` throws, nothing maps that to a status —
+    // and gets a 500 where it asserted 409 `no_model_credential`
+    // (compat-longtail.test.ts, "THE ASYMMETRY, provider side"). Whether that
+    // happened depended on whether one of the four files that wipe the slot ran
+    // in between, which is why it was intermittent. Take exactly these slots
+    // back; the file owns them while it runs, the same way env-fallback does.
+    //
+    // The take-back runs LAST and in a `finally`: a close that throws (or a
+    // beforeAll that failed before `app`/`upstream` were assigned) must not be
+    // able to skip it, and it must not be able to skip the closes either. The
+    // `db` guard covers a beforeAll that failed before the pool existed.
     try {
-      app?.server.closeAllConnections();
-  await restoreSb2Gates();
-      await app?.close();
+      try {
+        app?.server.closeAllConnections();
+        await restoreSb2Gates();
+        await app?.close();
+      } finally {
+        await upstream?.close();
+      }
     } finally {
-      await upstream?.close();
+      if (db) {
+        await db
+          .delete(modelCredentials)
+          .where(inArray(modelCredentials.provider, ["anthropic", "openai", "google", "xai"]));
+      }
     }
   } finally {
-    if (db) {
-      await db
-        .delete(modelCredentials)
-        .where(inArray(modelCredentials.provider, ["anthropic", "openai", "google", "xai"]));
-    }
+    loopback.assertRemoved();
   }
 });
 

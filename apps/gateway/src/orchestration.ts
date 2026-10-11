@@ -269,8 +269,9 @@ export function inTransaction<T>(dbx: DbOrTx, fn: (tx: Tx) => Promise<T>): Promi
 
 /** A step that must run only after the decision transaction has committed
  * (git executions, nested-run completion): the decision is durable first, and
- * a failure here can never be mistaken for a failed decision. */
-export type ApprovalPostCommit = (db: Db) => Promise<void>;
+ * a failure here can never be mistaken for a failed decision. A step may
+ * return fields for the decide answer (PR #357 review 6: `executionWarning`). */
+export type ApprovalPostCommit = (db: Db) => Promise<void | Record<string, unknown>>;
 
 /** §5.2 estimate-based node-start gate. Returns the node's estimated cost
  * under its CURRENT owner, or a blocked payload — in which case the

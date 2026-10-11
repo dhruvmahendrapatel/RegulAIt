@@ -1,12 +1,14 @@
 import { test, expect, type Page, type TestInfo } from "@playwright/test";
 import { AxeBuilder } from "@axe-core/playwright";
-import { signInPrepared } from "./demo-credentials";
+import { disposablePassword, signInPrepared } from "./demo-credentials";
 import { nextCode } from "./totp-sign-in";
 import { activate, expectDialogTrap, escapeToTrigger, tabTo, typeAt } from "./keyboard-audit";
 
 const email = "admin@regulait.local";
+// a fresh random password per run (or E2E_X36_ADMIN_PASSWORD); signInPrepared keeps it in the git-ignored store
+const password = disposablePassword("E2E_X36_ADMIN_PASSWORD");
 async function signIn(page: Page) {
-  expect(await signInPrepared(page, email, "X36-Disposable-Admin!", page.getByRole("heading", { name: /Welcome back/ }))).toBe(true);
+  expect(await signInPrepared(page, email, password, page.getByRole("heading", { name: /Welcome back/ }))).toBe(true);
 }
 async function evidence(page: Page, info: TestInfo, name: string) {
   for (const theme of ["light", "dark"]) {

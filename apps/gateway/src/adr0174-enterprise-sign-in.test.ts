@@ -68,6 +68,7 @@ import { forgetStepUpMethodsForTest, relaxStepUpForTest } from "./testing/step-u
 import { totpCode, totpStep } from "./auth.js";
 import { idTokenMfa } from "./federated-identity.js";
 import { DEMO_PERSONA_EMAILS, isDemoLicense, setDemoPasswords } from "./demo-set-passwords-lib.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -249,6 +250,9 @@ const roundTrip = async (
 };
 
 let restoreStepUp: (() => Promise<void>) | undefined;
+// M-068: the loopback allow entry is global state on the shared database; its id is
+// recorded so afterAll removes it, and no later file inherits it.
+let loopbackAllowHostId: string | undefined;
 beforeAll(async () => {
   const { runMigrations } = await import("@regulait/db");
   db = createDb(DATABASE_URL);
@@ -259,8 +263,9 @@ beforeAll(async () => {
     method: "POST", headers: AUTH, url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "adr0174 suite: local fake OIDC IdP" },
   });
-  // another suite may already have allow-listed the loopback IdP host
-  expect([201, 409]).toContain(egress.statusCode);
+  // the route upserts by host, so it is 201 even when the row already exists
+  expect(egress.statusCode, egress.body).toBe(201);
+  loopbackAllowHostId = egress.json().id;
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   orgSnapshot = settings ?? null;
   // B4S-06: admins here sign in through SSO (a linked identity is a step-up
@@ -272,16 +277,23 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await restoreStepUp?.();
+  // M-068: remove the loopback allow entry this file created. It goes first, while the
+  // app is open; its outcome is asserted only after every other restore has run.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
   try {
-    if (orgSnapshot) await db.update(orgSettings).set(orgSnapshot).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-    if (createdProviderIds.size > 0) await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdProviderIds]));
-    // B4S-06 (M-068): no admin of this suite keeps a step-up method
-    const mine = await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${`%-${tag}@adr0174.example`}`);
-    await forgetStepUpMethodsForTest(db, mine.map((u) => u.id));
+    await restoreStepUp?.();
+    try {
+      if (orgSnapshot) await db.update(orgSettings).set(orgSnapshot).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      if (createdProviderIds.size > 0) await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdProviderIds]));
+      // B4S-06 (M-068): no admin of this suite keeps a step-up method
+      const mine = await db.select({ id: users.id }).from(users).where(sql`${users.email} LIKE ${`%-${tag}@adr0174.example`}`);
+      await forgetStepUpMethodsForTest(db, mine.map((u) => u.id));
+    } finally {
+      await app.close();
+      await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
+    }
   } finally {
-    await app.close();
-    await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
+    loopback.assertRemoved();
   }
 });
 
