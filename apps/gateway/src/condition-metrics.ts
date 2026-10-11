@@ -798,7 +798,7 @@ async function reopenForBreach(
   opts: EvaluateConditionsOptions,
 ): Promise<{ reopened: boolean; skipped: string | null }> {
   const spec = specOf(cond)!;
-  let postCommit: ((d: Db) => Promise<void>) | null = null;
+  let postCommit: ((d: Db) => Promise<unknown>) | null = null;
   const done = await db.transaction(async (tx): Promise<{ reopened: boolean; skipped: string | null }> => {
     const [uc] = await tx.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId)).for("update");
     if (!uc) return { reopened: false, skipped: "use_case_not_found" };

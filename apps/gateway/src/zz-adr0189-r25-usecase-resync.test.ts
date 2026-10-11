@@ -8,8 +8,9 @@
  * caller's afterwards.
  *
  *  - the stranded case, end to end: an executor (a check report) completes the
- *    instance while no key is usable, the use case stays behind, the response
- *    says so, and the posture report counts it;
+ *    instance after the key became unusable mid-stage (the only way left since
+ *    the executor checks the key first: `keyLostMidStage`), the use case stays
+ *    behind, the response says so, and the posture report counts it;
  *  - POST /v1/use-cases/:useCaseId/resync: no key refuses 409 (audited, nothing
  *    commits); with a key it approves and takes the snapshot after commit;
  *    a second call is a 200 no-op; non-admins, unknown ids and a strict step-up
@@ -43,7 +44,7 @@ import {
 } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
-import { createWorkflowTemplateValidated, startWorkflowInstanceWithTemplates } from "./workflows.js";
+import { createWorkflowTemplateValidated, startWorkflowInstanceWithTemplates, workflowTestHooks } from "./workflows.js";
 import { useCaseDispatchGate } from "./use-case-gate.js";
 import { USE_CASE_QUESTIONNAIRE_OUTPUT } from "./use-cases.js";
 import { renderEuAiActAnswersBlock, type EuAiActAnswers } from "@regulait/shared";
@@ -87,6 +88,26 @@ async function withoutKey<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
+    useKey(true);
+  }
+}
+/**
+ * THE WINDOW LEFT AFTER THE R25 item 13 PREVENTION. An executor checks the key
+ * before it runs a stage that would complete the instance, so a completing
+ * report posted with no key no longer completes anything
+ * (zz-adr0189-r25-signoff-lookahead.test.ts). A use case is now stranded only
+ * when the key passes that check and then becomes unusable before the
+ * completion commits — so that is how these fixtures strand one: the key is
+ * removed at the executor's commit barrier, after its claim.
+ */
+async function keyLostMidStage<T>(fn: () => Promise<T>): Promise<T> {
+  workflowTestHooks.beforeStageCommit = async () => {
+    useKey(false);
+  };
+  try {
+    return await fn();
+  } finally {
+    delete workflowTestHooks.beforeStageCommit;
     useKey(true);
   }
 }
@@ -184,15 +205,16 @@ async function reportPass(instanceId: string) {
 /**
  * THE STRANDED CASE, through the real routes: the questionnaire is submitted
  * (the instance then waits on its check stage), and the passing check report
- * arrives while no key is usable. The executor completes the instance after the
- * route committed; the use-case approval is refused and the use case stays behind.
+ * arrives; the key is lost while its executor runs. The executor completes the
+ * instance after the route committed; the use-case approval is refused and the
+ * use case stays behind.
  */
 async function strandUseCase(label: string) {
   const f = await startInstance(label, CHECK_STAGES(label));
   const submitted = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25rs answers" });
   expect(submitted.statusCode, submitted.body).toBe(201);
   expect(submitted.json().status).toBe("awaiting_execution");
-  const reported = await withoutKey(() => reportPass(f.instanceId));
+  const reported = await keyLostMidStage(() => reportPass(f.instanceId));
   expect(reported.statusCode, reported.body).toBe(200);
   expect(reported.json().status).toBe("completed");
   expect(reported.json().useCaseSignoffWarning).toMatchObject({ code: "bom_signing_unavailable" });
@@ -202,7 +224,8 @@ async function strandUseCase(label: string) {
 /**
  * THE STRANDED CASE WITH A SIGN-OFF: the questionnaire goes to the approver, who
  * approves (with a key: the instance then waits on its check, the use case stays
- * under review), and the passing check report completes the instance with no key.
+ * under review), and the passing check report completes the instance as the key
+ * is lost mid-stage.
  */
 async function strandSignedOff(label: string) {
   const f = await startInstance(label, [
@@ -221,7 +244,7 @@ async function strandSignedOff(label: string) {
   const decided = await k.req("POST", `/v1/approvals/${pending!.id}/decide`, approver.auth, { decision: "approved", reason: "r25rs sign-off" });
   expect(decided.statusCode, decided.body).toBe(200);
   expect((await instanceRow(f.instanceId)).status).toBe("awaiting_execution");
-  const reported = await withoutKey(() => reportPass(f.instanceId));
+  const reported = await keyLostMidStage(() => reportPass(f.instanceId));
   expect(reported.statusCode, reported.body).toBe(200);
   expect(reported.json().status).toBe("completed");
   expect(await useCaseStatus(f.useCaseId)).toBe("under_review");
@@ -506,7 +529,7 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     // still proposed and the instance still running: the edit is allowed
     const edited = await k.req("PATCH", `/v1/use-cases/${f.useCaseId}`, owner.auth, { description: "r25rs edited before completion" });
     expect(edited.statusCode, edited.body).toBe(200);
-    const reported = await withoutKey(() => reportPass(f.instanceId));
+    const reported = await keyLostMidStage(() => reportPass(f.instanceId));
     expect(reported.json().status).toBe("completed");
     const res = await resync(f.useCaseId);
     expect(res.statusCode, res.body).toBe(200);
@@ -630,7 +653,7 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     const content = `# AI use-case intake questionnaire\n\n## 1. Purpose\nr25rs.\n\n## 9. EU AI Act risk screening\n\n${renderEuAiActAnswersBlock(BASELINE_ANSWERS)}`;
     const submitted = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content });
     expect(submitted.statusCode, submitted.body).toBe(201);
-    const reported = await withoutKey(() => reportPass(f.instanceId));
+    const reported = await keyLostMidStage(() => reportPass(f.instanceId));
     expect(reported.json().status).toBe("completed");
     const [screened] = await db.select({ tier: aiUseCases.euAiActTier }).from(aiUseCases).where(eq(aiUseCases.id, f.useCaseId));
     expect(screened!.tier, "screened when the questionnaire went in").not.toBeNull();
@@ -686,7 +709,7 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     // FIXTURE: round 1's decision carries an EARLIER decided_at than round 0's (a skewed
     // clock), so "the newest decided approval" would wrongly pick round 0's
     await db.update(approvals).set({ decidedAt: new Date(Date.now() - 86_400_000) }).where(eq(approvals.id, round1));
-    const reported = await withoutKey(() => reportPass(f.instanceId));
+    const reported = await keyLostMidStage(() => reportPass(f.instanceId));
     expect(reported.json().status).toBe("completed");
 
     const res = await resync(f.useCaseId);

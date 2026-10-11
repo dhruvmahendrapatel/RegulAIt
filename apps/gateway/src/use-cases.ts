@@ -141,6 +141,7 @@ import { buildAgentHolderIndex, INVENTORY_NOTES } from "./inventory.js";
 import { IDEMPOTENCY_WINDOW_MS, readIdempotencyKey, referencedId, replayReference } from "./request-idempotency.js";
 import {
   createWorkflowTemplateValidated,
+  standingExecutorRefusal,
   startWorkflowInstanceWithTemplates,
 } from "./workflows.js";
 import {
@@ -361,19 +362,68 @@ function statusForInstance(instanceStatus: string): AiUseCaseRow["status"] | nul
  * throws the same 409 `bom_signing_unavailable` the decide path answers — so
  * the transition, its artifact row and its git effects never happen, and the
  * use case is not left behind its instance.
+ *
+ * R25 item 13 prevention: `prospectiveStatus` judges a status the instance is
+ * ABOUT to take instead of the one it stands at — the executor's lookahead,
+ * before an external effect whose success would complete the instance.
  */
-export async function assertUseCaseSignoffPossibleForInstance(tx: Db, instanceId: string): Promise<void> {
+export async function assertUseCaseSignoffPossibleForInstance(tx: Db, instanceId: string, prospectiveStatus?: string): Promise<void> {
   const [instance] = await tx
     .select({ status: workflowInstances.status })
     .from(workflowInstances)
     .where(eq(workflowInstances.id, instanceId));
-  if (!instance || statusForInstance(instance.status) !== "approved") return;
+  if (!instance || statusForInstance(prospectiveStatus ?? instance.status) !== "approved") return;
   const [useCase] = await tx
     .select({ status: aiUseCases.status })
     .from(aiUseCases)
     .where(eq(aiUseCases.workflowInstanceId, instanceId));
   if (!useCase || useCase.status === "approved" || useCase.status === "rejected" || useCase.status === "retired") return;
   await assertAiBomSignoffPossible(tx);
+}
+
+/**
+ * ADR-0080/0084 + ADR-0189 R25: THE dependent-object mirror after an instance
+ * moved outside the decide transaction — the workflow driving routes (through
+ * `WorkflowRouteOptions.onInstanceTransition`) and the executor runs no route
+ * mirrors (an approval's post-commit step, a nested run's completion, an engine
+ * run's re-evaluation). Runs after the move committed.
+ *
+ * A use-case approval that cannot take its signed snapshot is refused inside
+ * its own sync transaction. The executors refuse such a completion before any
+ * external effect (R25 item 13 prevention), so this refusal is what is left of
+ * the race where the key became unusable mid-stage. The instance has already
+ * moved, so the refusal is reported, not thrown: the vendor mirror still runs
+ * and the caller learns the use case stayed behind its instance
+ * (`useCaseSignoffWarning`; POST /v1/use-cases/:useCaseId/resync recovers it).
+ */
+export async function mirrorInstanceTransition(
+  db: Db,
+  instanceId: string,
+  actorUserId: string | null,
+  log: { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void },
+): Promise<Record<string, unknown> | undefined> {
+  let useCaseSignoff: AiBomSignoff | null = null;
+  let useCaseSignoffRefused: { code: string; detail: string } | null = null;
+  try {
+    useCaseSignoff = await syncUseCaseForInstance(db, instanceId, actorUserId);
+  } catch (err) {
+    if (!(err instanceof AiBomError)) throw err;
+    log.warn({ instanceId, code: err.code }, "use-case approval refused: its AI BOM snapshot cannot be signed");
+    useCaseSignoffRefused = {
+      code: err.code,
+      detail:
+        `${err.message} The workflow instance has moved, but its AI use case was not approved; it stays where it was ` +
+        "until a receipt signing key is configured and an admin re-syncs it (POST /v1/use-cases/:useCaseId/resync).",
+    };
+  }
+  await syncVendorForInstance(db, instanceId, actorUserId);
+  // ADR-0189 R25: the move committed before this runs, so the snapshot runs here
+  const aiBomSnapshotWarning = await runAiBomSignoffs(db, [useCaseSignoff], log);
+  const extra = {
+    ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
+    ...(useCaseSignoffRefused ? { useCaseSignoffWarning: useCaseSignoffRefused } : {}),
+  };
+  return Object.keys(extra).length ? extra : undefined;
 }
 
 /**
@@ -1802,10 +1852,23 @@ async function useCaseReplayBody(
   const [row] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
   if (!row || !row.workflowInstanceId || (!caller.isAdmin && row.ownerUserId !== caller.userId)) return { id: useCaseId };
   const [instance] = await db
-    .select({ id: workflowInstances.id, status: workflowInstances.status, state: workflowInstances.state })
+    .select({
+      id: workflowInstances.id,
+      status: workflowInstances.status,
+      state: workflowInstances.state,
+      stageEntry: workflowInstances.stageEntry,
+      context: workflowInstances.context,
+    })
     .from(workflowInstances)
     .where(eq(workflowInstances.id, row.workflowInstanceId));
-  return instance ? createdBody(row, instance) : { id: useCaseId };
+  if (!instance) return { id: useCaseId };
+  // PR #357 recheck L-b: a replay re-drives nothing (ADR-0179); it carries the
+  // refusal the intake still stands on, read from the instance (a pure read)
+  const standing = standingExecutorRefusal(instance);
+  return {
+    ...createdBody(row, { id: instance.id, status: instance.status, state: instance.state }),
+    ...(standing ? { executorRefusal: standing } : {}),
+  };
 }
 
 /** thrown inside the create transaction to roll back the key claim with it */
@@ -2012,6 +2075,7 @@ export function registerUseCaseRoutes(
     // transaction at the unique (user_id, key) index and, once it commits,
     // conflicts and replays — two requests can never both create.
     let outcome: { kind: "created"; body: Record<string, unknown> } | { kind: "replay"; body: Record<string, unknown> | null };
+    let startSignoff: AiBomSignoff | null = null;
     try {
       outcome = await db.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Db;
@@ -2052,6 +2116,12 @@ export function registerUseCaseRoutes(
             changeType: "ai-use-case-intake",
             environment: "governance",
           },
+          // ADR-0189 R25 item 13 prevention: the use case is bound below, after
+          // the start ran its stages, so the executor's lookahead cannot find
+          // it by instance. An intake stage that would complete the instance
+          // would approve this proposal: it runs only if that approval could
+          // take its signed snapshot, and otherwise waits, effect-free.
+          executor: { assertTransitionAllowed: async (t) => assertAiBomSignoffPossible(t) },
         });
         if (!started.ok) throw new CreateRefused(started.status, started.body);
 
@@ -2093,7 +2163,28 @@ export function registerUseCaseRoutes(
           ruleChain: [],
           reason: `AI use case '${body.name}' proposed — intake workflow started`,
         });
-        const created = createdBody(row!, started.instance);
+        // ADR-0189 R25 item 13: an intake that completed while it started
+        // approves the proposal now, in this transaction, rather than leaving it
+        // behind its instance. The snapshot it owes runs after commit.
+        let bound = row!;
+        let signoffWarning: { code: string; detail: string } | null = null;
+        if (started.instance.status === "completed") {
+          try {
+            startSignoff = await syncUseCaseForInstance(tx, started.instance.id, userId);
+          } catch (err) {
+            // only a key lost after the start's lookahead: left behind, re-syncable
+            if (!(err instanceof AiBomError)) throw err;
+            signoffWarning = { code: err.code, detail: `${err.message} The intake completed, but this use case was not approved; an admin re-syncs it once a key is usable.` };
+          }
+          const [fresh] = await tx.select().from(aiUseCases).where(eq(aiUseCases.id, row!.id));
+          if (fresh) bound = fresh;
+        }
+        const created = {
+          ...createdBody(bound, started.instance),
+          ...(signoffWarning ? { useCaseSignoffWarning: signoffWarning } : {}),
+          // PR #357 review 5: an intake stage held at start says so
+          ...(started.executorRefusal ? { executorRefusal: started.executorRefusal } : {}),
+        };
         if (idemKey) {
           // ADR-0179 review item 3: the claim keeps a reference, not the body;
           // a replay rebuilds the same shape from the use case (useCaseReplayBody)
@@ -2119,7 +2210,9 @@ export function registerUseCaseRoutes(
       }
       return reply.status(200).header("Idempotent-Replay", "true").send(await useCaseReplayBody(db, outcome.body, caller));
     }
-    return reply.status(201).send(outcome.body);
+    // ADR-0189 R25: an intake that completed at start owes its approval's snapshot, after commit
+    const aiBomSnapshotWarning = await runAiBomSignoffs(db, [startSignoff], req.log);
+    return reply.status(201).send({ ...outcome.body, ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}) });
   });
 
   // List: fleet for admins, own proposals for everyone else — the same

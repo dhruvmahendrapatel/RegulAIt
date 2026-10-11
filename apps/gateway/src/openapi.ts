@@ -250,6 +250,8 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
     summary: "Approve or deny a pending request. Non-admin by design — the named approver is usually not an admin.",
     // ADR-0180 A2: the decide body also accepts measured conditions
     body: decideApprovalWithMeasuredSchema,
+    responseNote:
+      "When a workflow sign-off runs an executor stage after the decision commits, `executionWarning` reports what it could not do: `executorRefusal` (ADR-0189 R25 item 13 — the stage would complete the instance and approve its AI use case, but no receipt signing key is usable, so it was held; `/advance` runs it once a key is), `useCaseSignoffWarning` and `aiBomSnapshotWarning`. The decision itself stands.",
   },
 
   "GET /v1/projects": { summary: "Projects visible to the caller." },
@@ -278,9 +280,13 @@ export const ROUTE_DOCS: Readonly<Record<string, RouteDoc>> = {
       "Report per-check results into an automated_check stage. AER-048: `round` binds the results to the workflow round they were produced for — a report for any other round is refused 409 `stale_check_report` (audited). A key-authenticated caller (CI) MUST send it (422 `round_required`) unless the org setting `checkReportsAllowUnbound` is on; a console session may omit it, binding to the current round.",
     body: reportChecksSchema,
     responseNote:
-      "200 with `evaluation: \"evaluated\"` (the stage re-evaluated on this report) or `\"stored_for_later\"` (the stage is not executing yet); 202 with `evaluation: \"deferred_to_running_executor\"` when another executor is mid-evaluation of the stage — it folds this report into its verdict, or re-evaluates once if it ends without committing. Always carries `round`.",
+      "200 with `evaluation: \"evaluated\"` (the stage re-evaluated on this report) or `\"stored_for_later\"` (the stage is not executing yet); 202 with `evaluation: \"deferred_to_running_executor\"` when another executor is mid-evaluation of the stage — it folds this report into its verdict, or re-evaluates once if it ends without committing. 200 with `evaluation: \"refused_signoff_unavailable\"` (ADR-0189 R25 item 13) when passing the stage would complete the instance and approve its AI use case, but no receipt signing key is usable: the report is stored, the stage is not evaluated, and `executorRefusal` says why; the next report or `/advance` evaluates it once a key is usable. Always carries `round`.",
   },
-  "POST /v1/workflows/instances/:instanceId/advance": { summary: "Advance a workflow instance past its current stage, subject to that stage's gates." },
+  "POST /v1/workflows/instances/:instanceId/advance": {
+    summary: "Advance a workflow instance past its current stage, subject to that stage's gates.",
+    responseNote:
+      "ADR-0189 R25 item 13: an executor stage (git, deploy, nested build, checks) that would complete the instance and approve its AI use case is not run while no receipt signing key is usable (strict setting). The instance stays at that stage and nothing external happens. When the held stage is the one this call asked to run, the answer is 409 (503 for an unusable key) with `error`, `detail` and `executorRefusal` (`stageId`, `code`, `detail`), as the route-level refusals are; when it follows a transition this call made, the answer is 200 and carries `executorRefusal`. The artifact, check report, recheck and deploy-override routes carry the same field, and an Idempotency-Key replay of an artifact submit carries the refusal the instance still stands on. Retry once a key is usable.",
+  },
 
   // ADR-0181 (security review): internal (rendered only with ?include=all), but
   // its body is bound so the guardrail window's `assuranceWindow` field is stated
