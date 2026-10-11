@@ -31,6 +31,8 @@ describe("resyncRefusalText", () => {
     expect(resyncRefusalText(new ApiError(409, { error: "bom_signing_unavailable" }))).toMatch(/signing key/);
     expect(resyncRefusalText(new ApiError(409, { error: "use_case_edited_after_completion" }))).toMatch(/edited after/);
     expect(resyncRefusalText(new ApiError(403, { error: "bootstrap_cannot_drive" }))).toMatch(/Sign in as an administrator/);
+    expect(resyncRefusalText(new ApiError(409, { error: "no_completion_record" }))).toMatch(/no record of its intake workflow completing/);
+    expect(resyncRefusalText(new ApiError(409, { error: "eu_tier_changed_since_completion" }))).toMatch(/tier would change/);
   });
   it("falls back to the error's own message", () => {
     expect(resyncRefusalText(new Error("boom"))).toBe("boom");
@@ -41,5 +43,6 @@ describe("resyncOutcomeText", () => {
   it("says what changed, and says so when nothing did", () => {
     expect(resyncOutcomeText({ useCaseId: "u1", status: "approved", resynced: true })).toBe("Use case u1 re-synced: now approved.");
     expect(resyncOutcomeText({ useCaseId: "u1", status: "under_review", resynced: false })).toMatch(/already in step \(under review\)/);
+    expect(resyncOutcomeText({ useCaseId: "u1", status: "approved", resynced: true, approvalExpired: true })).toMatch(/already expired/);
   });
 });

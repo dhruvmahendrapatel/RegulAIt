@@ -259,7 +259,17 @@ function BehindCompletedInstance(props: { item: { count: number; sampleUseCaseId
               {id}
             </Link>
             <span className={p.noPrint}>
-              <Button size="sm" onClick={() => void run(id)} disabled={busyId !== null} aria-label={`Re-sync use case ${id}`}>
+              {/* aria-disabled, not disabled: a disabled button drops focus to the page,
+                  so on a refusal the person would lose their place in the list */}
+              <Button
+                size="sm"
+                onClick={() => {
+                  if (busyId === null) void run(id);
+                }}
+                aria-disabled={busyId !== null}
+                aria-busy={busyId === id}
+                aria-label={`Re-sync use case ${id}`}
+              >
                 {busyId === id ? "Re-syncing…" : "Re-sync"}
               </Button>
             </span>

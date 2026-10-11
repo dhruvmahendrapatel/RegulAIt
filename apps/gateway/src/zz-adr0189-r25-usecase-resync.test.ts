@@ -31,6 +31,8 @@ import {
   aiUseCases,
   auditLog,
   eq,
+  orgSettings,
+  ORG_SETTINGS_ID,
   requestIdempotencyKeys,
   sql,
   useCaseDecisionRecords,
@@ -42,6 +44,7 @@ import {
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { createWorkflowTemplateValidated, startWorkflowInstanceWithTemplates } from "./workflows.js";
+import { useCaseDispatchGate } from "./use-case-gate.js";
 
 const KEY_ENV = ["REGULAIT_RECEIPT_SIGNING_KEY", "REGULAIT_RECEIPT_SIGNING_KEY_ID"] as const;
 const savedEnv = Object.fromEntries(KEY_ENV.map((k) => [k, process.env[k]]));
@@ -88,6 +91,7 @@ async function startInstance(label: string, stages: unknown[]) {
   return { instanceId: started.instance.id, useCaseId: uc!.id };
 }
 
+const rowsOf = <T,>(r: unknown) => (r as { rows: T[] }).rows;
 async function useCaseStatus(useCaseId: string) {
   const [u] = await db.select({ status: aiUseCases.status }).from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
   return u!.status;
@@ -178,6 +182,34 @@ async function strandUseCase(label: string) {
   expect(await useCaseStatus(f.useCaseId)).toBe("proposed");
   return f;
 }
+/**
+ * THE STRANDED CASE WITH A SIGN-OFF: the questionnaire goes to the approver, who
+ * approves (with a key: the instance then waits on its check, the use case stays
+ * under review), and the passing check report completes the instance with no key.
+ */
+async function strandSignedOff(label: string) {
+  const f = await startInstance(label, [
+    { id: "intake", type: "trigger" },
+    { id: "questionnaire", type: "artifact_generation", output: `r25rs_${label}` },
+    { id: "signoff", type: "human_approval", approvers: [approver.id] },
+    { id: "ci-gate", type: "automated_check", checks: ["ci"] },
+  ]);
+  const submitted = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25rs answers" });
+  expect(submitted.statusCode, submitted.body).toBe(201);
+  expect(await useCaseStatus(f.useCaseId)).toBe("under_review");
+  const [pending] = await db
+    .select({ id: approvals.id })
+    .from(approvals)
+    .where(and(eq(approvals.instanceId, f.instanceId), eq(approvals.status, "pending")));
+  const decided = await k.req("POST", `/v1/approvals/${pending!.id}/decide`, approver.auth, { decision: "approved", reason: "r25rs sign-off" });
+  expect(decided.statusCode, decided.body).toBe(200);
+  expect((await instanceRow(f.instanceId)).status).toBe("awaiting_execution");
+  const reported = await withoutKey(() => reportPass(f.instanceId));
+  expect(reported.statusCode, reported.body).toBe(200);
+  expect(reported.json().status).toBe("completed");
+  expect(await useCaseStatus(f.useCaseId)).toBe("under_review");
+  return { ...f, approvalId: pending!.id };
+}
 const resync = (useCaseId: string, who: { authorization: string } = admin.auth) => k.req("POST", `/v1/use-cases/${useCaseId}/resync`, who, {});
 
 beforeAll(async () => {
@@ -265,6 +297,8 @@ describe("POST /v1/use-cases/:useCaseId/resync", () => {
     expect(lifetime.approvedAt!.getTime()).toBe(completion.at.getTime());
     expect(lifetime.decidedAt!.getTime()).toBe(completion.at.getTime());
     expect(lifetime.approvedUntil!.getTime()).toBeGreaterThan(lifetime.approvedAt!.getTime());
+    expect(new Date(res.json().approvedUntil).getTime()).toBe(lifetime.approvedUntil!.getTime());
+    expect(res.json().approvalExpired).toBe(false);
     const [record] = await decisionRecords(f.useCaseId);
     expect(record).toMatchObject({ outcome: "approved", decidedBy: owner.id, approvalId: null });
     expect(record!.decidedAt.getTime()).toBe(completion.at.getTime());
@@ -400,33 +434,14 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
   }, 180_000);
 
   it("a template with a sign-off: the decision keeps the original approver and approval, and the lifetime starts when it was decided", async () => {
-    const f = await startInstance("approved", [
-      { id: "intake", type: "trigger" },
-      { id: "questionnaire", type: "artifact_generation", output: "r25rs_approved" },
-      { id: "signoff", type: "human_approval", approvers: [approver.id] },
-      { id: "ci-gate", type: "automated_check", checks: ["ci"] },
-    ]);
-    const submitted = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25rs answers" });
-    expect(submitted.statusCode, submitted.body).toBe(201);
-    expect(await useCaseStatus(f.useCaseId)).toBe("under_review");
-    const [pending] = await db
-      .select({ id: approvals.id })
-      .from(approvals)
-      .where(and(eq(approvals.instanceId, f.instanceId), eq(approvals.status, "pending")));
-    const decided = await k.req("POST", `/v1/approvals/${pending!.id}/decide`, approver.auth, { decision: "approved", reason: "r25rs sign-off" });
-    expect(decided.statusCode, decided.body).toBe(200);
-    // the instance now waits on its check; the use case is still under review
-    expect((await instanceRow(f.instanceId)).status).toBe("awaiting_execution");
-    const reported = await withoutKey(() => reportPass(f.instanceId));
-    expect(reported.statusCode, reported.body).toBe(200);
-    expect(reported.json().status).toBe("completed");
-    expect(await useCaseStatus(f.useCaseId)).toBe("under_review");
-    const [approval] = await db.select().from(approvals).where(eq(approvals.id, pending!.id));
+    const f = await strandSignedOff("approved");
+    const pending = { id: f.approvalId };
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, pending.id));
     expect(approval!.decidedBy).toBe(approver.id);
 
     const res = await resync(f.useCaseId);
     expect(res.statusCode, res.body).toBe(200);
-    expect(res.json()).toMatchObject({ from: "under_review", status: "approved", resynced: true });
+    expect(res.json()).toMatchObject({ from: "under_review", status: "approved", resynced: true, approvalExpired: false });
     const [resynced] = await auditRows("use-case-resynced", f.useCaseId);
     expect(resynced!.userId).toBe(admin.id);
     expect(resynced!.detail).toMatchObject({
@@ -441,6 +456,94 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     const [record] = await decisionRecords(f.useCaseId);
     expect(record).toMatchObject({ outcome: "approved", decidedBy: approver.id, approvalId: pending!.id });
     expect(record!.decidedAt.getTime()).toBe(approval!.decidedAt!.getTime());
+    expect(new Date(res.json().approvedUntil).getTime()).toBe(lifetime.approvedUntil!.getTime());
+  }, 180_000);
+
+  it("an approval decided long ago: the lifetime runs from that decision, so it comes back already expired, and the dispatch gate treats it so", async () => {
+    const f = await strandSignedOff("expired");
+    // FIXTURE: the sign-off happened three years ago (the use case was stranded since)
+    const longAgo = new Date(Date.now() - 3 * 365 * 86_400_000);
+    await db.update(approvals).set({ decidedAt: longAgo }).where(eq(approvals.id, f.approvalId));
+    const res = await resync(f.useCaseId);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ status: "approved", resynced: true, approvalExpired: true });
+    const lifetime = await lifetimeOf(f.useCaseId);
+    expect(lifetime.approvedAt!.getTime()).toBe(longAgo.getTime());
+    expect(new Date(res.json().approvedUntil).getTime()).toBe(lifetime.approvedUntil!.getTime());
+    expect(lifetime.approvedUntil!.getTime()).toBeLessThan(Date.now());
+    // the gate: an approved use case whose lifetime is over does not satisfy it
+    await db.update(aiUseCases).set({ projectId: owner.projectId }).where(eq(aiUseCases.id, f.useCaseId));
+    await db.update(orgSettings).set({ useCaseGateMode: "enforce" }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const gate = await useCaseDispatchGate(db, { userId: owner.id, agentId: ucAgentId, agentName: "r25rs", projectId: owner.projectId });
+    expect(gate).toMatchObject({ kind: "refuse", error: "use_case_approval_required" });
+    expect((gate as { detail: string }).detail).toContain("the approval has expired");
+    // unlinked again, so no later test's dispatch meets it
+    await db.update(aiUseCases).set({ projectId: null }).where(eq(aiUseCases.id, f.useCaseId));
+  }, 180_000);
+
+  it("an edit committed BEFORE the instance completed does not block the re-sync (commit order, not clocks)", async () => {
+    const f = await startInstance("edit-before", CHECK_STAGES("edit-before"));
+    const submitted = await k.req("POST", `/v1/workflows/instances/${f.instanceId}/artifacts`, owner.auth, { stageId: "questionnaire", content: "r25rs answers" });
+    expect(submitted.statusCode, submitted.body).toBe(201);
+    // still proposed and the instance still running: the edit is allowed
+    const edited = await k.req("PATCH", `/v1/use-cases/${f.useCaseId}`, owner.auth, { description: "r25rs edited before completion" });
+    expect(edited.statusCode, edited.body).toBe(200);
+    const reported = await withoutKey(() => reportPass(f.instanceId));
+    expect(reported.json().status).toBe("completed");
+    const res = await resync(f.useCaseId);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ status: "approved", resynced: true });
+  }, 180_000);
+
+  it("lock order: the re-sync waits on the instance before it holds the use case, so a transition holding the instance then writing the use case does not deadlock", async () => {
+    const f = await strandUseCase("lock-order");
+    // a transition's order: the instance FOR UPDATE (applyEvent), then the use case (the mirror)
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    const transition = db.transaction(async (tx) => {
+      await tx.select({ id: workflowInstances.id }).from(workflowInstances).where(eq(workflowInstances.id, f.instanceId)).for("update");
+      held();
+      await released;
+      await tx.update(aiUseCases).set({ updatedAt: new Date() }).where(eq(aiUseCases.id, f.useCaseId));
+    });
+    await holding;
+    const pending = resync(f.useCaseId);
+    // the re-sync is now blocked on the instance lock (and, in this order, holds nothing on the use case)
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const waiting = rowsOf<{ n: number }>(
+        await db.execute(sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`),
+      )[0]!.n;
+      if (waiting >= 1) break;
+      if (Date.now() > deadline) throw new Error("the re-sync never waited on the instance lock");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    release();
+    await transition; // with the old order (use case, then instance) this is a 40P01 deadlock
+    const res = await pending;
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ status: "approved", resynced: true });
+  }, 180_000);
+
+  it("no completion record (e.g. removed by retention): refused 409 no_completion_record, nothing changes", async () => {
+    // a completed instance with no transition on record, as a purge would leave it
+    const [inst] = await db.insert(workflowInstances).values({
+      templateIds: [], definition: { stages: [] }, initiatorUserId: owner.id, change: { description: "r25rs no record", paths: [] }, state: {}, status: "completed",
+    }).returning({ id: workflowInstances.id });
+    const [uc] = await db.insert(aiUseCases).values({
+      name: `r25rs-uc-norecord-${k.RUN}`, description: "r25rs synthetic", ownerUserId: owner.id, businessContext: "r25rs synthetic",
+      intendedAgentIds: [ucAgentId], dataSensitivity: "internal", status: "under_review", workflowInstanceId: inst!.id,
+    }).returning({ id: aiUseCases.id });
+    const res = await resync(uc!.id);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json()).toMatchObject({ error: "no_completion_record" });
+    expect(await useCaseStatus(uc!.id)).toBe("under_review");
+    expect(await auditRows("use-case-approved", uc!.id)).toEqual([]);
+    expect(await decisionRecords(uc!.id)).toEqual([]);
+    // it stays behind by design; retire it so it does not crowd the posture sample
+    await db.update(aiUseCases).set({ status: "retired", retiredReason: "r25rs cleanup", retiredAt: new Date() }).where(eq(aiUseCases.id, uc!.id));
   }, 180_000);
 });
 
