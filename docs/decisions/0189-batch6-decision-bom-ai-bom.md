@@ -2031,10 +2031,20 @@ fixes were rechecked. These are the details the build settled:
         carries `useCaseSignoffWarning`.
       - The use case is left at `proposed` or `under_review` while its instance is completed. A completed instance
         cannot be advanced, so **nothing recovers it today**. This fails closed: nothing is approved without a snapshot.
-      - Open follow-up: an admin re-sync route for such use cases, and a posture item "instance completed, use case
-        not approved".
-      - The deploy-override route also runs git executions that can complete an instance without the use-case sync.
-        That predates R25 and is in the same follow-up.
+      - **Recovery (PR #355):** an admin re-syncs the use case with `POST /v1/use-cases/:useCaseId/resync`, from the
+        Re-sync action on the Posture page.
+        - The route requires an admin and an `approval_decide` step-up, and refuses the bootstrap credential.
+        - It runs the same key check and post-commit snapshot as any other sign-off.
+        - The decision keeps the original approver, approval id and decision time. With no approval stage, it takes
+          the completing event's actor and time. The re-syncing admin is recorded separately, in the
+          `use-case-resynced` row.
+        - It refuses a use case edited after its instance completed (`use_case_edited_after_completion`). PATCH also
+          refuses such an edit (`use_case_locked_instance_completed`).
+        - Posture shows `useCases.instanceCompletedNotApproved` (count, sample ids, action).
+      - **Prevention (open follow-up):** a lookahead check in the executor would refuse, before any external effect, a
+        stage that would complete an instance with no usable key.
+      - The deploy-override, `/recheck` and `/checks` routes now sync the use case as well (PR #355). Deploy-override
+        also checks the key inside its transaction.
 14. **Bulk and chat decisions refuse one item at a time.** A refused item is reported and audited as refused, and the
     rest of the batch carries on.
 15. **A configured key that cannot be used** is refused with 503 `receipt_signing_key_invalid`. Under the relaxed
