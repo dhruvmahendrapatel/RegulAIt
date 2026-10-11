@@ -21,6 +21,27 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-11 (afternoon) - R25 sign-off snapshots live; receipt keys are generated at install.**
+- **PR #352** wires ADR-0189 R25. Approved sign-offs take a signed AI BOM snapshot after commit, and that covers:
+  - use-case approval;
+  - model-card approval;
+  - evidence attached;
+  - prompt promotion;
+  - config promotion;
+  - server admission;
+  - skill admission.
+- **No key:** the sign-off is refused, either with 409 `bom_signing_unavailable` or, where the key is unusable, 503.
+- **Gaps:** snapshots that fail or are skipped become audited rows, and posture reports any snapshot that was owed but is missing.
+- **Migration 0192** adds the indexes for these audit rows.
+- **PR #353** implements the owner decision that the installer and first boot generate an Ed25519 receipt key. ADR-0189 R25 items 12 and 19 describe it:
+  - the key is stored in the `install_secrets` volume;
+  - an operator key always wins;
+  - each newly registered key writes a `receipt-signing-key-registered` audit row.
+- **Open follow-ups:**
+  - an admin re-sync route for use cases whose workflow instance completed while no key was usable;
+  - an audited receipt-key retire action;
+  - the #352 and #353 recheck Lows.
+
 **2026-10-11 (morning) - AI BOM snapshots released on demand; R25 settled.** PR #350 merged. It sets
 `AI_BOM_SNAPSHOTS_RELEASED` and keeps the public Rekor publication off (repo variable `RELEASE_AI_BOM_PUBLISH_APPROVED`
 unset, by owner decision). ADR-0189's "Amendments settling R25" fixes the sign-off trigger design; the R25 slice is being
