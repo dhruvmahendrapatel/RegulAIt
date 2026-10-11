@@ -139,6 +139,13 @@ function ExecutorsCard() {
   }, []);
   const rows = q.data === undefined ? null : parseExecutors(q.data);
   const failure = q.isError ? unavailableText("executors", availabilityOf(q.error)) : rows === null && !q.isPending ? "The gateway's executor list could not be read. No placement assurance is shown." : null;
+  // registering is offered only against a list that was read: never blind, and never where the read was refused
+  const registerReasonId = useId();
+  const registerBlocked = failure
+    ? `Registering an executor is unavailable while the executor list cannot be read. ${failure}`
+    : q.isPending
+      ? "Registering an executor is available once the executor list has loaded."
+      : null;
   return (
     <Card
       title="Executors"
@@ -147,7 +154,12 @@ function ExecutorsCard() {
           <Button size="sm" variant="ghost" disabled={q.isFetching} onClick={() => void q.refetch()}>
             Check again
           </Button>
-          <Button size="sm" onClick={() => setRegistering(true)}>
+          <Button
+            size="sm"
+            disabled={registerBlocked !== null}
+            aria-describedby={registerBlocked ? registerReasonId : undefined}
+            onClick={() => setRegistering(true)}
+          >
             Register executor
           </Button>
         </>
@@ -159,6 +171,11 @@ function ExecutorsCard() {
           self-test for it. Every report is software-attested by the executor on its own host: a compromised host can lie, so this
           is never hardware verification.
         </p>
+        {registerBlocked && (
+          <p id={registerReasonId} className={v.dim}>
+            {registerBlocked}
+          </p>
+        )}
         {failure ? (
           <EmptyState title="Executors unavailable" body={failure} />
         ) : (

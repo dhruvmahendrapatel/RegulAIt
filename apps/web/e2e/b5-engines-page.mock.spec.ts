@@ -399,9 +399,26 @@ test.describe("ADR-0187 X26: the Engines page", () => {
     await installBuilderMock(page, { isAdmin: true });
     await page.route("**/v1/engines", (route) => json(route, 500, { error: "internal" }));
     await page.route("**/v1/detection-content", (route) => json(route, 501, { error: "not_built" }));
+    // the isolation settings card on this page has its own QueryGate: give it a valid envelope so it adds no alert or Retry
+    await page.route("**/v1/org/settings", (route) =>
+      json(route, 200, {
+        settings: {
+          isolationEnforcement: "enforce",
+          isolationFloorPublic: "user_space_kernel",
+          isolationFloorInternal: "user_space_kernel",
+          isolationFloorConfidential: "user_space_kernel",
+          isolationFloorRegulated: "microvm",
+          isolationFloorMcpStdio: "user_space_kernel",
+          isolationFloorEngineWorker: "user_space_kernel",
+          executorAttestationMaxAgeMinutes: 120,
+        },
+      }),
+    );
     await page.goto("/ui/admin/engines");
-    await expect(page.getByRole("alert")).toContainText("Something went wrong on the server");
-    await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+    // scoped to the engine list's own error card, not page-wide
+    const engineError = page.locator("[data-rg-card]").filter({ has: page.getByRole("alert").filter({ hasText: "Something went wrong on the server" }) });
+    await expect(engineError.getByRole("alert")).toContainText("Something went wrong on the server");
+    await expect(engineError.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(page.getByText("No engines are registered")).toHaveCount(0);
   });
 });

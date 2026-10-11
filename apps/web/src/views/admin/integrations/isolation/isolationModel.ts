@@ -326,7 +326,8 @@ export function executorReading(e: Executor, now: number): Reading {
   const allowed = BACKEND_CLASSES[e.backend];
   const fresh = e.attestations.filter((a) => a.fresh && a.expiresAt !== null && a.expiresAt > now && allowed.includes(a.isolationClass ?? ""));
   if (fresh.length === 0) {
-    const expired = e.attestations.some((a) => a.fresh);
+    // only a report for a class this backend can attest was ever evidence; anything else is no report, not a stale one
+    const expired = e.attestations.some((a) => a.fresh && allowed.includes(a.isolationClass ?? ""));
     return expired
       ? { state: "Stale", tone: "warn", detail: "The last passing self-test has expired. It cannot justify a placement." }
       : { state: "No fresh report", tone: "neutral", detail: "No passing self-test within the attestation lifetime. Its classes do not count." };

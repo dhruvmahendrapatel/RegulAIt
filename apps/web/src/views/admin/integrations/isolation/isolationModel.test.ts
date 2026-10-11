@@ -192,9 +192,14 @@ describe("executors from GET /v1/executors", () => {
     expect(executorReading(one({ attestations: [{ profileDigest: "a".repeat(64), fresh: false }] }), now).tone).toBe("neutral");
   });
 
-  it("a class the backend cannot attest is not counted (OpenShell never attests L2)", () => {
+  it("a class the backend cannot attest is not counted (OpenShell never attests L2): no fresh report, not stale", () => {
     const e = one({ backend: "openshell", attestations: [{ profileDigest: "a".repeat(64), fresh: true, class: "user_space_kernel", expiresAt: iso(now + 60_000) }] });
-    expect(executorReading(e, now).tone).not.toBe("ok");
+    expect(executorReading(e, now)).toMatchObject({ state: "No fresh report", tone: "neutral" });
+    // also after its expiry: it never was evidence, so it never reads as an expired pass
+    expect(executorReading(e, now + 120_000)).toMatchObject({ state: "No fresh report", tone: "neutral" });
+    // a runc executor reporting L3 is likewise no report
+    const runc = one({ backend: "runc", attestations: [{ profileDigest: "a".repeat(64), fresh: true, class: "microvm", expiresAt: iso(now + 60_000) }] });
+    expect(executorReading(runc, now).state).toBe("No fresh report");
   });
 
   it("quarantined and revoked executors are refused whatever their reports say", () => {

@@ -13,7 +13,7 @@
  *    (`putOrgSettings`), so the gateway's `settings_relax` step-up is asked for.
  *  - If the read after a write fails, the form locks (`StaleAfterWrite`).
  */
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { putOrgSettings } from "../../../../stepup/stepUp";
@@ -77,6 +77,9 @@ function IsolationSettingsForm({ settings }: { settings: Record<string, unknown>
   const confirming = useRef(false);
   const [pending, setPending] = useState<{ intent: SettingsDraft; relaxed: string[]; changed: boolean; current: Record<string, unknown> } | null>(null);
   const unavailable = settings === null;
+  const unmeasuredId = useId();
+  /** while unmeasured, every disabled control is described by the reason it is disabled */
+  const describedBy = unavailable ? unmeasuredId : undefined;
 
   const write = async (body: Record<string, unknown>) => {
     if (await act.run(() => putOrgSettings(body), "Isolation settings saved")) await baseline.settle();
@@ -156,7 +159,7 @@ function IsolationSettingsForm({ settings }: { settings: Record<string, unknown>
         )}
       </p>
       {unavailable && (
-        <p role="status">
+        <p role="status" id={unmeasuredId}>
           Isolation settings are unmeasured: the gateway has not reported all eight values. Editing is unavailable, and no value is
           filled in from the defaults.
         </p>
@@ -178,10 +181,11 @@ function IsolationSettingsForm({ settings }: { settings: Record<string, unknown>
                     required
                     value={draft[key]}
                     disabled={locked}
+                    aria-describedby={describedBy}
                     onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
                   />
                 ) : (
-                  <Select value={draft[key]} disabled={locked} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}>
+                  <Select value={draft[key]} disabled={locked} aria-describedby={describedBy} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}>
                     {!draft[key] && <option value="">Not reported</option>}
                     {CLASSES.map((c) => (
                       <option key={c} value={c}>
@@ -202,7 +206,7 @@ function IsolationSettingsForm({ settings }: { settings: Record<string, unknown>
         longer attestation lifetime (up to 24 hours) lets a host that drifted keep serving longer before it is caught.
       </p>
       <div>
-        <Button type="submit" variant="primary" disabled={locked}>
+        <Button type="submit" variant="primary" disabled={locked} aria-describedby={describedBy}>
           Save isolation settings
         </Button>
       </div>

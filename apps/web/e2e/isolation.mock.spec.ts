@@ -138,6 +138,9 @@ test("Engines: a refused executor list is unavailable, never an empty fleet", as
   await expect(page.getByText("Executors unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText("You are not allowed to read executors.", { exact: true })).toBeVisible();
   await expect(page.getByText("No executors registered", { exact: true })).toHaveCount(0);
+  const register = page.getByRole("button", { name: "Register executor", exact: true });
+  await expect(register).toBeDisabled();
+  await expect(register).toHaveAccessibleDescription(/Registering an executor is unavailable while the executor list cannot be read\. You are not allowed to read executors\./);
 });
 
 test("settings: enforcement is fixed and never sent; only the edited floor is sent; a relaxation is confirmed and resent once with step-up", async ({ page }) => {
@@ -204,7 +207,11 @@ test("settings: malformed envelopes and a retired warn keep Engines usable and e
     await expect(save(page)).toBeDisabled();
     const controls = save(page).locator("xpath=ancestor::form").locator("input, select");
     await expect(controls).toHaveCount(EDITABLE);
-    for (const control of await controls.all()) await expect(control).toBeDisabled();
+    for (const control of await controls.all()) {
+      await expect(control).toBeDisabled();
+      await expect(control).toHaveAccessibleDescription(/Isolation settings are unmeasured/);
+    }
+    await expect(save(page)).toHaveAccessibleDescription(/Isolation settings are unmeasured/);
     await expect(floor(page)).toHaveValue("");
     await expect(page.getByText("At least as strict as the default", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Always on", { exact: true })).toHaveCount(0);
