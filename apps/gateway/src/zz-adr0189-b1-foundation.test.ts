@@ -958,8 +958,9 @@ describe("ADR-0189 §9: every route is registered under its route class", () => 
         "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": [501, "bom_snapshots_not_released"],
         "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": [200, null],
         "GET /v1/ai-bom/:subjectKind/:subjectId/drift": [404, "ai_bom_subject_not_found"],
-        "GET /v1/ai-bom/snapshots/:snapshotId": [404, "ai_bom_snapshot_not_found"],
-        "GET /v1/ai-bom/snapshots/:snapshotId/bundle": [404, "ai_bom_snapshot_not_found"],
+        // R17: the snapshot downloads stay off with the release switch (the master's ruling on #344)
+        "GET /v1/ai-bom/snapshots/:snapshotId": [501, "bom_snapshots_not_released"],
+        "GET /v1/ai-bom/snapshots/:snapshotId/bundle": [501, "bom_snapshots_not_released"],
         "GET /v1/decisions/:auditId/bom": [404, "bom_decision_not_found"],
         "GET /v1/decisions/:auditId/bom/bundle": process.env.REGULAIT_EXPORT_SIGNING_KEY ? [404, "bom_decision_not_found"] : [409, "bom_signing_unavailable"],
         "POST /v1/boms/verify": [400, "invalid_bom_verify_request"],

@@ -150,6 +150,11 @@ function tryJson(text: string | undefined): { ok: true; value: unknown } | { ok:
     return { ok: false };
   }
 }
+/** the parsed value, or a symbol that has no canonical form (so a comparison with its text fails) */
+const tryJsonValue = (text: string): unknown => {
+  const j = tryJson(text);
+  return j.ok ? j.value : Symbol("unparseable");
+};
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const canonicalOf = (v: unknown): string | null => {
   try {
@@ -726,7 +731,7 @@ function manifestSchemaIssues(value: unknown): boolean {
 }
 
 /** verify an `export-bundle/3` archive (the gzip bytes) against an out-of-band trust root */
-export async function verifyBomBundle(archive: Uint8Array, trust: BomVerifyTrust): Promise<BomVerifyReport> {
+async function verifyBomBundleUnguarded(archive: Uint8Array, trust: BomVerifyTrust): Promise<BomVerifyReport> {
   const read = readBomArchive(archive);
   if (!read.ok) return unreadable(read.why);
   const files = new Map<string, string>();
@@ -790,6 +795,8 @@ export async function verifyBomBundle(archive: Uint8Array, trust: BomVerifyTrust
         !pairOk
       ) r = bad("manifest_mismatch");
       else if ((m.files as Array<{ path: string; sha256: string }>).some((f) => f.sha256 !== hashBytes(read.files.get(f.path)!))) r = bad("hash_mismatch");
+      // every JSON entry is in its RFC 8785 form (so it has no duplicate key, and the scan reads what a parser reads)
+      else if ([...files].some(([p, text]) => p.endsWith(".json") && canonicalOf(tryJsonValue(text)) !== text)) r = bad("schema_violation");
     }
     checks.put("bundle_manifest_files", r);
   }
@@ -915,7 +922,7 @@ const storedSig = (s: StoredSignedBody): SignatureFile | null =>
   B64URL_SIG.test(s.signature) && DIGEST.test(s.bodySha256) ? { keyId: s.keyId, signature: s.signature, signedSha256: s.bodySha256 } : null;
 
 /** a frozen `decision_boms` row, with its linked AI BOM snapshot when it still exists (`null` when pruned or none) */
-export async function verifyStoredDecisionBom(input: StoredSignedBody & { linkedAiBom: StoredSignedBody | null }, trust: BomVerifyTrust): Promise<BomVerifyReport> {
+async function verifyStoredDecisionBomUnguarded(input: StoredSignedBody & { linkedAiBom: StoredSignedBody | null }, trust: BomVerifyTrust): Promise<BomVerifyReport> {
   const checks = new CheckList();
   const out = await verifyDecisionBody(checks, trust, {
     source: "decision_bom",
@@ -929,7 +936,7 @@ export async function verifyStoredDecisionBom(input: StoredSignedBody & { linked
 }
 
 /** a frozen `ai_bom_snapshots` row, its `bom_renderings` rows, and the subject's previous version (if any) */
-export async function verifyStoredAiBom(
+async function verifyStoredAiBomUnguarded(
   input: StoredSignedBody & { renderings: Array<{ format: string; bytes: string }>; previous: { id: string } | "pruned" | null },
   trust: BomVerifyTrust,
 ): Promise<BomVerifyReport> {
@@ -946,3 +953,34 @@ export async function verifyStoredAiBom(
   return finish(checks, { source: "ai_bom_snapshot", manifest: null }, { kind: "ai-bom", identity: out.identity, version: out.version });
 }
 
+
+// ---------------------------------------------------------------------------
+// the entry points: crafted input never throws (ADR-0191 review of #344, item 2)
+// ---------------------------------------------------------------------------
+
+/** an input the verifier could not even evaluate is `invalid` with one fixed check, never an exception */
+function evaluationFailed(source: BomVerifySource): BomVerifyReport {
+  const c = new CheckList();
+  if (source === "bundle") c.invalid("bundle_manifest_files", "bundle_unreadable");
+  else c.invalid("body_schema", "schema_violation");
+  return finish(c, { source, manifest: null }, null);
+}
+async function guarded(source: BomVerifySource, run: () => Promise<BomVerifyReport>): Promise<BomVerifyReport> {
+  try {
+    return await run();
+  } catch {
+    return evaluationFailed(source);
+  }
+}
+
+/** verify an `export-bundle/3` archive (the gzip bytes) against an out-of-band trust root; never throws */
+export const verifyBomBundle = (archive: Uint8Array, trust: BomVerifyTrust): Promise<BomVerifyReport> =>
+  guarded("bundle", () => verifyBomBundleUnguarded(archive, trust));
+/** a frozen `decision_boms` row, with its linked AI BOM snapshot when it still exists (`null` when pruned or none); never throws */
+export const verifyStoredDecisionBom = (input: StoredSignedBody & { linkedAiBom: StoredSignedBody | null }, trust: BomVerifyTrust): Promise<BomVerifyReport> =>
+  guarded("decision_bom", () => verifyStoredDecisionBomUnguarded(input, trust));
+/** a frozen `ai_bom_snapshots` row, its `bom_renderings` rows, and the subject's previous version (if any); never throws */
+export const verifyStoredAiBom = (
+  input: StoredSignedBody & { renderings: Array<{ format: string; bytes: string }>; previous: { id: string } | "pruned" | null },
+  trust: BomVerifyTrust,
+): Promise<BomVerifyReport> => guarded("ai_bom_snapshot", () => verifyStoredAiBomUnguarded(input, trust));

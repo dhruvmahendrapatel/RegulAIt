@@ -274,20 +274,30 @@ export function hasEmailShape(text: string): boolean {
 
 /** every JSON path whose key or string value holds an email shape; empty means clean */
 export function findEmailShapes(value: unknown, at = "$"): string[] {
+  // ITERATIVE (an explicit stack, document order kept): a deeply nested crafted value cannot overflow the call
+  // stack of the verifier or the export scan (ADR-0191 review of #344, item 2)
   const out: string[] = [];
-  const walk = (v: unknown, p: string) => {
+  const stack: Array<{ v: unknown; p: string } | { key: string; p: string }> = [{ v: value, p: at }];
+  while (stack.length) {
+    const item = stack.pop()!;
+    if ("key" in item) {
+      if (hasEmailShape(item.key)) out.push(`${item.p}{key}`);
+      continue;
+    }
+    const { v, p } = item;
     if (typeof v === "string") {
       if (hasEmailShape(v)) out.push(p);
     } else if (Array.isArray(v)) {
-      v.forEach((x, i) => walk(x, `${p}[${i}]`));
+      for (let i = v.length - 1; i >= 0; i--) stack.push({ v: v[i], p: `${p}[${i}]` });
     } else if (v !== null && typeof v === "object") {
-      for (const [k, x] of Object.entries(v)) {
-        if (hasEmailShape(k)) out.push(`${p}{key}`);
-        walk(x, `${p}.${k}`);
+      const entries = Object.entries(v);
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const [k, x] = entries[i]!;
+        stack.push({ v: x, p: `${p}.${k}` });
+        stack.push({ key: k, p });
       }
     }
-  };
-  walk(value, at);
+  }
   return out;
 }
 

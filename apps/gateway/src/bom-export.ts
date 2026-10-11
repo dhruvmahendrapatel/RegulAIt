@@ -14,6 +14,7 @@
  * configured export key, and the TSA trust bundle. Never a key from the bundle.
  */
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { readFileSync, statSync } from "node:fs";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { and, bomAuditorGrants, eq, isNull, orgSettings, ORG_SETTINGS_ID, receiptSigningKeys, sql, type Db } from "@regulait/db";
@@ -23,6 +24,7 @@ import {
   BOM_EXPORT_VERIFY_KEYS_FILE_ENV,
   bomOnlineExportTrust,
   EXPORT_BUNDLE_V3_SCHEMA,
+  writeBomTar,
   type BomBundleEnvelope,
   type BomCapabilities,
   type BomVerifyTrust,
@@ -30,7 +32,7 @@ import {
 } from "@regulait/shared";
 import { loadReceiptV2Boundary } from "./decision-receipts.js";
 import { deploymentTimestampVerifier } from "./bom-timestamp.js";
-import { buildTarGz, resolveExportSigningKey, resolveInstallIdentity } from "./export-bundle.js";
+import { resolveExportSigningKey, resolveInstallIdentity } from "./export-bundle.js";
 import { resolveLicense } from "./licensing.js";
 import { BomRouteError } from "./decision-bom.js";
 
@@ -121,7 +123,8 @@ export async function bomBundleEnvelope(db: Db, exportedByUserId: string): Promi
 
 /** write a built bundle as the served `.tar.gz` with the contract's headers (B4.1, `bomBundleHeadersSchema`) */
 export function sendBomBundle(reply: FastifyReply, built: BuiltBomBundle, subject: "decision-bom" | "ai-bom", exportKey: { keyId: string; fingerprint: string }): FastifyReply {
-  const archive = buildTarGz(built.files);
+  // the B4.1 writer the verifier rebuilds and compares against; one gzip member, level 9, MTIME 0, no name
+  const archive = gzipSync(writeBomTar(built.files), { level: 9 });
   const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
   return reply
     .status(200)

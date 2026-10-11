@@ -86,12 +86,23 @@ export interface DecisionBomProjectionInput {
 export const bomCompare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /** B4.7-3: the exact decimal sum of R23 cost strings (plain notation, no exponent, no trailing fractional zeros) */
+/**
+ * R23's exact shape, checked before any arithmetic: the ECMAScript shortest round-trip string of a FINITE double
+ * (`String(Number(s)) === s`), at most 32 characters. That bounds the digits and the exponent (a double is below
+ * 1e309 and above 5e-325), so `1e9999999`, `NaN`, `Infinity`, `0x10`, `1.0` or prose is refused, never summed
+ * (ADR-0191 review of #344, item 2).
+ */
+export function isBomCostString(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 32) return false;
+  const n = Number(value);
+  return Number.isFinite(n) && String(n) === value;
+}
+
 export function bomDecimalSum(values: readonly string[]): string {
   let total = new BigNumber(0);
   for (const v of values) {
-    const n = new BigNumber(v);
-    if (!n.isFinite()) throw new RangeError("bomDecimalSum: a cost is not a finite decimal");
-    total = total.plus(n);
+    if (!isBomCostString(v)) throw new RangeError("bomDecimalSum: a cost is not an R23 decimal string");
+    total = total.plus(new BigNumber(v));
   }
   const out = total.toFixed();
   return out === "-0" ? "0" : out;
@@ -139,11 +150,13 @@ export function projectDecisionBom(input: DecisionBomProjectionInput): DecisionB
   let cost: DecisionBomProjection["cost"] = null;
   if (usage.length) {
     const costs = usage.map((u) => u.projection.costUsd);
-    const costUsd = costs.some((c) => c === null || c === undefined)
+    const malformed = costs.some((c) => c !== null && c !== undefined && !isBomCostString(c));
+    if (malformed) problems.push({ section: "cost", why: "a bound usage event's costUsd is not an R23 decimal string" });
+    const costUsd = malformed || costs.some((c) => c === null || c === undefined)
       ? null
       : costs.length === 1
-        ? String(costs[0])
-        : bomDecimalSum(costs.map(String));
+        ? (costs[0] as string)
+        : bomDecimalSum(costs as string[]);
     cost = {
       usageEventIds: usage.map((u) => u.id),
       inputTokens: usage.reduce((s, u) => s + num(u.projection.inputTokens), 0),

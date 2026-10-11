@@ -101,32 +101,8 @@ async function run(v: Vector): Promise<BomVerifyReport> {
 }
 const reported = (r: BomVerifyReport, check: string) => r.checks.filter((c) => c.check === (check as BomVerifyCheck));
 
-/**
- * Vectors that disagree with the frozen contract, reported to the master and NOT changed here (the vectors are
- * read-only for B4). Each is pinned to exactly the deviation, so a fixed vector fails this test and is noticed.
- *
- * P25: its actor chain names `spiffe://TEST-ONLY-CANARY.example/...`. A SPIFFE trust domain is lower case (the
- * SPIFFE ID standard), and the frozen `bomSpiffeSchema` (`contract.ts`, `SPIFFE_HOST = /^[a-z0-9.-]+$/`) refuses
- * the upper-case host, so `decisionBomBodySchema` and `decisionFactsSchema` both refuse the body and its facts. The
- * verifier keeps the contract: `body_schema` `invalid` `schema_violation`, and the fact sections cannot be
- * recomputed from facts that do not parse (`sections_projection` `invalid`). N-R13 and N-R14 (based on P25) still
- * fail as they expect.
- */
-const KNOWN_DISAGREEMENTS: Record<string, Array<{ check: string; status: string; reason: string }>> = {
-  P25: [
-    { check: "body_schema", status: "invalid", reason: "schema_violation" },
-    { check: "sections_projection", status: "invalid", reason: "section_mismatch" },
-  ],
-};
-
 describe("ADR-0189 B4 verifier: the positive vectors", () => {
-  for (const [id, deviation] of Object.entries(KNOWN_DISAGREEMENTS)) {
-    it(`${id} disagrees with the frozen contract, and fails exactly where the contract says`, async () => {
-      const r = await run(positives.get(id)!);
-      expect(r.checks.filter((c) => c.status === "invalid").map((c) => ({ check: c.check, status: c.status, reason: c.reason }))).toEqual(deviation);
-    });
-  }
-  for (const v of (corpus.positives as Vector[]).filter((x) => !(x.id in KNOWN_DISAGREEMENTS))) {
+  for (const v of corpus.positives as Vector[]) {
     it(`${v.id} verifies ${v.expect.outcome}, with exactly the expected checks`, async () => {
       const r = await run(v);
       const why = JSON.stringify(r.checks.filter((c) => c.status !== "valid"));
@@ -276,7 +252,7 @@ describe("ADR-0189 B4.4: assembly refusals (the database-free assembly vectors)"
   };
 
   it("the assembler rebuilds every positive Decision BOM body byte for byte (the same mapping as the verifier)", () => {
-    for (const v of (corpus.positives as Vector[]).filter((x) => x.subject === "decision-bom" && !(x.id in KNOWN_DISAGREEMENTS))) {
+    for (const v of (corpus.positives as Vector[]).filter((x) => x.subject === "decision-bom")) {
       const text = entriesOf(v).find((e) => e.name.endsWith("/content/decision-bom.json"))!.text;
       const body = JSON.parse(text);
       const reason = body.completeness.action?.reason === "capture_off" ? "capture_off" : "pre_facts";

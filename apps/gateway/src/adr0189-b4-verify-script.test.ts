@@ -108,6 +108,13 @@ describe("ADR-0189 R19: scripts/verify-bom.mjs, one offline tool for both subjec
     // with no boundary a v2 receipt is invalid (B4.9 G10): nothing emits v2 before the recorded cutover
     expect(verifyBom(bundle("P01"), "--fingerprint", EXPORT_FPR, "--receipt-fingerprint", RECEIPT_FPR, "--receipt-v2-from", "none").status).toBe(1);
   });
+  it("review item 2: a crafted file is reported invalid (exit 1), never a crash", () => {
+    const junk = path.join(dir, "junk.tar.gz");
+    writeFileSync(junk, Buffer.concat([gzipSync(Buffer.from("[".repeat(200_000))), gzipSync(Buffer.alloc(512))]));
+    const r = verifyBom(junk, "--fingerprint", EXPORT_FPR, "--receipt-keyring", path.join(dir, "receipt-keys.json"), "--json");
+    expect(r.status, r.stderr).toBe(1);
+    expect(JSON.parse(r.stdout).outcome).toBe("invalid");
+  });
   it("refuses to run without both out-of-band trust roots (the bundle's own keys are never the authority)", () => {
     expect(verifyBom(bundle("P01")).status).toBe(2);
     expect(verifyBom(bundle("P01"), "--fingerprint", EXPORT_FPR).status).toBe(2);

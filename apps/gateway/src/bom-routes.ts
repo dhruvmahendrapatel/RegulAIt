@@ -10,9 +10,13 @@
  * routes are in `NON_ADMIN_ROUTES` and gated IN THE HANDLER by
  * `bom_export_roles` (§7, §9; `bom-export.ts`): admins, or an explicit auditor
  * grant while an admin has relaxed the setting; 403 `bom_export_forbidden` for
- * anyone else. The snapshot DOWNLOADS read frozen rows only; nothing can be
- * snapshotted through the API until the R17 switch (`AI_BOM_SNAPSHOTS_RELEASED`)
- * flips, which B4 does not do.
+ * anyone else.
+ *
+ * R17 (the master's ruling on #344): `AI_BOM_SNAPSHOTS_RELEASED` stays false in
+ * B4 and is flipped in its own PR right after #344 merges. Until then the
+ * snapshot freeze AND the two snapshot DOWNLOAD routes answer 501
+ * `bom_snapshots_not_released` (after the role check). The online verifier may
+ * still verify a stored snapshot: verifying needs no release.
  *
  *   POST /v1/ai-bom/:subjectKind/:subjectId/snapshots   freeze and sign (B3; 501 bom_snapshots_not_released until R17)
  *   GET  /v1/ai-bom/:subjectKind/:subjectId/snapshots   the subject's snapshot list (B3; the B6 tab)
@@ -86,6 +90,16 @@ const installId = (): string | null => {
   const v = process.env.REGULAIT_INSTALL_ID?.trim();
   return v ? v : null;
 };
+
+/**
+ * R17: the downloads follow `AI_BOM_SNAPSHOTS_RELEASED`. A test may open them for its own app (the switch itself is a
+ * code constant and is never changed by a test); production code never calls this.
+ */
+let downloadsReleasedForTest = false;
+export function releaseAiBomDownloadsForTest(on: boolean): void {
+  downloadsReleasedForTest = on;
+}
+const aiBomDownloadsReleased = (): boolean => AI_BOM_SNAPSHOTS_RELEASED || downloadsReleasedForTest;
 
 export function registerBomRoutes(app: FastifyInstance, db: Db): void {
   const limiter = new SharedRateLimitStore(db);
@@ -245,6 +259,10 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
 
   /** one snapshot, as a bundle of the native body and one format (or every rendered format) */
   const aiBomBundleRoute = async (req: FastifyRequest, reply: FastifyReply, request: { kind: "format"; format: AiBomDownloadFormat } | { kind: "bundle" }) => {
+    // R17: disabled IN CODE until the release switch flips (its own PR, after B4)
+    if (!aiBomDownloadsReleased()) {
+      return reply.status(501).send({ error: "bom_snapshots_not_released", detail: "AI BOM snapshot downloads are enabled with the AI BOM snapshot release (ADR-0189 R17)." });
+    }
     const params = b4Params(aiBomSnapshotParamsSchema, req.params);
     if (!params) return reply.status(400).send({ error: "invalid_bom_snapshot_id" });
     try {
