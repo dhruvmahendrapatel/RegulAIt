@@ -48,7 +48,6 @@ import { buildApp } from "./app.js";
 import { anchorRecordFromRow, timestampRequest } from "./audit-timestamp.js";
 import { verifyTimestampResponse, parseTimestampTrustBundle } from "./audit-timestamp-verify.js";
 import { AI_BOM_SNAPSHOTS_RELEASED, takeAiBomSnapshot } from "./ai-bom.js";
-import { releaseAiBomDownloadsForTest } from "./bom-routes.js";
 import { runDecisionReceiptSignSweep } from "./decision-receipts.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -274,7 +273,6 @@ describe("ADR-0189 B4: freezing a Decision BOM", () => {
 describe("ADR-0189 B4: bundles verify offline and online", () => {
   let auditId: string;
   const snapshotIds: { first?: string } = {};
-  afterAll(() => releaseAiBomDownloadsForTest(false));
 
   it("the Decision BOM bundle verifies offline under an out-of-band trust root, and online", async () => {
     const d = await decision();
@@ -359,18 +357,13 @@ describe("ADR-0189 B4: bundles verify offline and online", () => {
     }
   });
 
-  it("R17: while the release switch is off, both snapshot downloads answer 501 bom_snapshots_not_released", async () => {
+  it("R17: with the release switch on, both snapshot downloads serve a bundle (no test seam)", async () => {
     snapshotIds.first = (await takeAiBomSnapshot(db, { subject: { kind: "install", id: AI_BOM_INSTALL_SUBJECT_ID }, trigger: "on_demand", actorUserId: null })).id;
-    expect(AI_BOM_SNAPSHOTS_RELEASED).toBe(false);
-    for (const url of [`/v1/ai-bom/snapshots/${snapshotIds.first}?format=native`, `/v1/ai-bom/snapshots/${snapshotIds.first}/bundle`]) {
-      const res = await inject("GET", url);
-      expect(res.statusCode, url).toBe(501);
-      expect(res.json()).toMatchObject({ error: "bom_snapshots_not_released" });
-    }
+    expect(AI_BOM_SNAPSHOTS_RELEASED).toBe(true);
+    for (const url of [`/v1/ai-bom/snapshots/${snapshotIds.first}?format=native`, `/v1/ai-bom/snapshots/${snapshotIds.first}/bundle`]) await bundleOf(url);
   });
 
   it("an AI BOM snapshot downloads in every rendered format, each a verified bundle; an unrendered format is refused", async () => {
-    releaseAiBomDownloadsForTest(true);
     const [first] = await db.select().from(aiBomSnapshots).where(eq(aiBomSnapshots.id, snapshotIds.first!));
     const second = await takeAiBomSnapshot(db, { subject: { kind: "install", id: AI_BOM_INSTALL_SUBJECT_ID }, trigger: "on_demand", actorUserId: null });
     const trust = await offlineTrust();
@@ -454,7 +447,7 @@ describe("ADR-0189 B4: who may read, export and verify (§7, §9)", () => {
       const res = await inject("POST", "/v1/boms/verify", users[who].auth, { source: "decision_bom", auditId: "00000000-0000-4000-8000-000000000000" });
       expect(res.statusCode).toBe(403);
       expect(res.json()).toMatchObject({ error: "bom_export_forbidden" });
-      // review item 5: the bundle and both snapshot downloads, before anything is read (the release switch included)
+      // review item 5: the bundle and both snapshot downloads, before anything is read
       for (const url of [`/v1/decisions/${bom!.auditId}/bom/bundle`, `/v1/ai-bom/snapshots/${snap!.id}?format=native`, `/v1/ai-bom/snapshots/${snap!.id}/bundle`]) {
         const r = await inject("GET", url, users[who].auth);
         expect(r.statusCode, `${who} ${url}`).toBe(403);
@@ -475,19 +468,14 @@ describe("ADR-0189 B4: who may read, export and verify (§7, §9)", () => {
       const drift = await inject("GET", `/v1/ai-bom/install/${AI_BOM_INSTALL_SUBJECT_ID}/drift`, users.auditor.auth);
       expect(drift.statusCode).toBe(403);
       // review item 5: the bundle and both snapshot downloads refuse a member with no grant, while the setting is
-      // relaxed, and admit the auditor (the downloads opened for this test as in the release PR)
+      // relaxed, and admit the auditor (the downloads are released, R17)
       const [snap] = await db.select({ id: aiBomSnapshots.id }).from(aiBomSnapshots).limit(1);
-      releaseAiBomDownloadsForTest(true);
-      try {
-        const urls = [`/v1/decisions/${bom!.auditId}/bom/bundle?version=1`, `/v1/ai-bom/snapshots/${snap!.id}?format=native`, `/v1/ai-bom/snapshots/${snap!.id}/bundle`];
-        for (const url of urls) {
-          const refused = await inject("GET", url, users.member.auth);
-          expect(refused.statusCode, url).toBe(403);
-          expect(refused.json(), url).toMatchObject({ error: "bom_export_forbidden" });
-          expect((await inject("GET", url, users.auditor.auth)).statusCode, url).toBe(200);
-        }
-      } finally {
-        releaseAiBomDownloadsForTest(false);
+      const urls = [`/v1/decisions/${bom!.auditId}/bom/bundle?version=1`, `/v1/ai-bom/snapshots/${snap!.id}?format=native`, `/v1/ai-bom/snapshots/${snap!.id}/bundle`];
+      for (const url of urls) {
+        const refused = await inject("GET", url, users.member.auth);
+        expect(refused.statusCode, url).toBe(403);
+        expect(refused.json(), url).toMatchObject({ error: "bom_export_forbidden" });
+        expect((await inject("GET", url, users.auditor.auth)).statusCode, url).toBe(200);
       }
     } finally {
       await setting("bom_export_roles = 'admins_only'");

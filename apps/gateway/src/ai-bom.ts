@@ -23,10 +23,11 @@
  *  - `aiBomDrift(db, …)`: the change list of the live state against the last
  *    signed snapshot (R8). It is not a BOM document.
  *
- * SHIPS DISABLED (R2, R17): `AI_BOM_SNAPSHOTS_RELEASED` is false IN CODE (not a
- * setting), so the snapshot route answers 501 `bom_snapshots_not_released`
- * and `aiBomSnapshotTriggerGate` does nothing. Whichever of B4 and B5 merges
- * second flips it, once every v1 renderer exists.
+ * RELEASED (R2, R17): `AI_BOM_SNAPSHOTS_RELEASED` is true IN CODE (not a
+ * setting) now that every v1 renderer (B3, B5) and `export-bundle/3` (B4)
+ * exist, so the snapshot route freezes and `aiBomSnapshotTriggerGate` captures.
+ * No sign-off path calls the gate yet: the OWNER DECISION 8 / R25 trigger wiring
+ * is not built (see the TODO on `captureAiBomSnapshotInTx`).
  */
 import { createHash, sign } from "node:crypto";
 import {
@@ -101,10 +102,10 @@ import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
 
 /**
- * R2/R17: NOT RELEASED. A code constant, never a setting, defined ONCE in
+ * R2/R17: RELEASED. A code constant, never a setting, defined ONCE in
  * `packages/shared/src/bom/release-switch.ts` (B7's release step reads the same
- * one). The PR that merges second of B4 (export-bundle/3) and B5 (SPDX) flips it
- * there, with tests that download every format as a verified bundle.
+ * one). The R17 release PR set it to true, with tests that download every format
+ * as a verified bundle (`zz-adr0189-r17-release.test.ts`).
  */
 export { AI_BOM_SNAPSHOTS_RELEASED };
 
@@ -516,9 +517,10 @@ async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSn
  * per-subject lock BEFORE its snapshot (the caller's transaction already has
  * one), and it writes no audit row (an audit append under REPEATABLE READ can
  * read a stale chain tip after its lock wait). Both are settled when the
- * release PR wires triggers: the triggering transaction must take the session
- * lock first and append its audit row through a READ COMMITTED step. Until
- * then it is reachable only through the inert `aiBomSnapshotTriggerGate`.
+ * PR that wires the R25 triggers: the triggering transaction must take the
+ * session lock first and append its audit row through a READ COMMITTED step.
+ * The R17 release did not wire them, so no production path calls this or
+ * `aiBomSnapshotTriggerGate` yet.
  */
 export async function captureAiBomSnapshotInTx(tx: Tx, input: TakeSnapshotInput): Promise<TakenSnapshot> {
   return insertPreparedSnapshot(tx, await prepareAiBomSnapshot(tx, input), input, { audit: false });
@@ -549,9 +551,10 @@ export async function takeAiBomSnapshot(db: Db, input: TakeSnapshotInput): Promi
 }
 
 /**
- * OWNER DECISION 8 / R25: the sign-off trigger hook. Inert until the R17 switch
- * flips (R2: "triggers do nothing before the switch"); it then takes the
- * snapshot inside the triggering REPEATABLE READ transaction (#280 4237493034).
+ * OWNER DECISION 8 / R25: the sign-off trigger hook. It follows the R17 switch
+ * (R2: "triggers do nothing before the switch"); with the switch released it
+ * takes the snapshot inside the triggering REPEATABLE READ transaction
+ * (#280 4237493034). No sign-off path calls it yet (see above).
  */
 export async function aiBomSnapshotTriggerGate(tx: Tx, input: TakeSnapshotInput): Promise<{ status: "not_released" } | { status: "taken"; snapshot: TakenSnapshot }> {
   if (!AI_BOM_SNAPSHOTS_RELEASED) return { status: "not_released" };

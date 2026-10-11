@@ -254,10 +254,10 @@ describe("X41 policy on B7's own record lists", () => {
   });
 });
 
-describe("B7 the release step is inert until the R17 switch flips (R28, F6)", () => {
-  it("the real switch is off", async () => {
+describe("B7 the release step follows the R17 switch (R28, F6)", () => {
+  it("the real switch is released (the R17 release PR, after B4 #344 and B5 #297)", async () => {
     const real = await vi.importActual<typeof import("./release-switch.js")>("./release-switch.js");
-    expect(real.AI_BOM_SNAPSHOTS_RELEASED).toBe(false);
+    expect(real.AI_BOM_SNAPSHOTS_RELEASED).toBe(true);
   });
   it("switch off: the step builds nothing, even on input that would be refused", () => {
     sw.on = false;
