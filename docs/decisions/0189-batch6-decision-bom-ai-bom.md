@@ -2031,10 +2031,39 @@ fixes were rechecked. These are the details the build settled:
         carries `useCaseSignoffWarning`.
       - The use case is left at `proposed` or `under_review` while its instance is completed. A completed instance
         cannot be advanced, so **nothing recovers it today**. This fails closed: nothing is approved without a snapshot.
-      - Open follow-up: an admin re-sync route for such use cases, and a posture item "instance completed, use case
-        not approved".
-      - The deploy-override route also runs git executions that can complete an instance without the use-case sync.
-        That predates R25 and is in the same follow-up.
+      - **Recovery (PR #355):** an admin re-syncs the use case with `POST /v1/use-cases/:useCaseId/resync`, from the
+        Re-sync action on the Posture page.
+        - The route requires an admin and an `approval_decide` step-up, and refuses the bootstrap credential.
+        - It runs the same key check and post-commit snapshot as any other sign-off.
+        - The decision keeps the original decider and decision time. The decider is chosen in this order:
+          1. **The approver,** when this round was let through by a sign-off. That is the approved or consumed
+             approval in the newest request batch for the granting stage; the gate and the round are fixed by audit
+             `seq`.
+          2. **Otherwise, the person whose request committed the completing transition**, as the kernel records it
+             on that `workflow_events` row. Examples: the submitter of the artifact, or the user who reported the
+             check that let the executor finish.
+          3. **A pure system completion** (no event actor) is refused with `no_decider_record`. It is never credited
+             to the initiator.
+
+          The re-syncing admin is recorded separately, in the `use-case-resynced` row. Every refusal after the admin
+          check writes a `use-case-resync-refused` row.
+        - The approval's lifetime runs from the original decision, so a long-stranded use case can come back already
+          expired. The response reports this as `approvedUntil` and `approvalExpired`, and recertification then
+          applies.
+        - It refuses a use case edited after its instance completed (`use_case_edited_after_completion`). Edits and
+          completion are ordered by audit `seq`, which is commit order. PATCH also refuses such an edit
+          (`use_case_locked_instance_completed`).
+        - It also refuses, each with its own code, when:
+          - the completion record is missing (`no_completion_record`);
+          - no decider can be resolved (`no_decider_record`);
+          - the approval record is missing (`approval_record_missing`);
+          - the EU tier would change under the current ruleset (`eu_tier_changed_since_completion`).
+        - It locks the instance and then the use case, the same order the workflow uses.
+        - Posture shows `useCases.instanceCompletedNotApproved` (count, sample ids, action).
+      - **Prevention (open follow-up):** a lookahead check in the executor would refuse, before any external effect, a
+        stage that would complete an instance with no usable key.
+      - The deploy-override, `/recheck` and `/checks` routes now sync the use case as well (PR #355). Deploy-override
+        also checks the key inside its transaction.
 14. **Bulk and chat decisions refuse one item at a time.** A refused item is reported and audited as refused, and the
     rest of the batch carries on.
 15. **A configured key that cannot be used** is refused with 503 `receipt_signing_key_invalid`. Under the relaxed

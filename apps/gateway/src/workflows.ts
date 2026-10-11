@@ -642,7 +642,11 @@ export interface WorkflowRouteOptions {
    * approvals transaction in app.ts; this hook exists because those three
    * routes live here and app.ts composes the modules (no import cycle).
    * ADR-0189 R25: it may return extra response fields (an AI BOM snapshot
-   * warning), which each route adds to its answer. */
+   * warning), which each route adds to its answer. The R25 item 13 follow-up
+   * adds the routes whose executor can complete an instance: deploy-override,
+   * recheck and an evaluated check report. A completion no route mirrors (a
+   * nested run finishing) is listed on the posture report and recovered by
+   * POST /v1/use-cases/:useCaseId/resync. */
   onInstanceTransition?: (db: Db, instanceId: string, actorUserId: string | null) => Promise<Record<string, unknown> | undefined | void>;
   /** ADR-0189 R25 item 6: run INSIDE the transition's transaction, after the
    * transition is applied and before anything commits (artifact submit,
@@ -3117,11 +3121,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         evaluation = "deferred_to_running_executor";
       }
     }
+    // ADR-0189 R25 item 13 follow-up: an evaluated report can complete the
+    // instance; its use case and vendor mirror it, as on every other driving route
+    const extra = evaluation === "evaluated" ? await opts.onInstanceTransition?.(db, instanceId, req.authCtx.userId) : undefined;
     const [fresh] = await db
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, instanceId));
     return reply.status(evaluation === "deferred_to_running_executor" ? 202 : 200).send({
+      ...(extra ?? {}),
       status: fresh!.status,
       state: fresh!.state,
       context: fresh!.context,
@@ -3146,11 +3154,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       req.authCtx.userId,
     );
     await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
+    // ADR-0189 R25 item 13 follow-up: a passing re-run can complete the instance;
+    // its use case and vendor mirror it, as on every other driving route
+    const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, loaded.instance.id));
-    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+    return { ...(extra ?? {}), status: fresh!.status, state: fresh!.state, context: fresh!.context };
   });
 
   // §2 resolve a deploy stage parked at blocked_on_deploy — the operator confirms
@@ -3181,32 +3192,47 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
           "you initiated this change, so clearing its own deploy gate is a self-attestation; record why it is safe to advance (e.g. how it was actually deployed)",
       });
     }
-    const r = await applyEvent(
-      db,
-      loaded.instance.id,
-      { kind: "deploy_override", stageId: body.stageId },
-      req.authCtx.userId,
-    );
-    if (selfAttested || body.reason?.trim()) {
-      await db.insert(auditLog).values({
-        userId: req.authCtx.userId,
-        objectType: "workflow",
-        objectId: loaded.instance.id,
-        detail: { stageId: body.stageId, selfAttested, initiatorUserId: loaded.instance.initiatorUserId },
-        effect: "allow",
-        ruleId: "workflow:deploy-override-attested",
-        ruleChain: [],
-        reason: selfAttested
-          ? `initiator cleared their own parked deploy: ${body.reason!.trim()}`
-          : `operator cleared a parked deploy: ${body.reason!.trim()}`,
-      });
-    }
-    await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
+    // ADR-0189 R25 item 13 follow-up: the override, its attestation row and the
+    // dependent-object check share one transaction, exactly as /advance does. A
+    // clear that would approve a use case whose signed AI BOM snapshot cannot be
+    // taken is refused (409) before anything commits or any git effect runs.
+    const actorUserId = req.authCtx.userId;
+    const r = await inTransaction(db, async (tx) => {
+      const applied = await applyEvent(
+        tx,
+        loaded.instance.id,
+        { kind: "deploy_override", stageId: body.stageId },
+        actorUserId,
+        undefined,
+        undefined,
+        { deferSpan: true },
+      );
+      if (selfAttested || body.reason?.trim()) {
+        await tx.insert(auditLog).values({
+          userId: actorUserId,
+          objectType: "workflow",
+          objectId: loaded.instance.id,
+          detail: { stageId: body.stageId, selfAttested, initiatorUserId: loaded.instance.initiatorUserId },
+          effect: "allow",
+          ruleId: "workflow:deploy-override-attested",
+          ruleChain: [],
+          reason: selfAttested
+            ? `initiator cleared their own parked deploy: ${body.reason!.trim()}`
+            : `operator cleared a parked deploy: ${body.reason!.trim()}`,
+        });
+      }
+      await opts.assertTransitionAllowed?.(tx, loaded.instance.id);
+      return applied;
+    });
+    await recordDeferredSpan(db, r.deferredSpan);
+    await runGitExecutions(db, loaded.instance.id, r.effects, actorUserId, opts.dataKey);
+    // the dependent objects (use case, vendor) mirror the instance, as on every other driving route
+    const extra = await opts.onInstanceTransition?.(db, loaded.instance.id, actorUserId);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
       .where(eq(workflowInstances.id, loaded.instance.id));
-    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+    return { ...(extra ?? {}), status: fresh!.status, state: fresh!.state, context: fresh!.context };
   });
 
   app.post("/v1/workflows/instances/:instanceId/abort", async (req, reply) => {
