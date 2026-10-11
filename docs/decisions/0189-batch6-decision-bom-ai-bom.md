@@ -1826,6 +1826,41 @@ R51. **The mandatory SPDX properties are collected, never invented (slice B9).**
     - **Not in B9.** Requiring these values before a model card can be approved (option (c)) is not adopted; approval
       is unchanged. It is an open follow-up (open question 8).
 
+### Amendments from the B2 build and its review (2026-10-11)
+
+B2 (decision fact capture) is PR #341, with migration 0189. ADR-0191 required an independent review: the first pass
+at 74e533e returned fix-then-merge, rechecks were run at 4d9b5ea and e1c45f6, and the final verdict was merge.
+
+1. **One capture point.** Facts and the capture-status marker are written by the shared chained audit writer
+   (`appendChainedAuditRows`), inside the decision's own transaction. Every `insert(auditLog)` goes through that
+   writer, so all 21 `receiptClass: "decision"` writers are covered. A static scan, which recurses and flags a computed
+   `receiptClass`, enforces this. Migration 0189 adds a deferred constraint trigger: a decision audit row cannot commit
+   without its marker. A rollback leaves no facts. Decisions made before B2 are not back-filled and read `pre_facts`
+   (no grandfathering, ADR-0180).
+2. **B2 still emits v1 (R34 confirmed).** `RECEIPT_EMITTER_SUPPORTS_V2` stays false. The v2 payload code ships and is
+   tested only through explicit fixtures. With a recorded boundary, the sweep signs v1 rows below it and nothing at
+   or above it, and never throws. The boot refusal stays B1's check. The emitter is switched on in the cutover slice
+   (R42/R43), together with its admin command, never by a deploy.
+3. **"Not recorded" is not "none".** `inputs`, `abacPolicyVersions`, `configVersions` and `modelPolicyRuleIds` are
+   nullable. `null` means the path did not record the list, and `[]` means it recorded an empty list. The two
+   canonicalise and hash differently. B2 writes `inputs: null`. A path never writes `[]` for a list it did not record.
+4. **Policy facts by path (§4).** The MCP tool, MCP protocol and connector paths record the policy epoch and the
+   kill-switch state from one locked read in the decision transaction. If the epoch or the kill switch moved after
+   evaluation, the call is refused `governance-policy-changed` and nothing is written. Every other decision writer
+   records `policy` as not captured by path (`not_captured_by_path`, as the contract allows). ABAC, config and rule-id
+   versions are not yet recorded on any path.
+5. **"Kill switch engaged" means halted.** It is true only when the deployment or the decision's subject is halted.
+   `read_only` and `require_approval` are restrictions, not halts, and read as not engaged. Where a refusal is decided
+   before the execution posture is read (the indeterminate-config refusal), the kill switch is `null`.
+6. **Approved calls bind their approval.** The MCP proxy, connector-call and MCP protocol paths record
+   `approvedApprovalId` on the approved call, so B4 can bind the approval row (R5, §4). A queued call binds nothing.
+7. **Facts left null by design in B2.** `dataSensitivity` (projects have no such column), the model beyond the agent,
+   `refusalCode` and `upstreamStatusClass` (later, through usage events or addenda, R5). Addenda are not B2's scope.
+8. **Known limits.**
+   - A database superuser can bypass the 0189 trigger with `session_replication_role = replica`, as with every
+     existing guard. The deployment's application role must not be a superuser. The CI role is a superuser.
+   - Capture costs about 3–10 ms per decision inside the global audit lock. The test pins a ceiling.
+
 ## Further design review happens at slice level
 
 From the seventh review round on, this ADR is complete as a design record. Later design findings are not added here

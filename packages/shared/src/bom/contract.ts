@@ -481,9 +481,14 @@ export const decisionActionFactsSchema = z
         agentId: nullableUuid,
       })
       .strict(),
+    /**
+     * B2 review: `null` = the decision path does not record its inputs (NOT RECORDED, as a null scalar fact
+     * already reads); `[]` = the path records its inputs and there were none. Never `[]` for "unknown".
+     */
     inputs: z
       .array(z.object({ kind: z.enum(DECISION_INPUT_KINDS), id: bomIdentifierSchema, digest: bomDigestSchema.nullable(), classification: nullableId }).strict())
-      .max(256),
+      .max(256)
+      .nullable(),
     dataSensitivity: nullableId,
     complianceTags: z.array(bomIdentifierSchema).max(64),
   })
@@ -492,10 +497,11 @@ export const decisionActionFactsSchema = z
 export const decisionPolicyFactsSchema = z
   .object({
     governancePolicyEpoch: bomIntSchema.nullable(),
-    abacPolicyVersions: z.array(z.object({ id: bomIdentifierSchema, schemaVersion: bomIntSchema }).strict()).max(256),
-    configVersions: z.array(z.object({ id: bomUuidSchema, version: bomIntSchema.nullable(), canary: z.boolean() }).strict()).max(64),
+    // B2 review: every list is `null` when the path does not record it (NOT RECORDED), `[]` only for a recorded "none"
+    abacPolicyVersions: z.array(z.object({ id: bomIdentifierSchema, schemaVersion: bomIntSchema }).strict()).max(256).nullable(),
+    configVersions: z.array(z.object({ id: bomUuidSchema, version: bomIntSchema.nullable(), canary: z.boolean() }).strict()).max(64).nullable(),
     guardrailConfigDigest: bomDigestSchema.nullable(),
-    modelPolicyRuleIds: z.array(bomIdentifierSchema).max(256),
+    modelPolicyRuleIds: z.array(bomIdentifierSchema).max(256).nullable(),
     killSwitch: z.enum(["off", "engaged"]).nullable(),
   })
   .strict();
