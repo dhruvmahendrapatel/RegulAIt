@@ -538,10 +538,16 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     try {
       await holding;
       pending = resync(f.useCaseId);
+      let early: { statusCode: number; body: string } | null = null;
+      void pending.then((r) => {
+        early = r;
+      });
       // the re-sync is blocked BY THE HOLDER (pg_blocking_pids names its backend), and
       // in this order it holds nothing on the use case yet
       const deadline = Date.now() + 15_000;
       for (;;) {
+        // an answer before any wait means the re-sync never reached its lock: say why
+        if (early) throw new Error(`the re-sync answered before waiting on the instance lock: ${(early as { statusCode: number }).statusCode} ${(early as { body: string }).body}`);
         const blocked = rowsOf<{ n: number }>(
           await db.execute(sql`select count(*)::int as n from pg_stat_activity where ${holderPid}::int = any(pg_blocking_pids(pid))`),
         )[0]!.n;
@@ -648,7 +654,7 @@ describe("what the re-sync approves is what the workflow approved (PR #355 revie
     const f = await startInstance("reopen", [
       { id: "intake", type: "trigger" },
       { id: "questionnaire", type: "artifact_generation", output: "r25rs_reopen" },
-      { id: "signoff", type: "human_approval", approvers: [approver.id, admin.id] },
+      { id: "signoff", type: "human_approval", approvers: [approver.id, admin.id], quorum: "any" },
       { id: "ci-gate", type: "automated_check", checks: ["ci"] },
     ]);
     const submit = async (content: string) => {

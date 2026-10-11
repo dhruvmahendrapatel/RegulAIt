@@ -614,8 +614,8 @@ export function resyncVerdict(useCaseStatus: string, instanceStatus: string): Re
 }
 
 /*
- * ORDERING BY THE AUDIT CHAIN, NOT BY CLOCKS. `audit_log.at` is `now()`, the
- * START of the writing transaction, so a long completing transaction can carry
+ * ORDERING BY THE AUDIT CHAIN, NOT BY CLOCKS. `audit_log.at` is the writer's process clock
+ * when the row is built (packages/db audit-chain.ts), not commit time, so a long completing transaction can carry
  * an `at` older than an edit that committed while it ran. `seq` is allocated
  * under the chain's transaction-scoped advisory lock (packages/db
  * audit-chain.ts), held until commit: a row with a higher `seq` was appended
@@ -627,13 +627,13 @@ export function resyncVerdict(useCaseStatus: string, instanceStatus: string): Re
  */
 
 /** the audit row `applyEvent` writes for the transition into `completed`: its
- * chain position, its time (the database clock) and who drove that step */
+ * chain position, its time (the writer's clock when it was written) and who drove that step */
 export async function instanceCompletion(
   db: Pick<Db, "select" | "execute">,
   instanceId: string,
 ): Promise<{ seq: number | null; at: Date; actorUserId: string | null } | null> {
   const [hit] = await db
-    .select({ id: auditLog.id, seq: auditLog.seq, at: auditLog.at })
+    .select({ seq: auditLog.seq, at: auditLog.at, detail: auditLog.detail })
     .from(auditLog)
     .where(
       and(
@@ -649,17 +649,24 @@ export async function instanceCompletion(
   // WHO DROVE THE COMPLETING STEP comes from the kernel's own event row, never from
   // the audit row: `applyEvent` audits an actor-less (system) event under the
   // instance's INITIATOR, which would credit the requester with the decision. The
-  // event row is written in the same transaction as the audit row (same `now()`)
-  // with the same event, and carries the real actor, or null for a system step.
+  // event row carries the real actor: the person whose request committed the
+  // transition (for an executor stage, the person whose report, retry or override
+  // ran it, as `runGitExecutions` passes them), or null for a system step.
+  // WHICH event row: a completed instance accepts no event but a re-open, so while
+  // it stands completed its NEWEST event row is the completing one. (The audit
+  // row's `at` is the writer's process clock, not `now()`, so the two rows can't be
+  // joined on time.) Its kind must be the completion row's; anything else reads as
+  // no actor, which refuses (fail closed).
   const rows = (await db.execute(sql`
-    select we.actor_user_id as "actorUserId"
+    select we.actor_user_id as "actorUserId", (we.event->>'kind') as "kind"
       from ${workflowEvents} we
-      join ${auditLog} a on a.id = ${hit.id}
      where we.instance_id = ${instanceId}
-       and we.at = a.at
-       and (we.event->>'kind') = (a.detail->'event'->>'kind')
-     limit 1`)) as unknown as { rows: Array<{ actorUserId: string | null }> };
-  return { seq: hit.seq ?? null, at: hit.at, actorUserId: rows.rows[0]?.actorUserId ?? null };
+     order by we.at desc, we.id desc
+     limit 1`)) as unknown as { rows: Array<{ actorUserId: string | null; kind: string | null }> };
+  const completingKind = (hit.detail as { event?: { kind?: unknown } } | null)?.event?.kind;
+  const ev = rows.rows[0];
+  const actorUserId = ev && ev.kind === completingKind ? ev.actorUserId : null;
+  return { seq: hit.seq ?? null, at: hit.at, actorUserId };
 }
 
 /** "row is after the completion" in commit order (see the note above) */
