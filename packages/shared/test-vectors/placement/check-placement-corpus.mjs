@@ -8,7 +8,12 @@ const PENDING = 'b6-isolation-i3@cee8a67c34766abc55fefa7f237dcafe688c99c0';
 const ranks = { L0: 0, L1: 1, L2: 2, L3: 3 };
 const kinds = ['mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker'];
 const sensitivities = ['public', 'internal', 'confidential', 'regulated'];
-const fixedReasons = ['no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired'];
+// The broker's five reasons (decision 7) and the sixth, policy_unresolved (owner decision B, 2026-10-11), which is
+// decided before any broker selection, from the request's facts alone.
+const brokerReasons = ['no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired'];
+const fixedReasons = [...brokerReasons, 'policy_unresolved'];
+// Owner decision A (2026-10-11): warn is retired; the only mode a stored value reads as is enforce.
+const ENFORCEMENT_MODES = ['enforce'];
 const ORIGINS = ['X50', 'X50-revised', 'claude-new'];
 const SECTION_RE = /^(Decision (1|2|3|4|6|7|8|11|14)(\b| )|Test strategy: |Amendment [A-W]$)/;
 const PENDING_SECTION_RE = /^Amendment [K-W]$/;
@@ -35,6 +40,18 @@ function requiredClassOf(q) {
   if (q.agentAssurance !== 'known') inputs.push('L3');
   assert(inputs.every((x) => x in ranks));
   return Object.keys(ranks)[Math.max(...inputs.map((x) => ranks[x]))];
+}
+
+// Amendment item 15: the first policy fact that is missing or outside its vocabulary, or null when all resolve.
+// An explicitly absent optional fact (null parent, no compliance tags) is not unresolved; a named lookup is.
+function unresolvedFact(q) {
+  if (q.unresolvedPolicyLookup) return q.unresolvedPolicyLookup;
+  if (!kinds.includes(q.workloadKind)) return 'workloadKind';
+  if (!sensitivities.includes(q.sensitivity)) return 'sensitivity';
+  for (const k of ['sensitivityFloor', 'autonomyFloor', 'ownProfileFloor']) if (!(q[k] in ranks)) return k;
+  if (!Array.isArray(q.complianceFloors) || q.complianceFloors.some((x) => x !== null && !(x in ranks))) return 'complianceFloors';
+  if (q.parentRequiredClass !== null && q.parentRequiredClass !== undefined && !(q.parentRequiredClass in ranks)) return 'parentRequiredClass';
+  return null;
 }
 
 const classOf = (e) => (e.class === 'customer_declared' ? e.adminMappedClass : e.class);
@@ -94,11 +111,26 @@ export function checkPlacementCorpus(c) {
       assert.equal(e.upstreamContacts, 0);
       if (e.reason) {
         assert(fixedReasons.includes(e.reason));
-        if (Array.isArray(q.executors)) assert.equal(brokerDecision(q, e.requiredClass).reason, e.reason, v.id);
+        if (e.reason === 'policy_unresolved') {
+          // decided before any offer: a fact that does not resolve, no class, no offer
+          assert(unresolvedFact(q), `${v.id}: policy_unresolved needs an unresolved fact`);
+          assert.equal(e.minimumSelectableClass, null, v.id);
+          assert.equal(e.offersMade, 0, v.id);
+          assert.equal(e.auditAction, 'execution-refused', v.id);
+        } else if (Array.isArray(q.executors)) assert.equal(brokerDecision(q, e.requiredClass).reason, e.reason, v.id);
       }
     }
+    if (e.requiredClass || e.outcome === 'placement_eligible') assert.equal(unresolvedFact(q), null, `${v.id}: a class from an unresolved fact`);
+    if (q.enforcement !== undefined && !ENFORCEMENT_MODES.includes(q.enforcement)) {
+      // a retired mode (owner decision A) is read as enforce and can no longer be set
+      assert.equal(e.enforcementRead, 'enforce', v.id);
+      assert.equal(e.settingWriteStatus, 400, v.id);
+      assert.notEqual(e.outcome, 'placement_eligible', v.id);
+    }
     if (v.id.startsWith('unknown-')) {
-      assert.equal(e.outcome, 'fail_closed_pending_contract');
+      assert.equal(e.outcome, 'refuse');
+      assert.equal(e.error, 'execution_profile_unavailable');
+      assert.equal(e.reason, 'policy_unresolved');
       assert.equal(e.minimumSelectableClass, null);
       assert.equal(e.upstreamContacts, 0);
     }
@@ -152,7 +184,9 @@ export function checkPlacementCorpus(c) {
   assert.equal(mismatch.inputBytesDelivered, 0);
   assert.equal(mismatch.alertSeverity, 'high');
   const warn = get('warn-shortfall');
-  assert.equal(warn.outcome, 'contract_gap');
+  assert.equal(warn.outcome, 'refuse');
+  assert.equal(warn.reason, 'class_below_required');
+  assert.equal(warn.enforcementRead, 'enforce');
   assert.equal(warn.fallbackAllowed, false);
   assert.equal(get('selftest-while-quarantined').error, 'executor_quarantined');
   assert.equal(get('channel-unproven-large-body').bodyBytesRead, 0);
@@ -176,6 +210,12 @@ export const PLACEMENT_MUTATIONS = [
   ['proof 61 s old accepted', (c) => { find(c, 'channel-proof-iat-61').expectedProjection = { outcome: 'authenticated' }; }],
   ['pending marker dropped', (c) => { delete find(c, 'reenable-new-pass').pendingBranch; }],
   ['busy executor selected', (c) => { find(c, 'select-fewest-open-offers').expectedProjection.selectedExecutor = 'e-busy'; }],
+  // owner decisions A and B (2026-10-11)
+  ['unresolved fact given a capacity reason', (c) => { find(c, 'unknown-missing-sensitivity').expectedProjection.reason = 'no_executor'; }],
+  ['unresolved fact defaulted to a class', (c) => { find(c, 'unknown-autonomyFloor').expectedProjection.minimumSelectableClass = 'L2'; }],
+  ['policy_unresolved on resolved facts', (c) => { const q = find(c, 'refusal-policy_unresolved').semanticRequest; delete q.unresolvedPolicyLookup; q.sensitivityFloor = 'L2'; }],
+  ['warn placed below its class', (c) => { find(c, 'warn-shortfall').expectedProjection.outcome = 'placement_eligible'; }],
+  ['warn still settable', (c) => { find(c, 'warn-shortfall').expectedProjection.settingWriteStatus = 200; }],
 ];
 
 export function runPlacementChecks() {

@@ -6,7 +6,7 @@ and its review. Written from ADR text only; no shared source, product test, cont
 These are semantic requests and expected decision projections, not HTTP DTOs. `placement_eligible` means only that the
 isolation constraint can be met; it never authorizes a sponsor, actor, grant or upstream call.
 
-Counts: 130 vectors = 82 kept from X50 unchanged, 7 revised, 41 new.
+Counts: 131 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, see below), 7 revised, 42 new.
 48 carry `"pendingBranch": "b6-isolation-i3@cee8a67c…"`: every vector that cites an
 amendment from K to W, whose text is not yet on `main` (the checker enforces this marker both ways). Find them with
 `grep -n pendingBranch placement-semantic-corpus.json`.
@@ -23,6 +23,21 @@ amendment from K to W, whose text is not yet on `main` (the checker enforces thi
 - Checker: `byoc_worker` no longer gets an invented L2 kind floor (decision 3 gives it none: "the class the placement
   requires"); expected classes are unchanged because every sensitivity floor is at least L2. The frozen-blob
   `git hash-object` check was removed: the text the vectors follow is on a branch, and the tests must not depend on git.
+
+## Owner-decided changes (ADR-0190 owner decisions A and B, accepted 2026-10-11)
+
+These are vector changes decided by the owner, not corrections. Each changed vector carries a `decidedBy` field.
+
+- **A. `warn` is retired.** `isolation_enforcement` has one value, `enforce`. `warn-shortfall` is kept and pinned as
+  a refusal: a stored `warn` reads as `enforce` (`enforcementRead`), a request that sets it is a `400`
+  (`settingWriteStatus`), and the regulated L3 call with only an L2 executor is refused `class_below_required`. The
+  checker now refuses any vector whose request names a mode other than `enforce` unless it pins exactly that.
+- **B. An unresolved policy fact answers `409 execution_profile_unavailable`**, rule `execution-profile`, with the
+  sixth fixed reason `policy_unresolved`, decided before any offer (`offersMade: 0`) and audited `execution-refused`.
+  All 12 `unknown-*` vectors are pinned to it (they were `fail_closed_pending_contract`). New vector
+  `refusal-policy_unresolved` (an unresolved sensitivity-floor lookup) gives the sixth reason its own `refusal-*`
+  case. The checker derives the unresolved fact from the request and requires one for every `policy_unresolved`,
+  and none for any vector that projects a class.
 
 ## New vectors (amendments K-W)
 
@@ -62,10 +77,11 @@ owner (open items A and B).
   the live-chain refusal and the OpenShell refusal; the HTTP status of `execution_profile_mismatch`. **Closed by
   item 8** (`class_below_required`), **item 11** (`invalid_grant` / `delegation_isolation`), **item 12**
   (`actor-chain-invalid`), **item 13** (both ends refuse) and **item 10** (`409`). For unknown facts, **item 15**
-  fixes the fail-closed rule, and the envelope is **open item B**.
-- **`warn` versus "never fall back"** (decision 11 table and test strategy) is still unresolved (`warn-shortfall`).
-  **Item 14** sets the interim rule (the invariant wins, so there is no placement below the required class), with a
-  code follow-up. What `warn` means is **open item A**.
+  fixes the fail-closed rule. **Closed by owner decision B:** the envelope is `409 execution_profile_unavailable`
+  with reason `policy_unresolved`; the `unknown-*` vectors are pinned to it.
+- **`warn` versus "never fall back"** (decision 11 table and test strategy) (`warn-shortfall`). **Item 14** set the
+  interim rule (the invariant wins). **Closed by owner decision A:** `warn` is retired and can no longer be
+  configured; `warn-shortfall` is pinned as a `class_below_required` refusal.
 - Tie-break between eligible executors with equal open offers. **Closed by item 9:** unspecified on purpose, so a
   test must not pin one.
 
@@ -74,7 +90,9 @@ owner (open items A and B).
 `node packages/shared/test-vectors/placement/check-placement-corpus.mjs` (also run by
 `packages/shared/src/spec-vectors-0188-0190.test.ts`) recomputes every required class (decision 7 MAX), re-derives
 every refusal reason and selection with amendment P's precedence, checks the T predicate, the V URL rule, the K window,
-the U probe rule and the pending markers, then proves it rejects 14 deliberate corruptions. Self-consistency only;
+the U probe rule, the pending markers, the unresolved fact behind each `policy_unresolved` (owner decision B) and
+that no vector uses a retired enforcement mode (owner decision A), then proves it rejects 19 deliberate corruptions.
+Self-consistency only;
 not I2 conformance or runtime attestation.
 
 ## Vector map (id → ADR-0190 paragraph)
@@ -123,6 +141,7 @@ not I2 conformance or runtime attestation.
 | `refusal-class_below_required` | main | Decision 7 first Then bullet; Decision 6 | X50 |
 | `refusal-executor_quarantined` | **pending** | Decision 7 first Then bullet; Decision 6; Amendment P | X50-revised |
 | `refusal-profile_retired` | main | Decision 7 first Then bullet; Decision 6 | X50 |
+| `refusal-policy_unresolved` | main | Decision 7; Test strategy: Fail closed; owner decision B | claude-new |
 | `no-fallback-initial` | main | Decision 7 first Then bullet; Decision 11 invariants; Test strategy: No fallback | X50 |
 | `no-fallback-retry` | main | Decision 7 first Then bullet; Decision 11 invariants; Test strategy: No fallback | X50 |
 | `no-fallback-queued_retry` | main | Decision 7 first Then bullet; Decision 11 invariants; Test strategy: No fallback | X50 |
@@ -149,27 +168,27 @@ not I2 conformance or runtime attestation.
 | `middle-actor-executor-quarantined` | main | Decision 8 third bullet; Test strategy: Delegation | X50 |
 | `middle-actor-executor-stale` | main | Decision 8 third bullet; Test strategy: Delegation | X50 |
 | `sponsor-not-floor-override` | main | Decision 7 items 1–6; Decision 8 | X50 |
-| `unknown-workloadKind` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-sensitivity` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-complianceFloors` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-autonomyFloor` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-ownProfileFloor` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-parentRequiredClass` | main | Decision 7; Test strategy: Fail closed | X50 |
+| `unknown-workloadKind` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-sensitivity` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-complianceFloors` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-autonomyFloor` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-ownProfileFloor` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-parentRequiredClass` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
 | `attestation-missing` | **pending** | Decision 6 executor self-test; Decision 7; Amendment P | X50-revised |
 | `attestation-failing` | **pending** | Decision 6 executor self-test; Decision 7; Amendment N; Amendment P | X50-revised |
 | `profile-mismatch-offer` | **pending** | Decision 4 pull model; Decision 7 first Then bullet; Amendment P | X50-revised |
 | `freshness-boundary` | **pending** | Decision 6 executor self-test; Decision 11 attestation age; Amendment N | X50-revised |
-| `warn-shortfall` | main | Decision 11 isolation_enforcement; Decision 11 falling-back invariant; Test strategy: Fail closed | X50 |
+| `warn-shortfall` | main | Decision 11 isolation_enforcement; Decision 11 falling-back invariant; Test strategy: Fail closed; owner decision A | X50 |
 | `audited-l1-floors-still-profile-l2` | main | Decision 7 items 1–5; Decision 11 floors | X50 |
 | `audited-l1-all-inputs` | main | Decision 7; Decision 11 floors; Decision 2 profile relaxations | X50 |
 | `placement-report-mismatch` | **pending** | Decision 6 per-placement report; Amendment O | X50-revised |
 | `openshell-gvisor-refused` | main | Amendment F | X50 |
-| `unknown-missing-workloadKind` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-missing-sensitivity` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-missing-autonomyFloor` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-missing-ownProfileFloor` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-missing-complianceFloors` | main | Decision 7; Test strategy: Fail closed | X50 |
-| `unknown-missing-parentRequiredClass` | main | Decision 7; Test strategy: Fail closed | X50 |
+| `unknown-missing-workloadKind` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-missing-sensitivity` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-missing-autonomyFloor` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-missing-ownProfileFloor` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-missing-complianceFloors` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
+| `unknown-missing-parentRequiredClass` | main | Decision 7; Test strategy: Fail closed; owner decision B | X50 |
 | `precedence-quarantined-and-stale` | **pending** | Amendment P | claude-new |
 | `precedence-all-quarantined` | **pending** | Amendment P | claude-new |
 | `precedence-retired-over-no-executor` | **pending** | Amendment P | claude-new |
