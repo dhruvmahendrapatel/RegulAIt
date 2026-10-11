@@ -356,6 +356,7 @@ describe("OWNER DECISION B: an unresolved policy fact refuses 409 execution_prof
     // positive control: every fact resolves (with and without the profile's floor)
     expect(unresolvedPlacementFact(resolved)).toBeNull();
     expect(unresolvedPlacementFact({ ...resolved, profileMinClass: "microvm" })).toBeNull();
+    expect(unresolvedPlacementFact({ ...resolved, profileDigest: "a".repeat(64), imageDigest: `sha256:${"b".repeat(64)}` })).toBeNull();
     for (const [facts, fact] of [
       [{ ...resolved, workloadKind: undefined }, "workloadKind"],
       [{ ...resolved, workloadKind: "future_kind" }, "workloadKind"],
@@ -369,6 +370,12 @@ describe("OWNER DECISION B: an unresolved policy fact refuses 409 execution_prof
       [{ ...resolved, requiredClass: "customer_declared" }, "requiredClass"],
       [{ ...resolved, requiredBy: undefined }, "requiredBy"],
       [{ ...resolved, requiredBy: "sensitivity_lookup_failed" }, "requiredBy"],
+      [{ ...resolved, profileDigest: undefined }, "profileDigest"],
+      [{ ...resolved, profileDigest: "A".repeat(64) }, "profileDigest"],
+      [{ ...resolved, profileDigest: "a".repeat(65) }, "profileDigest"],
+      [{ ...resolved, imageDigest: undefined }, "imageDigest"],
+      [{ ...resolved, imageDigest: "b".repeat(64) }, "imageDigest"],
+      [{ ...resolved, imageDigest: `sha256:${"b".repeat(64)}\n` }, "imageDigest"],
       [{ ...resolved, profileMinClass: undefined }, "profileMinClass"],
       [{ ...resolved, profileMinClass: "L9" }, "profileMinClass"],
     ] as const) {

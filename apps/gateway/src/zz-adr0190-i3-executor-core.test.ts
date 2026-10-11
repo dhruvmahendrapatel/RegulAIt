@@ -436,6 +436,12 @@ describe("refused before any sandbox starts (decision 7, no fallback)", () => {
       // L0 is never a requirement: it is not coerced to anything
       [{ requiredClass: "in_gateway" }, "requiredClass"],
       [{ requiredBy: "a_lookup_that_did_not_resolve" }, "requiredBy"],
+      // review of #346: a missing profile digest is an unresolved fact, not a retired profile
+      [{ profileDigest: undefined }, "profileDigest"],
+      [{ profileDigest: "" }, "profileDigest"],
+      // review of #346: a malformed image digest is refused before the INSERT (it was a CHECK error, a 500)
+      [{ imageDigest: "sha256:not-a-digest" }, "imageDigest"],
+      [{ imageDigest: undefined }, "imageDigest"],
     ];
     for (const [over, fact] of unresolved) {
       const out = await offerTo(r, { ttlSeconds: 1, ...(over as object) });
@@ -448,6 +454,8 @@ describe("refused before any sandbox starts (decision 7, no fallback)", () => {
     // no executor was offered work and no sandbox started
     expect(await offersOf()).toBe(before);
     expect(placementSandboxes(r.backend)).toHaveLength(0);
+    // positive control for the digests: a well-formed digest that names no profile is still profile_retired (amendment P)
+    expect(await offerTo(r, { profileDigest: "0".repeat(64) })).toEqual({ kind: "refused", code: "profile_retired", placementId: null });
     // positive control: the same executor, with every fact resolved, is offered the placement
     const ok = await offerTo(r, { ttlSeconds: 1 });
     expect(ok).toMatchObject({ kind: "offered", executorId: r.executorId });

@@ -160,7 +160,11 @@ export function executionProfileUnavailable(reason: ExecutionRefusalReason): Exe
 }
 
 /** a policy fact a placement depends on */
-export type PlacementPolicyFact = "workloadKind" | "requiredClass" | "requiredBy" | "profileMinClass";
+export type PlacementPolicyFact = "workloadKind" | "requiredClass" | "requiredBy" | "profileDigest" | "imageDigest" | "profileMinClass";
+
+/** a profile digest is the SHA-256 hex of its canonical body; an image digest is `sha256:` plus 64 hex (linear, anchored) */
+const PROFILE_DIGEST_RE = /^[0-9a-f]{64}$/;
+const IMAGE_DIGEST_FACT_RE = /^sha256:[0-9a-f]{64}$/;
 
 /**
  * Amendment item 15 with OWNER DECISION B: the policy facts a placement
@@ -169,18 +173,26 @@ export type PlacementPolicyFact = "workloadKind" | "requiredClass" | "requiredBy
  * fact is never coerced to a class, never dropped from the MAX and never
  * defaulted: the caller refuses `policy_unresolved`. (Decision 7 item 5's
  * unknown agent is not a missing fact; it resolves to the most restrictive
- * profile before this point.) `profileMinClass` is checked only when given.
+ * profile before this point.) `profileDigest`, `imageDigest` and
+ * `profileMinClass` are checked only when the key is given. A well-formed
+ * profile digest that names no profile is not unresolved: it is
+ * `profile_retired` (amendment P).
  */
 export function unresolvedPlacementFact(facts: {
   workloadKind?: unknown;
   requiredClass?: unknown;
   requiredBy?: unknown;
+  profileDigest?: unknown;
+  imageDigest?: unknown;
   profileMinClass?: unknown;
 }): PlacementPolicyFact | null {
   const known = (list: readonly string[], v: unknown) => typeof v === "string" && list.includes(v);
+  const shaped = (re: RegExp, max: number, v: unknown) => typeof v === "string" && v.length <= max && re.test(v);
   if (!known(ISOLABLE_WORKLOAD_KINDS, facts.workloadKind)) return "workloadKind";
   if (!known(REQUIRABLE_ISOLATION_CLASSES, facts.requiredClass)) return "requiredClass";
   if (!known(REQUIRED_CLASS_SOURCES, facts.requiredBy)) return "requiredBy";
+  if ("profileDigest" in facts && !shaped(PROFILE_DIGEST_RE, 64, facts.profileDigest)) return "profileDigest";
+  if ("imageDigest" in facts && !shaped(IMAGE_DIGEST_FACT_RE, 71, facts.imageDigest)) return "imageDigest";
   if ("profileMinClass" in facts && !known(REQUIRABLE_ISOLATION_CLASSES, facts.profileMinClass)) return "profileMinClass";
   return null;
 }

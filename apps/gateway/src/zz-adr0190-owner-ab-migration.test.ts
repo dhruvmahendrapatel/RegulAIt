@@ -129,8 +129,26 @@ describe("migration 0191: warn retired (OWNER DECISION A), policy_unresolved (OW
     await refusedWith(refused("policy_unresolved"), /execution_placements_refusal_code_check/);
 
     // ---- 0191, twice (re-runnable) ------------------------------------------------------------------
+    const trailCount = async () =>
+      (await one<{ n: number }>(sql`select count(*)::int as n from migration_audit_outbox where migration = ${MIGRATION}`)).n;
+    expect(await trailCount()).toBe(0);
     await run0191();
+    expect(await trailCount()).toBe(2);
     await run0191();
+    expect(await trailCount()).toBe(2);
+
+    // ADR-0181 FX2: each rewrite left one outbox row with old and new values; the second run added none
+    const trail = rows<{ object_type: string; object_id: string | null; rule_id: string; reason: string; detail: Record<string, unknown> }>(
+      await db.execute(sql`select object_type, object_id, rule_id, reason, detail from migration_audit_outbox where migration = ${MIGRATION} order by object_type`),
+    );
+    expect(trail).toHaveLength(2);
+    const [offerTrail, settingsTrail] = trail;
+    expect(settingsTrail).toMatchObject({ object_type: "org_settings", rule_id: "org-settings-updated" });
+    expect(settingsTrail!.reason).toContain("ADR-0190 owner decision A");
+    expect(settingsTrail!.detail).toMatchObject({ decision: "ADR-0190 owner decision A", transitions: { isolationEnforcement: { from: "warn", to: "enforce" } } });
+    expect(offerTrail).toMatchObject({ object_type: "execution_placement", object_id: offer.id, rule_id: "execution-offer-enforcement-rewritten" });
+    expect(offerTrail!.reason).toContain("ADR-0190 owner decision A");
+    expect(offerTrail!.detail).toMatchObject({ offerId: offer.id, transitions: { enforcement: { from: "warn", to: "enforce" } } });
 
     // A: the stored warn reads as enforce
     expect((await one<{ m: string }>(sql`select isolation_enforcement as m from org_settings limit 1`)).m).toBe("enforce");

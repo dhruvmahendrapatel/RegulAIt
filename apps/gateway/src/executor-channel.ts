@@ -335,7 +335,14 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
   // Amendment item 15 with OWNER DECISION B: a policy fact that is missing or outside its vocabulary refuses
   // `policy_unresolved` before anything else is looked at, and before any executor is offered work. There is
   // no placement row (the row's own columns would have to hold the unresolved fact); the audit row records it.
-  const unresolved = unresolvedPlacementFact(input);
+  // Every fact the INSERTs below depend on is named here, so a malformed one is a refusal, never a CHECK error.
+  const unresolved = unresolvedPlacementFact({
+    workloadKind: input.workloadKind,
+    requiredClass: input.requiredClass,
+    requiredBy: input.requiredBy,
+    profileDigest: input.profileDigest,
+    imageDigest: input.imageDigest,
+  });
   if (unresolved) {
     await auditExecutor(db, {
       userId: NO_IDENTITY,
@@ -343,7 +350,12 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
       objectId: null,
       ruleId: "execution-refused",
       effect: "deny",
-      detail: { unresolvedFact: unresolved, profileDigest: typeof input.profileDigest === "string" ? input.profileDigest : null, code: "policy_unresolved" },
+      // only well-formed values are echoed: a malformed one is caller input of unbounded shape
+      detail: {
+        unresolvedFact: unresolved,
+        profileDigest: typeof input.profileDigest === "string" && /^[0-9a-f]{64}$/.test(input.profileDigest) ? input.profileDigest : null,
+        code: "policy_unresolved",
+      },
       reason: `placement refused (policy_unresolved): the policy fact ${unresolved} did not resolve (ADR-0190 decision 7, amendment item 15; never defaulted)`,
     });
     return { kind: "refused", code: "policy_unresolved", placementId: null };
@@ -369,7 +381,9 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
   }
   if (profile.retiredAt) return refuse("profile_retired");
   // the profile's own floor is a policy fact too: one that does not resolve is never dropped from the MAX
-  if (unresolvedPlacementFact({ ...input, profileMinClass: profile.minClass })) return refuse("policy_unresolved");
+  if (unresolvedPlacementFact({ workloadKind: input.workloadKind, requiredClass: input.requiredClass, requiredBy: input.requiredBy, profileMinClass: profile.minClass })) {
+    return refuse("policy_unresolved");
+  }
   if (isolationClassRank(profile.minClass) > isolationClassRank(input.requiredClass)) {
     // the profile's own floor is part of the requirement (decision 7 item 5)
     input = { ...input, requiredClass: profile.minClass, requiredBy: "configured_profile" };
