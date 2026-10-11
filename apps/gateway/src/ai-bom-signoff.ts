@@ -123,6 +123,35 @@ function keyState(): "ok" | "missing" | "invalid" {
   }
 }
 
+/** the item-6 refusal: no usable key while `ai_bom_snapshot_without_key = refuse` */
+function refusalFor(key: "missing" | "invalid"): AiBomError {
+  if (key === "invalid") {
+    return new AiBomError(503, "receipt_signing_key_invalid", "The receipt signing key is configured but unusable, so this sign-off cannot take its AI BOM snapshot and is refused. Nothing was changed.");
+  }
+  return new AiBomError(
+    409,
+    "bom_signing_unavailable",
+    "No receipt signing key is configured (REGULAIT_RECEIPT_SIGNING_KEY), so this sign-off cannot take its signed AI BOM " +
+      "snapshot and is refused (ai_bom_snapshot_without_key = refuse). Nothing was changed.",
+  );
+}
+
+/**
+ * THE EARLY CHECK, for a caller that must refuse a sign-off BEFORE work it
+ * cannot roll back (a workflow transition whose git effects run after commit):
+ * throws exactly what `prepareAiBomSignoff` would throw for a sign-off now
+ * (409 `bom_signing_unavailable`, or 503 for an unusable key), and returns
+ * when the sign-off would go through (a key, triggers relaxed to on demand
+ * only, or `skip_and_record`). Call it inside the triggering transaction.
+ */
+export async function assertAiBomSignoffPossible(tx: Pick<Db, "select">): Promise<void> {
+  if (!AI_BOM_SNAPSHOTS_RELEASED) return;
+  const settings = await signoffSettings(tx);
+  if (settings.triggers !== "sign_off_events" || settings.withoutKey !== "refuse") return;
+  const key = keyState();
+  if (key !== "ok") throw refusalFor(key);
+}
+
 /**
  * THE IN-TRANSACTION HALF. Call it on the approved branch, inside the
  * triggering transaction and BEFORE the triggering audit row is written, then
@@ -144,15 +173,7 @@ export async function prepareAiBomSignoff(
   if (key !== "ok") {
     if (settings.withoutKey === "refuse") {
       // item 6 / OWNER DECISION 12: the sign-off is refused and its transaction rolls back
-      if (key === "invalid") {
-        throw new AiBomError(503, "receipt_signing_key_invalid", "The receipt signing key is configured but unusable, so this sign-off cannot take its AI BOM snapshot and is refused. Nothing was changed.");
-      }
-      throw new AiBomError(
-        409,
-        "bom_signing_unavailable",
-        "No receipt signing key is configured (REGULAIT_RECEIPT_SIGNING_KEY), so this sign-off cannot take its signed AI BOM " +
-          "snapshot and is refused (ai_bom_snapshot_without_key = refuse). Nothing was changed.",
-      );
+      throw refusalFor(key);
     }
     const code = key === "invalid" ? "receipt_signing_key_invalid" : "bom_signing_unavailable";
     for (const subject of subjects) {

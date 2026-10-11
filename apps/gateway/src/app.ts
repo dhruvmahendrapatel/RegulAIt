@@ -408,6 +408,7 @@ import {
   precheckRiskAcceptance,
   registerUseCaseRoutes,
   syncUseCaseForInstance,
+  assertUseCaseSignoffPossibleForInstance,
   useCaseArtifactRefusal,
   useCaseForIntakeApproval,
 } from "./use-cases.js";
@@ -4009,7 +4010,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
    * a future change adds a check here, bulk inherits it for free; there is no
    * second place to remember.
    */
-  async function decideOneApproval(input: {
+  /**
+   * ADR-0189 R25 item 6: a decision refused because its sign-off cannot take its
+   * signed AI BOM snapshot (409 `bom_signing_unavailable`, or 503 for an unusable
+   * key) throws `AiBomError` from inside the decision's transaction, which has
+   * rolled back. Every channel gets that refusal as an ordinary `{ ok: false }`
+   * outcome rather than an exception: a bulk decision keeps deciding the other
+   * items, and a chat decision writes its refusal audit row.
+   */
+  async function decideOneApproval(input: Parameters<typeof decideOneApprovalUnguarded>[0]): ReturnType<typeof decideOneApprovalUnguarded> {
+    try {
+      return await decideOneApprovalUnguarded(input);
+    } catch (err) {
+      if (!(err instanceof AiBomError)) throw err;
+      return { ok: false as const, status: err.status, body: { ...(err.extra ?? {}), error: err.code, detail: err.message } };
+    }
+  }
+
+  async function decideOneApprovalUnguarded(input: {
     approvalId: string;
     deciderUserId: string | null;
     isAdmin: boolean;
@@ -5076,12 +5094,38 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // rejected); mirror both. The decide path is handled inside the one
     // approvals transaction above.
     onInstanceTransition: async (d, instanceId, actorUserId) => {
-      const useCaseSignoff = await syncUseCaseForInstance(d, instanceId, actorUserId);
+      // ADR-0189 R25: a use-case approval that cannot take its signed snapshot is
+      // refused inside its own sync transaction (the routes refuse it earlier,
+      // through `assertTransitionAllowed`; this covers a move made some other way,
+      // such as a git stage completing the instance). The instance has already
+      // moved, so the refusal is reported, not thrown: the vendor mirror still runs
+      // and the caller learns the use case stayed behind its instance.
+      let useCaseSignoff: AiBomSignoff | null = null;
+      let useCaseSignoffRefused: { code: string; detail: string } | null = null;
+      try {
+        useCaseSignoff = await syncUseCaseForInstance(d, instanceId, actorUserId);
+      } catch (err) {
+        if (!(err instanceof AiBomError)) throw err;
+        app.log.warn({ instanceId, code: err.code }, "use-case approval refused: its AI BOM snapshot cannot be signed");
+        useCaseSignoffRefused = {
+          code: err.code,
+          detail:
+            `${err.message} The workflow instance has moved, but its AI use case was not approved; it stays where it was ` +
+            "until a receipt signing key is configured and the instance is driven again (the mirror is idempotent).",
+        };
+      }
       await syncVendorForInstance(d, instanceId, actorUserId);
       // ADR-0189 R25: the routes call this after their own commit, so the snapshot runs here
       const aiBomSnapshotWarning = await runAiBomSignoffs(d, [useCaseSignoff], app.log);
-      return aiBomSnapshotWarning ? { aiBomSnapshotWarning } : undefined;
+      const extra = {
+        ...(aiBomSnapshotWarning ? { aiBomSnapshotWarning } : {}),
+        ...(useCaseSignoffRefused ? { useCaseSignoffWarning: useCaseSignoffRefused } : {}),
+      };
+      return Object.keys(extra).length ? extra : undefined;
     },
+    // ADR-0189 R25 item 6: a submission or advance that would approve a use case
+    // whose snapshot cannot be signed is refused 409 before anything commits
+    assertTransitionAllowed: (tx, instanceId) => assertUseCaseSignoffPossibleForInstance(tx as unknown as Db, instanceId),
     // ADR-0171 / AER-053: an intake questionnaire with an inconsistent
     // "Not sure" answer is refused before it is stored
     validateArtifact: useCaseArtifactRefusal,

@@ -56,7 +56,7 @@
  */
 import { recordRiskAcceptance } from "./risk-tolerance.js";
 import { writeUseCaseDecisionRecord } from "./decision-regression.js";
-import { prepareAiBomSignoff, type AiBomSignoff } from "./ai-bom-signoff.js";
+import { assertAiBomSignoffPossible, prepareAiBomSignoff, type AiBomSignoff } from "./ai-bom-signoff.js";
 import type { FastifyInstance } from "fastify";
 import {
   agents,
@@ -346,6 +346,30 @@ function statusForInstance(instanceStatus: string): AiUseCaseRow["status"] | nul
       // where it is rather than guess
       return null;
   }
+}
+
+/**
+ * ADR-0189 R25 item 6, for the workflow routes (artifact submit, advance):
+ * called INSIDE the transition's transaction, after the transition is applied
+ * and before anything commits. When the instance now stands at a status that
+ * would move its governed use case to `approved`, and that approval could not
+ * take its signed AI BOM snapshot under the strict `refuse` setting, this
+ * throws the same 409 `bom_signing_unavailable` the decide path answers — so
+ * the transition, its artifact row and its git effects never happen, and the
+ * use case is not left behind its instance.
+ */
+export async function assertUseCaseSignoffPossibleForInstance(tx: Db, instanceId: string): Promise<void> {
+  const [instance] = await tx
+    .select({ status: workflowInstances.status })
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instanceId));
+  if (!instance || statusForInstance(instance.status) !== "approved") return;
+  const [useCase] = await tx
+    .select({ status: aiUseCases.status })
+    .from(aiUseCases)
+    .where(eq(aiUseCases.workflowInstanceId, instanceId));
+  if (!useCase || useCase.status === "approved" || useCase.status === "rejected" || useCase.status === "retired") return;
+  await assertAiBomSignoffPossible(tx);
 }
 
 /**
