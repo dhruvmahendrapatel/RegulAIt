@@ -79,7 +79,7 @@ import {
   type McpProtocolMethod,
   type PiiHit,
 } from "@regulait/shared";
-import { approvalTargetForServer, governedEvaluate } from "./governed-evaluate.js";
+import { approvalTargetForServer, decisionPolicyStillCurrent, governedEvaluate, policyChangedDecision } from "./governed-evaluate.js";
 import { recordDecision } from "./metrics.js";
 import { loadOrgSettings } from "./org-settings.js";
 import {
@@ -348,6 +348,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     approvalScope,
     contextDigest,
     policyEpoch,
+    killSwitch,
     retiredApprovals,
     matchedApprovalRuleIds,
   } = await governedEvaluate(
@@ -384,7 +385,11 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       return { kind: "denied", decision: credentialAudienceDecision(audience.reason) };
     }
   }
-  await db.insert(auditLog).values({
+  // ADR-0189 B2: written only if the epoch and the kill-switch state it was decided under still hold, read in
+  // this transaction (`decisionPolicyStillCurrent`); otherwise refused, nothing written, nothing run
+  const recorded = await db.transaction(async (tx) => {
+    if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName: grant }))) return false;
+    await tx.insert(auditLog).values({
     userId,
     serverId,
     toolName: grant,
@@ -397,12 +402,23 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       contextDigest,
       projectId,
       target: auditTarget(serverRow),
+      // ADR-0189 B2: the approved queue row this decision relied on (R5), and the policy generation and
+      // kill-switch state it was decided under (§4 policy facts)
+      ...(approvedApprovalId ? { approvedApprovalId } : {}),
+      policyEpoch,
+      killSwitch,
     },
     effect: decision.effect,
     ruleId: decision.ruleId,
     ruleChain: decision.ruleChain,
     reason: decision.reason,
+    });
+    return true;
   });
+  if (!recorded) {
+    recordDecision({ surface: "mcp_protocol", effect: "deny" });
+    return { kind: "denied", decision: policyChangedDecision() };
+  }
   recordDecision({ surface: "mcp_protocol", effect: decision.effect });
   if (decision.effect === "deny") return { kind: "denied", decision };
 

@@ -52,6 +52,7 @@ import {
   ACCOUNTABILITY_SETTING_KEYS,
   accountabilitySettingRelaxed,
   alertTicketSettingsProblem,
+  composeAuditRetentionDays,
   type AccountabilitySettingKey,
   INTERNATIONAL_PII_CATEGORIES,
   type InternationalPiiCategory,
@@ -244,14 +245,9 @@ async function composedRetention(db: Db) {
   const withDays = profiles.filter(
     (p): p is typeof p & { auditRetentionDays: number } => p.auditRetentionDays != null,
   );
-  const profileFloor = withDays.length
-    ? withDays.reduce((m, p) => Math.max(m, p.auditRetentionDays), 0)
-    : null;
   const orgDays = org.defaultAuditRetentionDays;
-  const retainedDays =
-    profileFloor != null && orgDays != null
-      ? Math.max(profileFloor, orgDays)
-      : (profileFloor ?? orgDays);
+  // ONE composition rule, shared with ADR-0189 B2's decision-row `expires_at`
+  const retainedDays = composeAuditRetentionDays(withDays.map((p) => p.auditRetentionDays), orgDays);
   return { withDays, org, orgDays, retainedDays };
 }
 

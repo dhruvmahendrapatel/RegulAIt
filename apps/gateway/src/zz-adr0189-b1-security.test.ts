@@ -123,7 +123,8 @@ describe("F2: temp tables cannot shadow what the guard reads (search_path pinned
     const client = await db.$client.connect();
     try {
       await client.query("BEGIN");
-      const audit = (await client.query("select id from public.audit_log order by seq desc limit 1")).rows[0] as { id: string };
+      // a row with no capture marker yet (since B2, every decision row has one from its own transaction)
+      const audit = (await client.query("select a.id from public.audit_log a where not exists (select 1 from public.decision_capture_status m where m.audit_id = a.id) order by a.seq desc limit 1")).rows[0] as { id: string };
       await client.query(`insert into decision_capture_status (audit_id, audit_seq, audit_at, status, expires_at) values ($1, $2, '2020-01-01Z', 'capture_off', '2020-02-01Z')`, [audit.id, 660000 + Math.floor(Math.random() * 99_999)]);
       const held = randomUUID();
       await client.query(`insert into decision_capture_status (audit_id, audit_seq, audit_at, status, expires_at) values ($1, $2, '2020-01-01Z', 'capture_off', '2020-02-01Z')`, [held, 670000 + Math.floor(Math.random() * 99_999)]);

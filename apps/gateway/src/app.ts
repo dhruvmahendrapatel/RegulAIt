@@ -60,6 +60,7 @@ import {
   toolGrants,
   users,
   workflowInstances,
+  runWithAuditActor,
   type Db,
   type SQL,
 } from "@regulait/db";
@@ -145,6 +146,7 @@ import {
   SESSION_COOKIE,
   apiKeyMfaEnrollmentRequired,
   authenticate,
+  workloadPreHandler,
   clearSessionCookie,
   isAuthRefusal,
   generateToken,
@@ -312,6 +314,8 @@ export interface BuildAppOptions {
    * Exposed so a test can drive a real WORM buffer without touching the
    * environment. */
   auditAnchorSink?: AnchorSink | null;
+  /** ADR-0190 I3: the executor channel's stream cadence (tests shorten the poll) */
+  executorChannel?: ExecutorChannelOptions;
   /** L6a TEST SEAM (ADR-0056 amendment): inject a deterministic copilot
    * narrator instead of the real, governed `ModelBackedNarrator`. Absent =
    * the real path. */
@@ -456,10 +460,14 @@ import { registerAuditTimestampRoutes } from "./audit-timestamp.js";
 import { registerDetectionContentRoutes } from "./detection-content-routes.js";
 // ADR-0188 (batch 6 item 1) S1 — every identity route, a 501 stub until its slice lands
 import { registerIdentityRoutes } from "./identity-routes.js";
+import { lockPersonForRevocation, lockRoleForGrantInsert } from "./workload-identity-admin.js";
 // ADR-0189 (batch 6 item 2) B1 — every Decision BOM / AI BOM route, a 501 stub until its slice lands
 import { registerBomRoutes } from "./bom-routes.js";
+import { registerAiBomSpdxFieldRoutes } from "./ai-bom-spdx-fields.js";
 // ADR-0190 (batch 6 item 3) I1 — every isolation route, a 501 stub until its slice lands
 import { registerIsolationRoutes } from "./isolation-routes.js";
+// ADR-0190 I3 — the executor channel (in-route ADR-0188 proof) and the placement broker
+import { registerExecutorChannelRoutes, type ExecutorChannelOptions } from "./executor-channel.js";
 // ADR-0187 (batch 5): the sidecar engines (foundation + runner core)
 import { registerEngineRoutes, type EngineOptions } from "./engines.js";
 import { applyEngineRunApprovalDecision, lockEngineRunOfApprovalTx, registerEngineRunRoutes } from "./engine-runs.js";
@@ -1195,6 +1203,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
     }
 
+    // ADR-0188 S5: a gateway-issued delegated token (DPoP, or certificate-bound) is judged by its own path
+    const workload = await workloadPreHandler(db, req, reply, { dataKey: opts.dataKey });
+    if (workload === "refused") return reply;
+    if (workload === "authenticated") return;
     const ctx = await authenticate(db, opts.bootstrapToken, authorization);
     // ADR-0022: a valid key whose user is DEACTIVATED gets its own reason —
     // the holder should learn "your account is disabled", not "bad token".
@@ -1343,6 +1355,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin && !scopedKeyMayReach) {
       return reply.status(403).send({ error: "admin_only" });
     }
+  });
+
+  // ADR-0188 decision 9 (S4+S5 follow-up): every audit row, trace span and usage row a WORKLOAD caller's request
+  // writes is stamped with its chain, through the same async context the in-process chains use (S4 amendment 5).
+  // Callback style, so the handler runs INSIDE the context (the pattern @fastify/request-context uses).
+  app.addHook("preHandler", (req, _reply, done) => {
+    const c = req.authCtx;
+    if (c?.via === "workload" && c.workloadIdentityId && c.delegationGrantId && c.actorChain) {
+      void runWithAuditActor({ actorIdentityId: c.workloadIdentityId, delegationGrantId: c.delegationGrantId, actorChain: c.actorChain }, async () => done());
+      return;
+    }
+    done();
   });
 
   // identity echo for UI clients — who am I, what may I see. Additively
@@ -2236,10 +2260,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleToolGrants)
-      .values({ roleId, serverId: body.serverId, toolName: body.toolName })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleToolGrants)
+        .values({ roleId, serverId: body.serverId, toolName: body.toolName })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2254,10 +2282,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleServerGrants)
-      .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleServerGrants)
+        .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2273,10 +2305,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleAgentGrants)
-      .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleAgentGrants)
+        .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2290,15 +2326,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       req.authCtx.userId,
     );
     if (sod) return reply.status(409).send(sod);
-    const [row] = await db
-      .insert(roleConnectorGrants)
-      .values({
-        roleId,
-        connectorId: body.connectorId,
-        mode: body.mode,
-        allowedObjects: body.allowedObjects ?? null,
-      })
-      .returning();
+    // PR #339 review: the role's row FOR NO KEY UPDATE first, serialized with the workload-identity steward check
+    const [row] = await db.transaction(async (tx) => {
+      await lockRoleForGrantInsert(tx as unknown as Db, roleId);
+      return tx
+        .insert(roleConnectorGrants)
+        .values({
+          roleId,
+          connectorId: body.connectorId,
+          mode: body.mode,
+          allowedObjects: body.allowedObjects ?? null,
+        })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2581,10 +2621,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // Deleting the revocation reverses it — overrides are independently reversible.
   app.post("/v1/revocations", async (req, reply) => {
     const body = createRevocationSchema.parse(req.body);
-    const [row] = await db
-      .insert(revocations)
-      .values({ userId: body.userId, serverId: body.serverId, toolName: body.toolName ?? null })
-      .returning();
+    // ADR-0188 S4+S5 follow-up (review L5): serialized with the workload-identity steward check on the person's row
+    const [row] = await db.transaction(async (tx) => {
+      await lockPersonForRevocation(tx as unknown as Db, body.userId);
+      return tx
+        .insert(revocations)
+        .values({ userId: body.userId, serverId: body.serverId, toolName: body.toolName ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2621,10 +2665,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/users/:userId/revocations/agents", async (req, reply) => {
     const { userId } = revocationUserParam.parse(req.params);
     const body = createAgentRevocationSchema.parse(req.body);
-    const [row] = await db
-      .insert(agentRevocations)
-      .values({ userId, agentId: body.agentId, reason: body.reason ?? null })
-      .returning();
+    // ADR-0188 S4+S5 follow-up (review L5): serialized with the workload-identity steward check on the person's row
+    const [row] = await db.transaction(async (tx) => {
+      await lockPersonForRevocation(tx as unknown as Db, userId);
+      return tx
+        .insert(agentRevocations)
+        .values({ userId, agentId: body.agentId, reason: body.reason ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -2665,10 +2713,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/users/:userId/revocations/connectors", async (req, reply) => {
     const { userId } = revocationUserParam.parse(req.params);
     const body = createConnectorRevocationSchema.parse(req.body);
-    const [row] = await db
-      .insert(connectorRevocations)
-      .values({ userId, connectorId: body.connectorId, reason: body.reason ?? null })
-      .returning();
+    // ADR-0188 S4+S5 follow-up (review L5): serialized with the workload-identity steward check on the person's row
+    const [row] = await db.transaction(async (tx) => {
+      await lockPersonForRevocation(tx as unknown as Db, userId);
+      return tx
+        .insert(connectorRevocations)
+        .values({ userId, connectorId: body.connectorId, reason: body.reason ?? null })
+        .returning();
+    });
     return reply.status(201).send(row);
   });
 
@@ -5244,10 +5296,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAuditTimestampRoutes(app, db);
   registerDetectionContentRoutes(app, db);
   // ADR-0188 S1: per-agent and workload identity (route classes in route-classes.ts)
-  registerIdentityRoutes(app, db);
+  registerIdentityRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0189 B1: the Decision BOM and AI BOM (admin-only route class until B4's export-role check)
   registerBomRoutes(app, db);
+  // ADR-0189 B9 (R51): supplier-declared SPDX properties of models and datasets (admin-only, audited)
+  registerAiBomSpdxFieldRoutes(app, db);
   registerIsolationRoutes(app, db);
+  registerExecutorChannelRoutes(app, db, opts.executorChannel ?? {});
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (runner token only: registerEngineRunnerScopeHook).

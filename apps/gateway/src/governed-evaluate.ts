@@ -26,7 +26,7 @@ import {
 } from "@regulait/db";
 import { evaluate, matchingApprovalRules, type Decision, type GovernedActor, type ToolRef } from "@regulait/policy-kernel";
 import { evaluateAbac } from "@regulait/policy-kernel/abac";
-import { EVALUATION_ONLY_EXECUTION, resolveExecutionPosture } from "./execution-posture.js";
+import { EVALUATION_ONLY_EXECUTION, killSwitchState, resolveExecutionPosture } from "./execution-posture.js";
 // ADR-0185 G5 — the decision counter (a no-op seam until the meter lands)
 import { recordDecision } from "./metrics.js";
 import {
@@ -123,6 +123,9 @@ export interface GovernedEvaluation {
   contextDigest: string;
   /** DB policy generation read before the evaluation's policy snapshot. */
   policyEpoch: number;
+  /** ADR-0189 B2: the kill-switch state this call was decided under (`killSwitchState` of the resolved posture);
+   * null on the indeterminate-config refusal, which is decided before the posture is resolved (not recorded) */
+  killSwitch: "off" | "engaged" | null;
   /**
    * ADR-0186 A — the ids of the approval rules that MATCHED this call (the
    * kernel's own predicate, the same set `approvalScope` and `contextDigest`
@@ -254,6 +257,46 @@ export async function deriveDeployContext(db: Db, projectId: string): Promise<st
  * already-approved queue entry for exactly this user/server/tool. Pure
  * decision only — callers own auditing, queue writes, and consumption.
  */
+/**
+ * ADR-0189 B2 (review round 2) — THE DECISION-COMMIT RE-CHECK of the MCP tool and MCP protocol paths.
+ *
+ * `governedEvaluate` reads the policy epoch before it evaluates and the kill-switch posture after it, and the
+ * decision row is written later still, so a policy write or a halt in between would pair an old epoch with a
+ * new kill-switch state. So, as the connector path does, the decision transaction locks the epoch row
+ * `FOR SHARE` and re-reads the kill-switch state in that same transaction: the decision is written only when
+ * both still equal what it was decided under, and the facts record exactly those values. Every kill-switch
+ * source of these paths (`org_settings`, `mcp_tools.halted_at`) advances the epoch (migration 0120), so the held
+ * lock also keeps the posture from changing until the decision commits; the posture re-read is the second check.
+ * Otherwise the caller refuses with `policyChangedDecision()` and writes nothing (the connector path's
+ * `connector_policy_changed` behaviour); a re-submitted call is decided afresh. A refusal decided before the
+ * posture was read (`killSwitch: null`) re-checks the epoch only.
+ */
+export const GOVERNANCE_POLICY_CHANGED_RULE_ID = "governance-policy-changed";
+export function policyChangedDecision(): Decision {
+  return {
+    effect: "deny",
+    ruleId: GOVERNANCE_POLICY_CHANGED_RULE_ID,
+    ruleChain: [],
+    reason: "governance policy or the kill switch changed while this call was being decided; nothing ran. Re-submit the call to have it decided under the current policy.",
+  };
+}
+let decisionRecheckHookForTest: (() => Promise<void>) | null = null;
+/** TEST ONLY: run `fn` at the start of the next re-checks (between evaluation and the decision's commit); null clears it */
+export function setDecisionRecheckHookForTest(fn: (() => Promise<void>) | null): void {
+  decisionRecheckHookForTest = fn;
+}
+export async function decisionPolicyStillCurrent(
+  tx: Db,
+  decided: { policyEpoch: number; killSwitch: "off" | "engaged" | null },
+  subject: { serverId: string; toolName: string },
+): Promise<boolean> {
+  if (decisionRecheckHookForTest) await decisionRecheckHookForTest();
+  const [current] = await tx.select({ epoch: governancePolicyEpoch.epoch }).from(governancePolicyEpoch).for("share");
+  if (!current || current.epoch !== decided.policyEpoch) return false;
+  if (decided.killSwitch === null) return true;
+  return killSwitchState(await resolveExecutionPosture(tx, subject)) === decided.killSwitch;
+}
+
 export async function governedEvaluate(
   db: Db,
   userId: string,
@@ -473,6 +516,7 @@ export async function governedEvaluate(
           (unresolvable.length > 1 ? ` (and ${unresolvable.length - 1} more)` : ""),
       },
       approvedApprovalId: null,
+      killSwitch: null,
       // ADR-0104: the fingerprint is a fact about the CALL, not about the
       // decision, so it is still reported on a refusal — the audit row for an
       // indeterminate-config deny records which payload was attempted.
@@ -1002,6 +1046,7 @@ export async function governedEvaluate(
     approvalScope,
     contextDigest,
     policyEpoch,
+    killSwitch: killSwitchState(resolvedPosture),
     retiredApprovals,
     matchedApprovalRuleIds: matchedARules.map((r) => r.id),
     ...(candidateDecision ? { candidateDecision } : {}),

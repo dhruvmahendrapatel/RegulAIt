@@ -19,7 +19,7 @@ import {
   receiptCanonicalBytes,
   type AnyDecisionReceiptPayload,
 } from "../batch4.js";
-import { isDecisionReceiptPayload, isDecisionReceiptPayloadV1, receiptPayloadHash, verifyReceiptBundle, type ReceiptBundle, type ReceiptPublicKey } from "../receipts/verify.js";
+import { isDecisionReceiptPayload, isDecisionReceiptPayloadV1, receiptPayloadHash, receiptVersionForAuditSeq, verifyReceiptBundle, type ReceiptBundle, type ReceiptPublicKey } from "../receipts/verify.js";
 import {
   AI_BOM_INSTALL_SUBJECT_ID,
   AI_BOM_VERSION,
@@ -470,8 +470,15 @@ describe("receipt payload v2 (R34, R42, R48): verified, never emitted by this bu
   const verify = (receipts: ReceiptBundle["receipts"], boundary?: number | null) =>
     verifyReceiptBundle({ verifier: RECEIPT_PAYLOAD_VERSION, receipts, keys, ...(boundary !== undefined ? { receiptV2FromAuditSeq: boundary } : {}) }).results.map((r) => r.status);
 
-  it("NEGATIVE CONTROL: this build emits v1 only", () => {
+  it("this build emits v1 only, so it must stop at a recorded boundary: what it would emit there verifies invalid", () => {
+    // the switch the cutover slice flips (B2 review); the behaviour below is why a v1-only emitter stops there
     expect(RECEIPT_EMITTER_SUPPORTS_V2).toBe(false);
+    // the receipts a v1-only emitter produces: valid below a boundary, invalid at or above it (R42)
+    const emitted = chain(["v1", "v1", "v1"]); // audit seqs 10, 20, 30
+    expect(verify(emitted, 25)).toEqual(["valid", "valid", "invalid"]);
+    expect(verify(emitted, null)).toEqual(["valid", "valid", "valid"]);
+    expect(receiptVersionForAuditSeq(30, 25)).toBe(RECEIPT_PAYLOAD_VERSION_V2);
+    expect(receiptVersionForAuditSeq(20, 25)).toBe(RECEIPT_PAYLOAD_VERSION);
   });
   it("a v1 chain still verifies with no boundary (the receipts emitted today)", () => {
     expect(verify(chain(["v1", "v1"]))).toEqual(["valid", "valid"]);

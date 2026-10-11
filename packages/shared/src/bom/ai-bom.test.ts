@@ -528,7 +528,9 @@ describe("security review round (PR #287): free-form references and claims never
   });
   it("MEDIUM: URL-shaped claims, standard refs and bias methods keep the origin only; secret-shaped free text is refused", () => {
     const urlCases: Array<[(f: AiBomRecordSet) => void, string]> = [
+      // R51: downloadLocation is a retired data_claims key (refused); a URL in another claim keeps its origin only
       [(f) => { f.modelCards[0]!.dataClaims = { downloadLocation: "https://bucket.s3.test/w.bin?X-Amz-Signature=CANARYSIG" }; }, "CANARYSIG"],
+      [(f) => { f.modelCards[0]!.dataClaims = { trainingData: "https://bucket.s3.test/w.bin?X-Amz-Signature=CANARYSIG2" }; }, "CANARYSIG2"],
       [(f) => { f.modelCards[0]!.standardRefs = ["https://std.test/doc?token=CANARYSTD"]; }, "CANARYSTD"],
       [(f) => { f.modelCards[0]!.biasFairness = [{ dimension: "age", method: "https://eval.test/run?key=CANARYBIAS", status: "assessed", resultRef: null, assessedAt: null }]; }, "CANARYBIAS"],
       [(f) => { f.modelCards[0]!.dataClaims = { trainingData: "corpus key sk-live-CANARYTRAIN0123456789abcdef" }; }, "CANARYTRAIN"],
@@ -543,13 +545,13 @@ describe("security review round (PR #287): free-form references and claims never
     }
     expect(outcomes.filter((o) => o.endsWith("LEAKED"))).toEqual([]);
   });
-  it("assessedAt and releaseTime must be timestamps", () => {
+  it("assessedAt must be a timestamp; releaseTime is a retired data_claims key (R51)", () => {
     const f = fixture();
     f.modelCards[0]!.biasFairness = [{ ...f.modelCards[0]!.biasFairness[0]!, assessedAt: "token=SECRET" }];
     refused(() => normaliseAiBomRecords(f), /assessedAt/);
     const g = fixture();
-    g.modelCards[0]!.dataClaims = { releaseTime: "next tuesday" };
-    refused(() => normaliseAiBomRecords(g), /releaseTime/);
+    g.modelCards[0]!.dataClaims = { releaseTime: "2026-06-01T00:00:00Z" };
+    refused(() => normaliseAiBomRecords(g), /data_claims\.releaseTime is retired/);
   });
   it("LOW: a refusal names the field and rule, never the record value", () => {
     const f = fixture();
@@ -606,6 +608,12 @@ describe("X41: no string field carries a credential or a URL path/query into any
       builderSkills: [{ agentId: BA_ID, skillId: SK, snapshotName: "skill one", snapshotDigest: H("5"), snapshotVersion: 1, snapshotAdmissionState: "admitted" }],
       memoryStores: [{ kind: "builder_agent_memory", builderAgentId: BA_ID }],
       connectors: [{ ...fixture().connectors[0]!, ownerDisplayName: "Owner Three" }],
+      // B9 (R51): one record per subject kind, so every declarable string field is seeded (all records are enumerated)
+      spdxFields: [
+        { subjectKind: "training_dataset", subjectId: TDS, releaseTime: "2026-04-01T09:30:00Z", downloadLocation: "https://data.supplier.example", packageVersion: null, builtTime: "2026-03-15T08:00:00Z", originatedBy: "Data Supplier", datasetType: ["text"] },
+        { subjectKind: "eval_dataset", subjectId: EDS, releaseTime: "2026-05-20T00:00:00Z", downloadLocation: "https://evals.supplier.example", packageVersion: null, builtTime: "2026-05-19T23:59:59Z", originatedBy: "Eval Lab", datasetType: ["text", "image"] },
+        { subjectKind: "model_card", subjectId: CARD2, releaseTime: "2026-05-01T00:00:00Z", downloadLocation: "https://models.provider-a.example", packageVersion: "2026-05-01", builtTime: null, originatedBy: null, datasetType: [] },
+      ],
     });
   /** every path to a string (or string-array element) in the first record of each list */
   const stringPaths = (v: unknown, at: Array<string | number>): Array<Array<string | number>> => {
@@ -625,7 +633,9 @@ describe("X41: no string field carries a credential or a URL path/query into any
     for (const list of AI_BOM_RECORD_LISTS) {
       const recs = (base as unknown as Record<string, unknown[] | undefined>)[list] ?? [];
       if (!recs.length) continue;
-      for (const p of stringPaths(recs[0], [list, 0])) {
+      // B9: `spdxFields` carries different string fields per subject kind, so every record is enumerated
+      const paths = list === "spdxFields" ? recs.flatMap((r, i) => stringPaths(r, [list, i])) : stringPaths(recs[0], [list, 0]);
+      for (const p of paths) {
         for (const canary of CANARIES) {
           const f = rich();
           setAt(f, p, canary);

@@ -4,6 +4,8 @@
 export * from "./contract.js";
 export * from "./finality.js";
 export * from "./settings.js";
+// slice B2: decision fact capture (the pure half; packages/db holds the writer)
+export * from "./facts-capture.js";
 // slice B4 API contract (frozen for B6; B4 implements it exactly)
 export * from "./contract-b4.js";
 // slice B3: the AI BOM record set, builder, CycloneDX renderer and validator
@@ -19,3 +21,5 @@ export * from "./release-ai-bom.js";
 // slice B5: the SPDX 3.0.1 renderer and its offline validator
 export * from "./ai-bom-spdx.js";
 export * from "./ai-bom-spdx-schema.js";
+// slice B9: the supplier-declared SPDX properties (R51)
+export * from "./ai-bom-spdx-fields.js";

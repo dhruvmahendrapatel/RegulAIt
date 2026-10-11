@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import canonicalize from "canonicalize";
 import { createHash } from "node:crypto";
+import { ISOLATION_SETTING_COPY } from "./settings.js";
 import {
   ATTESTATION_PROBE_IDS,
   ATTESTATION_PROBES,
@@ -177,6 +178,8 @@ describe("decision 2: the body refuses every invariant break", () => {
     ["a platform we did not admit", (b) => ((b.runsc as { platform: string }).platform = "ptrace")],
     ["no per-placement report", (b) => ((b.attestation as { perPlacement: boolean }).perPlacement = false)],
     ["no probes", (b) => (b.attestation.probes = [])],
+    ["no runtime_identity probe (amendment U)", (b) => (b.attestation.probes = b.attestation.probes.filter((p) => p !== "runtime_identity"))],
+    ["no runtime_config probe (amendment U)", (b) => (b.attestation.probes = b.attestation.probes.filter((p) => p !== "runtime_config"))],
     ["an unknown probe", (b) => ((b.attestation as { probes: string[] }).probes = ["cpu_count"])],
     ["a wildcard host", (b) => (b.network = { mode: "allow_list", entries: [{ host: "*.example.com", port: 443 }] })],
     ["an empty allow-list", (b) => (b.network = { mode: "allow_list", entries: [] })],
@@ -272,6 +275,12 @@ describe("decision 11: the isolation org settings", () => {
     expect(isolationSettingLooser("isolationFloorPublic", "user_space_kernel", "microvm")).toBe(true);
     expect(isolationSettingLooser("isolationFloorPublic", "microvm", "user_space_kernel")).toBe(false);
     expect(isolationSettingLooser("executorAttestationMaxAgeMinutes", 120, 60)).toBe(true);
+  });
+
+  it("the warn copy never promises a placement below the required class (ADR-0190 amendment item 14)", () => {
+    const warn = ISOLATION_SETTING_COPY.isolationEnforcement.relaxed;
+    expect(warn).not.toMatch(/best isolation available/);
+    expect(warn).toContain("never placed below its required isolation, in any mode");
   });
 
   it("PUT /v1/org/settings accepts the isolation keys within bounds; never L0, never outside 60–1440", () => {

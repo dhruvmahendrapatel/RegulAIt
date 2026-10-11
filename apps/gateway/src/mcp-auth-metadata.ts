@@ -56,16 +56,20 @@
  * So even on a deployment with a configured, enabled OIDC provider, listing
  * that provider's issuer under `authorization_servers` would tell a conformant
  * client "go get an access token there and present it" — and the very next
- * request would be a 401. The field is therefore omitted UNCONDITIONALLY,
- * including when a provider is configured, and the reason is stated in the
- * document itself so an operator reading it does not think it is a bug.
+ * request would be a 401. An identity provider's issuer is therefore never
+ * listed, including when a provider is configured. The one issuer listed is
+ * the gateway's OWN (ADR-0188 S5), and only once delegated tokens are governed
+ * on the routes they reach (`DELEGATED_ROUTES_WIRED`, true since the S4+S5
+ * follow-up) and `REGULAIT_PUBLIC_URL` names it; otherwise the omission and
+ * its reason stand in the document.
  *
  * Accepting IdP-issued access tokens, dynamic client registration (RFC 7591)
  * and standing up an authorization-server surface of our own are all
  * deliberately OUT OF SCOPE — see ADR-0097.
  */
 
-import { deploymentBaseUrl } from "./public-url.js";
+import { deploymentBaseUrl, resolvePublicUrl } from "./public-url.js";
+import { DELEGATED_ROUTES_WIRED } from "./oauth/wiring.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 /** The MCP proxy route, as Fastify names it. */
@@ -119,7 +123,8 @@ export function protectedResourceMetadata(resource: string, baseUrl: string) {
     // operator who notices the omission deserves the reason without having to
     // find an ADR.
     //
-    //   `authorization_servers` — omitted UNCONDITIONALLY. This gateway
+    //   `authorization_servers` — never an identity provider's issuer
+    //   (see `delegatedTokenMetadata` for the gateway's own). This gateway
     //   accepts no IdP-issued access token on any route. Its OIDC/SAML support
     //   is a browser login flow that mints a local session; naming an issuer
     //   here would advertise a mechanism the next request would refuse.
@@ -145,9 +150,37 @@ export function protectedResourceMetadata(resource: string, baseUrl: string) {
           "The browser session an interactive login mints. Not a bearer method under RFC 6750, so it is not listed in bearer_methods_supported.",
       },
     ],
+    ...delegatedTokenMetadata(),
+    "x-regulait-dynamic-client-registration": false,
+  };
+}
+
+/**
+ * ADR-0188 S5: once delegated tokens are ACCEPTED here (the gateway's own
+ * issuer, decision 7), the document names that issuer under
+ * `authorization_servers` and says the tokens are sender-constrained. Until
+ * the routes govern calls under the grant (`DELEGATED_ROUTES_WIRED`), and
+ * whenever the issuer is not configured, the omission stands with its reason.
+ * An identity provider's issuer is still never listed.
+ */
+function delegatedTokenMetadata(): Record<string, unknown> {
+  let issuer: string | null = null;
+  try {
+    issuer = resolvePublicUrl();
+  } catch {
+    issuer = null;
+  }
+  if (DELEGATED_ROUTES_WIRED && issuer) {
+    return {
+      authorization_servers: [issuer],
+      dpop_signing_alg_values_supported: ["EdDSA", "ES256"],
+      dpop_bound_access_tokens_required: false,
+      tls_client_certificate_bound_access_tokens: true,
+    };
+  }
+  return {
     "x-regulait-authorization-servers-omitted-because":
       "this gateway accepts no identity-provider-issued access token on any route; OIDC/SAML are browser login flows that mint a local RegulAIt session, so listing an issuer here would advertise an authentication mechanism that would in fact be rejected",
-    "x-regulait-dynamic-client-registration": false,
   };
 }
 

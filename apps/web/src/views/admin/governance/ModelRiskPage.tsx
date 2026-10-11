@@ -40,6 +40,7 @@ import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { EngineScanEvidenceChip } from "./EngineScanChip";
 import type { ArtifactScan } from "./modelArtifacts";
+import { SpdxFieldsPanel } from "./SpdxFieldsPanel";
 
 type CardState = "unsigned" | "pending" | "approved" | "expiring" | "expired" | "revoked";
 
@@ -85,6 +86,8 @@ interface ModelCard {
   dataClaims: Record<string, unknown>;
   biasFairness: BiasSlot[];
   standardRefs: string[];
+  /** ADR-0175 A4: the exact model version the card was taken on; SPDX uses it before a declared package version (R51) */
+  pinnedModelVersion?: string | null;
   state: CardState;
   daysUntilExpiry: number | null;
   subjectKind?: string;
@@ -731,6 +734,9 @@ export default function ModelRiskPage() {
                     ]}
                   />
                 )}
+
+                {/* ADR-0189 B9 (R51): the supplier-declared SPDX fields, admin only */}
+                <SpdxFieldsPanel kind="model_card" subjectId={detail.id} pinnedModelVersion={detail.pinnedModelVersion ?? null} />
 
                 {/* sign-off request — the DECISION is not here */}
                 <form

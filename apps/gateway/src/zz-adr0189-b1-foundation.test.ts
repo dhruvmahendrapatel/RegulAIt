@@ -871,7 +871,7 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: verified, ne
     await assertReceiptEmitterBootable(rdb);
   });
 
-  it("after a recorded boundary: v1 only below it, the database refuses the wrong version, and the gateway refuses to boot", async () => {
+  it("after a recorded boundary: v1 only below it, nothing at or above it (no throw), the database refuses the wrong version, and the gateway refuses to boot", async () => {
     const below = await decision();
     const tip = await one<{ s: string }>(rdb, sql`select max(seq)::bigint as s from audit_log`);
     const boundary = Number(tip.s) + 1;
@@ -879,7 +879,10 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: verified, ne
     await expectRefused(rdb.execute(sql`delete from receipt_payload_versions`), /append-only/);
     const above = await decision();
     expect(above.seq!).toBeGreaterThanOrEqual(boundary);
-    await runDecisionReceiptSignSweep(rdb);
+    // B2 review: this build emits v1 only; a decision above the boundary (an audit v1 row here) is left
+    // unsigned for the cutover slice, and the sweep neither throws nor wedges on it
+    await expect(runDecisionReceiptSignSweep(rdb)).resolves.toMatchObject({ state: "signing" });
+    await expect(runDecisionReceiptSignSweep(rdb)).resolves.toEqual({ signed: 0, state: "signing" });
     expect(((await receiptOf(below.id))!.payload as { v: string }).v).toBe(RECEIPT_PAYLOAD_VERSION);
     expect(await receiptOf(above.id)).toBeUndefined();
 
@@ -893,6 +896,9 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: verified, ne
       await exported.close();
     }
 
+    // EXPLICIT v2 FIXTURES at the database: B2 wrote `above`'s captured marker in its own transaction
+    const aboveMarker = await one<{ status: string; facts_hash: string }>(rdb, sql`select status, facts_hash from decision_capture_status where audit_id = ${above.id}`);
+    expect(aboveMarker.status).toBe("captured");
     const [last] = await rdb.select().from(decisionReceipts).orderBy(desc(decisionReceipts.receiptSeq)).limit(1);
     const payload = (v: string, seq: number, extra: Record<string, unknown> = {}) => ({
       v, receiptSeq: last!.receiptSeq + 1, audit: { id: above.id, seq, rowHash: H("1"), contentHash: H("2") },
@@ -907,8 +913,8 @@ describe("receipt payload v2 (R34, R42, R43) on a scratch database: verified, ne
       await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("capture_off", null)), above.seq!)), /does not match its capture-status marker/);
       await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, below.seq!, v2("capture_off", null)), below.seq!)), /below the recorded boundary/);
       await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("captured", null)), above.seq!)), /decision_receipts_payload_check|does not match its capture-status marker/);
-      await marker(tx, { auditId: above.id, seq: above.seq!, status: "capture_off" });
-      await tx.execute(insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("capture_off", null)), above.seq!));
+      await expectRefused(inSavepoint(tx, insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("captured", H("e"))), above.seq!)), /does not match its capture-status marker/);
+      await tx.execute(insert(payload(RECEIPT_PAYLOAD_VERSION_V2, above.seq!, v2("captured", aboveMarker.facts_hash)), above.seq!));
     }, rdb);
 
     // R43: this build cannot emit v2, so it refuses to boot

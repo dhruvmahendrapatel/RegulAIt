@@ -121,6 +121,9 @@ import {
   PLACEMENT_OUTCOMES,
   REQUIRABLE_ISOLATION_CLASSES,
   REQUIRED_CLASS_SOURCES,
+  EXECUTION_OFFER_STATUSES,
+  EXECUTION_OFFER_DECLINE_REASONS,
+  EXECUTION_OFFER_END_OUTCOMES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -1297,6 +1300,10 @@ export const auditLog = pgTable(
         "training_dataset",
         "training_job",
         "training_artifact",
+        // ADR-0189 B9 (R51): a supplier-declared SPDX property of an evaluation
+        // dataset version was declared or withdrawn (model cards and training
+        // datasets use their own types above). Plain text column — no DDL needed.
+        "eval_dataset",
         // ADR-0066 (gateway parity): a virtual key's whole lifecycle — issued,
         // updated, revoked — plus every dispatch it was REFUSED, by its own
         // allow-list or its own budget. Kept as its own object type rather than
@@ -1464,6 +1471,10 @@ export const auditLog = pgTable(
         // delegation grants (cascade revocation). Plain text column — no DDL.
         "identity_signing_key",
         "delegation_grant",
+        // ADR-0190 I3: an executor (registration, announce, attestation, quarantine, re-enable, revoke,
+        // the customer mapping) and a placement offer (placed, refused, mismatch). Plain text column — no DDL.
+        "executor",
+        "execution_placement",
         // ADR-0188 S4: an internal workload identity created at first load, and
         // an admin replacing an identity's own grant set. Plain text — no DDL.
         "workload_identity",
@@ -3941,6 +3952,13 @@ export const orgSettings = pgTable(
     dpopNonceRequired: boolean("dpop_nonce_required").notNull().default(true),
     /** the longest a registered workload key is accepted, 1–90 days */
     workloadKeyMaxAgeDays: integer("workload_key_max_age_days").notNull().default(90),
+    // --- ADR-0188 S5 security review item 6 (migration 0188): strict root grants -------------------
+    /** a root delegation grant with no cap is refused; true relaxes it */
+    delegationUncappedRootAllowed: boolean("delegation_uncapped_root_allowed").notNull().default(false),
+    /** the cap (micro-dollars) a root grant gets when the person names none; 0 = none (a cap must be named); larger relaxes it */
+    delegationRootDefaultCapMicros: bigint("delegation_root_default_cap_micros", { mode: "number" }).notNull().default(0),
+    /** the longest a root delegation grant lives, 60–86400 s; longer relaxes it */
+    delegationRootMaxLifetimeSeconds: integer("delegation_root_max_lifetime_seconds").notNull().default(900),
 
     // --- ADR-0189 (batch 6 item 2, migration 0182): the BOM settings, all strict
     /** facts captured for every receipt-eligible decision; off relaxes it */
@@ -4629,6 +4647,9 @@ export const orgSettings = pgTable(
       sql`jsonb_typeof(${t.workloadClientAuthMethods}) = 'array' AND ${t.workloadClientAuthMethods} <@ '["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid"]'::jsonb`,
     ),
     check("org_settings_workload_key_max_age_days_check", sql`${t.workloadKeyMaxAgeDays} BETWEEN 1 AND 90`),
+    // ADR-0188 S5 review item 6 (migration 0188)
+    check("org_settings_delegation_root_default_cap_micros_check", sql`${t.delegationRootDefaultCapMicros} BETWEEN 0 AND 1000000000000`),
+    check("org_settings_delegation_root_max_lifetime_seconds_check", sql`${t.delegationRootMaxLifetimeSeconds} BETWEEN 60 AND 86400`),
     // ADR-0189 (migration 0182)
     check("org_settings_decision_facts_capture_check", sql`${t.decisionFactsCapture} IN ('on', 'off')`),
     check(
@@ -12230,6 +12251,44 @@ export const bomRetentionPrunes = pgTable(
   ],
 );
 
+/**
+ * ADR-0189 slice B9 (OWNER DECISION 13, amendment R51; migration 0186): the
+ * supplier-declared SPDX 3.0.1 properties no other table records. One row per
+ * declared value of ONE parent (a model card or a dataset version row); the
+ * current value is the newest row (`seq`) for that parent and property, and a
+ * `withdrawn` row clears it. APPEND-ONLY in the database (UPDATE, DELETE except
+ * the parent's cascade, and TRUNCATE are refused); `declared_at` is stamped by a
+ * trigger from the database clock. Value shapes: `@regulait/shared`
+ * `ai-bom-spdx-fields.ts`, repeated in the migration's CHECKs.
+ */
+export const aiBomSpdxDeclarations = pgTable(
+  "ai_bom_spdx_declarations",
+  {
+    seq: bigint("seq", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    modelCardId: uuid("model_card_id").references(() => modelCards.id, { onDelete: "cascade" }),
+    trainingDatasetId: uuid("training_dataset_id").references(() => trainingDatasets.id, { onDelete: "cascade" }),
+    evalDatasetId: uuid("eval_dataset_id").references(() => evalDatasets.id, { onDelete: "cascade" }),
+    property: text("property", { enum: ["releaseTime", "downloadLocation", "packageVersion", "builtTime", "originatedBy", "datasetType"] }).notNull(),
+    withdrawn: boolean("withdrawn").notNull().default(false),
+    valueTime: timestamp("value_time", { withTimezone: true }),
+    valueText: text("value_text"),
+    valueList: text("value_list").array(),
+    source: text("source", { enum: ["supplier_declared", "admin_entered"] }).notNull(),
+    /** no FK: a declaration outlives its author, like the audit row that records it */
+    declaredByUserId: uuid("declared_by_user_id").notNull(),
+    /** always the database clock (a BEFORE INSERT trigger overwrites any value sent) */
+    declaredAt: timestamp("declared_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_bom_spdx_declarations_model_card_idx").on(t.modelCardId, t.property, t.seq.desc()).where(sql`${t.modelCardId} IS NOT NULL`),
+    index("ai_bom_spdx_declarations_training_dataset_idx").on(t.trainingDatasetId, t.property, t.seq.desc()).where(sql`${t.trainingDatasetId} IS NOT NULL`),
+    index("ai_bom_spdx_declarations_eval_dataset_idx").on(t.evalDatasetId, t.property, t.seq.desc()).where(sql`${t.evalDatasetId} IS NOT NULL`),
+    check("ai_bom_spdx_declarations_one_parent_check", sql`num_nonnulls(${t.modelCardId}, ${t.trainingDatasetId}, ${t.evalDatasetId}) = 1`),
+    check("ai_bom_spdx_declarations_source_check", sql`${t.source} IN ('supplier_declared', 'admin_entered')`),
+    check("ai_bom_spdx_declarations_time_check", sql`${t.valueTime} IS NULL OR ${t.valueTime} = date_trunc('second', ${t.valueTime})`),
+  ],
+);
+
 /** R16 / OWNER DECISION 11: an evidence hold on BOM rows; only ever released, once. */
 export const bomRetentionHolds = pgTable(
   "bom_retention_holds",
@@ -12892,6 +12951,12 @@ export const delegationGrants = pgTable(
      * decision 23 `max_depth`. Root: the org's `delegation_max_depth`; child: min(parent.depthLimit, depth + max_depth).
      */
     depthLimit: integer("depth_limit").notNull(),
+    /**
+     * ADR-0188 S4+S5 (migration 0190): true only on a ROOT whose `depth_limit` was set from the person's SIGNED
+     * `max_depth` (the token endpoint's root exchange). The token endpoint admits an external child only under such
+     * a root; every other row, including every row made before 0190, is false (secure default, ADR-0180).
+     */
+    depthLimitSigned: boolean("depth_limit_signed").notNull().default(false),
     sponsorUserId: uuid("sponsor_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
@@ -12931,6 +12996,7 @@ export const delegationGrants = pgTable(
   (t) => [
     check("delegation_grants_depth_check", sql`${t.depth} = cardinality(${t.path}) AND ${t.depth} BETWEEN 0 AND 8`),
     check("delegation_grants_depth_limit_check", sql`${t.depthLimit} BETWEEN ${t.depth} AND 8`),
+    check("delegation_grants_depth_limit_signed_check", sql`NOT ${t.depthLimitSigned} OR ${t.depth} = 0`),
     check(
       "delegation_grants_parent_check",
       sql`(${t.depth} = 0 AND ${t.parentGrantId} IS NULL AND ${t.rootGrantId} = ${t.id}) OR (${t.depth} > 0 AND ${t.parentGrantId} IS NOT NULL AND ${t.path}[cardinality(${t.path})] = ${t.parentGrantId} AND ${t.path}[1] = ${t.rootGrantId})`,
@@ -13197,6 +13263,8 @@ export const executors = pgTable(
     status: text("status", { enum: EXECUTOR_STATUSES }).notNull().default("active"),
     quarantineCode: text("quarantine_code", { enum: EXECUTOR_QUARANTINE_CODES }),
     quarantinedAt: timestamp("quarantined_at", { withTimezone: true }),
+    /** ADR-0190 amendment T: the last re-enable (database clock); only attestations observed after it count */
+    reenabledAt: timestamp("reenabled_at", { withTimezone: true }),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13333,3 +13401,58 @@ export const executionPlacements = pgTable(
   ],
 );
 export type ExecutionPlacementRow = typeof executionPlacements.$inferSelect;
+
+/**
+ * ADR-0190 I3 (migration 0187): a placement OFFERED to one executor over its
+ * channel (decision 4). Rows, not memory, so a placement decided on one gateway
+ * replica reaches the executor's stream on another. Forward-only statuses
+ * (guard trigger), never deleted; the placement it ends in is named once known.
+ */
+export const executionOffers = pgTable(
+  "execution_offers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    executorId: uuid("executor_id")
+      .notNull()
+      .references(() => executors.id, { onDelete: "restrict" }),
+    workloadKind: text("workload_kind", { enum: ISOLABLE_WORKLOAD_KINDS }).notNull(),
+    requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull(),
+    requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }).notNull(),
+    enforcement: text("enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull(),
+    profileDigest: text("profile_digest")
+      .notNull()
+      .references(() => executionProfiles.digest, { onDelete: "restrict" }),
+    imageDigest: text("image_digest").notNull(),
+    status: text("status", { enum: EXECUTION_OFFER_STATUSES }).notNull().default("offered"),
+    declineReason: text("decline_reason", { enum: EXECUTION_OFFER_DECLINE_REASONS }),
+    endOutcome: text("end_outcome", { enum: EXECUTION_OFFER_END_OUTCOMES }),
+    placementId: uuid("placement_id").references(() => executionPlacements.id, { onDelete: "restrict" }),
+    offeredAt: timestamp("offered_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("execution_offers_workload_kind_check", sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`),
+    check("execution_offers_required_class_check", sql`${t.requiredClass} IN ('hardened_container', 'user_space_kernel', 'microvm')`),
+    check(
+      "execution_offers_required_by_check",
+      sql`${t.requiredBy} IN ('workload_kind', 'data_sensitivity', 'compliance_tag', 'autonomy_class', 'configured_profile', 'unknown_agent', 'parent_grant')`,
+    ),
+    check("execution_offers_enforcement_check", sql`${t.enforcement} IN ('enforce', 'warn')`),
+    check("execution_offers_image_digest_check", sql`${t.imageDigest} ~ '^sha256:[0-9a-f]{64}$'`),
+    check(
+      "execution_offers_status_check",
+      sql`${t.status} IN ('offered', 'accepted', 'placed', 'mismatch', 'declined', 'expired', 'withdrawn', 'ended')`,
+    ),
+    check(
+      "execution_offers_decline_reason_check",
+      sql`${t.declineReason} IS NULL OR ${t.declineReason} IN ('attestation_stale', 'class_below_required', 'capacity', 'quarantined', 'profile_unknown')`,
+    ),
+    check("execution_offers_end_outcome_check", sql`${t.endOutcome} IS NULL OR ${t.endOutcome} IN ('completed', 'failed', 'killed', 'limit_exceeded')`),
+    check("execution_offers_expiry_check", sql`${t.expiresAt} > ${t.offeredAt}`),
+    index("execution_offers_executor_status_idx").on(t.executorId, t.status, t.offeredAt),
+  ],
+);
+export type ExecutionOfferRow = typeof executionOffers.$inferSelect;
