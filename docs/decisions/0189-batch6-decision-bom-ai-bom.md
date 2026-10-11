@@ -2057,6 +2057,16 @@ fixes were rechecked. These are the details the build settled:
     - Use cases in any status, retired and rejected included, are snapshotted when they list an affected agent.
 
     Both are revisited if posture or latency shows a problem.
+19. **The install-generated receipt key as built (PR #353).**
+    - **Where the key lives.** First boot and `install.sh` generate an Ed25519 key in `<REGULAIT_INSTALL_SECRETS_DIR>/receipt-signing-key.pem`, which is the `install_secrets` Docker volume.
+    - **How it is created.** Generation is create-exclusive (a temp file opened with `wx`, fsynced, then `link()`, then a directory fsync). It never overwrites an existing key. The file must have mode 0600 and the directory 0700, and the file is checked on its open handle (`O_NOFOLLOW`).
+    - **Precedence.** Operator variables always win.
+    - **Key id.** The key id is derived from the public key, so a key lost with its volume is replaced under a new id. The old public key stays in `receipt_signing_keys`, so old receipts still verify.
+    - **Install-time check.** The installer and boot load the key exactly as a signer does. An unusable key makes `install.sh` fail; it is not reported as ok.
+    - **Audit.** Every newly registered key (install-generated or operator) writes one `receipt-signing-key-registered` audit row. It is written in the same transaction as the key's insert into `receipt_signing_keys`, and holds the key id, SPKI fingerprint and source, never key material.
+    - **Decision BOM routes.** An unusable key now answers 503 `receipt_signing_key_invalid` there, as on the AI BOM routes, rather than 409 `bom_signing_unavailable`. The no-key 409 text names both key sources.
+    - **Posture.** Posture and receipt status report the key as `install_generated`, `operator_managed`, `missing` or `invalid`. They never block anything.
+    - **Not built: key retirement.** Nothing sets `retired_at` yet. The interim procedure in BACKUP_RESTORE.md is for verifiers to drop the old public key. An audited retire action is an open follow-up slice.
 
 ## Further design review happens at slice level
 
