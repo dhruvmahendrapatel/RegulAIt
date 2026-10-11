@@ -2008,6 +2008,50 @@ defaults; the owner can overrule any of them.
 
     Drift reports them. Whether revocation should snapshot is left as an open follow-up.
 
+#### As built, and the owner's key decision (PR #352, 2026-10-11)
+
+PR #352 implements items 1 to 11. Under ADR-0191 it had an independent review at 400a789 (fix, then merge), and its
+fixes were rechecked. These are the details the build settled:
+
+12. **Owner decision: the installer generates the receipt signing key.**
+    - Without a key, every sign-off is refused (item 6), and a fresh install has no key. So the installer and first boot
+      create one, stored like the other install secrets, and posture shows it as `install-generated`.
+    - An admin can switch to a key they manage later.
+    - A hardware-backed (HSM) key stays a separate owner decision (ADR-0183).
+    - This is its own slice, built right after #352. Until it lands, an install must configure a key before anything
+      can be approved.
+
+    Test, e2e, Kong-harness and demo environments create a throwaway, test-only key. No key material is committed.
+13. **A missing or unusable key is refused before a workflow transition commits.**
+    - The workflow artifact and advance routes check inside their transaction, once the event is applied, whether the
+      transition would approve a use case. If it would and no key is usable, they answer 409, and the transition, the
+      artifact and any git effect all roll back.
+    - An instance that completes later, through an executor stage, is not covered by that check. There the use-case
+      sync refuses inside its own savepoint, the vendor sync still runs, and the response carries
+      `useCaseSignoffWarning`. The use case stays in review until the instance is driven again with a key.
+14. **Bulk and chat decisions refuse one item at a time.** A refused item is reported and audited as refused, and the
+    rest of the batch carries on.
+15. **A configured key that cannot be used** is refused with 503 `receipt_signing_key_invalid`. Under the relaxed
+    setting it is skipped and recorded with that code.
+16. **Unversioned agent edits are not config promotions.**
+    - A `PATCH /v1/agents/:id` on an agent with no stored `agent_config` version writes the row directly and never
+      reaches `activateVersion`, so it owes no snapshot. Drift reports the change.
+    - Once an agent has a stored version, every edit mints and activates a new version and is a sign-off.
+    - Making version-less agents versioned on first edit is an open follow-up.
+17. **Migration 0192** adds four partial indexes on `audit_log`, so the posture and drift snapshot-gap queries stay
+    bounded:
+    - sign-off id, subject kind and subject id, over the three snapshot rule ids;
+    - subject kind, subject id and `at`, over the two gap rule ids;
+    - `at`, over rows that owe snapshots;
+    - rule id and `at`, over the three snapshot rule ids.
+
+    Posture's lookup of what each sign-off owed is also bounded by the triggering row's time.
+18. **Known costs, accepted for now.**
+    - Snapshots run one after another in the request after commit, up to the 100-subject cap.
+    - Use cases in any status, retired and rejected included, are snapshotted when they list an affected agent.
+
+    Both are revisited if posture or latency shows a problem.
+
 ## Further design review happens at slice level
 
 From the seventh review round on, this ADR is complete as a design record. Later design findings are not added here
