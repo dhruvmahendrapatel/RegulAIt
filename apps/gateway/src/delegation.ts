@@ -551,6 +551,11 @@ export interface CreateRootGrantInput extends CommonGrantInput {
    * `delegation_max_depth`; more than that is refused. Stored as the absolute `depth_limit` (migration 0184).
    */
   maxFurtherDepth?: number;
+  /**
+   * migration 0190: `maxFurtherDepth` is the person's SIGNED `max_depth` (only the token endpoint's root exchange
+   * says so). Stored as `depth_limit_signed`; the token endpoint admits an external child only under such a root.
+   */
+  depthLimitSigned?: boolean;
   environment: string;
   projectId: string | null;
   context?: GrantContext;
@@ -729,6 +734,8 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
         path: [],
         depth: 0,
         depthLimit,
+        // a signed limit needs a stated one: without `maxFurtherDepth` the limit is the org's, never signed
+        depthLimitSigned: input.depthLimitSigned === true && input.maxFurtherDepth !== undefined,
         sponsorUserId: input.sponsorUserId,
         actorIdentityId: input.actorIdentityId,
         runId: ctx.runId ?? null,
