@@ -147,6 +147,9 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await form.getByLabel("Registry base URL").fill("https://second.example.test");
     await form.getByRole("button", { name: "Add registry" }).click();
     await expect.poll(() => sent(calls, "POST", "/v1/mcp-registries")).toEqual([{ name: "second", url: "https://second.example.test", enabled: false, allowPrivateRanges: null }]);
+    // the form resets its draft only once the add has resolved; wait for that reset before typing the next one,
+    // or it can land after the fills below and wipe them
+    await expect(form.getByLabel("Registry name")).toHaveValue("");
 
     // enabling at creation is a relaxation: confirmed first
     await form.getByLabel("Registry name").fill("third");
