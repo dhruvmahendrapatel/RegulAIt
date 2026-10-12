@@ -68,6 +68,21 @@ describe("report schedules", () => {
     expect(patchBody(fields, withTwo, edit(draftFromRecord(fields, withTwo), { set: { recipientUserIds: [] } }))).toEqual({ ok: true, body: { recipientUserIds: null } });
     expect(patchBody(fields, schedule, edit(d, { text: { enabled: "false", cadence: "weekly" } }))).toEqual({ ok: true, body: { cadence: "weekly", enabled: false } });
   });
+  it("stored recipients the options do not list are never dropped: editing only the cadence sends only the cadence", () => {
+    const stored = { ...schedule, recipientUserIds: ["u1", "u9"] };
+    const empty = reportScheduleFields([]);
+    expect(patchBody(empty, stored, edit(draftFromRecord(empty, stored), { text: { cadence: "weekly" } }))).toEqual({ ok: true, body: { cadence: "weekly" } });
+    // picking another known user keeps the unlisted stored one
+    expect(patchBody(fields, stored, edit(draftFromRecord(fields, stored), { set: { recipientUserIds: ["u1", "u9", "u2"] } }))).toEqual({
+      ok: true,
+      body: { recipientUserIds: ["u1", "u2", "u9"] },
+    });
+  });
+  it("while the options are loading, nothing can be saved", () => {
+    const loading = reportScheduleFields([], true);
+    const r = patchBody(loading, schedule, edit(draftFromRecord(loading, schedule), { text: { cadence: "weekly" } }));
+    expect(r.ok).toBe(false);
+  });
   it("the cadences are the shared ones", async () => {
     const s: any = await import(/* @vite-ignore */ sharedFile("reporting.ts"));
     expect(REPORT_CADENCES.map((c) => c.value)).toEqual([...s.REPORT_CADENCES]);
@@ -98,6 +113,12 @@ describe("vendors", () => {
     expect(d.text.linkedAgentProviders).toBe("openai");
     expect(patchBody(fields, vendor, edit(d, { text: { linkedAgentProviders: " openai, anthropic ,openai" } }))).toEqual({ ok: true, body: { linkedAgentProviders: ["openai", "anthropic"] } });
     expect(patchBody(fields, vendor, edit(d, { set: { linkedCustomProviderIds: ["p1"] } }))).toEqual({ ok: true, body: { linkedCustomProviderIds: ["p1"] } });
+  });
+  it("linked providers missing from an empty option list are kept, and not sent unless changed", () => {
+    const linked = { ...vendor, linkedCustomProviderIds: ["p7"] };
+    const none = vendorFields([]);
+    expect(patchBody(none, linked, edit(draftFromRecord(none, linked), { text: { category: "data_processor" } }))).toEqual({ ok: true, body: { category: "data_processor" } });
+    expect(patchBody(vendorFields([], true), linked, edit(draftFromRecord(none, linked), { text: { category: "data_processor" } })).ok).toBe(false);
   });
   it("only an in-flight vendor is editable; the categories are the shared ones", async () => {
     expect(vendorEditBlocked("proposed")).toBeNull();

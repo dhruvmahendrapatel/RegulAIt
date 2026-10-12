@@ -126,7 +126,7 @@ export function EditScopeRuleButton(props: { rule: { id: string; scopeKind: stri
 
 export const REPORT_CADENCES: readonly Choice[] = ["daily", "weekly", "monthly", "quarterly"].map((c) => ({ value: c, label: c }));
 
-export const reportScheduleFields = (users: readonly Choice[]): readonly PatchField[] => [
+export const reportScheduleFields = (users: readonly Choice[], usersLoading = false): readonly PatchField[] => [
   { key: "cadence", label: "Cadence", kind: "select", options: REPORT_CADENCES },
   { key: "enabled", label: "Enabled", kind: "select", options: [{ value: "true", label: "yes" }, { value: "false", label: "no" }], decode: BOOL.decode, encode: BOOL.encode },
   {
@@ -135,6 +135,7 @@ export const reportScheduleFields = (users: readonly Choice[]): readonly PatchFi
     kind: "multi",
     options: users,
     emptyAs: null,
+    loading: usersLoading,
     help: "Recorded for the entitlement check on each generated report. No delivery transport is wired: nobody is mailed.",
   },
 ];
@@ -143,6 +144,8 @@ export function EditReportScheduleButton(props: {
   schedule: { id: string; cadence: string; enabled: boolean; recipientUserIds: string[] | null };
   definitionName: string;
   users: readonly Choice[];
+  /** the user list is still loading: Save waits, so stored recipients are never judged against an empty list */
+  usersLoading?: boolean;
   onSaved?: () => void;
 }) {
   const done = useInvalidate();
@@ -151,7 +154,7 @@ export function EditReportScheduleButton(props: {
     <EditButton
       label={`Edit schedule for ${props.definitionName}`}
       title={`Edit the ${s.cadence} schedule for ${props.definitionName}`}
-      fields={reportScheduleFields(props.users)}
+      fields={reportScheduleFields(props.users, props.usersLoading)}
       record={{ ...s }}
       save={(body) => api.patch(`/v1/reports/schedules/${seg(s.id)}`, body)}
       onSaved={() => {
@@ -224,10 +227,10 @@ export const VENDOR_CATEGORIES: readonly Choice[] = [
   { value: "integration", label: "integration" },
 ];
 
-export const vendorFields = (customProviders: readonly Choice[]): readonly PatchField[] => [
+export const vendorFields = (customProviders: readonly Choice[], providersLoading = false): readonly PatchField[] => [
   { key: "description", label: "Description", kind: "textarea", maxLength: 4000, required: true },
   { key: "category", label: "Category", kind: "select", options: VENDOR_CATEGORIES },
-  { key: "linkedCustomProviderIds", label: "Linked custom LLM providers", kind: "multi", options: customProviders, max: 20 },
+  { key: "linkedCustomProviderIds", label: "Linked custom LLM providers", kind: "multi", options: customProviders, max: 20, loading: providersLoading },
   { key: "linkedAgentProviders", label: "Linked agent providers", kind: "list", maxItems: 20, maxLength: 100, help: "Provider keys as they appear on agents, e.g. anthropic, openai." },
 ];
 
@@ -241,6 +244,7 @@ export function vendorEditBlocked(status: string): string | null {
 export function EditVendorButton(props: {
   vendor: { id: string; name: string; status: string };
   customProviders: readonly Choice[];
+  providersLoading?: boolean;
   onSaved?: () => void;
 }) {
   const done = useInvalidate();
@@ -249,7 +253,7 @@ export function EditVendorButton(props: {
     <EditButton
       label={`Edit vendor ${vd.name}`}
       title={`Edit vendor ${vd.name}`}
-      fields={vendorFields(props.customProviders)}
+      fields={vendorFields(props.customProviders, props.providersLoading)}
       record={{ ...vd }}
       disabledReason={vendorEditBlocked(vd.status) ?? undefined}
       intro={<p>Status follows the linked assessment and attestations are recorded one by one; neither is edited here.</p>}

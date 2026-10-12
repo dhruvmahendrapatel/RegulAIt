@@ -322,7 +322,7 @@ export default function ReportsPage() {
                       header: "",
                       render: (s) => (
                         <div className={v.row}>
-                          <EditReportScheduleButton schedule={s} definitionName={s.definition} users={userOpts(users.data?.users).map((o) => ({ value: o.v, label: o.l }))} onSaved={() => void overview.refetch()} />
+                          <EditReportScheduleButton schedule={s} definitionName={s.definition} users={userOpts(users.data?.users).map((o) => ({ value: o.v, label: o.l }))} usersLoading={users.isLoading} onSaved={() => void overview.refetch()} />
                           <Button
                             size="sm"
                             variant="danger"

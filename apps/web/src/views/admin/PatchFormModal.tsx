@@ -121,7 +121,11 @@ export function PatchFormModal(props: {
               return (
                 <div key={f.key}>
                   <Fieldset legend={f.label}>
-                    {f.options.length === 0 ? <p className={v.faint}>Nothing to choose from.</p> : null}
+                    {f.loading ? (
+                      <p className={v.faint} role="status">Loading the choices…</p>
+                    ) : f.options.length === 0 ? (
+                      <p className={v.faint}>Nothing to choose from.</p>
+                    ) : null}
                     {f.options.map((o) => {
                       const optionId = `${id}-${o.value}`;
                       const on = (draft.set[f.key] ?? []).includes(o.value);
@@ -143,6 +147,12 @@ export function PatchFormModal(props: {
                         </label>
                       );
                     })}
+                    {(() => {
+                      const unlisted = (draft.set[f.key] ?? []).filter((x) => !f.options.some((o) => o.value === x));
+                      return unlisted.length > 0 && !f.loading ? (
+                        <p className={v.faint}>{unlisted.length} stored entr{unlisted.length === 1 ? "y" : "ies"} not in this list {unlisted.length === 1 ? "is" : "are"} kept as {unlisted.length === 1 ? "it is" : "they are"}.</p>
+                      ) : null;
+                    })()}
                   </Fieldset>
                   {help}
                 </div>

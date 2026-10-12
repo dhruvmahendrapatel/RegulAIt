@@ -256,6 +256,7 @@ export default function VendorsPage() {
                     <EditVendorButton
                       vendor={d.vendor}
                       customProviders={(customProviders.data?.providers ?? []).map((p) => ({ value: p.id, label: p.name }))}
+                      providersLoading={customProviders.isLoading}
                       onSaved={() => void detail.refetch()}
                     />
                     {vendorEditBlocked(d.vendor.status) ? <span className={v.faint}>{vendorEditBlocked(d.vendor.status)}</span> : null}

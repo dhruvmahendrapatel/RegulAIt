@@ -23,8 +23,12 @@ export type PatchField = {
   | { kind: "textarea"; maxLength: number; required?: boolean }
   /** `decode` turns the option value into what is sent (e.g. "" -> null, "true" -> true) */
   | { kind: "select"; options: readonly Choice[]; decode?: (raw: string) => unknown; encode?: (value: unknown) => string }
-  /** a subset of `options`; `min`/`max` entries; `emptyAs` is what an empty selection sends */
-  | { kind: "multi"; options: readonly Choice[]; min?: number; max?: number; emptyAs?: null | [] }
+  /**
+   * a subset of `options`; `min`/`max` entries; `emptyAs` is what an empty selection sends.
+   * `loading`: the options are still being read, so the field cannot be judged and Save waits.
+   * A stored id that is not among the options is kept as it is, never dropped.
+   */
+  | { kind: "multi"; options: readonly Choice[]; min?: number; max?: number; emptyAs?: null | []; loading?: boolean }
   /** a comma-separated list of short strings */
   | { kind: "list"; maxItems: number; maxLength: number }
   /** a write-only secret: blank keeps the stored one; `clearLabel` offers sending null */
@@ -99,12 +103,17 @@ export function patchBody(fields: readonly PatchField[], record: Record<string, 
         break;
       }
       case "multi": {
+        if (f.loading) return { ok: false, problem: `Loading the choices for ${f.label}…` };
         const known = f.options.map((o) => o.value);
-        const picked = known.filter((v) => (draft.set[f.key] ?? []).includes(v));
+        const chosen = draft.set[f.key] ?? [];
+        // known options in their order, then any stored id the options do not list (kept, never dropped)
+        const picked = [...known.filter((v) => chosen.includes(v)), ...chosen.filter((v) => !known.includes(v))];
+        const stored = Array.isArray(before) ? before.map(String) : [];
+        // sent only when the selection really changed
+        if (sortedSame(picked, stored)) break;
         if (f.min !== undefined && picked.length < f.min) return { ok: false, problem: `Choose at least ${f.min} for ${f.label}.` };
         if (f.max !== undefined && picked.length > f.max) return { ok: false, problem: `Choose at most ${f.max} for ${f.label}.` };
-        const value = picked.length === 0 && f.emptyAs !== undefined ? f.emptyAs : picked;
-        if (!sortedSame(value, before ?? (f.emptyAs === null ? null : []))) body[f.key] = value;
+        body[f.key] = picked.length === 0 && f.emptyAs !== undefined ? f.emptyAs : picked;
         break;
       }
       case "list": {
