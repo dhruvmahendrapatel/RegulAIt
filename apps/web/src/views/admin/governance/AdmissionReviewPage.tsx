@@ -239,7 +239,7 @@ export default function AdmissionReviewPage() {
         <Card title="MCP servers held by the manifest scan">
           <p className={v.dim} style={{ marginTop: 0 }}>
             Mode: {mcp.data?.mode ?? "…"}
-            {mcp.data && !mcp.data.enforcing ? " — recorded only, nothing is refused." : ""} Clear a held server with its Clear hold control on the <Link to="/admin/mcp-servers">MCP servers page</Link>.
+            {mcp.data && !mcp.data.enforcing ? " — recorded only, nothing is refused." : ""} Clear a held server with its Clear hold control on the <Link to="/admin/mcp-servers" style={{ textDecoration: "underline" }}>MCP servers page</Link>.
           </p>
           <Table
             rows={heldServers}
