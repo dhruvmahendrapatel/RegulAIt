@@ -381,6 +381,7 @@ describe("MCP registry import: inheriting a registry's open private ranges is a 
       op: "mcp_registry_import",
       registryId,
       entryId: entry!.id,
+      url: `${REGISTRY_URL}sds-mcp`,
       values: { allowPrivateRanges: true },
     });
     expect(ok.statusCode, ok.body).toBe(201);
