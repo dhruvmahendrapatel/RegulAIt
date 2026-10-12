@@ -105,7 +105,7 @@ export function assessDevSecrets(
 }
 
 /** is there a live admin user, i.e. is the bootstrap token still needed at all? */
-export async function realAdminExists(db: Db): Promise<boolean> {
+export async function realAdminExists(db: Pick<Db, "select">): Promise<boolean> {
   const [row] = await db
     .select({ id: users.id })
     .from(users)
