@@ -1,0 +1,325 @@
+/**
+ * ADR-0194 — scripts/install.sh asks for the first admin and retires the
+ * bootstrap token. No database and no Docker: the prompt loop
+ * (scripts/lib/first-admin.sh) runs against a stub runner, and the whole
+ * installer runs against a fake `docker` on PATH that plays the gateway
+ * container's first-admin.js (its exit codes are the contract).
+ *
+ * Covered (the ADR's test list):
+ *  - the mismatch re-prompt and the policy-refusal re-prompt;
+ *  - the password never in output, .env, the override or any process argv —
+ *    it reaches the runner on stdin only;
+ *  - token retirement: gone from .env, pinned EMPTY in compose.install.yml
+ *    (absent, docker-compose.yml would fall back to `dev-bootstrap`), the
+ *    gateway restarted, and a re-run keeps it retired;
+ *  - the skip on re-run: an existing admin means no prompt, no create call;
+ *  - the password file must be 0600 or stricter.
+ */
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execFileSync, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const INSTALL = path.join(root, "scripts/install.sh");
+const LIB = path.join(root, "scripts/lib/first-admin.sh");
+const hasOpenssl = spawnSync("openssl", ["version"]).status === 0;
+const posix = process.platform !== "win32";
+
+/** synthetic, minted per run — never a real password (gitleaks: CANARY) */
+const strong = () => `CANARY-${randomBytes(9).toString("base64url")}-Aa1!`;
+
+let sandbox: string;
+beforeAll(() => {
+  sandbox = mkdtempSync(path.join(os.tmpdir(), "install-first-admin-"));
+});
+afterAll(() => rmSync(sandbox, { recursive: true, force: true }));
+
+function freshDir(name: string): string {
+  const d = path.join(sandbox, `${name}-${randomBytes(4).toString("hex")}`);
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+// ---------------------------------------------------------------------------
+// 1. the prompt loop, against a stub runner
+// ---------------------------------------------------------------------------
+
+/** a stub first_admin_exec: records argv and stdin, applies a 12-char / 3-class policy, exit codes as first-admin.js */
+const STUB = String.raw`
+first_admin_exec() {
+  local pw
+  printf '%s\n' "$*" >> "$STUB_DIR/argv.log"
+  pw="$(cat)"
+  printf '%s\n' "$pw" >> "$STUB_DIR/stdin.log"
+  if [ "$(printf %s "$pw" | wc -c)" -lt 12 ]; then echo "first admin refused: password must be at least 12 characters (org password policy). Nothing was changed."; return 4; fi
+  case "$*" in *"--username taken "*) echo "first admin refused: username 'taken' already belongs to another account. Nothing was changed."; return 5 ;; esac
+  echo "first admin created: (stub)"; return 0
+}
+`;
+
+function runLoop(stdin: string): { status: number; out: string; argv: string; stdinLog: string[] } {
+  const dir = freshDir("stub");
+  const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\nrc=0\nfirst_admin_interactive || rc=$?\necho "RC=$rc USER=$FA_USERNAME EMAIL=$FA_EMAIL"\n`;
+  const r = spawnSync("bash", ["-c", script], { input: stdin, encoding: "utf8", env: { ...process.env, STUB_DIR: dir } });
+  const read = (f: string) => (existsSync(path.join(dir, f)) ? readFileSync(path.join(dir, f), "utf8") : "");
+  return {
+    status: r.status ?? -1,
+    out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+    argv: read("argv.log"),
+    stdinLog: read("stdin.log").split("\n").filter(Boolean),
+  };
+}
+
+describe("scripts/lib/first-admin.sh — the interactive prompt loop", () => {
+  it.runIf(posix)("a mismatched repetition re-prompts, and only the confirmed password reaches the runner — on stdin", () => {
+    const good = strong();
+    const r = runLoop(["", "ops@acme.example", good, `${good}x`, good, good, ""].join("\n"));
+    expect(r.out).toContain("RC=0 USER=admin EMAIL=ops@acme.example");
+    expect(r.out).toContain("do not match");
+    expect(r.stdinLog).toEqual([good]);
+    expect(r.argv).toContain("--username admin --email ops@acme.example");
+    expect(r.argv).not.toContain(good);
+    expect(r.out).not.toContain(good);
+  });
+
+  it.runIf(posix)("a password the policy refuses re-prompts for the password (not the identity) until one passes", () => {
+    const weak = "CANARYweak";
+    const good = strong();
+    const r = runLoop(["Ops.Lead", "ops@acme.example", weak, weak, good, good, ""].join("\n"));
+    expect(r.out).toContain("org password policy");
+    expect(r.out).toContain("choose another password");
+    expect(r.out).toContain("RC=0 USER=ops.lead");
+    expect(r.stdinLog).toEqual([weak, good]);
+    expect(r.out).not.toContain(weak);
+    expect(r.out).not.toContain(good);
+  });
+
+  it.runIf(posix)("an invalid username or email is asked again before any call; a taken username asks for the identity again", () => {
+    const good = strong();
+    const r = runLoop(["Bad User", "x@y", "taken", "not-an-email", "ops@acme.example", good, good, "admin2", "ops@acme.example", good, good, ""].join("\n"));
+    expect(r.out).toContain("a username is 2-63 characters");
+    expect(r.out).toContain("does not look like an email");
+    expect(r.out).toContain("choose another username or email");
+    expect(r.out).toContain("RC=0 USER=admin2");
+    expect(r.argv.split("\n").filter(Boolean)).toEqual([
+      "--username taken --email ops@acme.example",
+      "--username admin2 --email ops@acme.example",
+    ]);
+  });
+
+  it.runIf(posix)("end of input aborts without calling the runner", () => {
+    const r = runLoop("admin\nops@acme.example\n");
+    expect(r.out).toContain("RC=1");
+    expect(r.argv).toBe("");
+  });
+
+  it.runIf(posix)("the password file must be a non-empty regular file, 0600 or stricter; the content is never printed", () => {
+    const dir = freshDir("pwfile");
+    const f = path.join(dir, "pw");
+    const secret = strong();
+    writeFileSync(f, `${secret}\n`, { mode: 0o644 });
+    chmodSync(f, 0o644);
+    const check = () =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" }).trim();
+    expect(check()).toContain("must be 0600 or stricter");
+    chmodSync(f, 0o600);
+    expect(check()).toBe("");
+    chmodSync(f, 0o400);
+    expect(check()).toBe("");
+    expect(check()).not.toContain(secret);
+    writeFileSync(f, "", { mode: 0o600 });
+    expect(check()).toContain("is empty");
+    expect(execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", dir], { encoding: "utf8" })).toContain("not a regular file");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2. the whole installer, against a fake docker
+// ---------------------------------------------------------------------------
+
+const FAKE_DOCKER = String.raw`#!/usr/bin/env bash
+# fake docker for install-first-admin.test.ts — records argv, plays the gateway's first-admin.js
+printf '%s\n' "$*" >> "$FAKE_DOCKER_DIR/argv.log"
+case "$*" in
+  --version) echo "Docker version 99.0.0-fake"; exit 0 ;;
+  info*) exit 0 ;;
+  ps*) echo "fakecontainer"; exit 0 ;;
+  "volume inspect"*) exit 1 ;;
+  "image inspect"*) exit 0 ;;
+  "compose version --short") echo "2.99.0"; exit 0 ;;
+  "compose version") echo "Docker Compose version v2.99.0"; exit 0 ;;
+esac
+case "$*" in
+  *receipt-key-init.js*) echo "receipt signing key: install-generated install-ed25519-fake"; exit 0 ;;
+  *first-admin.js*--status*)
+    if [ -f "$FAKE_DOCKER_DIR/admin-exists" ]; then echo "first admin: an active admin already exists — nothing to do"; exit 3; fi
+    echo "first admin: none yet"; exit 0 ;;
+  *first-admin.js*)
+    pw="$(cat)"
+    printf '%s\n' "$pw" >> "$FAKE_DOCKER_DIR/stdin.log"
+    if [ "$(printf %s "$pw" | wc -c)" -lt 12 ]; then echo "first admin refused: password must be at least 12 characters (org password policy). Nothing was changed." >&2; exit 4; fi
+    touch "$FAKE_DOCKER_DIR/admin-exists"
+    echo "first admin created: (fake)"; exit 0 ;;
+  *" config"*) exit 0 ;;
+  *" up "*|*" up") exit 0 ;;
+esac
+exit 0
+`;
+
+describe("scripts/install.sh — the first-admin step and token retirement (fake docker)", () => {
+  function setupFakes(): { bin: string; state: string } {
+    const base = freshDir("fake");
+    const bin = path.join(base, "bin");
+    const state = path.join(base, "state");
+    mkdirSync(bin);
+    mkdirSync(state);
+    writeFileSync(path.join(bin, "docker"), FAKE_DOCKER, { mode: 0o755 });
+    // the readiness probe answers at once
+    writeFileSync(path.join(bin, "curl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    return { bin, state };
+  }
+
+  function install(dir: string, fakes: { bin: string; state: string }, extraEnv: Record<string, string>, args: string[] = []) {
+    const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
+    env.PATH = `${fakes.bin}:${process.env.PATH}`;
+    env.FAKE_DOCKER_DIR = fakes.state;
+    for (const k of ["REGULAIT_DEMO_LICENSE", "REGULAIT_BOOTSTRAP_TOKEN", "REGULAIT_DATA_KEY", "REGULAIT_RECEIPT_KEY_HOST_FILE", "REGULAIT_RECEIPT_KEY_HOST_ID"]) {
+      if (!(k in extraEnv)) delete env[k];
+    }
+    for (const k of ["REGULAIT_FIRST_ADMIN_PASSWORD_FILE", "REGULAIT_FIRST_ADMIN_EMAIL", "REGULAIT_FIRST_ADMIN_USERNAME"]) {
+      if (!(k in extraEnv)) delete env[k];
+    }
+    const dataKey = execFileSync("openssl", ["rand", "-hex", "32"], { encoding: "utf8" }).trim();
+    const r = spawnSync(
+      "bash",
+      [INSTALL, "--yes", "--mode", "byoc", "--domain", "fa.example", "--tls", "internal", "--dir", dir, "--data-key", dataKey, "--min-disk-gb", "0", ...args],
+      { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 },
+    );
+    const read = (f: string) => (existsSync(path.join(fakes.state, f)) ? readFileSync(path.join(fakes.state, f), "utf8") : "");
+    return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, argv: read("argv.log"), stdinLog: read("stdin.log") };
+  }
+
+  const envOf = (dir: string) => readFileSync(path.join(dir, ".env"), "utf8");
+  const overrideOf = (dir: string) => readFileSync(path.join(dir, "compose.install.yml"), "utf8");
+
+  it.runIf(hasOpenssl && posix)("from a 0600 password file: created through the runner's stdin, never printed or written, then the token is retired", () => {
+    const dir = freshDir("install");
+    const fakes = setupFakes();
+    const pwFile = path.join(freshDir("secret"), "first-admin-password");
+    const password = strong();
+    writeFileSync(pwFile, `${password}\n`, { mode: 0o600 });
+
+    const r = install(dir, fakes, {
+      REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile,
+      REGULAIT_FIRST_ADMIN_EMAIL: "ops@acme.example",
+      REGULAIT_FIRST_ADMIN_USERNAME: "Admin",
+    });
+    expect(r.status, r.out.slice(-3000)).toBe(0);
+    expect(r.out).toContain("first admin created");
+    expect(r.out).toContain("bootstrap token retired");
+    expect(r.out).toContain("Created: 'admin'");
+
+    // delivered on stdin, exactly once, and nowhere else
+    expect(r.stdinLog).toBe(`${password}\n`);
+    expect(r.argv).toContain("first-admin.js --username admin --email ops@acme.example");
+    expect(r.argv).not.toContain(password);
+    expect(r.out).not.toContain(password);
+    expect(envOf(dir)).not.toContain(password);
+    expect(overrideOf(dir)).not.toContain(password);
+
+    // retired: no token line in .env, the marker instead, pinned empty in the override, gateway restarted
+    expect(envOf(dir)).not.toMatch(/^REGULAIT_BOOTSTRAP_TOKEN=/m);
+    expect(envOf(dir)).toMatch(/^REGULAIT_BOOTSTRAP_RETIRED=1$/m);
+    expect(overrideOf(dir)).toContain('      REGULAIT_BOOTSTRAP_TOKEN: ""\n');
+    const ups = r.argv.split("\n").filter((l) => /^compose .* up -d/.test(l));
+    expect(ups).toHaveLength(2);
+    expect(ups[1]).toContain("up -d --no-build");
+    expect(r.out).not.toContain("REGULAIT_BOOTSTRAP_TOKEN — until");
+
+    // RE-RUN: the admin exists — no create call, no password needed, the token stays retired
+    const again = install(dir, fakes, {});
+    expect(again.status, again.out.slice(-3000)).toBe(0);
+    expect(again.out).toContain("an active admin already exists — skipped");
+    expect(again.out).toContain("bootstrap token: retired");
+    expect(again.out).toContain("An admin already exists");
+    expect(again.argv.split("\n").filter((l) => l.includes("first-admin.js --username"))).toHaveLength(1); // the first run's only
+    expect(envOf(dir)).not.toMatch(/^REGULAIT_BOOTSTRAP_TOKEN=/m);
+    expect(overrideOf(dir)).toContain('REGULAIT_BOOTSTRAP_TOKEN: ""');
+  });
+
+  it.runIf(hasOpenssl && posix)("a policy refusal from the file stops the install with nothing created and the token still in .env", () => {
+    const dir = freshDir("install-weak");
+    const fakes = setupFakes();
+    const pwFile = path.join(freshDir("secret"), "pw");
+    writeFileSync(pwFile, "CANARYweak\n", { mode: 0o600 });
+    const r = install(dir, fakes, { REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile, REGULAIT_FIRST_ADMIN_EMAIL: "ops@acme.example" });
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("the first admin was NOT created (exit 4)");
+    expect(r.out).toContain("org password policy");
+    expect(r.out).not.toContain("CANARYweak");
+    expect(envOf(dir)).toMatch(/^REGULAIT_BOOTSTRAP_TOKEN=[0-9a-f]{48}$/m);
+    expect(overrideOf(dir)).not.toContain("REGULAIT_BOOTSTRAP_TOKEN");
+  });
+
+  it.runIf(hasOpenssl && posix)("non-interactive with no password file: the step is skipped, the token stays, the summary gives the manual path", () => {
+    const dir = freshDir("install-skip");
+    const fakes = setupFakes();
+    const r = install(dir, fakes, {});
+    expect(r.status, r.out.slice(-3000)).toBe(0);
+    expect(r.out).toContain("not created by this run");
+    expect(r.out).toContain("RE-RUN THIS INSTALLER");
+    expect(r.argv).not.toContain("first-admin.js --username");
+    expect(envOf(dir)).toMatch(/^REGULAIT_BOOTSTRAP_TOKEN=[0-9a-f]{48}$/m);
+    // an admin made by hand (the manual path), then a re-run: the installer retires the token
+    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    const again = install(dir, fakes, {});
+    expect(again.status, again.out.slice(-3000)).toBe(0);
+    expect(again.out).toContain("bootstrap token retired");
+    expect(envOf(dir)).not.toMatch(/^REGULAIT_BOOTSTRAP_TOKEN=/m);
+  });
+
+  it.runIf(hasOpenssl && posix)("--check refuses a group-readable password file and a file without an email, before rendering", () => {
+    const fakes = setupFakes();
+    const pwFile = path.join(freshDir("secret"), "pw");
+    writeFileSync(pwFile, `${strong()}\n`, { mode: 0o644 });
+    chmodSync(pwFile, 0o644);
+    const dir = freshDir("check-mode");
+    const r = install(dir, fakes, { REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile, REGULAIT_FIRST_ADMIN_EMAIL: "ops@acme.example" }, ["--check"]);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("must be 0600 or stricter");
+    expect(existsSync(path.join(dir, ".env"))).toBe(false);
+    chmodSync(pwFile, 0o600);
+    const noEmail = install(dir, fakes, { REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile }, ["--check"]);
+    expect(noEmail.status).not.toBe(0);
+    expect(noEmail.out).toContain("REGULAIT_FIRST_ADMIN_EMAIL is not");
+  });
+
+  it.runIf(hasOpenssl && posix)("a retired token stays retired on re-render; an exported token is ignored; only --admin-token re-opens it", () => {
+    const fakes = setupFakes();
+    const dir = freshDir("retired");
+    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    expect(install(dir, fakes, {}).status).toBe(0); // admin exists -> retired on the first run
+    expect(envOf(dir)).toMatch(/^REGULAIT_BOOTSTRAP_RETIRED=1$/m);
+
+    const exported = install(dir, fakes, { REGULAIT_BOOTSTRAP_TOKEN: "a-stray-exported-CANARY-token" }, ["--check"]);
+    expect(exported.status).toBe(0);
+    expect(exported.out).toContain("it is ignored");
+    expect(envOf(dir)).not.toContain("a-stray-exported-CANARY-token");
+    expect(overrideOf(dir)).toContain('REGULAIT_BOOTSTRAP_TOKEN: ""');
+
+    const reopened = install(dir, fakes, {}, ["--admin-token", "reopened-CANARY-break-glass-token"]);
+    expect(reopened.status, reopened.out.slice(-3000)).toBe(0);
+    expect(reopened.out).toContain("re-opens the retired bootstrap token");
+    expect(reopened.out).toContain("The bootstrap token is OPEN");
+    expect(envOf(dir)).toContain("REGULAIT_BOOTSTRAP_TOKEN=reopened-CANARY-break-glass-token\n");
+    expect(overrideOf(dir)).not.toContain("REGULAIT_BOOTSTRAP_TOKEN");
+    // and a plain re-run retires it again
+    const plain = install(dir, fakes, {});
+    expect(plain.status).toBe(0);
+    expect(envOf(dir)).not.toMatch(/^REGULAIT_BOOTSTRAP_TOKEN=/m);
+  });
+});
