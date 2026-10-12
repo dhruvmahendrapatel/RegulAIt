@@ -164,8 +164,10 @@ export async function addIdentityCredential(identityId: string, body: AddWorkloa
 
 /** revoke (never delete) a credential, and every token and grant it authenticated */
 export async function revokeIdentityCredential(identityId: string, credentialId: string): Promise<unknown> {
-  const path = `/v1/workload-identities/${seg(identityId)}/credentials/${seg(credentialId)}`;
-  return withStepUp((h) => stepUpApi.del(path, undefined, h));
+  // both ids are checked before any request; the path is written at the call so the affordance census sees it
+  const identity = seg(identityId);
+  const credential = seg(credentialId);
+  return withStepUp((h) => stepUpApi.del(`/v1/workload-identities/${identity}/credentials/${credential}`, undefined, h));
 }
 
 /** cascade revoke: this grant and every descendant are refused at the next use */
