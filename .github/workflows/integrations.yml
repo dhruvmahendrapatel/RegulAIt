@@ -66,7 +66,10 @@ jobs:
   #     from luarocks.org (`--only-server`, so no fallback mirror is consulted),
   #     and the installed tree is then compared against that list.
   # The spec uses no OpenResty-only API, so upstream LuaJIT 2.1 and the
-  # OpenResty fork run it identically.
+  # OpenResty fork run it identically. ADR-0188 S7: test/workload_spec.lua runs
+  # the plugin's PDP client (private_key_jwt + DPoP) on the REAL
+  # lua-resty-openssl, pinned in the same rockspec, through LuaJIT's FFI
+  # against the runner's libcrypto.
   kong-plugin-spec:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -116,7 +119,7 @@ jobs:
           luajit "$ROCKS_TREE/lib/luarocks/rocks-5.1/busted/2.3.0-1/bin/busted" -o TAP | tee "$RUNNER_TEMP/busted.tap"
           n=$(grep -cE '^ok ' "$RUNNER_TEMP/busted.tap")
           echo "passed: $n"
-          test "$n" -ge 24
+          test "$n" -ge 42
 
   kong-adapter:
     runs-on: ubuntu-latest

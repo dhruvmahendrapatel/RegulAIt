@@ -12,6 +12,10 @@
 -- Test-only: none of these ship in the plugin, and none is loaded by Kong.
 -- Licences (all MIT or MIT/X11): busted, luassert, say, lua_cliargs,
 -- luasystem, dkjson, lua-term, penlight, luafilesystem, mediator_lua.
+-- ADR-0188 S7: lua-resty-openssl (BSD-2-Clause, no rock dependencies) is the
+-- cryptography the plugin's PDP client calls; Kong bundles it, so the plugin
+-- ships nothing new, and test/workload_spec.lua runs the real library under
+-- LuaJIT's FFI against the runner's libcrypto. Resolved 2026-10-12.
 -- Versions resolved from luarocks.org on 2026-10-05. To bump one, change it
 -- here only: the workflow's installed-tree check reads this file. A busted bump
 -- also changes the runner path in the workflow's spec step, which names the
@@ -36,6 +40,7 @@ dependencies = {
   "dkjson == 2.11-1",
   "lua-term == 0.8-1",
   "mediator_lua == 1.1.2-0",
+  "lua-resty-openssl == 1.2.0-1",
   -- the runner, last
   "busted == 2.3.0-1",
 }

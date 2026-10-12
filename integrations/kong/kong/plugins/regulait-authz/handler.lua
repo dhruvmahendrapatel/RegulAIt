@@ -45,8 +45,9 @@
 -- subject-impersonation key, each decision costs real database work, and a PDP
 -- decides without enforcing.
 
-local http = require "resty.http"
 local cjson = require "cjson.safe"
+-- ADR-0188 S7: the plugin's own key and the DPoP-bound self token it takes (workload.lua)
+local workload = require "kong.plugins.regulait-authz.workload"
 
 local RegulaitAuthz = {
   -- 0.1.0  the plugin that replaced the pre-function (ADR-0127 amendment).
@@ -68,7 +69,13 @@ local RegulaitAuthz = {
   --        basic-auth derive an origin, so a `jwt` route accepts any asserted
   --        origin unchecked (AER-036). Pinned by test/handler_spec.lua (busted
   --        on LuaJIT); verify.mjs checks the tag, pending its first CI run.
-  VERSION = "0.4.0",
+  -- 0.5.0  (ADR-0188 S7) the `pdp_key` bearer credential is GONE: the gateway
+  --        revokes every pdp virtual key (migration 0195). The plugin holds its
+  --        own Ed25519 key (`pdp_client_key`) bound to a `pdp` workload
+  --        identity and asks with a DPoP-bound self token (`issuer` names the
+  --        gateway's REGULAIT_PUBLIC_URL). A breaking config change. Pinned by
+  --        test/workload_spec.lua; the live path is PENDING ITS FIRST CI RUN.
+  VERSION = "0.5.0",
   -- Below every common auth plugin and below ACL, so `kong.client.get_consumer()`
   -- is populated by the time access() runs. This number IS the fix for (1).
   PRIORITY = 900,
@@ -363,24 +370,17 @@ function RegulaitAuthz:access(conf)
   end
   local session_origin = derived or asserted
 
-  local client = http.new()
-  client:set_timeout(conf.timeout_ms)
-
-  local res, err = client:request_uri(conf.pdp_url .. "/v1/authz/check", {
-    method = "POST",
-    headers = {
-      ["content-type"] = "application/json",
-      ["authorization"] = "Bearer " .. conf.pdp_key,
-    },
-    body = cjson.encode(build_question(conf, consumer, subject, session_origin)),
-  })
+  local res, failure, detail = workload.check(conf, cjson.encode(build_question(conf, consumer, subject, session_origin)))
 
   -- FAIL CLOSED, and say which failure it was. An outage that silently becomes
   -- an open door is the worst shape this can take, because the ledger would
-  -- show that nothing was ever asked.
+  -- show that nothing was ever asked. ADR-0188 S7: the plugin's own credential
+  -- failing (its key unreadable, its token refused) is a failure of the same
+  -- kind, with its own reason, so an operator is sent to the identity rather
+  -- than to the network.
   if not res then
-    kong.log.err("regulait pdp unreachable: ", err)
-    return refuse(503, "deny", "pdp_unreachable")
+    kong.log.err("regulait pdp: ", failure, " ", tostring(detail or ""))
+    return refuse(503, "deny", failure)
   end
   if res.status ~= 200 then
     kong.log.err("regulait pdp returned ", res.status)

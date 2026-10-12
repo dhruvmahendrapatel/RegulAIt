@@ -2,8 +2,9 @@
 --
 -- WHAT THIS IS AND IS NOT. `verify.mjs` runs the plugin inside a pinned Kong
 -- container against a live PDP and a counting upstream; that is the support
--- claim. This file runs `handler.lua` under busted with `kong`, `resty.http`
--- and `cjson.safe` stubbed, so the two behaviours ADR-0179 narrows the claims
+-- claim. This file runs `handler.lua` under busted with `kong`, the plugin's
+-- PDP client (`workload.lua`, pinned by its own spec, workload_spec.lua) and
+-- `cjson.safe` stubbed, so the two behaviours ADR-0179 narrows the claims
 -- to are pinned on every machine, including ones with no docker:
 --
 --   AER-028  data-scope rules are NOT supported at the Kong edge. The question
@@ -27,17 +28,14 @@
 -- stubs
 ------------------------------------------------------------------------------
 local pdp = { calls = {}, answer = nil }
-package.preload["resty.http"] = function()
+-- ADR-0188 S7: the plugin asks through its own credential (workload.lua); here
+-- that client is the stub PDP, so this file pins the decision logic only
+package.preload["kong.plugins.regulait-authz.workload"] = function()
   return {
-    new = function()
-      return {
-        set_timeout = function() end,
-        request_uri = function(_, url, opts)
-          pdp.calls[#pdp.calls + 1] = { url = url, question = opts.body }
-          if pdp.answer == nil then return nil, "connection refused" end
-          return { status = 200, body = pdp.answer }
-        end,
-      }
+    check = function(c, body)
+      pdp.calls[#pdp.calls + 1] = { url = c.pdp_url, question = body }
+      if pdp.answer == nil then return nil, "pdp_unreachable", "connection refused" end
+      return { status = 200, body = pdp.answer }
     end,
   }
 end
@@ -102,7 +100,7 @@ local JWT = { id = "j-1", key = "https://issuer.example", secret = "<s>", algori
 local OPAQUE = { id = "o-1" }
 
 local function conf(extra)
-  local c = { pdp_url = "http://pdp", pdp_key = "k", server_id = "s", tool_name = "t", timeout_ms = 2000 }
+  local c = { pdp_url = "http://pdp", issuer = "https://regulait.example", pdp_client_key = "<pem>", server_id = "s", tool_name = "t", timeout_ms = 2000 }
   for k, v in pairs(extra or {}) do c[k] = v end
   return c
 end
@@ -332,5 +330,33 @@ describe("AER-036: mixed authentication", function()
     end
     assert.is_not_nil(origin_field)
     assert.are.equal("password,oidc,saml", table.concat(origin_field.one_of, ","))
+  end)
+end)
+
+------------------------------------------------------------------------------
+-- ADR-0188 S7: the plugin's own credential failing fails CLOSED, with its reason
+------------------------------------------------------------------------------
+describe("ADR-0188 S7: the PDP client's credential", function()
+  it("an unreachable PDP (or token endpoint) is a 503 deny that names the failure", function()
+    local exit = run(conf(), { consumer = CONSUMER, credential = KEY_AUTH, pdp_answer = nil })
+    assert.are.equal(503, exit.status)
+    assert.are.equal("deny", state.headers["x-regulait-decision"])
+    assert.are.equal("pdp_unreachable", state.headers["x-regulait-reason"])
+  end)
+
+  it("the bearer pdp_key is gone from the schema; the key and the issuer are required", function()
+    local fields = {}
+    for _, f in ipairs(schema.fields) do
+      if f.config then
+        for _, cf in ipairs(f.config.fields) do
+          for name, def in pairs(cf) do fields[name] = def end
+        end
+      end
+    end
+    assert.is_nil(fields.pdp_key)
+    assert.is_true(fields.pdp_client_key.required)
+    assert.is_true(fields.pdp_client_key.encrypted)
+    assert.is_true(fields.pdp_client_key.referenceable)
+    assert.is_true(fields.issuer.required)
   end)
 end)

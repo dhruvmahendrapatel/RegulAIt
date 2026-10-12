@@ -19,9 +19,18 @@ return {
         type = "record",
         fields = {
           { pdp_url = typedefs.url({ required = true, default = "http://regulait-gateway:3000" }) },
-          -- The PDP credential. Use a Kong vault reference ({vault://...}) in
+          -- ADR-0188 S7: THE GATEWAY'S ISSUER, its REGULAIT_PUBLIC_URL exactly.
+          -- Not derived from pdp_url: the plugin usually reaches the gateway at
+          -- an internal address, while the token's audience and every DPoP
+          -- proof name the public one. No default, because a guessed issuer is
+          -- a refused token on every request.
+          { issuer = typedefs.url({ required = true }) },
+          -- ADR-0188 S7: THE PDP CLIENT'S OWN KEY, an Ed25519 private key in
+          -- PEM (PKCS#8) whose public half is the credential of a `pdp` workload
+          -- identity. It replaced the `pdp_key` bearer value (revoked by
+          -- migration 0195). Use a Kong vault reference ({vault://...}) in
           -- anything real; see GATEWAY_TOPOLOGY.md on why this key is sensitive.
-          { pdp_key = { type = "string", required = true, referenceable = true, encrypted = true } },
+          { pdp_client_key = { type = "string", required = true, referenceable = true, encrypted = true } },
           -- WHAT THIS ROUTE FRONTS. Required, because a route that cannot say
           -- what it fronts cannot be governed, and guessing would authorize an
           -- unnamed thing.
