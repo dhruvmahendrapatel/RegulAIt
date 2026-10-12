@@ -75,6 +75,10 @@ export const BOM_VERIFY_UNVERIFIABLE_REASONS = [
 export const BOM_VERIFY_OUTCOMES = ["valid", "unverifiable", "invalid"] as const;
 export type BomVerifyOutcome = (typeof BOM_VERIFY_OUTCOMES)[number];
 export const BOM_VERIFY_SOURCES = ["bundle", "decision_bom", "ai_bom_snapshot"] as const;
+/** contract.ts `BOM_BODY_VERSIONS`: the signed body each subject carries */
+export const DECISION_BOM_VERSION = "regulait.decision-bom.v1";
+export const AI_BOM_VERSION = "regulait.ai-bom.v1";
+export const BOM_BODY_VERSIONS = [DECISION_BOM_VERSION, AI_BOM_VERSION] as const;
 export type BomVerifySource = (typeof BOM_VERIFY_SOURCES)[number];
 export const BOM_BUNDLE_REQUIRED_CHECKS = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"] as const;
 export const BOM_ANCHOR_CHECKS = ["anchor_record", "anchor_imprint", "tsa_token"] as const;
@@ -541,20 +545,36 @@ export function requiredChecksFor(id: VerifyIdentity, source: BomVerifySource): 
   ];
 }
 
+/** what the report says about itself beyond its checks, sections and limits */
+interface VerifyEnvelope {
+  source: BomVerifySource;
+  outcome: string;
+  bodyVersion: string | null;
+  hasManifest: boolean;
+}
+
 /**
  * The contract's structural rules on a report (contract-b4 `bomVerifyResponseSchema`), as one sentence each.
  * Null means none is broken. A report that breaks one is never displayed: it could claim more than it checked.
+ * Every rule of the shared refinement is mirrored here; bomModel.test.ts runs both over a fixture matrix and
+ * fails when they disagree on accept or refuse.
  */
-function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], id: VerifyIdentity | null, source: BomVerifySource, outcome: string, cannotProve: string[]): string | null {
+function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], id: VerifyIdentity | null, env: VerifyEnvelope, cannotProve: string[]): string | null {
+  const { source, outcome } = env;
   if (checks.length === 0) return "it reports no checks";
   if (cannotProve.join() !== cannotProveFor(id, source).join()) return "its list of what cannot be proved is not the one for this BOM";
   const refs = new Map<string, Array<string | null>>();
   for (const c of checks) refs.set(c.check, [...(refs.get(c.check) ?? []), c.ref]);
   for (const r of refs.values()) if (r.length > 1 && (r.includes(null) || new Set(r).size !== r.length)) return "it repeats a check without telling the results apart";
-  if (id === null) return outcome === "invalid" && sections.length === 0 ? null : "an unreadable bundle is reported as more than invalid";
+  if ((source === "bundle") !== env.hasManifest && outcome !== "invalid") return source === "bundle" ? "it reports a readable bundle without its manifest" : "it reports a bundle manifest for a stored BOM";
+  if (id === null || env.bodyVersion === null) {
+    return outcome === "invalid" && checks.some((c) => c.status === "invalid") ? null : "an unreadable bundle is reported as more than invalid, or without the check that failed";
+  }
   const of = (check: string) => checks.filter((c) => c.check === check);
   const all = (check: string, status: string, reason: string) => of(check).every((c) => c.status === status && c.reason === reason);
   const decision = id.subject === "decision-bom";
+  if (env.bodyVersion !== (decision ? DECISION_BOM_VERSION : AI_BOM_VERSION)) return "its body version is not the one for this kind of BOM";
+  if ((source === "decision_bom" && !decision) || (source === "ai_bom_snapshot" && decision)) return "it verified a different kind of BOM than the stored one asked for";
   const foreign: readonly string[] = decision ? AI_BOM_ONLY_CHECKS : DECISION_BOM_ONLY_CHECKS;
   if (checks.some((c) => foreign.includes(c.check))) return "it reports checks that belong to the other kind of BOM";
   if (decision ? sections.map((s) => s.section).join() !== DECISION_BOM_SECTIONS.join() : sections.length !== 0) return "its sections are not this BOM's sections";
@@ -564,13 +584,28 @@ function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], 
     if (source !== "bundle" && !all(c, "unverifiable", "not_a_bundle")) return "it claims bundle checks for a stored BOM";
   }
   if (source === "bundle" && checks.some((c) => c.reason === "not_a_bundle")) return "it calls a bundle not a bundle";
-  if (id.subject === "ai-bom" && id.version === 1 && of("supersedes").length) return "it checks an earlier snapshot for version 1";
-  if (decision) {
-    if (!all("decision_content_binding", "unverifiable", "preimage_not_exported")) return "it claims the decision row's content, which is never exported";
-    if (id.recordedFinality === "chain_signed" && BOM_ANCHOR_CHECKS.some((c) => !all(c, "unverifiable", "anchor_absent"))) return "it claims anchor checks for a BOM with no anchor";
-    const projectionInvalid = of("sections_projection").some((c) => c.status === "invalid");
-    if (sections.some((s) => s.status === "invalid") !== projectionInvalid) return "its sections disagree with the section check";
+  if (checks.some((c) => c.reason === "not_a_bundle" && !(BOM_BUNDLE_REQUIRED_CHECKS as readonly string[]).includes(c.check))) return "it reports \"not a bundle\" on a check that is not about the bundle";
+  if (id.subject === "ai-bom") {
+    if (id.version === 1 && of("supersedes").length) return "it checks an earlier snapshot for version 1";
+    if (id.version > 1 && source === "bundle" && !all("supersedes", "unverifiable", "earlier_snapshot_not_in_bundle")) return "it claims to have checked the superseded snapshot, which a bundle never carries";
+    return null;
   }
+  if (!all("decision_content_binding", "unverifiable", "preimage_not_exported")) return "it claims the decision row's content, which is never exported";
+  if (id.receiptPayloadVersion === "v1") {
+    const v1Binding = of("receipt_facts_binding").every((c) => (c.status === "unverifiable" && c.reason === "receipt_v1_no_factsHash") || (c.status === "invalid" && c.reason === "v1_receipt_after_boundary"));
+    if (!v1Binding) return "it claims a facts binding for a version 1 receipt, which does not commit to the facts";
+  } else if (checks.some((c) => c.reason === "receipt_v1_no_factsHash" || c.reason === "v1_receipt_after_boundary")) return "it gives a version 2 receipt a version 1 result";
+  if (checks.some((c) => c.reason === "v2_receipt_before_boundary" && (id.receiptPayloadVersion !== "v2" || c.check !== "receipt_facts_binding"))) {
+    return "it reports a version 2 boundary result where it does not apply";
+  }
+  if (id.recordedFinality === "chain_signed") {
+    if (BOM_ANCHOR_CHECKS.some((c) => !all(c, "unverifiable", "anchor_absent"))) return "it claims anchor checks for a BOM with no anchor";
+  } else if (checks.some((c) => c.reason === "anchor_absent")) return "it says the anchor is absent for a BOM that has one";
+  const projection = of("sections_projection");
+  if (sections.some((s) => s.status === "invalid") !== projection.some((c) => c.status === "invalid")) return "its sections disagree with the section check";
+  if (projection.some((c) => c.status === "unverifiable")) return "it calls the section check unverifiable, though it is a pure recomputation";
+  const lapsed = id.reportedFinality === "anchored_lapsed" && (id.recordedFinality === "anchored" || id.recordedFinality === "anchored_finite_lock");
+  if (id.reportedFinality !== id.recordedFinality && !lapsed) return "its reported finality is neither the recorded one nor a lapse of it";
   return null;
 }
 
@@ -605,14 +640,16 @@ function readIdentity(value: unknown): VerifyIdentity | null {
  */
 export function readVerifyReport(value: unknown, expected: VerifyExpectation): VerifyView {
   const v = obj(value);
-  if (!v || v.trust !== "deployment_registry" || v.source !== expected.source || !oneOf(BOM_VERIFY_OUTCOMES, v.outcome) || !time(v.verifiedAt) || !Array.isArray(v.checks) || !Array.isArray(v.sections) || !Array.isArray(v.cannotProve)) {
+  if (!v || v.trust !== "deployment_registry" || v.source !== expected.source || !oneOf(BOM_VERIFY_OUTCOMES, v.outcome) || !(v.bodyVersion === null || oneOf(BOM_BODY_VERSIONS, v.bodyVersion)) || !(v.manifest === null || obj(v.manifest)) || !time(v.verifiedAt) || !Array.isArray(v.checks) || !Array.isArray(v.sections) || !Array.isArray(v.cannotProve)) {
     return unreadable("The verification result");
   }
   const identity = readIdentity(v.identity);
-  if (expected.source === "decision_bom" && (identity?.subject !== "decision-bom" || identity.auditId !== expected.auditId || (expected.version !== undefined && identity.version !== expected.version))) {
+  // a report about a different subject than the one asked for is refused; a null identity (an unreadable body,
+  // shown as invalid with its failing check, as the shared contract allows for every source) asks for nothing
+  if (identity !== null && expected.source === "decision_bom" && (identity.subject !== "decision-bom" || identity.auditId !== expected.auditId || (expected.version !== undefined && identity.version !== expected.version))) {
     return unreadable("The verification result");
   }
-  if (expected.source === "ai_bom_snapshot" && (identity?.subject !== "ai-bom" || identity.snapshotId !== expected.snapshotId)) return unreadable("The verification result");
+  if (identity !== null && expected.source === "ai_bom_snapshot" && (identity.subject !== "ai-bom" || identity.snapshotId !== expected.snapshotId)) return unreadable("The verification result");
   const checks = v.checks.map((raw): VerifyCheckRow => {
     const c = obj(raw);
     const reasonOk =
@@ -623,7 +660,7 @@ export function readVerifyReport(value: unknown, expected: VerifyExpectation): V
   });
   const sections = v.sections.map((raw) => {
     const s = obj(raw);
-    if (!s || !oneOf(DECISION_BOM_SECTIONS, s.section) || !oneOf(["valid", "invalid"] as const, s.status) || !oneOf(BOM_SECTION_STATUSES, s.completeness) || !(s.notRecordedReason === null || oneOf(BOM_NOT_RECORDED_REASONS, s.notRecordedReason))) {
+    if (!s || !oneOf(DECISION_BOM_SECTIONS, s.section) || !oneOf(["valid", "invalid"] as const, s.status) || !oneOf(BOM_SECTION_STATUSES, s.completeness) || !(s.notRecordedReason === null || oneOf(BOM_NOT_RECORDED_REASONS, s.notRecordedReason)) || (s.completeness === "not_recorded") !== (s.notRecordedReason !== null)) {
       return unreadable("The verification result");
     }
     return { section: s.section, status: s.status, completeness: s.completeness, notRecordedReason: s.notRecordedReason as string | null };
@@ -635,7 +672,7 @@ export function readVerifyReport(value: unknown, expected: VerifyExpectation): V
   if (derived !== v.outcome) {
     throw new BomEvidenceError(`The verification result is inconsistent: it reports "${v.outcome}" but its own checks give "${derived}". It is not shown as a result.`);
   }
-  const broken = brokenRule(checks, sections, identity, expected.source, v.outcome, v.cannotProve as string[]);
+  const broken = brokenRule(checks, sections, identity, { source: expected.source, outcome: v.outcome, bodyVersion: v.bodyVersion as string | null, hasManifest: v.manifest !== null }, v.cannotProve as string[]);
   if (broken) throw new BomEvidenceError(`The verification result is inconsistent: ${broken}. It is not shown as a result.`);
   return {
     source: expected.source,

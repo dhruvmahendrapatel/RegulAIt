@@ -22,7 +22,7 @@ import { api } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import { Badge, Button, Card, Field, Input, Modal, Select } from "../../../ui/kit";
-import { QueryGate, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
+import { adminKeys, orgSettingsQuery, QueryGate, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 
 export interface ReceiptSigningKeyPosture {
@@ -216,8 +216,8 @@ export function ReceiptKeyRow({ posture }: { posture: ReceiptSigningKeyPosture |
 }
 
 export function BomPostureCard({ receiptKey }: { receiptKey: ReceiptSigningKeyPosture | undefined }) {
-  const settings = useQuery({ queryKey: ["admin", "org-settings"], retry: false, queryFn: () => api.get<OrgSettingsResponse>("/v1/org/settings") });
-  const baseline = useSettleAfterWrite(["admin", "org-settings"]);
+  const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
+  const baseline = useSettleAfterWrite(adminKeys.orgSettings);
   const flight = useSingleFlight();
   const save = async (body: Record<string, unknown>) => {
     if (baseline.stale || !flight.enter()) throw new Error("The settings are locked until their current values are reloaded.");

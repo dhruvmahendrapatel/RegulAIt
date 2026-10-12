@@ -56,6 +56,10 @@ interface IsolationMock {
   failReads: boolean;
   failReadsAfterWrite: boolean;
   executorsStatus: number;
+  /** a body other than the fixture list for a 200 (a malformed envelope) */
+  executorsBody?: unknown;
+  /** held until resolved: the executor list stays loading */
+  executorsGate?: Promise<void>;
   registered: unknown[];
 }
 
@@ -82,7 +86,11 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
       m.registered.push(req.postDataJSON());
       return json(route, { executorId: "e9", name: "gvisor-b" }, 201);
     }
-    if (p === "/v1/executors") return m.executorsStatus === 200 ? json(route, { executors: executors(now) }) : json(route, { error: "forbidden" }, m.executorsStatus);
+    if (p === "/v1/executors") {
+      if (m.executorsGate) await m.executorsGate;
+      if (m.executorsStatus !== 200) return json(route, { error: "forbidden" }, m.executorsStatus);
+      return json(route, m.executorsBody !== undefined ? m.executorsBody : { executors: executors(now) });
+    }
     return json(route, { error: "not_built" }, 501);
   });
   return m;
@@ -141,6 +149,35 @@ test("Engines: a refused executor list is unavailable, never an empty fleet", as
   const register = page.getByRole("button", { name: "Register executor", exact: true });
   await expect(register).toBeDisabled();
   await expect(register).toHaveAccessibleDescription(/Registering an executor is unavailable while the executor list cannot be read\. You are not allowed to read executors\./);
+});
+
+test("Engines: registering is disabled while the executor list loads, and enabled once it has", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await setup(page, { executorsGate: gate });
+  await openEngines(page);
+  const register = page.getByRole("button", { name: "Register executor", exact: true });
+  await expect(register).toBeDisabled();
+  await expect(register).toHaveAccessibleDescription("Registering an executor is available once the executor list has loaded.");
+  await expect(page.getByText("No executors registered", { exact: true })).toHaveCount(0);
+  release();
+  await expect(page.getByRole("row").filter({ hasText: "gvisor-fresh" })).toBeVisible();
+  await expect(register).toBeEnabled();
+});
+
+test("Engines: a malformed executor list is unreadable, never an empty fleet, and registering stays disabled", async ({ page }) => {
+  await setup(page, { executorsBody: { executors: "none" } });
+  await openEngines(page);
+  await expect(page.getByText("Executors unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText("The gateway's executor list could not be read. No placement assurance is shown.", { exact: true })).toBeVisible();
+  await expect(page.getByText("No executors registered", { exact: true })).toHaveCount(0);
+  const register = page.getByRole("button", { name: "Register executor", exact: true });
+  await expect(register).toBeDisabled();
+  await expect(register).toHaveAccessibleDescription(
+    "Registering an executor is unavailable while the executor list cannot be read. The gateway's executor list could not be read. No placement assurance is shown.",
+  );
 });
 
 test("settings: enforcement is fixed and never sent; only the edited floor is sent; a relaxation is confirmed and resent once with step-up", async ({ page }) => {

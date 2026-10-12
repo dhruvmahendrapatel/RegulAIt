@@ -126,6 +126,7 @@ describe("the mirrored vocabularies match @regulait/shared", () => {
     expect(m.BOM_VERIFY_SOURCES).toEqual(s.BOM_VERIFY_SOURCES);
     expect(m.BOM_CANNOT_PROVE).toEqual(s.BOM_CANNOT_PROVE);
     expect(m.BOM_CANNOT_PROVE_COPY).toEqual(s.BOM_CANNOT_PROVE_COPY);
+    expect(m.BOM_BODY_VERSIONS).toEqual(s.BOM_BODY_VERSIONS);
   });
   it("every refusal code a BOM route can answer has its own sentence (none falls through to the generic text)", async () => {
     const s = await sharedBom();

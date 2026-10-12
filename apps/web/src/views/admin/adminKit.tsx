@@ -6,7 +6,7 @@
  * composes the phase-1 kit — no new dependencies.
  */
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../../api/client";
 import { guidanceOf, type RefusalGuidance } from "../../api/refusals";
 import type {
@@ -88,6 +88,7 @@ export const adminKeys = {
   profiles: ["admin", "compliance-profiles"] as const,
   customProviders: ["admin", "custom-model-providers"] as const,
   egressHosts: ["admin", "egress-allow-hosts"] as const,
+  orgSettings: ["admin", "org-settings"] as const,
 };
 
 export const useUsers = () =>
@@ -121,6 +122,16 @@ export const readCurrentOrgSettings = (): Promise<Record<string, unknown> | null
     (response) => (response.settings ? (response.settings as unknown as Record<string, unknown>) : null),
     () => null,
   );
+/**
+ * The one read of `GET /v1/org/settings` for cards that share a page and the
+ * ["admin", "org-settings"] cache entry (the enforcement posture page's BOM and
+ * isolation cards). One set of options, so the entry behaves the same whichever
+ * card mounts first: no retry, because a refused or failed read is shown as it is
+ * and a write settles against the stored values (`useSettleAfterWrite`), never
+ * against a retried guess. The raw envelope is returned: each card decodes it.
+ */
+export const orgSettingsQuery = <T = unknown,>() =>
+  queryOptions({ queryKey: adminKeys.orgSettings, retry: false, queryFn: () => api.get<T>("/v1/org/settings") });
 export const useRoles = () =>
   useQuery({ queryKey: adminKeys.roles, queryFn: () => api.get<{ roles: Role[] }>("/v1/roles") });
 export const useTeams = () =>
