@@ -1042,6 +1042,16 @@ case "$RECEIPT_KEY_RC:$RECEIPT_KEY_LINE" in
   Every sign-off is refused until this is fixed. For an operator-managed key: the file must be a
   PKCS#8 Ed25519 key readable by uid 1000 inside the container (chown 1000:1000, chmod 600), and
   --receipt-key-file / --receipt-key-id go together. Then re-run this installer." ;;
+  2:*"receipt signing key: "*)
+    # #353 follow-up: exit 2 = the gateway has no REGULAIT_INSTALL_SECRETS_DIR and no operator key, so there
+    # is nowhere to keep an install-generated key and every sign-off would be refused. The compose files an
+    # install runs always set that directory, so this is a broken install, not a choice: refuse it.
+    die "$RECEIPT_KEY_LINE
+
+  The gateway container has no install secrets directory (REGULAIT_INSTALL_SECRETS_DIR) and no
+  operator-managed key, so no receipt signing key can exist and every sign-off is refused. Check that
+  the compose files this installer wrote are the ones in use, or pass --receipt-key-file and
+  --receipt-key-id. Then re-run this installer." ;;
   *)
     warn "${RECEIPT_KEY_LINE:-the gateway could not be reached to check the receipt key}"
     warn "until a usable receipt signing key exists every sign-off is refused. Check: docker compose -p $PROJECT logs gateway | grep 'receipt key'" ;;

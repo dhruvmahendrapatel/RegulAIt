@@ -156,6 +156,30 @@ describe("first-boot generation", () => {
     expect(readdirSync(dir).sort()).toEqual([INSTALL_RECEIPT_KEY_FILE, "notes.tmp"].sort());
   });
 
+  it.runIf(posix)("#353 follow-up: a crash between publishing the key and removing its temporary file heals from the posture path once that file is stale", () => {
+    const dir = freshDir();
+    ensureInstallReceiptKey(installEnv(dir));
+    const file = path.join(dir, INSTALL_RECEIPT_KEY_FILE);
+    const tmp = path.join(dir, `.${INSTALL_RECEIPT_KEY_FILE}.4244.00112233aabb.tmp`);
+    linkSync(file, tmp); // the crashed generator's temporary file: a second link to the key
+    // fresh, it may be a generation in flight: left alone, and the two-link key is refused
+    expect(() => resolveReceiptSigningKey(installEnv(dir))).toThrow(ReceiptKeyError);
+    expect(receiptSigningKeyPosture(installEnv(dir)).state).toBe("invalid");
+    expect(existsSync(tmp)).toBe(true);
+    // stale: the posture read (no restart, no ensure) removes it and the key resolves again, unchanged
+    const keyBefore = readFileSync(file, "utf8");
+    const old = new Date(Date.now() - STALE_TMP_MS - 5_000);
+    utimesSync(tmp, old, old);
+    expect(receiptSigningKeyPosture(installEnv(dir)).state).toBe("install_generated");
+    expect(existsSync(tmp)).toBe(false);
+    expect(statSync(file).nlink).toBe(1);
+    expect(readFileSync(file, "utf8")).toBe(keyBefore);
+    // a refusal with no stale temporary file to remove still stands (here: group access on the directory)
+    chmodSync(dir, 0o750);
+    expect(() => resolveReceiptSigningKey(installEnv(dir))).toThrow(ReceiptKeyError);
+    chmodSync(dir, 0o700);
+  });
+
   it("does nothing while the operator variables are set (a test or demo that sets its own key generates nothing)", () => {
     const dir = freshDir();
     const opDir = freshDir();
@@ -377,6 +401,23 @@ describe("scripts/install.sh --check renders the receipt key choice", () => {
     });
     return { status: r.status ?? -1, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
   }
+
+  it("#353 follow-up: the installer's receipt-key step is fatal on exit 1 and on exit 2 (no secrets directory), and only warns when the check could not run", () => {
+    // the step's own `case` block, run with the installer's die/ok/warn stubbed: what each exit code does
+    const script = readFileSync(INSTALL, "utf8");
+    const start = script.indexOf('case "$RECEIPT_KEY_RC:$RECEIPT_KEY_LINE" in');
+    const end = script.indexOf("\nesac", start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const block = script.slice(start, end + "\nesac".length);
+    const run = (rc: number, line: string) =>
+      spawnSync("bash", ["-c", `die() { echo "DIE"; exit 9; }; ok() { echo "OK"; }; warn() { echo "WARN"; }; PROJECT=p; RECEIPT_KEY_RC="$1"; RECEIPT_KEY_LINE="$2"\n${block}\necho "CONTINUED"`, "case", String(rc), line], { encoding: "utf8" });
+    expect(run(0, "receipt signing key: install-generated: k (f)")).toMatchObject({ status: 0, stdout: "OK\nCONTINUED\n" });
+    expect(run(1, "receipt signing key: invalid — x")).toMatchObject({ status: 9, stdout: "DIE\n" });
+    expect(run(2, "receipt signing key: missing — none configured and REGULAIT_INSTALL_SECRETS_DIR is unset")).toMatchObject({ status: 9, stdout: "DIE\n" });
+    // the gateway could not be reached (docker exec failed): no key verdict at all, so a warning, not a refusal
+    expect(run(125, "Error response from daemon: container not running")).toMatchObject({ status: 0, stdout: "WARN\nWARN\nCONTINUED\n" });
+  });
 
   it.runIf(hasOpenssl)("default: install-generated, nothing about the key in .env or the override", () => {
     const dir = freshDir();
