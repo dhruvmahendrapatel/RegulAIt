@@ -63,6 +63,7 @@ import t from "./traces.module.css";
 // ADR-0173 batch 2c: THE AUTOMATIONS SLOT. This import is the mount point the
 // automation-rules UI replaces (the file, not this line).
 import TracesAutomationsTab from "./TracesAutomationsTab";
+import TracesEvaluationTab from "./TracesEvaluationTab";
 import {
   EMPTY_TRACE_FILTERS,
   activeFilterCount,
@@ -266,11 +267,12 @@ export default function TracesPage() {
           tabs={[
             { id: "traces", label: "Traces" },
             { id: "automations", label: "Automations" },
+            { id: "evaluation", label: "Evaluation" },
           ]}
           active={tab}
           onChange={setTab}
         />
-        {tab === "automations" ? <TracesAutomationsTab /> : <TracesView />}
+        {tab === "automations" ? <TracesAutomationsTab /> : tab === "evaluation" ? <TracesEvaluationTab /> : <TracesView />}
       </div>
     </>
   );

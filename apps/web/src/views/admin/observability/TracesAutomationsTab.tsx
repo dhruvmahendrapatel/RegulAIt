@@ -27,6 +27,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "..
 import { QueryGate, RemoveButton, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import v from "../../views.module.css";
 import m from "./monitoring.module.css";
+import { RetentionHoldsCard } from "./RetentionHoldsCard";
 import {
   ACTION_WORDS,
   AUTOMATION_UI_LIMITS,
@@ -208,6 +209,7 @@ export default function TracesAutomationsTab() {
       </Card>
       {editing && <RuleEditor rule={editing === "new" ? null : editing} maxHoldDays={maxHold} floorDays={rules.data?.retention?.floorDays ?? null} onClose={() => setEditing(null)} />}
       {logFor && <MatchLog rule={logFor} onClose={() => setLogFor(null)} />}
+      <RetentionHoldsCard />
     </div>
   );
 }
