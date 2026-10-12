@@ -22,9 +22,20 @@
  *     }
  *   });
  *
+ * An entry a single TEST creates is removed per entry from an `afterEach`, so a
+ * failing assertion between the POST and an in-body DELETE cannot leave it for
+ * the next test or file. The test passes the host through `trackHost`:
+ *
+ *   const perTest = trackEgressAllowHosts();
+ *   afterEach(async () => (await perTest.removeAll(app, AUTH)).assertRemoved());
+ *   ...
+ *   payload: { host: perTest.trackHost("169.254.169.254"), note: "..." }
+ *
  * `scripts/preflight-egress-allow-cleanup.mjs` enforces that every gateway test
  * file that creates an entry on the shared database reaches a removal from an
- * `afterAll`.
+ * `afterAll`, and that an entry created inside a test body is tracked for an
+ * `afterEach` removal, is a restore inside a `finally`, or is marked
+ * `egress-allow-cleanup: afterAll` (a file-scoped entry the afterAll removes).
  */
 
 interface InjectResponse {
@@ -81,4 +92,32 @@ export async function removeEgressAllowEntry(
   } catch (err) {
     return failed(err instanceof Error ? err.message : String(err));
   }
+}
+
+/** the per-test entries a suite created, removed host by host from `afterEach` */
+export interface EgressAllowTracker {
+  /** record a host a test is about to allow-list; returns it, so it can sit in the payload */
+  trackHost(host: string): string;
+  /** remove every tracked host's entry (by host, so a re-created row is found too) and forget them */
+  removeAll(app: EgressAllowInjector | undefined, headers: Record<string, string>): Promise<EgressAllowRemoval>;
+}
+
+export function trackEgressAllowHosts(): EgressAllowTracker {
+  const hosts = new Set<string>();
+  return {
+    trackHost(host) {
+      hosts.add(host);
+      return host;
+    },
+    async removeAll(app, headers) {
+      const removals: EgressAllowRemoval[] = [];
+      for (const host of hosts) removals.push(await removeEgressAllowEntry(app, headers, { host }));
+      hosts.clear();
+      return {
+        assertRemoved: () => {
+          for (const r of removals) r.assertRemoved();
+        },
+      };
+    },
+  };
 }

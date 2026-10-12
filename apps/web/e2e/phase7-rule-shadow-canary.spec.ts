@@ -26,6 +26,7 @@ import { passTotp } from "./totp-sign-in";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -35,7 +36,7 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
 
-const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
+const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
 const CSRF = { "x-regulait-csrf": "1" };
 
 interface ConsoleTracker {

@@ -60,6 +60,7 @@ import {
   useProjects,
 } from "../adminKit";
 import a from "../admin.module.css";
+import { EvalsSummaryCard } from "./EvalsSummaryCard";
 import v from "../../views.module.css";
 
 interface ScorerInfo {
@@ -323,6 +324,8 @@ export default function EvalsPage() {
         </div>
       ) : (
       <div className={v.stack}>
+        {/* ADR-0044: the drift view the page opens on */}
+        <EvalsSummaryCard onOpenRun={setSelectedRun} />
         {/* ------- ADR-0072: what the numbers MEAN, and what is stranded ---- */}
         <Card title="Scoring semantics — which stored measurements are still comparable">
           <QueryGate

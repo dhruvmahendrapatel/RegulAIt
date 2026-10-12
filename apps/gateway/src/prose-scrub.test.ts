@@ -379,6 +379,7 @@ describe("3. the siting: no route, no helper, and a third write shape", () => {
 
   it("scrubs the UPSERT branch — onConflictDoUpdate({ set }) writes the same columns", async () => {
     const host = `ps-upsert-${randomUUID().slice(0, 8)}.example.com`;
+    // egress-allow-cleanup: afterAll — the first POST's id is recorded in upsertAllowHostId, which afterAll removes
     const post = (note: string) =>
       app.inject({
         method: "POST",

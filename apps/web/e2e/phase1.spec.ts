@@ -22,6 +22,7 @@ import { asSteppedUpAdmin } from "./admin-api";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -31,7 +32,7 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
 
-const NEW_PASSWORD = "E2e-Rewrite-2026!";
+const NEW_PASSWORD = E2E_PASSWORDS.dana;
 
 interface ConsoleTracker {
   errors: string[];

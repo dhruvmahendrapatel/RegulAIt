@@ -24,6 +24,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Ta
 import { Stat, optionEls, useAction, useComplianceProfiles, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { CertRotationsCard } from "./CertRotations";
 import { putOrgSettings } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 
@@ -74,6 +75,8 @@ export default function InfrastructurePage() {
   });
 
   const [approver, setApprover] = useState<string | null>(null);
+  // ADR-0017: one certificate's rotation ledger
+  const [historyCert, setHistoryCert] = useState<InfraCert | null>(null);
   const effectiveApprover =
     approver ?? String(org.data?.settings.infraApproverUserId ?? "") ?? "";
   const [proposal, setProposal] = useState<{
@@ -299,24 +302,30 @@ export default function InfrastructurePage() {
                 key: "actions",
                 header: "",
                 align: "right",
-                render: (c) =>
-                  c.status === "active" ? (
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      onClick={() =>
-                        propose(
-                          "Propose certificate rotation?",
-                          `Rotating ${c.commonName} advances not-after / last-rotated and writes a cert_rotations outcome row — only after the named approver approves.`,
-                          `/v1/infra/certs/${c.id}/rotate`,
-                        )
-                      }
-                    >
-                      propose rotation
+                render: (c) => (
+                  <div className={v.rowTight} style={{ justifyContent: "flex-end" }}>
+                    <Button size="sm" aria-label={`Rotation history of ${c.commonName}`} onClick={() => setHistoryCert(historyCert?.id === c.id ? null : c)}>
+                      history
                     </Button>
-                  ) : (
-                    <span className={v.faint}>{c.status}</span>
-                  ),
+                    {c.status === "active" ? (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() =>
+                          propose(
+                            "Propose certificate rotation?",
+                            `Rotating ${c.commonName} advances not-after / last-rotated and writes a cert_rotations outcome row — only after the named approver approves.`,
+                            `/v1/infra/certs/${c.id}/rotate`,
+                          )
+                        }
+                      >
+                        propose rotation
+                      </Button>
+                    ) : (
+                      <span className={v.faint}>{c.status}</span>
+                    )}
+                  </div>
+                ),
               },
             ]}
             rows={certs.data?.certs ?? []}
@@ -327,6 +336,9 @@ export default function InfrastructurePage() {
             empty={<EmptyState title="No certificates tracked" />}
           />
         </Card>
+        {historyCert ? (
+          <CertRotationsCard key={historyCert.id} certId={historyCert.id} commonName={historyCert.commonName} onClose={() => setHistoryCert(null)} />
+        ) : null}
 
         <Card title="CVE patches — remediation ledger">
           <Table<InfraPatch>

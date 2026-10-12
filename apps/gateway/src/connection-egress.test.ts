@@ -30,7 +30,7 @@
  * check does not stop at write time.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { encryptSecret } from "./secrets.js";
 import { checkConnectionBaseUrl } from "./connection-egress.js";
 
@@ -222,6 +223,13 @@ beforeAll(async () => {
   });
 });
 
+// M-068 / M-078, per entry: an allow entry a single test creates is removed
+// after THAT test, whatever its assertions did.
+const perTest = trackEgressAllowHosts();
+afterEach(async () => {
+  (await perTest.removeAll(app, AUTH)).assertRemoved();
+});
+
 afterAll(async () => {
   await restoreSb1Posture?.();
   await db.delete(egressAllowHosts);
@@ -330,26 +338,18 @@ describe("write time: the endpoints refuse a destination before it is ever store
       url: "/v1/egress-allow-hosts",
       // the plaintext opt-in too, so nothing cheaper can be what refuses it:
       // the only thing left standing is the blocked-range check itself
-      payload: { host: "169.254.169.254", allowPlaintextHttp: true, note: "deliberate SSRF test" },
+      payload: { host: perTest.trackHost("169.254.169.254"), allowPlaintextHttp: true, note: "deliberate SSRF test" },
     });
     expect(allowed.statusCode).toBe(201);
-    try {
-      const res = await app.inject({
-        method: "POST",
-        headers: AUTH,
-        url: "/v1/connectors",
-        payload: { name: `ce-imds2-${uniq()}`, kind: "rest-api", providerKind: "webhook", baseUrl: IMDS },
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json().code).toBe("blocked_address_range");
-      expect(res.json().detail).toContain("link-local");
-    } finally {
-      await app.inject({
-        method: "DELETE",
-        headers: AUTH,
-        url: `/v1/egress-allow-hosts/${allowed.json().id}`,
-      });
-    }
+    const res = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/connectors",
+      payload: { name: `ce-imds2-${uniq()}`, kind: "rest-api", providerKind: "webhook", baseUrl: IMDS },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe("blocked_address_range");
+    expect(res.json().detail).toContain("link-local");
   });
 
   it("the internal-namespace, userinfo and compose-network tricks are refused on these paths too", async () => {
@@ -360,35 +360,27 @@ describe("write time: the endpoints refuse a destination before it is ever store
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
-      payload: { host: "metadata.google.internal", allowPlaintextHttp: true, note: "test" },
+      payload: { host: perTest.trackHost("metadata.google.internal"), allowPlaintextHttp: true, note: "test" },
     });
     expect(gcp.statusCode).toBe(201);
-    try {
-      for (const [baseUrl, code] of [
-        ["http://metadata.google.internal/computeMetadata/v1/", "blocked_host_suffix"],
-        // which side of the `@` is the real host? — refused rather than guessed
-        ["https://api.example.com@169.254.169.254/v1", "userinfo_forbidden"],
-        // Postgres on the compose network
-        ["http://db:5432/", "host_not_allowlisted"],
-      ] as const) {
-        const name = `ce-trick-${uniq()}`;
-        const res = await app.inject({
-          method: "POST",
-          headers: AUTH,
-          url: "/v1/connectors",
-          payload: { name, kind: "rest-api", providerKind: "webhook", baseUrl },
-        });
-        expect(res.statusCode).toBe(400);
-        expect(res.json().error).toBe("egress_blocked");
-        expect(res.json().code).toBe(code);
-        expect(await db.select().from(connectors).where(eq(connectors.name, name))).toHaveLength(0);
-      }
-    } finally {
-      await app.inject({
-        method: "DELETE",
+    for (const [baseUrl, code] of [
+      ["http://metadata.google.internal/computeMetadata/v1/", "blocked_host_suffix"],
+      // which side of the `@` is the real host? — refused rather than guessed
+      ["https://api.example.com@169.254.169.254/v1", "userinfo_forbidden"],
+      // Postgres on the compose network
+      ["http://db:5432/", "host_not_allowlisted"],
+    ] as const) {
+      const name = `ce-trick-${uniq()}`;
+      const res = await app.inject({
+        method: "POST",
         headers: AUTH,
-        url: `/v1/egress-allow-hosts/${gcp.json().id}`,
+        url: "/v1/connectors",
+        payload: { name, kind: "rest-api", providerKind: "webhook", baseUrl },
       });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("egress_blocked");
+      expect(res.json().code).toBe(code);
+      expect(await db.select().from(connectors).where(eq(connectors.name, name))).toHaveLength(0);
     }
   });
 });
@@ -625,37 +617,29 @@ describe("call time: rows that never went through an endpoint are still refused"
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
-      payload: { host: "hooks.partner-cdn.example", note: "looks like an ordinary SaaS receiver" },
+      payload: { host: perTest.trackHost("hooks.partner-cdn.example"), note: "looks like an ordinary SaaS receiver" },
     });
     expect(allowed.statusCode).toBe(201);
-    try {
-      const rebound = await checkConnectionBaseUrl(db, "https://hooks.partner-cdn.example/hook", {
-        resolve: async () => [{ address: "169.254.169.254", family: 4 }],
-      });
-      expect(rebound.decision.ok).toBe(false);
-      expect(rebound.decision.ok === false && rebound.decision.code).toBe("blocked_address_range");
+    const rebound = await checkConnectionBaseUrl(db, "https://hooks.partner-cdn.example/hook", {
+      resolve: async () => [{ address: "169.254.169.254", family: 4 }],
+    });
+    expect(rebound.decision.ok).toBe(false);
+    expect(rebound.decision.ok === false && rebound.decision.code).toBe("blocked_address_range");
 
-      // split DNS: one good answer does not launder the bad one
-      const split = await checkConnectionBaseUrl(db, "https://hooks.partner-cdn.example/hook", {
-        resolve: async () => [
-          { address: "93.184.216.34", family: 4 },
-          { address: "10.0.0.7", family: 4 },
-        ],
-      });
-      expect(split.decision.ok).toBe(false);
+    // split DNS: one good answer does not launder the bad one
+    const split = await checkConnectionBaseUrl(db, "https://hooks.partner-cdn.example/hook", {
+      resolve: async () => [
+        { address: "93.184.216.34", family: 4 },
+        { address: "10.0.0.7", family: 4 },
+      ],
+    });
+    expect(split.decision.ok).toBe(false);
 
-      // and the ordinary answer is allowed, so this is a guard and not a wall
-      const fine = await checkConnectionBaseUrl(db, "https://hooks.partner-cdn.example/hook", {
-        resolve: async () => [{ address: "93.184.216.34", family: 4 }],
-      });
-      expect(fine.decision.ok).toBe(true);
-    } finally {
-      await app.inject({
-        method: "DELETE",
-        headers: AUTH,
-        url: `/v1/egress-allow-hosts/${allowed.json().id}`,
-      });
-    }
+    // and the ordinary answer is allowed, so this is a guard and not a wall
+    const fine = await checkConnectionBaseUrl(db, "https://hooks.partner-cdn.example/hook", {
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    });
+    expect(fine.decision.ok).toBe(true);
   });
 });
 

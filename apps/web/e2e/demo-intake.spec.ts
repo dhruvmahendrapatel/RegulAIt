@@ -1,6 +1,6 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
-import { signInPrepared } from "./demo-credentials";
+import { disposablePassword, signInPrepared } from "./demo-credentials";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,11 @@ const SHOTS = path.join(here, "artifacts", "demo");
 // REGULAIT_BOOTSTRAP_TOKEN with whatever the gateway was started with.
 const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token";
 mkdirSync(SHOTS, { recursive: true });
+// ADR-0174 §6: never a literal. A fresh random password per run (or the named
+// environment variable); signInPrepared keeps it in the git-ignored store for
+// the review-policy journey that follows.
+const ADMIN_PASSWORD = disposablePassword("E2E_DEMO_ADMIN_PASSWORD");
+const AVERY_PASSWORD = disposablePassword("E2E_DEMO_AVERY_PASSWORD");
 
 async function freshUser(page: Page, email: string, password: string) {
   // B4S-06: with demo:prepare's printed credentials (E2E_DEMO_PREPARE_LOG) the
@@ -64,12 +69,12 @@ async function shotBoth(page: Page, name: string) {
 
 async function openAvery(browser: Browser) {
   const page = await browser.newPage();
-  await freshUser(page, "avery@regulait.local", "E2e-Demo-Avery!");
+  await freshUser(page, "avery@regulait.local", AVERY_PASSWORD);
   return page;
 }
 
 test("seeded credit-assistant journey: discover, register, assess, approve, monitor, remediate", async ({ page, browser }) => {
-  await freshUser(page, "admin@regulait.local", "E2e-Demo-Intake!");
+  await freshUser(page, "admin@regulait.local", ADMIN_PASSWORD);
   await page.goto("/ui/admin/shadow-ai");
   await expect(page.getByRole("heading", { name: "Shadow-AI discovery" })).toBeVisible();
   await shotBoth(page, "real-01-discover");

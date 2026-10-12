@@ -35,6 +35,9 @@ import {
   useUsers,
   userOpts,
 } from "../adminKit";
+import { PolicySimulationSettingsCard } from "./PolicySimulationSettingsCard";
+import { POLICY_SIMULATION_REFUSALS } from "./policySimulationModel";
+import { withRefusalCopy } from "./refusalCopy";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -157,6 +160,7 @@ export default function SimulationPage() {
         )}
 
         <BlastRadiusPanel />
+        <PolicySimulationSettingsCard />
       </div>
     </>
   );
@@ -359,6 +363,36 @@ function BlastRadiusPanel() {
           { key: "considered", header: "Calls examined", render: (r) => r.considered },
           { key: "blocked", header: "Newly blocked", render: (r) => r.newlyDenied },
           { key: "users", header: "Users", render: (r) => r.affectedUsers },
+          {
+            key: "open",
+            header: "",
+            align: "right",
+            render: (r) => (
+              <Button
+                size="sm"
+                disabled={act.busy}
+                aria-label={`Open the preview of ${r.policyName} v${r.policyVersion}`}
+                onClick={() =>
+                  void act.run(
+                    () =>
+                      withRefusalCopy(async () => {
+                        const detail = await api.get<{
+                          simulation: SimulationRow;
+                          samples: FlipRow[];
+                          fidelity: string;
+                          abacCannotGrant: string;
+                        }>(`/v1/policy-simulations/${r.id}`);
+                        setIncomplete(null);
+                        setSim(detail);
+                      }, POLICY_SIMULATION_REFUSALS),
+                    null,
+                  )
+                }
+              >
+                Open
+              </Button>
+            ),
+          },
         ]}
       />
     </Card>
