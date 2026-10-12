@@ -334,6 +334,40 @@ describe("model cards — authoring and admin gating", () => {
     expect(res.json().error).toBe("model_card_exists");
   });
 
+  it("an EDIT that would make two cards share (model, intended use) is refused by name, not by the unique index", async () => {
+    const other = await app.inject({
+      method: "POST",
+      url: "/v1/mrm/cards",
+      headers: AUTH,
+      payload: { agentId, intendedUse: "mrm-edit-clash draft use" },
+    });
+    expect(other.statusCode).toBe(201);
+    const otherId = other.json().card.id as string;
+    try {
+      const clash = await app.inject({
+        method: "PATCH",
+        url: `/v1/mrm/cards/${otherId}`,
+        headers: AUTH,
+        payload: { intendedUse: "summarize customer tickets" },
+      });
+      expect(clash.statusCode).toBe(409);
+      expect(clash.json().error).toBe("model_card_exists");
+      // nothing was written: the card keeps its own intended use
+      const [row] = await db.select().from(modelCards).where(eq(modelCards.id, otherId));
+      expect(row!.intendedUse).toBe("mrm-edit-clash draft use");
+      // re-saving a card's OWN intended use is not a clash with itself
+      const same = await app.inject({
+        method: "PATCH",
+        url: `/v1/mrm/cards/${otherId}`,
+        headers: AUTH,
+        payload: { intendedUse: "mrm-edit-clash draft use" },
+      });
+      expect(same.statusCode).toBe(200);
+    } finally {
+      await db.delete(modelCards).where(eq(modelCards.id, otherId));
+    }
+  });
+
   it("reports bias/fairness as an INCOMPLETE declaration, never as a measurement", async () => {
     const res = await app.inject({ method: "GET", url: `/v1/mrm/cards/${cardId}`, headers: AUTH });
     const card = res.json().card;

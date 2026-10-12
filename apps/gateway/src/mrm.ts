@@ -806,6 +806,28 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       if (!row) return reply.status(404).send({ error: "unknown_model_card" });
       const badPin = await pinRefusal(db, row.agentId, body.pinnedModelVersion);
       if (badPin) return reply.status(422).send(badPin);
+      // the same one-position-per-(model, intended use) rule the create route
+      // enforces, as a named refusal rather than the unique index's 500
+      if (body.intendedUse !== undefined && body.intendedUse !== row.intendedUse) {
+        const [clash] = await db
+          .select({ id: modelCards.id })
+          .from(modelCards)
+          .where(
+            and(
+              row.agentId ? eq(modelCards.agentId, row.agentId) : eq(modelCards.customProviderId, row.customProviderId!),
+              eq(modelCards.intendedUse, body.intendedUse),
+              ne(modelCards.id, id),
+            ),
+          );
+        if (clash) {
+          return reply.status(409).send({
+            error: "model_card_exists",
+            detail:
+              "another card already records a risk position on this model for that intended use — edit that card, or " +
+              "choose a different intended use",
+          });
+        }
+      }
       const [updated] = await db
         .update(modelCards)
         .set({

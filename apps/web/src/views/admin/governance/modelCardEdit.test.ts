@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cardPatch, draftOfCard, type EditableCard } from "./modelCardEdit";
+import { CARD_EDIT_REFUSALS, cardPatch, draftOfCard, isRedacted, redactedFields, type EditableCard } from "./modelCardEdit";
 
 const card: EditableCard = {
   intendedUse: "summarize tickets",
@@ -33,6 +33,28 @@ describe("cardPatch", () => {
     expect(cardPatch(card, { ...draftOfCard(card), dataClaims: "[1]" }).problems[0]).toMatch(/JSON object/);
     expect(cardPatch(card, { ...draftOfCard(card), dataClaims: "{" }).problems[0]).toMatch(/not valid JSON/);
     expect(cardPatch(card, { ...draftOfCard(card), dataClaims: "" }).body).toEqual({ dataClaims: {} });
+  });
+
+  it("never re-sends a field the presentation scrub masked, unless the person replaced it", () => {
+    const MASK = "[redacted:aws_key:20:1a5d44a2dca1]";
+    const masked: EditableCard = { ...card, limitations: `uses key ${MASK}`, dataClaims: { secret: MASK }, note: `see ${MASK}` };
+    expect(redactedFields(masked)).toEqual(["limitations", "note", "dataClaims"]);
+    expect(isRedacted("plain text")).toBe(false);
+    // untouched: an edit elsewhere sends only that field, never the masks
+    const d = { ...draftOfCard(masked), intendedUse: "triage tickets" };
+    expect(cardPatch(masked, d)).toEqual({ body: { intendedUse: "triage tickets" }, problems: [] });
+    // an edit that keeps the mask would write it over the original: refused, not sent
+    const kept = cardPatch(masked, { ...draftOfCard(masked), limitations: `now uses key ${MASK}` });
+    expect(kept.body).toEqual({});
+    expect(kept.problems).toEqual(["Known limitations still contains redacted text. Replace the whole field, or leave it unchanged to keep the stored value."]);
+    // replacing the whole field is sent as typed
+    expect(cardPatch(masked, { ...draftOfCard(masked), note: "rotated; no key here" }).body).toEqual({ note: "rotated; no key here" });
+    expect(cardPatch(masked, { ...draftOfCard(masked), limitations: "" }).body).toEqual({ limitations: null });
+  });
+
+  it("names a duplicate (model, intended use) and a generic conflict in words", () => {
+    expect(CARD_EDIT_REFUSALS.model_card_exists).toMatch(/Another card for this model already has that intended use/);
+    expect(CARD_EDIT_REFUSALS.conflict).toBeTruthy();
   });
 
   it("pins and unpins a model version, never on a card without an agent", () => {

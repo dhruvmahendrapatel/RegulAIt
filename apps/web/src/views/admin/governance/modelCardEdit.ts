@@ -28,6 +28,33 @@ export interface CardDraft {
   pinnedModelVersion: string;
 }
 
+/**
+ * The card read passes through the gateway's presentation scrub (ADR-0115),
+ * which replaces secret-looking text with `[redacted:<rule>:<length>:<fingerprint>]`.
+ * A field that came back that way holds a mask, not the stored text: it is
+ * flagged in the form, left out of the PATCH unless the person changes it,
+ * and refused if an edit would still save a mask over the original.
+ */
+const REDACTION_MARKER = /\[redacted:[a-z0-9_.+]+:[0-9]+:[a-f0-9]{12}\]/;
+export const isRedacted = (text: string): boolean => REDACTION_MARKER.test(text);
+
+export type CardTextField = "intendedUse" | "limitations" | "note" | "dataClaims" | "standardRefs" | "pinnedModelVersion";
+
+/** the fields of the card as read that carry a presentation-scrub mask */
+export function redactedFields(card: EditableCard): CardTextField[] {
+  const d = draftOfCard(card);
+  return (Object.keys(d) as CardTextField[]).filter((k) => isRedacted(d[k]));
+}
+
+const FIELD_NAMES: Record<CardTextField, string> = {
+  intendedUse: "Intended use",
+  limitations: "Known limitations",
+  note: "Note",
+  dataClaims: "Provider data claims",
+  standardRefs: "Standard refs",
+  pinnedModelVersion: "Pinned model version",
+};
+
 export const draftOfCard = (c: EditableCard): CardDraft => ({
   intendedUse: c.intendedUse,
   limitations: c.limitations ?? "",
@@ -104,6 +131,13 @@ export function cardPatch(card: EditableCard, draft: CardDraft): { body: CardPat
     else if (pin.length > 200) problems.push("The pinned model version must be at most 200 characters.");
     else body.pinnedModelVersion = pin || null;
   }
+  // a redacted field the person edited must not save the mask itself over the original
+  for (const k of redactedFields(card)) {
+    if (k in body && isRedacted(draft[k])) {
+      problems.push(`${FIELD_NAMES[k]} still contains redacted text. Replace the whole field, or leave it unchanged to keep the stored value.`);
+      delete body[k];
+    }
+  }
   return { body, problems };
 }
 
@@ -112,4 +146,6 @@ export const CARD_EDIT_REFUSALS: Readonly<Record<string, string>> = {
   unknown_model_card: "This model card no longer exists. Reload the page.",
   pinned_version_invalid: "The pinned model version does not match the model this card's agent serves.",
   pinned_version_needs_agent: "A pinned model version applies only to a card on an agent.",
+  model_card_exists: "Another card for this model already has that intended use. Edit that card, or choose a different intended use.",
+  conflict: "This edit conflicts with another model card. Reload the page and try again.",
 };

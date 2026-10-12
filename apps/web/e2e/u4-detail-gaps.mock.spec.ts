@@ -545,6 +545,8 @@ test.describe("U4: report definition, run and run history", () => {
     await expect(runDialog.getByRole("cell", { name: "Atlas" })).toBeVisible();
     await expectAxeClean(page, "report run dialog", '[role="dialog"]');
     await runDialog.getByRole("button", { name: "Close" }).click();
+    // the definition dialog it replaced is gone: focus returns to the button that opened it
+    await expect(page.getByRole("button", { name: "Details of Exec summary" })).toBeFocused();
 
     await expect(page.getByText("Run history")).toBeVisible();
     await expect.poll(() => calls(m, "GET", "/v1/reports/runs").at(-1)?.search).toBe("?limit=50");

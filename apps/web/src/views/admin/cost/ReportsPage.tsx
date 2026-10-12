@@ -16,7 +16,7 @@
  *    org report shows "org-wide"; anyone else sees the narrowed list, so the
  *    scoping is legible rather than implicit.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
@@ -108,6 +108,10 @@ export default function ReportsPage() {
   // Batch U4: a definition or a run opened for its full record
   const [openDefinition, setOpenDefinition] = useState<string | null>(null);
   const [openRun, setOpenRun] = useState<string | null>(null);
+  // the "Details" button that opened the definition dialog: a run opened from inside that dialog
+  // replaces it, so closing the run hands focus back here (the dialog's own return target is gone)
+  const definitionOpener = useRef<HTMLButtonElement | null>(null);
+  const [runFromDefinition, setRunFromDefinition] = useState(false);
 
   const defs = overview.data?.definitions ?? [];
 
@@ -217,7 +221,14 @@ export default function ReportsPage() {
                       header: "",
                       render: (d) => (
                         <div className={a.formRow}>
-                          <Button size="sm" aria-label={`Details of ${d.name}`} onClick={() => setOpenDefinition(d.id)}>
+                          <Button
+                            size="sm"
+                            aria-label={`Details of ${d.name}`}
+                            onClick={(e) => {
+                              definitionOpener.current = e.currentTarget;
+                              setOpenDefinition(d.id);
+                            }}
+                          >
                             Details
                           </Button>
                           <Button
@@ -438,13 +449,37 @@ export default function ReportsPage() {
               </div>
             </Card>
           )}
-          <ReportRunsCard definitions={defs.map((d) => ({ id: d.id, name: d.name }))} onOpenRun={setOpenRun} />
+          <ReportRunsCard definitions={defs.map((d) => ({ id: d.id, name: d.name }))} onOpenRun={(id) => {
+              setRunFromDefinition(false);
+              setOpenRun(id);
+            }}
+          />
         </QueryGate>
       </div>
       {openDefinition && (
-        <ReportDefinitionDetail key={openDefinition} id={openDefinition} onClose={() => setOpenDefinition(null)} onOpenRun={(id) => { setOpenDefinition(null); setOpenRun(id); }} />
+        <ReportDefinitionDetail key={openDefinition} id={openDefinition} onClose={() => setOpenDefinition(null)} onOpenRun={(id) => {
+            setOpenDefinition(null);
+            setRunFromDefinition(true);
+            setOpenRun(id);
+          }}
+        />
       )}
-      {openRun && <ReportRunDetail key={openRun} id={openRun} onClose={() => setOpenRun(null)} />}
+      {openRun && (
+        <ReportRunDetail
+          key={openRun}
+          id={openRun}
+          onClose={() => {
+            setOpenRun(null);
+            if (runFromDefinition) {
+              setRunFromDefinition(false);
+              // after the dialog unmounts and its own focus return has run
+              requestAnimationFrame(() => {
+                if (definitionOpener.current?.isConnected) definitionOpener.current.focus();
+              });
+            }
+          }}
+        />
+      )}
     </>
   );
 }

@@ -12,7 +12,7 @@ import { useState } from "react";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Button, Field, Input, Modal, Textarea } from "../../../ui/kit";
 import { useAction } from "../adminKit";
-import { CARD_EDIT_REFUSALS, cardPatch, draftOfCard, type CardDraft, type EditableCard } from "./modelCardEdit";
+import { CARD_EDIT_REFUSALS, cardPatch, draftOfCard, redactedFields, type CardDraft, type CardTextField, type EditableCard } from "./modelCardEdit";
 import { ApiError } from "../../../api/client";
 import v from "../../views.module.css";
 
@@ -31,6 +31,15 @@ export function ModelCardEditButton(props: { card: EditableCard & { id: string }
   const act = useAction();
   const { body, problems } = cardPatch(props.card, draft);
   const changed = Object.keys(body);
+  // fields the presentation scrub masked on the way out: flagged, and never re-sent unless edited
+  const masked = redactedFields(props.card);
+  const describedBy = (k: CardTextField) => (masked.includes(k) ? { "aria-describedby": `mc-redacted-${k}` } : {});
+  const notice = (k: CardTextField) =>
+    masked.includes(k) ? (
+      <p id={`mc-redacted-${k}`} className={v.faint} role="note">
+        This field was redacted for display; saving replaces it.
+      </p>
+    ) : null;
   const set = (k: keyof CardDraft) => (e: { target: { value: string } }) => setDraft((d) => ({ ...d, [k]: e.target.value }));
   const close = () => {
     setOpen(false);
@@ -82,25 +91,31 @@ export function ModelCardEditButton(props: { card: EditableCard & { id: string }
       >
         <div className={v.stack}>
           <Field label="Intended use">
-            <Input value={draft.intendedUse} onChange={set("intendedUse")} required />
+            <Input value={draft.intendedUse} onChange={set("intendedUse")} required {...describedBy("intendedUse")} />
           </Field>
+          {notice("intendedUse")}
           <Field label="Known limitations">
-            <Textarea rows={3} value={draft.limitations} onChange={set("limitations")} />
+            <Textarea rows={3} value={draft.limitations} onChange={set("limitations")} {...describedBy("limitations")} />
           </Field>
+          {notice("limitations")}
           <Field label="Provider data claims (JSON)">
-            <Textarea rows={3} value={draft.dataClaims} onChange={set("dataClaims")} />
+            <Textarea rows={3} value={draft.dataClaims} onChange={set("dataClaims")} {...describedBy("dataClaims")} />
           </Field>
+          {notice("dataClaims")}
           <Field label="Standard refs (comma separated)">
-            <Input value={draft.standardRefs} onChange={set("standardRefs")} />
+            <Input value={draft.standardRefs} onChange={set("standardRefs")} {...describedBy("standardRefs")} />
           </Field>
+          {notice("standardRefs")}
           {props.card.agentId && (
             <Field label="Pinned model version (blank = not pinned)">
-              <Input value={draft.pinnedModelVersion} onChange={set("pinnedModelVersion")} />
+              <Input value={draft.pinnedModelVersion} onChange={set("pinnedModelVersion")} {...describedBy("pinnedModelVersion")} />
             </Field>
           )}
+          {props.card.agentId && notice("pinnedModelVersion")}
           <Field label="Note">
-            <Textarea rows={2} value={draft.note} onChange={set("note")} />
+            <Textarea rows={2} value={draft.note} onChange={set("note")} {...describedBy("note")} />
           </Field>
+          {notice("note")}
           <div aria-live="polite" className={v.stack}>
             {problems.length > 0 ? (
               <ul className={v.errLine} role="alert">
