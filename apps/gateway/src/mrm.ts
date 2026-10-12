@@ -90,7 +90,7 @@ import { loadOrgSettings } from "./org-settings.js";
 import { modelCardSignoffSubjects, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { summarizeGroundedness } from "./evals.js";
-import { pinnedVersionProblem } from "@regulait/shared";
+import { containsAuditScrubMarker, pinnedVersionProblem } from "@regulait/shared";
 
 /**
  * ADR-0175 review fix — a card's pinned version must be an exact version of
@@ -624,6 +624,42 @@ async function cardView(db: Db, card: ModelCardRow, now: Date, warnDays: number)
   };
 }
 
+/**
+ * ADR-0115: the card reads and the create/edit echoes pass through the presentation scrub, which replaces
+ * secret-looking text with `[redacted:<rule>:<length>:<fingerprint>]`. A write that sends such a marker back
+ * (an edit of a field that came back masked, or text copied from a masked card into a new one) would store the
+ * mask over the original, so both card writers refuse it: 400 `redacted_text_refused`, naming the fields.
+ * Every string is checked, object keys included, through an explicit stack (no recursion depth to exhaust).
+ */
+export const REDACTED_TEXT_REFUSED = "redacted_text_refused";
+export function cardFieldsWithScrubMarker(body: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  const stack: Array<{ v: unknown; field: string }> = Object.entries(body).map(([k, v]) => ({ v, field: k }));
+  while (stack.length > 0 && out.size < 20) {
+    const { v, field } = stack.pop()!;
+    if (typeof v === "string") {
+      if (containsAuditScrubMarker(v)) out.add(field);
+    } else if (Array.isArray(v)) {
+      for (const x of v) stack.push({ v: x, field });
+    } else if (v !== null && typeof v === "object") {
+      for (const [k, x] of Object.entries(v)) {
+        if (containsAuditScrubMarker(k)) out.add(field);
+        stack.push({ v: x, field });
+      }
+    }
+  }
+  return [...out].sort();
+}
+function redactedTextRefusal(fields: string[]) {
+  return {
+    error: REDACTED_TEXT_REFUSED,
+    fields,
+    detail:
+      `${fields.join(", ")} contain${fields.length === 1 ? "s" : ""} a redaction marker ([redacted:…]) from a scrubbed view; ` +
+      "saving it would replace the stored text with its mask. Replace the whole field, or leave it out of the edit to keep the stored value",
+  };
+}
+
 export function registerMrmRoutes(app: FastifyInstance, db: Db) {
   /** the posture + the counts an admin screen leads with. The `posture` field
    * is computed, never stored — the UI must not be able to claim an assurance
@@ -734,6 +770,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
 
     scope.post("/v1/mrm/cards", async (req, reply) => {
       const body = createModelCardSchema.parse(req.body);
+      const masked = cardFieldsWithScrubMarker(body);
+      if (masked.length > 0) return reply.status(400).send(redactedTextRefusal(masked));
       if (body.agentId) {
         const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
         if (!a) return reply.status(404).send({ error: "unknown_agent" });
@@ -802,6 +840,8 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     scope.patch("/v1/mrm/cards/:id", async (req, reply) => {
       const { id } = idParam.parse(req.params);
       const body = updateModelCardSchema.parse(req.body);
+      const masked = cardFieldsWithScrubMarker(body);
+      if (masked.length > 0) return reply.status(400).send(redactedTextRefusal(masked));
       const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
       if (!row) return reply.status(404).send({ error: "unknown_model_card" });
       const badPin = await pinRefusal(db, row.agentId, body.pinnedModelVersion);

@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   AUDIT_SCRUB_MARKER_PREFIX,
   CREDENTIAL_MATERIAL_RULES,
+  containsAuditScrubMarker,
   scrubAuditDetail,
   scrubAuditRow,
   scrubAuditText,
@@ -218,5 +219,16 @@ describe("no second, drifting copy of the credential rules", () => {
     scrubAuditText(`${AWS_KEY} and ${AWS_KEY}`);
     for (const r of CREDENTIAL_MATERIAL_RULES) expect(r.re.lastIndex).toBe(0);
     expect(semanticDlpDetector.detect(`${AWS_KEY} ${AWS_KEY}`).some((h) => h.count === 2)).toBe(true);
+  });
+});
+
+describe("containsAuditScrubMarker (a writer refuses text copied from a scrubbed view)", () => {
+  it("finds a real marker, repeatedly (no lastIndex carried between calls), and nothing else", () => {
+    const masked = scrubAuditText("key AKIAIOSFODNN7EXAMPLE");
+    expect(masked).toContain(AUDIT_SCRUB_MARKER_PREFIX);
+    for (let i = 0; i < 3; i += 1) expect(containsAuditScrubMarker(`note: ${masked}`)).toBe(true);
+    expect(containsAuditScrubMarker("plain text")).toBe(false);
+    expect(containsAuditScrubMarker("[redacted] by hand")).toBe(false);
+    expect(containsAuditScrubMarker("[redacted:aws_key:20:XYZ]")).toBe(false);
   });
 });

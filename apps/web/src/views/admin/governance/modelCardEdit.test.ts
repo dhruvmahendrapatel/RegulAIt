@@ -55,6 +55,8 @@ describe("cardPatch", () => {
   it("names a duplicate (model, intended use) and a generic conflict in words", () => {
     expect(CARD_EDIT_REFUSALS.model_card_exists).toMatch(/Another card for this model already has that intended use/);
     expect(CARD_EDIT_REFUSALS.conflict).toBeTruthy();
+    // the gateway refuses a scrub marker in any card text field (PATCH and POST): a sentence, not the raw code
+    expect(CARD_EDIT_REFUSALS.redacted_text_refused).toMatch(/redacted text/);
   });
 
   it("pins and unpins a model version, never on a card without an agent", () => {

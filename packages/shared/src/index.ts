@@ -2915,6 +2915,7 @@ export {
 export {
   AUDIT_SCRUB_FINGERPRINT_HEX,
   AUDIT_SCRUB_MARKER_PREFIX,
+  containsAuditScrubMarker,
   scrubAuditDetail,
   scrubAuditRow,
   scrubAuditText,
