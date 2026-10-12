@@ -19,6 +19,7 @@ import { IntegrationOwnership } from "./IntegrationOwnership";
 import { ExecutionProfileSelector } from "./isolation/IsolationPanel";
 import { McpRegistriesPanel } from "./McpRegistriesPanel";
 import { McpAdmissionClearButton, McpVisibleToolsCard } from "./McpServerAdmission";
+import { IdentityPropagationCell, McpIdentityAssertionCard } from "./McpIdentityPropagation";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
@@ -132,6 +133,12 @@ function McpServersTab() {
                 header: "Private ranges",
                 render: (s) => s.transport === "stdio" ? "Not applicable" : <PrivateRangesCell key={s.id} server={s} />,
               },
+              {
+                // ADR-0188 S8: off by default; turning it on is a stepped-up, audited relaxation
+                key: "identityPropagation",
+                header: "Identity to upstream",
+                render: (s) => <IdentityPropagationCell key={s.id} server={s} />,
+              },
               { key: "id", header: "Proxy id", render: (s) => <IdChip id={s.id} /> },
             ]}
             rows={servers.data?.servers ?? []}
@@ -149,6 +156,7 @@ function McpServersTab() {
         <McpCoverage servers={servers.data?.servers ?? []} />
 
         {selectedId && <McpExecutionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
+        {selectedId && <McpIdentityAssertionCard server={(servers.data?.servers ?? []).find((s) => s.id === selectedId)} />}
 
         {selectedId && (
           <ToolsCard

@@ -172,6 +172,8 @@ const CODE_SENTENCES: Record<string, string> = {
   // PR #378: a relaxing write (an MCP server's private ranges, an agent's expected served model, ...) is a
   // compare-and-set on what its step-up was decided on; the screens that make one read the refusal here
   changed_concurrently: "Someone changed this while you were saving, so nothing was written. Reload and repeat the change",
+  // ADR-0188 S8: a stdio MCP server has no HTTP request to carry an identity assertion
+  identity_propagation_unsupported: "This server runs as a local (stdio) process, so it cannot receive an identity assertion. Nothing was saved",
   unavailable: "This record isn't available — it may not exist, or it may belong to someone else",
   not_found: "No such record",
   unknown_project: "No project with this ID exists",
