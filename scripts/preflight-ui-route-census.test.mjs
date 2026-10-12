@@ -340,7 +340,7 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
   // deliberate edit to this file too (and both files are CODEOWNERS-reviewed).
   // KNOWN_UI_GAPS_MAX only ever goes DOWN: lower it as gaps close, never raise it.
   it("THE PINNED SIZES: known gaps, machine-only, superseded and indirect entries", () => {
-    expect(KNOWN_UI_GAPS_MAX).toBe(22);
+    expect(KNOWN_UI_GAPS_MAX).toBe(0);
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
     expect(MACHINE_ONLY.size).toBe(40);
     expect(SUPERSEDED.size).toBe(14);
