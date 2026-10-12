@@ -6,3 +6,4 @@ export * from "./profiles.js";
 export * from "./settings.js";
 export * from "./attestation.js";
 export * from "./channel.js";
+export * from "./placement.js";

@@ -424,6 +424,8 @@ export const VERSIONED_RULE_FIELDS: Partial<Record<ConfigArtifactType, readonly 
     "redteamGatingClasses",
     "redteamMinTrials",
     "redteamFailOnSeverity",
+    // ADR-0190 decision 7 item 3
+    "minIsolationClass",
   ],
 };
 
@@ -504,6 +506,7 @@ const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
     redteamGatingClasses: z.array(z.string()).nullish(),
     redteamMinTrials: z.number().int().positive().nullish(),
     redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullish(),
+    minIsolationClass: z.enum(["hardened_container", "user_space_kernel", "microvm"]).nullish(),
   }),
 };
 

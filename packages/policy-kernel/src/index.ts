@@ -684,6 +684,10 @@ export type RuleName =
   | "delegation-scope"
   | "delegation-budget"
   | "actor-allow-list"
+  /** ADR-0190 decision 7 (slice I2): no executor can place the call at its required isolation class (or a
+   * policy fact behind that class did not resolve). Applied AFTER this kernel allowed, by the gateway's placement
+   * decision (`execution-placement.ts`); it can only turn an allow into a refusal, before any upstream contact. */
+  | "execution-profile"
   | "default-deny";
 
 export const DEFAULT_DENY_RULE_ID = "default-deny";
