@@ -1011,6 +1011,7 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
     // OIDC issuer behind the default-deny egress guard, so the loopback issuer
     // is allow-listed here exactly as an air-gapped operator with a
     // self-hosted Keycloak would (the pattern auth.test.ts already uses).
+    // egress-allow-cleanup: afterAll — its id is recorded in loopbackAllowHostId, which afterAll removes
     const allow = await app.inject({
       method: "POST", headers: AUTH, url: "/v1/egress-allow-hosts",
       payload: {

@@ -22,13 +22,15 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
+import { snapshotEgressAllowHosts, type EgressAllowSnapshot } from "./egress-allow-restore";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
   passwords: { admin: string };
 };
 
-const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
+const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
 const CSRF = { "x-regulait-csrf": "1" };
 const SCORER = "zz-e2e-scorer";
 
@@ -82,6 +84,15 @@ test.beforeAll(async () => {
   port = (srv.address() as { port: number }).port;
 });
 
+// M-068 / M-078: the 127.0.0.1 allow entry this spec adds is put back as it was
+// found (removed, or its original opt-ins restored) after the test, pass or fail
+let egressSnapshot: EgressAllowSnapshot | undefined;
+test.afterEach(async ({ page }) => {
+  const snapshot = egressSnapshot;
+  egressSnapshot = undefined;
+  await snapshot?.restore(page.request);
+});
+
 test.afterAll(async () => {
   srv.closeAllConnections();
   await new Promise<void>((r) => srv.close(() => r()));
@@ -91,6 +102,7 @@ test("an external scorer is registered, tested against a real endpoint, enabled,
   await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   // the operator's egress act: allow 127.0.0.1 with private ranges + plaintext
+  egressSnapshot = await snapshotEgressAllowHosts(page.request, "", ["127.0.0.1"]);
   const allow = await page.request.post("/v1/egress-allow-hosts", {
     headers: CSRF,
     data: {

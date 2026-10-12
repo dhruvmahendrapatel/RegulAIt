@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { recordTotpSecret, resetTotpStore } from "./totp-sign-in";
+import { generateSettledPasswords } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -161,7 +162,9 @@ export default async function globalSetup() {
 
   writeFileSync(
     STATE_FILE,
-    JSON.stringify({ pid: child.pid, passwords, baseUrl: `http://127.0.0.1:${PORT}` }, null, 2),
+    // settledPasswords: what the journeys set in place of the one-time ones, fresh per run (ADR-0174 §6)
+    JSON.stringify({ pid: child.pid, passwords, settledPasswords: generateSettledPasswords(), baseUrl: `http://127.0.0.1:${PORT}` }, null, 2),
+    { mode: 0o600 },
   );
   process.env.E2E_BASE_URL = `http://127.0.0.1:${PORT}`;
 }

@@ -18,6 +18,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { asSteppedUpAdmin } from "./admin-api";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -29,7 +30,7 @@ mkdirSync(SHOTS, { recursive: true });
 
 const BOOT_AUTH = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
 const IDA_EMAIL = "ovr-ida@example.com";
-const IDA_PASSWORD = "E2e-Ovr-Ida-1!";
+const IDA_PASSWORD = E2E_PASSWORDS.overrideIda;
 
 async function api<T = Record<string, unknown>>(
   method: string,

@@ -649,6 +649,7 @@ describe("A11: the production wiring", () => {
       // another file's entry: use it as it is, and never delete what is not ours
       expect(existing.allowPrivateRanges && existing.allowPlaintextHttp).toBe(true);
     } else {
+      // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
       const [row] = await db
         .insert(egressAllowHosts)
         .values({ host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "k-auto test receiver" })

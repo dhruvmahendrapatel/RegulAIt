@@ -64,6 +64,65 @@ afterAll(async () => { await app.close(); });`;
     expect(analyzeTestFile(src)).toMatchObject({ creates: true, cleansInAfterAll: false });
   });
 
+  describe("PER ENTRY: a create inside a test body needs its own cleanup", () => {
+    const fileLevel = `beforeAll(async () => { await post("/v1/egress-allow-hosts", { host: "127.0.0.1" }); });
+afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" }); });
+`;
+
+    it("a second host a test allow-lists is NOT covered by the file's afterAll removal", () => {
+      const src = `${fileLevel}it("imds", async () => {
+  await app.inject({ method: "POST", url: "/v1/egress-allow-hosts", payload: { host: "169.254.169.254" } });
+  expect(1).toBe(1);
+  await app.inject({ method: "DELETE", url: \`/v1/egress-allow-hosts/\${id}\` });
+});`;
+      const a = analyzeTestFile(src);
+      expect(a.cleansInAfterAll).toBe(true);
+      expect(a.untrackedTestCreates).toEqual([4]);
+    });
+
+    it("a try/finally DELETE after the POST statement is not enough either: the brief's credential-egress shape", () => {
+      const src = `${fileLevel}it("imds", async () => {
+  const r = await app.inject({ method: "POST", url: "/v1/egress-allow-hosts", payload: { host: "x" } });
+  try { expect(1).toBe(1); } finally { await app.inject({ method: "DELETE", url: \`/v1/egress-allow-hosts/\${r.id}\` }); }
+});`;
+      expect(analyzeTestFile(src).untrackedTestCreates).toEqual([4]);
+    });
+
+    it("a host passed through trackHost with an afterEach removeAll is clean, and each half alone is not", () => {
+      const create = `it.each([1])("imds %s", async () => {
+  await app.inject({ method: "POST", url: "/v1/egress-allow-hosts", payload: { host: perTest.trackHost("169.254.169.254") } });
+});\n`;
+      const teardown = `afterEach(async () => { (await perTest.removeAll(app, AUTH)).assertRemoved(); });\n`;
+      expect(analyzeTestFile(fileLevel + create + teardown)).toMatchObject({ cleansInAfterEach: true, untrackedTestCreates: [] });
+      expect(analyzeTestFile(fileLevel + create).untrackedTestCreates).toHaveLength(1);
+      const untracked = create.replace(`perTest.trackHost("169.254.169.254")`, `"169.254.169.254"`);
+      expect(analyzeTestFile(fileLevel + untracked + teardown).untrackedTestCreates).toHaveLength(1);
+    });
+
+    it("a restore inside a finally, and a marked file-scoped or refused create, are accepted", () => {
+      const restore = `it("withdraw", async () => {
+  try { await db.delete(egressAllowHosts); } finally { await db.insert(egressAllowHosts).values(saved); }
+});\n`;
+      const marked = `it("shared", async () => {
+  // egress-allow-cleanup: afterAll — the loopback entry later tests use
+  const r = await post("/v1/egress-allow-hosts", { host: "127.0.0.1" });
+});\n`;
+      const refused = `it("non-admin", async () => {
+  // egress-allow-cleanup: refused — a non-admin POST creates nothing
+  for (const [m, u] of [["POST", "/v1/egress-allow-hosts"]]) await app.inject({ method: m, url: u });
+});\n`;
+      for (const body of [restore, marked, refused]) expect(analyzeTestFile(fileLevel + body).untrackedTestCreates, body).toEqual([]);
+      // the marker must sit on the creating statement, not on the test
+      const misplaced = `// egress-allow-cleanup: afterAll\nit("shared", async () => {\n  await post("/v1/egress-allow-hosts", { host: "127.0.0.1" });\n});\n`;
+      expect(analyzeTestFile(fileLevel + misplaced).untrackedTestCreates).toHaveLength(1);
+    });
+
+    it("a create in beforeAll or in a helper stays a file-level create (afterAll rule only)", () => {
+      const helper = `async function allow(h) { await post("/v1/egress-allow-hosts", { host: h }); }\nit("x", async () => { await allow("a"); });\n`;
+      expect(analyzeTestFile(fileLevel + helper).untrackedTestCreates).toEqual([]);
+    });
+  });
+
   it("recognises a scratch database dropped from afterAll by the helper or by its own statement", () => {
     expect(analyzeTestFile(`afterAll(async () => { await dropScratchDatabase(admin, NAME); });`).dropsScratchDb).toBe(true);
     expect(analyzeTestFile(`afterAll(async () => { await control(\`DROP DATABASE "\${database}"\`); });`).dropsScratchDb).toBe(true);
