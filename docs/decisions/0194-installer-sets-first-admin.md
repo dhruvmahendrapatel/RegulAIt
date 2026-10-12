@@ -56,3 +56,28 @@ ADR-0180 (secure by default), and a known default administrator credential is a 
   - the skip on re-run.
 - INSTALL.md and the installer summary are rewritten around the new step. The manual bootstrap path stays as the
   documented fallback.
+
+## As built (2026-10-12)
+
+1. **Where the account is created.** The installer runs a small command-line tool inside the gateway container,
+   `dist/first-admin.js`, built from `first-admin.ts` and `first-admin-lib.ts`, rather than calling the gateway over
+   HTTP. No route is added.
+   - The password reaches the tool on stdin only: `printf | docker compose exec -T`, or a redirect from the 0600
+     file. It never appears in any process's arguments and is never read into a shell variable.
+   - The tool validates the username and email with the same shared schemas and seat gate as `POST /v1/users`.
+   - It writes the user, the password hash and the audit rows in one transaction: `username-set`,
+     `initial-password-set` and a new `first-admin-created`. None of these rows carries the password or the hash.
+   - It checks again for an existing admin under the sign-in lock, so two concurrent runs create one admin.
+2. **Retiring the token needs more than removing it from `.env` (refines decision 4).** `docker-compose.yml`
+   defaults the token to `dev-bootstrap`, and the gateway refuses that value on a deployed box. So the installer
+   also:
+   - pins `REGULAIT_BOOTSTRAP_TOKEN: ""` in `compose.install.yml`;
+   - writes `REGULAIT_BOOTSTRAP_RETIRED=1` to `.env`, so that re-runs do not generate a new token;
+   - restarts the gateway with `up -d --no-build`.
+   The manual fallback in INSTALL.md now ends with "re-run the installer to retire the token" instead of the old
+   `sed` instruction, which would have hit that refusal.
+3. **Break-glass.** An explicit `--admin-token` re-opens a retired token for recovery. The next installer run
+   without that flag retires it again. A token that is only exported in the shell is ignored.
+4. **Unattended installs.** `REGULAIT_FIRST_ADMIN_PASSWORD_FILE` must be a regular, non-empty file with mode 0600 or
+   stricter, and `REGULAIT_FIRST_ADMIN_EMAIL` is required with it. Both are checked before anything is rendered.
+   Without the file, a non-interactive run skips the step and prints the manual path.
