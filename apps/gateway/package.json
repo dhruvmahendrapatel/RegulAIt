@@ -21,6 +21,7 @@
     "demo:gate": "node dist/demo-gate.js",
     "demo:export-key": "node dist/demo-export-key.js",
     "receipt-key:init": "node dist/receipt-key-init.js",
+    "identity-key:init": "node dist/identity-key-init.js",
     "demo:set-passwords": "node dist/demo-set-passwords.js"
   },
   "dependencies": {

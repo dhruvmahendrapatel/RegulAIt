@@ -37,6 +37,7 @@ import { metricsPosture } from "./metrics.js";
 import { approvalSigningPosture } from "./approval-signatures.js";
 import { bootstrapStepUpPosture } from "./step-up.js";
 import { receiptSigningKeyPosture } from "./receipt-signing-key.js";
+import { identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import type { FastifyInstance } from "fastify";
 import {
   auditLog,
@@ -365,6 +366,9 @@ export function registerPosturePresetRoutes(
       // ADR-0189 R25 item 12: where the receipt signing key came from. Reported, never a control:
       // it does not count toward `hardened` and blocks nothing (a missing key already refuses sign-offs).
       receiptSigningKey: receiptSigningKeyPosture(process.env),
+      // ADR-0188 S7: where the identity issuer's signing key came from (reported, never a control; a
+      // missing key already refuses every self token and delegated token)
+      identitySigningKey: await identitySigningKeyConfiguration(process.env),
     };
   });
 

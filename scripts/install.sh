@@ -149,6 +149,9 @@ USAGE
 # --- defaults ---------------------------------------------------------------
 MODE=""
 DOMAIN=""
+# ADR-0188 S7: the gateway's issuer (REGULAIT_PUBLIC_URL). Kept from a prior install; else
+# https://<domain> when Caddy terminates TLS; else unset (see the warning below).
+PUBLIC_URL=""
 TLS=""
 ACME_EMAIL=""
 OIDC_ISSUER=""
@@ -373,6 +376,7 @@ if [ -f "$ENV_FILE" ]; then
   PRIOR_EMAIL="$(env_get "$ENV_FILE" REGULAIT_TLS_EMAIL_DIRECTIVE)"
   PRIOR_OIDC="$(env_get "$ENV_FILE" REGULAIT_OIDC_ISSUER)"
   PRIOR_SEED="$(env_get "$ENV_FILE" SEED_DEMO)"
+  PUBLIC_URL="$(env_get "$ENV_FILE" REGULAIT_PUBLIC_URL)"
   [ -n "$DATA_KEY" ]     || DATA_KEY="$(env_get "$ENV_FILE" REGULAIT_DATA_KEY)"
   [ -n "$ADMIN_TOKEN" ]  || ADMIN_TOKEN="$(env_get "$ENV_FILE" REGULAIT_BOOTSTRAP_TOKEN)"
   PRIOR_RETIRED="$(env_get "$ENV_FILE" REGULAIT_BOOTSTRAP_RETIRED)"
@@ -465,6 +469,16 @@ if [ "$TLS" != "letsencrypt" ] && [ -n "$ACME_EMAIL" ]; then
 fi
 if [ "$TLS" != "none" ] && [ -z "$DOMAIN" ]; then
   die "--tls $TLS needs a --domain: Caddy's site address is the hostname it serves and (for letsencrypt) issues for."
+fi
+# ADR-0188 S7: engine runners and PDP clients take DPoP-bound self tokens whose issuer is
+# REGULAIT_PUBLIC_URL; with it unset the token endpoint refuses (503) and none of them can
+# authenticate. Behind Caddy the public origin is known; behind your own terminator only you
+# know it, so it is left for you to set rather than guessed.
+if [ -z "$PUBLIC_URL" ] && [ "$TLS" != "none" ] && [ -n "$DOMAIN" ]; then
+  PUBLIC_URL="https://$DOMAIN"
+fi
+if [ -z "$PUBLIC_URL" ]; then
+  warn "REGULAIT_PUBLIC_URL is not set: engine runners and PDP clients (the Kong adapter) cannot authenticate until it names this deployment's https origin. Add REGULAIT_PUBLIC_URL=https://<your host> to $ENV_FILE and re-run."
 fi
 if [ "$MODE" != "hosted" ] && [ "$SEED_DEMO" = "1" ]; then
   warn "SEED_DEMO=1 on a $MODE deployment will create demo users (dana/avery/admin) and demo API keys in a CUSTOMER database. This is almost never what you want."
@@ -834,6 +848,13 @@ ENV
 
 # ---- application -----------------------------------------------------------
 SEED_DEMO=$SEED_DEMO
+ENV
+  # ADR-0188 S7: the issuer of every workload self token (and the passkey relying party,
+  # ADR-0121); written only when known, because an empty value is not a URL
+  if [ -n "$PUBLIC_URL" ]; then
+    printf 'REGULAIT_PUBLIC_URL=%s\n' "$PUBLIC_URL"
+  fi
+  cat <<ENV
 # ADR-0031: the ONLY peer allowed to speak for the client via X-Forwarded-*.
 # This is Caddy's pinned compose address and nothing else. If you terminate TLS
 # on your own proxy instead, set this to that proxy's address — and never to a
@@ -1055,6 +1076,29 @@ case "$RECEIPT_KEY_RC:$RECEIPT_KEY_LINE" in
   *)
     warn "${RECEIPT_KEY_LINE:-the gateway could not be reached to check the receipt key}"
     warn "until a usable receipt signing key exists every sign-off is refused. Check: docker compose -p $PROJECT logs gateway | grep 'receipt key'" ;;
+esac
+
+# ADR-0188 S7: the installer's half of the install-generated identity ISSUER key, the
+# receipt key's twin. Engine runners and PDP clients authenticate with DPoP-bound self
+# tokens the issuer signs (their bearer tokens are retired), so with no issuer key none
+# of them could ever authenticate. Same generator as the gateway's first boot: it reuses
+# an existing key, never overwrites one, does nothing for an operator-managed
+# REGULAIT_IDENTITY_SIGNING_KEY, and prints key ids (public thumbprints) only.
+step "Identity issuer key (install-generated unless REGULAIT_IDENTITY_SIGNING_KEY is set)"
+IDENTITY_KEY_LINE=""
+IDENTITY_KEY_RC=0
+IDENTITY_KEY_LINE="$(docker compose "${COMPOSE_ARGS[@]}" exec -T gateway node apps/gateway/dist/identity-key-init.js 2>&1)" || IDENTITY_KEY_RC=$?
+case "$IDENTITY_KEY_RC:$IDENTITY_KEY_LINE" in
+  0:*) ok "$IDENTITY_KEY_LINE" ;;
+  [12]:*"identity issuer key: "*)
+    die "$IDENTITY_KEY_LINE
+
+  No workload token can be issued until this is fixed: engine runners and PDP clients cannot
+  authenticate. The install-generated key lives in the install secrets volume (mode 0600, owned
+  by uid 1000) and is never overwritten. Then re-run this installer." ;;
+  *)
+    warn "${IDENTITY_KEY_LINE:-the gateway could not be reached to check the issuer key}"
+    warn "until a usable issuer key exists no engine runner or PDP client can authenticate. Check: docker compose -p $PROJECT logs gateway | grep 'issuer key'" ;;
 esac
 
 # ===========================================================================

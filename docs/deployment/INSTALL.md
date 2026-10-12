@@ -423,6 +423,31 @@ recoverable: the next boot makes a new key under a new key id, and the receipts 
 one still verify against its recorded public key. Read the key-retirement section there: the
 product has no way yet to retire the old key id.
 
+### The identity issuer key and the public URL (ADR-0188 S7)
+
+Engine runners and PDP clients (the Kong adapter) no longer hold bearer secrets: each holds its own
+Ed25519 key and takes short DPoP-bound tokens from the gateway's `/oauth/token`. Two things must
+exist for that:
+
+- **An issuer signing key.** Like the receipt key, the installer and the gateway's first boot create
+  one in the install secrets volume as `identity-signing-key.pem` (mode `0600`, owned by the
+  gateway's user, never overwritten). The boot log's `issuer key:` line and the installer's
+  `Identity issuer key` step name it by key id only. `REGULAIT_IDENTITY_SIGNING_KEY` (a PEM file of
+  one or more PKCS#8 Ed25519 keys) always wins; listing the next key beside the current one and
+  rotating at **Admin → Workload identities → Issuer signing keys** is how a key is rotated (the old
+  public half stays published until the tokens it signed expire). `GET /v1/org/posture` reports
+  `identitySigningKey.source` (`install_generated`, `operator_managed`, `missing`, `invalid`).
+- **`REGULAIT_PUBLIC_URL`.** It is the issuer every token and proof names. The installer writes
+  `https://<domain>` when Caddy terminates TLS and keeps a value you set; behind your own terminator
+  it warns and leaves it to you. Runners receive the same value through compose (they still dial
+  `http://gateway:3000`).
+
+**Runners** generate their key on first start (`runner-key` on their own state volume, mode `0600`),
+register its public half with the one-time enrolment token, and rotate it themselves before it
+expires (`POST /v1/engine-runner/credentials`, proved by the current key). An upgrade revokes every
+old `rge_` runner token (migration 0195): re-enrol each runner with a new enrolment token. **PDP
+clients** are provisioned by an admin: see [GATEWAY_TOPOLOGY.md](GATEWAY_TOPOLOGY.md) §3.
+
 ### 5. Read the logs (ADR-0167)
 
 The gateway logs structured JSON lines to stdout (`docker compose logs gateway`; the compose file

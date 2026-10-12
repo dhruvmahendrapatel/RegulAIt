@@ -54,6 +54,7 @@ import { backfillOtlpHeaderCiphertext, loadOrgSettings } from "./org-settings.js
 import { ManifestDigestRepinBootError, repinManifestDigests, type ManifestDigestRepinResult } from "./manifest-digest-repin.js";
 import { DevSecretsBootError, assessDevSecrets, realAdminExists } from "./dev-secrets.js";
 import { checkReceiptSigningKey } from "./receipt-signing-key.js";
+import { ensureInstallIdentityKey, identitySigningKeyConfiguration } from "./identity-signing-keys.js";
 import { describeGatewayLogger, resolveGatewayLogger } from "./gateway-logger.js";
 import { databaseTlsBootWarning, describeDbPool, resolveDbPoolConfig } from "@regulait/db";
 import { describeMetricsPosture, resolveMetricsConfig, startMetricsListener } from "./metrics.js";
@@ -110,6 +111,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // refused, which is where a deployment with no key already is. The key is then RESOLVED as a signer
   // resolves it, so an unreadable operator key is logged `invalid` here, not found at the first sign-off.
   const receiptKey = checkReceiptSigningKey(env);
+  // ADR-0188 S7: the same for the identity ISSUER's signing key. Without one no workload can take a self
+  // token, so on a fresh install an engine runner or a PDP client could never authenticate.
+  const identityKeyEnsure = await ensureInstallIdentityKey(env);
+  const identityKey = await identitySigningKeyConfiguration(env);
 
   // ADR-0167 (CFG-02): the SERVING process logs. Resolved here, not inside
   // buildApp, so the ~100 test files that construct apps stay silent; forced
@@ -423,6 +428,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // An operator who cannot see this from the boot log will not go looking.
   log(`  bootstrap: ${secrets.bootstrapLine}`);
   log(`  receipt key: ${receiptKey.line}`);
+  log(
+    `  issuer key:  ${identityKey.source}${identityKey.configuredKids.length ? ` (${identityKey.configuredKids.join(", ")})` : ""}` +
+      `${identityKeyEnsure.outcome === "created" ? " — created on this boot" : identityKeyEnsure.outcome === "failed" ? ` — GENERATION FAILED (${identityKeyEnsure.reason})` : ""}`,
+  );
   for (const finding of secrets.findings) {
     log(`  secrets:   DEV-GRADE — ${finding}`);
   }

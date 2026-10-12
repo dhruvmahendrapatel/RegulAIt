@@ -981,8 +981,24 @@ export interface IdentitySigningKeyView {
 }
 
 /** `GET /v1/identity/signing-keys` (S3): every issuer key ever recorded, newest first; public halves only */
+/**
+ * ADR-0188 S7: where the issuer's private keys come from. `install_generated` is the
+ * `identity-signing-key.pem` the installer or first boot creates in the install secrets
+ * directory (the receipt-key pattern); `operator_managed` is REGULAIT_IDENTITY_SIGNING_KEY;
+ * `missing` means no token can be issued (every workload self token and delegated token is refused).
+ */
+export const IDENTITY_SIGNING_KEY_SOURCES = ["operator_managed", "install_generated", "missing", "invalid"] as const;
+export type IdentitySigningKeySource = (typeof IDENTITY_SIGNING_KEY_SOURCES)[number];
+export interface IdentitySigningKeyConfigurationView {
+  source: IdentitySigningKeySource;
+  /** the kids (RFC 7638 thumbprints) of the configured private keys; never key material */
+  configuredKids: string[];
+  note: string;
+}
 export interface IdentitySigningKeyListView {
   items: IdentitySigningKeyView[];
+  /** ADR-0188 S7: where the private halves come from (absent from a gateway before S7) */
+  configuration?: IdentitySigningKeyConfigurationView;
 }
 
 /** an issuer key id: the RFC 7638 thumbprint of its public JWK (migration 0180 CHECK allows this alphabet) */

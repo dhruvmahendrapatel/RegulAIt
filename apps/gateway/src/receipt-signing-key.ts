@@ -117,6 +117,16 @@ function pause(ms: number): void {
  * non-POSIX platforms skip the mode and owner checks (their stat reports no meaningful bits).
  */
 function loadInstallKey(file: string): ResolvedReceiptKey | null {
+  const parsed = loadInstallKeyFile(file);
+  return parsed ? { keyId: installReceiptKeyId(parsed.jwk), source: "install_generated", ...parsed } : null;
+}
+
+/**
+ * ADR-0188 S7: the same strict read for ANY install-generated Ed25519 key in the install secrets
+ * directory (the receipt key, and the identity issuer's signing key). null when the file or its
+ * directory does not exist; ReceiptKeyError when it exists and is unusable (see `loadInstallKey`).
+ */
+export function loadInstallKeyFile(file: string): { privateKey: KeyObject; jwk: ReceiptPublicJwk } | null {
   if (POSIX) {
     // checked on an open handle (O_NOFOLLOW|O_DIRECTORY), never by a separate path stat
     let dfd: number;
@@ -151,8 +161,7 @@ function loadInstallKey(file: string): ResolvedReceiptKey | null {
       if (n === 0) break;
       read += n;
     }
-    const parsed = parseReceiptPem(buf.subarray(0, read));
-    return { keyId: installReceiptKeyId(parsed.jwk), source: "install_generated", ...parsed };
+    return parseReceiptPem(buf.subarray(0, read));
   } catch {
     throw new ReceiptKeyError();
   } finally {
@@ -207,12 +216,12 @@ if (!TMP_RE.test(`.${INSTALL_RECEIPT_KEY_FILE}.1.000000000000.tmp`)) throw new E
 export const STALE_TMP_MS = 60_000;
 
 /** remove temporary key files a crashed generation left behind; never the key, never a fresh temporary file */
-export function removeStaleInstallKeyTemps(dir: string, now: number = Date.now()): number {
+export function removeStaleInstallKeyTemps(dir: string, now: number = Date.now(), tmpRe: RegExp = TMP_RE): number {
   let removed = 0;
   let names: string[];
   try { names = readdirSync(dir); } catch { return 0; }
   for (const name of names) {
-    if (!TMP_RE.test(name)) continue;
+    if (!tmpRe.test(name)) continue;
     const p = path.join(dir, name);
     let fd: number | null = null;
     try {
@@ -244,16 +253,33 @@ export function ensureInstallReceiptKey(env: NodeJS.ProcessEnv = process.env, de
   if (operatorReceiptKeyConfigured(env)) return { outcome: "operator_managed" };
   const file = installReceiptKeyPath(env);
   if (!file) return { outcome: "not_configured" };
+  const r = ensureInstallKeyFile(file, TMP_RE, deps);
+  if (r.outcome === "failed") return r;
+  return { outcome: r.outcome, keyId: installReceiptKeyId(r.jwk), fingerprint: receiptPublicKeyFingerprint(r.jwk), path: file };
+}
+
+export type EnsureInstallKeyFileOutcome =
+  | { outcome: "created" | "reused"; jwk: ReceiptPublicJwk; path: string }
+  | { outcome: "failed"; reason: string; path: string };
+
+/**
+ * The generator behind every install-generated key (ADR-0189 R25 item 12; ADR-0188 S7 reuses it for the
+ * identity issuer's key): idempotent, never overwrites, create-exclusive (link(2)), never throws. `tmpRe`
+ * must match `.<basename>.<pid>.<12 hex>.tmp` for `file` exactly: it is how a crashed generation's
+ * temporary file is recognised, and it is a literal at each caller (CodeQL js/incomplete-sanitization).
+ */
+export function ensureInstallKeyFile(file: string, tmpRe: RegExp, deps: EnsureInstallReceiptKeyDeps = {}): EnsureInstallKeyFileOutcome {
   const dir = path.dirname(file);
-  removeStaleInstallKeyTemps(dir, (deps.now ?? Date.now)());
-  const reused = (): EnsureInstallReceiptKeyOutcome => {
+  if (!tmpRe.test(`.${path.basename(file)}.1.000000000000.tmp`)) throw new Error("the temporary-file pattern does not match the key file");
+  removeStaleInstallKeyTemps(dir, (deps.now ?? Date.now)(), tmpRe);
+  const reused = (): EnsureInstallKeyFileOutcome => {
     // a concurrent creator holds a second link for an instant (its temporary file) before removing it,
     // so a refusal is retried briefly before it is reported
     for (let attempt = 0; ; attempt++) {
       try {
-        const key = loadInstallKey(file);
+        const key = loadInstallKeyFile(file);
         if (!key) return { outcome: "failed", reason: "the key file disappeared after it was created", path: file };
-        return { outcome: "reused", keyId: key.keyId, fingerprint: receiptPublicKeyFingerprint(key.jwk), path: file };
+        return { outcome: "reused", jwk: key.jwk, path: file };
       } catch {
         if (attempt >= 20) return { outcome: "failed", reason: `an existing key file is unusable (${UNUSABLE_INSTALL_KEY}); it was left untouched`, path: file };
         pause(50);
@@ -262,9 +288,9 @@ export function ensureInstallReceiptKey(env: NodeJS.ProcessEnv = process.env, de
   };
   // one load attempt, no separate existence check: null means there is no key file yet
   let present = true;
-  try { present = loadInstallKey(file) !== null; } catch { /* present but refused: reused() retries, then reports it */ }
+  try { present = loadInstallKeyFile(file) !== null; } catch { /* present but refused: reused() retries, then reports it */ }
   if (present) return reused();
-  const tmp = path.join(dir, `.${INSTALL_RECEIPT_KEY_FILE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let fd: number | null = null;
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -284,7 +310,7 @@ export function ensureInstallReceiptKey(env: NodeJS.ProcessEnv = process.env, de
     }
     unlinkSync(tmp); // back to one link at once: a reader refuses a key file with two
     fsyncDir(dir);
-    return { outcome: "created", keyId: installReceiptKeyId(parsed.jwk), fingerprint: receiptPublicKeyFingerprint(parsed.jwk), path: file };
+    return { outcome: "created", jwk: parsed.jwk, path: file };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return { outcome: "failed", reason: code ? `could not write the key (${code})` : "could not generate a valid Ed25519 key", path: file };

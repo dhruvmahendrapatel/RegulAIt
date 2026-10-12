@@ -65,6 +65,9 @@ x-engine-runner: &engine-runner
   environment:
     REGULAIT_GATEWAY_URL: http://gateway:3000
     REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_ENROLLMENT_TOKEN:-}
+    # ADR-0188 S7: the gateway's issuer, which the runner's self-token requests and DPoP proofs
+    # name (the runner still DIALS http://gateway:3000); the same value the gateway is given
+    REGULAIT_PUBLIC_URL: ${REGULAIT_PUBLIC_URL:-}
   restart: unless-stopped
   networks: [engines]
 

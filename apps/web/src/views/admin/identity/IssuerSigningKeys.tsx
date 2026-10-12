@@ -12,7 +12,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Modal, SkeletonBlock, Table } from "../../../ui/kit";
 import { getDelegationGrant, listSigningKeys, revokeSigningKey, rotateSigningKey, signingKeyKeys, workloadIdentityKeys } from "./workloadIdentityApi";
-import { SIGNING_KEY_STATE_TEXT, kidOk, signingKeyRefusal, signingKeyState, type IdentitySigningKeyView } from "./signingKeyModel";
+import { SIGNING_KEY_SOURCE_TEXT, SIGNING_KEY_STATE_TEXT, kidOk, signingKeyRefusal, signingKeyState, type IdentitySigningKeyView } from "./signingKeyModel";
 import { formatMicros, type DelegationAllocationView } from "./workloadIdentityModel";
 import s from "./workloadIdentities.module.css";
 
@@ -59,6 +59,15 @@ export function IssuerSigningKeysCard(props: { busy: boolean; ask: (c: AskConfir
         configured by the deployment operator first; rotating here activates it and retires the current signer, whose public half stays published
         until the tokens it signed expire.
       </p>
+      {keys.data?.configuration && (
+        // ADR-0188 S7: where the private halves come from; engine runners and PDP clients need one to authenticate
+        <p>
+          <Badge tone={keys.data.configuration.source === "missing" || keys.data.configuration.source === "invalid" ? "danger" : "ok"}>
+            {SIGNING_KEY_SOURCE_TEXT[keys.data.configuration.source]}
+          </Badge>{" "}
+          {keys.data.configuration.note}
+        </p>
+      )}
       <form
         className={s.actions}
         onSubmit={(e) => {
