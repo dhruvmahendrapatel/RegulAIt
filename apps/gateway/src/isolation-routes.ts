@@ -317,7 +317,7 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     const exists =
       targetKind === "agent"
         ? (await db.select({ id: agents.id }).from(agents).where(eq(agents.id, targetId)))[0]
-        : (await db.select({ id: builderAgents.id }).from(builderAgents).where(eq(builderAgents.id, targetId)))[0];
+        : (await db.select({ id: builderAgents.id }).from(builderAgents).where(and(eq(builderAgents.id, targetId), isNull(builderAgents.archivedAt))))[0];
     if (!exists) {
       await reply.status(404).send({ error: "target_not_found" });
       return null;

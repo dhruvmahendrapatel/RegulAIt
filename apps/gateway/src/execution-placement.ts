@@ -164,7 +164,10 @@ async function complianceFloors(db: Db, projectId: string | null): Promise<Array
   if (!projectId) return [];
   const [p] = await db.select({ classifications: projects.classifications }).from(projects).where(eq(projects.id, projectId));
   if (!p) return undefined;
-  const tags = Array.isArray(p.classifications) ? p.classifications : [];
+  // null = the project carries no tags; anything else that is not a list of tag strings does not resolve (never [])
+  const raw: unknown = p.classifications;
+  if (raw !== null && (!Array.isArray(raw) || !raw.every((t) => typeof t === "string" && t.length > 0 && t.length <= 64))) return undefined;
+  const tags = (raw ?? []) as string[];
   try {
     const profiles = await complianceProfilesForTags(db, tags);
     return profiles.map((x) => (x.minIsolationClass ?? null) as string | null);
@@ -221,10 +224,13 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
 
   // the profile: the MCP server's, else the agent's, else the shipped default; an unknown agent gets the most
   // restrictive whatever is assigned (PF-06)
+  // an mcp_stdio call names its stdio server: without one (or with a server that is not stdio) the server's own
+  // profile, a floor of the call, cannot be looked up, so the fact does not resolve (never the agent's or the default)
   let serverProfileId: string | null = null;
+  if (kind === "mcp_stdio" && !req.mcpServerId) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
   if (req.mcpServerId) {
     const [srv] = await db.select({ executionProfileId: mcpServers.executionProfileId, transport: mcpServers.transport }).from(mcpServers).where(eq(mcpServers.id, req.mcpServerId));
-    if (!srv) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
+    if (!srv || srv.transport !== "stdio") return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
     serverProfileId = srv.executionProfileId;
   }
   const byId = async (id: string) => (await db.select().from(executionProfiles).where(eq(executionProfiles.id, id)))[0] ?? null;
@@ -233,23 +239,28 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
   const raise = (c: RequirableIsolationClass) => {
     configuredFloor = configuredFloor === undefined || isolationClassRank(c) > isolationClassRank(configuredFloor) ? c : configuredFloor;
   };
+  // the CONFIGURED profile (the server's, else the agent's, else the shipped default for the kind) is the
+  // configured_profile floor whatever the assurance. An unknown or low-assurance agent is then PLACED under the most
+  // restrictive profile; that profile's class is the unknown_agent floor, not a configured one (so the floor that set
+  // the requirement is named for what it is)
+  const serverRow = serverProfileId ? await byId(serverProfileId) : null;
+  const agentRow = agentProfileId ? await byId(agentProfileId) : null;
+  if ((serverProfileId && !serverRow) || (agentProfileId && !agentRow)) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
+  let configured: ResolvedProfile | null = null;
+  if (serverRow) configured = profileView(serverRow, "mcp_server");
+  else if (agentRow) configured = profileView(agentRow, "agent");
+  else {
+    const row = await shippedProfile(db, defaultProfileFor(kind, "known"));
+    if (row) configured = profileView(row, "shipped_default");
+  }
+  if (!configured) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
+  raise(configured.minClass);
+  if (agentRow && agentRow.id !== configured.id) raise(agentRow.minClass as RequirableIsolationClass);
   if (assurance !== "known") {
     const row = await shippedProfile(db, defaultProfileFor(kind, assurance));
     if (row) profile = profileView(row, "most_restrictive");
-  } else {
-    const serverRow = serverProfileId ? await byId(serverProfileId) : null;
-    const agentRow = agentProfileId ? await byId(agentProfileId) : null;
-    if ((serverProfileId && !serverRow) || (agentProfileId && !agentRow)) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
-    if (serverRow) profile = profileView(serverRow, "mcp_server");
-    else if (agentRow) profile = profileView(agentRow, "agent");
-    else {
-      const row = await shippedProfile(db, defaultProfileFor(kind, assurance));
-      if (row) profile = profileView(row, "shipped_default");
-    }
-    if (agentRow && profile && agentRow.id !== profile.id) raise(agentRow.minClass as RequirableIsolationClass);
-  }
+  } else profile = configured;
   if (!profile) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
-  raise(profile.minClass);
   // the profile must allow this workload kind: a profile that cannot run it is a configuration fault
   const body = executionProfileBodySchema.safeParse(JSON.parse((await byId(profile.id))?.body ?? "null"));
   if (!body.success || !(body.data.workloadKinds as readonly string[]).includes(kind)) {
