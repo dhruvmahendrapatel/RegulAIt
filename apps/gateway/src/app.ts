@@ -138,6 +138,13 @@ import {
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
+import {
+  auditIdentityPropagationChange,
+  identityPropagationUpdate,
+  lockIdentityAudiences,
+  refuseIdentityPropagationOnStdio,
+  refuseSharedIdentityAudience,
+} from "./mcp-identity-assertion.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
   AUTH_REFUSAL_DETAIL,
@@ -2073,6 +2080,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           : `this server's transport is '${before.transport}'; register a new server to use another. Nothing was saved.`,
       });
     }
+    // ADR-0188 S8: a stdio server cannot carry an identity assertion (409, nothing saved)
+    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation);
+    if (identityRefusal) return reply.status(identityRefusal.status).send(identityRefusal.body);
     const label = `MCP server '${before.name}'`;
     const nextUrl = body.url ?? before.url;
     const nextFlag =
@@ -2140,12 +2150,26 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       body.allowPrivateRanges,
       (await loadOrgSettings(db)).mcpPrivateRangesDefault,
     );
-    const rangesStepUpArgs = rangesRelaxed
+    // ADR-0188 S8: sending the caller's identity to this upstream is a relaxation too, bound to the url it goes to;
+    // a url move without it turns the opt-in off (it never follows the url to a new destination)
+    const identity = identityPropagationUpdate(before, body);
+    const relaxedValues = rangesRelaxed || identity.relaxed ? { ...rangesRelaxed, ...identity.relaxed } : null;
+    const rangesStepUpArgs = relaxedValues
       ? {
           kind: "settings_relax" as const,
-          facts: { op: "mcp_server_update", serverId, ...(body.url !== undefined ? { url: nextUrl } : {}), values: rangesRelaxed },
+          facts: {
+            op: "mcp_server_update",
+            serverId,
+            ...(body.url !== undefined || identity.relaxed ? { url: nextUrl } : {}),
+            values: relaxedValues,
+          },
         }
       : null;
+    // ADR-0188 S8: two opted-in servers never share an audience (asked before any step-up; re-checked under a lock below)
+    if (identity.relaxed) {
+      const shared = await refuseSharedIdentityAudience(db, serverId, nextUrl);
+      if (shared) return reply.status(shared.status).send(shared.body);
+    }
     // ADR-0185 I9 — an owner named on PATCH goes through the same audited change as PUT …/owner. A refused
     // request changes NOTHING: the owner target is validated (its refusal audited by the one owner writer) and
     // both step-ups are looked at (not spent) before anything is written; then the ranges grant is spent, the
@@ -2182,6 +2206,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ...(body.allowPrivateRanges !== undefined
         ? { allowPrivateRanges: body.allowPrivateRanges }
         : {}),
+      ...(identity.write !== null ? { identityPropagation: identity.write } : {}),
       ...stdioPatch,
     };
     let row: typeof mcpServers.$inferSelect = before;
@@ -2193,9 +2218,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // ranges AND the url it was decided on are unchanged, so a concurrent change (another admin closing the ranges,
       // or moving the url) is never overwritten by a write decided against the old values. The ranges grant is
       // spent inside the same transaction AFTER that compare-and-set, so a 409 never burns it.
-      const touchesPosture = body.allowPrivateRanges !== undefined || body.url !== undefined;
+      const touchesPosture = body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
       const out = await db.transaction(async (tx): Promise<Patched> => {
+        if (identity.relaxed) {
+          await lockIdentityAudiences(tx);
+          const shared = await refuseSharedIdentityAudience(tx, serverId, nextUrl);
+          if (shared) return { refused: { status: shared.status, body: shared.body } };
+        }
         const [written] = await tx
           .update(mcpServers)
           .set(patch)
@@ -2207,6 +2237,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
                     ? isNull(mcpServers.allowPrivateRanges)
                     : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
                   eq(mcpServers.url, before.url),
+                  eq(mcpServers.identityPropagation, before.identityPropagation),
                 )
               : eq(mcpServers.id, serverId),
           )
@@ -2251,6 +2282,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           reason:
             `${label}: private ranges ${String(before.allowPrivateRanges ?? "inherit")} → ${String(row.allowPrivateRanges ?? "inherit")}` +
             (rangesRelaxed ? " — a relaxation of the strict default" : ""),
+        });
+      }
+      // a url move that keeps it on writes no identity column, and is still a relaxation on the trail
+      if (identity.write !== null || identity.relaxed) {
+        await auditIdentityPropagationChange(db, {
+          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+          serverId,
+          label,
+          from: before.identityPropagation,
+          to: row.identityPropagation,
+          url: row.url,
+          update: identity,
+          stepUp: identity.relaxed ? rangesStepUp : null,
         });
       }
       if (stdioChange) {
@@ -5279,7 +5323,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // the org's behalf is precisely the act a non-admin must not reach.
   registerRiskRoutes(app, db);
 
-  registerMcpProxy(app, db);
+  registerMcpProxy(app, db, { dataKey: opts.dataKey });
   // ADR-0097 part A — the admission review queue and the reason-required,
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.

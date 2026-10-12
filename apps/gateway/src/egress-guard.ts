@@ -704,8 +704,11 @@ export function egressRefusal(err: unknown): string | null {
 }
 
 export interface GuardedFetchOptions extends EgressCheckOptions {
-  /** Runs after destination validation and immediately before transport admission. */
-  beforeSend?: () => Promise<void>;
+  /**
+   * Runs after destination validation and immediately before transport admission. It receives the init this
+   * fetch was called with (ADR-0188 S8 audits an identity disclosure here, keyed by that object).
+   */
+  beforeSend?: (init?: RequestInit) => Promise<void>;
   /**
    * TEST SEAM ONLY. Injecting a fetch replaces the pinned transport below, so
    * an injected fetch resolves the hostname itself and is therefore NOT pinned.
@@ -774,7 +777,7 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
     const signal = init?.signal ?? AbortSignal.timeout(timeouts().outboundDefaultMs);
 
     // Admission runs after asynchronous DNS/egress validation, before any send.
-    if (opts.beforeSend) await opts.beforeSend();
+    if (opts.beforeSend) await opts.beforeSend(init);
 
     let res: Response;
     if (injected) {

@@ -69,6 +69,7 @@ import {
   McpEgressBlockedError,
   type McpUpstreamRow,
 } from "./mcp-egress.js";
+import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { timeouts } from "./timeouts.js";
 import {
   attemptsForToolKind,
@@ -256,7 +257,7 @@ export async function refuseStdioWithoutEntitlement(
 export async function connectUpstream(
   db: Db,
   serverRow: McpUpstreamRow,
-  opts: { retry?: RetryReport; retryAttempts?: number } = {},
+  opts: { retry?: RetryReport; retryAttempts?: number; outboundIdentity?: OutboundIdentity | null } = {},
 ): Promise<Client> {
   // ADR-0128 — THE RETRY SEQUENCE WRAPS BOTH GATES, and that is the point of
   // putting it here rather than inside `guardedMcpConnect`. A handshake is
@@ -278,7 +279,11 @@ export async function connectUpstream(
       // last sync is not a fact about this request, and a row written straight
       // into Postgres must be adjudicated too.
       await assertAdmitted(db, serverRow.id);
-      return guardedMcpConnect(db, serverRow, { connectDeadlineMs: deadlineMs });
+      return guardedMcpConnect(db, serverRow, {
+        connectDeadlineMs: deadlineMs,
+        // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)
+        ...(opts.outboundIdentity ? { outboundIdentity: opts.outboundIdentity } : {}),
+      });
     },
     {
       budgetMs: timeouts().mcpConnectMs,
@@ -689,7 +694,7 @@ export async function executeGovernedToolCall(
 
 async function executeGovernedToolCallInner(
   db: Db,
-  _dataKey: string | undefined,
+  dataKey: string | undefined,
   args: Parameters<typeof executeGovernedToolCall>[2],
   traceInput: { value?: Record<string, unknown> },
 ): Promise<GovernedToolCallOutcome> {
@@ -717,6 +722,8 @@ async function executeGovernedToolCallInner(
   // Unknown tool: sync the manifest once in case it's newly added upstream.
   let kind = toolRow?.kind;
   let upstream: Client | null = null;
+  // ADR-0188 S8: an opted-in server's identity holder, on every connect of this call; armed only once allowed
+  const outboundIdentity = outboundIdentityFor(serverRow);
   const redactActive = piiMode === "redact";
   const closeUpstream = async () => {
     if (upstream) {
@@ -832,7 +839,7 @@ async function executeGovernedToolCallInner(
       if (refused) return refused;
       let upstreamTools;
       try {
-        upstream = await connectUpstream(db, serverRow);
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
@@ -1222,11 +1229,26 @@ async function executeGovernedToolCallInner(
       }
     }
 
+    // ADR-0188 S8 (decision 8): the call is allowed; an opted-in server's tools/call carries a signed assertion of
+    // who it is for and who is acting. Armed BEFORE the connect and before any approval is consumed, so a refusal
+    // here contacts nothing and spends nothing.
+    if (outboundIdentity) {
+      const armed = await armOutboundIdentity(outboundIdentity, "tools/call", {
+        db,
+        dataKey,
+        server: serverRow,
+        sponsorUserId: userId,
+        actors: delegatedActor ? delegatedActor.chain.actors : null,
+        toolName,
+        projectId,
+      });
+      if (!armed.ok) return { kind: "denied", decision: armed.decision };
+    }
     if (!upstream) {
       const refused = await breakerRefusesUpstream();
       if (refused) return refused;
       try {
-        upstream = await connectUpstream(db, serverRow);
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity });
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
@@ -1930,7 +1952,8 @@ export async function resolveNodeToolContext(
   return { toolDefs, serverByTool };
 }
 
-export function registerMcpProxy(app: FastifyInstance, db: Db) {
+/** `dataKey`: ADR-0188 S8, the pairwise subject of an outbound identity assertion is keyed from it */
+export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}) {
   // O10 (ADR-0027): admin-only per-tool price override (NOT in
   // NON_ADMIN_ROUTES — the default gate keeps it admin-only, like the server
   // registry writes). Set on the INVENTORY row so a manifest re-sync (which
@@ -2241,6 +2264,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           userId,
           serverId,
           method,
+          dataKey: opts.dataKey,
           params,
           projectId,
           principal: abacPrincipalFromRequest(req),
@@ -2251,7 +2275,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
         }).catch(async (err: unknown) => {
           // the same named policy refusal a tools/call raises post-hijack
-          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
+          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
             await finishTrace(db, protocolTrace, "denied");
             throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
           }
@@ -2371,7 +2395,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       });
       // The proxy route is now a thin governance-to-MCP-error mapper over the
       // shared primitive; the identical logic serves the worker loop too.
-      const outcome = await executeGovernedToolCall(db, undefined, {
+      const outcome = await executeGovernedToolCall(db, opts.dataKey, {
         userId,
         serverId,
         toolName,
@@ -2390,7 +2414,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // answers. It is the SAME named policy refusal the manifest handler
         // raises post-hijack — never a generic internal error, and never the
         // breaker's "retry later".
-        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
+        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
           await finishTrace(db, toolTrace, "denied");
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
         }

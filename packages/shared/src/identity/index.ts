@@ -4,3 +4,4 @@
 export * from "./contract.js";
 export * from "./settings.js";
 export * from "./delegation-authz.js";
+export * from "./mcp-identity-assertion.js";

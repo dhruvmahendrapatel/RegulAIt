@@ -37,6 +37,7 @@ const DECISION_WRITERS = [
   "engine-runs.ts",
   "governed-evaluate.ts", // the `governance-policy-changed` refusal row of the MCP tool, MCP protocol and connector paths
   "guardrails.ts",
+  "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made
   "mcp-protocol.ts", // MCP protocol methods
   "mcp-proxy.ts", // MCP tool calls (governed-evaluate.ts decides; its callers write the decision row)
   "outbound-audience.ts",
