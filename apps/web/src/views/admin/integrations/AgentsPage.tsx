@@ -24,6 +24,7 @@ import {
   userOpts,
 } from "../adminKit";
 import { StewardshipCard } from "./AgentStewardship";
+import { ExpectedServedModelCard } from "./ExpectedServedModelCard";
 import { ProviderMark, ProviderTiles } from "../../../ui/ModelPicker";
 import { providerLabel } from "../../models/modelBindings";
 import a from "../admin.module.css";
@@ -191,6 +192,7 @@ export default function AgentsPage() {
 
         <RegisterAgentCard />
         <ModelPricingCard agents={agents.data?.agents ?? []} />
+        <ExpectedServedModelCard agents={agents.data?.agents ?? []} />
         <SystemPromptCard agents={agents.data?.agents ?? []} />
         <FallbackChainCard agents={agents.data?.agents ?? []} />
 
