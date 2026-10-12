@@ -171,6 +171,26 @@ const check = (name, ok, detail = "") => {
 const sh = (cmd, args, opts = {}) =>
   execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe", ...opts });
 
+// ---- ADR-0188 S7: identity_manage setup calls, step-up off for exactly those calls ----
+//
+// Creating, binding and revoking the PDP client's identity is an `identity_manage` action, which needs a
+// step-up. The bootstrap credential passes one only until a real admin with a step-up method exists, and the
+// demo seed makes one, so these calls would be refused 403 `step_up_required`. The harness owns this scratch
+// database: it turns step-up OFF around exactly these calls, through its own psql connection, and puts the
+// previous value back in a finally. Nothing else the harness does runs relaxed.
+const psqlScalar = (sql) =>
+  execFileSync("psql", [`${PG}/${DB}`, "-v", "ON_ERROR_STOP=1", "-tAc", sql], { encoding: "utf8", stdio: "pipe" }).trim();
+async function withStepUpOff(call) {
+  const prior = psqlScalar("SELECT step_up_mode FROM org_settings WHERE id = 'singleton'");
+  if (!/^[a-z_]+$/.test(prior)) throw new Error(`unexpected step_up_mode '${prior.slice(0, 40)}'`);
+  psqlScalar("UPDATE org_settings SET step_up_mode = 'off' WHERE id = 'singleton'");
+  try {
+    return await call();
+  } finally {
+    psqlScalar(`UPDATE org_settings SET step_up_mode = '${prior}' WHERE id = 'singleton'`);
+  }
+}
+
 // ---- ADR-0188 S7: the PDP client's credential, exercised from OUTSIDE Kong ----
 //
 // The plugin asks with its own key's DPoP-bound self token. When the Kong run
@@ -539,16 +559,16 @@ async function main() {
   created.base = base;
   created.boot = boot;
   beforeCreating("the PDP client identity");
-  const ident = await api("POST", `${base}/v1/workload-identities`,
-    { kind: "pdp", sponsorUserIds: [admin.id], environments: [DEPLOY_MODE] }, boot);
+  const ident = await withStepUpOff(() => api("POST", `${base}/v1/workload-identities`,
+    { kind: "pdp", sponsorUserIds: [admin.id], environments: [DEPLOY_MODE] }, boot));
   if (ident.status !== 201) throw new Error(`could not create the PDP client identity: ${ident.status} ${JSON.stringify(ident.json).slice(0, 200)}`);
   // remembered so teardown can revoke it even when an assertion below throws
   created.pdpIdentityId = ident.json.id;
   // the key is made HERE and only its public half is sent: the gateway never holds the private key
   const pdpPrivate = generateKeyPairSync("ed25519").privateKey;
   const { kty, crv, x } = pdpPrivate.export({ format: "jwk" });
-  const bound = await api("POST", `${base}/v1/workload-identities/${created.pdpIdentityId}/credentials`,
-    { kind: "jwk", publicJwk: { kty, crv, x } }, boot);
+  const bound = await withStepUpOff(() => api("POST", `${base}/v1/workload-identities/${created.pdpIdentityId}/credentials`,
+    { kind: "jwk", publicJwk: { kty, crv, x } }, boot));
   if (bound.status !== 201) throw new Error(`could not bind the PDP client key: ${bound.status} ${JSON.stringify(bound.json).slice(0, 200)}`);
   // one line (an env-file holds one): base64url of the PKCS#8 DER, which the plugin also accepts as PEM
   const pdpKey = pdpPrivate.export({ type: "pkcs8", format: "der" }).toString("base64url");
@@ -1529,12 +1549,14 @@ async function teardown(why) {
   //    hung gateway must not hold the rest of the teardown hostage.
   if (created.pdpIdentityId && created.base && created.boot) {
     try {
-      await fetch(`${created.base}/v1/workload-identities/${created.pdpIdentityId}/revoke`, {
-        method: "POST",
-        headers: { ...created.boot, "content-type": "application/json" },
-        body: "{}",
-        signal: AbortSignal.timeout(5_000),
-      });
+      await withStepUpOff(() =>
+        fetch(`${created.base}/v1/workload-identities/${created.pdpIdentityId}/revoke`, {
+          method: "POST",
+          headers: { ...created.boot, "content-type": "application/json" },
+          body: "{}",
+          signal: AbortSignal.timeout(5_000),
+        }),
+      );
     } catch {
       /* best effort — the gateway may already be dead from assertion (j) */
     }

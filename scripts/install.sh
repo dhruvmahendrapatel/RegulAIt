@@ -487,8 +487,17 @@ fi
 if [ -n "$PUBLIC_URL" ]; then
   # written into .env and compose: only an http(s) origin (optionally a plain base path) of safe characters.
   # The gateway applies the full rules at boot (https, or http on loopback only) and refuses anything else.
+  # One trailing slash is normalised away (the gateway and the runners drop it too: parsePublicUrl).
+  PUBLIC_URL="${PUBLIC_URL%/}"
   url_re='^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*$'
   [[ "$PUBLIC_URL" =~ $url_re ]] || die "--public-url must be an http(s) origin with an optional plain base path (e.g. https://regulait.acme.example), got $(printf '%q' "$PUBLIC_URL")"
+  url_host="${PUBLIC_URL#*://}"; url_host="${url_host%%/*}"; url_host="${url_host%%:*}"
+  # a trailing-dot host names the same host under another origin string; the gateway refuses it at boot
+  case "$url_host" in *.) die "--public-url must not end its host with a dot: $(printf '%q' "$PUBLIC_URL")" ;; esac
+  # '.' and '..' path segments are refused as written, never normalised away (as the gateway does)
+  url_rest="${PUBLIC_URL#*://}"; url_path=""
+  case "$url_rest" in */*) url_path="/${url_rest#*/}" ;; esac
+  case "$url_path/" in */./*|*/../*) die "--public-url must not contain '.' or '..' path segments: $(printf '%q' "$PUBLIC_URL")" ;; esac
 fi
 if [ -z "$PUBLIC_URL" ]; then
   warn "REGULAIT_PUBLIC_URL is not set: engine runners and PDP clients (the Kong adapter) cannot authenticate until it names this deployment's https origin. Add REGULAIT_PUBLIC_URL=https://<your host> to $ENV_FILE and re-run."

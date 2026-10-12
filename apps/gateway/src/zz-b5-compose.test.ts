@@ -223,7 +223,7 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(worker).toMatch(/\n {4}user: "10001:10001"\n/);
     expect(worker).toMatch(/\n {4}pull_policy: \$\{REGULAIT_ENGINE_PULL_POLICY:-never\}\n/);
     expect(worker).toMatch(/\n {4}profiles: \["engines"\]\n/);
-    // credential isolation (decision 140): no runner token, no enrolment token, no state volume
+    // credential isolation (decision 140): no runner key, no enrolment token, no state volume
     const wvols = worker.slice(worker.indexOf("    volumes:\n") + 13, worker.indexOf("    environment:"));
     expect(wvols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-garak-jobs:/jobs:ro", "- engine-garak-results:/out"]);
     expect(worker).not.toMatch(/ENROLLMENT_TOKEN|\/state|engine-garak-state|IMAGE_DIGEST/);

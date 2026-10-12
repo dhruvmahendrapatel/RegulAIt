@@ -381,7 +381,7 @@ function job(over: Partial<GarakJob> = {}): GarakJob {
   };
 }
 
-describe("B5-G exchange: the runner never runs garak, the worker never holds the runner token", () => {
+describe("B5-G exchange: the runner never runs garak, the worker never holds the runner key", () => {
   it("a job round-trips: one garak process per probe, each report read back by sha256, and the job (with its key) removed", async () => {
     const jobs = path.join(root, "jobs");
     const results = path.join(root, "results");

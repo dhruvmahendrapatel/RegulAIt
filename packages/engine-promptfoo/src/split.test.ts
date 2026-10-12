@@ -6,7 +6,7 @@
  * What is pinned (each shown red by breaking it; see ADR-0187 decisions 170 on):
  *   - the runner never runs promptfoo, and nothing of the runner's credential crosses the exchange:
  *     the job carries the run key and nothing else secret, and the worker's child environment is the
- *     allow-list (no enrolment token, no runner token) whatever the worker's own environment holds;
+ *     allow-list (no enrolment token, no runner key) whatever the worker's own environment holds;
  *   - the worker re-checks every job (schema and the gateway-only invariant) and never starts
  *     promptfoo for one it refuses;
  *   - cancel and the deadline reach the worker; a results file that is not the one the worker
@@ -143,7 +143,7 @@ describe("B5-P2: the runner hands promptfoo to the worker", () => {
       // the runner's side never started promptfoo; the worker ran both steps
       expect(runnerSide.calls).toEqual([]);
       expect(worker.calls.map((c) => c.step)).toEqual(["redteam", "eval"]);
-      // the job is the config, the gateway URL, the RUN key and the deadline; never the runner token
+      // the job is the config, the gateway URL, the RUN key and the deadline; never the runner key
       expect(jobSeen).not.toBeNull();
       expect(Object.keys(JSON.parse(jobSeen!)).sort()).toEqual(["apiKey", "baseUrl", "config", "deadlineAt", "runId"]);
       expect(JSON.parse(jobSeen!).apiKey).toBe(KEY);
@@ -162,7 +162,7 @@ describe("B5-P2: the runner hands promptfoo to the worker", () => {
     } finally {
       await stopWorker();
     }
-    // nothing anywhere in the exchange ever held the runner token
+    // nothing anywhere in the exchange ever held the runner key
     for (const f of [...(await filesUnder(v.jobs)), ...(await filesUnder(v.results))]) expect(await readFile(f, "utf8")).not.toContain(token);
   });
 

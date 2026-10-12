@@ -1,7 +1,7 @@
 # ADR-0187 B5-M — the modelscan engine image. ONE image, TWO containers (decision 104):
 #
 #   engine-modelscan          the runner: `node /app/dist/main.js`, on the internal `engines` network,
-#                             holding the runner token on its state volume; it never runs modelscan
+#                             holding the runner key on its state volume; it never runs modelscan
 #   engine-modelscan-scanner  the scanner: `node /app/dist/scanner-main.js`, network_mode: none, no
 #                             token, no state; it runs modelscan on the read-only job volume
 #

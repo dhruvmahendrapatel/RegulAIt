@@ -1,9 +1,9 @@
 # ADR-0187 B5-G — the garak engine image. ONE image, TWO containers (decision 140):
 #
 #   engine-garak         the runner: `node /app/dist/main.js`, on the internal `engines` network, holding
-#                        the runner token on its state volume; it never runs garak
+#                        the runner key on its state volume; it never runs garak
 #   engine-garak-worker  the worker: `node /app/dist/worker-main.js`, on `engines` (it must reach the
-#                        gateway's model routes), with NO runner token and no state; it runs one garak
+#                        gateway's model routes), with NO runner key and no state; it runs one garak
 #                        process per probe with the run's own virtual key
 #
 # Built from the REPOSITORY ROOT (the shim is a workspace package):
