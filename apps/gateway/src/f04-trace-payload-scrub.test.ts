@@ -38,6 +38,8 @@
  * filtered to rows this file created.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -208,7 +210,7 @@ beforeAll(async () => {
   upstream = await startUpstream();
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
-  const egressAllowed = await app.inject({
+  const egressAllowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -218,7 +220,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "f04 suite: local upstream MCP server",
     },
-  });
+  }));
   expect(egressAllowed.statusCode).toBe(201);
   loopbackAllowHostId = egressAllowed.json().id;
 

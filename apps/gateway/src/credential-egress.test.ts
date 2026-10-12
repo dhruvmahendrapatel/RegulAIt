@@ -24,6 +24,8 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -248,7 +250,7 @@ describe("write time: the endpoint refuses a destination before it is ever store
   });
 
   it("allow-listing the IMDS address does NOT make it reachable — the range check is separate", async () => {
-    const allowed = await app.inject({
+    const allowed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
@@ -260,7 +262,7 @@ describe("write time: the endpoint refuses a destination before it is ever store
         allowPlaintextHttp: true,
         note: "deliberate SSRF attempt for the test",
       },
-    });
+    }));
     expect(allowed.statusCode).toBe(201);
     const res = await app.inject({
       method: "POST",
@@ -297,12 +299,12 @@ describe("write time: the endpoint refuses a destination before it is ever store
     // `.internal` is where GCP/Azure park their metadata services. Allow-list
     // the exact host first, so the refusal is the SUFFIX rule doing its job
     // rather than default-deny answering before it gets a turn.
-    const gcp = await app.inject({
+    const gcp = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("metadata.google.internal"), allowPlaintextHttp: true, note: "test" },
-    });
+    }));
     expect(gcp.statusCode).toBe(201);
     for (const [baseUrl, code] of [
       ["http://metadata.google.internal/computeMetadata/v1/", "blocked_host_suffix"],
@@ -430,7 +432,7 @@ describe("the allow-listed loopback endpoint an air-gapped operator actually wan
   beforeAll(async () => {
     await clearCredentials();
     hits = [];
-    const res = await app.inject({
+    const res = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
@@ -440,7 +442,7 @@ describe("the allow-listed loopback endpoint an air-gapped operator actually wan
         allowPlaintextHttp: true,
         note: "local self-hosted model server",
       },
-    });
+    }));
     expect(res.statusCode).toBe(201);
     allowHostId = res.json().id;
   });
@@ -489,7 +491,7 @@ describe("the allow-listed loopback endpoint an air-gapped operator actually wan
       expect(res.json().detail).toContain("not in the egress allow-list");
       expect(hits).toHaveLength(before);
     } finally {
-      const re = await app.inject({
+      const re = await relaxStepUpAround(db, () => app.inject({
         method: "POST",
         headers: AUTH,
         url: "/v1/egress-allow-hosts",
@@ -499,7 +501,7 @@ describe("the allow-listed loopback endpoint an air-gapped operator actually wan
           allowPlaintextHttp: true,
           note: "restored",
         },
-      });
+      }));
       allowHostId = re.json().id;
     }
   });

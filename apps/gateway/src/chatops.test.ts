@@ -34,6 +34,8 @@
  * user and audit row the suite created.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -220,12 +222,12 @@ beforeAll(async () => {
   if (typeof addr !== "object" || !addr) throw new Error("no address");
   slackBase = `http://127.0.0.1:${addr.port}`;
 
-  const allow = await post("/v1/egress-allow-hosts", {
+  const allow = await relaxStepUpAround(db, () => post("/v1/egress-allow-hosts", {
     host: "127.0.0.1",
     allowPrivateRanges: true,
     allowPlaintextHttp: true,
     note: "chatops suite: local fake Slack",
-  });
+  }));
   expect([201, 200]).toContain(allow.statusCode);
 
   const mk = async (email: string, name: string) => {

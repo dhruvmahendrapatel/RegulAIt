@@ -23,6 +23,8 @@
  *  - the cost of capture, measured (Consequences: "B2 measures the cost").
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
@@ -234,7 +236,7 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
   upstream = await startUpstream();
   connectorUpstream = await startConnectorUpstream();
-  const egress = await inject("POST", "/v1/egress-allow-hosts", AUTH, { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "b2 suite: local doubles" });
+  const egress = await relaxStepUpAround(db, () => inject("POST", "/v1/egress-allow-hosts", AUTH, { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "b2 suite: local doubles" }));
   expect(egress.statusCode, egress.body).toBe(201);
   const s = await inject("POST", "/v1/servers", AUTH, { name: `b2-upstream-${RUN}`, url: upstream.url });
   expect(s.statusCode, s.body).toBeLessThan(300);

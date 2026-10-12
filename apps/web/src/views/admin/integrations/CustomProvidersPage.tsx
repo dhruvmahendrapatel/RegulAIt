@@ -545,13 +545,21 @@ function EgressAllowListCard(props: {
           void act
             .run(
               host.trim(),
+              // opting a host into private ranges or plaintext http is a relaxation the gateway confirms with a
+              // step-up (settings_relax); a plain public https entry asks for nothing
               () =>
-                api.post("/v1/egress-allow-hosts", {
-                  host: host.trim(),
-                  allowPrivateRanges: privateRanges,
-                  allowPlaintextHttp: plaintext,
-                  ...(note.trim() ? { note: note.trim() } : {}),
-                }),
+                withStepUp((h) =>
+                  stepUpApi.post(
+                    "/v1/egress-allow-hosts",
+                    {
+                      host: host.trim(),
+                      allowPrivateRanges: privateRanges,
+                      allowPlaintextHttp: plaintext,
+                      ...(note.trim() ? { note: note.trim() } : {}),
+                    },
+                    h,
+                  ),
+                ),
               {
                 title: "Egress destination granted",
                 reason:

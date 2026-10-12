@@ -21,6 +21,8 @@
  *  - add `observe` to connectUpstream's retry → delta exceeds the request count.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,12 +125,12 @@ beforeAll(async () => {
   await db.update(orgSettings).set({ mcpProtocolMethods: ["resources/read"] as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   up = await startUpstream();
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
-  const allow = await app.inject({
+  const allow = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "int-observe: local MCP double" },
-  });
+  }));
   expect(allow.statusCode, allow.body).toBe(201);
   loopbackAllowHostId = allow.json().id;
   const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `int-observe-${Date.now()}`, url: up.url } });

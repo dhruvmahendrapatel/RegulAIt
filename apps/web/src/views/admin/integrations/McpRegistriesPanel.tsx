@@ -20,6 +20,7 @@ import { ApiError, api } from "../../../api/client";
 import { ago, fmtAt } from "../../../api/format";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, IdChip, Input, Modal, Select, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import {
   EMPTY_REGISTRY_DRAFT,
   PRIVATE_RANGES_TEXT,
@@ -178,7 +179,8 @@ function CreateRegistryForm() {
   const enabledHelp = useId();
   const save = (body: unknown) =>
     void act
-      .run(() => registryCall(() => api.post("/v1/mcp-registries", body)), "Registry added. Nothing was imported.")
+      // enabling it or allowing private ranges is a relaxation the gateway confirms with a step-up (settings_relax)
+      .run(() => registryCall(() => withStepUp((h) => stepUpApi.post("/v1/mcp-registries", body, h))), "Registry added. Nothing was imported.")
       .then((ok) => {
         if (ok) setDraft(EMPTY_REGISTRY_DRAFT);
       });
@@ -260,7 +262,8 @@ function EditRegistryDialog(props: { registry: McpRegistry; onClose: () => void 
   const send = () => {
     if ("error" in computed) return;
     void act
-      .run(() => registryCall(() => api.patch(`/v1/mcp-registries/${r.id}`, computed.body)), `Registry ${r.name} updated`)
+      // a relaxing edit (enable, open private ranges) is confirmed here AND stepped up at the gateway
+      .run(() => registryCall(() => withStepUp((h) => stepUpApi.patch(`/v1/mcp-registries/${r.id}`, computed.body, h))), `Registry ${r.name} updated`)
       .then((ok) => {
         if (ok) props.onClose();
       });
@@ -429,7 +432,8 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
           setImporting(null);
           if (!e) return;
           void act.run(async () => {
-            const out = await registryCall(() => api.post<RegistryImportResult>(`/v1/mcp-registries/entries/${e.id}/import`), "import");
+            // an import from a registry that allows private ranges is a relaxation the gateway steps up (settings_relax)
+            const out = await registryCall(() => withStepUp((h) => stepUpApi.post<RegistryImportResult>(`/v1/mcp-registries/entries/${e.id}/import`, {}, h)), "import");
             setImported(out);
             await q.refetch();
           }, `Imported ${e.upstreamName}. Nobody can use it until granted.`);

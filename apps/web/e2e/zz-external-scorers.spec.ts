@@ -24,6 +24,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2E_PASSWORDS } from "./e2e-passwords";
 import { snapshotEgressAllowHosts, type EgressAllowSnapshot } from "./egress-allow-restore";
+import { ADMIN_EMAIL } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -31,7 +33,6 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 };
 
 const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
-const CSRF = { "x-regulait-csrf": "1" };
 const SCORER = "zz-e2e-scorer";
 
 /**
@@ -103,14 +104,12 @@ test("an external scorer is registered, tested against a real endpoint, enabled,
 
   // the operator's egress act: allow 127.0.0.1 with private ranges + plaintext
   egressSnapshot = await snapshotEgressAllowHosts(page.request, "", ["127.0.0.1"]);
-  const allow = await page.request.post("/v1/egress-allow-hosts", {
-    headers: CSRF,
-    data: {
-      host: "127.0.0.1",
-      allowPrivateRanges: true,
-      allowPlaintextHttp: true,
-      note: "zz-e2e local scoring shim",
-    },
+  // opting a host into private ranges and plaintext is a relaxation (ADR-0186 A): stepped up with Ada's authenticator
+  const allow = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", "/v1/egress-allow-hosts", {
+    host: "127.0.0.1",
+    allowPrivateRanges: true,
+    allowPlaintextHttp: true,
+    note: "zz-e2e local scoring shim",
   });
   expect(allow.status()).toBe(201);
 

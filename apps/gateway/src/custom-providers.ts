@@ -33,7 +33,7 @@ import {
   type CustomModelProviderRow,
   type Db,
 } from "@regulait/db";
-import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import {
   createCustomModelProviderSchema,
   createEgressAllowHostSchema,
@@ -298,27 +298,74 @@ export function registerCustomProviderRoutes(
       note: body.note ?? null,
       createdBy: req.authCtx.userId ?? null,
     };
-    const [row] = await db
-      .insert(egressAllowHosts)
-      .values(values)
-      .onConflictDoUpdate({ target: egressAllowHosts.host, set: values })
-      .returning();
-    // AUDITED: widening what the gateway may connect to is a governance act,
-    // and opting a host into private ranges or plaintext doubly so.
-    await db.insert(auditLog).values({
-      userId: actor(req),
-      objectType: "custom_model_provider",
-      objectId: row!.id,
-      detail: { phase: "egress_allow_host", ...values },
-      effect: "allow",
-      ruleId: "egress-allow-host-set",
-      ruleChain: [],
-      reason:
-        `egress allow-list entry for '${host}'` +
-        (values.allowPrivateRanges ? " WITH private-range access" : "") +
-        (values.allowPlaintextHttp ? " WITH plaintext http" : ""),
+    // ADR-0180/0186 A: a plain entry (a named public host, https only) is ordinary configuration of the
+    // default-deny allow-list, audited and with no step-up: the host still passes DNS pinning, the unconditional
+    // ranges and every private-range check. Opting a host INTO private ranges or plaintext http relaxes those
+    // checks, so turning either opt-in on (a new entry, or an upsert that widens an existing one) needs a
+    // settings_relax step-up bound to the host and the opt-ins it turns on. Turning them off needs nothing.
+    /** the opt-ins this write turns on, against a stored row (or none) */
+    const relaxationsAgainst = (stored: { allowPrivateRanges: boolean; allowPlaintextHttp: boolean } | undefined) => {
+      const out: Record<string, true> = {};
+      if (values.allowPrivateRanges && !stored?.allowPrivateRanges) out.allowPrivateRanges = true;
+      if (values.allowPlaintextHttp && !stored?.allowPlaintextHttp) out.allowPlaintextHttp = true;
+      return out;
+    };
+    const [existing] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host));
+    const relaxed = relaxationsAgainst(existing);
+    const relaxation = Object.keys(relaxed).length > 0;
+    const stepUpArgs = { kind: "settings_relax" as const, facts: { op: "egress_allow_host", host, values: relaxed } };
+    // looked at (not spent) here, so a request without a grant is answered at once; SPENT inside the transaction,
+    // after the row is locked and the relaxation re-decided, so a concurrent change never burns it
+    if (relaxation) {
+      const look = await checkStepUp(db, req, stepUpArgs, { spend: false });
+      if (!look.ok) return reply.status(look.status).send(look.body);
+    }
+    type Out = { row: typeof egressAllowHosts.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
+    const out = await db.transaction(async (tx): Promise<Out> => {
+      // ALWAYS locked and re-decided, relaxing or not: a write decided as "no relaxation" (a note edit re-sending
+      // opt-ins that were on) must not turn an opt-in back on that a concurrent admin just turned off
+      const [now] = await tx.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host)).for("update");
+      if (JSON.stringify(relaxationsAgainst(now)) !== JSON.stringify(relaxed)) {
+        return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
+      }
+      let stepUp: string | null = null;
+      if (relaxation) {
+        // the single-use claim is made on the root handle, so a refusal row written by it survives this rollback
+        const su = await checkStepUp(db, req, stepUpArgs);
+        if (!su.ok) return { refused: { status: su.status, body: su.body } };
+        stepUp = su.method;
+      }
+      const [written] = await tx
+        .insert(egressAllowHosts)
+        .values(values)
+        .onConflictDoUpdate({ target: egressAllowHosts.host, set: values })
+        .returning();
+      // AUDITED: widening what the gateway may connect to is a governance act,
+      // and opting a host into private ranges or plaintext doubly so.
+      await tx.insert(auditLog).values({
+        userId: actor(req),
+        objectType: "custom_model_provider",
+        objectId: written!.id,
+        detail: {
+          phase: "egress_allow_host",
+          ...values,
+          ...(now ? { from: { allowPrivateRanges: now.allowPrivateRanges, allowPlaintextHttp: now.allowPlaintextHttp } } : {}),
+          relaxation,
+          ...(relaxation ? { relaxed, stepUp } : {}),
+        },
+        effect: "allow",
+        ruleId: "egress-allow-host-set",
+        ruleChain: [],
+        reason:
+          `egress allow-list entry for '${host}'` +
+          (values.allowPrivateRanges ? " WITH private-range access" : "") +
+          (values.allowPlaintextHttp ? " WITH plaintext http" : "") +
+          (relaxation ? " (a relaxation, confirmed with a step-up)" : ""),
+      });
+      return { row: written! };
     });
-    return reply.status(201).send(row);
+    if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
+    return reply.status(201).send(out.row);
   });
 
   app.delete("/v1/egress-allow-hosts/:hostId", async (req, reply) => {

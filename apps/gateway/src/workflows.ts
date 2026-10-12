@@ -2989,7 +2989,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
     }
     if (templateIds.length === 0) {
-      return reply.status(422).send({ error: "no_workflow_matches_change" });
+      // no workflow is ever assigned on an admin's behalf (no shipped default rules): say who can fix it
+      return reply.status(422).send({
+        error: "no_workflow_matches_change",
+        changeType: change.changeType,
+        detail:
+          `no workflow assignment rule matches this change (change type '${change.changeType}'), so no workflow was ` +
+          "started: an admin must assign a workflow template to it under Workflow templates (assignment rules)",
+      });
     }
 
     const started = await startWorkflowInstanceWithTemplates(db, opts.dataKey, {

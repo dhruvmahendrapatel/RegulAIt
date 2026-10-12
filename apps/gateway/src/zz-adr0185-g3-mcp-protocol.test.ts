@@ -9,6 +9,8 @@
  * recorded in the commit message of the slice).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -198,12 +200,12 @@ beforeAll(async () => {
   bare = await startUpstream(false);
   squat = await startUpstream("reserved");
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
-  const allow = await app.inject({
+  const allow = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "g3 suite: local MCP doubles" },
-  });
+  }));
   expect(allow.statusCode, allow.body).toBe(201);
   loopbackAllowHostId = allow.json().id;
   const f = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `g3-full-${Date.now()}`, url: full.url } });

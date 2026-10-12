@@ -13,6 +13,8 @@
  */
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
 import {
   and,
@@ -322,12 +324,12 @@ beforeAll(async () => {
 
   const [existing] = await k.db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   if (!existing) {
-    const allow = await k.req("POST", "/v1/egress-allow-hosts", k.BOOT, {
+    const allow = await relaxStepUpAround(k.db, () => k.req("POST", "/v1/egress-allow-hosts", k.BOOT, {
       host: "127.0.0.1",
       allowPrivateRanges: true,
       allowPlaintextHttp: true,
       note: "chat confirmations suite: local fake platform",
-    });
+    }));
     expect([200, 201]).toContain(allow.statusCode);
     createdEgressEntry = true;
   }

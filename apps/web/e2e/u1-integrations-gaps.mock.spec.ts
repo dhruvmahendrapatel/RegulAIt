@@ -151,7 +151,14 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     // or it can land after the fills below and wipe them
     await expect(form.getByLabel("Registry name")).toHaveValue("");
 
-    // enabling at creation is a relaxation: confirmed first
+    // enabling at creation is a relaxation: confirmed first, then the gateway's settings_relax step-up
+    const su = await requireStepUpOn(page, {
+      method: "POST",
+      path: "/v1/mcp-registries",
+      kind: "settings_relax",
+      when: (b) => (b as Json).enabled === true || (b as Json).allowPrivateRanges === true,
+      facts: (b) => ({ op: "mcp_registry_create", name: (b as Json).name, url: (b as Json).url, values: { enabled: true } }),
+    });
     await form.getByLabel("Registry name").fill("third");
     await form.getByLabel("Registry base URL").fill("https://third.example.test");
     await form.getByLabel("Scheduled pulls").selectOption("on");
@@ -160,6 +167,8 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expect(confirm).toContainText("The strict default is disabled");
     await expectAxeClean(page, "relaxed registry confirmation");
     await confirm.getByRole("button", { name: "Add registry" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
     await expect.poll(() => sent(calls, "POST", "/v1/mcp-registries").length).toBe(2);
     expect(sent(calls, "POST", "/v1/mcp-registries")[1]).toMatchObject({ name: "third", enabled: true });
 
@@ -200,8 +209,28 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expect(dialog.getByRole("alert")).toContainText("This relaxes the registry");
     expect(sent(calls, "PATCH", `/v1/mcp-registries/${REGISTRY.id}`)).toEqual([]);
     await expectAxeClean(page, "registry edit relaxation");
+    const su = await requireStepUpOn(page, {
+      method: "PATCH",
+      path: `/v1/mcp-registries/${REGISTRY.id}`,
+      kind: "settings_relax",
+      when: (b) => (b as Json).enabled === true || (b as Json).allowPrivateRanges === true,
+      facts: () => ({ op: "mcp_registry_update", registryId: REGISTRY.id, values: { enabled: true } }),
+    });
     await dialog.getByRole("button", { name: "Save the relaxed setting" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ enabled: true });
     await expect.poll(() => sent(calls, "PATCH", `/v1/mcp-registries/${REGISTRY.id}`)).toEqual([{ enabled: true }]);
+    // disabling it again is tightening: sent once, no step-up asked (wait for the list to show it enabled first)
+    await expect(dialog).toHaveCount(0);
+    // the State cell, not the row: a row's text joins its cells with no separator, so a word boundary never matches
+    await expect(page.getByRole("row").filter({ hasText: "internal-mirror" }).getByRole("cell", { name: "enabled", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Edit registry internal-mirror" }).click();
+    const again = page.getByRole("dialog", { name: "Edit registry internal-mirror" });
+    await again.getByLabel("Scheduled pulls").selectOption("off");
+    await again.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => sent(calls, "PATCH", `/v1/mcp-registries/${REGISTRY.id}`)).toEqual([{ enabled: true }, { enabled: false }]);
+    expect(su.attempts).toHaveLength(2);
 
     await page.getByRole("button", { name: "Browse entries of internal-mirror" }).click();
     // a collision recorded at the last sync is a warning; the gateway re-checks it live and decides
@@ -242,6 +271,51 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
     expect(su.attempts[1]!.body).toEqual({ reason: "Reviewed the tool descriptions with security" });
     // the harness answered the first attempt; only the resent one reached the gateway mock
     expect(calls.filter((c) => c.path.endsWith("/admission/clear"))).toHaveLength(1);
+  });
+
+  test("allowing a server's private ranges is stepped up at registration and on edit; denying them is not", async ({ page }) => {
+    const calls = await mockApi(page, [
+      ["GET", /^\/v1\/servers$/, () => ({ body: { servers: [CLEAN] } })],
+      ["POST", /^\/v1\/servers$/, ({ body }) => ({ status: 201, body: { ...CLEAN, id: U(402), admissionState: "unscanned", ...body } })],
+      ["PATCH", /^\/v1\/servers\/([^/]+)$/, ({ body }) => ({ body: { ...CLEAN, ...body } })],
+    ]);
+    const opens = (b: unknown) => (b as Json).allowPrivateRanges === true;
+    const reg = await requireStepUpOn(page, {
+      method: "POST",
+      path: "/v1/servers",
+      kind: "settings_relax",
+      when: opens,
+      facts: (b) => ({ op: "mcp_server_create", name: (b as Json).name, url: (b as Json).url, values: { allowPrivateRanges: true } }),
+    });
+    await page.goto("/ui/admin/mcp-servers");
+    const form = page.getByRole("form", { name: "Register an MCP server" });
+    await form.getByLabel("Name").fill("lan-tools", { timeout: 30_000 });
+    await form.getByLabel("URL").fill("http://10.0.0.5/mcp");
+    await form.getByLabel("Private ranges (ADR-0043)").selectOption("true");
+    await form.getByRole("button", { name: "Register" }).click();
+    await confirmStepUp(page);
+    await reg.expectResentOnce();
+    expect(reg.attempts[1]!.body).toMatchObject({ name: "lan-tools", url: "http://10.0.0.5/mcp", allowPrivateRanges: true });
+    await expect.poll(() => sent(calls, "POST", "/v1/servers").length).toBe(1);
+
+    const edit = await requireStepUpOn(page, {
+      method: "PATCH",
+      path: `/v1/servers/${CLEAN.id}`,
+      kind: "settings_relax",
+      when: opens,
+      facts: () => ({ op: "mcp_server_update", serverId: CLEAN.id, values: { allowPrivateRanges: true } }),
+    });
+    const posture = page.getByLabel("Private-range posture for search");
+    await posture.selectOption("true");
+    await posture.locator("xpath=..").getByRole("button", { name: "Save" }).click();
+    await confirmStepUp(page);
+    await edit.expectResentOnce();
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${CLEAN.id}`)).toEqual([{ allowPrivateRanges: true }]);
+    // denying them is tightening: sent once, never refused for a step-up
+    await posture.selectOption("false");
+    await posture.locator("xpath=..").getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${CLEAN.id}`)).toEqual([{ allowPrivateRanges: true }, { allowPrivateRanges: false }]);
+    expect(edit.attempts).toHaveLength(2);
   });
 
   test("a reserved tool name is refused in words; the preview lists what discovery shows", async ({ page }) => {
@@ -488,7 +562,7 @@ test.describe("regulAIt-LLM — add rows, validate, poll (ADR-0065)", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("Agents — expected served model (ADR-0175)", () => {
-  test("setting it is confirmed as a relaxation; clearing sends null", async ({ page }) => {
+  test("setting it is confirmed as a relaxation and stepped up; clearing sends null and asks nothing", async ({ page }) => {
     const AGENT = { id: U(900), name: "deployment-bot", provider: "mock", tier: 1, model: "prod-deployment", enabled: true, costPerMTokIn: null, costPerMTokOut: null, systemPrompt: null, expectedServedModel: null };
     const calls = await mockApi(page, [
       ["GET", /^\/v1\/agents$/, () => ({ body: { agents: [AGENT] } })],
@@ -497,6 +571,13 @@ test.describe("Agents — expected served model (ADR-0175)", () => {
         return { body: AGENT };
       }],
     ]);
+    const su = await requireStepUpOn(page, {
+      method: "PUT",
+      path: `/v1/agents/${AGENT.id}/expected-served-model`,
+      kind: "settings_relax",
+      when: (b) => (b as Json).expectedServedModel !== null,
+      facts: (b) => ({ op: "agent_expected_served_model", agentId: AGENT.id, expectedServedModel: (b as Json).expectedServedModel }),
+    });
     await page.goto("/ui/admin/agents");
     const card = page.locator("section").filter({ has: page.getByText("Expected served model — drift baseline", { exact: true }) });
     await card.getByLabel("Agent", { exact: true }).selectOption(AGENT.id, { timeout: 30_000 });
@@ -507,11 +588,15 @@ test.describe("Agents — expected served model (ADR-0175)", () => {
     await expect(dialog).toContainText("relaxes the strict default");
     await expectAxeClean(page, "expected served model confirmation");
     await dialog.getByRole("button", { name: "Set expected model" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
     await expect.poll(() => sent(calls, "PUT", `/v1/agents/${AGENT.id}/expected-served-model`)).toEqual([{ expectedServedModel: "example-served-model-v1" }]);
     await card.getByLabel("Expected served model (empty = the configured model)").fill("");
     await card.getByRole("button", { name: "Clear expected model" }).click();
     await expect.poll(() => sent(calls, "PUT", `/v1/agents/${AGENT.id}/expected-served-model`).length).toBe(2);
     expect(sent(calls, "PUT", `/v1/agents/${AGENT.id}/expected-served-model`)[1]).toEqual({ expectedServedModel: null });
+    // the clear was never refused for a step-up: the harness saw only the two attempts of the relaxation
+    expect(su.attempts).toHaveLength(2);
   });
 });
 

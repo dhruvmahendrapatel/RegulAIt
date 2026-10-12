@@ -36,6 +36,8 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,7 +148,7 @@ async function setOrgPolicy(policy: "inherit" | "strict") {
 }
 
 async function allow(host: string, opts: { privateRanges?: boolean; plaintext?: boolean } = {}) {
-  const res = await app.inject({
+  const res = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -156,7 +158,7 @@ async function allow(host: string, opts: { privateRanges?: boolean; plaintext?: 
       allowPlaintextHttp: opts.plaintext ?? false,
       note: "ADR-0062 suite",
     },
-  });
+  }));
   expect(res.statusCode).toBe(201);
 }
 

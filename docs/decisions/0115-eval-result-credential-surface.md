@@ -276,3 +276,12 @@ absolute row counts across the shared database.
    an output deterministically and with no network — and it is narrow: no real model was asked to
    leak anything.
 8. **This is application-layer**, exactly like ADR-0060/0099/0102/0112.
+
+## As built — 2026-10-12: card writes refuse the marker the presentation scrub produces
+
+A model-card field read through this scope can come back as `[redacted:<rule>:<length>:<fingerprint>]`. The web form
+kept an untouched masked field out of its PATCH, but the server accepted a marker. A client (or text copied from a
+masked card into a new one) could store the mask over the original. `PATCH /v1/mrm/cards/:id` and `POST
+/v1/mrm/cards` now refuse any string or object key carrying the marker. The answer is 400 `redacted_text_refused`
+with the field names, and nothing is written. The check uses the scrub's own marker grammar
+(`containsAuditScrubMarker` in `packages/shared/src/audit-scrub.ts`).

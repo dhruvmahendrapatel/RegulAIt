@@ -257,6 +257,7 @@ export const REFUSAL_SENTENCES: Readonly<Record<RefusalScope, Readonly<Record<st
     unknown_registry: "That registry no longer exists. Refresh the list.",
     conflict: "A registry with this name already exists. Choose another name.",
     egress_blocked: "The gateway's egress guard refused this URL. Nothing was saved.",
+    changed_concurrently: "Someone changed this registry while you were saving, so nothing was written. Reload and repeat the change.",
   },
   import: {
     unknown_entry: "That catalogue entry no longer exists. Sync the registry again.",

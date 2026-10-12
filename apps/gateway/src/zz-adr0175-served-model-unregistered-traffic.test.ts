@@ -42,6 +42,10 @@ import { unregisteredTrafficQuery } from "./governance-monitor.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
+// setting an expected served model is a settings_relax step-up; this suite drives it with an admin's API key and is
+// not about step-up, so it turns step-up off for its run (proved in zz-secure-default-stepups.test.ts)
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+let restoreStepUp: () => Promise<void> = async () => {};
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -86,6 +90,7 @@ beforeAll(async () => {
   restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   app = buildApp(db, { bootstrapToken: BOOT });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  restoreStepUp = await relaxStepUpForTest(db);
   const u = await call("POST", "/v1/users", AUTH, { email: `g175m-${RUN}@example.com`, displayName: `Monitor admin ${RUN}`, isAdmin: true });
   admin.id = u.json().id;
   admin.auth = { authorization: `Bearer ${(await call("POST", `/v1/users/${admin.id}/keys`, AUTH, { name: "k" })).json().token}` };
@@ -123,6 +128,7 @@ afterAll(async () => {
   await call("POST", "/v1/governance/monitor/evaluate", admin.auth);
   app.server.closeAllConnections();
   await restoreSb2Gates();
+  await restoreStepUp();
   await app.close();
 });
 

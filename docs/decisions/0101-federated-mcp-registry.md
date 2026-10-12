@@ -251,3 +251,19 @@ registry configuration must never cascade into deleting servers an operator reli
   green under each probe assert the *other* half (pagination and cursor round-trip, egress and
   air-gap, sweep bounds, audit counts, admin-only routing), which is what one would want, but it
   does mean no single probe reddens the file.
+
+## As built — 2026-10-12: enabling a registry and opening its private ranges need a server step-up
+
+Enabling a registry (at create or update) and allowing its private ranges are relaxations of the strict defaults
+(disabled; inherit the org default). The UI confirmed them, but the gateway did not. They now need a
+`settings_relax` step-up (`op: "mcp_registry_create"` / `"mcp_registry_update"`, ADR-0186 As built 2026-10-12),
+asked after the egress refusal. Moving an explicit deny back to inherit while the org default is open also counts.
+Disabling and denying need nothing. The `mcp-registry-configured` audit row records `relaxation`, the relaxed values
+and the step-up method; an update also records `from`/`to`.
+
+**Import (PR #378 review).** An import creates a server that inherits its registry's `allowPrivateRanges`. When
+that is `true`, the import is the same relaxation as registering a server with private ranges allowed. It needs a
+`settings_relax` step-up (`op: "mcp_registry_import"`, `{registryId, entryId, values: {allowPrivateRanges: true}}`),
+asked after every import refusal. A caller of `importRegistryEntry` that passes no step-up check is refused
+(fail closed). The `mcp-registry-entry-imported` row now records `allowPrivateRanges`, `relaxation` and the step-up
+method. A registry PATCH that moves the url binds `url` in its facts too.

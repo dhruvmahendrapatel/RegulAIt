@@ -18,6 +18,8 @@
  * that keeps the steady state requiring the current password.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { createServer, type Server } from "node:http";
 import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -305,7 +307,7 @@ beforeAll(async () => {
   // IdP is plaintext http on loopback, so this suite allow-lists 127.0.0.1
   // with the private-range and plaintext opt-ins, exactly as an air-gapped
   // operator with a self-hosted Keycloak would (the ADR-0034 suite pattern).
-  const egressAllowed = await app.inject({
+  const egressAllowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -315,7 +317,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "auth suite: local fake OIDC IdP",
     },
-  });
+  }));
   expect(egressAllowed.statusCode).toBe(201);
   loopbackAllowHostId = egressAllowed.json().id;
   // snapshot the shared singleton so whatever this file flips is handed back

@@ -227,6 +227,16 @@ interface Span {
  * string, so it cannot accidentally change it.
  */
 const MARKER_PATTERN=/\[redacted:([a-z0-9_.+]+):[0-9]+:[a-f0-9]{12}\]/g;
+/** MARKER_PATTERN without the global flag, so a yes/no test keeps no lastIndex between calls */
+const MARKER_TEST=new RegExp(MARKER_PATTERN.source);
+/**
+ * Does `text` carry a scrub marker (`[redacted:<rule>:<length>:<fingerprint>]`, the canonical grammar above)?
+ * A writer that accepts text a reader may have copied from a scrubbed view refuses it with this: saving the
+ * marker would replace the stored original with its mask. Linear: one character class, no nested quantifiers.
+ */
+export function containsAuditScrubMarker(text:string):boolean{
+ return MARKER_TEST.test(text);
+}
 const MARKER_LABELS=new Set([FIELD_RULE_LABEL,...CREDENTIAL_MATERIAL_RULES.map(rule=>shortRuleId(rule.id)),...SCRUB_ONLY_RULES.map(rule=>rule.id),...GENERATED_SECRET_RULES.map(rule=>rule.id)]);
 function knownMarkers(text:string){
  const labels=new Map<string,boolean>();

@@ -43,6 +43,7 @@ import { grantCascadeTestHooks, identityCreateStepUp } from "./oauth/identity-ad
 import type { StepUpCheckArgs } from "./step-up.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { makeCert } from "./testing/x509-fixtures.js";
 import { hashToken } from "./token-hash.js";
 import { putIdentityGrants } from "./workload-identity-admin.js";
@@ -415,7 +416,15 @@ describe("GET /v1/workload-identities/:id/grant-proposals", () => {
     for (const a of [held, neverRan, already, forbidden, sponsorDenied]) expect((await grantUserAgent(steward.id, a)).statusCode).toBeLessThan(300);
     const ident = await agentIdentity("prop-subject", steward.id);
     await putIdentityGrants(db, ident.id, { tools: [], servers: [], agents: [{ agentId: already, allowedModes: ["plan"] }], connectors: [], roleIds: [], revision: 0 }, null);
-    const server = await inject("POST", "/v1/servers", AUTH, { name: `s6-prop-server-${RUN}`, url: "http://127.0.0.1:9", allowPrivateRanges: true });
+    // opening private ranges is a settings_relax step-up (ADR-0186 A) the bootstrap credential cannot always give;
+    // this case is not about it, so step-up is off for this one registration only and put back strict at once
+    const restoreStepUpPolicy = await relaxStepUpForTest(db);
+    let server;
+    try {
+      server = await inject("POST", "/v1/servers", AUTH, { name: `s6-prop-server-${RUN}`, url: "http://127.0.0.1:9", allowPrivateRanges: true });
+    } finally {
+      await restoreStepUpPolicy();
+    }
     expect(server.statusCode, server.body).toBe(201);
 
     // observed decisions, stamped with the identity as the acting agent the way the governed paths stamp them

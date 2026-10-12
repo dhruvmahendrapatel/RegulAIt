@@ -148,4 +148,6 @@ export const CARD_EDIT_REFUSALS: Readonly<Record<string, string>> = {
   pinned_version_needs_agent: "A pinned model version applies only to a card on an agent.",
   model_card_exists: "Another card for this model already has that intended use. Edit that card, or choose a different intended use.",
   conflict: "This edit conflicts with another model card. Reload the page and try again.",
+  redacted_text_refused:
+    "A field still contains redacted text from the scrubbed view, so saving it would replace the stored text with its mask. Replace the whole field, or leave it unchanged to keep the stored value.",
 };

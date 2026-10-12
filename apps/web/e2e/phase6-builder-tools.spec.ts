@@ -326,6 +326,18 @@ test("an organisation approval waits for the admin and the thread finishes when 
       { timeout: 30_000 },
     )
     .toContain("done");
+  // the step is marked done when the tool returns; the agent's reply quoting it is written by the NEXT model step of
+  // the resumed turn, after that. The thread page does not poll, so a reload between the two shows no reply: wait
+  // on the API for the reply itself before reading the page
+  await expect
+    .poll(
+      async () => {
+        const d = (await (await dana.request.get(`/v1/builder/threads/${thread}`)).json()) as { messages: Array<{ role: string; content: string | null }> };
+        return d.messages.some((m) => m.role !== "user" && /ONCOLOGY_PHI/.test(m.content ?? ""));
+      },
+      { timeout: 30_000, message: "the resumed turn's reply quotes the tool result" },
+    )
+    .toBe(true);
 
   await dana.reload();
   const convo = dana.getByRole("region", { name: "Conversation" });

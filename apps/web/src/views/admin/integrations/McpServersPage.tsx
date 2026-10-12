@@ -20,6 +20,7 @@ import { ExecutionProfileSelector } from "./isolation/IsolationPanel";
 import { McpRegistriesPanel } from "./McpRegistriesPanel";
 import { McpAdmissionClearButton, McpVisibleToolsCard } from "./McpServerAdmission";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
@@ -327,6 +328,7 @@ function RegisterServerForm() {
   const [privateRanges, setPrivateRanges] = useState("inherit");
   return (
     <form
+      aria-label="Register an MCP server"
       className={a.formRow}
       style={{ marginBottom: "var(--s2)" }}
       onSubmit={(e) => {
@@ -334,11 +336,18 @@ function RegisterServerForm() {
         void act
           .run(
             () =>
-              api.post("/v1/servers", {
-                name,
-                transport,
-                ...(transport === "stdio" ? { stdio: { command, args } } : { url, allowPrivateRanges: privateRangeValue(privateRanges) }),
-              }),
+              // allowing private ranges is a relaxation the gateway confirms with a step-up (settings_relax)
+              withStepUp((h) =>
+                stepUpApi.post(
+                  "/v1/servers",
+                  {
+                    name,
+                    transport,
+                    ...(transport === "stdio" ? { stdio: { command, args } } : { url, allowPrivateRanges: privateRangeValue(privateRanges) }),
+                  },
+                  h,
+                ),
+              ),
             "Server registered",
           )
           .then((ok) => {
@@ -391,7 +400,8 @@ function RegisterServerForm() {
 /** ADR-0043: edit one server's private-range posture in place — the PATCH
  * re-runs the write-time egress check server-side, so an edit that would make
  * the stored URL unreachable is an honest 400 here, not a surprise at the next
- * tool call. */
+ * tool call. Opening the ranges (or inheriting an open org default over an
+ * explicit deny) asks for a `settings_relax` step-up (ADR-0186 A). */
 function PrivateRangesCell(props: { server: McpServer }) {
   const act = useAction();
   const stored =
@@ -407,9 +417,8 @@ function PrivateRangesCell(props: { server: McpServer }) {
         e.preventDefault();
         void act.run(
           () =>
-            api.patch(`/v1/servers/${props.server.id}`, {
-              allowPrivateRanges: privateRangeValue(value),
-            }),
+            // opening the ranges is a relaxation the gateway confirms with a step-up; closing them asks nothing
+            withStepUp((h) => stepUpApi.patch(`/v1/servers/${props.server.id}`, { allowPrivateRanges: privateRangeValue(value) }, h)),
           `Private-range posture for ${props.server.name} saved`,
         );
       }}

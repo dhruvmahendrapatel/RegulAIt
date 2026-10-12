@@ -27,13 +27,15 @@
  * throughout; screenshots land in E2E_SHOTS_DIR, including a narrow viewport.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { passTotp } from "./totp-sign-in";
+import { nextCode, passTotp } from "./totp-sign-in";
 import http from "node:http";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2E_PASSWORDS } from "./e2e-passwords";
 import { snapshotEgressAllowHosts, type EgressAllowSnapshot } from "./egress-allow-restore";
+import { ADMIN_EMAIL } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -186,10 +188,11 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
         await egressSnapshot?.restore(page.request);
       } finally {
         for (const host of seededHosts) {
-          const restored = await page.request.post(`${state.baseUrl}/v1/egress-allow-hosts`, { headers: { "x-regulait-csrf": "1" }, data: {
+          // re-adding a seeded row's opt-ins is a relaxation (ADR-0186 A): stepped up with Ada's authenticator
+          const restored = await steppedUpAs(page.request, ADMIN_EMAIL, "POST", `${state.baseUrl}/v1/egress-allow-hosts`, {
             host: host.host, allowPrivateRanges: host.allowPrivateRanges, allowPlaintextHttp: host.allowPlaintextHttp,
             ...(host.note ? { note: host.note } : {}),
-          } });
+          });
           expect(restored.ok()).toBe(true);
         }
       }
@@ -223,10 +226,18 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     const plain = page.getByLabel("Allow plaintext HTTP", { exact: true });
     if ((await priv.isChecked()) !== opts.privateRanges) await priv.setChecked(opts.privateRanges);
     if ((await plain.isChecked()) !== opts.plaintext) await plain.setChecked(opts.plaintext);
+    // the answer that writes the row: an opt-in turned on is first refused for a step-up (ADR-0186 A), and the
+    // retry carrying the grant is the one that lands
     const done = page.waitForResponse(
-      (r) => r.url().includes("/v1/egress-allow-hosts") && r.request().method() === "POST",
+      (r) => r.url().includes("/v1/egress-allow-hosts") && r.request().method() === "POST" && r.status() !== 403,
     );
     await page.getByTestId("add-allow-host").click();
+    const prompt = page.getByRole("dialog", { name: "Confirm it's you" });
+    const asked = await prompt.waitFor({ state: "visible", timeout: 5_000 }).then(() => true, () => false);
+    if (asked) {
+      await prompt.getByLabel("Authenticator code").fill(await nextCode(ADMIN_EMAIL));
+      await prompt.getByRole("button", { name: "Confirm with code" }).click();
+    }
     expect((await done).status()).toBe(201);
   };
 

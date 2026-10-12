@@ -124,6 +124,7 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import { REGISTRATION_ADMISSION_STATE } from "./mcp-admission.js";
 import { recordSighting } from "./release-age.js";
 import { createHash } from "node:crypto";
@@ -705,7 +706,17 @@ export type ImportRefusal =
   | { status: 409; body: { error: "not_importable"; reason: string; detail: string } }
   | { status: 409; body: { error: "conflict"; reason: McpImportConflictReason; conflictServerId: string; detail: string } }
   | { status: 409; body: { error: "already_imported"; serverId: string } }
-  | { status: 400; body: { error: "egress_blocked"; code: string; detail: string } };
+  | { status: 400; body: { error: "egress_blocked"; code: string; detail: string } }
+  /** ADR-0186 A: the step-up an opening import needs was not given (the step-up check's own answer) */
+  | { status: number; body: Record<string, unknown> };
+
+/**
+ * ADR-0186 A: how the caller confirms a relaxing import. The HTTP route passes the step-up check (it spends the
+ * grant); a caller that passes nothing gets a fail-closed refusal for an import that opens private ranges.
+ */
+export type ImportStepUp = (
+  facts: Record<string, unknown>,
+) => Promise<{ ok: true; method: string } | { ok: false; status: number; body: Record<string, unknown> }>;
 
 export interface ImportResult {
   serverId: string;
@@ -733,7 +744,7 @@ export interface ImportResult {
 export async function importRegistryEntry(
   db: Db,
   entryId: string,
-  opts: { actorUserId?: string | null; now?: Date; deps?: McpRegistryDeps } = {},
+  opts: { actorUserId?: string | null; now?: Date; deps?: McpRegistryDeps; stepUp?: ImportStepUp } = {},
 ): Promise<{ ok: true; result: ImportResult } | { ok: false; refusal: ImportRefusal }> {
   const now = opts.now ?? new Date();
   const [entry] = await db.select().from(mcpRegistryEntries).where(eq(mcpRegistryEntries.id, entryId));
@@ -830,6 +841,35 @@ export async function importRegistryEntry(
     return { ok: false, refusal: { status: 400, body: { error: "egress_blocked", code: denied.code, detail } } };
   }
 
+  // ADR-0180/0186 A: the new server inherits the registry's private-range posture. When that posture explicitly
+  // allows private ranges, the import creates a server whose url may reach private network space — the same
+  // relaxation as POST /v1/servers with allowPrivateRanges: true — so it needs a settings_relax step-up bound to
+  // the registry, the entry and the value. Asked after every refusal above, so a refused import spends nothing.
+  const inheritedRanges = registry?.allowPrivateRanges ?? null;
+  const relaxation = inheritedRanges === true;
+  let stepUpMethod: string | null = null;
+  if (relaxation) {
+    // the url the opened server will dial is bound too, so a grant made for one endpoint is refused for another
+    const facts = { op: "mcp_registry_import", registryId: entry.registryId, entryId: entry.id, url: entry.remoteUrl, values: { allowPrivateRanges: true } };
+    if (!opts.stepUp) {
+      return {
+        ok: false,
+        refusal: {
+          status: 403,
+          body: {
+            error: "step_up_required",
+            actionKind: "settings_relax",
+            methods: [],
+            detail: "this import opens private ranges (inherited from its registry) and nothing here can confirm a step-up",
+          },
+        },
+      };
+    }
+    const su = await opts.stepUp(facts);
+    if (!su.ok) return { ok: false, refusal: { status: su.status, body: su.body } };
+    stepUpMethod = su.method;
+  }
+
   // ADR-0175 A5 — the release-age cooldown ages an import from the first time
   // the registry sweep saw this exact entry release (recorded now if the sweep
   // never did), not from the moment somebody clicked import.
@@ -844,14 +884,25 @@ export async function importRegistryEntry(
     }),
     now,
   );
-  const [row] = await db
+  // Class A: the posture this import inherits (and its step-up, when it opens private ranges) was decided on an
+  // unlocked read of the registry. The server row is written under a share lock on the registry row, and only if
+  // that posture is still what was decided on; otherwise nothing is created (409 changed_concurrently).
+  const remoteUrl = entry.remoteUrl; // narrowed above (a remote entry has one)
+  const row = await db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select({ allowPrivateRanges: mcpRegistries.allowPrivateRanges })
+      .from(mcpRegistries)
+      .where(eq(mcpRegistries.id, entry.registryId))
+      .for("share");
+    if ((locked?.allowPrivateRanges ?? null) !== inheritedRanges) return null;
+    const [inserted] = await tx
     .insert(mcpServers)
     .values({
       releaseSeenAt,
       name: localServerNameFor(entry.upstreamName),
-      url: entry.remoteUrl,
+      url: remoteUrl,
       // ADR-0043's tri-state, inherited from the registry that vouched for it.
-      allowPrivateRanges: registry?.allowPrivateRanges ?? null,
+      allowPrivateRanges: inheritedRanges,
       // ADR-0097: EXPLICIT, and deliberately not `grandfathered`. A server that
       // arrived from a public directory has no history to be trusted on.
       admissionState: REGISTRATION_ADMISSION_STATE,
@@ -863,7 +914,10 @@ export async function importRegistryEntry(
       registryLastSyncedAt: entry.lastSyncedAt,
     })
     .returning();
-  if (!row) throw new Error("import failed to create server row");
+    if (!inserted) throw new Error("import failed to create server row");
+    return inserted;
+  });
+  if (!row) return { ok: false, refusal: { status: 409, body: { error: "changed_concurrently", detail: "the registry's private-range posture changed while this import was being checked, so nothing was imported: try again" } } };
 
   await db
     .update(mcpRegistryEntries)
@@ -885,6 +939,9 @@ export async function importRegistryEntry(
       url: entry.remoteUrl,
       admissionState: REGISTRATION_ADMISSION_STATE,
       origin: "federated",
+      allowPrivateRanges: row.allowPrivateRanges,
+      relaxation,
+      ...(relaxation ? { relaxed: { allowPrivateRanges: true }, stepUp: stepUpMethod } : {}),
       grantsCreated: 0,
       toolsCreated: 0,
     },
@@ -1090,6 +1147,64 @@ export const updateMcpRegistrySchema = z
 const uuidParam = z.object({ registryId: z.string().uuid() });
 const entryParam = z.object({ entryId: z.string().uuid() });
 
+/**
+ * ADR-0180/0186 A: the values a registry CREATE relaxes from the strict defaults (disabled; private ranges
+ * inherited from the org default), or null. Allowing private ranges explicitly is the relaxation; inheriting
+ * the org default (itself a stepped-up setting when it is open) and denying them are not.
+ */
+export function registryCreateRelaxations(body: {
+  enabled?: boolean | undefined;
+  allowPrivateRanges?: boolean | null | undefined;
+}): Record<string, boolean> | null {
+  const out: Record<string, boolean> = {};
+  if (body.enabled === true) out.enabled = true;
+  if (body.allowPrivateRanges === true) out.allowPrivateRanges = true;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * ADR-0180/0186 A: the values a registry UPDATE relaxes, or null. Enabling a disabled registry; allowing private
+ * ranges where they were not explicitly allowed; and moving an explicit deny back to "inherit" while the org
+ * default is open (the registry's effective posture opens). Disabling and denying are tightening.
+ */
+export function registryUpdateRelaxations(
+  before: { enabled: boolean; allowPrivateRanges: boolean | null },
+  body: { enabled?: boolean | undefined; allowPrivateRanges?: boolean | null | undefined },
+  orgPrivateRangesDefault: boolean,
+): Record<string, boolean | null> | null {
+  const out: Record<string, boolean | null> = {};
+  if (body.enabled === true && !before.enabled) out.enabled = true;
+  const ranges = privateRangesRelaxation(before.allowPrivateRanges, body.allowPrivateRanges, orgPrivateRangesDefault);
+  if (ranges) Object.assign(out, ranges);
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * ADR-0180/0186 A: does an UPDATE of a tri-state `allowPrivateRanges` (an MCP registry's or an MCP server's)
+ * relax it? Allowing private ranges where they were not explicitly allowed does; so does moving an explicit deny
+ * back to "inherit" while the org default is open (the effective posture opens). Denying, inheriting a closed
+ * default and an unchanged value do not. Returns the relaxed value, or null.
+ */
+export function privateRangesRelaxation(
+  before: boolean | null,
+  next: boolean | null | undefined,
+  orgPrivateRangesDefault: boolean,
+): { allowPrivateRanges: boolean | null } | null {
+  if (next === undefined) return null;
+  const value = next ?? null;
+  if (value === true && before !== true) return { allowPrivateRanges: true };
+  if (value === null && before === false && orgPrivateRangesDefault) return { allowPrivateRanges: null };
+  return null;
+}
+
+function relaxationText(relaxed: Record<string, boolean | null>): string {
+  const parts: string[] = [];
+  if (relaxed.enabled === true) parts.push("enabled (the scheduled sweep pulls it)");
+  if (relaxed.allowPrivateRanges === true) parts.push("private ranges allowed");
+  else if ("allowPrivateRanges" in relaxed) parts.push("private ranges inherit the open org default");
+  return parts.join("; ");
+}
+
 /** Admin-only through the default gate (none of these appear in
  * NON_ADMIN_ROUTES): configuring a registry, pulling one, and importing an
  * entry are all acts that change what governed objects exist. */
@@ -1104,6 +1219,23 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
       deps,
     });
     if (refusal) return reply.status(400).send(refusal);
+    // ADR-0180/0186 A: a registry is created disabled and inheriting the org's private-range default (the strict
+    // values). Creating it enabled, or with private ranges explicitly allowed, is a relaxation: a settings_relax
+    // step-up bound to this registry and exactly the relaxed values, asked AFTER the egress refusal so a refused
+    // URL never spends the grant.
+    const relaxed = registryCreateRelaxations(body);
+    let stepUp: string | null = null;
+    if (relaxed) {
+      // the name is checked BEFORE the grant is spent, so a duplicate (409, as the unique index would answer) never burns it
+      const [taken] = await db.select({ id: mcpRegistries.id }).from(mcpRegistries).where(eq(mcpRegistries.name, body.name));
+      if (taken) return reply.status(409).send({ error: "conflict", detail: `an MCP registry named '${body.name}' already exists` });
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "mcp_registry_create", name: body.name, url: body.url, values: relaxed },
+      });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
     const [row] = await db
       .insert(mcpRegistries)
       .values({
@@ -1117,11 +1249,22 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
       userId: req.authCtx.userId ?? NIL_USER,
       objectType: "mcp_server",
       objectId: row!.id,
-      detail: { phase: "registry-configure", action: "create", name: body.name, url: body.url, enabled: row!.enabled },
+      detail: {
+        phase: "registry-configure",
+        action: "create",
+        name: body.name,
+        url: body.url,
+        enabled: row!.enabled,
+        allowPrivateRanges: row!.allowPrivateRanges,
+        relaxation: relaxed !== null,
+        ...(relaxed ? { relaxed, stepUp } : {}),
+      },
       effect: "allow",
       ruleId: mcpRegistryRuleIds.configured,
       ruleChain: [],
-      reason: `Configured MCP registry '${body.name}' (${row!.enabled ? "enabled" : "disabled"}). Configuring a registry imports nothing.`,
+      reason:
+        `Configured MCP registry '${body.name}' (${row!.enabled ? "enabled" : "disabled"}). Configuring a registry imports nothing.` +
+        (relaxed ? ` Relaxed from the strict default: ${relaxationText(relaxed)}.` : ""),
     });
     return reply.status(201).send(row);
   });
@@ -1158,6 +1301,21 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
       });
       if (refusal) return reply.status(400).send(refusal);
     }
+    // ADR-0180/0186 A: enabling a registry, or opening its private ranges, is a relaxation (a settings_relax
+    // step-up bound to this registry and the relaxed values); disabling it or closing its ranges is tightening
+    // and needs nothing. Asked after the egress refusal, so a refused write never spends the grant.
+    const org = await loadOrgSettings(db);
+    const relaxed = registryUpdateRelaxations(before, body, org.mcpPrivateRangesDefault);
+    let stepUp: string | null = null;
+    if (relaxed) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        // the url the relaxed posture applies to is bound too when this request moves it
+        facts: { op: "mcp_registry_update", registryId, ...(body.url !== undefined ? { url: nextUrl } : {}), values: relaxed },
+      });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
     const [row] = await db
       .update(mcpRegistries)
       .set({
@@ -1165,17 +1323,44 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
         ...(body.allowPrivateRanges !== undefined ? { allowPrivateRanges: body.allowPrivateRanges ?? null } : {}),
       })
-      .where(eq(mcpRegistries.id, registryId))
+      // Class A: a relaxation decided on an unlocked read is written only if what it rested on is unchanged
+      .where(
+        relaxed
+          ? and(
+              eq(mcpRegistries.id, registryId),
+              eq(mcpRegistries.enabled, before.enabled),
+              before.allowPrivateRanges === null
+                ? isNull(mcpRegistries.allowPrivateRanges)
+                : eq(mcpRegistries.allowPrivateRanges, before.allowPrivateRanges),
+            )
+          : eq(mcpRegistries.id, registryId),
+      )
       .returning();
+    if (!row) {
+      if (relaxed) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+      return reply.status(404).send({ error: "unknown_registry" });
+    }
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NIL_USER,
       objectType: "mcp_server",
       objectId: registryId,
-      detail: { phase: "registry-configure", action: "update", name: before.name, url: row!.url, enabled: row!.enabled },
+      detail: {
+        phase: "registry-configure",
+        action: "update",
+        name: before.name,
+        url: row.url,
+        enabled: row.enabled,
+        from: { enabled: before.enabled, allowPrivateRanges: before.allowPrivateRanges },
+        to: { enabled: row.enabled, allowPrivateRanges: row.allowPrivateRanges },
+        relaxation: relaxed !== null,
+        ...(relaxed ? { relaxed, stepUp } : {}),
+      },
       effect: "allow",
       ruleId: mcpRegistryRuleIds.configured,
       ruleChain: [],
-      reason: `Updated MCP registry '${before.name}' (${row!.enabled ? "enabled" : "disabled"}).`,
+      reason:
+        `Updated MCP registry '${before.name}' (${row.enabled ? "enabled" : "disabled"}).` +
+        (relaxed ? ` Relaxed: ${relaxationText(relaxed)}.` : ""),
     });
     return reply.send(row);
   });
@@ -1216,6 +1401,11 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
     const out = await importRegistryEntry(db, entryId, {
       actorUserId: req.authCtx.userId ?? null,
       deps,
+      // spends the grant (single use); the refusal, if any, is the import's answer
+      stepUp: async (facts) => {
+        const su = await checkStepUp(db, req, { kind: "settings_relax", facts });
+        return su.ok ? { ok: true, method: su.method } : { ok: false, status: su.status, body: su.body };
+      },
     });
     if (!out.ok) return reply.status(out.refusal.status).send(out.refusal.body);
     return reply.status(201).send(out.result);

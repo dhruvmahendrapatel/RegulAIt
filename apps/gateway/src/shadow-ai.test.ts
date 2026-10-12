@@ -50,7 +50,7 @@ import {
   users,
   type Db,
 } from "@regulait/db";
-import { DEFAULT_AI_SIGNATURES, EVIDENCE_MAX_ROWS } from "@regulait/shared";
+import { changeDescriptorSchema, DEFAULT_AI_SIGNATURES, EVIDENCE_MAX_ROWS, startInstanceSchema } from "@regulait/shared";
 import { SHADOW_AI_RULE_IDS } from "./shadow-ai.js";
 
 const { buildApp } = await import("./app.js");
@@ -460,6 +460,11 @@ describe("the inventory is actionable and states its own coverage", () => {
     expect(JSON.stringify(plan.json().steps)).toMatch(/usage_events/);
     // and it hands back the ONE workflow route rather than starting one itself
     expect(plan.json().workflowRequest.route).toBe("POST /v1/workflows/instances");
+    // … and the body it hands back is one that route accepts as it stands (no unknown keys either)
+    expect(startInstanceSchema.safeParse(plan.json().workflowRequest.body).success).toBe(true);
+    expect(changeDescriptorSchema.strict().safeParse(plan.json().workflowRequest.body.change).success).toBe(true);
+    expect(plan.json().workflowRequest.needsInput).toEqual(["change.environment"]);
+    expect(plan.json().assignment).toMatchObject({ changeType: "shadow-ai-remediation" });
   });
 
   it("reports severity-ordered findings and never claims completeness", async () => {

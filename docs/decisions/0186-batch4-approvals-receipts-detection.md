@@ -798,3 +798,67 @@ PR #377 review: both refusals are decided once before the step-up is spent (so a
 the grant) and again under the lock. The AI BOM and Decision BOM signers read their key row `FOR SHARE` in the
 transaction that stores the signature, so a retire waits for a signature in flight and a signer that starts
 after it sees the key retired. Lock order everywhere: the key row, then the audit chain lock.
+
+## As built — 2026-10-12: four relaxations now need a server step-up; a prompt is not a deny
+
+Branch `secure-default-stepups` (PR #378). These writes relax a strict default, and the gateway enforced nothing
+(the UI confirmed three of them). Each now needs a `settings_relax` step-up bound to `{op, ...}` facts, and its audit row records
+`relaxation`, the relaxed values and the step-up method. Tightening needs nothing.
+
+- `POST /v1/mcp-registries` (`op: "mcp_registry_create"`, `{name, url, values}`): creating a registry enabled, or
+  with `allowPrivateRanges: true`.
+- `PATCH /v1/mcp-registries/:id` (`op: "mcp_registry_update"`, `{registryId, values}`): enabling it; allowing
+  private ranges; moving an explicit deny back to inherit while the org default is open. A stepped-up update is a
+  compare-and-set (409 `changed_concurrently`).
+- `POST /v1/servers` (`op: "mcp_server_create"`, `{name, url, values}`) with `allowPrivateRanges: true`, and
+  `PATCH /v1/servers/:id` (`op: "mcp_server_update"`, `{serverId, values}`) when it allows private ranges or moves
+  an explicit deny back to inherit while the org default is open. The PATCH looks at the grant before the owner
+  change and spends it just before the write, a compare-and-set. Every change of a server's private ranges now
+  writes `mcp-server-private-ranges-changed` with both values; registration records the relaxation on
+  `mcp-server-registered`.
+- `PUT /v1/agents/:id/expected-served-model` (`op: "agent_expected_served_model"`, `{agentId,
+  expectedServedModel}`) when it sets or changes the value, and `POST /v1/agents` with one (`op:
+  "agent_create_expected_served_model"`, `{name, expectedServedModel}`). Clearing it and re-sending the stored
+  value need nothing.
+
+Each is asked after the route's own refusals (egress guard, evidence hold), so a refused write never spends the
+grant. The `step-up.ts` header lists every `settings_relax` `op`.
+
+`POST /v1/use-cases/:id/resync` audited every step-up outcome as `use-case-resync-refused` with code
+`step_up_<status>`, including the ordinary prompt a person answers before the retry. It now reports step-up like
+every other protected route. A prompt (`step_up_required` naming a usable method, `isStepUpPrompt`) is sent and not
+recorded. A refusal nobody can answer is recorded under the body's own code (`step_up_required` with
+`credentialKind` set to the body's `credential`, or `step_up_unavailable`). The detail key is `credentialKind`, not
+`credential`: the audit scrub masks any field named `credential` (ADR-0099), which would erase the value.
+
+PR #378 review follow-ups:
+- **Further relaxations.** `egress_allow_host` (an allow entry's private-range or plaintext opt-in turned on; a plain
+  entry needs nothing, ADR-0034 As built 2026-10-12) and `mcp_registry_import` (an import that inherits a registry's
+  open private ranges, ADR-0101).
+- **A duplicate name never burns a grant.** The relaxing creates (`POST /v1/agents`, `/v1/mcp-registries`,
+  `/v1/servers`) check the name before spending the grant and answer 409 `conflict`.
+- **`PATCH /v1/servers/:id` changes nothing when refused.** It validates the owner target and looks at both step-ups
+  (ranges, owner) without spending them. Then it spends the ranges grant, writes the columns (compare-and-set), and
+  runs the owner change last, which spends its own grant. Only a concurrent change between the look and the owner
+  write can still leave the columns written without the owner.
+- **The url is bound.** The server and registry PATCH facts include `url` when the request moves it.
+- **The agent PUT spends inside the hold transaction.** It looks at the grant first and spends it inside the
+  evidence-hold transaction, after the hold re-check.
+- **Test-only helpers.** `relaxStepUpForTest` and `forgetStepUpMethodsForTest` throw outside a test runner.
+  `step-up-posture-guard.test.ts` pins, statically, that no product source imports them.
+
+PR #378 recheck:
+- **Allow-list upserts.** `POST /v1/egress-allow-hosts` always locks the host's row and re-decides the relaxation
+  under the lock. A write decided as "no relaxation" (a note edit re-sending opt-ins that were on) that would now turn
+  an opt-in back on answers 409 `changed_concurrently`. The grant is spent inside that transaction, after the
+  re-decision, so a 409 never burns it.
+- **Server PATCH.** Every `PATCH /v1/servers/:id` that touches the private ranges or the url compare-and-sets both,
+  and spends its ranges grant inside that transaction, after the compare-and-set.
+- **Registry import.** The step-up binds the entry's `remoteUrl`. The server row is written under a share lock on
+  the registry row, and only if the inherited posture is unchanged (409 `changed_concurrently` otherwise).
+- **Host spelling.** Hosts are bound in their normalised spelling (lower case, no trailing dot), so a grant serves
+  any spelling of the same host.
+- **Suite setup.** Gateway suites post their opt-in allow entries through `relaxStepUpAround`, which turns step-up
+  off for that one call and puts the policy back as found. They no longer depend on no admin on the shared database
+  having a step-up method.
+

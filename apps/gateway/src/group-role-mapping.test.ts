@@ -35,6 +35,8 @@
  * with a keypair generated at suite start.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { execFileSync } from "node:child_process";
 import { createHash, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -472,13 +474,13 @@ beforeAll(async () => {
 
   // the fake OIDC IdP is plaintext http on loopback — the same conscious
   // opt-in the auth suite makes (ADR-0043 default-deny egress).
-  const egress = await app.inject({
+  const egress = await relaxStepUpAround(db, () => app.inject({
     method: "POST", headers: AUTH, url: "/v1/egress-allow-hosts",
     payload: {
       host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true,
       note: "group-role-mapping suite: local fake OIDC IdP",
     },
-  });
+  }));
   expect(egress.statusCode, egress.body).toBe(201);
   loopbackAllowHostId = egress.json().id;
 

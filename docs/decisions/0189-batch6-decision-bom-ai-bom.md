@@ -2208,3 +2208,10 @@ an accepted decision or needs an owner choice.
 - The audit and receipt keys gain one more use; HSM-backed keys stay owner-gated with HSM/FIPS (ADR-0183).
 - Not decided here: in-toto/DSSE views (until asked), A2A agent cards in the AI BOM (after PF-02's A2A work),
   transparency-log entries for BOMs, and any production designation (standing guardrail).
+
+## As built — 2026-10-12: the use-case re-sync records step-up refusals, not prompts
+
+`POST /v1/use-cases/:id/resync` no longer records the ordinary step-up prompt as a `use-case-resync-refused` row
+with the code `step_up_<status>`. A prompt is sent and not recorded, as on every other protected route. A refusal
+nobody can answer (an API key or the bootstrap credential, no method enrolled) is recorded under the body's own code
+(`step_up_required` with `credentialKind`, or `step_up_unavailable`). See ADR-0186, As built 2026-10-12.

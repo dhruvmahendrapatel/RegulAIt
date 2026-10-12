@@ -78,6 +78,10 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { LOCAL_MCP_DOUBLE, relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+// enabling a registry is a settings_relax step-up (ADR-0186 A); this suite drives it with the bootstrap credential
+// and is not about step-up, so it turns step-up off for its run (proved in zz-secure-default-stepups.test.ts)
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+let restoreStepUp: () => Promise<void> = async () => {};
 
 // ADR-0181: this file pins behaviour against a LOCAL MCP double (127.0.0.1, registered
 // seconds ago), not the strict admission defaults — relaxed explicitly, restored after.
@@ -420,6 +424,7 @@ beforeAll(async () => {
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db, [...LOCAL_MCP_DOUBLE, "mcpAdmissionMode"]);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
+  restoreStepUp = await relaxStepUpForTest(db);
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
   fake = await startFakeRegistry();
@@ -482,6 +487,7 @@ afterAll(async () => {
   }
   app.server.closeAllConnections();
   await restoreSb2Gates();
+  await restoreStepUp();
   await app.close();
   await fake.close();
   await cleanUpstream.close();

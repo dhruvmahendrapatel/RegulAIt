@@ -42,11 +42,15 @@ describe("shadow-AI environment", () => {
   const plan: RemediationPlan = {
     findingId: "f1",
     subject: "app.example",
-    provider: "openai",
+    provider: "example-provider",
     severity: "high",
     replacementAgent: null,
     steps: [],
-    workflowRequest: { route: "POST /v1/workflows/instances", body: { change: { targetSystem: "app.example", changeType: "shadow-ai-remediation" } } },
+    workflowRequest: {
+      route: "POST /v1/workflows/instances",
+      body: { change: { description: "Pull app.example (example-provider) into governance — shadow-AI finding f1", paths: [], changeType: "shadow-ai-remediation", environment: "unstated", targetSystem: "app.example" } },
+      needsInput: ["change.environment"],
+    },
     note: "",
   };
   it("has no default and must be stated", () => {

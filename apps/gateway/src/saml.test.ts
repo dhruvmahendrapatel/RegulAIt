@@ -20,6 +20,8 @@
  * together; and the ADR-0039 / ADR-0028 interplay for the new origin.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -1012,7 +1014,7 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
     // is allow-listed here exactly as an air-gapped operator with a
     // self-hosted Keycloak would (the pattern auth.test.ts already uses).
     // egress-allow-cleanup: afterAll — its id is recorded in loopbackAllowHostId, which afterAll removes
-    const allow = await app.inject({
+    const allow = await relaxStepUpAround(db, () => app.inject({
       method: "POST", headers: AUTH, url: "/v1/egress-allow-hosts",
       payload: {
         host: "127.0.0.1",
@@ -1020,7 +1022,7 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
         allowPlaintextHttp: true,
         note: "ADR-0036 lockout-guard test: loopback OIDC issuer",
       },
-    });
+    }));
     expect([200, 201]).toContain(allow.statusCode);
     loopbackAllowHostId = allow.json().id;
     const oidc2 = await app.inject({

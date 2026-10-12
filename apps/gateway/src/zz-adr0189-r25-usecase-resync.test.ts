@@ -415,6 +415,11 @@ describe("POST /v1/use-cases/:useCaseId/resync", () => {
     expect(strictNoKey.json()).toMatchObject({ error: "bom_signing_unavailable" });
     expect(strict.statusCode, strict.body).toBe(403);
     expect(strict.json()).toMatchObject({ error: "step_up_required", actionKind: "approval_decide" });
+    // an API key can never step up: a real refusal, recorded under the code every protected route answers with
+    // (not a status-derived `step_up_403`); a prompt a person can answer is never recorded (isStepUpPrompt)
+    const refusedDetails = (await auditRows("use-case-resync-refused", f.useCaseId)).map((r) => r.detail as { code: string; credentialKind?: string });
+    expect(refusedDetails).toContainEqual(expect.objectContaining({ code: "step_up_required", credentialKind: "api_key" }));
+    expect(refusedDetails.map((d) => d.code).filter((c) => c.startsWith("step_up_4"))).toEqual([]);
     expect(await useCaseStatus(f.useCaseId)).toBe("proposed");
     // with step-up relaxed, the admin's key re-syncs it
     const ok = await resync(f.useCaseId, admin.auth);

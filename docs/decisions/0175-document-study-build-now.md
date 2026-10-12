@@ -250,3 +250,11 @@ Migration 0142 was edited in place (it had not been pushed).
    feed one rule. If one fails, that rule is left out of the pass's evaluated set, so its open episodes are neither
    refreshed nor resolved. The failure is audited (`governance-monitor-input-failed`) and reported in `notEvaluated`,
    and every other rule still runs.
+
+## As built — 2026-10-12: the expected served model is a stepped-up relaxation
+
+Setting or changing an agent's expected served model relaxes the served-model drift check. Calls that report that
+model stop counting as drift. `PUT /v1/agents/:id/expected-served-model` now needs a `settings_relax` step-up (`op:
+"agent_expected_served_model"`) when it sets or changes the value, and so does `POST /v1/agents` with one. Clearing
+it restores the strict default and needs nothing. The `agent-expected-served-model-set` row records `relaxation`
+and the step-up method, and the write is a compare-and-set on the value the step-up was decided on.

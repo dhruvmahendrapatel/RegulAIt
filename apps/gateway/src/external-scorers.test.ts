@@ -37,6 +37,8 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -353,7 +355,7 @@ const SHIM = "xs-fiddler-shim";
 describe("register → test → enable, the custom-provider lifecycle verbatim", () => {
   it("registers DISABLED once 127.0.0.1 is allow-listed, and never returns the key", async () => {
     // egress-allow-cleanup: afterAll — the loopback entry the lifecycle tests share; afterAll removes it by host
-    const allow = await app.inject({
+    const allow = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       url: "/v1/egress-allow-hosts",
       headers: AUTH,
@@ -363,7 +365,7 @@ describe("register → test → enable, the custom-provider lifecycle verbatim",
         allowPlaintextHttp: true,
         note: "xs local scoring shim",
       },
-    });
+    }));
     expect(allow.statusCode).toBe(201);
 
     const res = await app.inject({

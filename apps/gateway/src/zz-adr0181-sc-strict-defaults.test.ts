@@ -21,6 +21,8 @@
  * private address and really quarantines a server registered now.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -227,12 +229,12 @@ describe("ADR-0181 SC — the strict MCP posture really refuses on a fresh org",
       expect(refused.statusCode, refused.body).toBeGreaterThanOrEqual(400);
       expect(refused.body).toMatch(/private|allow/i);
 
-      const allow = await app.inject({
+      const allow = await relaxStepUpAround(fresh, () => app.inject({
         method: "POST",
         url: "/v1/egress-allow-hosts",
         headers: AUTH,
         payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "adr0181 test" },
-      });
+      }));
       expect(allow.statusCode, allow.body).toBe(201);
       const ok = await app.inject({
         method: "POST",

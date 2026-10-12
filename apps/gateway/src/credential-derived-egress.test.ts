@@ -29,6 +29,8 @@
  */
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { auditLog, createDb, desc, eq, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
@@ -209,12 +211,12 @@ describe("a typed login host is adjudicated like a typed baseUrl", () => {
 describe("once the host is allow-listed the gate opens — and the upstream body is still not relayed", () => {
   it("the login host is reached, a non-JSON upstream body is withheld, a JSON error is relayed", async () => {
     // egress-allow-cleanup: afterAll — its id is recorded in allowEntryId, which afterAll removes
-    const allow = await post("/v1/egress-allow-hosts", {
+    const allow = await relaxStepUpAround(db, () => post("/v1/egress-allow-hosts", {
       host: FAKE_HOST,
       allowPrivateRanges: true,
       allowPlaintextHttp: true,
       note: "cde suite: local fake Entra login host",
-    });
+    }));
     expect([200, 201]).toContain(allow.statusCode);
     allowEntryId = allow.json().id ?? allow.json().host?.id ?? null;
 

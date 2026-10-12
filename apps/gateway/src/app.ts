@@ -192,7 +192,7 @@ import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
-import { changeOwner, ownerChangeGate, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import { changeOwner, checkOwnerTarget, ownerChangeGate, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
 // ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
 // queue carries the keep/revoke decisions) and the campaign CRUD routes.
 import {
@@ -384,7 +384,7 @@ import {
 } from "./mcp-admission.js";
 // ADR-0101 — federated MCP registries. Admin-only through the default gate;
 // a sync writes only the catalogue and an import is an explicit operator act.
-import { registerMcpRegistryRoutes } from "./mcp-registry.js";
+import { privateRangesRelaxation, registerMcpRegistryRoutes } from "./mcp-registry.js";
 import {
   MCP_PROXY_ROUTE_URL,
   registerMcpAuthMetadata,
@@ -448,7 +448,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles, namedApproverSeatExists } from "./approval-pool.js";
 import {
   decisionView,
@@ -656,6 +656,13 @@ function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): 
 function auditWhere(q: AuditFilterInput, from: Date | null, to: Date | null): SQL | undefined {
   const conds = auditFilters(q, from, to);
   return conds.length === 0 ? undefined : conds.length === 1 ? conds[0] : and(...conds);
+}
+
+/** a step-up refused inside a write's transaction: thrown so the write rolls back, answered after it */
+class StepUpRefusedInTx extends Error {
+  constructor(readonly status: number, readonly body: Record<string, unknown>) {
+    super("step_up_refused_in_transaction");
+  }
 }
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
@@ -1956,6 +1963,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ownerUserId: owner.ownerUserId,
       };
     }
+    // ADR-0180/0186 A: a server registers inheriting the org's private-range default (the strict value);
+    // explicitly allowing private ranges is a relaxation — a settings_relax step-up bound to this server's name,
+    // url and the value, asked after every refusal above so a refused registration never spends the grant
+    let rangesStepUp: string | null = null;
+    const rangesRelaxed = parsed.transport !== "stdio" && parsed.allowPrivateRanges === true;
+    if (rangesRelaxed) {
+      // the name is checked BEFORE the grant is spent, so a duplicate (409, as the unique index would answer) never burns it
+      const [taken] = await db.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.name, parsed.name));
+      if (taken) return reply.status(409).send({ error: "conflict", detail: `an MCP server named '${parsed.name}' already exists` });
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "mcp_server_create", name: parsed.name, url: values.url, values: { allowPrivateRanges: true } },
+      });
+      if (!su.ok) return reply;
+      rangesStepUp = su.method;
+    }
     // ADR-0097: the registration path sets the admission state EXPLICITLY
     // rather than inheriting migration 0103's DEFAULT. The default exists for
     // rows that predate the scanner ('grandfathered' — trusted because they
@@ -2006,11 +2029,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             url: created.url,
             allowPrivateRanges: created.allowPrivateRanges,
             ownerUserId: created.ownerUserId,
+            relaxation: rangesRelaxed,
+            ...(rangesRelaxed ? { relaxed: { allowPrivateRanges: true }, stepUp: rangesStepUp } : {}),
           },
           effect: "allow",
           ruleId: "mcp-server-registered",
           ruleChain: [],
-          reason: `${label} registered as a ${created.transport} upstream at ${created.url}`,
+          reason:
+            `${label} registered as a ${created.transport} upstream at ${created.url}` +
+            (rangesRelaxed ? " — relaxed from the strict default: private ranges allowed" : ""),
         });
       }
       return created;
@@ -2105,19 +2132,46 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         };
       }
     }
-    // ADR-0185 I9 — an owner named on PATCH goes through the same audited
-    // change as PUT …/owner (422 unknown_owner / owner_inactive). It runs after
-    // every refusal above, so a refused PATCH changes no owner either.
-    if (body.ownerUserId !== undefined) {
-      const owned = await changeOwner(db, {
-        kind: "mcp_server",
-        id: serverId,
-        ownerUserId: body.ownerUserId,
-        actorUserId: req.authCtx.userId,
-        gate: ownerChangeGate(db, req, "mcp_server", serverId), // ADR-0186 A: owner_change step-up
-      });
-      if (!owned.ok) return reply.status(owned.status).send(owned.body);
-      before.ownerUserId = owned.body.ownerUserId;
+    // ADR-0180/0186 A: opening this server's private ranges (or moving an explicit deny back to inherit while
+    // the org default is open) is a relaxation — a settings_relax step-up bound to this server, the value and (when
+    // this request also moves it) the url the ranges would apply to.
+    const rangesRelaxed = privateRangesRelaxation(
+      before.allowPrivateRanges,
+      body.allowPrivateRanges,
+      (await loadOrgSettings(db)).mcpPrivateRangesDefault,
+    );
+    const rangesStepUpArgs = rangesRelaxed
+      ? {
+          kind: "settings_relax" as const,
+          facts: { op: "mcp_server_update", serverId, ...(body.url !== undefined ? { url: nextUrl } : {}), values: rangesRelaxed },
+        }
+      : null;
+    // ADR-0185 I9 — an owner named on PATCH goes through the same audited change as PUT …/owner. A refused
+    // request changes NOTHING: the owner target is validated (its refusal audited by the one owner writer) and
+    // both step-ups are looked at (not spent) before anything is written; then the ranges grant is spent, the
+    // columns are written (a compare-and-set), and the owner change runs last, spending its own grant.
+    const ownerChanges = body.ownerUserId !== undefined && body.ownerUserId !== before.ownerUserId;
+    if (ownerChanges) {
+      const target = await checkOwnerTarget(db, body.ownerUserId ?? null);
+      if (!target.ok) {
+        const refused = await changeOwner(db, {
+          kind: "mcp_server",
+          id: serverId,
+          ownerUserId: body.ownerUserId ?? null,
+          actorUserId: req.authCtx.userId,
+          gate: ownerChangeGate(db, req, "mcp_server", serverId),
+        });
+        if (!refused.ok) return reply.status(refused.status).send(refused.body);
+        return reply.status(target.status).send(target.body);
+      }
+    }
+    if (rangesStepUpArgs) {
+      const look = await checkStepUp(db, req, rangesStepUpArgs, { spend: false });
+      if (!look.ok) return reply.status(look.status).send(look.body);
+    }
+    if (ownerChanges) {
+      const look = await checkStepUp(db, req, ownerChangeStepUpArgs("mcp_server", serverId, body.ownerUserId ?? null), { spend: false });
+      if (!look.ok) return reply.status(look.status).send(look.body);
     }
     const patch: Partial<typeof mcpServers.$inferInsert> = {
       ...(body.name !== undefined ? { name: body.name } : {}),
@@ -2130,31 +2184,103 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : {}),
       ...stdioPatch,
     };
+    let row: typeof mcpServers.$inferSelect = before;
     // ADR-0185: a body that only restates the transport (or only changes the
-    // owner, already written above) changes no column here — answer with the
-    // row rather than issue an empty UPDATE
-    if (Object.keys(patch).length === 0) return reply.send(mcpServerView(before));
-    const [row] = await db
-      .update(mcpServers)
-      .set(patch)
-      .where(eq(mcpServers.id, serverId))
-      .returning();
-    if (stdioChange) {
-      await db.insert(auditLog).values({
-        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-        serverId,
-        objectType: "mcp_server",
-        objectId: serverId,
-        detail: { phase: "update", transport: "stdio", transitions: stdioChange },
-        effect: "allow",
-        ruleId: "mcp-stdio-command-changed",
-        ruleChain: [],
-        reason:
-          `${label}: stdio command changed to ${row!.stdioCommand} (sha256 ${row!.stdioCommandDigest} pinned); ` +
-          `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
+    // owner, below) changes no column here — no empty UPDATE is issued
+    if (Object.keys(patch).length > 0) {
+      let rangesStepUp: string | null = null;
+      // Class A, for EVERY write that touches the egress posture (relaxing or not): it applies only if the private
+      // ranges AND the url it was decided on are unchanged, so a concurrent change (another admin closing the ranges,
+      // or moving the url) is never overwritten by a write decided against the old values. The ranges grant is
+      // spent inside the same transaction AFTER that compare-and-set, so a 409 never burns it.
+      const touchesPosture = body.allowPrivateRanges !== undefined || body.url !== undefined;
+      type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
+      const out = await db.transaction(async (tx): Promise<Patched> => {
+        const [written] = await tx
+          .update(mcpServers)
+          .set(patch)
+          .where(
+            touchesPosture
+              ? and(
+                  eq(mcpServers.id, serverId),
+                  before.allowPrivateRanges === null
+                    ? isNull(mcpServers.allowPrivateRanges)
+                    : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
+                  eq(mcpServers.url, before.url),
+                )
+              : eq(mcpServers.id, serverId),
+          )
+          .returning();
+        if (!written) {
+          return touchesPosture
+            ? { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } }
+            : { refused: { status: 404, body: { error: "unknown_server" } } };
+        }
+        if (rangesStepUpArgs) {
+          // claimed on the root handle: single use, and its refusal row survives this transaction's rollback
+          const su = await checkStepUp(db, req, rangesStepUpArgs);
+          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body);
+          rangesStepUp = su.method;
+        }
+        return { row: written };
+      }).catch((err: unknown) => {
+        if (err instanceof StepUpRefusedInTx) return { refused: { status: err.status, body: err.body } } as Patched;
+        throw err;
       });
+      if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
+      row = out.row;
+      // the private-range posture decides which network space this server's url may reach: every change of it is
+      // on the trail with both values, and an opening one as a relaxation with its step-up
+      if (body.allowPrivateRanges !== undefined && (body.allowPrivateRanges ?? null) !== before.allowPrivateRanges) {
+        await db.insert(auditLog).values({
+          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+          serverId,
+          objectType: "mcp_server",
+          objectId: serverId,
+          detail: {
+            phase: "update",
+            from: { allowPrivateRanges: before.allowPrivateRanges },
+            to: { allowPrivateRanges: row.allowPrivateRanges },
+            url: row.url,
+            relaxation: rangesRelaxed !== null,
+            ...(rangesRelaxed ? { relaxed: rangesRelaxed, stepUp: rangesStepUp } : {}),
+          },
+          effect: "allow",
+          ruleId: "mcp-server-private-ranges-changed",
+          ruleChain: [],
+          reason:
+            `${label}: private ranges ${String(before.allowPrivateRanges ?? "inherit")} → ${String(row.allowPrivateRanges ?? "inherit")}` +
+            (rangesRelaxed ? " — a relaxation of the strict default" : ""),
+        });
+      }
+      if (stdioChange) {
+        await db.insert(auditLog).values({
+          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+          serverId,
+          objectType: "mcp_server",
+          objectId: serverId,
+          detail: { phase: "update", transport: "stdio", transitions: stdioChange },
+          effect: "allow",
+          ruleId: "mcp-stdio-command-changed",
+          ruleChain: [],
+          reason:
+            `${label}: stdio command changed to ${row.stdioCommand} (sha256 ${row.stdioCommandDigest} pinned); ` +
+            `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
+        });
+      }
     }
-    return reply.send(mcpServerView(row!));
+    if (body.ownerUserId !== undefined) {
+      const owned = await changeOwner(db, {
+        kind: "mcp_server",
+        id: serverId,
+        ownerUserId: body.ownerUserId,
+        actorUserId: req.authCtx.userId,
+        gate: ownerChangeGate(db, req, "mcp_server", serverId), // ADR-0186 A: owner_change step-up
+      });
+      if (!owned.ok) return reply.status(owned.status).send(owned.body);
+      row = { ...row, ownerUserId: owned.body.ownerUserId };
+    }
+    return reply.send(mcpServerView(row));
   });
 
   app.get("/v1/servers", async () => ({

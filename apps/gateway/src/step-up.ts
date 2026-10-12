@@ -49,8 +49,20 @@
  * still set.
  *
  * POLICY: `org_settings.step_up_mode` (`required` strict; `off` is a relaxation
- * and itself needs a `settings_relax` step-up) and `step_up_actions` (all six
- * strict; removing one is a relaxation), read on every check.
+ * and itself needs a `settings_relax` step-up) and `step_up_actions` (every
+ * kind in `STEP_UP_ACTION_KINDS` strict, seven today; removing one is a
+ * relaxation), read on every check.
+ *
+ * `settings_relax` OUTSIDE PUT /v1/org/settings: a relaxation through its own
+ * route binds `{values}` (requireRelaxStepUp) or `{op, ...}` naming the act.
+ * The `op`s: `execution_profile_create`/`_version`/`_assign`,
+ * `executor_reenable`, `executor_declared_class`, `receipt_key_retire`,
+ * `mcp_registry_create`/`_update` (enabling a registry or opening its private
+ * ranges), `mcp_registry_import` (an import that inherits a registry's open
+ * private ranges), `mcp_server_create`/`_update` (opening an MCP server's
+ * private ranges), `egress_allow_host` (turning an allow entry's private-range
+ * or plaintext opt-in on), `agent_expected_served_model` and
+ * `agent_create_expected_served_model` (relaxing the served-model drift check).
  *
  * METHODS: `passkey` (an enrolled, unrevoked passkey and a configured
  * relying party), `totp` (an enrolled authenticator; replay-protected by the
@@ -544,6 +556,20 @@ export async function checkStepUp(
       ...(tokens.length > 0 ? { presentedGrant: "not_valid_for_this_action" } : {}),
     },
   };
+}
+
+/**
+ * Is this step-up refusal a PROMPT — `step_up_required` naming at least one
+ * method the caller can use — rather than a deny? A prompt is the normal first
+ * half of every protected action (the browser confirms and resends), so a
+ * route that audits its own refusals records it as nothing: no protected route
+ * writes a deny row for being asked. Everything else (an API key, the
+ * bootstrap credential, a chat tap, no method enrolled) is a refusal the
+ * caller cannot answer, and a route may audit it under the body's own `error`.
+ * A presented grant that was not valid is recorded by `checkStepUp` itself.
+ */
+export function isStepUpPrompt(body: Record<string, unknown>): boolean {
+  return body.error === "step_up_required" && Array.isArray(body.methods) && body.methods.length > 0;
 }
 
 /**

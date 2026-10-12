@@ -33,6 +33,8 @@
  *     logged body cannot recover it.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -137,12 +139,12 @@ function serve(host: string, hits: Hit[], answer: (req: http.IncomingMessage, bo
 }
 
 const allow = async (host: string) => {
-  const res = await inject("POST", "/v1/egress-allow-hosts", {
+  const res = await relaxStepUpAround(db, () => inject("POST", "/v1/egress-allow-hosts", {
     host,
     allowPrivateRanges: true,
     allowPlaintextHttp: true,
     note: `adr0183 2.6 ${RUN}: local fake ${host === LOGIN_HOST ? "token endpoint" : "Graph"}`,
-  });
+  }));
   expect(res.statusCode, res.body).toBe(201);
   allowIds[host] = res.json().id as string;
 };

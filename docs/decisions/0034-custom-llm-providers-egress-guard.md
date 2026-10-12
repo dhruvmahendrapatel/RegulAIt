@@ -838,3 +838,21 @@ untrusted issuer still fails**. Those last two are the anti-regression for the t
   real (non-injected) guarded request through a new transport moved nothing.
 - `pnpm -r build` clean; full `pnpm -r test` green on a freshly dropped/recreated `regulait_test`,
   and the gateway suite green again under `--sequence.shuffle.files`.
+
+## As built — 2026-10-12: an allow entry's opt-ins are stepped-up relaxations
+
+`POST /v1/egress-allow-hosts` (an upsert by host) now needs a `settings_relax` step-up when it turns an opt-in on:
+`allowPrivateRanges` or `allowPlaintextHttp`, on a new entry or on an existing one (`op: "egress_allow_host"`,
+`{host, values}`, where `values` names only the opt-ins this write turns on). Turning them off needs nothing. The
+`egress-allow-host-set` audit row records `relaxation`, the relaxed opt-ins, the step-up method and the previous
+opt-ins. A stepped-up write is a compare-and-set on the opt-ins it was decided on (409 `changed_concurrently`).
+
+**A plain entry (a named host, https only, no opt-in) needs no step-up.** The allow-list is the mechanism of the
+default-deny posture, not a setting with a strict value to relax. A plain entry names one destination, and that
+destination still passes every check: DNS pinning, the unconditional ranges, the private-range rules and https.
+ADR-0181 treats such entries as ordinary configuration ("an allow-list entry for the demo's local MCP hosts"). What
+loosens a guard is an opt-in, so that is where the step-up sits. Registering an MCP server or provider at a public
+host likewise needs no step-up. The refusal texts that suggest an opt-in now say it is confirmed with a step-up.
+
+The demo seeder writes its loopback entries (both opt-ins on) before Ada enrols her authenticator, while the
+bootstrap credential still passes a step-up (B4S-06, the pattern its passwords, grants and stewardship use).
