@@ -13,7 +13,7 @@
  * Shares one database with the other gateway suites (fileParallelism is off).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,7 @@ import { customProviderDisabledRefusal } from "./custom-providers.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
-import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { removeEgressAllowEntry, trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -138,6 +138,13 @@ afterAll(async () => {
   }
 });
 
+// M-068 / M-078, per entry: the IMDS entry a single test creates is removed
+// after THAT test, whatever its assertions did.
+const perTest = trackEgressAllowHosts();
+afterEach(async () => {
+  (await perTest.removeAll(app, AUTH)).assertRemoved();
+});
+
 const baseUrlFor = () => `http://127.0.0.1:${port}/v1`;
 
 describe("egress allow-list: default-deny before anything else", () => {
@@ -158,7 +165,7 @@ describe("egress allow-list: default-deny before anything else", () => {
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
-      payload: { host: "169.254.169.254", note: "deliberate SSRF attempt for the test" },
+      payload: { host: perTest.trackHost("169.254.169.254"), note: "deliberate SSRF attempt for the test" },
     });
     expect(listed.statusCode).toBe(201);
     const res = await app.inject({
@@ -179,7 +186,7 @@ describe("egress allow-list: default-deny before anything else", () => {
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
-      payload: { host: "169.254.169.254", allowPlaintextHttp: true, note: "still must not work" },
+      payload: { host: perTest.trackHost("169.254.169.254"), allowPlaintextHttp: true, note: "still must not work" },
     });
     expect(withPlaintext.statusCode).toBe(201);
     const again = await app.inject({
@@ -195,14 +202,11 @@ describe("egress allow-list: default-deny before anything else", () => {
     });
     expect(again.statusCode).toBe(400);
     expect(again.json().code).toBe("blocked_address_range");
-
-    // clean up so no later suite inherits an IMDS allow entry
-    const hosts = await app.inject({ method: "GET", headers: AUTH, url: "/v1/egress-allow-hosts" });
-    const imds = hosts.json().hosts.find((h: { host: string }) => h.host === "169.254.169.254");
-    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${imds.id}` });
+    // the IMDS entry is removed by the afterEach above, even when an assertion here fails
   });
 
   it("records the allow-list entry — and the private/plaintext opt-ins — in the audit trail", async () => {
+    // egress-allow-cleanup: afterAll — the loopback entry the later lifecycle tests use; afterAll removes it by host
     const res = await app.inject({
       method: "POST",
       headers: AUTH,
@@ -366,6 +370,7 @@ describe("registration, connection test, and enablement", () => {
   });
 
   it("is admin-only — a non-admin sees 403 on every route", async () => {
+    // egress-allow-cleanup: refused — a non-admin POST with no host creates nothing
     for (const [method, url] of [
       ["GET", "/v1/custom-model-providers"],
       ["POST", "/v1/custom-model-providers"],
@@ -553,6 +558,7 @@ describe("registration, connection test, and enablement", () => {
       expect(denied.effect).toBe("deny");
 
       // restore for the teardown assertions below
+      // egress-allow-cleanup: afterAll — the file's loopback entry, removed by host
       const re = await app.inject({
         method: "POST",
         headers: AUTH,

@@ -36,7 +36,7 @@
  * test (M-012); row assertions are deltas or scoped to this file's own ids.
  */
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,7 +54,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
-import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { removeEgressAllowEntry, trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -228,6 +228,13 @@ afterAll(async () => {
   }
 });
 
+// M-068 / M-078, per entry: the IMDS entry a single test creates is removed
+// after THAT test, whatever its assertions did.
+const perTest = trackEgressAllowHosts();
+afterEach(async () => {
+  (await perTest.removeAll(app, AUTH)).assertRemoved();
+});
+
 const scoreUrl = () => `http://127.0.0.1:${port}/score`;
 
 async function makeDataset(name: string, scorerKind: string, scorerConfig: Record<string, unknown> = {}) {
@@ -284,7 +291,7 @@ describe("the scorer URL is a typed destination under the full egress guard", ()
       method: "POST",
       url: "/v1/egress-allow-hosts",
       headers: AUTH,
-      payload: { host: "169.254.169.254", note: "deliberate SSRF attempt for the test" },
+      payload: { host: perTest.trackHost("169.254.169.254"), note: "deliberate SSRF attempt for the test" },
     });
     expect(listed.statusCode).toBe(201);
     const res = await app.inject({
@@ -300,11 +307,6 @@ describe("the scorer URL is a typed destination under the full egress guard", ()
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("egress_blocked");
-    await app.inject({
-      method: "DELETE",
-      url: `/v1/egress-allow-hosts/${listed.json().id}`,
-      headers: AUTH,
-    });
   });
 
   it("REFUSES in air-gapped mode exactly as everywhere else — the posture is inherited, not bolted on", async () => {
@@ -350,6 +352,7 @@ const SHIM = "xs-fiddler-shim";
 
 describe("register → test → enable, the custom-provider lifecycle verbatim", () => {
   it("registers DISABLED once 127.0.0.1 is allow-listed, and never returns the key", async () => {
+    // egress-allow-cleanup: afterAll — the loopback entry the lifecycle tests share; afterAll removes it by host
     const allow = await app.inject({
       method: "POST",
       url: "/v1/egress-allow-hosts",

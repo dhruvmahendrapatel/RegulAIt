@@ -23,7 +23,7 @@
  * check does not stop at write time.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ import { buildApp } from "./app.js";
 import { encryptSecret } from "./secrets.js";
 import { checkCredentialBaseUrl } from "./credential-egress.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { removeEgressAllowEntry, trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -198,6 +199,14 @@ beforeAll(async () => {
   });
 });
 
+// M-068 / M-078, per entry: an allow entry a single test creates (IMDS, the
+// `.internal` host, the rebinding host) is removed after THAT test, whatever
+// its assertions did, so the next test still starts from default-deny.
+const perTest = trackEgressAllowHosts();
+afterEach(async () => {
+  (await perTest.removeAll(app, AUTH)).assertRemoved();
+});
+
 afterAll(async () => {
   await clearCredentials();
   srv.closeAllConnections();
@@ -244,7 +253,7 @@ describe("write time: the endpoint refuses a destination before it is ever store
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: {
-        host: "169.254.169.254",
+        host: perTest.trackHost("169.254.169.254"),
         // BOTH opt-ins, so nothing cheaper can be what refuses it: the only
         // thing left standing between this credential and the instance role is
         // the blocked-range check itself.
@@ -253,23 +262,15 @@ describe("write time: the endpoint refuses a destination before it is ever store
       },
     });
     expect(allowed.statusCode).toBe(201);
-    try {
-      const res = await app.inject({
-        method: "POST",
-        headers: AUTH,
-        url: "/v1/model-credentials",
-        payload: { provider: "openai", apiKey: "sk-ssrf-attempt-2", baseUrl: IMDS },
-      });
-      expect(res.statusCode).toBe(400);
-      expect(res.json().code).toBe("blocked_address_range");
-      expect(res.json().detail).toContain("link-local");
-    } finally {
-      await app.inject({
-        method: "DELETE",
-        headers: AUTH,
-        url: `/v1/egress-allow-hosts/${allowed.json().id}`,
-      });
-    }
+    const res = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/model-credentials",
+      payload: { provider: "openai", apiKey: "sk-ssrf-attempt-2", baseUrl: IMDS },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe("blocked_address_range");
+    expect(res.json().detail).toContain("link-local");
   });
 
   it("a PER-USER credential pointed at IMDS is refused for the user's own row too", async () => {
@@ -300,36 +301,28 @@ describe("write time: the endpoint refuses a destination before it is ever store
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
-      payload: { host: "metadata.google.internal", allowPlaintextHttp: true, note: "test" },
+      payload: { host: perTest.trackHost("metadata.google.internal"), allowPlaintextHttp: true, note: "test" },
     });
     expect(gcp.statusCode).toBe(201);
-    try {
-      for (const [baseUrl, code] of [
-        ["http://metadata.google.internal/computeMetadata/v1/", "blocked_host_suffix"],
-        // which side of the `@` is the real host? — refused rather than guessed
-        ["https://api.openai.com@169.254.169.254/v1", "userinfo_forbidden"],
-        // Postgres on the compose network
-        ["http://db:5432/", "host_not_allowlisted"],
-        // not an HTTP destination at all
-        ["file:///etc/passwd", "unsupported_scheme"],
-      ] as const) {
-        const res = await app.inject({
-          method: "POST",
-          headers: AUTH,
-          url: "/v1/model-credentials",
-          payload: { provider: "openai", apiKey: "sk-x", baseUrl },
-        });
-        // `file://` may be turned away by the request schema before the guard
-        // sees it; either refusal is fine, a 201 is not.
-        expect(res.statusCode).toBe(400);
-        if (res.json().error === "egress_blocked") expect(res.json().code).toBe(code);
-      }
-    } finally {
-      await app.inject({
-        method: "DELETE",
+    for (const [baseUrl, code] of [
+      ["http://metadata.google.internal/computeMetadata/v1/", "blocked_host_suffix"],
+      // which side of the `@` is the real host? — refused rather than guessed
+      ["https://api.openai.com@169.254.169.254/v1", "userinfo_forbidden"],
+      // Postgres on the compose network
+      ["http://db:5432/", "host_not_allowlisted"],
+      // not an HTTP destination at all
+      ["file:///etc/passwd", "unsupported_scheme"],
+    ] as const) {
+      const res = await app.inject({
+        method: "POST",
         headers: AUTH,
-        url: `/v1/egress-allow-hosts/${gcp.json().id}`,
+        url: "/v1/model-credentials",
+        payload: { provider: "openai", apiKey: "sk-x", baseUrl },
       });
+      // `file://` may be turned away by the request schema before the guard
+      // sees it; either refusal is fine, a 201 is not.
+      expect(res.statusCode).toBe(400);
+      if (res.json().error === "egress_blocked") expect(res.json().code).toBe(code);
     }
     expect(
       await db.select().from(modelCredentials).where(eq(modelCredentials.provider, "openai")),
@@ -401,37 +394,29 @@ describe("dispatch time: a row that never went through the endpoint is still ref
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
-      payload: { host: "models.corp-cdn.example", note: "looks like an ordinary vendor host" },
+      payload: { host: perTest.trackHost("models.corp-cdn.example"), note: "looks like an ordinary vendor host" },
     });
     expect(allowed.statusCode).toBe(201);
-    try {
-      const rebound = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
-        resolve: async () => [{ address: "169.254.169.254", family: 4 }],
-      });
-      expect(rebound.decision.ok).toBe(false);
-      expect(rebound.decision.ok === false && rebound.decision.code).toBe("blocked_address_range");
+    const rebound = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
+      resolve: async () => [{ address: "169.254.169.254", family: 4 }],
+    });
+    expect(rebound.decision.ok).toBe(false);
+    expect(rebound.decision.ok === false && rebound.decision.code).toBe("blocked_address_range");
 
-      // split DNS: one good answer does not launder the bad one
-      const split = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
-        resolve: async () => [
-          { address: "93.184.216.34", family: 4 },
-          { address: "10.0.0.7", family: 4 },
-        ],
-      });
-      expect(split.decision.ok).toBe(false);
+    // split DNS: one good answer does not launder the bad one
+    const split = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
+      resolve: async () => [
+        { address: "93.184.216.34", family: 4 },
+        { address: "10.0.0.7", family: 4 },
+      ],
+    });
+    expect(split.decision.ok).toBe(false);
 
-      // and the ordinary answer is allowed, so this is a guard and not a wall
-      const fine = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
-        resolve: async () => [{ address: "93.184.216.34", family: 4 }],
-      });
-      expect(fine.decision.ok).toBe(true);
-    } finally {
-      await app.inject({
-        method: "DELETE",
-        headers: AUTH,
-        url: `/v1/egress-allow-hosts/${allowed.json().id}`,
-      });
-    }
+    // and the ordinary answer is allowed, so this is a guard and not a wall
+    const fine = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    });
+    expect(fine.decision.ok).toBe(true);
   });
 });
 
@@ -461,8 +446,13 @@ describe("the allow-listed loopback endpoint an air-gapped operator actually wan
   });
 
   afterAll(async () => {
-    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/egress-allow-hosts/${allowHostId}` });
-    await clearCredentials();
+    // by host: the withdraw test re-creates the row under a new id
+    const loopback = await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" });
+    try {
+      await clearCredentials();
+    } finally {
+      loopback.assertRemoved();
+    }
   });
 
   it("stores the override and dispatches through it end to end", async () => {

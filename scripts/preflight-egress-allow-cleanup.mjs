@@ -23,6 +23,16 @@
  *    (the only route on that path is DELETE), or `removeEgressAllowEntry(...)`.
  *    A removal at the end of a test body does not count: a failing assertion
  *    before it skips it.
+ *  - PER ENTRY (M-078 follow-up): a create INSIDE a test body (`it`/`test`)
+ *    also needs a cleanup of its own, because the afterAll removal a file has
+ *    for its shared loopback row says nothing about a second host a test
+ *    allow-lists. It is accepted when the create is a restore inside a
+ *    `finally` block, when its statement passes the host through
+ *    `trackHost(...)` and an `afterEach` reaches a removal
+ *    (`removeAll(...)` of the tracker, or any removal above), or when the
+ *    statement carries the marker comment `egress-allow-cleanup: afterAll`
+ *    (a file-scoped entry the file's afterAll removes) or
+ *    `egress-allow-cleanup: refused` (a POST the test expects to be refused).
  *  - A file that creates its entries only on a scratch database it drops is
  *    listed in SCRATCH_DB_FILES with a reason. The listing is checked too: an
  *    exempt file must still create an entry and still drop a scratch database
@@ -43,6 +53,13 @@ export const GATEWAY_SRC = "apps/gateway/src";
 const ROUTE = "/v1/egress-allow-hosts";
 const TABLE = "egressAllowHosts";
 const HELPER = "removeEgressAllowEntry";
+/** the per-test tracker's removal (src/testing/egress-allow-cleanup.ts) */
+const TRACKER_REMOVAL = "removeAll";
+const TRACKER_ADD = "trackHost";
+export const FILE_SCOPED_MARKER = "egress-allow-cleanup: afterAll";
+/** a POST the test expects to be REFUSED (a non-admin, an empty payload) creates nothing */
+export const REFUSED_MARKER = "egress-allow-cleanup: refused";
+const TEST_FNS = new Set(["it", "test"]);
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
 /**
@@ -113,15 +130,61 @@ const isTableCall = (node, method) =>
 const isRemoval = (node) =>
   isTableCall(node, "delete") ||
   (ts.isTemplateExpression(node) && node.head.text.startsWith(`${ROUTE}/`)) ||
-  (ts.isCallExpression(node) && calleeName(node) === HELPER);
+  (ts.isCallExpression(node) && (calleeName(node) === HELPER || calleeName(node) === TRACKER_REMOVAL));
 
-const isAfterAll = (node) => ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "afterAll";
+const isHook = (name) => (node) => ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name;
+const isAfterAll = isHook("afterAll");
+const isAfterEach = isHook("afterEach");
+
+/** `it(...)`, `test(...)`, `it.skip(...)`, `it.each(rows)(...)`: the root identifier of the callee chain */
+const isTestCall = (node) => {
+  if (!ts.isCallExpression(node)) return false;
+  let e = node.expression;
+  while (ts.isPropertyAccessExpression(e) || ts.isCallExpression(e)) e = e.expression;
+  return ts.isIdentifier(e) && TEST_FNS.has(e.text);
+};
+
+/** the innermost statement holding a node (its leading comments carry the marker) */
+const statementOf = (node) => {
+  let n = node;
+  while (n.parent && !(ts.isBlock(n.parent) || ts.isSourceFile(n.parent) || ts.isCaseOrDefaultClause(n.parent))) n = n.parent;
+  return n.parent ? n : undefined;
+};
+
+/** where a create sits relative to the test that runs it */
+function createContext(node, sf) {
+  let inTestBody = false;
+  let inFinally = false;
+  for (let p = node.parent; p; p = p.parent) {
+    if (p.parent && ts.isTryStatement(p.parent) && p.parent.finallyBlock === p) inFinally = true;
+    if (isTestCall(p)) {
+      inTestBody = true;
+      break;
+    }
+  }
+  const stmt = statementOf(node);
+  let tracked = false;
+  let marked = false;
+  if (stmt) {
+    const scan = (n) => {
+      if (ts.isCallExpression(n) && calleeName(n) === TRACKER_ADD) tracked = true;
+      ts.forEachChild(n, scan);
+    };
+    scan(stmt);
+    const leading = stmt.getFullText(sf).slice(0, stmt.getStart(sf) - stmt.getFullStart());
+    marked = leading.includes(FILE_SCOPED_MARKER) || leading.includes(REFUSED_MARKER);
+  }
+  return { inTestBody, inFinally, tracked, marked };
+}
 
 /** analyse one test file's source */
 export function analyzeTestFile(source, fileName = "x.test.ts") {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const createLines = [];
+  /** creates inside a test body, with what protects each */
+  const testCreates = [];
   const afterAllBodies = [];
+  const afterEachBodies = [];
   /** name → function-like nodes declared under that name anywhere in the file */
   const functions = new Map();
   const declare = (name, fn) => functions.set(name, [...(functions.get(name) ?? []), fn]);
@@ -129,13 +192,20 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
   const line = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const visit = (node) => {
     const route = stringValue(node);
+    let creates = false;
     if (route === ROUTE && !ts.isLiteralTypeNode(node.parent)) {
       const method = methodNear(node);
-      if (method === undefined || method === "POST") createLines.push(line(node));
+      if (method === undefined || method === "POST") creates = true;
     }
-    if (isTableCall(node, "insert")) createLines.push(line(node));
-    if (isAfterAll(node)) {
-      for (const a of node.arguments) if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) afterAllBodies.push(a);
+    if (isTableCall(node, "insert")) creates = true;
+    if (creates) {
+      createLines.push(line(node));
+      const ctx = createContext(node, sf);
+      if (ctx.inTestBody) testCreates.push({ line: line(node), ...ctx });
+    }
+    if (isAfterAll(node) || isAfterEach(node)) {
+      const into = isAfterAll(node) ? afterAllBodies : afterEachBodies;
+      for (const a of node.arguments) if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) into.push(a);
     }
     if (ts.isFunctionDeclaration(node) && node.name) declare(node.name.text, node);
     if (
@@ -150,34 +220,49 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
   };
   visit(sf);
 
-  // walk everything reachable from an afterAll callback, following calls to
+  // walk everything reachable from the hook callbacks, following calls to
   // functions declared in this file
-  const seen = new Set();
-  const work = [...afterAllBodies];
-  let cleansInAfterAll = false;
-  let dropsScratchDb = false;
-  while (work.length > 0) {
-    const fn = work.pop();
-    if (seen.has(fn)) continue;
-    seen.add(fn);
-    const scan = (node) => {
-      if (isRemoval(node)) cleansInAfterAll = true;
-      // a scratch database dropped by the shared helper or by its own DROP DATABASE statement
-      if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node)) && /\bDROP DATABASE\b/i.test(node.text)) dropsScratchDb = true;
-      if (ts.isCallExpression(node)) {
-        const name = calleeName(node);
-        if (name === "dropScratchDatabase") dropsScratchDb = true;
-        if (ts.isIdentifier(node.expression)) for (const f of functions.get(node.expression.text) ?? []) work.push(f);
-      }
-      // a function passed by name (closeAll([... drop ...]), arr.map(fn))
-      if (ts.isIdentifier(node) && functions.has(node.text) && !ts.isCallExpression(node.parent)) {
-        for (const f of functions.get(node.text)) work.push(f);
-      }
-      ts.forEachChild(node, scan);
-    };
-    scan(fn);
-  }
-  return { creates: createLines.length > 0, createLines, cleansInAfterAll, dropsScratchDb };
+  const reach = (bodies) => {
+    const seen = new Set();
+    const work = [...bodies];
+    let removes = false;
+    let dropsScratchDb = false;
+    while (work.length > 0) {
+      const fn = work.pop();
+      if (seen.has(fn)) continue;
+      seen.add(fn);
+      const scan = (node) => {
+        if (isRemoval(node)) removes = true;
+        // a scratch database dropped by the shared helper or by its own DROP DATABASE statement
+        if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node)) && /\bDROP DATABASE\b/i.test(node.text)) dropsScratchDb = true;
+        if (ts.isCallExpression(node)) {
+          const name = calleeName(node);
+          if (name === "dropScratchDatabase") dropsScratchDb = true;
+          if (ts.isIdentifier(node.expression)) for (const f of functions.get(node.expression.text) ?? []) work.push(f);
+        }
+        // a function passed by name (closeAll([... drop ...]), arr.map(fn))
+        if (ts.isIdentifier(node) && functions.has(node.text) && !ts.isCallExpression(node.parent)) {
+          for (const f of functions.get(node.text)) work.push(f);
+        }
+        ts.forEachChild(node, scan);
+      };
+      scan(fn);
+    }
+    return { removes, dropsScratchDb };
+  };
+  const afterAllReach = reach(afterAllBodies);
+  const cleansInAfterEach = reach(afterEachBodies).removes;
+  const untrackedTestCreates = testCreates
+    .filter((c) => !c.inFinally && !c.marked && !(c.tracked && cleansInAfterEach))
+    .map((c) => c.line);
+  return {
+    creates: createLines.length > 0,
+    createLines,
+    cleansInAfterAll: afterAllReach.removes,
+    cleansInAfterEach,
+    untrackedTestCreates,
+    dropsScratchDb: afterAllReach.dropsScratchDb,
+  };
 }
 
 /** every *.test.ts under apps/gateway/src, relative to it */
@@ -202,7 +287,7 @@ export function findEgressAllowLeaks(base = root) {
     const a =
       source.includes(ROUTE) || source.includes(TABLE)
         ? analyzeTestFile(source, rel)
-        : { creates: false, createLines: [], cleansInAfterAll: false, dropsScratchDb: false };
+        : { creates: false, createLines: [], cleansInAfterAll: false, cleansInAfterEach: false, untrackedTestCreates: [], dropsScratchDb: false };
     if (a.creates) creators.push(rel);
     if (exempt) {
       if (!a.creates) stale.push(`${rel}: listed in SCRATCH_DB_FILES but creates no allow entry`);
@@ -210,6 +295,9 @@ export function findEgressAllowLeaks(base = root) {
       continue;
     }
     if (a.creates && !a.cleansInAfterAll) leaks.push(`${rel} (creates at line ${a.createLines.join(", ")})`);
+    else if (a.untrackedTestCreates.length > 0) {
+      leaks.push(`${rel} (a test creates an entry with no per-entry cleanup at line ${a.untrackedTestCreates.join(", ")})`);
+    }
   }
   for (const rel of SCRATCH_DB_FILES.keys()) if (!files.includes(rel)) stale.push(`${rel}: listed in SCRATCH_DB_FILES but no longer exists`);
   return { files, creators, leaks, stale };
@@ -224,7 +312,10 @@ function main() {
     console.error(
       "\nEach file above adds an egress allow entry on the shared database and no afterAll\n" +
         "removes it. Record the id and remove it with removeEgressAllowEntry (src/testing/\n" +
-        "egress-allow-cleanup.ts) in afterAll, asserting the result in a finally (M-068).",
+        "egress-allow-cleanup.ts) in afterAll, asserting the result in a finally (M-068).\n" +
+        "An entry a single test creates is passed through trackEgressAllowHosts().trackHost(...)\n" +
+        "and removed in afterEach; a file-scoped one created in a test carries the comment\n" +
+        `'${FILE_SCOPED_MARKER}', and a POST the test expects refused '${REFUSED_MARKER}'.`,
     );
   }
   return leaks.length > 0 || stale.length > 0 ? 1 : 0;
