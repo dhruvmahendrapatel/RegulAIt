@@ -1298,7 +1298,9 @@ details that the decisions above leave open:
    the old key's `not_after` to now. The old key mints no new token; tokens it already has live to their own expiry.
    Rotations of one runner are serialised (the identity row is locked), and the authenticating key must still be live
    on the database clock, so a token whose key was already rotated out gets `409 credential_not_live`; a runner holds
-   at most two live keys (`409 runner_key_limit`), a cap the admin bind route applies too. A rotation whose answer
+   at most two live keys (`409 runner_key_limit`), a cap the admin bind route applies too. So a second key an admin
+   binds to a runner blocks the runner's next rotation with `runner_key_limit` until it is revoked or expires; that
+   is accepted (the admin owns that key, and the current key works to the end of its window). A rotation whose answer
    was lost is recovered by the runner, not retried: on `credential_not_live`, `credential_already_registered` or a
    refused token it asks whether the next key authenticates and, if so, promotes it.
    Nothing is revoked, and the identity, and so the audit trail, stays the same. A PDP client's key is rotated by an

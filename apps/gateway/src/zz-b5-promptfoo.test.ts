@@ -139,11 +139,16 @@ function asRunner(secret: string): TestWorkloadClient {
   if (!c) runnerClients.set(secret, (c = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner", runnerSecret: secret })));
   return c;
 }
-/** ADR-0188 S7: the token endpoint refuses this key (no cached token is used: a fresh request is made) */
+/**
+ * ADR-0188 S7: the token endpoint refuses this key as a client it does not accept (no cached token is used: a
+ * fresh request is made). PR #380 recheck: the refusal CODE is checked too, so a 401 for another reason (a DPoP
+ * or assertion fault in the test client) cannot pass for a revoked key.
+ */
 async function keyRefused(secret: string): Promise<boolean> {
   const c = asRunner(secret);
   c.reset();
-  return (await c.tokenRequest()).statusCode === 401;
+  const r = await c.tokenRequest();
+  return r.statusCode === 401 && (r.json() as { error?: string }).error === "invalid_client";
 }
 /** the runner row whose identity holds this key (the gateway records a key by its RFC 7638 thumbprint) */
 async function runnerIdFor(secret: string): Promise<string | null> {

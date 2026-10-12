@@ -679,9 +679,11 @@ export const RUNNER_MAX_LIVE_KEYS = 2;
 
 /**
  * ADR-0188 S7 (review of #380): the two-live-key cap of an engine runner's identity, on the database clock.
- * Applied by BOTH binding paths (the runner's own rotation and the admin bind route), so an extra key bound by
- * an admin can never block the runner's next rotation, and no path leaves a runner with more live keys. The
- * caller holds the identity row FOR UPDATE, so two binds cannot both pass the count.
+ * Applied by BOTH binding paths (the runner's own rotation and the admin bind route), so no path leaves a runner
+ * with more live keys. A second key an admin binds therefore takes the slot a rotation needs: the runner's next
+ * rotation is refused `409 runner_key_limit` until that key is revoked (or expires). That is accepted: an admin
+ * who binds a runner key owns it, and the runner's current key keeps working until its window ends. The caller
+ * holds the identity row FOR UPDATE, so two binds cannot both pass the count.
  */
 export async function runnerKeyLimitRefusal(t: Db, identityId: string): Promise<IdentityAdminError | null> {
   const rows = (await t.execute(

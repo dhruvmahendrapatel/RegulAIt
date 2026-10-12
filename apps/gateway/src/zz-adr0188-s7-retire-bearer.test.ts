@@ -743,10 +743,18 @@ describe("S7 — review of #380: what else a self token must not do", () => {
       const r = await runner.client.tokenRequest({ dpop: await other.proof("POST", `${ORIGIN}/oauth/token`) });
       expect(r.statusCode, r.body).toBe(400);
       expect((r.json() as { error: string }).error).toBe("invalid_dpop_proof");
+      // scoped to THIS runner's client id (its key's thumbprint), so a leftover row from another run cannot satisfy it
+      const clientId = await runner.client.clientId();
       const [audited] = await db
         .select()
         .from(auditLog)
-        .where(and(eq(auditLog.ruleId, "workload-token-refused"), sql`${auditLog.detail} ->> 'code' = 'dpop_key_mismatch'`))
+        .where(
+          and(
+            eq(auditLog.ruleId, "workload-token-refused"),
+            sql`${auditLog.detail} ->> 'code' = 'dpop_key_mismatch'`,
+            sql`${auditLog.detail} ->> 'clientId' = ${clientId}`,
+          ),
+        )
         .orderBy(desc(auditLog.at))
         .limit(1);
       expect(audited).toBeDefined();
