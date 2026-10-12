@@ -1253,6 +1253,68 @@ independent security review:
    paths only, never the values). The proposals and picker-source reads are audited, because they expose user
    emails.
 
+## As built: slice S7 (2026-10-12)
+
+S7 carries out owner decision 8. Engine runners and PDP clients no longer hold bearer secrets: each holds its own
+Ed25519 key, bound as the credential of its workload identity, and authenticates with a short DPoP-bound token from
+`/oauth/token`. The tests for the old path were written first (the S7 suite against `rge_` and the `pdp` key) and
+then switched to the new path unchanged in meaning, together with the B5 engine suites and AER-027. Migration
+`0195` makes the change on first load, with no grace period and no warn-only phase (ADR-0180). These points settle
+details that the decisions above leave open:
+
+1. **The self token.** A workload of kind `engine_runner` or `pdp` takes a token for itself, not for a person, with
+   the RFC 6749 `client_credentials` grant: client authentication by `private_key_jwt` (RFC 7523) with its key,
+   a DPoP proof (RFC 9449, the gateway nonce required), and `resource` set to its kind's one route family
+   (`<issuer>/v1/engine-runner` or `<issuer>/v1/authz/check`, RFC 8707). There is no delegation grant and no
+   sponsor on the token: `issued_tokens.grant_id` is now nullable, a new `subject_identity_id` names the workload,
+   and a CHECK requires exactly one of the two, with a self token always DPoP-bound. The client id may be the key's
+   RFC 9278 thumbprint URI, so a key and the issuer are the whole client configuration. The token response carries
+   `regulait_credential_not_after` and `regulait_credential_rotate_after` (two thirds of the key's window), so a
+   client knows when to rotate without a second call. Issued and refused tokens are audited
+   (`workload-token-issued` / `workload-token-refused`). Other workload kinds and agent identities are refused this
+   grant.
+2. **What the token reaches.** It is recognised by its audience and resolves to `via: "engine-runner"` (the ADR-0187
+   runner context: the engine-key ceilings, project pinning and the runner route set, unchanged) or `via: "pdp"`
+   (only `POST /v1/authz/check`; anything else answers `403 workload_scope`). Every request re-checks the token row,
+   its binding, the credential, the identity's state and environment, and for a runner that the runner is not
+   revoked (`401 engine_runner_revoked`). Revoking a runner, its key or its identity revokes its live tokens.
+3. **Runners enrol with a key.** The runner core generates the key on its own state volume (`runner-key`, mode
+   0600) and registers only the public JWK with the one-time enrolment token. Registration creates the runner's
+   identity (S4's `ensureIdentityFor`) and binds the key through S6's one binding path, so S6 decision 2 holds: one
+   key, one identity, ever. A runner superseding its previous registration proves it with a JWS signed by the old
+   key that names the new key's thumbprint. The runner's client is `oauth4webapi` (`clientCredentialsGrantRequest`
+   with `PrivateKeyJwt` and `DPoP`, then `protectedResourceRequest`); the artifact stream rides the same client.
+4. **Rotation (decision 12).** A runner rotates its own key at two thirds of the key's window:
+   `POST /v1/engine-runner/credentials` with its current token and a proof by the new key binds the new key and moves
+   the old key's `not_after` to now. The old key mints no new token; tokens it already has live to their own expiry.
+   Nothing is revoked, and the identity, and so the audit trail, stays the same. A PDP client's key is rotated by an
+   admin in the S6 page: bind the next key, switch the client, revoke the old credential.
+5. **The bearer paths are gone.** `rge_` is no longer a credential (401 everywhere). `engine_runners.token_hash` is
+   dropped and every live runner is revoked by the migration, so each runner re-enrols once with a new enrolment
+   token. Every live `pdp` virtual key is revoked, a CHECK keeps any `pdp` key revoked, and
+   `POST /v1/virtual-keys` with `purpose: "pdp"` answers `410 pdp_key_retired`. `dispatch` and `engine` virtual
+   keys stay, as decision 8 says.
+6. **Provisioning.** Without an issuer key no self token can be issued, so a fresh install creates one: the installer
+   (`identity-key-init.js`) and the gateway's first boot write `identity-signing-key.pem` to the install secrets
+   volume with the receipt key's generator and strict reader, now shared (`ensureInstallKeyFile`: 0600, opened
+   O_NOFOLLOW, create-exclusive, never overwritten). `REGULAIT_IDENTITY_SIGNING_KEY` still wins and is how an
+   operator rotates the issuer key. `GET /v1/org/posture` (`identitySigningKey`), the signing-keys list and its card
+   name the source by key id only. The issuer is `REGULAIT_PUBLIC_URL`: the installer writes `https://<domain>` when
+   Caddy terminates TLS, keeps an operator's value, and warns when it cannot know it. Compose passes the same value
+   to the runners, which still dial `http://gateway:3000`.
+7. **The Kong adapter (plugin 0.5.0).** `pdp_key` is replaced by `pdp_client_key` (an Ed25519 key, PEM or one-line
+   base64url PKCS#8, through a vault reference) and `issuer`. The client is written over `resty.openssl`, which
+   Kong bundles: no Lua library does RFC 7523 and RFC 9449 on the client side with EdDSA (ADR-0176 §4), so only the
+   two compact JWS are put together here. `test/workload_spec.lua` runs the real library under LuaJIT and checks
+   RFC 8037's published thumbprint vector. `verify.mjs` provisions the PDP identity and key; the live Kong run is
+   pending its first CI run.
+8. **Rule ids.** `workload-token-issued`, `workload-token-refused`, `engine-runner-key-rotated`,
+   `engine-runner-key-rotation-refused`.
+
+Not done in S7 and left open: whether `dispatch` and `engine` virtual keys also become DPoP-bound (decision 8's
+follow-up); automatic rotation for PDP clients (it is admin-driven today); which steward an installer-provisioned
+PDP identity should name when the PDP client is not provisioned by a person.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of
