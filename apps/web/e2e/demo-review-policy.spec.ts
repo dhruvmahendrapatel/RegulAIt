@@ -21,7 +21,7 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
-import { PERSONA_EMAIL, preparedCredentials, signInPrepared, steppedUpAs } from "./demo-credentials";
+import { PERSONA_EMAIL, disposablePassword, preparedCredentials, signInPrepared, steppedUpAs } from "./demo-credentials";
 
 const BASE = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const BOOT_TOKEN = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "e2e-bootstrap-token";
@@ -30,6 +30,13 @@ const RUN = randomUUID();
 const NAME = `Credit-limit assistant (policy run ${RUN})`;
 const ADMIN_EMAIL = `policy-${RUN}@example.test`;
 const ADMIN_NAME = "Ada Admin";
+// ADR-0174 §6: never a literal. A fresh random password per run (or the named
+// environment variable); signInPrepared keeps a persona's in the git-ignored
+// store, so Ada signs in with whatever demo-intake set her to.
+const ADA_PASSWORD = disposablePassword("E2E_DEMO_ADMIN_PASSWORD");
+const POLICY_ADMIN_PASSWORD = disposablePassword("E2E_POLICY_ADMIN_PASSWORD");
+const AVERY_PASSWORD = disposablePassword("E2E_POLICY_AVERY_PASSWORD");
+const DANA_PASSWORD = disposablePassword("E2E_POLICY_DANA_PASSWORD");
 
 type Json = Record<string, any>;
 const api = async (path: string, init: RequestInit = {}): Promise<Json> => {
@@ -53,7 +60,7 @@ async function oneTimePassword(browser: Browser | null, id: string): Promise<str
   if (browser && preparedCredentials()) {
     const ada = await browser.newPage();
     try {
-      expect(await signInPrepared(ada, PERSONA_EMAIL.admin, "E2e-Demo-Intake!", LANDING(ada)), "Ada signs in").toBe(true);
+      expect(await signInPrepared(ada, PERSONA_EMAIL.admin, ADA_PASSWORD, LANDING(ada)), "Ada signs in").toBe(true);
       const r = await steppedUpAs(ada.request, PERSONA_EMAIL.admin, "POST", `${BASE}/v1/users/${id}/set-initial-password`, { force: true });
       expect(r.status(), `one-time password: ${await r.text()}`).toBe(200);
       return ((await r.json()) as { password: string }).password;
@@ -127,7 +134,7 @@ async function createFixtureAdmin(browser: Browser): Promise<string> {
   if (preparedCredentials()) {
     const ada = await browser.newPage();
     try {
-      expect(await signInPrepared(ada, PERSONA_EMAIL.admin, "E2e-Demo-Intake!", LANDING(ada)), "Ada signs in").toBe(true);
+      expect(await signInPrepared(ada, PERSONA_EMAIL.admin, ADA_PASSWORD, LANDING(ada)), "Ada signs in").toBe(true);
       const r = await steppedUpAs(ada.request, PERSONA_EMAIL.admin, "POST", `${BASE}/v1/users`, body);
       expect(r.status(), `fixture admin: ${await r.text()}`).toBe(201);
       return ((await r.json()) as { id: string }).id;
@@ -173,7 +180,7 @@ test("review policy: two role reviews, a send-back, a prefilled resubmission and
   const [averyId, danaId] = [idOf("avery@regulait.local"), idOf("dana@regulait.local")];
 
   // 1. the admin sets the policy on its page
-  await signIn(page, ADMIN_EMAIL, "E2e-Policy-Admin!", browser);
+  await signIn(page, ADMIN_EMAIL, POLICY_ADMIN_PASSWORD, browser);
   // Same literacy standing as the seeded personas, without relaxing the gate.
   const literacyResponse = await page.request.get(`${BASE}/v1/me/ai-literacy`);
   expect(literacyResponse.ok()).toBe(true);
@@ -261,8 +268,8 @@ test("review policy: two role reviews, a send-back, a prefilled resubmission and
   });
 
   // 3. both role members see their own review; Dana (Privacy) sends it back
-  const avery = await persona(browser, "avery@regulait.local", "E2e-Policy-Avery!");
-  const dana = await persona(browser, "dana@regulait.local", "E2e-Policy-Dana!");
+  const avery = await persona(browser, "avery@regulait.local", AVERY_PASSWORD);
+  const dana = await persona(browser, "dana@regulait.local", DANA_PASSWORD);
   let review = await openReview(avery);
   await expect(review.getByText("Security review", { exact: true })).toBeVisible();
   await review.getByRole("button", { name: "Cancel" }).click();

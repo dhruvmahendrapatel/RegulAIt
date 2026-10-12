@@ -18,10 +18,11 @@
 import { expect, request, type APIRequestContext, type APIResponse, type Locator, type Page } from "@playwright/test";
 import { nextCode, passTotp } from "./totp-sign-in";
 import { steppedUpAs } from "./demo-credentials";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 export const ADMIN_EMAIL = "admin@regulait.local";
 /** the password the journeys give Ada once her one-time password is spent (phase2 sets the same) */
-export const E2E_ADMIN_PASSWORD = "E2e-Admin-Phase2!";
+export const E2E_ADMIN_PASSWORD = E2E_PASSWORDS.admin;
 const CSRF = { "x-regulait-csrf": "1" };
 
 /**

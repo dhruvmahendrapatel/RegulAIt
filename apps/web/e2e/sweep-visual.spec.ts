@@ -24,6 +24,7 @@ import { passTotp } from "./totp-sign-in";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -33,7 +34,7 @@ const SHOTS = path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
 
 /** the password every admin spec in this suite settles on */
-const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
+const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
 
 async function signIn(page: Page, email: string, candidates: string[], settleOn: string) {
   for (const [i, password] of candidates.entries()) {
