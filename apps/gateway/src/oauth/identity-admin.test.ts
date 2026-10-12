@@ -45,7 +45,11 @@ describe("a JWK credential", () => {
 
   it("refuses a P-256 point that is not on the curve (jose builds the key; nothing invalid is stored)", async () => {
     const jwk = generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" }) as Record<string, string>;
-    const y = jwk.y!.slice(0, 42) + (jwk.y!.endsWith("A") ? "B" : "A");
+    // flip a real bit of the decoded coordinate: editing the last base64url character can change only its two padding
+    // bits, which decode to the same y, so the point stayed on the curve in about one run in eight
+    const yBytes = Buffer.from(jwk.y!, "base64url");
+    yBytes[yBytes.length - 1] ^= 0x01;
+    const y = yBytes.toString("base64url");
     expect(await refused(prepareCredential({ kind: "jwk", publicJwk: { kty: "EC", crv: "P-256", x: jwk.x!, y } }, NOW, NO_ENV))).toBe("credential_invalid");
   });
 });
