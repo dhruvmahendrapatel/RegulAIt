@@ -20,6 +20,7 @@ export {
   loadAuditChainBoundary,
   readAuditV2Boundary,
   runWithAuditActor,
+  runWithCallerAuditAtForTest,
   runAuditV2Cutover,
   currentAuditActor,
   withAuditChain,

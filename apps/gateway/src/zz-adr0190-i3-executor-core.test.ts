@@ -814,6 +814,11 @@ describe("admin quarantine, revoke, the customer mapping", () => {
     const attBefore = (await db.select().from(executorAttestations).where(eq(executorAttestations.executorId, r.executorId))).length;
     expect(await selfTest().catch((e: unknown) => e)).toMatchObject({ status: 409, code: "executor_quarantined", next: "quarantined" });
     expect((await db.select().from(executorAttestations).where(eq(executorAttestations.executorId, r.executorId))).length).toBe(attBefore);
+    // ... and the refusal leaves its own deny row (the accept and report refusals' twin)
+    const selfTestRefusals = await audits("executor-channel-refused", r.executorId);
+    expect(selfTestRefusals, "the self-test's executor_quarantined refusal is audited once").toHaveLength(1);
+    expect(selfTestRefusals[0]).toMatchObject({ effect: "deny", objectType: "executor" });
+    expect(selfTestRefusals[0]!.detail).toMatchObject({ phase: "self-test", code: "executor_quarantined", executorId: r.executorId, status: "quarantined", quarantineCode: "admin" });
     // the executor's own stream hears it
     await r.run(1, { selfTestIntervalMs: 24 * 3600_000 });
     expect(r.logs.some((l) => l.includes("-> quarantined"))).toBe(true);

@@ -777,3 +777,24 @@ Codex pushed revisions to X21 to X23 before the review was posted; which finding
 - Detection improves with pinned, licensed, linear-time vendored content.
 - Every approver must enrol a passkey before approving (demo:prepare enrols soft passkeys).
 - Codex works on gateway code for the first time; the cross-review and the foundation's fixed contracts contain that.
+
+## As built — 2026-10-12: an audited way to retire a receipt signing key
+
+`receipt_signing_keys.retired_at` already stopped every signer (receipt sweep, AI BOM snapshot, Decision BOM)
+from using a key, but only a database write could set it. `POST /v1/receipts/keys/:keyId/retire` now does:
+admin-only, a `settings_relax` step-up (facts `{ op: "receipt_key_retire", keyId }`), `retired_at` set from the
+database clock, and an `allow` audit row (`receipt-signing-key-retired`) in the same transaction, decided under
+the receipt sign lock. It is one-way. The public key stays recorded, so receipts and BOMs the key signed keep
+verifying (`packages/shared/src/receipts/README.md`).
+
+It refuses, with a `deny` audit row (`receipt-signing-key-retire-refused`) written after the refused
+transaction: the key this gateway signs with now (`409 receipt_key_in_use`: configure the replacement and
+restart first), and the last active recorded key (`409 receipt_key_only_active`: a replacement is recorded on
+its first signature). The Enforcement posture page lists the recorded keys and offers Retire only where the
+gateway would accept it. A writer that loses the registration race on a key id now re-reads the row and refuses
+(`ReceiptKeyError`) when it records a different public key or is retired.
+
+PR #377 review: both refusals are decided once before the step-up is spent (so a refused retire never burns
+the grant) and again under the lock. The AI BOM and Decision BOM signers read their key row `FOR SHARE` in the
+transaction that stores the signature, so a retire waits for a signature in flight and a signer that starts
+after it sees the key retired. Lock order everywhere: the key row, then the audit chain lock.

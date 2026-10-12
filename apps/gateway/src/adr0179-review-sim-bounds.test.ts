@@ -25,6 +25,7 @@ import {
   replayCounterFor,
   runRuleSimulation,
 } from "./policy-simulation.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 /**
  * ADR-0179 security review of the Codex batch — findings 1, 4 and 8.
@@ -102,7 +103,7 @@ async function mkUser(tag: string): Promise<string> {
 
 async function recordCalls(userId: string, n: number, spacingMs: number): Promise<void> {
   const start = Date.now() - 6 * 60 * MIN;
-  await db.insert(auditLog).values(
+  await backdated(db).insert(auditLog).values(
     Array.from({ length: n }, (_, i) => ({
       userId,
       objectType: "mcp_tool" as const,
@@ -407,7 +408,7 @@ describe("F4: the audit prune is one transaction", () => {
       const floor = await retentionFloor(db);
       const effective = floor.retainedDays!;
       expect(effective).toBeGreaterThanOrEqual(3650);
-      await db.insert(auditLog).values({
+      await backdated(db).insert(auditLog).values({
         userId: actor,
         at: new Date(Date.now() - (effective + 30) * 24 * 3600 * 1000),
         effect: "allow",

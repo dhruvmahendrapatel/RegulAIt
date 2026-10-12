@@ -17,12 +17,14 @@
  * BomPostureCard.test.ts); this page invents no sentence about what a setting does.
  */
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
-import { putOrgSettings } from "../../../stepup/stepUp";
-import { Badge, Button, Card, Field, Input, Modal, Select } from "../../../ui/kit";
+import { fmtAt } from "../../../api/format";
+import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
+import { Badge, Button, Card, ConfirmModal, Field, Input, Modal, Select, Table } from "../../../ui/kit";
 import { adminKeys, orgSettingsQuery, QueryGate, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
+import { parseReceiptKeys, receiptKeyRefusal, retireGate, type RecordedReceiptKey } from "./receiptKeysModel";
 import v from "../../views.module.css";
 
 export interface ReceiptSigningKeyPosture {
@@ -215,6 +217,109 @@ export function ReceiptKeyRow({ posture }: { posture: ReceiptSigningKeyPosture |
   );
 }
 
+const receiptKeysQueryKey = ["admin", "receipt-keys"] as const;
+
+/**
+ * Every receipt signing key the deployment has recorded, with a RETIRE action (admin, step-up, audited by the
+ * gateway). A retired key never signs again; receipts it signed keep verifying under its recorded public key.
+ * The key this gateway signs with now, and the last active key, cannot be retired; the row says why.
+ */
+export function ReceiptKeysTable({ inUseKeyId }: { inUseKeyId: string | null }) {
+  const qc = useQueryClient();
+  const keys = useQuery({ queryKey: receiptKeysQueryKey, retry: false, queryFn: () => api.get<unknown>("/v1/receipts/keys") });
+  const act = useAction();
+  const [pending, setPending] = useState<RecordedReceiptKey | null>(null);
+  const parsed = keys.data === undefined ? undefined : parseReceiptKeys(keys.data);
+  const retire = (keyId: string) =>
+    act.run(async () => {
+      try {
+        await withStepUp((h) => stepUpApi.post(`/v1/receipts/keys/${encodeURIComponent(keyId)}/retire`, {}, h));
+      } catch (e) {
+        const text = receiptKeyRefusal(e);
+        throw text ? new Error(text) : e;
+      } finally {
+        await qc.invalidateQueries({ queryKey: receiptKeysQueryKey });
+      }
+    }, `Receipt signing key ${keyId} retired`);
+  return (
+    <div className={v.stack} data-testid="receipt-keys">
+      <p>
+        <strong>Recorded receipt signing keys</strong>
+      </p>
+      <p className={v.faint}>
+        Retiring a key stops anything signing with it again. Its public key stays recorded, so receipts and BOMs it signed keep verifying.
+        Retiring is audited and asks you to confirm it&rsquo;s you.
+      </p>
+      {parsed === null ? (
+        <p role="status">This gateway did not report its recorded receipt keys, so none can be retired here.</p>
+      ) : (
+        <Table<RecordedReceiptKey>
+          rows={parsed}
+          rowKey={(k) => k.keyId}
+          loading={keys.isLoading}
+          error={keys.error}
+          onRetry={() => void keys.refetch()}
+          empty="No receipt signing key is recorded yet. A key is recorded when it first signs."
+          columns={[
+            { key: "keyId", header: "Key", render: (k) => <code className={v.mono}>{k.keyId}</code> },
+            { key: "firstUsedAt", header: "First signed", render: (k) => (k.firstUsedAt ? fmtAt(k.firstUsedAt) : "Not yet") },
+            {
+              key: "state",
+              header: "State",
+              render: (k) =>
+                k.retiredAt ? (
+                  <Badge tone="neutral">retired {fmtAt(k.retiredAt)}</Badge>
+                ) : k.keyId === inUseKeyId ? (
+                  <Badge tone="ok">active, signing now</Badge>
+                ) : (
+                  <Badge tone="ok">active</Badge>
+                ),
+            },
+            {
+              key: "retire",
+              header: "Retire",
+              render: (k) => {
+                const gate = retireGate(k, parsed ?? [], inUseKeyId);
+                if (k.retiredAt) return <span className={v.faint}>Retired</span>;
+                return gate.ok ? (
+                  <Button size="sm" variant="danger" disabled={act.busy} aria-label={`Retire receipt signing key ${k.keyId}`} onClick={() => setPending(k)}>
+                    Retire
+                  </Button>
+                ) : (
+                  <span className={v.faint}>{gate.reason}</span>
+                );
+              },
+            },
+          ]}
+        />
+      )}
+      {act.error && (
+        <p className={v.errLine} role="alert">
+          {act.error}
+        </p>
+      )}
+      <ConfirmModal
+        open={pending !== null}
+        title={`Retire receipt signing key ${pending?.keyId ?? ""}?`}
+        confirmLabel="Retire key"
+        danger
+        body={
+          <>
+            <p>Nothing signs with this key again, on any gateway. Receipts and BOMs it already signed keep verifying under its recorded public key.</p>
+            <p>This cannot be undone. It is audited, and you will be asked to confirm it&rsquo;s you.</p>
+          </>
+        }
+        onCancel={() => setPending(null)}
+        onConfirm={() => {
+          const k = pending;
+          setPending(null);
+          if (k) void retire(k.keyId);
+        }}
+      />
+    </div>
+  );
+}
+
 export function BomPostureCard({ receiptKey }: { receiptKey: ReceiptSigningKeyPosture | undefined }) {
   const settings = useQuery(orgSettingsQuery<OrgSettingsResponse>());
   const baseline = useSettleAfterWrite(adminKeys.orgSettings);
@@ -244,6 +349,7 @@ export function BomPostureCard({ receiptKey }: { receiptKey: ReceiptSigningKeyPo
     <Card title="BOM evidence">
       <div className={v.stack} data-testid="bom-posture">
         <ReceiptKeyRow posture={receiptKey} />
+        <ReceiptKeysTable inUseKeyId={receiptKey && (receiptKey.state === "install_generated" || receiptKey.state === "operator_managed") ? receiptKey.keyId : null} />
         {factsOff && (
           <p role="status">
             <Badge tone="warn">Decision BOM: not captured</Badge> Decision fact capture is off; decisions made now will say &ldquo;not recorded&rdquo; forever.

@@ -70,6 +70,7 @@ import { requiredTestStatus } from "./required-tests.js";
 import { autonomyFloorFor } from "./autonomy.js";
 import { residualPosition } from "./risk-tolerance.js";
 import { incidentGateInputs } from "./incidents.js";
+import { databaseNow } from "./db-clock.js";
 
 export const DEPLOY_GATE_RULE_IDS = { allowed: "deploy-gate-allowed", denied: "deploy-gate-denied" } as const;
 
@@ -102,7 +103,9 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
         detail: "the deploy gate answers for a use case's owner (e.g. its pipeline's service account) or an admin",
       });
     }
-    const now = new Date();
+    // M-075: every row this gate compares with (approval windows, condition metrics over audit_log.at) is on the
+    // database clock, so the gate's instant is too
+    const now = await databaseNow(db);
     const intended = (uc.intendedAgentIds ?? []) as string[];
     // AER-044: the approved stack plus any requested extras (the same union the
     // evaluator checks) — `[]` and a subset cannot drop an intended agent.

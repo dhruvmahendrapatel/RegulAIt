@@ -571,7 +571,10 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       if (!auth) return reply;
       const row = auth.executor!;
       // amendment T: a quarantined executor's self-test is refused; its classes return only through a re-enable and a new pass
-      if (row.status !== "active") return refused(reply, 409, "executor_quarantined", row);
+      if (row.status !== "active") {
+        await auditSelfTestRefusal(row, row);
+        return refused(reply, 409, "executor_quarantined", row);
+      }
       const body = executorSelfTestSchema.safeParse(jsonOf(req));
       if (!body.success) return refused(reply, 400, "invalid_body", row);
       const seen = new Set<string>();
@@ -635,7 +638,11 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         }
         return { ok: true as const, results, current };
       });
-      if (!out.ok) return refused(reply, 409, "executor_quarantined", out.current);
+      if (!out.ok) {
+        // the deciding transaction wrote nothing; the refusal's own row is written after it, on `db`
+        await auditSelfTestRefusal(out.current, row);
+        return refused(reply, 409, "executor_quarantined", out.current);
+      }
       return reply.status(200).send({ results: out.results, next: nextFor(out.current) });
     });
 
@@ -722,6 +729,24 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         effect: "deny",
         detail: { phase: `offer-${step}`, code: "executor_quarantined", offerId, executorId: ex.id, executorName: ex.name, status: executor?.status ?? null, quarantineCode: executor?.quarantineCode ?? null },
         reason: `executor ${ex.name} may not ${step === "accept" ? "take" : "report on"} offer ${offerId}: it is ${executor?.status ?? "gone"}, not active; nothing was placed (ADR-0190 decision 6)`,
+      });
+    }
+
+    /**
+     * The self-test's twin of `auditQuarantinedRefusal`: a self-test refused because the executor is not active
+     * (at authentication, or as the judging transaction re-read it) leaves its own deny row, written on `db` after
+     * any deciding transaction has ended. Nothing was judged and no attestation was written.
+     */
+    async function auditSelfTestRefusal(executor: ExecutorRow | null, authed: ExecutorRow): Promise<void> {
+      const ex = executor ?? authed;
+      await auditExecutor(db, {
+        userId: NO_IDENTITY,
+        objectType: "executor",
+        objectId: ex.id,
+        ruleId: "executor-channel-refused",
+        effect: "deny",
+        detail: { phase: "self-test", code: "executor_quarantined", executorId: ex.id, executorName: ex.name, status: executor?.status ?? null, quarantineCode: executor?.quarantineCode ?? null },
+        reason: `executor ${ex.name} may not self-test: it is ${executor?.status ?? "gone"}, not active; nothing was judged and no attestation was written (ADR-0190 amendment T)`,
       });
     }
 

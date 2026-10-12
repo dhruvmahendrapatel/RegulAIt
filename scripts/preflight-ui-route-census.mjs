@@ -80,7 +80,6 @@ export const MACHINE_ONLY = new Map([
 
   // ---- public verification: keys an outside verifier needs -------------------
   ["GET /v1/exports/signing-key", "public verification: the public key a third party checks a signed export bundle with"],
-  ["GET /v1/receipts/keys", "public verification: the public keys a third party checks decision receipts with"],
 
   // ---- the data plane: what the gateway proxies and governs -------------------
   ["POST /v1/chat/completions", "data plane: OpenAI-compatible proxy (ADR-0020); called by vendor SDKs, governed per call"],

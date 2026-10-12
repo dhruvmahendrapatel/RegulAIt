@@ -169,28 +169,12 @@ export type LiveFailureCode =
 // ---------------------------------------------------------------------------
 
 /**
- * THE clock of every S3 decision: the database's `now()`. Every timestamp S3
- * writes to, or compares with, a database row (grant creation and expiry,
- * credential windows, revocation, token issue and expiry, key lifecycle,
- * DPoP freshness and nonce slots) is taken from here unless a caller passes
- * an explicit `now` (tests). One replica's clock running ahead or behind then
- * changes nothing. Inside a transaction this is that transaction's `now()`.
+ * THE clock of every S3 decision: the database's `now()` (and, after a lock wait, its wall clock). Every
+ * timestamp S3 writes to, or compares with, a database row is taken from here unless a caller passes an explicit
+ * `now` (tests). They live in `db-clock.ts` (no gateway imports, so any module can use them without a cycle).
  */
-export async function databaseNow(db: DbOrTx): Promise<Date> {
-  const r = await db.execute<{ ms: number | string }>(sql`select (extract(epoch from now()) * 1000)::float8 as ms`);
-  return new Date(Number(r.rows[0]!.ms));
-}
-
-/**
- * The database's WALL clock (`clock_timestamp()`), for a decision taken after waiting on a row lock
- * (X43 I7S3-01): `now()` is the transaction's START, so a transaction that waited on the parent's lock
- * past the parent's expiry would still judge it live. Every liveness and expiry decision taken after a
- * lock is judged by this, sampled once the locks are held.
- */
-export async function databaseWallNow(db: DbOrTx): Promise<Date> {
-  const r = await db.execute<{ ms: number | string }>(sql`select (extract(epoch from clock_timestamp()) * 1000)::float8 as ms`);
-  return new Date(Number(r.rows[0]!.ms));
-}
+import { databaseNow, databaseWallNow } from "./db-clock.js";
+export { databaseNow, databaseWallNow };
 
 /** the facts about an identity and its subject that decide whether it is in service */
 export interface IdentityServiceFacts {

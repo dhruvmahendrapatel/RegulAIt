@@ -14,6 +14,7 @@ import { buildApp, AUDIT_MAX_PAGE_SIZE } from "./app.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { backdated } from "./testing/backdated-audit.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -51,7 +52,7 @@ beforeAll(async () => {
   // A4 (ADR-0027): a spread of deploy modes INCLUDING nulls, so the shared-WHERE
   // equivalence and the bucket-partition assertions have something to bite on.
   const MODES = ["hosted", "byoc", "air_gapped", null] as const;
-  await db.insert(auditLog).values(
+  await backdated(db).insert(auditLog).values(
     Array.from({ length: TOTAL }, (_, i) => ({
       userId,
       objectType: (i % 2 === 0 ? "mcp_tool" : "agent") as "mcp_tool",
@@ -64,7 +65,7 @@ beforeAll(async () => {
     })),
   );
   // one row far in the past, for the from/to filters
-  await db.insert(auditLog).values({
+  await backdated(db).insert(auditLog).values({
     userId,
     objectType: "mcp_tool",
     effect: "allow",

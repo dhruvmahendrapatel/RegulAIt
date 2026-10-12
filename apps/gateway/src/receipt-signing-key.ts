@@ -42,6 +42,10 @@ export const INSTALL_SECRETS_DIR_ENV = "REGULAIT_INSTALL_SECRETS_DIR";
 export const INSTALL_RECEIPT_KEY_FILE = "receipt-signing-key.pem";
 const MAX_KEY_BYTES = 16384;
 const KEY_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+/** a receipt key id as `receipt_signing_keys.key_id` accepts it (one anchored character class: linear) */
+export function isReceiptKeyId(value: unknown): value is string {
+  return typeof value === "string" && KEY_ID_RE.test(value);
+}
 
 export type ReceiptKeySource = "operator_managed" | "install_generated";
 export type ReceiptKeyState = ReceiptKeySource | "missing" | "invalid";
@@ -164,7 +168,19 @@ function loadInstallKey(file: string): ResolvedReceiptKey | null {
 export function resolveReceiptSigningKey(env: NodeJS.ProcessEnv = process.env): ResolvedReceiptKey | null {
   if (operatorReceiptKeyConfigured(env)) return loadOperatorKey(env);
   const file = installReceiptKeyPath(env);
-  return file ? loadInstallKey(file) : null;
+  if (!file) return null;
+  try {
+    return loadInstallKey(file);
+  } catch (err) {
+    // #353 follow-up: a generator that crashed between publishing the key (link) and removing its temporary
+    // file leaves the key with TWO links, which every reader refuses. The boot path sweeps such a temporary
+    // file once it is stale, but a gateway that booted within the stale window would refuse the key until its
+    // next restart. So a refusal re-sweeps stale temporaries here (the posture and every signer resolve
+    // through this) and retries once when one was removed; a fresh temporary file, which may belong to a
+    // generation in flight, is never touched, and any other refusal stands.
+    if (removeStaleInstallKeyTemps(path.dirname(file)) === 0) throw err;
+    return loadInstallKey(file);
+  }
 }
 
 export type EnsureInstallReceiptKeyOutcome =

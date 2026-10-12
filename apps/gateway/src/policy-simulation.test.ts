@@ -29,6 +29,7 @@ import {
   summarizeBlastRadius,
   type ReplayedDecision,
 } from "@regulait/shared";
+import { backdated } from "./testing/backdated-audit.js";
 
 /**
  * ADR-0059 — POLICY SIMULATION / BLAST-RADIUS PREVIEW, proved by attack.
@@ -162,7 +163,7 @@ async function recordCall(opts: {
   minutesAgo?: number;
 }) {
   const at = new Date(Date.now() - (opts.minutesAgo ?? 5) * 60_000);
-  const [row] = await db
+  const [row] = await backdated(db)
     .insert(auditLog)
     .values({
       at,

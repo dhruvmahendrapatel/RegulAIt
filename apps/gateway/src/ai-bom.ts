@@ -503,7 +503,23 @@ async function prepareAiBomSnapshot(tx: Tx, input: TakeSnapshotInput): Promise<P
 
 /** FREEZE: the key row (first use), the snapshot and its renderings, and the audit row, in the caller's transaction */
 async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSnapshotInput): Promise<TakenSnapshot> {
-  if (!p.keyRecorded) await registerReceiptSigningKey(tx as unknown as Db, p.key, new Date(p.createdAt), "ai-bom-snapshot");
+  // PR #377 review: the key row is re-read here, FOR SHARE, in the transaction that stores the signature (the
+  // capture's read-only snapshot cannot lock rows). A retire committed since the capture is seen, and one that has
+  // not committed waits for this snapshot to commit: no snapshot is stored under a key after it was retired. Lock
+  // order: the key row before the audit chain lock (the audit row below), as the retire route takes them.
+  const [current] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, p.key.keyId)).for("share");
+  if (current && (!sameReceiptPublicKey(current.publicJwk, p.key.jwk) || current.retiredAt)) {
+    throw new AiBomError(503, "receipt_signing_key_invalid", "The receipt signing key conflicts with its recorded public key, or was retired.");
+  }
+  if (!current) {
+    // #353 follow-up: a key id another writer registered meanwhile with a different public key (or retired) is a refusal
+    try {
+      await registerReceiptSigningKey(tx as unknown as Db, p.key, new Date(p.createdAt), "ai-bom-snapshot");
+    } catch (e) {
+      if (e instanceof ReceiptKeyError) throw new AiBomError(503, "receipt_signing_key_invalid", "The receipt signing key conflicts with its recorded public key.");
+      throw e;
+    }
+  }
   await tx.insert(aiBomSnapshots).values({
     id: p.id, subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, serialNumber: p.build.body.serialNumber.slice("urn:uuid:".length), supersedesId: p.prevId,
     trigger: input.trigger, basis: { rows: p.build.basis.length, sha256: bomDigestOf(p.build.basis) }, body: p.build.bodyBytes, bodySha256: p.build.bodySha256,

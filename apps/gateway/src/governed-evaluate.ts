@@ -608,9 +608,9 @@ export async function governedEvaluate(
   //
   // AER-014: on a REPLAY the window ends at the recorded call's instant and
   // counts only what came STRICTLY BEFORE it, answered by the replay's own
-  // counter against the stored timestamps (never by the query below, whose
-  // clock is a JS Date). Without a replay clock this is byte-identical to
-  // before: the window starts at `Date.now() - window` and has no upper bound.
+  // counter against the stored timestamps (never by the query below). Without
+  // a replay clock the window starts at the DATABASE's `now() - window` (M-075:
+  // `audit_log.at` is stamped on that clock) and has no upper bound.
   const replay = simulate?.replay;
   const countFor = async (l: {
     id: string;
@@ -619,9 +619,8 @@ export async function governedEvaluate(
     windowSeconds: number;
     maxCalls: number;
   }) => {
-    const clockMs = replay ? replay.asOf.getTime() : Date.now();
-    const windowStart = new Date(clockMs - l.windowSeconds * 1000);
     if (replay) {
+      const windowStart = new Date(replay.asOf.getTime() - l.windowSeconds * 1000);
       if (typeof replay.countAllowed !== "function") {
         throw new Error("a replay clock must carry its countAllowed counter; there is no direct replay count");
       }
@@ -639,7 +638,9 @@ export async function governedEvaluate(
     const conditions = [
       eq(auditLog.userId, userId),
       eq(auditLog.effect, "allow"),
-      gte(auditLog.at, windowStart),
+      // M-075: `audit_log.at` is stamped on the database clock (audit-chain.ts), so the live window is
+      // measured on that clock too, never this replica's (a replay keeps its own recorded instant above)
+      gte(auditLog.at, sql`now() - make_interval(secs => ${l.windowSeconds})`),
       // ADR-0127 — count EXECUTIONS, not questions. `/v1/evaluate` and the G9
       // authorization callout answer "what would you decide" and run nothing,
       // but they wrote an `allow` row like any other, so a preview spent the

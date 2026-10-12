@@ -120,6 +120,22 @@ export function currentAuditActor(): AuditActorStamp | undefined {
   return auditActorContext.getStore();
 }
 
+/**
+ * TEST FIXTURES ONLY: run `fn` with audit rows allowed to name their own `at` (a backdated retention or
+ * window fixture). Production code never calls it, and it runs only under a test runner (VITEST set or NODE_ENV=test); outside
+ * it, a caller-named `at` is refused (see `resolveDefaults`).
+ */
+const callerAuditAtForTest = new AsyncLocalStorage<true>();
+export function runWithCallerAuditAtForTest<T>(fn: () => PromiseLike<T> | T): Promise<T> {
+  // allowed ONLY under a test runner (the gateway's boot.ts / scheduler.ts `underTest` check): the shipped image
+  // sets no NODE_ENV, so "refuse when production" would never fire there; this fails closed everywhere else
+  const underTest = process.env.VITEST !== undefined || process.env.NODE_ENV === "test";
+  if (!underTest) {
+    return Promise.reject(new Error("audit-chain: caller-named audit timestamps are a test fixture and are refused outside a test run"));
+  }
+  return callerAuditAtForTest.run(true, async () => await fn());
+}
+
 /** Marker property: `true` on a handle that already chains, so wrapping is
  * idempotent and a doubly-wrapped handle cannot chain a row twice. */
 const CHAINED = Symbol.for("regulait.audit-chain.wrapped");
@@ -153,12 +169,28 @@ type AuditInsertValues = Partial<AuditChainFields> & Record<string, unknown>;
  * one row and the database would store a different one, and every such row
  * would report as tampered on the first verification.
  *
- * `at` in particular: `now()` has MICROSECOND resolution and JavaScript's
- * `Date` has milliseconds. Letting the column default would store a timestamp
- * the hash could never reproduce.
+ * `at` in particular: Postgres timestamps have MICROSECOND resolution and
+ * JavaScript's `Date` has milliseconds. Letting the column default would store
+ * a timestamp the hash could never reproduce.
+ *
+ * `dbNow` is the DATABASE clock (M-075), read by the writer under the chain
+ * lock and already truncated to milliseconds there, so the value hashed here
+ * is exactly the value stored. It is never the gateway's process clock: the
+ * timestamps an audit row is compared with (rate-limit windows, sweeps, domain
+ * rows stamped `now()`) are on the database clock, and a replica whose clock
+ * drifted would otherwise stamp the chain out of order.
+ *
+ * A caller may NOT name its own `at` (PR #377 review, secure by default): a
+ * row the writer let a caller date could be backdated into a window it never
+ * happened in. The only exception is a test fixture run inside
+ * `runWithCallerAuditAtForTest`, which production code never calls and which
+ * runs only under a test runner (VITEST set or NODE_ENV=test).
  */
-function resolveDefaults(v: AuditInsertValues): AuditChainFields & Record<string, unknown> {
-  const at = v.at instanceof Date ? v.at : v.at != null ? new Date(v.at as string) : new Date();
+function resolveDefaults(v: AuditInsertValues, dbNow: Date): AuditChainFields & Record<string, unknown> {
+  if (v.at != null && !callerAuditAtForTest.getStore()) {
+    throw new Error("audit-chain: an audit row's `at` is stamped by the database clock; a caller may not name it, and nothing was appended");
+  }
+  const at = v.at instanceof Date ? v.at : v.at != null ? new Date(v.at as string) : dbNow;
   return {
     ...v,
     id: (v.id as string | undefined) ?? randomUUID(),
@@ -216,6 +248,14 @@ export async function appendChainedAuditRows(
   // 0067 has not run (impossible here, it created the row) or someone deleted
   // it. Starting a fresh chain from the genesis constant is the only sane
   // behaviour: verification will separately report the missing genesis.
+  // M-075: the rows' time on the DATABASE clock, read after the lock. `clock_timestamp()`, not `now()`:
+  // `now()` is when the enclosing transaction STARTED, so a transaction that waited on this lock (or did
+  // other work before its audit insert) would stamp a time earlier than rows already ahead of it in `seq`,
+  // and `at` would run backwards along the chain. Read under the lock, and never below the tip's `at`
+  // (`auditChainClock`), `at` never decreases along `seq`. Truncated to milliseconds in SQL (what a `Date`
+  // holds), so the value hashed below is the value stored.
+  const dbNow = await auditChainClock(tx);
+
   let prevHash = tip[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
   let nextSeq = (tip[0]?.seq ?? AUDIT_GENESIS_SEQ - 1) + 1;
 
@@ -237,7 +277,7 @@ export async function appendChainedAuditRows(
     // helpers, for the same reason chaining is (see this file's header): a
     // raw `db.insert(auditLog)` written next month is scrubbed without its
     // author knowing this line exists. Convention could not promise that.
-    const resolved = resolveDefaults(raw);
+    const resolved = resolveDefaults(raw, dbNow);
     // ADR-0188 decision 19: the boundary decides the version, never the caller
     const version = auditChainVersionAt(nextSeq, v2FromSeq);
     // ADR-0188 S4: stamp the acting agent from the async context (a row that names its own actor keeps it)
@@ -292,6 +332,25 @@ export async function appendChainedAuditRows(
   // row committed without its marker.
   await captureDecisionFacts(tx as never, rows);
   return out;
+}
+
+/**
+ * The audit chain's clock (M-075): the database's `clock_timestamp()`, truncated to milliseconds, and never
+ * earlier than the chain tip's `at` (rounded UP to the millisecond, for a legacy or genesis row stored with
+ * microseconds). So `at` never decreases along `seq`, even across an NTP step-back of the database host's
+ * clock: a step-back holds new rows at the tip's time until the clock catches up. The writer calls it under
+ * the chain lock, where the tip cannot move; `appendChainedAuditRows` says why it is not `now()`.
+ */
+export async function auditChainClock(tx: { execute: (query: SQL) => PromiseLike<unknown> }): Promise<Date> {
+  const res = (await tx.execute(sql`
+    select greatest(
+      date_trunc('milliseconds', clock_timestamp()),
+      (select date_trunc('milliseconds', "at" + interval '999 microseconds') from "audit_log" where "seq" is not null order by "seq" desc limit 1)
+    ) as "at"`)) as { rows?: Array<{ at: Date | string }> };
+  const at = res.rows?.[0]?.at;
+  const d = at instanceof Date ? at : typeof at === "string" ? new Date(at) : null;
+  if (!d || Number.isNaN(d.getTime())) throw new Error("audit-chain: the database clock could not be read; nothing was appended");
+  return d;
 }
 
 /**

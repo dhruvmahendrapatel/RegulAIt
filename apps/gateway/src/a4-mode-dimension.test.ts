@@ -11,6 +11,7 @@ import { buildApp } from "./app.js";
 import { deriveDeployContext, governedEvaluate } from "./governed-evaluate.js";
 import { effectiveModeOverrides, runAuditPruneOnce, retentionFloor } from "./org-settings.js";
 import { isCsvNoticeRow } from "./csv-export.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 /** ADR-0124 — the shipped posture; these suites are about entitlement, not
  * about the kill switch, so the dial adds nothing to their decisions. */
@@ -384,7 +385,7 @@ describe("(b) MAX-only per-mode audit retention", () => {
     try {
       const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 3600 * 1000);
       const mk = (ruleId: string, at: Date, deployMode: "hosted" | "byoc" | "air_gapped" | null) =>
-        db.insert(auditLog).values({
+        backdated(db).insert(auditLog).values({
           userId: piaId, at, effect: "allow", ruleId, ruleChain: [],
           reason: "a4 retention fixture", deployMode,
         });

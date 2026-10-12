@@ -663,3 +663,34 @@ the reason. An install that takes the default is told, in the product, that it
 has accident-resistance and not evidence. The weaker default can never
 masquerade as the stronger one — which is what makes leaving it weak
 acceptable.
+
+## As built — 2026-10-12: `audit_log.at` is the database clock
+
+The chained writer (`packages/db/src/audit-chain.ts`) stamped a row whose caller named no `at` with the
+gateway's process clock (`new Date()`). Every timestamp an audit row is compared with (rate-limit windows,
+sweeps, domain rows stamped `now()`) is on the database clock, so a replica whose clock drifted wrote audit
+rows that disagreed with them (M-075).
+
+The writer now reads the database clock **under the chain lock**, as
+`date_trunc('milliseconds', clock_timestamp())`, and hashes and stores that value. It is truncated to
+milliseconds in SQL because a JavaScript `Date` holds milliseconds: the value in `content_hash` is the value in
+the column, so the chain stays verifiable.
+
+`clock_timestamp()` was chosen over `now()`. `now()` is the time the enclosing transaction started, so a
+transaction that waited on the chain lock, or did other work before its audit insert, would stamp a time
+earlier than rows already ahead of it in `seq`, and `at` would run backwards along the chain. Read after the
+lock, `at` records when the row's place in the chain was fixed.
+
+PR #377 review: the stamp is `greatest(clock_timestamp(), tip.at)` (the tip rounded up to the millisecond), so
+`at` never decreases along `seq`, even across an NTP step-back of the database host's clock: new rows are held
+at the tip's time until the clock catches up. A caller may **not** name `at` (secure by default: a row could
+otherwise be backdated into a window it never happened in); the writer refuses it and appends nothing. Test
+fixtures that need a dated row use `runWithCallerAuditAtForTest` (via the gateway's `testing/backdated-audit.ts`),
+which production code never calls and which runs only under a test runner (`VITEST` set or `NODE_ENV=test`; the shipped image sets no `NODE_ENV`, so a production check would never fire). A static test pins that no product source imports it.
+
+The comparisons against `at` moved to the database clock in the same PR: the live rate-limit window
+(`governed-evaluate.ts`; a replay keeps its recorded instant), the receipt status's stalled check, the posture
+report's window, the condition-metric sweep and route and the deploy gate (whose instant feeds the metric
+windows), and the builder runtime's step lookup. Day-scale windows (org-settings retention, reporting periods)
+still take the process clock: a skew of seconds does not move them. Tests: `audit-chain.test.ts`
+("M-075: audit_log.at is stamped on the database clock").

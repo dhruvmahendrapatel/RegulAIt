@@ -18,13 +18,13 @@
  * a test that left the chain broken would make every subsequent assertion
  * meaningless.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { chmod, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { auditLog, createDb, runMigrations, sql, type Db } from "@regulait/db";
+import { auditLog, createDb, runMigrations, runWithCallerAuditAtForTest, sql, type Db } from "@regulait/db";
 import {
   AUDIT_GENESIS_CONTENT_HASH,
   AUDIT_GENESIS_PREV_HASH,
@@ -766,6 +766,90 @@ describe("ADR-0060: the chain covers rows written by ordinary governed routes", 
     // burned, so a future gap still means something.
     expect(after.length).toBe(before.length);
     expect(Number(after.at(-1)!.seq)).toBe(Number(before.at(-1)!.seq));
+    expect((await verify()).status).toBe("ok");
+  });
+});
+
+describe("M-075: audit_log.at is stamped on the database clock", () => {
+  const CLOCK_RULE = "chain-db-clock-fixture";
+  const dbClock = async (): Promise<Date> => {
+    const res = await db.execute(sql`select date_trunc('milliseconds', clock_timestamp()) as t`);
+    return new Date((res as unknown as { rows: Array<{ t: Date | string }> }).rows[0]!.t);
+  };
+
+  it("takes `at` from the database, not the process clock, stores no sub-millisecond part, and still verifies", async () => {
+    const before = await dbClock();
+    // the process clock is twenty-five years off: a row stamped from it would say 2001
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2001-01-01T00:00:00.000Z") });
+    let rows: Array<{ id: string; at: Date }>;
+    try {
+      rows = await db.insert(auditLog).values(auditRow({ ruleId: CLOCK_RULE, reason: "db clock" })).returning({ id: auditLog.id, at: auditLog.at });
+    } finally {
+      vi.useRealTimers();
+    }
+    const row = rows[0];
+    const after = await dbClock();
+    expect(row!.at.getTime()).toBeGreaterThanOrEqual(before.getTime());
+    expect(row!.at.getTime()).toBeLessThanOrEqual(after.getTime());
+    // the hashed value is the stored value: nothing below the millisecond was stored
+    const res = await db.execute(sql`select (extract(microseconds from at)::bigint % 1000)::int as sub from audit_log where id = ${row!.id}`);
+    expect((res as unknown as { rows: Array<{ sub: number }> }).rows[0]!.sub).toBe(0);
+    expect((await verify()).status).toBe("ok");
+  });
+
+  it("never runs backwards along seq: a transaction that started before the row ahead of it stamps a later time", async () => {
+    let release!: () => void;
+    let opened!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const isOpen = new Promise<void>((r) => (opened = r));
+    const late = db.transaction(async (tx) => {
+      const started = (await tx.execute(sql`select now() as t`)) as unknown as { rows: Array<{ t: Date | string }> };
+      opened();
+      await gate; // another append commits while this transaction is open
+      const [r] = await tx.insert(auditLog).values(auditRow({ ruleId: CLOCK_RULE, reason: "late in a long transaction" })).returning({ at: auditLog.at, seq: auditLog.seq });
+      return { started: new Date(started.rows[0]!.t), row: r! };
+    });
+    await isOpen;
+    await new Promise((r) => setTimeout(r, 30));
+    const [ahead] = await db.insert(auditLog).values(auditRow({ ruleId: CLOCK_RULE, reason: "ahead in the chain" })).returning({ at: auditLog.at, seq: auditLog.seq });
+    release();
+    const { started, row } = await late;
+    expect(Number(row.seq)).toBeGreaterThan(Number(ahead!.seq));
+    // `now()` (the transaction's start) would have stamped a time BEFORE the row ahead of it
+    expect(started.getTime()).toBeLessThan(ahead!.at.getTime());
+    expect(row.at.getTime()).toBeGreaterThanOrEqual(ahead!.at.getTime());
+    // and across every row this block wrote, `at` never decreases along `seq`
+    const res = await db.execute(sql`
+      select count(*)::int as n from (
+        select at, lag(at) over (order by seq) as prev from audit_log where seq is not null and rule_id = ${CLOCK_RULE}
+      ) w where prev is not null and at < prev`);
+    expect((res as unknown as { rows: Array<{ n: number }> }).rows[0]!.n).toBe(0);
+    expect((await verify()).status).toBe("ok");
+  });
+
+  it("refuses an `at` the caller names: nothing is appended (a row cannot be backdated)", async () => {
+    const before = (await chainRows()).length;
+    await expect(db.insert(auditLog).values(auditRow({ reason: "backdated", at: new Date("2026-01-02T03:04:05.678Z") }))).rejects.toThrow(
+      "a caller may not name it",
+    );
+    expect((await chainRows()).length).toBe(before);
+    // only a test fixture may, inside the fixture path (the hash covers exactly the named value)
+    const named = new Date("2026-01-02T03:04:05.678Z");
+    const [row] = await runWithCallerAuditAtForTest(() => db.insert(auditLog).values(auditRow({ reason: "fixture-dated", at: named })).returning({ at: auditLog.at }));
+    expect(row!.at.toISOString()).toBe(named.toISOString());
+    expect((await verify()).status).toBe("ok");
+  });
+
+  it("never stamps a time earlier than the tip, even when the database clock is behind it (an NTP step-back)", async () => {
+    // a tip ahead of the database clock is what a step-back leaves behind; a fixture-dated row stands in for it
+    const ahead = new Date((await dbClock()).getTime() + 3_000);
+    const [tip] = await runWithCallerAuditAtForTest(() =>
+      db.insert(auditLog).values(auditRow({ ruleId: CLOCK_RULE, reason: "tip from before the step-back", at: ahead })).returning({ at: auditLog.at, seq: auditLog.seq }),
+    );
+    const [next] = await db.insert(auditLog).values(auditRow({ ruleId: CLOCK_RULE, reason: "after the step-back" })).returning({ at: auditLog.at, seq: auditLog.seq });
+    expect(Number(next!.seq)).toBe(Number(tip!.seq) + 1);
+    expect(next!.at.getTime()).toBe(ahead.getTime()); // held at the tip's time, not the (earlier) clock
+    expect((await dbClock()).getTime()).toBeLessThan(ahead.getTime());
     expect((await verify()).status).toBe("ok");
   });
 });

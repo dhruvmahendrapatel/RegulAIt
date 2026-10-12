@@ -44,6 +44,7 @@ import {
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { backdated } from "./testing/backdated-audit.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 // resetOrg/resetInterception drop the singletons (strict defaults come back), so
@@ -868,7 +869,7 @@ describe("audit retention — org default composed with the profile floor", () =
     expect(floorDays).toBeGreaterThanOrEqual(100); // the org default is at least in force
     const old = new Date(Date.now() - (floorDays + 100) * 24 * 3600 * 1000);
     const plantedRuleId = `orgset-planted-old-row-${RUN}`;
-    await db.insert(auditLog).values({
+    await backdated(db).insert(auditLog).values({
       userId: umaId,
       objectType: "agent",
       objectId: null,

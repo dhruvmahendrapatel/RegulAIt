@@ -283,9 +283,20 @@ export async function freezeDecisionBom(db: Db, auditId: string, actorUserId: st
     if (!decisionBomBodySchema.safeParse(assembled.body).success) throw new BomRouteError(500, { error: "bom_integrity_failure", detail: "The assembled body does not meet regulait.decision-bom.v1." });
     const key = receiptKeyOrNull();
     if (!key) throw noReceiptKey();
-    const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId));
+    // PR #377 review: FOR SHARE, so a concurrent retire either committed first (seen here: refused) or waits for this
+    // BOM to commit; nothing is signed under a key after it was retired. Lock order: the key row before the audit
+    // chain lock, as the retire route takes them.
+    const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId)).for("share");
     if (recorded && (!sameReceiptPublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt)) throw invalidReceiptKey();
-    if (!recorded) await registerReceiptSigningKey(tx as unknown as Db, key, now, "decision-bom");
+    if (!recorded) {
+      // #353 follow-up: a key id another writer registered meanwhile with a different public key (or retired) is a refusal
+      try {
+        await registerReceiptSigningKey(tx as unknown as Db, key, now, "decision-bom");
+      } catch (e) {
+        if (e instanceof ReceiptKeyError) throw invalidReceiptKey();
+        throw e;
+      }
+    }
     const signature = sign(null, Buffer.from(assembled.bodyBytes, "utf8"), key.privateKey).toString("base64url");
     const [row] = await tx
       .insert(decisionBoms)
