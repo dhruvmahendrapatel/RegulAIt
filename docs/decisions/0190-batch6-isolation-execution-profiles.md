@@ -690,6 +690,55 @@ of the "merges after I2–I4" rule above, under three conditions that keep the p
 3. Each later slice (I2–I4, I8) that turns a stub into a real route also switches its card from the stub state to
    the live state in the same PR, with that card's tests. A merged stub screen is not counted as I9 being done.
 
+## As built: slice I2 placement decision (2026-10-12)
+
+I2 delivers the required-class computation (decision 7), the placement decision with its refusal envelope and
+audit, the `delegation-isolation` check, and real profile, placement and assignment routes. Migration 0194 holds
+the new columns and the database backstop that a child grant never drops below its parent's class. No governed
+call path calls `decidePlacement` yet: I4 (stdio) and I5 (engines) wire it in. These points settle what the
+decisions above leave open:
+
+1. **Project sensitivity.** Projects carry no sensitivity of their own. The project's sensitivity is the strictest
+   sensitivity among its AI use cases. A project with no use case, or a call with no project, cannot resolve the
+   fact and is refused `policy_unresolved` (fail closed, ADR-0180). Once I4/I5 route calls through placement, a
+   stdio call in a project without a use case is refused until one is registered. Whether projects should get
+   their own sensitivity field is an open question for the owner. Until it is settled, the fail-closed rule stands.
+2. **Agents with no autonomy class.** Registry agents and RegulAIt's own workers get a defined L1 autonomy floor.
+   A floor that is genuinely null stays unresolved and is refused, as the `unknown-autonomyFloor` vector requires.
+3. **Assurance vocabulary.** It adds `unknown`, for a workload kind that acts for an agent but names none. That
+   case maps to `restricted-microvm` (L3).
+4. **Additions to decision 14:**
+   - columns `mcp_servers.execution_profile_id` (decision 7 item 5, "the MCP server's own profile") and
+     `delegation_grants.execution_placement_id` (needed for the live-chain check, amendment item 12);
+   - the `execution-profile-assigned` audit action;
+   - the assignment routes `GET`/`PUT /v1/execution-profile-assignments/:targetKind/:targetId`, for agents,
+     builder agents and stdio MCP servers.
+   An assignment looser than the current one needs a `settings_relax` step-up and a compare-and-set.
+5. **Shipped profiles.** `restricted`, `restricted-microvm` and `engine-worker` cannot be versioned or retired
+   through the API. A new profile, or a new version, looser than `restricted` (or than the version it replaces)
+   needs a `settings_relax` step-up and is audited `execution-profile-relaxed`. Lowering a compliance profile's
+   `minIsolationClass` is treated as a relaxation.
+6. **Token endpoint.** The `delegation_isolation` error code is mapped to `invalid_grant`. It cannot be produced
+   there today, because a signed child body has no class field and always inherits its parent's class.
+7. **Which floor is named (`requiredBy`).** When several floors give the same highest class, the first in
+   decision 7's order is named: workload kind, data sensitivity, compliance tag, autonomy class, configured
+   profile, unknown agent, parent grant. The configured-profile floor is the profile actually configured (the
+   server's, else the agent's, else the shipped default), whatever the agent's assurance. An unknown or
+   low-assurance agent's forced `restricted-microvm` counts as the unknown-agent floor, not the configured profile.
+8. **Grants and placements.**
+   - A grant that names a placement must carry a class at least as strict as the placement's required class. A
+     child that inherits gets its parent's class.
+   - A placement belongs to one actor in one chain. A grant from another actor, or under another root, is refused
+     `placement_bound_elsewhere`.
+   - A placement stays live only while its executor attests at the stricter of the grant's class and the
+     placement's required class.
+   - These rules hold in code, and the migration 0194 trigger enforces them too. A placement refusal on a root
+     grant is audited like one on a child, and nothing is created if the audit write fails.
+9. **Stdio and tags must resolve.**
+   - An `mcp_stdio` call must name a stdio server. A missing, unknown or non-stdio server refuses
+     `policy_unresolved`, with no fallback to the agent's or the default profile.
+   - Malformed project classifications refuse `policy_unresolved`. A null column still means no tags.
+
 ## Test strategy
 
 Every rule gets a red proof (fails with the control removed, then passes), through the real app, with an upstream

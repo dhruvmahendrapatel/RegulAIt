@@ -155,6 +155,12 @@ export const COMPLIANCE_PROFILE_LOOSENING: Classified<typeof complianceProfiles.
     looser: rankLowered({ critical: 0, high: 1, medium: 2, low: 3 }),
     why: "a higher (or no) severity at which a defeat fails its class",
   },
+  // ADR-0190 decision 7 item 3: a lower (or no) isolation floor lets the tag's calls run with weaker isolation
+  minIsolationClass: {
+    kind: "compare",
+    looser: rankLowered({ hardened_container: 1, user_space_kernel: 2, microvm: 3 }),
+    why: "a lower (or no) isolation class floor",
+  },
 };
 
 const BY_KIND: Readonly<Record<string, Readonly<Record<string, FieldClass>>>> = {

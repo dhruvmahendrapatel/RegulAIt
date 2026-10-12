@@ -302,12 +302,16 @@ async function requestDpop(ctx: KoaContextLike, s: RequestState): Promise<{ thum
   return { thumbprint: await calculateJwkThumbprint(jwk, "sha256"), jti: payload.jti, iat: payload.iat };
 }
 
-function mapDelegationRefusal(e: DelegationRefusedError): OIDCProviderError {
+/** exported for the ADR-0190 I2 suite (amendment item 11: the token-endpoint shape of `delegation-isolation`) */
+export function mapDelegationRefusal(e: DelegationRefusedError): OIDCProviderError {
   switch (e.ruleId) {
     case "delegation-budget":
       return refuse(new InvalidGrant(e.message), "delegation_budget");
     case "delegation-depth":
       return refuse(new InvalidGrant(e.message), "delegation_depth");
+    // ADR-0190 decision 8 with amendment item 11: decision 15's pattern, `invalid_grant` with `error_code`
+    case "delegation-isolation":
+      return refuse(new InvalidGrant(e.message), "delegation_isolation");
     case "delegation-scope":
     case "actor-allow-list":
     case "lead-ceiling":

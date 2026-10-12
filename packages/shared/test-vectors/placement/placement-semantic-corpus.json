@@ -2389,10 +2389,17 @@
         "outcome": "refuse",
         "ruleId": "delegation-isolation",
         "authorizationStillRequired": true,
-        "gap": "delegation_refusal_http"
+        "gap": null,
+        "tokenEndpoint": {
+          "error": "invalid_grant",
+          "errorCode": "delegation_isolation"
+        },
+        "grantsCreated": 0,
+        "auditRuleId": "delegation-isolation"
       },
       "note": "",
-      "origin": "X50"
+      "origin": "X50",
+      "pinnedBy": "ADR-0190 conformance-vector amendment item 11 (slice I2)"
     },
     {
       "id": "delegation-L2-L2",
@@ -2506,10 +2513,17 @@
         "outcome": "refuse",
         "ruleId": "delegation-isolation",
         "authorizationStillRequired": true,
-        "gap": "delegation_refusal_http"
+        "gap": null,
+        "tokenEndpoint": {
+          "error": "invalid_grant",
+          "errorCode": "delegation_isolation"
+        },
+        "grantsCreated": 0,
+        "auditRuleId": "delegation-isolation"
       },
       "note": "",
-      "origin": "X50"
+      "origin": "X50",
+      "pinnedBy": "ADR-0190 conformance-vector amendment item 11 (slice I2)"
     },
     {
       "id": "delegation-L3-L2",
@@ -2545,10 +2559,17 @@
         "outcome": "refuse",
         "ruleId": "delegation-isolation",
         "authorizationStillRequired": true,
-        "gap": "delegation_refusal_http"
+        "gap": null,
+        "tokenEndpoint": {
+          "error": "invalid_grant",
+          "errorCode": "delegation_isolation"
+        },
+        "grantsCreated": 0,
+        "auditRuleId": "delegation-isolation"
       },
       "note": "",
-      "origin": "X50"
+      "origin": "X50",
+      "pinnedBy": "ADR-0190 conformance-vector amendment item 11 (slice I2)"
     },
     {
       "id": "delegation-L3-L3",
@@ -2629,10 +2650,14 @@
       "expectedProjection": {
         "outcome": "refuse",
         "upstreamContacts": 0,
-        "gap": "live_chain_refusal_envelope"
+        "gap": null,
+        "ruleId": "actor-chain-invalid",
+        "liveFailure": "executor_not_active",
+        "failingActor": "synthetic-middle"
       },
       "note": "A fresh healthy leaf does not rescue an invalid middle actor placement.",
-      "origin": "X50"
+      "origin": "X50",
+      "pinnedBy": "ADR-0190 conformance-vector amendment item 12 (slice I2)"
     },
     {
       "id": "middle-actor-executor-quarantined",
@@ -2674,10 +2699,14 @@
       "expectedProjection": {
         "outcome": "refuse",
         "upstreamContacts": 0,
-        "gap": "live_chain_refusal_envelope"
+        "gap": null,
+        "ruleId": "actor-chain-invalid",
+        "liveFailure": "executor_quarantined",
+        "failingActor": "synthetic-middle"
       },
       "note": "A fresh healthy leaf does not rescue an invalid middle actor placement.",
-      "origin": "X50"
+      "origin": "X50",
+      "pinnedBy": "ADR-0190 conformance-vector amendment item 12 (slice I2)"
     },
     {
       "id": "middle-actor-executor-stale",
@@ -2719,10 +2748,14 @@
       "expectedProjection": {
         "outcome": "refuse",
         "upstreamContacts": 0,
-        "gap": "live_chain_refusal_envelope"
+        "gap": null,
+        "ruleId": "actor-chain-invalid",
+        "liveFailure": "executor_attestation_stale",
+        "failingActor": "synthetic-middle"
       },
       "note": "A fresh healthy leaf does not rescue an invalid middle actor placement.",
-      "origin": "X50"
+      "origin": "X50",
+      "pinnedBy": "ADR-0190 conformance-vector amendment item 12 (slice I2)"
     },
     {
       "id": "sponsor-not-floor-override",
@@ -4813,6 +4846,402 @@
         "jtiClaimed": "unspecified",
         "auditRows": 1
       }
+    },
+    {
+      "id": "delegation-L3-inherit",
+      "adrSections": [
+        "Decision 8 second bullet",
+        "Decision 11 child invariant"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": "L3",
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": null
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null,
+        "storedChildClass": "L3"
+      },
+      "note": "A child that names no class inherits its parent's: it never runs looser (decision 8: a child's class must be at least its parent's).",
+      "origin": "claude-new"
+    },
+    {
+      "id": "delegation-unclassed-parent-L1",
+      "adrSections": [
+        "Decision 8 second bullet"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "grant_creation",
+        "childRequestedClass": "L1"
+      },
+      "expectedProjection": {
+        "outcome": "isolation_constraint_satisfied",
+        "ruleId": null,
+        "authorizationStillRequired": true,
+        "gap": null,
+        "storedChildClass": "L1"
+      },
+      "note": "A parent with no isolation class constrains nothing; the child's own class is stored.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "code_exec-relaxed-sensitivity-keeps-L3",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1–2",
+        "Decision 11 isolation floors"
+      ],
+      "semanticRequest": {
+        "workloadKind": "code_exec",
+        "sensitivity": "confidential",
+        "sensitivityFloor": "L1",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L3",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "selectedClassAtLeast": "L3",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "Relaxing the confidential sensitivity floor to L1 does not lower code_exec: its own floor is L3 for confidential and regulated projects.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "stdio-floor-relaxed-sensitivity-holds",
+      "adrSections": [
+        "Decision 3",
+        "Decision 7 items 1–2",
+        "Decision 11 isolation floors"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L1",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "workloadKindFloorOverride": "L1"
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "The mcp_stdio floor relaxed to L1 (audited, step-up) lowers only that floor: the strict public sensitivity floor still requires L2.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "every-floor-relaxed-L1",
+      "adrSections": [
+        "Decision 1",
+        "Decision 7 items 1–2",
+        "Decision 11 isolation floors"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L1",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L1",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L1",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "workloadKindFloorOverride": "L1"
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L1",
+        "minimumSelectableClass": "L1",
+        "selectedClassAtLeast": "L1",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "With every floor relaxed to L1 by an admin, a hardened container satisfies the call; nothing is ever placed at L0.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "assurance-no_identity-overrides-relaxed-profile",
+      "adrSections": [
+        "Decision 7 item 5",
+        "Decision 2"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "no_identity",
+        "ownProfileFloor": "L1",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "httpStatus": 409,
+        "error": "execution_profile_unavailable",
+        "reason": "class_below_required",
+        "ruleId": "execution-profile",
+        "upstreamContacts": 0,
+        "sandboxesStarted": 0,
+        "fallbackAllowed": false
+      },
+      "note": "An agent with no identity runs only under the most restrictive profile (L3), whatever looser profile it was assigned; an L2 executor cannot take it.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "middle-actor-attested-below-placement",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": false,
+            "attestation": "fresh_passing",
+            "grantClass": "L2",
+            "placementRequiredClass": "L3",
+            "attestedClass": "L2"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": null,
+        "ruleId": "actor-chain-invalid",
+        "liveFailure": "executor_attestation_stale",
+        "failingActor": "synthetic-middle"
+      },
+      "note": "Review M1: the placement required L3; an executor now attesting only L2 no longer holds it, even though the grant named L2.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "middle-actor-attested-below-grant",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": false,
+            "attestation": "fresh_passing",
+            "grantClass": "L3",
+            "placementRequiredClass": "L2",
+            "attestedClass": "L2"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": null,
+        "ruleId": "actor-chain-invalid",
+        "liveFailure": "executor_attestation_stale",
+        "failingActor": "synthetic-middle"
+      },
+      "note": "The grant requires L3: an L2 attestation fails it whatever the placement required.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "live-placement-attested-at-both",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": false,
+            "attestation": "fresh_passing",
+            "grantClass": "L3",
+            "placementRequiredClass": "L3",
+            "attestedClass": "L3"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "live",
+        "upstreamContacts": null,
+        "gap": null,
+        "ruleId": null,
+        "liveFailure": null
+      },
+      "note": "The control: an active, fresh executor attesting at the stricter of the two classes keeps the actor live.",
+      "origin": "claude-new"
     }
   ]
 }

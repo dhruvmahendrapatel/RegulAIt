@@ -729,7 +729,7 @@ function McpExecutionCard(props: { server: McpServer | undefined }) {
   return (
     <Card title="Execution isolation">
       {server?.transport === "stdio" ? (
-        <ExecutionProfileSelector context={server.name} />
+        <ExecutionProfileSelector context={server.name} targetKind="mcp_server" targetId={server.id} />
       ) : server?.transport === "streamable_http" || server?.transport === "sse" ? (
         <p>
           This is a remote MCP server: it runs on its own host, which RegulAIt does not isolate. Its evidence records the execution as

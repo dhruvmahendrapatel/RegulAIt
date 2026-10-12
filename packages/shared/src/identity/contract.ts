@@ -198,6 +198,8 @@ export const DELEGATION_RULE_IDS = [
   "delegation-depth",
   "delegation-budget",
   "lead-ceiling",
+  /** ADR-0190 decision 8 (slice I2): a child grant asked for an isolation class below its parent's */
+  "delegation-isolation",
 ] as const;
 export type DelegationRuleId = (typeof DELEGATION_RULE_IDS)[number];
 
@@ -370,6 +372,8 @@ export const DELEGATION_ERROR_CODES = [
   "delegation_depth_unenforced",
   "delegation_cap_required",
   "delegation_lifetime",
+  // ADR-0190 decision 8 with amendment item 11 (slice I2): a child below its parent's isolation class
+  "delegation_isolation",
 ] as const;
 
 /** the form fields of `POST /oauth/token` (decisions 15 and 23); S5 validates the semantics */

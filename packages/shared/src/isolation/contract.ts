@@ -143,7 +143,11 @@ export type RequiredClassSource = (typeof REQUIRED_CLASS_SOURCES)[number];
 export const PLACEMENT_OUTCOMES = ["placed", "refused", "mismatch"] as const;
 export type PlacementOutcome = (typeof PLACEMENT_OUTCOMES)[number];
 
-/** the kernel rule ids decision 7 and 8 add */
+/**
+ * the kernel rule ids decision 7 and 8 add. `delegation-isolation` is also in `DELEGATION_RULE_IDS`
+ * (identity/contract.ts), and its token-endpoint `error_code` `delegation_isolation` in `DELEGATION_ERROR_CODES`
+ * (amendment item 11).
+ */
 export const EXECUTION_PROFILE_RULE_ID = "execution-profile" as const;
 export const DELEGATION_ISOLATION_RULE_ID = "delegation-isolation" as const;
 
@@ -217,6 +221,8 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-profile-mismatch",
   // I3 review L5: how a placed sandbox ended (completed, failed, killed, limit_exceeded)
   "execution-ended",
+  // I2: an execution profile assigned to (or unassigned from) an agent, builder agent or stdio MCP server
+  "execution-profile-assigned",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -672,11 +678,13 @@ export const ISOLATION_NOT_BUILT = { error: "not_built" } as const;
  * credentials and is designed by slice I3; it is not stubbed here.
  */
 export const ISOLATION_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT"; path: string; cls: "admin"; slice: string; built: boolean }> = [
-  { method: "GET", path: "/v1/execution-profiles", cls: "admin", slice: "I2", built: false },
-  { method: "POST", path: "/v1/execution-profiles", cls: "admin", slice: "I2", built: false },
-  { method: "GET", path: "/v1/execution-profiles/:name", cls: "admin", slice: "I2", built: false },
-  { method: "POST", path: "/v1/execution-profiles/:name/versions", cls: "admin", slice: "I2", built: false },
-  { method: "POST", path: "/v1/execution-profiles/:name/retire", cls: "admin", slice: "I2", built: false },
+  { method: "GET", path: "/v1/execution-profiles", cls: "admin", slice: "I2", built: true },
+  { method: "POST", path: "/v1/execution-profiles", cls: "admin", slice: "I2", built: true },
+  { method: "GET", path: "/v1/execution-profiles/:name", cls: "admin", slice: "I2", built: true },
+  { method: "POST", path: "/v1/execution-profiles/:name/versions", cls: "admin", slice: "I2", built: true },
+  { method: "POST", path: "/v1/execution-profiles/:name/retire", cls: "admin", slice: "I2", built: true },
+  { method: "GET", path: "/v1/execution-profile-assignments/:targetKind/:targetId", cls: "admin", slice: "I2", built: true },
+  { method: "PUT", path: "/v1/execution-profile-assignments/:targetKind/:targetId", cls: "admin", slice: "I2", built: true },
   { method: "GET", path: "/v1/executors", cls: "admin", slice: "I3", built: true },
   { method: "POST", path: "/v1/executors", cls: "admin", slice: "I3", built: true },
   { method: "GET", path: "/v1/executors/:executorId", cls: "admin", slice: "I3", built: true },
@@ -685,6 +693,6 @@ export const ISOLATION_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT"; p
   { method: "POST", path: "/v1/executors/:executorId/reenable", cls: "admin", slice: "I3", built: true },
   { method: "POST", path: "/v1/executors/:executorId/revoke", cls: "admin", slice: "I3", built: true },
   { method: "PUT", path: "/v1/executors/:executorId/declared-class", cls: "admin", slice: "I3", built: true },
-  { method: "GET", path: "/v1/execution-placements", cls: "admin", slice: "I2", built: false },
-  { method: "GET", path: "/v1/execution-placements/:placementId", cls: "admin", slice: "I2", built: false },
+  { method: "GET", path: "/v1/execution-placements", cls: "admin", slice: "I2", built: true },
+  { method: "GET", path: "/v1/execution-placements/:placementId", cls: "admin", slice: "I2", built: true },
 ];

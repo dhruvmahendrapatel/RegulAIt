@@ -666,7 +666,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
         <Section title="Autonomy" icon={Icon.check()} defaultOpen={false}>
           <AutonomyPanel agent={agent} />
           {/* ADR-0190 I9: the agent's execution profile (decision 7 item 5) */}
-          <ExecutionProfileSelector context="agent" />
+          <ExecutionProfileSelector context="agent" targetKind="builder_agent" targetId={agent.id} />
         </Section>
       )}
 

@@ -21,6 +21,8 @@ const ID_RE = /^[A-Za-z0-9_-]+$/;
 const DOTTED_QUAD_127_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 // Attestation states the broker never counts: none exists, or the pass predates the re-enable (amendment T).
 const UNCOUNTED = new Set(['missing', 'pass_before_reenable', 'pass_at_reenable']);
+// Amendment item 12: why an actor's placement no longer holds (the executor not active, quarantined, or stale).
+const LIVE_PLACEMENT_FAILURES = ['executor_not_active', 'executor_quarantined', 'executor_attestation_stale'];
 
 export function readPlacementCorpus() {
   return JSON.parse(readFileSync(new URL('./placement-semantic-corpus.json', import.meta.url), 'utf8'));
@@ -145,6 +147,35 @@ export function checkPlacementCorpus(c) {
       assert.equal(e.outcome, lower ? 'refuse' : 'isolation_constraint_satisfied');
       assert.equal(e.ruleId, lower ? 'delegation-isolation' : null);
       assert.equal(e.authorizationStillRequired, true);
+      // amendment item 11 (pinned by slice I2): the token-endpoint shape, nothing created, the refusal audited
+      if (lower && e.gap === null) {
+        assert.deepEqual(e.tokenEndpoint, { error: 'invalid_grant', errorCode: 'delegation_isolation' }, v.id);
+        assert.equal(e.grantsCreated, 0, v.id);
+        assert.equal(e.auditRuleId, 'delegation-isolation', v.id);
+      }
+      // a child that names no class inherits its parent's (decision 8)
+      if (e.storedChildClass !== undefined) assert.equal(e.storedChildClass, q.childRequestedClass ?? q.parentRequiredClass, v.id);
+    }
+    // review M1 (slice I2): an actor's placement holds only while its executor attests at the STRICTER of the grant's
+    // class and the placement's own requirement; recomputed here wherever a vector states the three classes
+    if (Array.isArray(q.actorPlacements) && q.actorPlacements.some((a) => a.attestedClass !== undefined)) {
+      const failure = q.actorPlacements
+        .map((a) => {
+          if (a.executorQuarantined) return 'executor_quarantined';
+          if (!a.executorActive) return 'executor_not_active';
+          const needed = Math.max(ranks[a.grantClass] ?? 0, ranks[a.placementRequiredClass]);
+          return a.attestation !== 'fresh_passing' || ranks[a.attestedClass] < needed ? 'executor_attestation_stale' : null;
+        })
+        .find((f) => f !== null) ?? null;
+      assert.equal(e.liveFailure, failure, v.id);
+      assert.equal(e.outcome, failure ? 'refuse' : 'live', v.id);
+    }
+    // amendment item 12 (pinned by slice I2): the live-chain refusal is actor-chain-invalid, nothing reaches the upstream
+    if (v.id.startsWith('middle-actor-') && e.gap === null) {
+      assert.equal(e.outcome, 'refuse', v.id);
+      assert.equal(e.ruleId, 'actor-chain-invalid', v.id);
+      assert.equal(e.upstreamContacts, 0, v.id);
+      assert(LIVE_PLACEMENT_FAILURES.includes(e.liveFailure), v.id);
     }
     if (v.id.startsWith('reenable-') && q.executors) {
       for (const x of q.executors) if (x.reenabledAt !== undefined && x.lastPassObservedAt !== undefined)
@@ -216,6 +247,13 @@ export const PLACEMENT_MUTATIONS = [
   ['policy_unresolved on resolved facts', (c) => { const q = find(c, 'refusal-policy_unresolved').semanticRequest; delete q.unresolvedPolicyLookup; q.sensitivityFloor = 'L2'; }],
   ['warn placed below its class', (c) => { find(c, 'warn-shortfall').expectedProjection.outcome = 'placement_eligible'; }],
   ['warn still settable', (c) => { find(c, 'warn-shortfall').expectedProjection.settingWriteStatus = 200; }],
+  // amendment items 11 and 12, pinned by slice I2
+  ['delegation refusal not invalid_grant', (c) => { find(c, 'delegation-L3-L2').expectedProjection.tokenEndpoint.error = 'invalid_request'; }],
+  ['refused child created', (c) => { find(c, 'delegation-L2-L1').expectedProjection.grantsCreated = 1; }],
+  ['live-chain refusal under another rule', (c) => { find(c, 'middle-actor-executor-stale').expectedProjection.ruleId = 'execution-profile'; }],
+  ['child inherits a lower class', (c) => { find(c, 'delegation-L3-inherit').expectedProjection.storedChildClass = 'L2'; }],
+  ['placement class ignored at use', (c) => { const e = find(c, 'middle-actor-attested-below-placement').expectedProjection; e.outcome = 'live'; e.liveFailure = null; }],
+  ['relaxed sensitivity lowers code_exec', (c) => { const e = find(c, 'code_exec-relaxed-sensitivity-keeps-L3').expectedProjection; e.requiredClass = 'L1'; e.minimumSelectableClass = 'L1'; e.selectedClassAtLeast = 'L1'; }],
 ];
 
 export function runPlacementChecks() {

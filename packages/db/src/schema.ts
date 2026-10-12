@@ -859,9 +859,14 @@ export const mcpServers = pgTable("mcp_servers", {
    * ON DELETE SET NULL: the server reads `unowned`/`orphaned`, it is never
    * deleted with its owner. */
   ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** ADR-0190 decision 7 item 5 (migration 0194): the execution profile VERSION a stdio server's sandbox runs
+   * under. Stdio servers only (a remote server runs on its own host: `external`, never a class). NULL = the
+   * shipped default. */
+  executionProfileId: uuid("execution_profile_id").references((): AnyPgColumn => executionProfiles.id, { onDelete: "restrict" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
+  check("mcp_servers_execution_profile_check", sql`${t.executionProfileId} IS NULL OR ${t.transport} = 'stdio'`),
   check(
     "mcp_servers_transport_shape",
     sql`(${t.transport} = 'stdio' AND ${t.url} = 'stdio:' || ${t.name} AND ${t.stdioCommand} IS NOT NULL AND ${t.stdioArgs} IS NOT NULL AND jsonb_typeof(${t.stdioArgs}) = 'array' AND ${t.stdioCommandDigest} IS NOT NULL) OR (${t.transport} <> 'stdio' AND ${t.url} NOT LIKE 'stdio:%' AND ${t.stdioCommand} IS NULL AND ${t.stdioArgs} IS NULL AND ${t.stdioCommandDigest} IS NULL)`,
@@ -1475,6 +1480,9 @@ export const auditLog = pgTable(
         // the customer mapping) and a placement offer (placed, refused, mismatch). Plain text column — no DDL.
         "executor",
         "execution_placement",
+        // ADR-0190 I2: an execution profile (created, versioned, retired, relaxed) and its assignment to an
+        // agent, builder agent or stdio MCP server. Plain text column — no DDL.
+        "execution_profile",
         // ADR-0188 S4: an internal workload identity created at first load, and
         // an admin replacing an identity's own grant set. Plain text — no DDL.
         "workload_identity",
@@ -3283,6 +3291,10 @@ export const complianceProfiles = pgTable("compliance_profiles", {
   redteamFailOnSeverity: text("redteam_fail_on_severity", {
     enum: ["low", "medium", "high", "critical"],
   }),
+  /** ADR-0190 decision 7 item 3 (migration 0194): the isolation class FLOOR this framework forces onto every
+   * isolable call of a project carrying its tag. Composed MAX across a project's profiles (like
+   * `guardrailModes`), so a tag can only raise the requirement. NULL = no isolation opinion. */
+  minIsolationClass: text("min_isolation_class", { enum: ["hardened_container", "user_space_kernel", "microvm"] }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -12706,11 +12718,20 @@ export const workloadIdentities = pgTable(
     status: text("status", { enum: WORKLOAD_IDENTITY_STATUSES }).notNull().default("active"),
     /** the revision of the identity's own grant set: a replacing PUT names it and bumps it by one (X33) */
     grantsRevision: integer("grants_revision").notNull().default(0),
+    /**
+     * ADR-0190 decision 8 (migration 0194): the execution profile VERSION this agent's isolable workloads run
+     * under (a floor input, decision 7 item 5). Agent and builder-agent identities only; NULL = the shipped default.
+     */
+    executionProfileId: uuid("execution_profile_id").references((): AnyPgColumn => executionProfiles.id, { onDelete: "restrict" }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check(
+      "workload_identities_execution_profile_check",
+      sql`${t.executionProfileId} IS NULL OR ${t.kind} IN ('agent', 'builder_agent')`,
+    ),
     unique("workload_identities_identifier_uq").on(t.identifier),
     unique("workload_identities_agent_uq").on(t.agentId),
     unique("workload_identities_builder_agent_uq").on(t.builderAgentId),
@@ -13018,9 +13039,27 @@ export const delegationGrants = pgTable(
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     /** a CODE from `DELEGATION_REVOKE_REASONS`, never prose */
     revokedReason: text("revoked_reason", { enum: DELEGATION_REVOKE_REASONS }),
+    /**
+     * ADR-0190 decision 8 (migration 0194): the isolation class this grant's isolable workloads require. A child's
+     * is at least its parent's (refused `delegation-isolation`; the guard trigger inherits the parent's when none is
+     * named and refuses a lower one). NULL = no isolable workload pinned (a root that names none).
+     */
+    requiredIsolationClass: text("required_isolation_class", { enum: ["hardened_container", "user_space_kernel", "microvm"] }),
+    /** ADR-0190 decision 8: the digest of the execution profile it runs under (inherited from the parent when none is named) */
+    executionProfileDigest: text("execution_profile_digest"),
+    /**
+     * ADR-0190 decision 8 third bullet (migration 0194): the placement that holds this actor's workload. The live
+     * chain (ADR-0188 decision 17) then also requires that placement's executor to be active, not quarantined, and
+     * freshly attested at the required class (amendment item 12). NULL = the actor runs in the gateway.
+     */
+    executionPlacementId: uuid("execution_placement_id").references((): AnyPgColumn => executionPlacements.id, { onDelete: "restrict" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check(
+      "delegation_grants_isolation_check",
+      sql`(${t.requiredIsolationClass} IS NULL OR ${t.requiredIsolationClass} IN ('hardened_container', 'user_space_kernel', 'microvm')) AND (${t.executionProfileDigest} IS NULL OR ${t.executionProfileDigest} ~ '^[0-9a-f]{64}$') AND (${t.executionPlacementId} IS NULL OR ${t.requiredIsolationClass} IS NOT NULL)`,
+    ),
     check("delegation_grants_depth_check", sql`${t.depth} = cardinality(${t.path}) AND ${t.depth} BETWEEN 0 AND 8`),
     check("delegation_grants_depth_limit_check", sql`${t.depthLimit} BETWEEN ${t.depth} AND 8`),
     check("delegation_grants_depth_limit_signed_check", sql`NOT ${t.depthLimitSigned} OR ${t.depth} = 0`),

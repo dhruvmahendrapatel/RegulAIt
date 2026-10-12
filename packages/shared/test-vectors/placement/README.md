@@ -6,7 +6,8 @@ and its review. Written from ADR text only; no shared source, product test, cont
 These are semantic requests and expected decision projections, not HTTP DTOs. `placement_eligible` means only that the
 isolation constraint can be met; it never authorizes a sponsor, actor, grant or upstream call.
 
-Counts: 131 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, see below), 7 revised, 42 new.
+Counts: 140 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, and 6 pinned by slice I2, see
+below), 7 revised, 51 new (9 of them added by slice I2).
 48 carry `"pendingBranch": "b6-isolation-i3@cee8a67c…"`: every vector that cites an
 amendment from K to W, whose text is not yet on `main` (the checker enforces this marker both ways). Find them with
 `grep -n pendingBranch placement-semantic-corpus.json`.
@@ -85,13 +86,37 @@ owner (open items A and B).
 - Tie-break between eligible executors with equal open offers. **Closed by item 9:** unspecified on purpose, so a
   test must not pin one.
 
+## Pinned and added by slice I2 (amendment items 11 and 12)
+
+Slice I2 built the placement decision, so the two gaps its text closed are pinned, and six vectors were added from the
+ADR text. Each pinned vector carries a `pinnedBy` field. `apps/gateway/src/adr0190-i2-placement-decision.test.ts`
+runs every requirement, `unknown-*`, `delegation-*`, `middle-actor-*` and `non-isolable-*` vector against the
+product's own functions (that file, not this checker, is the I2 conformance claim).
+
+- **`delegation-L2-L1`, `delegation-L3-L1`, `delegation-L3-L2`** (gap `delegation_refusal_http`, item 11): the token
+  endpoint answers `invalid_grant` with `error_code` `delegation_isolation`, no grant is created, and the refusal is
+  audited under rule `delegation-isolation`.
+- **`middle-actor-executor-inactive`, `-quarantined`, `-stale`** (gap `live_chain_refusal_envelope`, item 12): the
+  refusal is `actor-chain-invalid` with the live failure `executor_not_active`, `executor_quarantined` or
+  `executor_attestation_stale`, naming the failing actor; the upstream counter stays at zero.
+- **New:** `delegation-L3-inherit` (a child that names no class inherits its parent's), `delegation-unclassed-parent-L1`
+  (a parent with no class constrains nothing), `code_exec-relaxed-sensitivity-keeps-L3`,
+  `stdio-floor-relaxed-sensitivity-holds`, `every-floor-relaxed-L1` (a relaxed floor lowers only itself, never below
+  L1) and `assurance-no_identity-overrides-relaxed-profile` (an unknown agent stays at L3 whatever looser profile it
+  was assigned).
+- **Security review M1 (PR #373):** `middle-actor-attested-below-placement`, `middle-actor-attested-below-grant` and
+  the control `live-placement-attested-at-both`. An actor's placement stays live only while its executor attests at
+  the stricter of the grant's class and the placement's own requirement; the checker recomputes it from the three
+  classes each vector states.
+
 ## Checks
 
 `node packages/shared/test-vectors/placement/check-placement-corpus.mjs` (also run by
 `packages/shared/src/spec-vectors-0188-0190.test.ts`) recomputes every required class (decision 7 MAX), re-derives
 every refusal reason and selection with amendment P's precedence, checks the T predicate, the V URL rule, the K window,
 the U probe rule, the pending markers, the unresolved fact behind each `policy_unresolved` (owner decision B) and
-that no vector uses a retired enforcement mode (owner decision A), then proves it rejects 19 deliberate corruptions.
+that no vector uses a retired enforcement mode (owner decision A) and the shapes slice I2 pinned (items 11 and 12),
+then proves it rejects 25 deliberate corruptions.
 Self-consistency only;
 not I2 conformance or runtime attestation.
 
@@ -230,6 +255,15 @@ not I2 conformance or runtime attestation.
 | `channel-proof-jti-replay` | **pending** | Amendment K | claude-new |
 | `channel-unproven-large-body` | **pending** | Amendment W | claude-new |
 | `channel-proven-header-then-bad-body-hash` | **pending** | Amendment W; Amendment K | claude-new |
+| `delegation-L3-inherit` | main | Decision 8 second bullet; Decision 11 child invariant | claude-new (I2) |
+| `delegation-unclassed-parent-L1` | main | Decision 8 second bullet | claude-new (I2) |
+| `code_exec-relaxed-sensitivity-keeps-L3` | main | Decision 3; Decision 7 items 1–2; Decision 11 isolation floors | claude-new (I2) |
+| `stdio-floor-relaxed-sensitivity-holds` | main | Decision 3; Decision 7 items 1–2; Decision 11 isolation floors | claude-new (I2) |
+| `every-floor-relaxed-L1` | main | Decision 1; Decision 7 items 1–2; Decision 11 isolation floors | claude-new (I2) |
+| `assurance-no_identity-overrides-relaxed-profile` | main | Decision 7 item 5; Decision 2 | claude-new (I2) |
+| `middle-actor-attested-below-placement` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
+| `middle-actor-attested-below-grant` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
+| `live-placement-attested-at-both` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
 
 ## History
 

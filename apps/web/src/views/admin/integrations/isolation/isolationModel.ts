@@ -9,10 +9,11 @@
  *  - `GET /v1/org/settings`: the eight isolation settings (I1, built).
  *  - `GET /v1/executors`: executors with the gateway's own freshness verdict
  *    per profile digest, judged on the database clock (I3, built).
- *  - `GET /v1/execution-profiles` and `GET /v1/execution-placements`: 501
- *    `not_built` stubs until slice I2. Their success bodies are not frozen,
- *    so this model never decodes them.
- *  - No route assigns an execution profile to an agent or an MCP server.
+ *  - `GET /v1/execution-profiles` and `GET /v1/execution-placements` (I2,
+ *    built): profile versions with their relaxations against `restricted`,
+ *    and placement decisions with the refusals made before any placement row.
+ *  - `GET|PUT /v1/execution-profile-assignments/:kind/:id` (I2, built): the
+ *    profile an agent, builder agent or stdio MCP server runs under.
  *
  * Every reader treats the response as unknown input. Anything missing or
  * malformed reads as unmeasured and never as a pass (ADR-0180).
@@ -383,9 +384,25 @@ const hex = (c: string) => digit(c) || (c >= "a" && c <= "f") || (c >= "A" && c 
 export const uuidOk = (s: string) =>
   s.length === 36 && [...s].every((c, i) => ([8, 13, 18, 23].includes(i) ? c === "-" : hex(c)));
 
+/**
+ * `GET /v1/identity/picker-sources` `workerIdentities` (ADR-0188 S6): the active worker_runtime identities an
+ * executor may be registered against, as `{id, label}` (the label is the SPIFFE identifier). Null when the answer
+ * cannot be read; a malformed option is dropped from the choices (it could not be sent anyway), and `truncated`
+ * says when the gateway capped the list.
+ */
+export function parseWorkerIdentities(value: unknown): { options: Array<{ id: string; label: string }>; truncated: boolean } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v.workerIdentities)) return null;
+  const options = v.workerIdentities
+    .filter((o): o is { id: string; label: string } => o !== null && typeof o === "object" && uuidOk(String((o as { id?: unknown }).id ?? "")) && str((o as { label?: unknown }).label))
+    .map((o) => ({ id: o.id, label: o.label }));
+  return { options, truncated: v.truncated === true };
+}
+
 /** the body to post, or what is wrong with the draft. The gateway re-checks all of it. */
 export function registerBody(d: RegisterDraft): { error: string } | { body: RegisterBody } {
-  if (!uuidOk(d.workloadIdentityId)) return { error: "Worker identity id: the identity's UUID, for example 8d4b1f8e-0000-4000-8000-000000000001." };
+  if (!uuidOk(d.workloadIdentityId)) return { error: "Choose the worker identity the executor authenticates as." };
   if (!executorNameOk(d.name)) return { error: "Name: 2 to 63 characters, lower-case letters, digits and hyphens, starting with a letter." };
   if (!d.backend) return { error: "Choose the backend." };
   if (!runtimeVersionOk(d.runtimeVersion)) return { error: "Runtime version: 1 to 128 characters, letters, digits and . _ + -" };
@@ -395,6 +412,200 @@ export function registerBody(d: RegisterDraft): { error: string } | { body: Regi
   if (classes.some((c) => !allowed.includes(c))) return { error: `The ${d.backend} backend cannot attest every chosen class.` };
   return { body: { workloadIdentityId: d.workloadIdentityId, name: d.name, backend: d.backend, runtimeVersion: d.runtimeVersion, classesDeclared: classes } };
 }
+
+// ---------------------------------------------------------------------------
+// execution profiles: `GET /v1/execution-profiles` (I2, built)
+// ---------------------------------------------------------------------------
+
+export interface ProfileVersion {
+  id: string;
+  name: string;
+  version: number;
+  digest: string;
+  minClass: IsolationClass;
+  shipped: boolean;
+  retiredAt: number | null;
+  /** fields looser than the shipped `restricted` profile, as the gateway judged them */
+  relaxations: string[];
+}
+
+const posInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1;
+
+export function parseProfileVersion(raw: unknown): ProfileVersion | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const p = raw as Record<string, unknown>;
+  if (!str(p.id) || !str(p.name) || !posInt(p.version) || !str(p.digest) || !isClass(p.minClass) || typeof p.shipped !== "boolean") return null;
+  if (!Array.isArray(p.relaxations) || !p.relaxations.every((r) => typeof r === "string")) return null;
+  if (p.retiredAt !== null && isoMs(p.retiredAt) === null) return null;
+  return {
+    id: p.id,
+    name: p.name,
+    version: p.version,
+    digest: p.digest,
+    minClass: p.minClass,
+    shipped: p.shipped,
+    retiredAt: p.retiredAt === null ? null : isoMs(p.retiredAt),
+    relaxations: p.relaxations as string[],
+  };
+}
+
+/** `{profiles: [...]}`; null when the envelope is malformed; a malformed row is kept as `unreadable`, never dropped */
+export function parseProfiles(value: unknown): Array<ProfileVersion | { unreadable: true; index: number }> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "profiles")) return null;
+  const list = (value as { profiles: unknown }).profiles;
+  if (!Array.isArray(list)) return null;
+  return list.map((row, index) => parseProfileVersion(row) ?? { unreadable: true as const, index });
+}
+
+/** the profiles an admin may assign: every live (not retired) version */
+export const assignableProfiles = (list: Array<ProfileVersion | { unreadable: true; index: number }>): ProfileVersion[] =>
+  list.filter((p): p is ProfileVersion => !("unreadable" in p) && p.retiredAt === null);
+
+export const profileText = (p: ProfileVersion) => `${p.name} v${p.version} · ${classText(p.minClass)}`;
+
+/** `^[a-z][a-z0-9-]{1,62}$` (EXECUTION_PROFILE_NAME_RE), checked by character (M-074) */
+export const profileNameOk = (s: string) =>
+  s.length >= 2 && s.length <= 63 && s[0]! >= "a" && s[0]! <= "z" && [...s].every((c) => (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-");
+
+/**
+ * A new profile starts from an existing version's body (`GET /v1/execution-profiles/:name`), renamed and with the
+ * chosen minimum class. Every other field is the base's: the gateway judges each field against `restricted`, and a
+ * looser one is a step-up and an audited relaxation. Null when the base body is not an object.
+ */
+export function newProfileBody(base: unknown, name: string, minClass: IsolationClass): Record<string, unknown> | null {
+  if (base === null || typeof base !== "object" || Array.isArray(base)) return null;
+  return { ...(base as Record<string, unknown>), name, minClass };
+}
+
+/** the body of one version from `GET /v1/execution-profiles/:name` (`{versions: [{id, body}]}`) */
+export function versionBody(value: unknown, id: string): unknown {
+  if (value === null || typeof value !== "object" || !Array.isArray((value as { versions?: unknown }).versions)) return null;
+  const v = ((value as { versions: unknown[] }).versions as Array<Record<string, unknown>>).find((x) => x && x.id === id);
+  return v?.body ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// profile assignment: `GET|PUT /v1/execution-profile-assignments/:kind/:id` (I2, built)
+// ---------------------------------------------------------------------------
+
+export type AssignmentTargetKind = "agent" | "builder_agent" | "mcp_server";
+
+export interface Assignment {
+  assigned: ProfileVersion | null;
+  effective: ProfileVersion;
+  source: "assigned" | "shipped_default";
+}
+
+/** a malformed answer is unmeasured (null), never "the default" */
+export function parseAssignment(value: unknown): Assignment | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const a = value as Record<string, unknown>;
+  const effective = parseProfileVersion(a.effective);
+  if (!effective || (a.source !== "assigned" && a.source !== "shipped_default")) return null;
+  const assigned = a.assigned === null ? null : parseProfileVersion(a.assigned);
+  if (a.assigned !== null && !assigned) return null;
+  if ((a.source === "assigned") !== (assigned !== null)) return null;
+  return { assigned, effective, source: a.source };
+}
+
+// ---------------------------------------------------------------------------
+// placements: `GET /v1/execution-placements` (I2, built)
+// ---------------------------------------------------------------------------
+
+/** decision 7: which floor set the required class */
+export const REQUIRED_BY_TEXT: Readonly<Record<string, string>> = {
+  workload_kind: "the workload kind",
+  data_sensitivity: "the project's data sensitivity",
+  compliance_tag: "a compliance tag",
+  autonomy_class: "the agent's autonomy class",
+  configured_profile: "the configured profile",
+  unknown_agent: "an unknown or low-assurance agent",
+  parent_grant: "the parent delegation",
+};
+
+const OUTCOMES = ["placed", "refused", "mismatch"] as const;
+export interface Placement {
+  id: string;
+  workloadKind: string;
+  requiredClass: IsolationClass;
+  requiredBy: string;
+  outcome: (typeof OUTCOMES)[number];
+  refusalCode: string | null;
+  appliedClass: string | null;
+  executorName: string | null;
+  profileName: string | null;
+  profileVersion: number | null;
+  createdAt: number;
+}
+export interface UnrecordedRefusal {
+  auditId: string;
+  at: number;
+  code: string | null;
+  unresolvedFact: string | null;
+}
+
+function parsePlacement(raw: unknown): Placement | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const p = raw as Record<string, unknown>;
+  const createdAt = isoMs(p.createdAt);
+  if (!str(p.id) || !str(p.workloadKind) || !isClass(p.requiredClass) || !str(p.requiredBy) || createdAt === null) return null;
+  if (typeof p.outcome !== "string" || !(OUTCOMES as readonly string[]).includes(p.outcome)) return null;
+  const opt = (v: unknown) => (typeof v === "string" && v.length > 0 && v.length <= 512 ? v : null);
+  // a refusal or a mismatch names its code; a placement names the class it ran under
+  if (p.outcome !== "placed" && !opt(p.refusalCode)) return null;
+  if (p.outcome === "placed" && !opt(p.appliedClass)) return null;
+  return {
+    id: p.id,
+    workloadKind: p.workloadKind,
+    requiredClass: p.requiredClass,
+    requiredBy: p.requiredBy,
+    outcome: p.outcome as Placement["outcome"],
+    refusalCode: opt(p.refusalCode),
+    appliedClass: opt(p.appliedClass),
+    executorName: opt(p.executorName),
+    profileName: opt(p.profileName),
+    profileVersion: posInt(p.profileVersion) ? p.profileVersion : null,
+    createdAt,
+  };
+}
+
+/** `{placements, refusalsWithoutPlacement}`; null when the envelope is malformed */
+export function parsePlacements(
+  value: unknown,
+): { placements: Array<Placement | { unreadable: true; index: number }>; unrecorded: Array<UnrecordedRefusal | { unreadable: true; index: number }> } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v.placements) || !Array.isArray(v.refusalsWithoutPlacement)) return null;
+  return {
+    placements: v.placements.map((row, index) => parsePlacement(row) ?? { unreadable: true as const, index }),
+    unrecorded: v.refusalsWithoutPlacement.map((row, index) => {
+      const r = (row ?? {}) as Record<string, unknown>;
+      const at = isoMs(r.at);
+      if (!str(r.auditId) || at === null) return { unreadable: true as const, index };
+      return { auditId: r.auditId, at, code: typeof r.code === "string" ? r.code : null, unresolvedFact: typeof r.unresolvedFact === "string" ? r.unresolvedFact : null };
+    }),
+  };
+}
+
+/** `GET /v1/execution-placements/:placementId`: the decision with the audit row it was recorded under; null when unreadable */
+export function parsePlacementDetail(value: unknown): { id: string; auditId: string | null; auditRuleId: string | null; auditReason: string | null; reportSha256: string | null } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!str(v.id)) return null;
+  const audit = v.audit !== null && typeof v.audit === "object" && !Array.isArray(v.audit) ? (v.audit as Record<string, unknown>) : null;
+  const text = (x: unknown) => (typeof x === "string" && x.length > 0 && x.length <= 4096 ? x : null);
+  return {
+    id: v.id,
+    auditId: audit ? text(audit.id) : null,
+    auditRuleId: audit ? text(audit.ruleId) : null,
+    auditReason: audit ? text(audit.reason) : null,
+    reportSha256: typeof v.reportSha256 === "string" && /^[0-9a-f]{64}$/.test(v.reportSha256) ? v.reportSha256 : null,
+  };
+}
+
+/** a refusal code in words: decision 7's reasons, or the mismatch */
+export const refusalText = (code: string | null): string =>
+  code === "execution_profile_mismatch" ? MISMATCH_TEXT : code && Object.hasOwn(REFUSAL_TEXT, code) ? REFUSAL_TEXT[code as RefusalReason] : "Reason not reported.";
 
 // ---------------------------------------------------------------------------
 // executor lifecycle (I3): detail, attestation history, and the admin acts

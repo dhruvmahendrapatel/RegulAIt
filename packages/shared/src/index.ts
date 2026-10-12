@@ -1970,6 +1970,10 @@ export const upsertComplianceProfileSchema = z.object({
   redteamGatingClasses: z.array(z.enum(RED_TEAM_ATTACK_CLASSES)).max(16).nullable().optional(),
   redteamMinTrials: z.number().int().min(1).max(25).nullable().optional(),
   redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullable().optional(),
+  /** ADR-0190 decision 7 item 3: the isolation class floor this framework forces onto every isolable call of a
+   * project carrying its tag (L1 to L3, never L0). MAX-composed, so it can only raise the requirement; lowering or
+   * dropping it on an existing profile is a loosening (step-up, rule-loosening.ts). */
+  minIsolationClass: z.enum(["hardened_container", "user_space_kernel", "microvm"]).nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
