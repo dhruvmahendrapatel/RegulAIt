@@ -89,6 +89,7 @@ import { recommendationsPostureSection } from "./access-recommendations.js";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 // ADR-0189 R25 item 13 follow-up: use cases left behind a completed instance
 import { useCasesBehindCompletedInstance } from "./use-cases.js";
+import { databaseNow } from "./db-clock.js";
 
 /** the rolling activity window the posture view reads (denials, PII blocks,
  * pack evidence, eval runs). Spend uses the current calendar month, because
@@ -106,7 +107,8 @@ export async function computePostureReport(
   db: Db,
   opts: { sink?: AnchorSink | null; now?: Date } = {},
 ): Promise<Record<string, unknown>> {
-  const now = opts.now ?? new Date();
+  // M-075: the window over audit_log.at (stamped on the database clock) is measured on that clock too
+  const now = opts.now ?? (await databaseNow(db));
   const windowStart = new Date(now.getTime() - POSTURE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const month = resolveReportPeriod("current_month", now);
 

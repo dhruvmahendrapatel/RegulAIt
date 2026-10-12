@@ -1345,7 +1345,8 @@ async function answer(
     .where(
       and(
         eq(auditLog.userId, seg.userId),
-        gte(auditLog.at, new Date((stepRow?.createdAt ?? new Date()).getTime() - 1000)),
+        // M-075: both sides on the database clock (the step's created_at, else the database's now())
+        stepRow ? gte(auditLog.at, new Date(stepRow.createdAt.getTime() - 1000)) : sql`${auditLog.at} >= now() - interval '1 second'`,
         sql`${auditLog.detail}->>'builderStepId' = ${stepId}`,
       ),
     )

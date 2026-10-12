@@ -124,6 +124,7 @@ import { evaluatePack } from "./compliance-packs.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { measureTraceMetricForScope } from "./kri.js";
 import { reopenUseCaseReview } from "./review-policy.js";
+import { databaseNow } from "./db-clock.js";
 
 export type { ConditionVerdict } from "@regulait/shared";
 
@@ -940,7 +941,8 @@ export async function runConditionEvaluationSweep(
   db: Db,
   opts: { now?: Date; dataKey?: string | undefined; log?: (line: string) => void } = {},
 ): Promise<ConditionEvaluationSweepResult> {
-  const now = opts.now ?? new Date();
+  // M-075: every window a metric reads (audit_log.at among them) is measured on the database clock
+  const now = opts.now ?? (await databaseNow(db));
   const log = opts.log ?? ((line: string) => console.error(line));
   const out: ConditionEvaluationSweepResult = { useCases: 0, evaluated: 0, met: 0, breached: 0, reopened: 0, skipped: [] };
   for (const id of await useCasesWithMeasuredConditions(db)) {
@@ -1108,7 +1110,7 @@ export function registerConditionMetricRoutes(app: FastifyInstance, db: Db, opts
     if (cond.status === "waived") {
       return reply.status(409).send({ error: "condition_waived", detail: "a waived condition is not evaluated" });
     }
-    const now = new Date();
+    const now = await databaseNow(db); // M-075: the metric windows are on the database clock
     const r = await evaluateConditionsDetailed(db, useCaseId, now, {
       persist: true,
       conditionIds: [conditionId],
