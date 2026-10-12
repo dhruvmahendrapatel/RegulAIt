@@ -272,14 +272,19 @@ test.describe("ADR-0187 X26: the Engines page", () => {
   });
 
   test("a self-test passing as the page was opened stops reading green at its 24 h expiry, with no user action", async ({ page }) => {
-    await page.clock.install();
-    await open(page);
+    // One epoch for the fixture and the browser clock, and absolute pause points: the bound is crossed at a known
+    // instant. A relative fastForward on a clock that keeps running in real time, against a fixture stamped from
+    // the test runner's own clock, left only a minute either side of the bound to whatever the runner's load ate.
+    const epoch = Date.now();
+    await page.clock.install({ time: epoch });
+    await open(page, { engines: enginesList(epoch) });
     const pf = card(page, "promptfoo");
-    // the fixture's promptfoo self-test passed 30 minutes ago: green until 23 h 30 min from now
+    // the fixture's promptfoo self-test passed 30 minutes before the epoch: green until 23 h 30 min after it
+    const expiry = epoch - 30 * 60_000 + 24 * 3600_000;
     await expect(pf.getByText("On — self-test passed")).toBeVisible();
-    await page.clock.fastForward("23:29:00");
+    await page.clock.pauseAt(expiry - 60_000);
     await expect(pf.getByText("On — self-test passed")).toBeVisible();
-    await page.clock.fastForward("00:02:00");
+    await page.clock.pauseAt(expiry + 60_000);
     await expect(pf.getByText("On — self-test not current")).toBeVisible();
     await expect(pf.getByText("On — self-test passed")).toHaveCount(0);
   });
@@ -372,13 +377,18 @@ test.describe("ADR-0187 X26: the Engines page", () => {
   });
 
   test("a runner report that expires while the page is open stops reading passed, with no user action", async ({ page }) => {
-    await page.clock.install();
-    const list = enginesList();
-    list.engines[0].runners[0].selfTestReportedAt = new Date(Date.now() - 23.5 * 3600_000).toISOString();
+    // the same single epoch and absolute pause points as the engine-level expiry test above
+    const epoch = Date.now();
+    await page.clock.install({ time: epoch });
+    const list = enginesList(epoch);
+    list.engines[0].runners[0].selfTestReportedAt = new Date(epoch - 23.5 * 3600_000).toISOString();
     await open(page, { engines: list });
     const row = card(page, "promptfoo").getByRole("row", { name: /promptfoo-runner-1/ });
+    const expiry = epoch + 30 * 60_000;
     await expect(row.getByText("passed", { exact: true })).toBeVisible();
-    await page.clock.fastForward("00:31:00");
+    await page.clock.pauseAt(expiry - 60_000);
+    await expect(row.getByText("passed", { exact: true })).toBeVisible();
+    await page.clock.pauseAt(expiry + 60_000);
     await expect(row.getByText("self-test report stale")).toBeVisible();
     await expect(row.getByText("passed", { exact: true })).toHaveCount(0);
   });

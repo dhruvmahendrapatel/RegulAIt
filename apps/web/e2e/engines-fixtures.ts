@@ -72,8 +72,13 @@ function engine(over: Json): Json {
   };
 }
 
-/** GET /v1/engines: promptfoo enabled, garak failed its egress self-test, modelscan not built */
-export function enginesList(): Json {
+/**
+ * GET /v1/engines: promptfoo enabled, garak failed its egress self-test, modelscan not built.
+ * Its times are stamped relative to `now`; a test that drives the browser clock passes the same
+ * instant it installs the clock at, so the 24 h self-test bound falls at a moment the test knows.
+ */
+export function enginesList(now: number = Date.now()): Json {
+  const iso = (minsAgo: number) => new Date(now - minsAgo * 60_000).toISOString();
   return {
     taxonomyVersion: 1,
     engines: [
