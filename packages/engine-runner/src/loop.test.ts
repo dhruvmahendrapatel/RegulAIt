@@ -950,4 +950,106 @@ describe("ADR-0188 S7 (decision 12): a rotation whose answer was lost is recover
     expect(logs.some((l) => /rotated this runner's key/.test(l))).toBe(true);
     expect(logs.join("\n")).not.toContain(stored);
   });
+
+  it("PR #380 recheck: the next key's probe gets a 503 once; the runner keeps the next key, never falls back to the retired key, and is promoted on the next visit", async () => {
+    const live = new Set<string>([kid(STORED)]);
+    let rotations = 0;
+    let probe503 = 0;
+    let nextJkt: string | null = null;
+    const calls: Array<{ path: string; bearer: string }> = [];
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      if (p === "/oauth/token") {
+        const assertion = new URLSearchParams(init.body ?? "").get("client_assertion") ?? "";
+        const sub = String(b64json(assertion.split(".")[1] ?? "").sub ?? "");
+        const jkt = sub.slice(sub.lastIndexOf(":") + 1);
+        // the gateway is briefly unavailable for the next key's FIRST token request (the probe)
+        if (jkt === nextJkt && probe503 === 0) {
+          probe503++;
+          return { status: 503, headers: { "content-type": "application/json" }, json: async () => ({ error: "temporarily_unavailable" }) };
+        }
+        if (!live.has(jkt)) return { status: 401, headers: { "content-type": "application/json" }, json: async () => ({ error: "invalid_client" }) };
+        const rotateAfter = jkt === kid(STORED) ? 0 : 4_000_000_000;
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          json: async () => ({ access_token: `tok-${jkt}`, token_type: "DPoP", expires_in: 300, regulait_credential_rotate_after: rotateAfter }),
+        };
+      }
+      const auth = init.headers.authorization ?? "";
+      calls.push({ path: p, bearer: auth.startsWith("DPoP tok-") ? `Key ${auth.slice("DPoP tok-".length)}` : auth });
+      if (p.endsWith("/credentials")) {
+        rotations++;
+        const jkt = auth.slice("DPoP tok-".length);
+        if (!live.has(jkt)) return { status: 409, json: async () => ({ error: "credential_not_live" }) };
+        const body = JSON.parse(init.body ?? "{}") as { publicJwk: { x: string } };
+        nextJkt = jwkKid(body.publicJwk);
+        live.delete(jkt);
+        live.add(nextJkt);
+        // committed; the answer is lost on the way back
+        throw new Error("socket hang up");
+      }
+      return { status: 204, json: async () => null };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    const { o, logs } = await opts({ maxIterations: 5 });
+    await o.store.save(STORED);
+    // never a stop: the retired key is never used again, so no lease is refused as "revoked"
+    await runRunnerLoop(client, async () => ({ items: [] }) as never, o);
+    expect(probe503).toBe(1);
+    const stored = (await o.store.load())!;
+    expect(stored).not.toBe(STORED);
+    expect(kid(stored)).toBe(nextJkt);
+    expect(await o.store.loadNext()).toBeNull();
+    expect(rotations).toBe(2);
+    // after the rotation committed, every lease used the new key
+    const firstRotation = calls.findIndex((c) => c.path.endsWith("/credentials"));
+    const leasesAfter = calls.slice(firstRotation).filter((c) => c.path.endsWith("/lease"));
+    expect(leasesAfter.length).toBeGreaterThan(0);
+    expect(leasesAfter.slice(1).every((c) => c.bearer === bearer(stored))).toBe(true);
+    expect(calls.filter((c) => c.path.endsWith("/lease")).at(-1)!.bearer).toBe(bearer(stored));
+    expect(logs.some((l) => /could not be checked/.test(l))).toBe(true);
+    expect(logs.some((l) => /rotated this runner's key/.test(l))).toBe(true);
+    expect(logs.join("\n")).not.toMatch(/revoked|lease refused|state: leasing -> stopped/);
+    expect(logs.join("\n")).not.toContain(stored);
+  });
+  it("PR #380 recheck: at a restart, a 503 on the next key's probe neither falls back to the retired key nor stops; the next visit promotes it", async () => {
+    const NEXT = generateRunnerSecret();
+    // the rotation committed before the restart: only the next key is live
+    const live = new Set<string>([kid(NEXT)]);
+    let probe503 = 0;
+    const leases: string[] = [];
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      if (p === "/oauth/token") {
+        const assertion = new URLSearchParams(init.body ?? "").get("client_assertion") ?? "";
+        const sub = String(b64json(assertion.split(".")[1] ?? "").sub ?? "");
+        const jkt = sub.slice(sub.lastIndexOf(":") + 1);
+        if (jkt === kid(NEXT) && probe503 === 0) {
+          probe503++;
+          return { status: 503, headers: { "content-type": "application/json" }, json: async () => ({ error: "temporarily_unavailable" }) };
+        }
+        if (!live.has(jkt)) return { status: 401, headers: { "content-type": "application/json" }, json: async () => ({ error: "invalid_client" }) };
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          json: async () => ({ access_token: `tok-${jkt}`, token_type: "DPoP", expires_in: 300, regulait_credential_rotate_after: 4_000_000_000 }),
+        };
+      }
+      const auth = init.headers.authorization ?? "";
+      if (p.endsWith("/lease")) leases.push(auth.startsWith("DPoP tok-") ? `Key ${auth.slice("DPoP tok-".length)}` : auth);
+      return { status: 204, json: async () => null };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    const { o, logs } = await opts({ maxIterations: 3 });
+    await o.store.save(STORED);
+    await o.store.saveNext(NEXT);
+    await runRunnerLoop(client, async () => ({ items: [] }) as never, o);
+    expect(probe503).toBe(1);
+    expect(await o.store.load()).toBe(NEXT);
+    expect(await o.store.loadNext()).toBeNull();
+    expect(leases.length).toBeGreaterThan(0);
+    expect(leases.every((b) => b === bearer(NEXT))).toBe(true);
+    expect(logs.join("\n")).not.toMatch(/revoked|lease refused|state: leasing -> stopped/);
+  });
 });

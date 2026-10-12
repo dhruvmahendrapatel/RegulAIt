@@ -270,14 +270,54 @@ const MESSAGE_REENROL =
   "this runner's key was registered for another build (the image or engine version changed) and no unused enrolment token is set: " +
   "mint a new enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner (the old registration is revoked when it re-enrols)";
 
-/** does the client's current key get a self token from the gateway? */
-async function keyAuthenticates(client: RunnerClient): Promise<boolean> {
+/**
+ * Does the client's current key get a self token from the gateway? PR #380 recheck: only a refusal of the
+ * key ("refused": the token endpoint said no, which `token()` reports as `next: "revoked"`) is an answer.
+ * A 5xx, 408, 429, a network error, a timeout or an unreadable answer says nothing about the key
+ * ("transient"), and must never be read as "this key is not live".
+ */
+type KeyProbe = "authenticates" | "refused" | "transient";
+async function probeKey(client: RunnerClient): Promise<KeyProbe> {
   try {
     await client.probeToken();
-    return true;
-  } catch {
-    return false;
+    return "authenticates";
+  } catch (e) {
+    return e instanceof RunnerHttpError && e.next === "revoked" ? "refused" : "transient";
   }
+}
+
+/** a rotation's next key whose probe failed transiently: confirmed (or given up) before the next lease */
+interface UnconfirmedNextKey {
+  next: string;
+  /** the key the runner held before (restored only if the gateway refuses the next key) */
+  before: string | null;
+}
+
+/** promote the next key: it is the stored credential from now on */
+async function promoteNext(opts: RunnerLoopOptions, next: string): Promise<string> {
+  await opts.store.save(next);
+  await opts.store.clearNext();
+  return next;
+}
+
+/**
+ * PR #380 recheck: settle a next key whose earlier probe failed transiently. The client already uses the
+ * next key (the old one may be retired). Returns the promoted key, null when the gateway refused the next
+ * key (the old key is restored and `.next` kept, so a later rotation tries again), or "transient" when the
+ * probe failed transiently again (nothing changes; the loop tries again at its next visit).
+ */
+async function confirmNextKey(client: RunnerClient, opts: RunnerLoopOptions, u: UnconfirmedNextKey): Promise<string | null | "transient"> {
+  client.useKey(u.next);
+  const probe = await probeKey(client);
+  if (probe === "transient") return "transient";
+  if (probe === "refused") {
+    if (u.before) client.useKey(u.before);
+    opts.log?.("the next key of an unconfirmed key rotation does not authenticate; will retry the rotation");
+    return null;
+  }
+  await promoteNext(opts, u.next);
+  opts.log?.("rotated this runner's key (confirmed after a transient failure; the old key mints no new token)");
+  return u.next;
 }
 
 /**
@@ -289,10 +329,12 @@ async function keyAuthenticates(client: RunnerClient): Promise<boolean> {
  * `409 credential_not_live` while the old key's token lasts, a refused token (401) after it expires, or
  * `409 credential_already_registered` if the next key is named again. On any of those the runner asks
  * whether the NEXT key authenticates; if it does, the rotation happened and the next key is promoted. A
- * restart does the same from `<file>.next` (`runRunnerLoop`). Returns the new key, or null when the
- * rotation did not complete (logged; retried on a later visit).
+ * restart does the same from `<file>.next` (`runRunnerLoop`). Returns the new key, null when the
+ * rotation did not complete (logged; retried on a later visit), or — when the gateway did not answer the
+ * next key's probe (5xx, 408, 429, network, timeout) — the unconfirmed next key: the client stays on it,
+ * `.next` is kept, and the loop probes again before it leases (PR #380 recheck).
  */
-async function rotateKey(client: RunnerClient, opts: RunnerLoopOptions): Promise<string | null> {
+async function rotateKey(client: RunnerClient, opts: RunnerLoopOptions): Promise<string | null | UnconfirmedNextKey> {
   let next = await opts.store.loadNext();
   if (!next) {
     next = generateRunnerSecret();
@@ -307,7 +349,14 @@ async function rotateKey(client: RunnerClient, opts: RunnerLoopOptions): Promise
     if (maybeRotated) {
       const before = await opts.store.load();
       client.useKey(next);
-      if (!(await keyAuthenticates(client))) {
+      const probe = await probeKey(client);
+      if (probe === "transient") {
+        // PR #380 recheck: the probe says nothing about the next key. The old key may already be retired, so
+        // the client stays on the next key, `.next` is kept, and the probe is retried before the next lease.
+        opts.log?.(`key rotation may have completed (${whyOf(e)}), but the next key could not be checked (the gateway did not answer); will check again`);
+        return { next, before };
+      }
+      if (probe === "refused") {
         if (before) client.useKey(before);
         if ((e as RunnerHttpError).code === "credential_already_registered") {
           // a next key bound elsewhere, or refused: drop it; a fresh one is generated at the next attempt
@@ -323,8 +372,7 @@ async function rotateKey(client: RunnerClient, opts: RunnerLoopOptions): Promise
       return null;
     }
   }
-  await opts.store.save(next);
-  await opts.store.clearNext();
+  await promoteNext(opts, next);
   opts.log?.("rotated this runner's key (the old key mints no new token)");
   return next;
 }
@@ -379,17 +427,22 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
   // ADR-0188 S7: a rotation interrupted by a crash or a restart. If its next key already authenticates (the
   // rotation committed), it IS the credential; otherwise it stays as the next key and the rotation runs again
   let credential = stored;
+  /** PR #380 recheck: a next key whose probe failed transiently; settled before any lease */
+  let unconfirmed: UnconfirmedNextKey | null = null;
   const next = stored && !interrupted ? await opts.store.loadNext() : null;
   if (next && stored) {
     client.useKey(next);
-    if (await keyAuthenticates(client)) {
-      await opts.store.save(next);
-      await opts.store.clearNext();
-      credential = next;
+    const probe = await probeKey(client);
+    if (probe === "authenticates") {
+      credential = await promoteNext(opts, next);
       opts.log?.("a key rotation had completed before a restart: the new key is this runner's credential");
+    } else if (probe === "transient") {
+      // the gateway did not answer: whether the rotation committed is unknown, so neither key is assumed
+      unconfirmed = { next, before: stored };
+      opts.log?.("a key rotation was under way before a restart and the gateway could not be asked whether it completed; will check again");
     }
   }
-  if (credential && !interrupted) {
+  if (credential && !interrupted && !unconfirmed) {
     client.useKey(credential);
     opts.log?.("using the stored runner key");
   }
@@ -627,9 +680,24 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
         leasingVisits++;
         // ADR-0188 S7 (decision 12): rotate the key when the gateway's last token answer said it is due. A
         // failure is logged and tried again on a later visit; the key keeps working until its window ends.
-        if (client.rotationDue(clock())) {
+        // PR #380 recheck: a next key whose probe failed transiently is settled first, and nothing is leased
+        // until it is (the old key may be retired; leasing with it would read as a revoked runner)
+        if (unconfirmed) {
+          const settled = await confirmNextKey(client, opts, unconfirmed);
+          if (settled === "transient") {
+            await backOff();
+            break;
+          }
+          if (settled) held = settled;
+          unconfirmed = null;
+        } else if (client.rotationDue(clock())) {
           const rotated = await rotateKey(client, opts);
-          if (rotated) held = rotated;
+          if (typeof rotated === "string") held = rotated;
+          else if (rotated) {
+            unconfirmed = rotated;
+            await backOff();
+            break;
+          }
         }
         // round 5 [68]: retained results are delivered (or dropped) before any new work. Round 11 [90]:
         // from the persistent retain root (and the work root, for any crash leftovers there)
