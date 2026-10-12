@@ -15,6 +15,7 @@ import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
+import { RunLineageCard } from "./RunLineageCard";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -70,6 +71,8 @@ export default function LineagePage() {
   const [direction, setDirection] = useState("backward");
   const [maxDepth, setMaxDepth] = useState("5");
   const [result, setResult] = useState<Traversal | null>(null);
+  // ADR-0050: one run's direct inputs and outputs
+  const [runId, setRunId] = useState<string | null>(null);
 
   const nodes = useQuery({
     queryKey: ["admin", "lineage-nodes", projectId],
@@ -190,6 +193,17 @@ export default function LineagePage() {
                           <span className={v.faint}>metadata only</span>
                         ),
                     },
+                    {
+                      key: "run",
+                      header: "",
+                      align: "right",
+                      render: (n) =>
+                        n.kind === "run" && n.refId ? (
+                          <Button size="sm" aria-label={`Inputs and outputs of ${n.label}`} onClick={() => setRunId(n.refId)}>
+                            Inputs and outputs
+                          </Button>
+                        ) : null,
+                    },
                   ]}
                 />
                 <div className={v.sectionTitle}>Edges</div>
@@ -207,6 +221,8 @@ export default function LineagePage() {
             )}
           </div>
         </Card>
+
+        <RunLineageCard runId={runId} onRunId={setRunId} />
 
         <QueryGate loading={overview.isLoading} error={overview.error} onRetry={() => void overview.refetch()}>
           <Card title="Graph census">

@@ -11,6 +11,7 @@ import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
 import { putOrgSettings } from "../../../stepup/stepUp";
+import { RemediationsCard } from "./RemediationsCard";
 
 type AlertStatus = "open" | "acknowledged" | "resolved";
 interface GovernanceAlert {
@@ -219,6 +220,7 @@ export default function GovernanceAlertsPage() {
             </div>
           )}
         </QueryGate>
+        <RemediationsCard />
         <DetectionMonitorSettings />
         <AlertSettingsCard />
       </div>

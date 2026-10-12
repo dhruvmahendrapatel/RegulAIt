@@ -21,11 +21,13 @@
  *    still caught on read — so nobody reads a red row here as "we were
  *    unprotected".
  */
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
+import { SchedulerJobHistory } from "./SchedulerJobHistory";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -92,6 +94,15 @@ function outcomeTone(outcome: string | null): "ok" | "danger" | "warn" | "info" 
 
 export default function SchedulerPage() {
   const act = useAction();
+  // ADR-0064: which jobs have their full run ledger open
+  const [history, setHistory] = useState<Set<string>>(() => new Set());
+  const toggleHistory = (name: string) =>
+    setHistory((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
   const status = useQuery({
     queryKey: ["admin", "scheduler"],
     queryFn: () => api.get<SchedulerStatus>("/v1/scheduler"),
@@ -227,7 +238,18 @@ export default function SchedulerPage() {
                   <Button size="sm" variant="ghost" onClick={() => toggle(job)} disabled={act.busy}>
                     {job.enabled ? "Disable" : "Enable"}
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-expanded={history.has(job.name)}
+                    aria-label={`${history.has(job.name) ? "Hide" : "Show"} the full run history of ${job.name}`}
+                    onClick={() => toggleHistory(job.name)}
+                  >
+                    {history.has(job.name) ? "Hide full history" : "Full history"}
+                  </Button>
                 </div>
+
+                {history.has(job.name) ? <SchedulerJobHistory name={job.name} /> : null}
 
                 {job.recentRuns.length === 0 ? (
                   <div className={v.faint}>No recorded runs.</div>
