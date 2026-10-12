@@ -1,7 +1,7 @@
 /**
  * ADR-0187 B5-E — THE RUNNER CORE: the protocol side of the thin shim each
  * engine image runs (`engines/<id>/runner` in B5-P/M/G). No listening port: it
- * registers once (enrolment token → runner token, reporting its self-test),
+ * registers once (enrolment token → its own key, reporting its self-test),
  * then loops: lease → run the engine under a heartbeat → post the envelope →
  * wipe the work directory.
  *
@@ -164,6 +164,9 @@ function tokenRefusal(e: unknown): { status: number; code: string | null } | nul
 }
 
 /** the runner routes (lease, self-test, rotation, heartbeat, artifact, result) and its enrolment, nothing else */
+/** ADR-0188 S7: the JWS `alg` of every runner assertion and proof (the gateway's workload profile, RFC 8037) */
+export const RUNNER_JWS_ALG = "EdDSA";
+
 export class RunnerClient {
   /** ADR-0188 S7: the runner's own key (a `rgek_` secret); never sent, never logged */
   private key: string | null = null;
@@ -256,9 +259,20 @@ export class RunnerClient {
     const m = await runnerKeyMaterial(this.key);
     const as: oauth.AuthorizationServer = { issuer: this.issuer, token_endpoint: `${this.issuer}/oauth/token` };
     const client: oauth.Client = { client_id: m.clientId };
-    this.dpop ??= oauth.DPoP(client, m.cryptoKeyPair);
+    // `oauth4webapi` 3.x labels an Ed25519 key's JWS with the fully-specified `alg` "Ed25519" (RFC 9864). The
+    // gateway's workload profile names the same signature "EdDSA" (RFC 8037; WORKLOAD_PROOF_ALGS) and refuses any
+    // other label, so every JWS this runner sends says "EdDSA". The signature itself is identical.
+    this.dpop ??= oauth.DPoP(client, m.cryptoKeyPair, { [oauth.modifyAssertion]: (h) => void (h.alg = RUNNER_JWS_ALG) });
     // the gateway requires the assertion's `aud` to be exactly its token endpoint URL (S5 review item 7)
-    const auth = oauth.PrivateKeyJwt({ key: m.cryptoKeyPair.privateKey, kid: m.jkt }, { [oauth.modifyAssertion]: (_h, p) => void (p.aud = as.token_endpoint) });
+    const auth = oauth.PrivateKeyJwt(
+      { key: m.cryptoKeyPair.privateKey, kid: m.jkt },
+      {
+        [oauth.modifyAssertion]: (h, p) => {
+          h.alg = RUNNER_JWS_ALG;
+          p.aud = as.token_endpoint;
+        },
+      },
+    );
     for (let attempt = 0; ; attempt++) {
       try {
         const res = await oauth.clientCredentialsGrantRequest(as, client, auth, { resource: `${this.issuer}${WORKLOAD_SELF_RESOURCE_PATHS.engine_runner}` }, {
@@ -346,7 +360,7 @@ export class RunnerClient {
     const res = await this.call("POST", "/v1/engine-runner/register", enrollmentToken, {
       ...body,
       publicJwk: m.publicJwk,
-      ...(supersedes && isRunnerKeySecret(supersedes) ? { supersedes: await supersedeProof(supersedes, runnerSecret) } : {}),
+      ...(supersedes && isRunnerKeySecret(supersedes) ? { supersedes: await supersedeProof(supersedes, runnerSecret, this.issuer) } : {}),
     });
     // PR #205 follow-up [101]: a 2xx that is not a well-formed 201 answer is transient (the
     // registration may have committed: the loop confirms the same key, decision 77), never a refusal

@@ -18,7 +18,7 @@ import path from "node:path";
 import { ENGINE_RESULT_VERSION, type EngineLease, type EngineResultEnvelope } from "@regulait/shared";
 import { probeEgress, tcpConnect } from "./egress.js";
 import { runProcessGroup } from "./process.js";
-import { generateRunnerSecret } from "./key.js";
+import { generateRunnerSecret, runnerIssuerFromEnv } from "./key.js";
 import { buildSelfTest, postResultWithRetry, RETAINED_RESULT_FILE, runOnce, RunnerClient, RunnerHttpError, RunnerMalformedResponseError, RunnerTimeoutError, type RunnerHttp } from "./runner.js";
 
 const refuse = (code: string) => () => Promise.reject(Object.assign(new Error(code), { code }));
@@ -457,5 +457,38 @@ describe("PR #205 follow-up [101]: the sweep of every runner route for a swallow
 
   it("result: the status is the whole answer; a 2xx with a truncated body is still definitive (a retry would get 409 engine_run_finished)", async () => {
     expect(await clientAnswering(200, truncated).result("r", {} as EngineResultEnvelope)).toBe(200);
+  });
+});
+
+describe("ADR-0188 S7: the runner's own credential, as the gateway's workload profile reads it", () => {
+  const b64json = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as Record<string, unknown>;
+
+  it("every JWS the runner sends says alg EdDSA (the gateway refuses the RFC 9864 label oauth4webapi would use)", async () => {
+    const seen: Array<{ path: string; headers: Record<string, string>; body?: string }> = [];
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      seen.push({ path: p, headers: init.headers, ...(typeof init.body === "string" ? { body: init.body } : {}) });
+      if (p === "/oauth/token") return { status: 200, headers: { "content-type": "application/json" }, json: async () => ({ access_token: "s7-test-token", token_type: "DPoP", expires_in: 300 }) };
+      return { status: 204, json: async () => null };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: "https://regulait.example", http });
+    client.useKey(TEST_KEY);
+    expect(await client.lease({ imageDigest: `sha256:${"1".repeat(64)}`, engineVersion: "1.0.0" })).toBeNull();
+    const token = seen.find((c) => c.path === "/oauth/token")!;
+    const form = new URLSearchParams(token.body ?? "");
+    const assertion = form.get("client_assertion")!.split(".");
+    expect(b64json(assertion[0]!).alg).toBe("EdDSA");
+    expect(b64json(assertion[1]!).aud).toBe("https://regulait.example/oauth/token");
+    const proofHeader = (h: Record<string, string>) => b64json((h.dpop ?? h.DPoP)!.split(".")[0]!);
+    expect(proofHeader(token.headers).alg).toBe("EdDSA");
+    const lease = seen.find((c) => c.path === "/v1/engine-runner/lease")!;
+    expect(proofHeader(lease.headers).alg).toBe("EdDSA");
+  });
+
+  it("a runner refuses to start without the issuer, and never guesses one", () => {
+    expect(() => runnerIssuerFromEnv({})).toThrow(/REGULAIT_PUBLIC_URL is empty/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "  " })).toThrow(/REGULAIT_PUBLIC_URL is empty/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "not a url" })).toThrow(/not an absolute URL/);
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://regulait.example/" })).toBe("https://regulait.example");
   });
 });

@@ -550,7 +550,8 @@ describe("runner credentials", () => {
     expect(enrol.headers["set-cookie"]).toBeUndefined();
     // ADR-0188 S7: a runner holds no bearer value at all; its DPoP-bound self token is not a key either
     const self = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: await pfRunner.client.token() } });
-    expect(self.statusCode, self.body).toBe(401);
+    // refused before it is looked up (a self token is longer than any API key the route accepts: 400), never a session
+    expect([400, 401], self.body).toContain(self.statusCode);
     expect(self.headers["set-cookie"]).toBeUndefined();
   });
 

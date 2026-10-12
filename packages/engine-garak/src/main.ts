@@ -1,6 +1,6 @@
 /**
  * ADR-0187 B5-G — the garak RUNNER's entrypoint (`node dist/main.js`), in the runner container: on the
- * internal `engines` network, holding the runner token on its state volume, never running garak
+ * internal `engines` network, holding the runner key on its state volume, never running garak
  * itself. Probes go to the worker container through the exchange volumes (exchange.ts).
  *
  * Its life comes from the shared core (`runRunnerLoop`): token persistence, enrolment, the self-test
@@ -9,7 +9,7 @@
  * port. The token is never logged.
  */
 import path from "node:path";
-import { FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError } from "@regulait/engine-runner";
+import { FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST } from "@regulait/shared";
 import { garakAdapter } from "./adapter.js";
 import { ExchangeGarakExecutor } from "./exchange.js";
@@ -29,7 +29,8 @@ async function main(): Promise<void> {
   const resultsRoot = process.env.REGULAIT_GARAK_RESULTS_DIR ?? "/results";
   // ADR-0188 S7: the runner authenticates with its own key (private_key_jwt + DPoP); each proof names the request
   // under the gateway's issuer (REGULAIT_PUBLIC_URL), the same value the gateway is configured with
-  const client = new RunnerClient({ gatewayUrl, ...(process.env.REGULAIT_PUBLIC_URL ? { issuer: process.env.REGULAIT_PUBLIC_URL } : {}) });
+  // (it refuses to start without one: never a guess from the address it dials)
+  const client = new RunnerClient({ gatewayUrl, issuer: runnerIssuerFromEnv(process.env) });
   const stateDir = process.env.REGULAIT_RUNNER_STATE_DIR ?? "/state";
   const store = new FileRunnerKeyStore(path.join(stateDir, "runner-key"));
   const executor = new ExchangeGarakExecutor(jobsRoot, resultsRoot);

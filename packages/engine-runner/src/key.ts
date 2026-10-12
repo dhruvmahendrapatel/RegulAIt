@@ -87,11 +87,14 @@ export async function runnerKeyThumbprint(secret: string): Promise<string> {
  * ADR-0187 round 5 [67], S7: the proof a re-enrolling runner gives that it held the registration it
  * supersedes — a compact JWS by the OLD key (`kid` = its thumbprint) naming the NEW key (`jkt`).
  */
-export async function supersedeProof(oldSecret: string, newSecret: string): Promise<string> {
+export async function supersedeProof(oldSecret: string, newSecret: string, issuer: string): Promise<string> {
   const old = await runnerKeyMaterial(oldSecret);
   const next = await runnerKeyMaterial(newSecret);
+  // `aud` the gateway's issuer and a one-use `jti` (the gateway claims it in its replay store)
   return new SignJWT({ jkt: next.jkt })
     .setProtectedHeader({ alg: "EdDSA", typ: RUNNER_SUPERSEDE_PROOF_TYP, kid: old.jkt })
+    .setAudience(issuer)
+    .setJti(crypto.randomUUID())
     .setIssuedAt()
     .sign(old.privateKey);
 }
@@ -107,4 +110,28 @@ export async function rotationProof(newSecret: string, rotationUrl: string): Pro
     .setAudience(rotationUrl)
     .setIssuedAt()
     .sign(next.privateKey);
+}
+
+/**
+ * ADR-0188 S7: the gateway's issuer a runner names in every token request and proof, from
+ * `REGULAIT_PUBLIC_URL`. A runner REFUSES to start without it rather than guessing: the address it dials
+ * (`REGULAIT_GATEWAY_URL`, e.g. http://gateway:3000) is not the issuer, and a guessed issuer is a refused
+ * token on every request. Returns the URL without a trailing slash.
+ */
+export function runnerIssuerFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.REGULAIT_PUBLIC_URL?.trim() ?? "";
+  if (!raw) {
+    throw new Error(
+      "REGULAIT_PUBLIC_URL is empty: the runner authenticates with tokens the gateway's issuer signs and names, and the issuer is " +
+        "the gateway's REGULAIT_PUBLIC_URL. Set it to the same value the gateway has (the installer writes it; compose passes it on).",
+    );
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`REGULAIT_PUBLIC_URL is not an absolute URL: ${JSON.stringify(raw.slice(0, 200))}`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("REGULAIT_PUBLIC_URL must be an http(s) URL");
+  return raw.replace(/\/+$/, "");
 }
