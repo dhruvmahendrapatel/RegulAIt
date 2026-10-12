@@ -237,13 +237,31 @@ export function livePlacementFailure(f: {
   executorStatus: ExecutorStatus | null;
   /** a counting, passing attestation for the placement's profile, fresh on the database clock */
   attestationFresh: boolean;
-  /** that attestation (through the customer mapping) at or above the grant's required class */
+  /** that attestation (through the customer mapping) at or above `livePlacementRequiredClass` */
   attestedClassSatisfies: boolean;
 }): LivePlacementFailure | null {
   if (f.executorStatus === "quarantined") return "executor_quarantined";
   if (f.executorStatus !== "active") return "executor_not_active";
   if (!f.attestationFresh || !f.attestedClassSatisfies) return "executor_attestation_stale";
   return null;
+}
+
+/**
+ * The class an actor's placement must still hold at use (security review M1): the stricter of the grant's class
+ * and the placement's own requirement. An executor that drops below EITHER is no longer live, so a placement made
+ * at L3 never keeps serving at L2 because its grant named less.
+ */
+export function livePlacementRequiredClass(grantClass: RequirableIsolationClass | null, placementClass: RequirableIsolationClass): RequirableIsolationClass {
+  return grantClass === null || isolationClassRank(placementClass) > isolationClassRank(grantClass) ? placementClass : grantClass;
+}
+
+/**
+ * Can a grant naming `grantClass` run in a placement that required `placementClass`? Only when the grant's class
+ * is at least the placement's (review M1): otherwise the grant, and every child that inherits its class, would
+ * record less than the isolation its workload was placed for. Refused `delegation-isolation`.
+ */
+export function grantCoversPlacement(grantClass: RequirableIsolationClass | null, placementClass: RequirableIsolationClass): boolean {
+  return grantClass !== null && isolationClassRank(grantClass) >= isolationClassRank(placementClass);
 }
 
 // ---------------------------------------------------------------------------

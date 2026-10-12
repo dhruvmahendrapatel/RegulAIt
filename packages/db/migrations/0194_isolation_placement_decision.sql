@@ -13,7 +13,8 @@
 --    (decision 8 third bullet, amendment item 12). The guard trigger (migration 0184's body, unchanged otherwise)
 --    gains: a child that names no class inherits its parent's, and one that names a LOWER class is refused (the
 --    gateway refuses it first, `delegation-isolation`; this is the backstop). The digest is inherited the same way.
---    A grant that names a placement must name a class at or below that placement's requirement, and the placement
+--    A grant that names a placement must name a class AT LEAST that placement's requirement (security review M1), the
+--    placement belongs to one actor in one chain (every grant naming it has the same actor and root), and the placement
 --    must be `placed`. The UPDATE branch already makes every column but revocation and spend immutable.
 --
 -- Adding a nullable column fires no trigger and rewrites no row.
@@ -105,6 +106,16 @@ BEGIN
       RAISE EXCEPTION 'delegation_grants: a grant names only a placement that was placed (ADR-0190 decision 8)'
         USING ERRCODE = 'check_violation';
     END IF;
+    -- one actor in one chain per placement; serialised per placement so two inserts cannot both pass
+    PERFORM pg_advisory_xact_lock(hashtext('execution_placement:' || NEW."execution_placement_id"::text));
+    IF EXISTS (
+      SELECT 1 FROM "delegation_grants" g
+       WHERE g."execution_placement_id" = NEW."execution_placement_id"
+         AND (g."actor_identity_id" <> NEW."actor_identity_id" OR g."root_grant_id" <> NEW."root_grant_id")
+    ) THEN
+      RAISE EXCEPTION 'delegation_grants: the placement holds another actor''s or another chain''s workload (ADR-0190 decision 8)'
+        USING ERRCODE = 'check_violation';
+    END IF;
   END IF;
   -- migration 0184: an insert that names no depth limit gets the org limit (a root) or inherits its parent's,
   -- narrowed by the org limit (a child). It is never widened; the checks below still bind a stated one.
@@ -116,8 +127,8 @@ BEGIN
       COALESCE((SELECT "delegation_max_depth" FROM "org_settings" LIMIT 1), 3)
     );
     IF NEW."execution_placement_id" IS NOT NULL
-       AND array_position(ranks, placement_class) < array_position(ranks, NEW."required_isolation_class") THEN
-      RAISE EXCEPTION 'delegation_grants: a grant runs in a placement at or above its isolation class (ADR-0190 decision 8)'
+       AND array_position(ranks, NEW."required_isolation_class") < array_position(ranks, placement_class) THEN
+      RAISE EXCEPTION 'delegation_grants: a grant''s isolation class is at least its placement''s requirement (ADR-0190 decision 8, review M1)'
         USING ERRCODE = 'check_violation';
     END IF;
     RETURN NEW;
@@ -173,8 +184,8 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
   IF NEW."execution_placement_id" IS NOT NULL
-     AND array_position(ranks, placement_class) < array_position(ranks, NEW."required_isolation_class") THEN
-    RAISE EXCEPTION 'delegation_grants: a grant runs in a placement at or above its isolation class (ADR-0190 decision 8)'
+     AND array_position(ranks, NEW."required_isolation_class") < array_position(ranks, placement_class) THEN
+    RAISE EXCEPTION 'delegation_grants: a grant''s isolation class is at least its placement''s requirement (ADR-0190 decision 8, review M1)'
       USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;

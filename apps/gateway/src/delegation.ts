@@ -102,7 +102,9 @@ import {
   DELEGATION_DEPTH_CEILING,
   DELEGATION_ISOLATION_RULE_ID,
   isolationClassRank,
+  grantCoversPlacement,
   livePlacementFailure,
+  livePlacementRequiredClass,
   REQUIRABLE_ISOLATION_CLASSES,
   SHA256_B64URL_PATTERN,
   type DelegationRevokeReason,
@@ -299,7 +301,9 @@ async function placementFailuresOf(db: DbOrTx, grants: readonly DelegationGrantR
       const a = await freshAttestation(db as Db, ex.id, r.placement.profileDigest, now);
       fresh = a !== null;
       const effective = a ? (a.class === "customer_declared" ? ex.declaredClass : a.class) : null;
-      satisfies = effective !== null && g.requiredIsolationClass !== null && isolationClassRank(effective) >= isolationClassRank(g.requiredIsolationClass);
+      // review M1: the stricter of the grant's class and the placement's own requirement
+      const needed = livePlacementRequiredClass(g.requiredIsolationClass, r.placement.requiredClass as RequirableIsolationClass);
+      satisfies = effective !== null && isolationClassRank(effective) >= isolationClassRank(needed);
     }
     const failure = livePlacementFailure({ executorStatus: ex?.status ?? null, attestationFresh: fresh, attestedClassSatisfies: satisfies });
     if (failure) out.set(g.id, failure);
@@ -783,6 +787,16 @@ function bindingColumns(b: GrantBinding) {
  * human delegation proof, decision 15). Refuses over-scope; never narrows.
  */
 export async function createRootGrant(db: Db, input: CreateRootGrantInput): Promise<DelegationGrantRow> {
+  try {
+    return await createRootGrantTx(db, input);
+  } catch (err) {
+    // review L3: a refusal over isolation or the named placement is audited as admitChildGrant's is
+    if (isPlacementRefusal(err)) await auditIsolationRefusal(db, { phase: "create", parentGrantId: null, sponsorUserId: input.sponsorUserId, input }, err);
+    throw err;
+  }
+}
+
+async function createRootGrantTx(db: Db, input: CreateRootGrantInput): Promise<DelegationGrantRow> {
   const ctx = input.context ?? {};
   if ([ctx.runId, ctx.builderTurnId, ctx.engineRunId, ctx.scheduleId].filter((v) => v != null).length > 1) {
     refuse("delegation-request-invalid", "context_invalid", "a grant is made for at most one run context");
@@ -795,7 +809,8 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
     validateCommon(input, now);
     await checkActorSponsorScope(tx, input, now);
     const rootClass = input.isolation?.requiredClass ?? null;
-    await checkPlacementHolds(tx, input.isolation?.placementId ?? null, rootClass);
+    const id = randomUUID();
+    await checkPlacementHolds(tx, input.isolation?.placementId ?? null, rootClass, { actorIdentityId: input.actorIdentityId, rootGrantId: id });
     const org = await loadOrgSettings(tx as unknown as Db);
     let depthLimit = Math.min(org.delegationMaxDepth, DELEGATION_DEPTH_CEILING);
     if (input.maxFurtherDepth !== undefined) {
@@ -804,7 +819,6 @@ export async function createRootGrant(db: Db, input: CreateRootGrantInput): Prom
       }
       depthLimit = input.maxFurtherDepth;
     }
-    const id = randomUUID();
     const [row] = await tx
       .insert(delegationGrants)
       .values({
@@ -919,53 +933,83 @@ export async function admitChildGrant(
     // ADR-0190 decision 8, amendment item 11: a `delegation-isolation` refusal is audited and creates nothing. The
     // row is written after the admitting transaction rolled back (so it survives it); the token endpoint, which
     // runs this inside its own transaction, also records the refusal with its `error_code`.
-    if (err instanceof DelegationRefusedError && err.ruleId === DELEGATION_ISOLATION_RULE_ID) {
-      await auditIsolationRefusal(db, input, err).catch(() => {});
-    }
+    // review L3: an audit write that fails is NOT swallowed: its error propagates (the call fails closed; nothing
+    // was created either way)
+    if (isPlacementRefusal(err)) await auditIsolationRefusal(db, { phase: "admit", parentGrantId: input.parentGrantId, sponsorUserId: null, input }, err);
     throw err;
   }
 }
 
-async function auditIsolationRefusal(db: Db, input: AdmitChildGrantInput, err: DelegationRefusedError): Promise<void> {
-  const [parent] = await db
-    .select({ sponsorUserId: delegationGrants.sponsorUserId, requiredIsolationClass: delegationGrants.requiredIsolationClass })
-    .from(delegationGrants)
-    .where(eq(delegationGrants.id, input.parentGrantId));
+/** the codes a refusal over isolation or the named placement carries (decision 8; every one is audited) */
+const PLACEMENT_REFUSAL_CODES = new Set(["delegation_isolation", "placement_without_class", "placement_not_placed", "placement_bound_elsewhere"]);
+const isPlacementRefusal = (err: unknown): err is DelegationRefusedError =>
+  err instanceof DelegationRefusedError && (err.ruleId === DELEGATION_ISOLATION_RULE_ID || PLACEMENT_REFUSAL_CODES.has(err.code));
+
+async function auditIsolationRefusal(
+  db: Db,
+  ctx: { phase: "create" | "admit"; parentGrantId: string | null; sponsorUserId: string | null; input: CommonGrantInput },
+  err: DelegationRefusedError,
+): Promise<void> {
+  const [parent] = ctx.parentGrantId
+    ? await db
+        .select({ sponsorUserId: delegationGrants.sponsorUserId, requiredIsolationClass: delegationGrants.requiredIsolationClass })
+        .from(delegationGrants)
+        .where(eq(delegationGrants.id, ctx.parentGrantId))
+    : [];
   await db.insert(auditLog).values({
-    userId: parent?.sponsorUserId ?? SYSTEM_USER_ID,
+    userId: ctx.sponsorUserId ?? parent?.sponsorUserId ?? SYSTEM_USER_ID,
     objectType: "delegation_grant",
-    objectId: input.parentGrantId,
+    objectId: ctx.parentGrantId,
     detail: {
-      phase: "admit",
+      phase: ctx.phase,
       code: err.code,
-      parentGrantId: input.parentGrantId,
-      actorIdentityId: input.actorIdentityId,
+      parentGrantId: ctx.parentGrantId,
+      actorIdentityId: ctx.input.actorIdentityId,
       parentRequiredIsolationClass: parent?.requiredIsolationClass ?? null,
-      requestedIsolationClass: input.isolation?.requiredClass ?? null,
-      executionPlacementId: input.isolation?.placementId ?? null,
+      requestedIsolationClass: ctx.input.isolation?.requiredClass ?? null,
+      executionPlacementId: ctx.input.isolation?.placementId ?? null,
     },
     effect: "deny",
-    ruleId: DELEGATION_ISOLATION_RULE_ID,
+    ruleId: err.ruleId,
     ruleChain: [],
-    reason: `child delegation refused: ${err.message} (ADR-0190 decision 8; a child never runs below its parent's isolation class; nothing was created)`,
+    reason: `${ctx.phase === "admit" ? "child" : "root"} delegation refused: ${err.message} (ADR-0190 decision 8; nothing was created)`,
   });
 }
 
 /**
- * ADR-0190 decision 8: a grant that names a placement runs its actor's workload there. The placement must exist,
- * have been placed (not refused, not a mismatch), and require at least the grant's class. Below it is the same
- * refusal as a child below its parent: `delegation-isolation`.
+ * ADR-0190 decision 8: a grant that names a placement runs its actor's workload there. The placement must exist
+ * and have been placed (not refused, not a mismatch); the grant's class must be AT LEAST the placement's own
+ * requirement (review M1: otherwise the grant, and every child inheriting its class, records less than the
+ * isolation the workload was placed for), else `delegation-isolation`. A placement belongs to ONE actor in ONE
+ * chain: once a grant names it, only grants of that actor under the same root may (the row is locked while this
+ * is judged; the guard trigger checks the same).
  */
-async function checkPlacementHolds(tx: DbOrTx, placementId: string | null, requiredClass: RequirableIsolationClass | null): Promise<void> {
+async function checkPlacementHolds(
+  tx: DbOrTx,
+  placementId: string | null,
+  requiredClass: RequirableIsolationClass | null,
+  owner: { actorIdentityId: string; rootGrantId: string },
+): Promise<void> {
   if (placementId === null) return;
   if (requiredClass === null) {
     refuse("delegation-request-invalid", "placement_without_class", "a grant that runs in a placement names its isolation class");
   }
-  const [pl] = await tx.select().from(executionPlacements).where(eq(executionPlacements.id, placementId));
+  const [pl] = await tx.select().from(executionPlacements).where(eq(executionPlacements.id, placementId)).for("update");
   if (!pl || pl.outcome !== "placed") refuse("delegation-request-invalid", "placement_not_placed", "the named placement does not exist or was not placed");
-  if (isolationClassRank(pl!.requiredClass) < isolationClassRank(requiredClass!)) {
-    refuse(DELEGATION_ISOLATION_RULE_ID, "delegation_isolation", `the placement requires ${pl!.requiredClass}, below the grant's ${requiredClass}`);
+  if (!grantCoversPlacement(requiredClass, pl!.requiredClass as RequirableIsolationClass)) {
+    refuse(DELEGATION_ISOLATION_RULE_ID, "delegation_isolation", `the placement requires ${pl!.requiredClass}, above the grant's ${requiredClass}`);
   }
+  const [other] = await tx
+    .select({ id: delegationGrants.id })
+    .from(delegationGrants)
+    .where(
+      and(
+        eq(delegationGrants.executionPlacementId, placementId),
+        or(sql`${delegationGrants.actorIdentityId} <> ${owner.actorIdentityId}`, sql`${delegationGrants.rootGrantId} <> ${owner.rootGrantId}`),
+      ),
+    )
+    .limit(1);
+  if (other) refuse("delegation-request-invalid", "placement_bound_elsewhere", "the placement holds another actor's or another chain's workload");
 }
 
 async function admitChildGrantTx(
@@ -1060,7 +1104,7 @@ async function admitChildGrantTx(
       refuse(DELEGATION_ISOLATION_RULE_ID, "delegation_isolation", `the requested isolation class ${requestedClass} is below the parent's ${parentClass}`);
     }
     const childClass = childIsolationClass(parentClass, requestedClass);
-    await checkPlacementHolds(tx, input.isolation?.placementId ?? null, childClass);
+    await checkPlacementHolds(tx, input.isolation?.placementId ?? null, childClass, { actorIdentityId: input.actorIdentityId, rootGrantId: parent.rootGrantId });
     await checkActorSponsorScope(tx, { ...input, sponsorUserId: parent.sponsorUserId, environment: parent.environment }, now);
 
     const id = randomUUID();
