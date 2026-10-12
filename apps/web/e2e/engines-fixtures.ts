@@ -172,7 +172,17 @@ const summary = (verdict: string, counts: Json, extra: Json = {}) => ({
   ...extra,
 });
 
-/** one run in every status a page must render */
+/**
+ * A leased run's live clock fields, stamped relative to NOW each time the run is
+ * served. Stamped once at module load, a long single-worker run would show a
+ * heartbeat many minutes old and an already-expired lease.
+ */
+export function liveRun(r: Json): Json {
+  if (r.status !== "leased") return r;
+  return { ...r, leasedAt: iso(5), leaseExpiresAt: iso(-1), heartbeatAt: iso(0), deadlineAt: iso(-25) };
+}
+
+/** one run in every status a page must render (a leased run's clock fields are re-stamped per request: `liveRun`) */
 export const RUNS = {
   queued: run("99999999-1111-4000-8000-000000000001", { status: "queued" }),
   awaitingApproval: run("99999999-1111-4000-8000-000000000002", { status: "awaiting_approval", config: { sets: ["agentic"], params: {} }, approvalId: "99999999-2222-4000-8000-000000000001" }),
@@ -324,7 +334,7 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
     if (p === "/v1/engine-runs" && method === "GET") {
       const engineId = url.searchParams.get("engineId");
       const status = url.searchParams.get("status");
-      return json(route, 200, { runs: state.runs.filter((r) => (!engineId || r.engineId === engineId) && (!status || r.status === status)) });
+      return json(route, 200, { runs: state.runs.filter((r) => (!engineId || r.engineId === engineId) && (!status || r.status === status)).map(liveRun) });
     }
     if (p === "/v1/engine-runs" && method === "POST") {
       // as the manifests class them: promptfoo's `basic` and modelscan's `scan` are standard, anything else waits for approval
@@ -348,7 +358,7 @@ export async function installEnginesMock(page: Page, init: Partial<EnginesMockSt
     if (runMatch) {
       const r = state.runs.find((x) => x.id === runMatch[1]);
       if (!r) return json(route, 404, { error: "engine_run_not_found" });
-      if (method === "GET" && !runMatch[2]) return json(route, 200, { run: r, items: itemsOf(r.id) });
+      if (method === "GET" && !runMatch[2]) return json(route, 200, { run: liveRun(r), items: itemsOf(r.id) });
       if (method === "POST" && runMatch[2]) {
         if (["completed", "failed", "timeout", "cancelled", "not_run"].includes(r.status)) return json(route, 409, { error: "engine_run_finished", status: r.status });
         Object.assign(r, { status: "cancelled", errorCode: "cancelled", finishedAt: new Date().toISOString(), cancelRequestedAt: new Date().toISOString() });

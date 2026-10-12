@@ -18,7 +18,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { putOrgSettings } from "../../../../stepup/stepUp";
 import { Badge, Button, Card, ConfirmModal, Field, Input, Select } from "../../../../ui/kit";
-import { QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../../adminKit";
+import { adminKeys, orgSettingsQuery, QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../../adminKit";
 import {
   CLASSES,
   CLASS_LABEL,
@@ -37,7 +37,6 @@ import {
 import v from "../../../views.module.css";
 
 /** the same key and raw envelope as the other org-settings readers */
-const ORG_SETTINGS_KEY = ["admin", "org-settings"] as const;
 
 /** the values stored now; null when they cannot be read or are incomplete */
 async function readStored(): Promise<Record<string, unknown> | null> {
@@ -50,7 +49,7 @@ async function readStored(): Promise<Record<string, unknown> | null> {
 }
 
 export function IsolationSettingsCard() {
-  const q = useQuery({ queryKey: ORG_SETTINGS_KEY, queryFn: () => api.get<unknown>("/v1/org/settings") });
+  const q = useQuery(orgSettingsQuery());
   const loaded = q.data !== undefined;
   const settings = loaded ? settingsFromEnvelope(q.data) : null;
   const complete = settingsComplete(settings);
@@ -72,7 +71,7 @@ const defaultText = (key: EditableKey) =>
 function IsolationSettingsForm({ settings }: { settings: Record<string, unknown> | null }) {
   const act = useAction();
   const flight = useSingleFlight();
-  const baseline = useSettleAfterWrite(ORG_SETTINGS_KEY);
+  const baseline = useSettleAfterWrite(adminKeys.orgSettings);
   const [draft, setDraft] = useState<SettingsDraft>(() => draftFrom(settings ?? {}));
   const confirming = useRef(false);
   const [pending, setPending] = useState<{ intent: SettingsDraft; relaxed: string[]; changed: boolean; current: Record<string, unknown> } | null>(null);

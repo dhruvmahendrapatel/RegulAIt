@@ -340,4 +340,43 @@ test.describe("ADR-0189 B6: BOM posture", () => {
     await expect(card.getByTestId("bom-setting-decisionFactsCapture").getByText("relaxed (audited)")).toBeVisible();
     await expectAxeClean(page, "BOM posture");
   });
+
+  // the BOM and isolation cards share one org-settings read (orgSettingsQuery); a save in one settles the shared
+  // entry, and an unsaved draft in the other card must neither be reset nor be sent with it
+  const isolationFloor = (page: Page) => page.getByLabel("Isolation floor: public projects", { exact: true });
+  const puts = (st: Scenario) => st.calls.filter((c) => c.method === "PUT" && c.path === "/v1/org/settings").map((c) => c.body);
+
+  test("an unsaved isolation draft survives a BOM save on the same page, and is not sent with it", async ({ page }) => {
+    const st = await mockApi(page);
+    await page.goto("/ui/admin/enforcement-posture");
+    await isolationFloor(page).selectOption("microvm");
+    const row = page.getByTestId("bom-posture").getByTestId("bom-setting-decisionFactsCapture");
+    await row.getByLabel("Decision BOM facts").selectOption("off");
+    await row.getByRole("button", { name: "Review change" }).click();
+    const dialog = page.getByRole("dialog", { name: "Change decision bom facts?" });
+    await dialog.getByRole("button", { name: "Save setting" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(row.getByText("relaxed (audited)")).toBeVisible();
+    expect(puts(st)).toEqual([{ decisionFactsCapture: "off" }]);
+    await expect(isolationFloor(page)).toHaveValue("microvm");
+    await page.getByRole("button", { name: "Save isolation settings", exact: true }).click();
+    await expect(page.getByText("Isolation settings saved", { exact: true })).toBeVisible();
+    expect(puts(st)).toEqual([{ decisionFactsCapture: "off" }, { isolationFloorPublic: "microvm" }]);
+  });
+
+  test("an unsaved BOM draft survives an isolation save on the same page, and is not sent with it", async ({ page }) => {
+    const st = await mockApi(page);
+    await page.goto("/ui/admin/enforcement-posture");
+    const row = page.getByTestId("bom-posture").getByTestId("bom-setting-decisionFactsCapture");
+    await row.getByLabel("Decision BOM facts").selectOption("off");
+    await isolationFloor(page).selectOption("microvm");
+    await page.getByRole("button", { name: "Save isolation settings", exact: true }).click();
+    await expect(page.getByText("Isolation settings saved", { exact: true })).toBeVisible();
+    expect(puts(st)).toEqual([{ isolationFloorPublic: "microvm" }]);
+    await expect(row.getByLabel("Decision BOM facts")).toHaveValue("off");
+    await row.getByRole("button", { name: "Review change" }).click();
+    await page.getByRole("dialog", { name: "Change decision bom facts?" }).getByRole("button", { name: "Save setting" }).click();
+    await expect(row.getByText("relaxed (audited)")).toBeVisible();
+    expect(puts(st)).toEqual([{ isolationFloorPublic: "microvm" }, { decisionFactsCapture: "off" }]);
+  });
 });
