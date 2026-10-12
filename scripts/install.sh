@@ -99,8 +99,10 @@ Secrets
   --admin-token <tok>              REGULAIT_BOOTSTRAP_TOKEN, the identity-less
                                    break-glass admin credential. Generated if
                                    absent, and RETIRED by the installer once the
-                                   first admin exists (ADR-0194). Passing it on
-                                   a later run re-opens that door on purpose.
+                                   first admin exists (ADR-0194), also when you
+                                   pass it on a first install. Passing it AFTER
+                                   it was retired re-opens that door on purpose
+                                   (break-glass) until a run without it.
   --db-password <pw>               Postgres password. Generated on a first
                                    install; preserved on every re-run.
   --receipt-key-file <host path>   ADR-0189 R25: a receipt signing key YOU
@@ -162,6 +164,8 @@ ADMIN_TOKEN="${REGULAIT_BOOTSTRAP_TOKEN:-}"
 ADMIN_TOKEN_FLAG=0
 # ADR-0194: 1 once the installer has retired the bootstrap token (recorded in .env, read back on re-runs)
 BOOTSTRAP_RETIRED=0
+# 1 only when --admin-token re-opens a token an earlier run retired (break-glass); never on a first install
+TOKEN_REOPENED=0
 FIRST_ADMIN_PASSWORD_FILE="${REGULAIT_FIRST_ADMIN_PASSWORD_FILE:-}"
 FIRST_ADMIN_USERNAME="${REGULAIT_FIRST_ADMIN_USERNAME:-}"
 FIRST_ADMIN_EMAIL="${REGULAIT_FIRST_ADMIN_EMAIL:-}"
@@ -547,6 +551,7 @@ fi
 # break-glass recovery the operator chose); a token merely exported in the shell is ignored.
 if [ "${PRIOR_RETIRED:-}" = "1" ]; then
   if [ "$ADMIN_TOKEN_FLAG" = "1" ] && [ -n "$ADMIN_TOKEN" ]; then
+    TOKEN_REOPENED=1
     warn "--admin-token re-opens the retired bootstrap token: a full-admin credential with no user identity. Retire it again by re-running this installer without --admin-token once you are done."
   else
     if [ -n "$ADMIN_TOKEN" ]; then
@@ -1105,13 +1110,16 @@ esac
 # Retire the bootstrap token once an admin exists — unless the operator re-opened it on purpose this run.
 TOKEN_RETIRED_NOW=0
 if { [ "$FIRST_ADMIN_STATE" = "created" ] || [ "$FIRST_ADMIN_STATE" = "exists" ]; } \
-   && [ "$BOOTSTRAP_RETIRED" != "1" ] && [ "$ADMIN_TOKEN_FLAG" != "1" ]; then
+   && [ "$BOOTSTRAP_RETIRED" != "1" ] && [ "$TOKEN_REOPENED" != "1" ]; then
   BOOTSTRAP_RETIRED=1
   ADMIN_TOKEN=""
   render_env      | write_if_changed "$ENV_FILE"
   render_override | write_if_changed "$OVERRIDE_FILE"
   chmod 644 "$OVERRIDE_FILE"
-  docker compose "${COMPOSE_ARGS[@]}" up -d --no-build
+  docker compose "${COMPOSE_ARGS[@]}" up -d --no-build || die "restarting the gateway to retire the bootstrap token FAILED.
+  $ENV_FILE and $OVERRIDE_FILE already say the token is retired, but the RUNNING
+  gateway still accepts the old token. Fix the cause (docker compose -p $PROJECT logs gateway)
+  and re-run this installer: it converges and restarts the gateway."
   TOKEN_RETIRED_NOW=1
   ok "bootstrap token retired: removed from $(basename "$ENV_FILE"), pinned empty in $(basename "$OVERRIDE_FILE"), gateway restarted"
 fi
@@ -1147,6 +1155,14 @@ case "$FIRST_ADMIN_STATE" in
     if [ "$FIRST_ADMIN_STATE" = "created" ]; then
       FA_HEADLINE="Created: '$FIRST_ADMIN_NAME'. Sign in at the URL above with the password you chose.
     The first sign-in enrols an authenticator app (MFA is required for admins)."
+    elif [ "$SEED_DEMO" = "1" ]; then
+      # --seed-demo: the demo seed made its personas first, so the demo admin IS the existing admin
+      FA_HEADLINE="The demo dataset is loaded (--seed-demo), so its personas are the admins
+    (admin@regulait.local) and you were not asked for one. Their one-time passwords are
+    printed once in the gateway log (docker compose -p $PROJECT logs gateway). To use your
+    own account, sign in as the demo admin, create your admin under Admin -> Users, then
+    deactivate the demo personas. With the token retired, the demo seed that re-runs at
+    each gateway start can no longer act and logs a failure; the loaded data stays."
     else
       FA_HEADLINE="An admin already exists; this run did not change any account."
     fi
@@ -1155,9 +1171,11 @@ case "$FIRST_ADMIN_STATE" in
       if [ "$TOKEN_RETIRED_NOW" = "1" ]; then
         FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
       fi
-    else
+    elif [ "$TOKEN_REOPENED" = "1" ]; then
       FA_TOKEN_LINE="The bootstrap token is OPEN: you re-opened it with --admin-token. Re-run without
     --admin-token to retire it again."
+    else
+      FA_TOKEN_LINE="The bootstrap token is still live: re-run this installer to retire it."
     fi
     cat <<SUMMARY
 
@@ -1169,6 +1187,17 @@ case "$FIRST_ADMIN_STATE" in
 SUMMARY
     ;;
   *)
+    if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
+      # retired earlier, yet no active admin now: there is no live token to print
+      cat <<SUMMARY
+
+  ${C_BLD}FIRST ADMIN${C_RST} — none active, and the bootstrap token is retired
+    Re-run this installer in a terminal to be asked for an admin, or
+    non-interactively with REGULAIT_FIRST_ADMIN_PASSWORD_FILE (a 0600 file) and
+    REGULAIT_FIRST_ADMIN_EMAIL set. To use the manual path instead, re-open the
+    token on purpose: re-run with --admin-token "\$(openssl rand -hex 24)".
+SUMMARY
+    else
     cat <<SUMMARY
 
   ${C_BLD}FIRST ADMIN${C_RST} — not created by this run
@@ -1185,6 +1214,7 @@ SUMMARY
     then issue that user a one-time password (POST /v1/users/<id>/set-initial-password)
     and RE-RUN THIS INSTALLER: it sees the admin and retires the bootstrap token.
 SUMMARY
+    fi
     ;;
 esac
 

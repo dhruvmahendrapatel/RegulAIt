@@ -250,8 +250,10 @@ REGULAIT_FIRST_ADMIN_USERNAME=admin \
 shred -u /root/first-admin-password
 ```
 
-The file must be a regular file with mode `0600` or stricter; anything else is refused before
-anything renders. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
+The file must be a regular file (not a symbolic link) owned by you or root, with mode `0600` or
+stricter, holding one line: no control characters except one trailing newline, and no UTF-8
+byte-order mark. Anything else is refused before anything renders, and checked again just before
+use. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
 three. Without the file, a non-interactive install skips the step and says so.
 
 **The bootstrap door closes itself.** `REGULAIT_BOOTSTRAP_TOKEN` authenticates as an admin **with
@@ -260,8 +262,16 @@ it: the token is removed from `.env` (a `REGULAIT_BOOTSTRAP_RETIRED=1` line reco
 pinned to the empty string in `compose.install.yml`, and the gateway is restarted. It is pinned
 rather than just deleted because `docker-compose.yml` would otherwise fall back to its published
 dev default, which the gateway refuses to boot with. Re-runs keep it retired, and a token merely
-exported in your shell is ignored. Only an explicit `--admin-token` re-opens it, for a break-glass
-recovery; the next run without that flag retires it again.
+exported in your shell is ignored. Only an explicit `--admin-token` on a run AFTER it was retired
+re-opens it, for a break-glass recovery; the next run without that flag retires it again. On a
+first install, `--admin-token` only chooses the token's value, and it is retired like any other
+once the first admin exists. If retiring fails because the gateway cannot be restarted, the
+installer stops and says so: the running gateway still accepts the old token until a re-run
+succeeds.
+
+With `--seed-demo`, the demo personas are created first, so the demo admin
+(`admin@regulait.local`) is the existing admin and you are not asked for one. The summary says how
+to replace it with your own account.
 
 **Re-running** on a deployment that already has an active admin skips the step, changes no
 account, and retires a token that is still live.

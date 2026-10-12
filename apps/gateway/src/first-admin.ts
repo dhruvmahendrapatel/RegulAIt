@@ -16,7 +16,7 @@
  * Environment: DATABASE_URL (the gateway container's own).
  */
 import { createDb } from "@regulait/db";
-import { createFirstAdmin, FIRST_ADMIN_PASSWORD_MAX, firstAdminStatus } from "./first-admin-lib.js";
+import { createFirstAdmin, describeFirstAdminError, FIRST_ADMIN_PASSWORD_MAX, firstAdminStatus } from "./first-admin-lib.js";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -72,10 +72,11 @@ try {
     }
   }
 } catch (err) {
-  // the error names what failed; it never carries the password (which is only
-  // ever handed to the policy check and the scrypt hash)
-  console.error(`first-admin failed: ${err instanceof Error ? err.message : String(err)}`);
-  exitCode = 2;
+  // never err.message: a query error's message carries its params (the email and
+  // the password hash) — see describeFirstAdminError
+  const d = describeFirstAdminError(err);
+  console.error(d.line);
+  exitCode = d.exitCode;
 } finally {
   await (db.$client as { end: () => Promise<void> }).end();
 }

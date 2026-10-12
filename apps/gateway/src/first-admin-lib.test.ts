@@ -205,6 +205,36 @@ describe("first-admin.js (the CLI install.sh runs in the gateway container)", ()
     ]);
   });
 
+  it("a failed insert prints neither the email nor the password hash: 23505 is exit 5, anything else exit 2", async () => {
+    // make the users INSERT fail in the database, as a racing write or a broken database would
+    await db.execute(sql.raw(`
+      CREATE FUNCTION first_admin_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'first-admin test failure for %', NEW.email USING ERRCODE = current_setting('first_admin_test.code'); END $$;
+      ALTER DATABASE ${SCRATCH_DB} SET first_admin_test.code = '23505';
+      CREATE TRIGGER first_admin_test_fail BEFORE INSERT ON users FOR EACH ROW EXECUTE FUNCTION first_admin_test_fail();`));
+    try {
+      const email = "canary-leak@acme.example";
+      const password = strongPassword();
+      const dup = cli(["--username", "admin", "--email", email], `${password}\n`);
+      expect(dup.status, dup.out).toBe(5);
+      const other = (code: string) => db.execute(sql.raw(`ALTER DATABASE ${SCRATCH_DB} SET first_admin_test.code = '${code}'`));
+      await other("P0001");
+      const failed = cli(["--username", "admin", "--email", email], `${password}\n`);
+      expect(failed.status, failed.out).toBe(2);
+      expect(failed.out).toContain("database error P0001");
+      for (const out of [dup.out, failed.out]) {
+        expect(out).not.toContain(email);
+        expect(out).not.toContain(password);
+        expect(out).not.toContain("scrypt$");
+        expect(out).not.toContain("params");
+      }
+      expect(await db.select({ id: users.id }).from(users)).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER first_admin_test_fail ON users; DROP FUNCTION first_admin_test_fail();
+        ALTER DATABASE ${SCRATCH_DB} RESET first_admin_test.code;`));
+    }
+  }, 120_000);
+
   it("--status, a policy refusal, creation from stdin, then --status 3 and a skipping re-run — never printing the password", async () => {
     expect(cli(["--status"]).status).toBe(0);
 

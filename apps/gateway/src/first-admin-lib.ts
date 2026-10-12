@@ -189,3 +189,24 @@ function passwordRefused(why: string): FirstAdminResult {
     lines: [`first admin refused: ${why} (org password policy). Nothing was changed.`],
   };
 }
+
+/**
+ * What the CLI prints for an error it did not expect. NEVER `err.message`: a
+ * drizzle query error's message carries the statement's `params:` — for the
+ * user insert that is the email and the scrypt hash. Only the error's class
+ * and the Postgres SQLSTATE code are printed; a unique violation (23505 — a
+ * username or email taken by a concurrent write) is the identity refusal (5).
+ */
+export function describeFirstAdminError(err: unknown): { exitCode: 2 | 5; line: string } {
+  const e = err as { name?: unknown; code?: unknown; cause?: { code?: unknown } } | null | undefined;
+  const raw = e?.cause?.code ?? e?.code;
+  const code = typeof raw === "string" && /^[0-9A-Z]{5}$/.test(raw) ? raw : null;
+  if (code === "23505") {
+    return { exitCode: 5, line: "first-admin refused: that username or email already belongs to another account. Nothing was changed." };
+  }
+  const kind = typeof e?.name === "string" && /^[A-Za-z]{1,64}$/.test(e.name) ? e.name : "Error";
+  return {
+    exitCode: 2,
+    line: `first-admin failed: ${kind}${code ? ` (database error ${code})` : ""}. Nothing was changed; see the gateway log and re-run.`,
+  };
+}

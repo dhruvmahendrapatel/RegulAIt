@@ -37,20 +37,46 @@ FA_OUTPUT=""
 fa_say() { printf '  %s\n' "$*" >&2; }
 
 # Why the file named by REGULAIT_FIRST_ADMIN_PASSWORD_FILE cannot be used, or nothing. Never reads it into
-# a variable and never prints its content.
+# a variable and never prints its content. Refuses: a symbolic link (the target can be swapped), a file
+# owned by anyone but this user or root, group/other access, an empty password, a leading UTF-8 byte-order
+# mark, and any control character other than ONE trailing newline (\n or \r\n), which the gateway strips.
 fa_password_file_problem() {
-  local f="$1" perm
+  local f="$1" perm owner me size ctl tail2 bom
   [ -n "$f" ] || { echo "no file named"; return 0; }
+  [ ! -L "$f" ] || { echo "$f is a symbolic link: name the file itself"; return 0; }
   [ -e "$f" ] || { echo "$f does not exist"; return 0; }
   [ -f "$f" ] || { echo "$f is not a regular file"; return 0; }
   [ -r "$f" ] || { echo "$f is not readable by this user"; return 0; }
   [ -s "$f" ] || { echo "$f is empty"; return 0; }
-  perm="$(stat -L -c '%a' "$f" 2>/dev/null || stat -L -f '%Lp' "$f" 2>/dev/null || true)"
-  if [ -z "$perm" ]; then echo "the mode of $f could not be read"; return 0; fi
+  perm="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null || true)"
+  owner="$(stat -c '%u' "$f" 2>/dev/null || stat -f '%u' "$f" 2>/dev/null || true)"
+  if [ -z "$perm" ] || [ -z "$owner" ]; then echo "the mode or owner of $f could not be read"; return 0; fi
   if [[ ! "$perm" =~ ^[0-7]?[0-7]00$ ]]; then
     echo "$f has mode $perm: it must be 0600 or stricter (no group or other access) — chmod 600 $f"
     return 0
   fi
+  me="$(id -u)"
+  if [ "$owner" != "$me" ] && [ "$owner" != "0" ]; then
+    echo "$f is owned by uid $owner: it must be owned by you (uid $me) or root"
+    return 0
+  fi
+  bom="$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')"
+  if [ "$bom" = "efbbbf" ]; then
+    echo "$f starts with a UTF-8 byte-order mark: save it without one"
+    return 0
+  fi
+  size="$(wc -c <"$f" | tr -d ' ')"
+  ctl="$(LC_ALL=C tr -cd '\000-\037\177' <"$f" | wc -c | tr -d ' ')"
+  tail2="$(tail -c 2 "$f" | od -An -tx1 | tr -d ' \n')"
+  case "$ctl" in
+    0) ;;
+    1) if [ "${tail2: -2}" != "0a" ]; then echo "$f contains a control character: only one trailing newline is allowed"; return 0; fi
+       size=$((size - 1)) ;;
+    2) if [ "$tail2" != "0d0a" ]; then echo "$f contains control characters: only one trailing newline is allowed"; return 0; fi
+       size=$((size - 2)) ;;
+    *) echo "$f contains control characters (a password is one line; only one trailing newline is allowed)"; return 0 ;;
+  esac
+  [ "$size" -gt 0 ] || { echo "$f is empty"; return 0; }
   return 0
 }
 
@@ -140,7 +166,10 @@ first_admin_interactive() {
 # Non-interactive: the password file is redirected to the runner's stdin (it is never read into a
 # variable). The runner strips one trailing newline.
 first_admin_from_file() {
-  local f="$1" rc=0
+  local f="$1" rc=0 problem
+  # re-checked immediately before use: the file may have changed since preflight
+  problem="$(fa_password_file_problem "$f")"
+  if [ -n "$problem" ]; then FA_OUTPUT="password file refused: $problem"; return 2; fi
   FA_OUTPUT="$(first_admin_exec --username "$FA_USERNAME" --email "$FA_EMAIL" <"$f" 2>&1)" || rc=$?
   return "$rc"
 }

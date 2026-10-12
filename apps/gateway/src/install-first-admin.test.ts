@@ -22,6 +22,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { chownSync, symlinkSync } from "node:fs";
+import { describeFirstAdminError } from "./first-admin-lib.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const INSTALL = path.join(root, "scripts/install.sh");
@@ -131,9 +133,55 @@ describe("scripts/lib/first-admin.sh — the interactive prompt loop", () => {
     chmodSync(f, 0o400);
     expect(check()).toBe("");
     expect(check()).not.toContain(secret);
-    writeFileSync(f, "", { mode: 0o600 });
+    // owner-writable again first: a non-root runner cannot open a 0400 file for writing (root can, locally)
+    chmodSync(f, 0o600);
+    writeFileSync(f, "");
     expect(check()).toContain("is empty");
     expect(execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", dir], { encoding: "utf8" })).toContain("not a regular file");
+  });
+
+  it.runIf(posix)("the password file: no symlink, one line (one trailing \\n or \\r\\n only), no byte-order mark, not just a newline", () => {
+    const dir = freshDir("pwcontent");
+    const f = path.join(dir, "pw");
+    const problem = (p = f) =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", p], { encoding: "utf8" }).trim();
+    const put = (content: string | Buffer) => {
+      rmSync(f, { force: true });
+      writeFileSync(f, content, { mode: 0o600 });
+      chmodSync(f, 0o600);
+    };
+    const pw = strong();
+    put(pw);
+    expect(problem()).toBe("");
+    put(`${pw}\n`);
+    expect(problem()).toBe("");
+    put(`${pw}\r\n`);
+    expect(problem()).toBe("");
+    put(`${pw}\n\n`);
+    expect(problem()).toContain("control characters");
+    put(`${pw}\nsecond-line`);
+    expect(problem()).toContain("control character");
+    put(`CANARY\u0001${pw}`);
+    expect(problem()).toContain("control character");
+    put(`${pw}\r`);
+    expect(problem()).toContain("control character");
+    put(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(pw)]));
+    expect(problem()).toContain("byte-order mark");
+    put("\n");
+    expect(problem()).toContain("is empty");
+    put(pw);
+    const link = path.join(dir, "link");
+    symlinkSync(f, link);
+    expect(problem(link)).toContain("symbolic link");
+    for (const out of [problem(), problem(link)]) expect(out).not.toContain(pw);
+  });
+
+  it.runIf(posix && process.getuid?.() === 0)("the password file must be owned by the installing user or root", () => {
+    const f = path.join(freshDir("pwowner"), "pw");
+    writeFileSync(f, strong(), { mode: 0o600 });
+    chownSync(f, 65534, 65534);
+    const out = execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" });
+    expect(out).toContain("owned by uid 65534");
   });
 });
 
@@ -165,6 +213,7 @@ case "$*" in
     touch "$FAKE_DOCKER_DIR/admin-exists"
     echo "first admin created: (fake)"; exit 0 ;;
   *" config"*) exit 0 ;;
+  *" up -d --no-build"*) if [ -n "$FAKE_RETIRE_UP_FAIL" ]; then echo "fake: up failed" >&2; exit 1; fi; exit 0 ;;
   *" up "*|*" up") exit 0 ;;
 esac
 exit 0
@@ -321,5 +370,90 @@ describe("scripts/install.sh — the first-admin step and token retirement (fake
     const plain = install(dir, fakes, {});
     expect(plain.status).toBe(0);
     expect(envOf(dir)).not.toMatch(/^REGULAIT_BOOTSTRAP_TOKEN=/m);
+  });
+  it.runIf(hasOpenssl && posix)("--admin-token on a FIRST install only picks the value: the token is still retired once the admin exists", () => {
+    const dir = freshDir("first-flag");
+    const fakes = setupFakes();
+    const pwFile = path.join(freshDir("secret"), "pw");
+    writeFileSync(pwFile, strong(), { mode: 0o600 });
+    const r = install(dir, fakes, { REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile, REGULAIT_FIRST_ADMIN_EMAIL: "ops@acme.example" }, [
+      "--admin-token",
+      "first-install-CANARY-token-value",
+    ]);
+    expect(r.status, r.out.slice(-3000)).toBe(0);
+    expect(r.out).not.toContain("re-opens the retired bootstrap token");
+    expect(r.out).toContain("bootstrap token retired");
+    expect(envOf(dir)).not.toContain("first-install-CANARY-token-value");
+    expect(overrideOf(dir)).toContain('REGULAIT_BOOTSTRAP_TOKEN: ""');
+  });
+
+  it.runIf(hasOpenssl && posix)("a failed restart while retiring stops the install and says the running gateway still holds the old token", () => {
+    const dir = freshDir("retire-fail");
+    const fakes = setupFakes();
+    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    const r = install(dir, fakes, { FAKE_RETIRE_UP_FAIL: "1" });
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("the RUNNING");
+    expect(r.out).toContain("still accepts the old token");
+    expect(r.out).toContain("re-run this installer");
+  });
+
+  it.runIf(hasOpenssl && posix)("retired with no active admin: the summary prints no empty Bearer curl, it says how to proceed", () => {
+    const dir = freshDir("retired-noadmin");
+    const fakes = setupFakes();
+    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    expect(install(dir, fakes, {}).status).toBe(0);
+    rmSync(path.join(fakes.state, "admin-exists"));
+    const r = install(dir, fakes, {});
+    expect(r.status, r.out.slice(-3000)).toBe(0);
+    expect(r.out).toContain("none active, and the bootstrap token is retired");
+    expect(r.out).toContain("--admin-token");
+    expect(r.out).not.toMatch(/Bearer \s*"/);
+    expect(r.out).not.toContain("/v1/users \\");
+  });
+
+  it.runIf(hasOpenssl && posix)("--seed-demo: the summary says the demo personas are the admins and how to replace them", () => {
+    const dir = freshDir("seed-demo");
+    const fakes = setupFakes();
+    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    const r = install(dir, fakes, {}, ["--seed-demo"]);
+    expect(r.status, r.out.slice(-3000)).toBe(0);
+    expect(r.out).toContain("its personas are the admins");
+    expect(r.out).toContain("admin@regulait.local");
+    expect(r.out).toContain("create your admin under Admin -> Users");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. the CLI's error line never carries a query's params
+// ---------------------------------------------------------------------------
+
+describe("describeFirstAdminError (first-admin.js's catch)", () => {
+  // the shape drizzle throws: the message repeats the statement and its params
+  const hash = "scrypt$16384$8$1$c2FsdA$CANARYhashCANARYhash";
+  const email = "canary-leak@acme.example";
+  const queryError = (code: string) =>
+    Object.assign(new Error(`Failed query: insert into "users" ... \nparams: ${email},admin,${hash}`), {
+      name: "DrizzleQueryError",
+      cause: Object.assign(new Error(`duplicate key value violates unique constraint "users_email_unique" Key (email)=(${email})`), { code }),
+    });
+
+  it("a unique violation is the identity refusal (exit 5), naming neither the email nor the hash", () => {
+    const d = describeFirstAdminError(queryError("23505"));
+    expect(d.exitCode).toBe(5);
+    expect(d.line).not.toContain(email);
+    expect(d.line).not.toContain(hash);
+    expect(d.line).not.toContain("CANARY");
+  });
+
+  it("any other failure prints the class and SQLSTATE only (exit 2)", () => {
+    const d = describeFirstAdminError(queryError("53300"));
+    expect(d).toEqual({ exitCode: 2, line: expect.stringContaining("DrizzleQueryError (database error 53300)") });
+    expect(d.line).not.toContain(email);
+    expect(d.line).not.toContain("CANARY");
+    const plain = describeFirstAdminError(new Error(`connect failed for ${email}`));
+    expect(plain.exitCode).toBe(2);
+    expect(plain.line).not.toContain(email);
+    expect(describeFirstAdminError("weird").line).toContain("first-admin failed: Error");
   });
 });
