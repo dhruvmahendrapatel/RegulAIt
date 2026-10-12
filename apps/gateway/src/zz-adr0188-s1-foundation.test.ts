@@ -876,15 +876,15 @@ describe("ADR-0188 the stubs: every route answers 501 under its auth class", () 
     expect(tagged).toEqual(IDENTITY_ROUTES.map((r) => `${r.method} ${r.path}`).sort());
   });
 
-  it("each route not yet built answers 501 not_built to an authorised caller", async () => {
+  it("no identity route answers 501 not_built any more", async () => {
     // S3 built its routes (the JWKS and the signing keys); zz-adr0188-s3-issuer-grants.test.ts covers them.
     // S4 built the identity reads and the own-grant set; zz-adr0188-s4-in-process.test.ts covers them.
-    // S5 built the token family, the delegation proof and the grant admin routes; zz-adr0188-s5-*.test.ts cover them
-    for (const r of IDENTITY_ROUTES.filter((x) => x.slice !== "S3" && x.slice !== "S4" && x.slice !== "S5")) {
+    // S5 built the token family, the delegation proof and the grant admin routes; zz-adr0188-s5-*.test.ts cover them.
+    // S6 built the rest (create, revoke, credentials, proposals, pickers); zz-adr0188-s6-identity-admin.test.ts covers them.
+    for (const r of IDENTITY_ROUTES) {
       const headers = r.cls === "public" ? {} : r.cls === "user" ? users.member.auth : users.admin.auth;
       const res = await inject(r.method, url(r.path), headers, r.method === "GET" || r.method === "DELETE" ? undefined : {});
-      expect(res.statusCode, `${r.method} ${r.path}: ${res.body}`).toBe(501);
-      expect(res.json(), `${r.method} ${r.path}`).toEqual({ error: "not_built" });
+      expect(res.statusCode, `${r.method} ${r.path}: ${res.body}`).not.toBe(501);
     }
   });
 

@@ -1578,6 +1578,14 @@ export const auditLog = pgTable(
     index("audit_log_ai_bom_snapshot_rows_idx")
       .on(t.ruleId, t.at)
       .where(sql`${t.ruleId} IN ('ai-bom-snapshot-taken', 'ai-bom-snapshot-skipped-no-key', 'ai-bom-snapshot-failed')`),
+    // migration 0193 (ADR-0188 S6 review): one acting identity's decision rows by time, in the v2 actor columns and
+    // in the pre-boundary `detail.delegation` stamp, so the grant proposals never scan the trail
+    index("audit_log_actor_decision_at_idx")
+      .on(t.actorIdentityId, t.at)
+      .where(sql`${t.actorIdentityId} IS NOT NULL AND (${t.detail} ->> 'receiptClass') = 'decision'`),
+    index("audit_log_legacy_actor_decision_at_idx")
+      .on(sql`((${t.detail} -> 'delegation') ->> 'actorIdentityId')`, t.at)
+      .where(sql`${t.actorIdentityId} IS NULL AND ${t.detail} ? 'delegation' AND (${t.detail} ->> 'receiptClass') = 'decision'`),
   ],
 );
 
@@ -12864,6 +12872,8 @@ export const workloadCredentials = pgTable(
     publicJwk: jsonb("public_jwk").$type<WorkloadPublicJwk>(),
     jwkThumbprint: text("jwk_thumbprint"),
     x5tS256: text("x5t_s256"),
+    /** migration 0193 (ADR-0188 S6 review): an `x509` credential's public-key RFC 7638 thumbprint (one key, one identity, ever) */
+    spkiThumbprint: text("spki_thumbprint"),
     sanUri: text("san_uri"),
     subjectDn: text("subject_dn"),
     spiffeId: text("spiffe_id"),
@@ -12900,6 +12910,8 @@ export const workloadCredentials = pgTable(
     check("workload_credentials_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
     uniqueIndex("workload_credentials_jwk_thumbprint_uq").on(t.jwkThumbprint).where(sql`${t.jwkThumbprint} IS NOT NULL`),
     uniqueIndex("workload_credentials_x5t_uq").on(t.x5tS256).where(sql`${t.x5tS256} IS NOT NULL`),
+    check("workload_credentials_spki_thumbprint_check", sql`${t.spkiThumbprint} IS NULL OR (${t.kind} = 'x509' AND ${t.spkiThumbprint} ~ '^[A-Za-z0-9_-]{43}$')`),
+    uniqueIndex("workload_credentials_spki_thumbprint_uq").on(t.spkiThumbprint).where(sql`${t.spkiThumbprint} IS NOT NULL`),
     uniqueIndex("workload_credentials_spiffe_id_live_uq")
       .on(t.spiffeId)
       .where(sql`${t.spiffeId} IS NOT NULL AND ${t.revokedAt} IS NULL`),

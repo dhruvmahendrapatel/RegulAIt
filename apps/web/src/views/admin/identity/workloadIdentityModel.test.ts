@@ -5,12 +5,22 @@ import {
   ENVIRONMENT_NAME_PATTERN,
   GRANTS_REVISION_CONFLICT,
   GRANT_SET_LIMITS,
+  PRIVATE_JWK_MEMBERS,
   REFUSAL_SENTENCES,
+  SPIFFE_ID_PATTERN,
+  WORKLOAD_CREDENTIAL_KINDS,
+  WORKLOAD_CREDENTIAL_MAX_DAYS,
   IDENTITY_ROUTES_NOT_BUILT,
   WORKLOAD_IDENTITY_KINDS,
   WORKLOAD_IDENTITY_MAX_ENVIRONMENTS,
   WORKLOAD_IDENTITY_MAX_STEWARDS,
   WORKLOAD_IDENTITY_STATUSES,
+  createIdentityBody,
+  defaultProposalSelection,
+  proposalKey,
+  setWithProposals,
+  credentialBody,
+  credentialState,
   delegationRefusalMessages,
   delegationState,
   formatMicros,
@@ -51,6 +61,12 @@ describe("mirror of packages/shared/src/identity/contract.ts", () => {
     expect(contract).toContain(`export const ENVIRONMENT_NAME_PATTERN = ${ENVIRONMENT_NAME_PATTERN.toString()};`);
     expect(contract).toContain(`export const GRANTS_REVISION_CONFLICT = "${GRANTS_REVISION_CONFLICT}" as const;`);
   });
+  it("S6 credential kinds, limits, private members and the SPIFFE pattern match", () => {
+    expect(arrayOf("WORKLOAD_CREDENTIAL_KINDS")).toEqual([...WORKLOAD_CREDENTIAL_KINDS]);
+    expect(arrayOf("PRIVATE_JWK_MEMBERS")).toEqual([...PRIVATE_JWK_MEMBERS]);
+    expect(numberOf("WORKLOAD_CREDENTIAL_MAX_DAYS")).toBe(WORKLOAD_CREDENTIAL_MAX_DAYS);
+    expect(contract).toContain(`export const SPIFFE_ID_PATTERN = ${SPIFFE_ID_PATTERN.toString()};`);
+  });
   it("grant-set bounds match the shared schema", () => {
     expect(contract).toContain(`z.array(identityToolGrantSchema).max(${GRANT_SET_LIMITS.tools})`);
     expect(contract).toContain(`z.array(identityServerGrantSchema).max(${GRANT_SET_LIMITS.servers})`);
@@ -69,9 +85,8 @@ describe("routes the page treats as not built", () => {
     const stubbed = [...gatewayRoutes.matchAll(/app\.(get|post|put|patch|delete)\(\s*"([^"]+)",\s*notBuilt\)/g)]
       .map((m) => `${m[1]!.toUpperCase()} ${m[2]}`)
       .sort();
-    expect(stubbed.length).toBeGreaterThan(0);
-    // When this fails because a route went live: switch its control on in
-    // WorkloadIdentitiesPage, drop it here, and consider the navigation entry.
+    // S6 built the last stub, so both lists are empty. When this fails because a
+    // stub reappeared, list it here and disable its control on the page.
     expect(IDENTITY_ROUTES_NOT_BUILT.map((r) => `${r.method} ${r.path}`).sort()).toEqual(stubbed);
   });
 });
@@ -186,8 +201,13 @@ describe("delegation tree", () => {
 
 describe("refusal codes exist where the page's routes raise them", () => {
   const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
-  it("every code given a sentence is one the S4 identity or S5 grant-admin routes return", () => {
-    const routes = [src("../../../../../gateway/src/workload-identity-admin.ts"), src("../../../../../gateway/src/oauth/grant-admin.ts"), contract].join("\n");
+  it("every code given a sentence is one the S4 identity, S5 grant-admin or S6 identity-admin routes return", () => {
+    const routes = [
+      src("../../../../../gateway/src/workload-identity-admin.ts"),
+      src("../../../../../gateway/src/oauth/grant-admin.ts"),
+      src("../../../../../gateway/src/oauth/identity-admin.ts"),
+      contract,
+    ].join("\n");
     const missing = Object.keys(REFUSAL_SENTENCES).filter((code) => !routes.includes(`"${code}"`));
     expect(missing).toEqual([]);
   });
@@ -202,5 +222,79 @@ describe("refusals", () => {
     expect(identityRefusalSentence(GRANTS_REVISION_CONFLICT)).toMatch(/changed since this page loaded/);
     expect(identityRefusalSentence("toString")).toBeNull();
     expect(identityRefusalSentence(undefined)).toBeNull();
+  });
+});
+
+describe("S6: create body", () => {
+  const base = { kind: "worker_runtime" as const, subjectId: "", identifier: "", stewardIds: [U(1)], environments: ["dev"] };
+  it("sends only the subject column its kind names, and an identifier only for an external kind", () => {
+    expect(createIdentityBody(base)).toEqual({ body: { kind: "worker_runtime", sponsorUserIds: [U(1)], environments: ["dev"] } });
+    expect(createIdentityBody({ ...base, kind: "agent", subjectId: U(9) })).toEqual({ body: { kind: "agent", agentId: U(9), sponsorUserIds: [U(1)], environments: ["dev"] } });
+    expect(createIdentityBody({ ...base, identifier: " spiffe://example.org/w/1 " })).toEqual({
+      body: { kind: "worker_runtime", identifier: "spiffe://example.org/w/1", sponsorUserIds: [U(1)], environments: ["dev"] },
+    });
+  });
+  it("refuses a missing subject, steward, a SPIFFE ID on an internal kind, and a malformed SPIFFE ID", () => {
+    expect(createIdentityBody({ ...base, kind: "agent" })).toMatchObject({ error: expect.stringContaining("Choose") });
+    expect(createIdentityBody({ ...base, stewardIds: [] })).toMatchObject({ error: expect.stringContaining("steward") });
+    expect(createIdentityBody({ ...base, kind: "agent", subjectId: U(9), identifier: "spiffe://example.org/w/1" })).toMatchObject({ error: expect.stringContaining("external") });
+    expect(createIdentityBody({ ...base, identifier: "spiffe://example.org/../x" })).toMatchObject({ error: expect.stringContaining("SPIFFE") });
+  });
+});
+
+describe("S6: credential body", () => {
+  const now = Date.parse("2026-10-12T00:00:00Z");
+  const draft = { kind: "jwk" as const, jwkText: "", certificatePem: "", selfSigned: false, spiffeId: "", notAfterDate: "" };
+  const x = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
+  it("keeps only the public members of a JWK and refuses any private member before sending", () => {
+    expect(credentialBody({ ...draft, jwkText: JSON.stringify({ kty: "OKP", crv: "Ed25519", x, kid: "k" }) }, now)).toEqual({ body: { kind: "jwk", publicJwk: { kty: "OKP", crv: "Ed25519", x } } });
+    for (const m of PRIVATE_JWK_MEMBERS) {
+      expect(credentialBody({ ...draft, jwkText: JSON.stringify({ kty: "OKP", crv: "Ed25519", x, [m]: "secret" }) }, now)).toMatchObject({ error: expect.stringContaining("private key") });
+    }
+    expect(credentialBody({ ...draft, jwkText: JSON.stringify({ kty: "RSA", n: "a", e: "AQAB" }) }, now)).toMatchObject({ error: expect.stringContaining("Ed25519") });
+    expect(credentialBody({ ...draft, jwkText: "not json" }, now)).toMatchObject({ error: expect.any(String) });
+  });
+  it("refuses a PEM with a private key, and bounds the end date", () => {
+    const pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----";
+    expect(credentialBody({ ...draft, kind: "x509", certificatePem: pem, selfSigned: true }, now)).toEqual({ body: { kind: "x509", certificatePem: pem, selfSigned: true } });
+    expect(credentialBody({ ...draft, kind: "x509", certificatePem: `${pem}\n-----BEGIN EC PRIVATE KEY-----\nB\n-----END EC PRIVATE KEY-----` }, now)).toMatchObject({ error: expect.stringContaining("private key") });
+    expect(credentialBody({ ...draft, kind: "spiffe_id", spiffeId: "spiffe://example.org/w", notAfterDate: "2026-11-01" }, now)).toEqual({
+      body: { kind: "spiffe_id", spiffeId: "spiffe://example.org/w", notAfter: "2026-11-01T00:00:00.000Z" },
+    });
+    expect(credentialBody({ ...draft, kind: "spiffe_id", spiffeId: "spiffe://example.org/w", notAfterDate: "2027-03-01" }, now)).toMatchObject({ error: expect.stringContaining("90 days") });
+    expect(credentialBody({ ...draft, kind: "spiffe_id", spiffeId: "spiffe://example.org/w", notAfterDate: "2026-10-01" }, now)).toMatchObject({ error: expect.stringContaining("future") });
+  });
+  it("a credential's state: revoked wins, then expiry, never live on an unreadable date", () => {
+    const c = { revokedAt: null, notBefore: "2026-10-01T00:00:00Z", notAfter: "2026-11-01T00:00:00Z" };
+    expect(credentialState(c, now)).toBe("live");
+    expect(credentialState({ ...c, revokedAt: "2026-10-02T00:00:00Z" }, now)).toBe("revoked");
+    expect(credentialState({ ...c, notAfter: "2026-10-02T00:00:00Z" }, now)).toBe("expired");
+    expect(credentialState({ ...c, notAfter: "garbage" }, now)).toBe("unmeasured");
+  });
+});
+
+describe("S6 review: proposal selection (least privilege)", () => {
+  const p = (modes: string[], held: boolean, refusalOnly: boolean) => ({
+    grant: { kind: "agent" as const, agentId: U(4), allowedModes: modes },
+    observedCalls: 2,
+    refusedCalls: refusalOnly ? 2 : 1,
+    lastObservedAt: "2026-10-12T00:00:00Z",
+    heldByStewards: held,
+    refusalOnly,
+  });
+  const ran = p(["execute"], true, false);
+  const neverRan = p(["review"], true, true);
+  const unheld = p(["admin"], false, true);
+  const base = { tools: [], servers: [], agents: [{ agentId: U(4), allowedModes: ["plan"] }], connectors: [], roleIds: [], revision: 7 };
+  it("pre-selects only steward-held proposals that ran at least once", () => {
+    expect([...defaultProposalSelection([ran, neverRan, unheld])]).toEqual([proposalKey(ran)]);
+  });
+  it("merges only selected, steward-held proposals onto the set, leaving the set unchanged", () => {
+    const all = new Set([ran, neverRan, unheld].map(proposalKey));
+    const out = setWithProposals(base, [ran, neverRan, unheld], all);
+    expect(out.agents).toEqual([{ agentId: U(4), allowedModes: ["plan", "execute", "review"] }]);
+    expect(out.revision).toBe(7);
+    expect(base.agents[0]!.allowedModes).toEqual(["plan"]);
+    expect(setWithProposals(base, [ran, neverRan], defaultProposalSelection([ran, neverRan])).agents[0]!.allowedModes).toEqual(["plan", "execute"]);
   });
 });

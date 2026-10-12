@@ -2,7 +2,8 @@
  * ADR-0188 S6 — the workload identities admin page, as the console reads it.
  *
  * MIRRORS `packages/shared/src/identity/contract.ts` (the SPA does not import
- * the shared package). The wire shapes below are the frozen S4/S5 read views;
+ * the shared package). The wire shapes below are the frozen S4/S5 read views
+ * and the S6 credential, proposal and picker views;
  * `workloadIdentityModel.test.ts` reads the shared source and the gateway's
  * route file so neither the limits nor the list of routes this page treats as
  * "not built yet" can drift silently.
@@ -130,35 +131,115 @@ export interface DelegationGrantListView {
 }
 
 // ---------------------------------------------------------------------------
-// what this gateway has not built yet
+// S6 wire shapes: credentials, proposals, picker sources
+// ---------------------------------------------------------------------------
+
+export const WORKLOAD_CREDENTIAL_KINDS = ["jwk", "x509", "spiffe_id"] as const;
+export type WorkloadCredentialKind = (typeof WORKLOAD_CREDENTIAL_KINDS)[number];
+/** a registered key lives at most this long (OWNER DECISION 7) */
+export const WORKLOAD_CREDENTIAL_MAX_DAYS = 90;
+/** the private or symmetric JWK members that must never be sent */
+export const PRIVATE_JWK_MEMBERS = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"] as const;
+/** a SPIFFE ID, as the shared contract's pattern reads it */
+export const SPIFFE_ID_PATTERN = /^spiffe:\/\/[a-z0-9._-]{1,255}(\/[A-Za-z0-9._-]+)+$/;
+export const SPIFFE_ID_MAX_LENGTH = 2048;
+/** the kinds that may be bound to an exact SPIFFE ID instead of the default identifier */
+export const EXTERNAL_IDENTITY_KINDS: ReadonlyArray<WorkloadIdentityKind> = ["worker_runtime", "pdp"];
+
+export interface WorkloadCredentialView {
+  id: string;
+  identityId: string;
+  kind: WorkloadCredentialKind;
+  publicJwk: Record<string, string> | null;
+  jwkThumbprint: string | null;
+  x5tS256: string | null;
+  sanUri: string | null;
+  subjectDn: string | null;
+  spiffeId: string | null;
+  selfSigned: boolean;
+  notBefore: string;
+  notAfter: string;
+  revokedAt: string | null;
+  createdAt: string;
+}
+/** `GET /v1/workload-identities/:identityId/credentials` */
+export interface WorkloadCredentialListView {
+  items: WorkloadCredentialView[];
+}
+
+export type IdentityGrantProposalGrant =
+  | { kind: "tool"; serverId: string; toolName: string }
+  | { kind: "agent"; agentId: string; allowedModes: string[] }
+  | { kind: "connector"; connectorId: string; mode: ConnectorGrantMode; allowedObjects: string[] };
+export interface IdentityGrantProposal {
+  grant: IdentityGrantProposalGrant;
+  observedCalls: number;
+  refusedCalls: number;
+  lastObservedAt: string;
+  heldByStewards: boolean;
+  /** every observation was a refusal by the agent's own allow-list: never pre-selected, opted into per item */
+  refusalOnly: boolean;
+}
+/** `GET /v1/workload-identities/:identityId/grant-proposals` */
+export interface IdentityGrantProposalsView {
+  identityId: string;
+  windowDays: number;
+  since: string;
+  revision: number;
+  proposals: IdentityGrantProposal[];
+  /** the own grant set at `revision`: the base the admin's selection is merged onto */
+  currentSet: PutAgentGrants;
+  /** the server's default selection (steward-held, allowed at least once) */
+  proposedSet: PutAgentGrants;
+  unproposable: number;
+  truncated: boolean;
+}
+
+export interface IdentityPickerOption {
+  id: string;
+  label: string;
+}
+/** `GET /v1/identity/picker-sources` */
+export interface IdentityPickerSourcesView {
+  sponsors: Array<IdentityPickerOption & { email: string }>;
+  subjects: { agent: IdentityPickerOption[]; builder_agent: IdentityPickerOption[]; engine_runner: IdentityPickerOption[] };
+  environments: string[];
+  servers: Array<IdentityPickerOption & { tools: string[] }>;
+  agents: IdentityPickerOption[];
+  connectors: IdentityPickerOption[];
+  roles: IdentityPickerOption[];
+  workerIdentities: IdentityPickerOption[];
+  truncated: boolean;
+}
+
+/** the body of `POST /v1/workload-identities` */
+export interface CreateWorkloadIdentityBody {
+  kind: WorkloadIdentityKind;
+  agentId?: string;
+  builderAgentId?: string;
+  engineRunnerId?: string;
+  identifier?: string;
+  sponsorUserIds: string[];
+  environments: string[];
+}
+
+/** the body of `POST /v1/workload-identities/:identityId/credentials` */
+export type AddWorkloadCredentialBody =
+  | { kind: "jwk"; publicJwk: Record<string, string>; notAfter?: string }
+  | { kind: "x509"; certificatePem: string; selfSigned: boolean; notAfter?: string }
+  | { kind: "spiffe_id"; spiffeId: string; notAfter?: string };
+
+// ---------------------------------------------------------------------------
+// routes this gateway has not built yet
 // ---------------------------------------------------------------------------
 
 /**
- * The identity routes the gateway still answers 501 `not_built` (ADR-0188 S1
- * stubs awaiting the S6 backend). The page disables the controls behind them
- * with these reasons rather than sending a request it knows will be refused.
- * The model test reads `apps/gateway/src/identity-routes.ts` and fails when
- * this list and the gateway disagree, so a route that goes live forces the
- * control to be switched on here.
+ * The identity routes the gateway still answers 501 `not_built`. S6 built the
+ * last of them, so the list is empty. The model test reads
+ * `apps/gateway/src/identity-routes.ts` and fails if a stub reappears without
+ * a matching entry here (and a disabled control on the page).
  */
-export const IDENTITY_ROUTES_NOT_BUILT: ReadonlyArray<{ method: "GET" | "POST" | "DELETE"; path: string }> = [
-  { method: "POST", path: "/v1/workload-identities" },
-  { method: "POST", path: "/v1/workload-identities/:identityId/revoke" },
-  { method: "GET", path: "/v1/workload-identities/:identityId/credentials" },
-  { method: "POST", path: "/v1/workload-identities/:identityId/credentials" },
-  { method: "DELETE", path: "/v1/workload-identities/:identityId/credentials/:credentialId" },
-  { method: "GET", path: "/v1/workload-identities/:identityId/grant-proposals" },
-  { method: "GET", path: "/v1/identity/picker-sources" },
-];
-
-export const NOT_BUILT_REASON = {
-  create:
-    "Creating a workload identity is not built on this gateway yet (ADR-0188 S6 backend). An agent's identity is created with the agent; nothing was sent.",
-  revoke:
-    "Revoking an identity is not built on this gateway yet (ADR-0188 S6 backend). Suspending it refuses every grant naming it at the next use, and can be undone.",
-  credentials:
-    "Public credentials cannot be listed, added or revoked on this gateway yet (ADR-0188 S6 backend). The count above is the server's own; no key is shown or accepted here.",
-} as const;
+export const IDENTITY_ROUTES_NOT_BUILT: ReadonlyArray<{ method: "GET" | "POST" | "DELETE"; path: string }> = [];
 
 // ---------------------------------------------------------------------------
 // display rules
@@ -399,6 +480,184 @@ export function orderedDelegationTree(view: Pick<DelegationGrantListView, "items
 }
 
 // ---------------------------------------------------------------------------
+// create an identity
+// ---------------------------------------------------------------------------
+
+export const SUBJECT_COLUMN: Record<WorkloadIdentityKind, "agentId" | "builderAgentId" | "engineRunnerId" | null> = {
+  agent: "agentId",
+  builder_agent: "builderAgentId",
+  engine_runner: "engineRunnerId",
+  worker_runtime: null,
+  pdp: null,
+};
+
+export function isSpiffeId(value: string): boolean {
+  if (value.length > SPIFFE_ID_MAX_LENGTH || !SPIFFE_ID_PATTERN.test(value)) return false;
+  return value.slice("spiffe://".length).split("/").slice(1).every((seg) => seg !== "." && seg !== "..");
+}
+
+export interface CreateIdentityDraft {
+  kind: WorkloadIdentityKind;
+  subjectId: string;
+  identifier: string;
+  stewardIds: string[];
+  environments: string[];
+}
+
+/** the create body, or a sentence; the gateway refuses the same things on its own */
+export function createIdentityBody(d: CreateIdentityDraft): { body: CreateWorkloadIdentityBody } | { error: string } {
+  const column = SUBJECT_COLUMN[d.kind];
+  if (column && !UUID_PATTERN.test(d.subjectId)) return { error: "Choose what this identity is for from the list." };
+  const problem = validateStewardsAndEnvironments(d.stewardIds, d.environments);
+  if (problem) return { error: problem };
+  const identifier = d.identifier.trim();
+  if (identifier) {
+    if (!EXTERNAL_IDENTITY_KINDS.includes(d.kind)) return { error: "Only an external worker or a policy client can be bound to its own SPIFFE ID." };
+    if (!isSpiffeId(identifier)) return { error: "Enter an exact SPIFFE ID, such as spiffe://example.org/worker/one." };
+  }
+  const body: CreateWorkloadIdentityBody = { kind: d.kind, sponsorUserIds: [...d.stewardIds], environments: [...d.environments] };
+  if (column) body[column] = d.subjectId;
+  if (identifier) body.identifier = identifier;
+  return { body };
+}
+
+// ---------------------------------------------------------------------------
+// public credentials
+// ---------------------------------------------------------------------------
+
+export const credentialKindLabels: Record<WorkloadCredentialKind, string> = {
+  jwk: "Public key (JWK)",
+  x509: "Client certificate",
+  spiffe_id: "SPIFFE ID",
+};
+
+export interface CredentialDraft {
+  kind: WorkloadCredentialKind;
+  jwkText: string;
+  certificatePem: string;
+  selfSigned: boolean;
+  spiffeId: string;
+  /** a calendar date (yyyy-mm-dd), or empty for the longest the gateway allows */
+  notAfterDate: string;
+}
+
+const PRIVATE_PEM = /PRIVATE KEY-----/;
+const DAY_MS = 86_400_000;
+
+/**
+ * The credential body, or a sentence. A private key is refused HERE, before
+ * anything is sent: only a public half ever leaves the browser.
+ */
+export function credentialBody(d: CredentialDraft, nowMs: number): { body: AddWorkloadCredentialBody } | { error: string } {
+  let notAfter: string | undefined;
+  if (d.notAfterDate) {
+    const at = /^\d{4}-\d{2}-\d{2}$/.test(d.notAfterDate) ? Date.parse(`${d.notAfterDate}T00:00:00Z`) : Number.NaN;
+    if (!Number.isFinite(at) || at <= nowMs) return { error: "The end date must be in the future." };
+    if (at > nowMs + WORKLOAD_CREDENTIAL_MAX_DAYS * DAY_MS) return { error: `A credential lives at most ${WORKLOAD_CREDENTIAL_MAX_DAYS} days.` };
+    notAfter = new Date(at).toISOString();
+  }
+  const tail = notAfter ? { notAfter } : {};
+  if (d.kind === "jwk") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(d.jwkText);
+    } catch {
+      return { error: "Paste the public key as a JSON Web Key." };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { error: "Paste the public key as a JSON Web Key." };
+    const jwk = parsed as Record<string, unknown>;
+    if (PRIVATE_JWK_MEMBERS.some((m) => Object.hasOwn(jwk, m))) return { error: "That is a private key. Paste only the public key; nothing was sent." };
+    const okp = jwk.kty === "OKP" && jwk.crv === "Ed25519" && typeof jwk.x === "string";
+    const ec = jwk.kty === "EC" && jwk.crv === "P-256" && typeof jwk.x === "string" && typeof jwk.y === "string";
+    if (!okp && !ec) return { error: "Only an Ed25519 (OKP) or P-256 (EC) public key is accepted." };
+    const publicJwk: Record<string, string> = okp
+      ? { kty: "OKP", crv: "Ed25519", x: jwk.x as string }
+      : { kty: "EC", crv: "P-256", x: jwk.x as string, y: jwk.y as string };
+    return { body: { kind: "jwk", publicJwk, ...tail } };
+  }
+  if (d.kind === "x509") {
+    const pem = d.certificatePem.trim();
+    if (PRIVATE_PEM.test(pem)) return { error: "That text contains a private key. Paste only the certificate; nothing was sent." };
+    if (!pem.includes("-----BEGIN CERTIFICATE-----") || pem.length > 16_384) return { error: "Paste one certificate in PEM form." };
+    return { body: { kind: "x509", certificatePem: pem, selfSigned: d.selfSigned, ...tail } };
+  }
+  const spiffeId = d.spiffeId.trim();
+  if (!isSpiffeId(spiffeId)) return { error: "Enter an exact SPIFFE ID, such as spiffe://example.org/worker/one." };
+  return { body: { kind: "spiffe_id", spiffeId, ...tail } };
+}
+
+/** what a credential row shows as its public fact */
+export function credentialFact(c: WorkloadCredentialView): string {
+  if (c.kind === "jwk") return c.jwkThumbprint ? `Thumbprint ${c.jwkThumbprint}` : "Unmeasured";
+  if (c.kind === "x509") return c.x5tS256 ? `${c.selfSigned ? "Self-signed; " : ""}SHA-256 ${c.x5tS256}` : "Unmeasured";
+  return c.spiffeId ?? "Unmeasured";
+}
+
+/** revoked wins; otherwise by this browser's clock inside [notBefore, notAfter) */
+export function credentialState(
+  c: Pick<WorkloadCredentialView, "revokedAt" | "notBefore" | "notAfter">,
+  nowMs: number,
+): "revoked" | "expired" | "pending" | "live" | "unmeasured" {
+  if (c.revokedAt !== null) return "revoked";
+  const from = Date.parse(c.notBefore);
+  const to = Date.parse(c.notAfter);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return "unmeasured";
+  if (to <= nowMs) return "expired";
+  return from > nowMs ? "pending" : "live";
+}
+
+// ---------------------------------------------------------------------------
+// grant proposals
+// ---------------------------------------------------------------------------
+
+export function proposalLabel(g: IdentityGrantProposalGrant): string {
+  if (g.kind === "tool") return `Tool ${g.toolName}`;
+  if (g.kind === "agent") return `Agent invocation; modes: ${g.allowedModes.join(", ")}`;
+  return `Connector ${g.mode === "read" ? "read" : "read and write"}; objects: ${g.allowedObjects.join(", ")}`;
+}
+
+/** a proposal's key within one view */
+export const proposalKey = (p: IdentityGrantProposal) => JSON.stringify(p.grant);
+
+/**
+ * The proposals selected by default: a steward holds it AND it was allowed at least once. A refusal-only proposal
+ * (it never ran) is never pre-selected; the admin opts into it item by item. One no steward holds is never
+ * selectable (the replace would refuse it).
+ */
+export function defaultProposalSelection(proposals: readonly IdentityGrantProposal[]): Set<string> {
+  return new Set(proposals.filter((p) => p.heldByStewards && !p.refusalOnly).map(proposalKey));
+}
+
+/** `set` plus the selected, steward-held proposals, merged per target; `set` is not changed (mirrors the gateway) */
+export function setWithProposals(set: PutAgentGrants, proposals: readonly IdentityGrantProposal[], selected: ReadonlySet<string>): PutAgentGrants {
+  const out = copySet(set);
+  for (const p of proposals) {
+    if (!p.heldByStewards || !selected.has(proposalKey(p))) continue;
+    const g = p.grant;
+    if (g.kind === "tool") {
+      if (!out.tools.some((x) => x.serverId === g.serverId && x.toolName === g.toolName)) out.tools.push({ serverId: g.serverId, toolName: g.toolName });
+    } else if (g.kind === "agent") {
+      const existing = out.agents.find((x) => x.agentId === g.agentId);
+      if (existing) existing.allowedModes = [...new Set([...existing.allowedModes, ...g.allowedModes])].slice(0, GRANT_SET_LIMITS.modes);
+      else out.agents.push({ agentId: g.agentId, allowedModes: [...g.allowedModes] });
+    } else {
+      const existing = out.connectors.find((x) => x.connectorId === g.connectorId);
+      if (existing) {
+        existing.mode = existing.mode === "readwrite" || g.mode === "readwrite" ? "readwrite" : "read";
+        existing.allowedObjects = [...new Set([...existing.allowedObjects, ...g.allowedObjects])].slice(0, GRANT_SET_LIMITS.objects);
+      } else {
+        out.connectors.push({ connectorId: g.connectorId, mode: g.mode, allowedObjects: [...g.allowedObjects] });
+      }
+    }
+  }
+  return out;
+}
+
+export function proposalTargetId(g: IdentityGrantProposalGrant): string {
+  return g.kind === "tool" ? g.serverId : g.kind === "agent" ? g.agentId : g.connectorId;
+}
+
+// ---------------------------------------------------------------------------
 // refusals, in words
 // ---------------------------------------------------------------------------
 
@@ -419,6 +678,25 @@ export const REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
   grant_exceeds_stewards: "No steward of this identity holds that permission, and an identity's grants never exceed its stewards'. Grant it to a steward first, or choose a steward who holds it.",
   steward_not_found: "Every steward must be an existing, enabled user. Refresh the people list and choose again.",
   grant_not_found: "That delegation grant no longer exists. Refresh the tree.",
+  // S6: create, revoke and credentials
+  identity_exists: "That subject already has its identity. One identity per subject, ever: a revoked one is not replaced.",
+  identifier_taken: "Another identity already uses that identifier. Choose a different SPIFFE ID.",
+  identifier_reserved: "That SPIFFE ID is in the namespace the gateway assigns. Use the default identifier, or an ID your own SPIRE issues.",
+  identifier_not_allowed: "Only an external worker or a policy client can be bound to its own SPIFFE ID.",
+  subject_not_found: "What this identity was for no longer exists. Refresh and choose again.",
+  subject_not_in_service: "What this identity was for is retired, archived or revoked, so it cannot get an identity.",
+  identity_already_revoked: "This identity is already revoked. Revocation is terminal.",
+  credential_invalid: "The gateway could not read that as a valid public key or certificate. Nothing was stored.",
+  credential_private_material: "That contained a private key, so nothing was stored. Paste only the public half.",
+  certificate_time: "That certificate is not valid right now. Nothing was stored.",
+  certificate_not_self_signed: "That certificate is not signed by its own key. Clear “Self-signed” if a CA issued it.",
+  certificate_leaf_ca: "That is a CA certificate. Register the workload's own client certificate.",
+  credential_not_after: "That end date is past what is allowed: at most the longest workload key lifetime, and never after the certificate expires.",
+  credential_already_registered: "That key, certificate or SPIFFE ID is already registered, and a key is never registered twice. Generate a new key.",
+  spiffe_trust_domain_unknown: "No trust bundle is configured for that SPIFFE trust domain, so the ID could never sign in. Nothing was stored.",
+  trust_config_invalid: "The gateway's SPIFFE trust configuration could not be read. Nothing was stored; ask the operator to check it.",
+  credential_not_found: "That credential no longer exists on this identity. Refresh the list.",
+  credential_already_revoked: "That credential is already revoked. A revoked credential is never revived.",
 };
 
 /** the page's sentence for a refusal code, or null to use the client's own reading */

@@ -2,10 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "../../../api/client";
 import { subscribeStepUpPrompt } from "../../../stepup/stepUp";
 import {
+  addIdentityCredential,
+  createWorkloadIdentity,
   listRunDelegationTree,
   listWorkloadIdentities,
   replaceIdentityGrants,
   revokeDelegationGrant,
+  revokeIdentityCredential,
+  revokeWorkloadIdentity,
   updateWorkloadIdentity,
 } from "./workloadIdentityApi";
 import type { PutAgentGrants } from "./workloadIdentityModel";
@@ -79,6 +83,30 @@ describe("writes go through the identity_manage step-up and resend the same body
     const put = vi.spyOn(api, "putWithHeaders");
     await expect(replaceIdentityGrants(U(1), { tools: [], servers: [], agents: [], connectors: [], roleIds: [], revision: -1 })).rejects.toThrow(/Reload/);
     expect(put).not.toHaveBeenCalled();
+  });
+  it("S6 writes: create, revoke, bind and revoke a credential, each resent once with the same frozen body", async () => {
+    answerStepUp();
+    const post = vi
+      .spyOn(api, "postWithHeaders")
+      .mockRejectedValueOnce(stepUpRefusal())
+      .mockResolvedValue({ body: {}, headers: new Headers() } as never);
+    await createWorkloadIdentity({ kind: "worker_runtime", sponsorUserIds: [U(1)], environments: ["dev"] });
+    expect(post.mock.calls.map((c) => [c[0], c[2]])).toEqual([
+      ["/v1/workload-identities", {}],
+      ["/v1/workload-identities", { "x-regulait-step-up": "rgsu_1" }],
+    ]);
+    expect(Object.isFrozen(post.mock.calls[1]![1])).toBe(true);
+    post.mockClear();
+    await revokeWorkloadIdentity(U(2));
+    await addIdentityCredential(U(2), { kind: "spiffe_id", spiffeId: "spiffe://example.org/w" });
+    expect(post.mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      [`/v1/workload-identities/${U(2)}/revoke`, {}],
+      [`/v1/workload-identities/${U(2)}/credentials`, { kind: "spiffe_id", spiffeId: "spiffe://example.org/w" }],
+    ]);
+    const del = vi.spyOn(api, "delWithHeaders").mockResolvedValue({});
+    await revokeIdentityCredential(U(2), U(3));
+    expect(del).toHaveBeenCalledWith(`/v1/workload-identities/${U(2)}/credentials/${U(3)}`, {}, undefined);
+    await expect(revokeIdentityCredential(U(2), "../x")).rejects.toThrow(/could not be read/);
   });
   it("cascade revoke posts an empty body to the grant's revoke route", async () => {
     const post = vi.spyOn(api, "postWithHeaders").mockResolvedValue({ body: {}, headers: new Headers() } as never);
