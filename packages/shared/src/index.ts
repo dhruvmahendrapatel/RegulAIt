@@ -27,6 +27,7 @@ import { approvalRuleQuorumFields, batch4OrgSettingsFields } from "./batch4.js";
 import { batch5OrgSettingsFields } from "./engines/settings.js";
 // ADR-0188 (batch 6 item 1): the identity settings ride the same PUT
 import { identityOrgSettingsFields } from "./identity/settings.js";
+import { IDENTITY_PROPAGATION_MODES } from "./identity/contract.js";
 // ADR-0189 (batch 6 item 2): the Decision BOM / AI BOM settings ride the same PUT
 import { bomOrgSettingsFields } from "./bom/settings.js";
 // ADR-0190 (batch 6 item 3): the isolation settings ride the same PUT
@@ -804,6 +805,8 @@ export const updateServerSchema = z
     transport: z.enum(MCP_UPSTREAM_TRANSPORTS).optional(),
     stdio: mcpStdioSpecSchema.optional(),
     ownerUserId: serverOwnerField,
+    // ADR-0188 S8: send the caller's identity to this upstream (a relaxation: settings_relax step-up)
+    identityPropagation: z.enum(IDENTITY_PROPAGATION_MODES).optional(),
   })
   .strict();
 
