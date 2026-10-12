@@ -122,13 +122,16 @@ export function currentAuditActor(): AuditActorStamp | undefined {
 
 /**
  * TEST FIXTURES ONLY: run `fn` with audit rows allowed to name their own `at` (a backdated retention or
- * window fixture). Production code never calls it, and it refuses to run under NODE_ENV=production; outside
+ * window fixture). Production code never calls it, and it runs only under a test runner (VITEST set or NODE_ENV=test); outside
  * it, a caller-named `at` is refused (see `resolveDefaults`).
  */
 const callerAuditAtForTest = new AsyncLocalStorage<true>();
 export function runWithCallerAuditAtForTest<T>(fn: () => PromiseLike<T> | T): Promise<T> {
-  if (process.env.NODE_ENV === "production") {
-    return Promise.reject(new Error("audit-chain: caller-named audit timestamps are a test fixture and are refused in production"));
+  // allowed ONLY under a test runner (the gateway's boot.ts / scheduler.ts `underTest` check): the shipped image
+  // sets no NODE_ENV, so "refuse when production" would never fire there; this fails closed everywhere else
+  const underTest = process.env.VITEST !== undefined || process.env.NODE_ENV === "test";
+  if (!underTest) {
+    return Promise.reject(new Error("audit-chain: caller-named audit timestamps are a test fixture and are refused outside a test run"));
   }
   return callerAuditAtForTest.run(true, async () => await fn());
 }
@@ -181,7 +184,7 @@ type AuditInsertValues = Partial<AuditChainFields> & Record<string, unknown>;
  * row the writer let a caller date could be backdated into a window it never
  * happened in. The only exception is a test fixture run inside
  * `runWithCallerAuditAtForTest`, which production code never calls and which
- * refuses to run under NODE_ENV=production.
+ * runs only under a test runner (VITEST set or NODE_ENV=test).
  */
 function resolveDefaults(v: AuditInsertValues, dbNow: Date): AuditChainFields & Record<string, unknown> {
   if (v.at != null && !callerAuditAtForTest.getStore()) {

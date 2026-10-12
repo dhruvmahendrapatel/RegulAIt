@@ -686,7 +686,7 @@ PR #377 review: the stamp is `greatest(clock_timestamp(), tip.at)` (the tip roun
 at the tip's time until the clock catches up. A caller may **not** name `at` (secure by default: a row could
 otherwise be backdated into a window it never happened in); the writer refuses it and appends nothing. Test
 fixtures that need a dated row use `runWithCallerAuditAtForTest` (via the gateway's `testing/backdated-audit.ts`),
-which production code never calls and which refuses to run under `NODE_ENV=production`.
+which production code never calls and which runs only under a test runner (`VITEST` set or `NODE_ENV=test`; the shipped image sets no `NODE_ENV`, so a production check would never fire). A static test pins that no product source imports it.
 
 The comparisons against `at` moved to the database clock in the same PR: the live rate-limit window
 (`governed-evaluate.ts`; a replay keeps its recorded instant), the receipt status's stalled check, the posture

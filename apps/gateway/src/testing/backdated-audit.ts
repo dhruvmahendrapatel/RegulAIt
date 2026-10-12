@@ -12,9 +12,10 @@ type AuditInsert = typeof auditLog.$inferInsert;
 
 export function backdated(db: Db) {
   return {
-    insert: (table: typeof auditLog) => ({
+    // `auditLog` is named outright (not the parameter), so the ADR-0074 write scan resolves the table statically
+    insert: (_table: typeof auditLog) => ({
       values: (values: AuditInsert | AuditInsert[]) => {
-        const builder = db.insert(table).values(values as never) as unknown as PromiseLike<unknown> & {
+        const builder = db.insert(auditLog).values(values as never) as unknown as PromiseLike<unknown> & {
           returning: (selection?: unknown) => PromiseLike<unknown>;
         };
         return {
