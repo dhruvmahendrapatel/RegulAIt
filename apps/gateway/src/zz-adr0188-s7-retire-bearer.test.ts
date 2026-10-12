@@ -690,10 +690,10 @@ describe("S7 — key rotation (decision 12) and revocation", () => {
       const oldJkt = await runner.client.jkt();
       const next = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
       expect((await call(runner.caller, "POST", "/v1/engine-runner/credentials", { publicJwk: next.publicJwk, proof: await rotationProofBy(next) })).statusCode).toBe(201);
-      const supersede = async (signer: TestWorkloadClient, kid: string) => {
+      const supersede = async (signer: TestWorkloadClient, kid: string, alg: "EdDSA" | "Ed25519" = "EdDSA") => {
         const fresh = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
         const proof = await new SignJWT({ jkt: await calculateJwkThumbprint(fresh.publicJwk as JWK, "sha256") })
-          .setProtectedHeader({ alg: "EdDSA", typ: "regulait-runner-supersede+jwt", kid })
+          .setProtectedHeader({ alg, typ: "regulait-runner-supersede+jwt", kid })
           .setAudience(ORIGIN)
           .setJti(randomUUID())
           .setIssuedAt()
@@ -714,8 +714,9 @@ describe("S7 — key rotation (decision 12) and revocation", () => {
       expect(stale.supersededRunnerId).toBeNull();
       const [still] = await db.select({ revokedAt: engineRunners.revokedAt }).from(engineRunners).where(eq(engineRunners.id, runner.id));
       expect(still!.revokedAt).toBeNull();
-      // the control: the LIVE key supersedes this runner
-      const live = await supersede(next, await next.jkt());
+      // the control: the LIVE key supersedes this runner (its proof labelled `Ed25519`, RFC 9864: both labels of
+      // the signature are accepted)
+      const live = await supersede(next, await next.jkt(), "Ed25519");
       expect(live.supersededRunnerId).toBe(runner.id);
       await inject("DELETE", `/v1/engine-runners/${stale.runnerId}`, admin.key);
       await inject("DELETE", `/v1/engine-runners/${live.runnerId}`, admin.key);
@@ -742,6 +743,13 @@ describe("S7 — review of #380: what else a self token must not do", () => {
       const r = await runner.client.tokenRequest({ dpop: await other.proof("POST", `${ORIGIN}/oauth/token`) });
       expect(r.statusCode, r.body).toBe(400);
       expect((r.json() as { error: string }).error).toBe("invalid_dpop_proof");
+      const [audited] = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, "workload-token-refused"), sql`${auditLog.detail} ->> 'code' = 'dpop_key_mismatch'`))
+        .orderBy(desc(auditLog.at))
+        .limit(1);
+      expect(audited).toBeDefined();
       expect((await runner.client.tokenRequest()).statusCode).toBe(200);
     } finally {
       await runner.revoke();
@@ -781,6 +789,58 @@ describe("S7 — review of #380: what else a self token must not do", () => {
     } finally {
       await db.update(workloadIdentities).set({ status: "active" }).where(eq(workloadIdentities.id, pdp.identityId));
       await pdp.revoke();
+    }
+  });
+});
+
+describe("S7 — review of #380, LOW 5: both labels of an Ed25519 signature", () => {
+  it("an assertion and DPoP proofs labelled `Ed25519` (RFC 9864) are accepted, as `EdDSA` (RFC 8037) is", async () => {
+    const runner = await enrolRunner();
+    try {
+      const nowS = () => Math.floor(Date.now() / 1000);
+      const cid = await runner.client.clientId();
+      const assertion = await new SignJWT({})
+        .setProtectedHeader({ alg: "Ed25519", kid: await runner.client.jkt() })
+        .setIssuer(cid)
+        .setSubject(cid)
+        .setAudience(`${ORIGIN}/oauth/token`)
+        .setJti(randomUUID())
+        .setIssuedAt()
+        .setExpirationTime(nowS() + 60)
+        .sign(runner.client.privateKey);
+      const proof = (htu: string, extra: Record<string, unknown> = {}) =>
+        new SignJWT({ htm: "POST", htu, iat: nowS(), jti: randomUUID(), nonce: runner.client.nonce(), ...extra })
+          .setProtectedHeader({ alg: "Ed25519", typ: "dpop+jwt", jwk: runner.client.publicJwk as JWK })
+          .sign(runner.client.privateKey);
+      const r = await runner.client.tokenRequest({ form: { client_assertion: assertion }, dpop: await proof(`${ORIGIN}/oauth/token`) });
+      expect(r.statusCode, r.body).toBe(200);
+      const token = (r.json() as { access_token: string }).access_token;
+      const ath = createHash("sha256").update(token).digest("base64url");
+      const lease = await inject("POST", "/v1/engine-runner/lease", { authorization: `DPoP ${token}`, dpop: await proof(`${ORIGIN}/v1/engine-runner/lease`, { ath }) }, PF_BUILD());
+      expect(lease.statusCode, lease.body).toBe(204);
+      // and the RFC 8037 label (the test client's default) on the same key
+      runner.client.reset();
+      expect((await call(runner.caller, "POST", "/v1/engine-runner/lease", PF_BUILD())).statusCode).toBe(204);
+    } finally {
+      await runner.revoke();
+    }
+  });
+});
+
+describe("S7 — review of #380, LOW 2: the admin bind route keeps a runner at two live keys", () => {
+  it("an admin cannot bind a third live key to an engine runner's identity (409 runner_key_limit)", async () => {
+    const runner = await enrolRunner();
+    try {
+      const [ident] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.engineRunnerId, runner.id));
+      const bind = (k: TestWorkloadClient) =>
+        relaxStepUpAround(db, () => inject("POST", `/v1/workload-identities/${ident!.id}/credentials`, AUTH, { kind: "jwk", publicJwk: k.publicJwk }));
+      const second = await bind(new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" }));
+      expect(second.statusCode, second.body).toBe(201);
+      const third = await bind(new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" }));
+      expect(third.statusCode, third.body).toBe(409);
+      expect(third.json().error).toBe("runner_key_limit");
+    } finally {
+      await runner.revoke();
     }
   });
 });

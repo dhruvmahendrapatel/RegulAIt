@@ -9,7 +9,7 @@
  *   - every engine starts off; enabling needs a fresh passing self-test AND a
  *     settings_relax step-up; a disabled engine cannot be leased;
  *   - the self-test fails when the egress probe resolved or connected;
- *   - a runner token reaches only its route allow-list, and the runner routes
+ *   - a runner's self token reaches only its route allow-list, and the runner routes
  *     refuse every other credential;
  *   - the run-scoped key: compat routes only, pinned to the run's project,
  *     revoked on result, on cancel and by the timeout sweep, and at once when
@@ -489,7 +489,7 @@ describe("secure by default", () => {
 
 // ===========================================================================
 describe("runner credentials", () => {
-  it("a runner token reaches only its route allow-list", async () => {
+  it("a runner's self token reaches only its route allow-list", async () => {
     for (const [method, url] of [
       ["GET", "/v1/engines"],
       ["GET", "/v1/me"],
@@ -513,7 +513,7 @@ describe("runner credentials", () => {
     }
     const viaSession = await asAdmin("POST", "/v1/engine-runner/lease");
     expect(viaSession.statusCode, viaSession.body).toBe(401);
-    // an enrolment token is not a runner token
+    // an enrolment token is not a runner credential
     const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, {});
     const enrolment = { authorization: `Bearer ${t.json().token}` };
     const asLease = await inject("POST", "/v1/engine-runner/lease", enrolment);
@@ -551,7 +551,7 @@ describe("runner credentials", () => {
     // ADR-0188 S7: a runner holds no bearer value at all; its DPoP-bound self token is not a key either
     const self = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: await pfRunner.client.token() } });
     // refused before it is looked up (a self token is longer than any API key the route accepts: 400), never a session
-    expect([400, 401], self.body).toContain(self.statusCode);
+    expect(self.statusCode, self.body).toBe(400);
     expect(self.headers["set-cookie"]).toBeUndefined();
   });
 

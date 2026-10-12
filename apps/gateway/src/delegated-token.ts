@@ -64,7 +64,12 @@ import { loadOrgSettings } from "./org-settings.js";
 /** the JOSE `typ` of a delegated access token (RFC 9068) */
 export const ACCESS_TOKEN_TYP = "at+jwt" as const;
 /** the algorithms a DPoP proof or a delegation authorization may use (decision 13) */
-export const WORKLOAD_PROOF_ALGS = ["EdDSA", "ES256"] as const;
+/**
+ * The JWS algorithms a workload's assertions and proofs may use. ADR-0188 S7 (review of #380): `Ed25519` is the
+ * RFC 9864 fully-specified name of the same Ed25519 signature `EdDSA` (RFC 8037) names, and current client
+ * libraries (oauth4webapi 3.x) emit it, so both labels are accepted. Either way the key must be an Ed25519 key.
+ */
+export const WORKLOAD_PROOF_ALGS = ["EdDSA", "Ed25519", "ES256"] as const;
 /** a DPoP nonce is an HMAC over a 5-minute slot (decision 20) */
 export const DPOP_NONCE_SLOT_SECONDS = 300;
 /** a placeholder jwks_uri handed to oauth4webapi; `customFetch` answers it locally and nothing else */

@@ -674,6 +674,25 @@ export async function bindPreparedCredentialTx(
   return credentialView(row!);
 }
 
+/** live keys an engine runner's identity may hold at once: its current key and, during a rotation, the next one */
+export const RUNNER_MAX_LIVE_KEYS = 2;
+
+/**
+ * ADR-0188 S7 (review of #380): the two-live-key cap of an engine runner's identity, on the database clock.
+ * Applied by BOTH binding paths (the runner's own rotation and the admin bind route), so an extra key bound by
+ * an admin can never block the runner's next rotation, and no path leaves a runner with more live keys. The
+ * caller holds the identity row FOR UPDATE, so two binds cannot both pass the count.
+ */
+export async function runnerKeyLimitRefusal(t: Db, identityId: string): Promise<IdentityAdminError | null> {
+  const rows = (await t.execute(
+    sql`SELECT count(*)::int AS live FROM workload_credentials WHERE identity_id = ${identityId} AND revoked_at IS NULL AND not_after > clock_timestamp()`,
+  )) as unknown as { rows: Array<{ live: number }> };
+  const live = rows.rows[0]?.live ?? 0;
+  return live >= RUNNER_MAX_LIVE_KEYS
+    ? new IdentityAdminError("runner_key_limit", 409, `an engine runner holds at most ${RUNNER_MAX_LIVE_KEYS} live keys (its current key and, during a rotation, the next)`)
+    : null;
+}
+
 /**
  * Bind a PUBLIC credential to an ACTIVE identity. Its window starts now
  * (database clock) and ends at `notAfter`, default and maximum
@@ -694,9 +713,16 @@ export async function addWorkloadCredential(
   try {
     out = await db.transaction(async (tx): Promise<WorkloadCredentialView | IdentityAdminError> => {
       const t = tx as unknown as Db;
-      const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for("share");
+      // an engine runner's identity is locked FOR UPDATE: its two-live-key cap is counted under the lock
+      const [kindRow] = await t.select({ kind: workloadIdentities.kind }).from(workloadIdentities).where(eq(workloadIdentities.id, identityId));
+      const runnerIdentity = kindRow?.kind === "engine_runner";
+      const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for(runnerIdentity ? "update" : "share");
       if (!ident) return new IdentityAdminError("identity_not_found", 404, `no workload identity ${identityId}`);
       if (ident.status !== "active") return new IdentityAdminError("identity_not_active", 409, `identity ${identityId} is ${ident.status}; a credential is bound only to an active identity`);
+      if (ident.kind === "engine_runner") {
+        const limit = await runnerKeyLimitRefusal(t, identityId);
+        if (limit) return limit;
+      }
       const now = await databaseNow(t);
       const prepared = await prepareCredential(input, now, env);
       if (prepared instanceof IdentityAdminError) return prepared;

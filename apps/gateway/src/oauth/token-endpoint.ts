@@ -722,6 +722,9 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
     cookies: { keys: [randomBytes(32).toString("base64url")] },
     routes: { token: OAUTH_TOKEN_ROUTE_PATH },
     clientAuthMethods: ["private_key_jwt", "tls_client_auth"],
+    // ADR-0188 S7: EdDSA and Ed25519 (RFC 9864) for an Ed25519 key, ES256 for P-256. There is no discovery
+    // document; the one signing-alg list the gateway publishes is the RFC 9728 dpop_signing_alg_values_supported
+    // (mcp-auth-metadata.ts), which names the same three
     enabledJWA: { clientAuthSigningAlgValues: [...WORKLOAD_PROOF_ALGS], dPoPSigningAlgValues: [...WORKLOAD_PROOF_ALGS] },
     clockTolerance: 5,
     // the provider validates every client's metadata against its own keystore; it signs no ID token here

@@ -139,6 +139,12 @@ function asRunner(secret: string): TestWorkloadClient {
   if (!c) runnerClients.set(secret, (c = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner", runnerSecret: secret })));
   return c;
 }
+/** ADR-0188 S7: the token endpoint refuses this key (no cached token is used: a fresh request is made) */
+async function keyRefused(secret: string): Promise<boolean> {
+  const c = asRunner(secret);
+  c.reset();
+  return (await c.tokenRequest()).statusCode === 401;
+}
 /** the runner row whose identity holds this key (the gateway records a key by its RFC 7638 thumbprint) */
 async function runnerIdFor(secret: string): Promise<string | null> {
   const jkt = await runnerKeyThumbprint(secret);
@@ -851,9 +857,9 @@ describe("PR #205 review round 5: the runner state machine against the real gate
     expect(audit).toHaveLength(1);
     const [fresh] = ((await db.execute(sql`SELECT id, reported_digest FROM engine_runners WHERE id = ${await runnerIdFor(replaced)}`)) as unknown as { rows: Array<{ id: string; reported_digest: string }> }).rows;
     expect(fresh).toMatchObject({ reported_digest: PF_DIGEST });
-    // the old token authenticates nothing now
-    const gone = await inject("POST", "/v1/engine-runner/lease", asRunner(secret), PF_BUILD);
-    expect(gone.statusCode).toBe(401);
+    // the old key authenticates nothing now: the token endpoint refuses it (ADR-0188 S7: a runner holds a key, and a
+    // revoked runner's key gets no token at all)
+    expect(await keyRefused(secret)).toBe(true);
     // a `supersedes` that is not a live runner of this engine revokes nothing
     const other = await register("upgrade-bystander");
     const t = await enrolmentToken("upgrade-unrelated");
@@ -1815,7 +1821,7 @@ describe("PR #205 review round 12: only current-build runners count; a failing r
     expect(logs.some((m) => /secret was revoked: registering a new one/.test(m))).toBe(true);
     const [live] = ((await db.execute(sql`SELECT revoked_at FROM engine_runners WHERE id = ${await runnerIdFor(fresh)}`)) as unknown as { rows: Array<{ revoked_at: string | null }> }).rows;
     expect(live!.revoked_at).toBeNull();
-    expect((await inject("POST", "/v1/engine-runner/lease", asRunner(dead), PF_BUILD)).statusCode).toBe(401);
+    expect(await keyRefused(dead)).toBe(true);
     expect((await inject("POST", "/v1/engine-runner/lease", asRunner(fresh), PF_BUILD)).statusCode).not.toBe(401);
   });
 

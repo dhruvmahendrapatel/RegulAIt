@@ -1273,9 +1273,10 @@ details that the decisions above leave open:
    client knows when to rotate without a second call. The DPoP proof must be signed by the same key that
    authenticated the client (`dpop_key_mismatch`). Issued and refused tokens are audited
    (`workload-token-issued` / `workload-token-refused`). Other workload kinds and agent identities are refused this
-   grant, and a self token is never a `subject_token` or a parent in token exchange. JWS from these clients carry
-   `alg` `EdDSA`: `oauth4webapi` 3.x labels an Ed25519 key `Ed25519` (RFC 9864), so the runner relabels its
-   assertions and proofs (the signature is the same) rather than the gateway widening its algorithm list.
+   grant, and a self token is never a `subject_token` or a parent in token exchange. An Ed25519 signature is
+   accepted under both its labels, `EdDSA` (RFC 8037) and `Ed25519` (RFC 9864), for client assertions, DPoP proofs,
+   supersede and rotation proofs: `oauth4webapi` 3.x (the runner) writes `Ed25519`, the Kong adapter and older
+   clients `EdDSA`. A client's registered Ed25519 key carries no `alg` member, so the provider matches it to either.
 2. **What the token reaches.** It is recognised by its audience and resolves to `via: "engine-runner"` (the ADR-0187
    runner context: the engine-key ceilings, project pinning and the runner route set, unchanged) or `via: "pdp"`
    (only `POST /v1/authz/check`; anything else answers `403 workload_scope`). Every request re-checks the token row,
@@ -1296,7 +1297,9 @@ details that the decisions above leave open:
    the old key's `not_after` to now. The old key mints no new token; tokens it already has live to their own expiry.
    Rotations of one runner are serialised (the identity row is locked), and the authenticating key must still be live
    on the database clock, so a token whose key was already rotated out gets `409 credential_not_live`; a runner holds
-   at most two live keys (`409 runner_key_limit`).
+   at most two live keys (`409 runner_key_limit`), a cap the admin bind route applies too. A rotation whose answer
+   was lost is recovered by the runner, not retried: on `credential_not_live`, `credential_already_registered` or a
+   refused token it asks whether the next key authenticates and, if so, promotes it.
    Nothing is revoked, and the identity, and so the audit trail, stays the same. A PDP client's key is rotated by an
    admin in the S6 page: bind the next key, switch the client, revoke the old credential.
 5. **The bearer paths are gone.** `rge_` is no longer a credential (401 everywhere). `engine_runners.token_hash` is
@@ -1313,7 +1316,8 @@ details that the decisions above leave open:
    name the source by key id only. The issuer is `REGULAIT_PUBLIC_URL`: the installer writes `https://<domain>` when
    Caddy terminates TLS, takes `--public-url`, keeps an operator's value, and warns (does not refuse) when it cannot
    know it: a missing issuer fails closed. Runners refuse to start with an empty `REGULAIT_PUBLIC_URL` and never fall
-   back to the address they dial; the Engines page and `GET /v1/org/posture` (`workloadIssuer`) say "issuer not
+   back to the address they dial. Both sides parse it with the one `parsePublicUrl` (now in `@regulait/shared`), so
+   the runner names the issuer exactly as the gateway does; the Engines page and `GET /v1/org/posture` (`workloadIssuer`) say "issuer not
    configured". Compose passes the same value to the runners, which still dial `http://gateway:3000`.
 7. **The Kong adapter (plugin 0.5.0).** `pdp_key` is replaced by `pdp_client_key` (an Ed25519 key, PEM or one-line
    base64url PKCS#8, through a vault reference) and `issuer`. The client is written over `resty.openssl`, which

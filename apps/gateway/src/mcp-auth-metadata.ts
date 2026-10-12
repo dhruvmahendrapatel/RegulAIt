@@ -173,7 +173,8 @@ function delegatedTokenMetadata(): Record<string, unknown> {
   if (DELEGATED_ROUTES_WIRED && issuer) {
     return {
       authorization_servers: [issuer],
-      dpop_signing_alg_values_supported: ["EdDSA", "ES256"],
+      // ADR-0188 S7: both labels of the Ed25519 signature (RFC 8037 `EdDSA`, RFC 9864 `Ed25519`)
+      dpop_signing_alg_values_supported: ["EdDSA", "Ed25519", "ES256"],
       dpop_bound_access_tokens_required: false,
       tls_client_certificate_bound_access_tokens: true,
     };

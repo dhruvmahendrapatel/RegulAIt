@@ -1323,7 +1323,7 @@ describe("S4+S5 — a workload caller is governed by its grant on the routes it 
   it("the RFC 9728 document now names the gateway's own issuer (never an identity provider's)", async () => {
     const doc = (await app.inject({ method: "GET", url: "/.well-known/oauth-protected-resource" })).json();
     expect(doc.authorization_servers).toEqual([ISSUER]);
-    expect(doc.dpop_signing_alg_values_supported).toEqual(["EdDSA", "ES256"]);
+    expect(doc.dpop_signing_alg_values_supported).toEqual(["EdDSA", "Ed25519", "ES256"]);
   });
 });
 

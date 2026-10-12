@@ -95,7 +95,9 @@ export function clientJwks(client: WorkloadClient): Array<Record<string, string>
     .map((c): Record<string, string> => {
       const j = c.publicJwk as unknown as Record<string, string>;
       return j.kty === "OKP"
-        ? { kty: "OKP", crv: "Ed25519", x: j.x!, kid: c.jwkThumbprint!, alg: "EdDSA", use: "sig" }
+        ? // no `alg` member: the provider then matches an Ed25519 key to BOTH labels of its signature (`EdDSA`,
+          // RFC 8037, and `Ed25519`, RFC 9864); a key that names one alg is refused for the other
+          { kty: "OKP", crv: "Ed25519", x: j.x!, kid: c.jwkThumbprint!, use: "sig" }
         : { kty: "EC", crv: "P-256", x: j.x!, y: j.y!, kid: c.jwkThumbprint!, alg: "ES256", use: "sig" };
     });
 }

@@ -38,13 +38,12 @@ import {
 } from "@regulait/shared";
 import { databaseNow } from "./delegation.js";
 import { claimReplay, WORKLOAD_PROOF_ALGS } from "./delegated-token.js";
-import { bindPreparedCredentialTx, IdentityAdminError, prepareCredential, type PreparedCredential } from "./oauth/identity-admin.js";
+import { bindPreparedCredentialTx, IdentityAdminError, prepareCredential, runnerKeyLimitRefusal, type PreparedCredential } from "./oauth/identity-admin.js";
 import { identityIssuer } from "./oauth/common.js";
 
 /** the system actor of a runner's own registration and rotation (no person acted) */
 export const RUNNER_ACTOR_ID = "00000000-0000-0000-0000-000000000000";
-/** live keys a runner identity may hold at once: its current key and, during a rotation, the next one */
-export const RUNNER_MAX_LIVE_KEYS = 2;
+export { RUNNER_MAX_LIVE_KEYS } from "./oauth/identity-admin.js";
 /** the route a runner rotates its key on (also the `aud` of the rotation proof, under the issuer) */
 export const RUNNER_KEY_ROTATION_PATH = "/v1/engine-runner/credentials";
 
@@ -87,11 +86,13 @@ export async function verifySupersedeProof(db: Db, jws: string, engineId: string
   const issuer = identityIssuer();
   if (!issuer) return null;
   let kid: unknown;
+  let alg: unknown;
   try {
-    kid = decodeProtectedHeader(jws).kid;
+    ({ kid, alg } = decodeProtectedHeader(jws));
   } catch {
     return null;
   }
+  if (typeof alg !== "string" || !(WORKLOAD_PROOF_ALGS as readonly string[]).includes(alg)) return null;
   if (typeof kid !== "string" || kid.length !== 43) return null;
   const [cred] = await db
     .select({ publicJwk: workloadCredentials.publicJwk, runnerId: workloadIdentities.engineRunnerId })
@@ -112,7 +113,10 @@ export async function verifySupersedeProof(db: Db, jws: string, engineId: string
   let jti: string;
   let exp: number;
   try {
-    const { payload } = await jwtVerify(jws, await importJWK(j, j.kty === "OKP" ? "EdDSA" : "ES256"), {
+    // the key is imported for the alg the proof names (EdDSA or Ed25519 for an Ed25519 key, ES256 for P-256): a
+    // label that does not fit the registered key fails the import, and the proof with it
+    if ((j.kty === "OKP") !== (alg === "EdDSA" || alg === "Ed25519")) return null;
+    const { payload } = await jwtVerify(jws, await importJWK(j, alg), {
       algorithms: [...WORKLOAD_PROOF_ALGS],
       typ: RUNNER_SUPERSEDE_PROOF_TYP,
       audience: issuer,
@@ -222,12 +226,10 @@ export function registerRunnerKeyRotationRoute(app: FastifyInstance, db: Db): vo
         )
         .for("update");
       if (!current) return new IdentityAdminError("credential_not_live", 409, "the key this token was issued to is no longer live (already rotated, expired or revoked)");
-      // at most RUNNER_MAX_LIVE_KEYS during the overlap: the authenticating key and the new one
-      const liveRows = (await t.execute(
-        sql`SELECT count(*)::int AS live FROM workload_credentials WHERE identity_id = ${identityId} AND revoked_at IS NULL AND not_after > clock_timestamp()`,
-      )) as unknown as { rows: Array<{ live: number }> };
-      const live = liveRows.rows[0]?.live ?? 0;
-      if (live >= RUNNER_MAX_LIVE_KEYS) return new IdentityAdminError("runner_key_limit", 409, `a runner holds at most ${RUNNER_MAX_LIVE_KEYS} live keys during a rotation`);
+      // at most RUNNER_MAX_LIVE_KEYS during the overlap: the authenticating key and the new one (the same cap the
+      // admin bind route applies)
+      const limit = await runnerKeyLimitRefusal(t, identityId);
+      if (limit) return limit;
       const bound = await bindPreparedCredentialTx(t, identityId, prepared, RUNNER_ACTOR_ID, now);
       if (bound instanceof IdentityAdminError) return bound;
       // decision 12: rotation is not revocation. The old key's window ends now (it mints nothing new); tokens it

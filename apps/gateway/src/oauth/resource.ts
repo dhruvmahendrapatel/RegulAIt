@@ -105,7 +105,7 @@ export async function authenticateWorkloadRequest(db: Db, req: FastifyRequest, o
   const header = req.headers.authorization;
   if (!isDelegatedTokenHeader(header)) return { kind: "none" };
   const route = `${req.method} ${req.routeOptions.url ?? ""}`;
-  const challenge = (error: string) => ({ "www-authenticate": `DPoP error="${error}", algs="EdDSA ES256"` });
+  const challenge = (error: string) => ({ "www-authenticate": `DPoP error="${error}", algs="EdDSA Ed25519 ES256"` });
   // ADR-0188 S7: an engine runner's or a PDP client's SELF token is recognised by the one control-plane audience
   // it names, on whatever route it is presented. It is verified as such (never as a delegated token), and the
   // route allow-lists then confine it exactly as they confined the bearer value it replaced (403 elsewhere).
