@@ -128,6 +128,16 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
       <p className={v.faint} id={ids.note}>
         {p.note}
       </p>
+      {p.assignment && !p.assignment.ruleConfigured ? (
+        <p role="note" data-testid="shadow-no-assignment-rule">
+          <Badge tone="warn">no workflow assigned</Badge>{" "}
+          <span className={v.dim}>
+            No workflow is assigned to the change type <code>{p.assignment.changeType}</code>, and none is by default. An admin must add an
+            assignment rule for it under Workflow templates before a remediation workflow can start; until then, link a workflow started
+            another way.
+          </span>
+        </p>
+      ) : null}
 
       <form
         aria-label="Start a remediation workflow"

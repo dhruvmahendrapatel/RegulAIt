@@ -156,7 +156,22 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
           { step: "register the endpoint in the model catalogue", why: "a governed provider entry makes the traffic routable" },
           { step: "route acme/billing through the compat surface (ADR-0020)", why: "a base URL change", blocked: "no governed replacement is registered for this provider" },
         ],
-        workflowRequest: { route: "POST /v1/workflows/instances", body: { change: { targetSystem: "acme/billing", changeType: "shadow-ai-remediation", repoPath: "acme/billing" } } },
+        workflowRequest: {
+          route: "POST /v1/workflows/instances",
+          body: {
+            change: {
+              description: `Pull acme/billing (openai) into governance — shadow-AI finding ${FINDING}`,
+              paths: ["acme/billing"],
+              changeType: "shadow-ai-remediation",
+              environment: "unstated",
+              targetSystem: "acme/billing",
+            },
+          },
+          needsInput: ["change.environment"],
+        },
+        assignment: opts.noWorkflowMatch
+          ? { changeType: "shadow-ai-remediation", ruleConfigured: false, detail: "an admin must assign a workflow template to it" }
+          : { changeType: "shadow-ai-remediation", ruleConfigured: true },
         note: "This module does not start workflows.",
       });
     }
@@ -332,6 +347,8 @@ test.describe("U2: governance records", () => {
     const plan = page.getByTestId("shadow-remediation");
     await expect(plan).toContainText("no governed replacement is registered for this provider");
     await expect(plan.getByLabel("Environment")).toHaveValue("");
+    // an assigned workflow: no "admin must assign" note
+    await expect(plan.getByTestId("shadow-no-assignment-rule")).toHaveCount(0);
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toHaveCount(0);
     await plan.getByLabel("Environment").fill("production");
@@ -364,6 +381,8 @@ test.describe("U2: governance records", () => {
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     await expect(plan.getByRole("alert")).toContainText("No workflow assignment rule covers the change type 'shadow-ai-remediation'");
+    // the plan said so before anyone tried: no workflow is assigned to the change type by default
+    await expect(plan.getByTestId("shadow-no-assignment-rule")).toContainText("An admin must add an assignment rule");
     expect(posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toHaveLength(0);
 
     await plan.getByLabel("Or link an existing workflow").selectOption(INSTANCE);

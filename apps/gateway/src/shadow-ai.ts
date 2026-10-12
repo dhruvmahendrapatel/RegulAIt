@@ -80,6 +80,7 @@ import {
   shadowAiImports,
   sql,
   userModelCredentials,
+  workflowAssignmentRules,
   workflowInstances,
   type Db,
   mcpServers,
@@ -210,6 +211,35 @@ function toSignature(r: typeof aiEndpointSignatures.$inferSelect): AiSignature {
     provenance: r.provenance,
     lastUpdatedAt: r.lastUpdatedAt,
     enabled: r.enabled,
+  };
+}
+
+/** the change type a shadow-AI remediation workflow is started under (an admin assigns a template to it) */
+export const SHADOW_AI_REMEDIATION_CHANGE_TYPE = "shadow-ai-remediation";
+/** the environment the plan body carries until the person states where the usage runs (`needsInput`) */
+export const SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED = "unstated";
+
+/**
+ * The `POST /v1/workflows/instances` body for a finding's remediation, shaped to `startInstanceSchema` (pure;
+ * pinned by a test that parses it with that schema). The server knows the subject and the provider, not where the
+ * ungoverned usage runs, so `environment` is a stated placeholder the screen replaces with what the person types.
+ * A repo finding's subject is its path (so a path-scoped assignment rule can match it), as before.
+ */
+export function remediationStartBody(row: {
+  id: string;
+  subject: string;
+  subjectKind: string;
+  provider: string;
+}): { change: { description: string; paths: string[]; changeType: string; environment: string; targetSystem?: string } } {
+  const targetSystem = row.subject.trim().slice(0, 200);
+  return {
+    change: {
+      description: `Pull ${row.subject} (${row.provider}) into governance — shadow-AI finding ${row.id}`,
+      paths: row.subjectKind === "repo" && row.subject.trim() ? [row.subject] : [],
+      changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE,
+      environment: SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
+      ...(targetSystem ? { targetSystem } : {}),
+    },
   };
 }
 
@@ -1238,6 +1268,13 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       ? await db.select().from(agents).where(eq(agents.id, row.replacementAgentId))
       : [];
 
+    const [rule] = await db
+      .select({ id: workflowAssignmentRules.id })
+      .from(workflowAssignmentRules)
+      .where(eq(workflowAssignmentRules.changeType, SHADOW_AI_REMEDIATION_CHANGE_TYPE))
+      .limit(1);
+    const assignmentRuleExists = rule !== undefined;
+
     const steps: Array<{ step: string; why: string; blocked?: string }> = [];
     if (row.severity === "critical") {
       steps.push({
@@ -1272,16 +1309,26 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       severity: row.severity,
       replacementAgent: agent ? { id: agent.id, name: agent.name, provider: agent.provider, enabled: agent.enabled } : null,
       steps,
-      /** post THIS to the existing workflow route — there is no second one */
+      /** post THIS to the existing workflow route — there is no second one. It validates against that route's
+       * `startInstanceSchema`; `needsInput` names what only the person can state (where the usage runs). */
       workflowRequest: {
         route: "POST /v1/workflows/instances",
-        body: {
-          change: {
-            targetSystem: row.subject,
-            changeType: "shadow-ai-remediation",
-            repoPath: row.subjectKind === "repo" ? row.subject : undefined,
-          },
-        },
+        body: remediationStartBody(row),
+        needsInput: ["change.environment"],
+      },
+      /** no workflow is shipped for this change type (secure by default: nothing is assigned on anyone's behalf);
+       * until an admin assigns one, starting answers 422 `no_workflow_matches_change` */
+      assignment: {
+        changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE,
+        ruleConfigured: assignmentRuleExists,
+        ...(assignmentRuleExists
+          ? {}
+          : {
+              detail:
+                `no workflow assignment rule names the change type '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}': an admin must ` +
+                "assign a workflow template to it (Workflow templates, assignment rules) before a remediation workflow " +
+                "can be started, or link a workflow started another way",
+            }),
       },
       note:
         "This module does not start workflows. It composes the plan and hands back the request body for the ONE " +

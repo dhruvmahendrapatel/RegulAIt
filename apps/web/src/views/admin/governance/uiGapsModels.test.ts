@@ -35,10 +35,23 @@ describe("shadow-AI remediation workflow body", () => {
     severity: "high",
     replacementAgent: null,
     steps: [],
-    workflowRequest: { route: "POST /v1/workflows/instances", body: { change: { targetSystem: "acme/billing", changeType: "shadow-ai-remediation", repoPath: "acme/billing" } } },
+    // the gateway's body, already shaped to startInstanceSchema; only the environment is a placeholder
+    workflowRequest: {
+      route: "POST /v1/workflows/instances",
+      body: {
+        change: {
+          description: "Pull acme/billing (openai) into governance — shadow-AI finding f1",
+          paths: ["acme/billing"],
+          changeType: "shadow-ai-remediation",
+          environment: "unstated",
+          targetSystem: "acme/billing",
+        },
+      },
+      needsInput: ["change.environment"],
+    },
     note: "",
   };
-  it("completes the plan's partial change into what the workflow route requires", () => {
+  it("takes the plan's body and replaces the placeholder environment with the stated one", () => {
     const built = startInstanceBody(plan, { ...startFormFrom(plan), environment: "production" });
     expect(built).toEqual({
       ok: true,
@@ -54,7 +67,13 @@ describe("shadow-AI remediation workflow body", () => {
     });
   });
   it("has no repo path for a non-repo subject, bills a chosen project, and needs a description", () => {
-    const host = { ...plan, workflowRequest: { ...plan.workflowRequest, body: { change: { targetSystem: "app.example", changeType: "shadow-ai-remediation" } } } };
+    const host = {
+      ...plan,
+      workflowRequest: {
+        ...plan.workflowRequest,
+        body: { change: { description: "Pull app.example (openai) into governance", paths: [], changeType: "shadow-ai-remediation", environment: "unstated", targetSystem: "app.example" } },
+      },
+    };
     const built = startInstanceBody(host, { ...startFormFrom(host), environment: "production", projectId: "p1" });
     expect(built.ok && built.body).toMatchObject({ projectId: "p1", change: { paths: [], targetSystem: "app.example" } });
     expect(startInstanceBody(plan, { ...startFormFrom(plan), environment: "production", description: " " })).toMatchObject({ ok: false });
