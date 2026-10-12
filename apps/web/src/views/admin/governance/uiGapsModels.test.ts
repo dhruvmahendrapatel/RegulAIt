@@ -39,7 +39,7 @@ describe("shadow-AI remediation workflow body", () => {
     note: "",
   };
   it("completes the plan's partial change into what the workflow route requires", () => {
-    const built = startInstanceBody(plan, startFormFrom(plan));
+    const built = startInstanceBody(plan, { ...startFormFrom(plan), environment: "production" });
     expect(built).toEqual({
       ok: true,
       body: {
@@ -55,14 +55,14 @@ describe("shadow-AI remediation workflow body", () => {
   });
   it("has no repo path for a non-repo subject, bills a chosen project, and needs a description", () => {
     const host = { ...plan, workflowRequest: { ...plan.workflowRequest, body: { change: { targetSystem: "app.example", changeType: "shadow-ai-remediation" } } } };
-    const built = startInstanceBody(host, { ...startFormFrom(host), projectId: "p1" });
+    const built = startInstanceBody(host, { ...startFormFrom(host), environment: "production", projectId: "p1" });
     expect(built.ok && built.body).toMatchObject({ projectId: "p1", change: { paths: [], targetSystem: "app.example" } });
-    expect(startInstanceBody(plan, { ...startFormFrom(plan), description: " " })).toMatchObject({ ok: false });
+    expect(startInstanceBody(plan, { ...startFormFrom(plan), environment: "production", description: " " })).toMatchObject({ ok: false });
     expect(startInstanceBody(plan, { ...startFormFrom(plan), environment: "" })).toMatchObject({ ok: false });
   });
   it("validates against the gateway's start schema", async () => {
     const shared = await import(new URL("../../../../../../packages/shared/src/index.ts", import.meta.url).pathname);
-    const built = startInstanceBody(plan, startFormFrom(plan));
+    const built = startInstanceBody(plan, { ...startFormFrom(plan), environment: "production" });
     expect(built.ok && shared.startInstanceSchema.safeParse(built.body).success).toBe(true);
     // the shared index is large; importing it cold takes a few seconds under load
   }, 60_000);

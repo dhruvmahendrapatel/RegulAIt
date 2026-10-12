@@ -32,7 +32,8 @@ export interface StartForm {
 
 export const startFormFrom = (plan: RemediationPlan): StartForm => ({
   description: `Pull ${plan.subject} (${plan.provider}) into governance — shadow-AI finding ${plan.findingId}`,
-  environment: "production",
+  // no default: where the ungoverned usage runs is a fact the person states
+  environment: "",
   projectId: "",
 });
 
@@ -52,7 +53,7 @@ export function startInstanceBody(plan: RemediationPlan, form: StartForm): { ok:
   const description = form.description.trim();
   if (!description) return { ok: false, problem: "Describe the change the workflow is for." };
   const environment = form.environment.trim();
-  if (!environment) return { ok: false, problem: "Name the environment the usage runs in." };
+  if (!environment) return { ok: false, problem: "Name the environment the usage runs in (for example production or staging)." };
   const planned = plan.workflowRequest.body.change;
   const targetSystem = (planned.targetSystem ?? plan.subject).trim().slice(0, 200);
   const body: StartInstanceBody = {

@@ -13,6 +13,7 @@ import { QueryGate, optionEls, useAction, useUsers, userOpts } from "../adminKit
 import {
   holdsQuery,
   isActiveHold,
+  pickedOnScreen,
   releaseBody,
   releaseConsequence,
   type ReleaseBody,
@@ -31,12 +32,16 @@ export function RetentionHoldsCard() {
   const [filters, setFilters] = useState({ traceId: "", userId: "" });
   const query = holdsQuery(filters);
   const [lastQs, setLastQs] = useState(() => (query.ok ? query.qs : "limit=200"));
-  if (query.ok && query.qs !== lastQs) setLastQs(query.qs);
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  if (query.ok && query.qs !== lastQs) {
+    setLastQs(query.qs);
+    // a filter change hides rows: nothing picked under the old filter may be released unseen
+    setPicked(new Set());
+  }
   const holds = useQuery({
     queryKey: ["admin", "retention-holds", lastQs],
     queryFn: () => stepUpApi.get<RetentionHoldsResponse>(`/v1/retention-holds?${lastQs}`),
   });
-  const [picked, setPicked] = useState<Set<string>>(() => new Set());
   const [form, setForm] = useState<ReleaseForm>(EMPTY_RELEASE);
   const [problem, setProblem] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ReleaseBody | null>(null);
@@ -47,6 +52,8 @@ export function RetentionHoldsCard() {
     return u ? u.displayName || u.email : null;
   };
   const rows = Array.isArray(holds.data?.holds) ? holds.data.holds : [];
+  // only holds on screen right now can be released: never one picked under another filter
+  const visiblePicked = pickedOnScreen(picked, rows);
   const set = <K extends keyof ReleaseForm>(k: K, value: ReleaseForm[K]) => {
     setProblem(null);
     setForm((f) => ({ ...f, [k]: value }));
@@ -129,7 +136,7 @@ export function RetentionHoldsCard() {
         style={{ marginTop: "var(--s2)" }}
         onSubmit={(e) => {
           e.preventDefault();
-          const built = releaseBody(form, [...picked]);
+          const built = releaseBody(form, visiblePicked);
           if (!built.ok) {
             setProblem(built.problem);
             return;
@@ -141,7 +148,7 @@ export function RetentionHoldsCard() {
         <div className={a.formRow}>
           <Field label="What to release">
             <Select value={form.scope} onChange={(e) => set("scope", e.target.value as ReleaseForm["scope"])}>
-              <option value="selected">The selected traces ({picked.size})</option>
+              <option value="selected">The selected traces ({visiblePicked.length})</option>
               <option value="person">Every hold on one person's traces</option>
             </Select>
           </Field>
@@ -193,7 +200,22 @@ export function RetentionHoldsCard() {
         danger
         title="Release these retention holds?"
         confirmLabel="Release"
-        body={confirm ? <p>{releaseConsequence(confirm, "userId" in confirm ? nameOf(confirm.userId) : null)} You will be asked to confirm it is you.</p> : null}
+        body={
+          confirm ? (
+            <>
+              <p>{releaseConsequence(confirm, "userId" in confirm ? nameOf(confirm.userId) : null)} You will be asked to confirm it is you.</p>
+              {"traceIds" in confirm ? (
+                <ul data-testid="release-trace-ids">
+                  {confirm.traceIds.map((id) => (
+                    <li key={id}>
+                      <code>{id}</code>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : null
+        }
         onCancel={() => setConfirm(null)}
         onConfirm={() => {
           const body = confirm;

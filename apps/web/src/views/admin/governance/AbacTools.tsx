@@ -42,6 +42,7 @@ import {
   type VersionForm,
 } from "./abacModel";
 import { withRefusalCopy } from "./refusalCopy";
+import { schemaNote } from "./abacModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -50,6 +51,8 @@ export function AbacNewVersionForm(props: {
   policyId: string;
   policy: AbacPolicySummary | null;
   versions: readonly AbacPolicyVersion[];
+  /** the attribute schema the gateway validates a new version against (its default) */
+  currentSchema: string | null;
   onCreated: (version: number) => void;
 }) {
   const users = useUsers();
@@ -90,6 +93,9 @@ export function AbacNewVersionForm(props: {
       <p className={v.faint} id={ids.intro}>
         Saving adds the next version and leaves every earlier one untouched. Nothing changes for live calls until you
         activate the new version, and activation is a separate, audited step.
+      </p>
+      <p className={v.faint} data-testid="abac-version-schema">
+        {schemaNote(props.versions, props.currentSchema)}
       </p>
       <div className={a.formRow}>
         <Field label="When it matches">

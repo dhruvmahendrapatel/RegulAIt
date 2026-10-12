@@ -43,6 +43,17 @@ export function versionFormFrom(versions: readonly AbacPolicyVersion[], policy?:
   };
 }
 
+/** which attribute schema a new version is validated and stored against */
+export function schemaNote(versions: readonly AbacPolicyVersion[], current: string | null): string {
+  const newest = [...versions].sort((x, y) => y.version - x.version)[0];
+  const on = current ? `the current attribute schema (${current})` : "the current attribute schema";
+  const base = `The new version is validated and saved against ${on}.`;
+  if (newest && current && newest.schemaVersion !== current) {
+    return `${base} v${newest.version} was written against ${newest.schemaVersion}, so an attribute that schema allowed may now be refused.`;
+  }
+  return base;
+}
+
 export type Built<T> = { ok: true; body: T } | { ok: false; problem: string };
 
 export interface VersionBody {

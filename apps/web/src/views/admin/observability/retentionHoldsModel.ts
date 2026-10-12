@@ -48,6 +48,11 @@ export function holdsQuery(f: HoldFilters): { ok: true; qs: string } | { ok: fal
 export const isActiveHold = (h: RetentionHold, now = Date.now()): boolean =>
   h.releasedAt === null && new Date(h.holdUntil).getTime() > now;
 
+/** the picked traces that are on screen and still held, in list order */
+export function pickedOnScreen(picked: ReadonlySet<string>, rows: readonly RetentionHold[], now = Date.now()): string[] {
+  return rows.filter((h) => picked.has(h.traceId) && isActiveHold(h, now)).map((h) => h.traceId);
+}
+
 export type ReleaseBody =
   | { reason: "erasure"; userId: string; reference: string }
   | { reason: "admin"; traceIds: string[]; reference: string }

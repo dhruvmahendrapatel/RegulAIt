@@ -167,6 +167,7 @@ test.describe("U2: ABAC editing, simulation and tests", () => {
     await page.getByRole("button", { name: "Edit — add a new version" }).click();
     const form = page.getByRole("form", { name: "Add a policy version" });
     await expect(form.getByLabel("Cedar policy (new version)")).toHaveValue(SOURCE_V1);
+    await expect(form.getByTestId("abac-version-schema")).toHaveText("The new version is validated and saved against the current attribute schema (v3).");
     await expectAxeClean(page, "ABAC version editor");
 
     await form.getByLabel("Timezone the policy reads times in").fill("Europe/London");

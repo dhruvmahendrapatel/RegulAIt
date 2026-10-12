@@ -61,6 +61,8 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [linked, setLinked] = useState<string | null>(null);
+  // a workflow that started but whose link failed: a retry links THIS one and never starts another
+  const [startedUnlinked, setStartedUnlinked] = useState<string | null>(null);
   const ids = { note: useId(), env: useId(), problem: useId() };
   const instances = useQuery({
     queryKey: ["admin", "shadow-ai-link-instances"],
@@ -83,10 +85,12 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
             if (what.kind === "start") {
               const started = await api.post<{ id: string }>("/v1/workflows/instances", what.body);
               instanceId = started.id;
+              setStartedUnlinked(instanceId);
             } else {
               instanceId = what.instanceId;
             }
             await link(instanceId);
+            setStartedUnlinked(null);
             setLinked(instanceId);
             return what.kind === "start"
               ? `Workflow ${instanceId.slice(0, 8)} started and linked; the finding is now confirmed`
@@ -144,7 +148,7 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
             <Input value={form.description} onChange={(e) => set("description", e.target.value)} />
           </Field>
           <Field label="Environment">
-            <Input value={form.environment} aria-describedby={ids.env} onChange={(e) => set("environment", e.target.value)} />
+            <Input required value={form.environment} placeholder="for example production" aria-describedby={ids.env} onChange={(e) => set("environment", e.target.value)} />
           </Field>
           <Field label="Bill to project (optional)">
             <Select value={form.projectId} onChange={(e) => set("projectId", e.target.value)}>
@@ -157,7 +161,12 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
           which stages the workflow has.
         </p>
         <div className={v.row}>
-          <Button type="submit" variant="primary" disabled={act.busy} aria-describedby={problem ? ids.problem : undefined}>
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={act.busy || startedUnlinked !== null}
+            aria-describedby={problem ? ids.problem : undefined}
+          >
             Start remediation workflow…
           </Button>
         </div>
@@ -191,6 +200,17 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
         </Button>
       </form>
 
+      {startedUnlinked && (
+        <div className={v.row} data-testid="shadow-started-unlinked">
+          <p role="alert" className={v.errLine} style={{ margin: 0 }}>
+            Workflow <code>{startedUnlinked}</code> was started but is not linked to this finding yet. Retry the link; a
+            second workflow will not be started.
+          </p>
+          <Button disabled={act.busy} onClick={() => run({ kind: "link", instanceId: startedUnlinked })}>
+            Retry linking this workflow
+          </Button>
+        </div>
+      )}
       {problem && (
         <p className={v.errLine} role="alert" id={ids.problem}>
           {problem}

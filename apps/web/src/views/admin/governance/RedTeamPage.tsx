@@ -160,7 +160,7 @@ export default function RedTeamPage() {
   const [pForbidden, setPForbidden] = useState("");
   // ADR-0057: a published library changes only by minting version N+1
   const [mintNote, setMintNote] = useState("");
-  const [mintedNote, setMintedNote] = useState<string | null>(null);
+  const [minted, setMinted] = useState<{ libraryId: string; note: string } | null>(null);
 
   // --- run form
   const [runAgent, setRunAgent] = useState("");
@@ -319,7 +319,7 @@ export default function RedTeamPage() {
                         mintNote.trim() ? { note: mintNote.trim() } : {},
                       );
                       setMintNote("");
-                      setMintedNote(minted.note);
+                      setMinted({ libraryId: minted.library.id, note: minted.note });
                       await libraries.refetch();
                       setSelectedLibrary(minted.library.id);
                       return `v${minted.library.version} minted as a draft with ${minted.copiedProbes} probes copied — add attacks, then publish`;
@@ -396,9 +396,9 @@ export default function RedTeamPage() {
                   </Button>
                 </form>
               )}
-              {mintedNote && !libDetail.data.frozen ? (
+              {minted && minted.libraryId === selectedLibrary && !libDetail.data.frozen ? (
                 <p className={v.faint} role="status">
-                  {mintedNote}
+                  {minted.note}
                 </p>
               ) : null}
               <Table

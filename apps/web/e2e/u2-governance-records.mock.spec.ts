@@ -39,10 +39,11 @@ interface Call {
   body: unknown;
 }
 
-async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean } = {}): Promise<Call[]> {
+async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOnce?: boolean } = {}): Promise<Call[]> {
   const calls: Call[] = [];
   const me = { userId: "u-admin", isAdmin: true, user: { id: "u-admin", email: "avery@example.test", displayName: "Avery Admin" } };
   let libFrozen = true;
+  let linkFailures = opts.failLinkOnce ? 1 : 0;
   await page.route("**/*", async (route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -164,7 +165,13 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean } = {}): Pr
       return json(route, { id: INSTANCE, status: "running" }, 201);
     }
     if (p === "/v1/workflows/instances") return json(route, { instances: [{ id: INSTANCE, status: "running", createdAt: ISO, change: { description: "Existing remediation" } }] });
-    if (p === `/v1/shadow-ai/findings/${FINDING}/remediate` && method === "POST") return json(route, { id: FINDING, disposition: "confirmed" });
+    if (p === `/v1/shadow-ai/findings/${FINDING}/remediate` && method === "POST") {
+      if (linkFailures > 0) {
+        linkFailures -= 1;
+        return json(route, { error: "internal" }, 500);
+      }
+      return json(route, { id: FINDING, disposition: "confirmed" });
+    }
     // --- red team
     if (p === "/v1/redteam/attack-classes") return json(route, { attackClasses: [{ id: "prompt_injection", summary: "s" }], disclosure: "d", scheduling: { schedulerEnabled: false, posture: "p", note: "n" } });
     if (p === "/v1/redteam/libraries" && method === "GET") {
@@ -324,6 +331,10 @@ test.describe("U2: governance records", () => {
     await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
     await expect(plan).toContainText("no governed replacement is registered for this provider");
+    await expect(plan.getByLabel("Environment")).toHaveValue("");
+    await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
+    await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toHaveCount(0);
+    await plan.getByLabel("Environment").fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     const dialog = page.getByRole("dialog", { name: "Start a remediation workflow?" });
     await expect(dialog).toContainText("its disposition becomes confirmed");
@@ -349,6 +360,7 @@ test.describe("U2: governance records", () => {
     await page.goto("/ui/admin/shadow-ai");
     await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
+    await plan.getByLabel("Environment").fill("staging");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     await expect(plan.getByRole("alert")).toContainText("No workflow assignment rule covers the change type 'shadow-ai-remediation'");
@@ -360,6 +372,24 @@ test.describe("U2: governance records", () => {
     await expect.poll(() => posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toEqual([{ instanceId: INSTANCE }]);
   });
 
+  test("a workflow that started but failed to link is retried as a link only, never a second start", async ({ page }) => {
+    const calls = await mockApi(page, { failLinkOnce: true });
+    await page.goto("/ui/admin/shadow-ai");
+    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    const plan = page.getByTestId("shadow-remediation");
+    await plan.getByLabel("Environment").fill("production");
+    await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
+    await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
+    const unlinked = plan.getByTestId("shadow-started-unlinked");
+    await expect(unlinked).toContainText(`Workflow ${INSTANCE} was started but is not linked`);
+    await expect(plan.getByRole("button", { name: "Start remediation workflow…" })).toBeDisabled();
+    await unlinked.getByRole("button", { name: "Retry linking this workflow" }).click();
+    await expect(unlinked).toHaveCount(0);
+    await expect(plan.getByRole("status")).toContainText(INSTANCE);
+    expect(posted(calls, "POST", "/v1/workflows/instances")).toHaveLength(1);
+    expect(posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toEqual([{ instanceId: INSTANCE }, { instanceId: INSTANCE }]);
+  });
+
   test("a published red-team library mints its next version as a draft", async ({ page }) => {
     const calls = await mockApi(page);
     await page.goto("/ui/admin/redteam");
@@ -369,8 +399,10 @@ test.describe("U2: governance records", () => {
     await expectAxeClean(page, "red-team mint form", "form[aria-label='Mint the next library version']");
     await mint.getByRole("button", { name: "Mint next version" }).click();
     await expect.poll(() => posted(calls, "POST", `/v1/redteam/libraries/${LIB}/versions`)).toEqual([{ note: "add jailbreaks" }]);
-    await expect(page.getByText("core v2")).toBeVisible();
     await expect(page.getByRole("button", { name: "Add probe" })).toBeVisible();
+    const draft = page.locator("section[data-rg-card]").filter({ has: page.getByRole("button", { name: "Add probe" }) }).first();
+    await expect(draft).toContainText("core v2");
+    await expect(draft.getByRole("status")).toContainText("Re-scoring under a newer version can surface a regression.");
   });
 
   test("audit anchoring: anchor now and write out pending anchors, each saying what happened", async ({ page }) => {

@@ -201,6 +201,7 @@ test.describe("U2: retention holds", () => {
     await form.getByRole("button", { name: "Release holds…" }).click();
     const dialog = page.getByRole("dialog", { name: "Release these retention holds?" });
     await expect(dialog).toContainText("The hold on 1 trace ends now");
+    await expect(dialog.getByTestId("release-trace-ids")).toHaveText(HELD_A);
     await dialog.getByRole("button", { name: "Release" }).click();
     await confirmStepUp(page);
     await su.expectResentOnce();
@@ -208,9 +209,25 @@ test.describe("U2: retention holds", () => {
     await expect(form.getByRole("status")).toContainText("1 hold released.");
   });
 
+  test("changing the filter clears the selection, so a hidden hold cannot be released unseen", async ({ page }) => {
+    const cap = await mockApi(page);
+    await page.goto("/ui/admin/traces");
+    await page.getByRole("tab", { name: "Automations" }).click();
+    const card = page.locator("section[data-rg-card]").filter({ hasText: "Retention holds" }).first();
+    const form = page.getByRole("form", { name: "Release retention holds" });
+    await card.getByRole("checkbox", { name: `Select the hold on trace ${HELD_A}` }).check();
+    await expect(form.getByLabel("What to release")).toContainText("The selected traces (1)");
+    await card.getByLabel("Filter by person").selectOption(USER);
+    await expect(form.getByLabel("What to release")).toContainText("The selected traces (0)");
+    await form.getByLabel("Reference (ticket or erasure request)").fill("TCK-9");
+    await form.getByRole("button", { name: "Release holds…" }).click();
+    await expect(form.getByRole("alert")).toContainText("Select the held traces");
+    expect(cap.releases).toHaveLength(0);
+  });
+
   test("an erasure release names the person and is scoped to them", async ({ page }) => {
     const cap = await mockApi(page);
-    await requireStepUpOn(page, { method: "POST", path: "/v1/retention-holds/release", kind: "evidence_hold_override" });
+    const su = await requireStepUpOn(page, { method: "POST", path: "/v1/retention-holds/release", kind: "evidence_hold_override" });
     await page.goto("/ui/admin/traces");
     await page.getByRole("tab", { name: "Automations" }).click();
     const form = page.getByRole("form", { name: "Release retention holds" });
@@ -223,7 +240,7 @@ test.describe("U2: retention holds", () => {
     await expect(dialog).toContainText("Every retention hold on Ada Analyst's traces ends now, for their erasure request.");
     await dialog.getByRole("button", { name: "Release" }).click();
     await confirmStepUp(page);
-    await expect.poll(() => cap.releases.length).toBe(1);
-    expect(cap.releases[0]).toEqual({ reason: "erasure", userId: USER, reference: "DSR-7" });
+    await su.expectResentOnce();
+    expect(cap.releases).toEqual([{ reason: "erasure", userId: USER, reference: "DSR-7" }]);
   });
 });

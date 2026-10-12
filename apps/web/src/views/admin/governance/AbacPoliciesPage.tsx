@@ -309,7 +309,7 @@ export default function AbacPoliciesPage() {
           </Card>
         </QueryGate>
 
-        {selected && <PolicyDetail policyId={selected} />}
+        {selected && <PolicyDetail policyId={selected} currentSchema={schema.data?.current ?? null} />}
 
         <AbacSimulateCard />
         <AbacSuiteCard />
@@ -343,7 +343,7 @@ export default function AbacPoliciesPage() {
 }
 
 /** Version history + activate/rollback + the test runner, for one policy. */
-function PolicyDetail(props: { policyId: string }) {
+function PolicyDetail(props: { policyId: string; currentSchema: string | null }) {
   const act = useAction();
   const [testRun, setTestRun] = useState<AbacTestRun | null>(null);
   const [editing, setEditing] = useState(false);
@@ -468,6 +468,7 @@ function PolicyDetail(props: { policyId: string }) {
           <AbacNewVersionForm
             key={`${props.policyId}:${versions.length}`}
             policyId={props.policyId}
+            currentSchema={props.currentSchema}
             policy={detail.data.policy}
             versions={versions}
             onCreated={() => {
