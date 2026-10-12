@@ -238,8 +238,20 @@ jobs:
       # run; both fail the job. An intentional API-only route is declared in
       # `DELIBERATELY_API_ONLY` inside the script, with a reason, rather than by
       # loosening this step.
-      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
-        run: node scripts/preflight-ui-affordances.mjs
+      #
+      # The ROUTE CENSUS (`scripts/preflight-ui-route-census.mjs`) generalises
+      # it to every verb: each route in openapi-registry.ts (held equal to the
+      # live Fastify inventory by openapi.test.ts) is called by the SPA, or is
+      # on a reasoned list in that script (machine-only by category,
+      # superseded by a route the UI calls, an indirect call with its
+      # evidence), or is a 501 stub. Real gaps sit in a TEMPORARY
+      # `KNOWN_UI_GAPS` list that this step prints loudly and whose count may
+      # only go down. A list entry that no longer matches fails the step, so
+      # the lists cannot rot.
+      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c), and every route has UI or a reason
+        run: |
+          node scripts/preflight-ui-affordances.mjs
+          node scripts/preflight-ui-route-census.mjs
 
       # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line
