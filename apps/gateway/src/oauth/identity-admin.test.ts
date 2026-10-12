@@ -48,7 +48,8 @@ describe("a JWK credential", () => {
     // flip a real bit of the decoded coordinate: editing the last base64url character can change only its two padding
     // bits, which decode to the same y, so the point stayed on the curve in about one run in eight
     const yBytes = Buffer.from(jwk.y!, "base64url");
-    yBytes[yBytes.length - 1] ^= 0x01;
+    const last = yBytes.length - 1;
+    yBytes[last] = yBytes[last]! ^ 0x01;
     const y = yBytes.toString("base64url");
     expect(await refused(prepareCredential({ kind: "jwk", publicJwk: { kty: "EC", crv: "P-256", x: jwk.x!, y } }, NOW, NO_ENV))).toBe("credential_invalid");
   });
