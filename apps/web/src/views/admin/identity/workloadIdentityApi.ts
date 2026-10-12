@@ -8,20 +8,25 @@
  * body is built and frozen before the first attempt, so a retry can never
  * send something other than what the person confirmed.
  *
- * Live on the gateway today: the identity list and detail (S4), PATCH for
+ * Live on the gateway: the identity list and detail (S4), PATCH for
  * stewards, environments and suspend/restore (S4), the own-grant set read
- * and replace (S4), and the delegation-grant list and cascade revoke (S5).
- * The routes that still answer 501 (`IDENTITY_ROUTES_NOT_BUILT`) have no call
- * here: the page shows their controls disabled, and the affordance census
- * skips a `notBuilt` stub until it becomes a real handler.
+ * and replace (S4), the delegation-grant list and cascade revoke (S5), and
+ * (S6) create and revoke an identity, its public credentials (list, bind,
+ * revoke), the grant proposals from observed use, and the picker sources.
  */
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import {
   DELEGATION_TREE_MAX_NODES,
   UUID_PATTERN,
+  type AddWorkloadCredentialBody,
   type AgentGrantsView,
+  type CreateWorkloadIdentityBody,
   type DelegationAllocationView,
+  type IdentityGrantProposalsView,
+  type IdentityPickerSourcesView,
+  type WorkloadCredentialListView,
+  type WorkloadCredentialView,
   type DelegationGrantListView,
   type DelegationGrantView,
   type PutAgentGrants,
@@ -36,6 +41,9 @@ export const workloadIdentityKeys = {
   detail: (id: string) => ["admin", "workload-identities", "detail", id] as const,
   grants: (id: string) => ["admin", "workload-identities", "grants", id] as const,
   tree: (runId: string) => ["admin", "workload-identities", "tree", runId] as const,
+  credentials: (id: string) => ["admin", "workload-identities", "credentials", id] as const,
+  proposals: (id: string) => ["admin", "workload-identities", "proposals", id] as const,
+  pickers: ["admin", "workload-identities", "pickers"] as const,
 };
 
 /** one path segment that must be a UUID; anything else is refused before a request is made */
@@ -68,6 +76,21 @@ export function getWorkloadIdentity(identityId: string): Promise<WorkloadIdentit
 
 export function getIdentityGrants(identityId: string): Promise<AgentGrantsView> {
   return api.get<AgentGrantsView>(`/v1/workload-identities/${seg(identityId)}/grants`);
+}
+
+/** public halves only; the gateway stores no private member */
+export function listIdentityCredentials(identityId: string): Promise<WorkloadCredentialListView> {
+  return api.get<WorkloadCredentialListView>(`/v1/workload-identities/${seg(identityId)}/credentials`);
+}
+
+/** proposals from the identity's last 30 days of observed use; reading them changes nothing */
+export function getGrantProposals(identityId: string): Promise<IdentityGrantProposalsView> {
+  return api.get<IdentityGrantProposalsView>(`/v1/workload-identities/${seg(identityId)}/grant-proposals`);
+}
+
+/** what the identity forms may offer (only objects that exist) */
+export function getIdentityPickerSources(): Promise<IdentityPickerSourcesView> {
+  return api.get<IdentityPickerSourcesView>("/v1/identity/picker-sources");
 }
 
 const TREE_PAGE = 200;
@@ -118,6 +141,31 @@ export function replaceIdentityGrants(identityId: string, set: PutAgentGrants): 
   const path = `/v1/workload-identities/${seg(identityId)}/grants`;
   const body = deepFreeze({ ...set });
   return withStepUp((h) => stepUpApi.put<AgentGrantsView>(path, body, { ...h, "if-match": `"${body.revision}"` }));
+}
+
+/** a new identity: active, with no grants of its own */
+export function createWorkloadIdentity(body: CreateWorkloadIdentityBody): Promise<WorkloadIdentityView> {
+  const frozen = deepFreeze({ ...body });
+  return withStepUp((h) => stepUpApi.post<WorkloadIdentityView>("/v1/workload-identities", frozen, h));
+}
+
+/** terminal: the identity, its credentials, its tokens and every grant naming it end */
+export async function revokeWorkloadIdentity(identityId: string): Promise<unknown> {
+  const path = `/v1/workload-identities/${seg(identityId)}/revoke`;
+  return withStepUp((h) => stepUpApi.post(path, {}, h));
+}
+
+/** bind a PUBLIC credential (the body is built by `credentialBody`, which refuses private material) */
+export async function addIdentityCredential(identityId: string, body: AddWorkloadCredentialBody): Promise<WorkloadCredentialView> {
+  const path = `/v1/workload-identities/${seg(identityId)}/credentials`;
+  const frozen = deepFreeze({ ...body });
+  return withStepUp((h) => stepUpApi.post<WorkloadCredentialView>(path, frozen, h));
+}
+
+/** revoke (never delete) a credential, and every token and grant it authenticated */
+export async function revokeIdentityCredential(identityId: string, credentialId: string): Promise<unknown> {
+  const path = `/v1/workload-identities/${seg(identityId)}/credentials/${seg(credentialId)}`;
+  return withStepUp((h) => stepUpApi.del(path, undefined, h));
 }
 
 /** cascade revoke: this grant and every descendant are refused at the next use */

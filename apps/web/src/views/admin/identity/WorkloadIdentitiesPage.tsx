@@ -3,14 +3,13 @@
  * stewards and environments, its OWN grants, and a run's delegation tree.
  *
  * PREVIEW, NOT IN THE NAVIGATION. The route is registered (`/admin/workload-
- * identities`) but no sidebar entry points at it, because the parts of S6
- * that make it a complete surface — creating and revoking an identity, and
- * binding a public credential — still answer 501 on the gateway. What IS
- * built is wired for real: the S4 list/detail/PATCH/grants routes and the S5
- * delegation-grant list and cascade revoke. A control whose route is not
- * built is present, disabled and explained (`IDENTITY_ROUTES_NOT_BUILT`, pinned
- * against the gateway by the model test); it never sends a request and never
- * reports a success. Add the navigation entry when those routes go live.
+ * identities`) but no sidebar entry points at it yet. Every control is wired
+ * to a live route: the S4 list/detail/PATCH/grants routes, the S5
+ * delegation-grant list and cascade revoke, and (S6) creating and revoking an
+ * identity, its public credentials, the grant proposals from observed use and
+ * the picker sources. `IDENTITY_ROUTES_NOT_BUILT` (pinned against the gateway
+ * by the model test) is empty; a stub that reappears must be listed there and
+ * its control disabled, never left to report a success.
  *
  * Every write is an `identity_manage` step-up (the shell's "Confirm it's you"
  * dialog) behind a confirmation that states the consequence.
@@ -19,24 +18,40 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, InfoButton, Input, Modal, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { useAgents, useConnectors, useRoles, useServers, useServerTools, useUserPicker } from "../adminKit";
 import {
+  addIdentityCredential,
+  createWorkloadIdentity,
+  getGrantProposals,
   getIdentityGrants,
+  getIdentityPickerSources,
   getWorkloadIdentity,
+  listIdentityCredentials,
   listRunDelegationTree,
   listWorkloadIdentities,
   replaceIdentityGrants,
   revokeDelegationGrant,
+  revokeIdentityCredential,
+  revokeWorkloadIdentity,
   updateWorkloadIdentity,
   workloadIdentityKeys,
 } from "./workloadIdentityApi";
 import {
+  EXTERNAL_IDENTITY_KINDS,
   GRANTS_REVISION_CONFLICT,
-  NOT_BUILT_REASON,
+  SUBJECT_COLUMN,
   UUID_PATTERN,
+  WORKLOAD_CREDENTIAL_KINDS,
+  WORKLOAD_CREDENTIAL_MAX_DAYS,
+  WORKLOAD_IDENTITY_KINDS,
   WORKLOAD_IDENTITY_MAX_STEWARDS,
+  createIdentityBody,
+  credentialBody,
+  credentialFact,
+  credentialKindLabels,
+  credentialState,
   delegationRefusalMessages,
   delegationState,
   environmentNameProblem,
@@ -48,12 +63,20 @@ import {
   identityRefusalSentence,
   nameList,
   orderedDelegationTree,
+  proposalLabel,
+  proposalTargetId,
   remainingMicros,
   stewardsAndEnvironmentsChange,
   validateStewardsAndEnvironments,
   workloadKindLabels,
   type AgentGrantsView,
   type ConnectorGrantMode,
+  type CreateWorkloadIdentityBody,
+  type CredentialDraft,
+  type IdentityGrantProposal,
+  type WorkloadCredentialKind,
+  type WorkloadCredentialView,
+  type WorkloadIdentityKind,
   type GrantAddition,
   type GrantKind,
   type GrantRow,
@@ -130,6 +153,8 @@ export default function WorkloadIdentitiesPage() {
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [editing, setEditing] = useState<WorkloadIdentityDetailView | null>(null);
   const [addingGrant, setAddingGrant] = useState<{ identity: WorkloadIdentityDetailView; set: AgentGrantsView } | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [addingCredential, setAddingCredential] = useState<WorkloadIdentityDetailView | null>(null);
 
   const identities = useInfiniteQuery({
     queryKey: workloadIdentityKeys.list,
@@ -168,13 +193,16 @@ export default function WorkloadIdentitiesPage() {
             ceiling. Suspending or revoking refuses the next use; an external effect already dispatched cannot be recalled.
           </>
         }
-        actions={<Unavailable label="Add identity" reason={NOT_BUILT_REASON.create} />}
+        actions={
+          <Button variant="primary" disabled={write.busy} onClick={() => setCreating(true)}>
+            Add identity
+          </Button>
+        }
       />
       <div className={s.stack}>
         <p role="note" className={s.preview}>
-          Preview: this page is not in the navigation yet. Creating and revoking identities and binding public credentials
-          are not built on this gateway, so those controls are disabled. Everything else here reads and changes the live
-          gateway.
+          Preview: this page is not in the navigation yet. Everything here reads and changes the live gateway, and every
+          change asks you to confirm it&apos;s you.
         </p>
         {write.failure && (
           <ErrorState title="Change not recorded" message={write.failure} onRetry={() => write.setFailure(null)} />
@@ -233,6 +261,7 @@ export default function WorkloadIdentitiesPage() {
             personLabel={personLabel}
             onEdit={setEditing}
             onAddGrant={(identity, set) => setAddingGrant({ identity, set })}
+            onAddCredential={setAddingCredential}
             ask={ask}
           />
         )}
@@ -303,6 +332,48 @@ export default function WorkloadIdentitiesPage() {
           }}
         />
       )}
+      {creating && (
+        <CreateIdentityDialog
+          onClose={() => setCreating(false)}
+          onSave={(body, what) => {
+            setCreating(false);
+            ask({
+              title: "Create workload identity?",
+              label: "Create identity",
+              danger: false,
+              okMessage: "Workload identity created.",
+              body: (
+                <>
+                  Creates {what}. It starts active with no grants of its own; grant it only what its stewards hold.
+                </>
+              ),
+              run: () => createWorkloadIdentity(body),
+            });
+          }}
+        />
+      )}
+      {addingCredential && (
+        <CredentialDialog
+          onClose={() => setAddingCredential(null)}
+          onSave={(body, what) => {
+            const identity = addingCredential;
+            setAddingCredential(null);
+            ask({
+              title: "Add public credential?",
+              label: "Add credential",
+              danger: false,
+              okMessage: "Public credential added.",
+              body: (
+                <>
+                  Binds {what} to {identity.identifier}. Whoever holds the matching private key can then sign in as this
+                  identity until the credential ends or is revoked.
+                </>
+              ),
+              run: () => addIdentityCredential(identity.id, body),
+            });
+          }}
+        />
+      )}
       <ConfirmModal
         open={!!confirmation}
         title={confirmation?.title ?? "Confirm identity change"}
@@ -336,6 +407,7 @@ function SelectedIdentity(props: {
   personLabel: (id: string) => string;
   onEdit: (identity: WorkloadIdentityDetailView) => void;
   onAddGrant: (identity: WorkloadIdentityDetailView, set: AgentGrantsView) => void;
+  onAddCredential: (identity: WorkloadIdentityDetailView) => void;
   ask: (c: Confirmation) => void;
 }) {
   const detail = useQuery({ queryKey: workloadIdentityKeys.detail(props.identityId), queryFn: () => getWorkloadIdentity(props.identityId) });
@@ -424,18 +496,29 @@ function SelectedIdentity(props: {
             {active ? "Suspend identity" : "Restore identity"}
           </Button>
         )}
-        <Unavailable label="Revoke identity" reason={NOT_BUILT_REASON.revoke} />
+        {revoked ? (
+          <Unavailable label="Revoke identity" reason="This identity is already revoked. Revocation is terminal." />
+        ) : (
+          <Button
+            variant="danger"
+            disabled={props.busy}
+            onClick={() =>
+              props.ask({
+                title: "Revoke identity permanently?",
+                label: "Revoke identity",
+                danger: true,
+                okMessage: "Identity revoked.",
+                body: `${identity.identifier} is revoked for good, with its public credentials, its tokens and every delegation grant naming it. It can never be restored, and its subject never gets another identity; suspend it instead if you may need it again. An external effect already dispatched cannot be recalled.`,
+                run: () => revokeWorkloadIdentity(identity.id),
+              })
+            }
+          >
+            Revoke identity
+          </Button>
+        )}
       </div>
 
-      <div className={s.heading}>
-        <h2>Public credentials</h2>
-        <Unavailable label="Add public credential" reason={NOT_BUILT_REASON.credentials} />
-      </div>
-      <p>
-        {identity.activeCredentialCount === 1 ? "1 credential is" : `${identity.activeCredentialCount} credentials are`} active
-        (not revoked, not expired). Private keys stay with the workload; an in-process agent uses its grant directly and needs
-        none.
-      </p>
+      <IdentityCredentials identity={identity} busy={props.busy} active={active} inactiveReason={inactiveReason} onAdd={() => props.onAddCredential(identity)} ask={props.ask} />
 
       <div className={s.heading}>
         <h2>Own grants</h2>
@@ -500,6 +583,17 @@ function SelectedIdentity(props: {
                 ),
             },
           ]}
+        />
+      )}
+      {active && grants.data && (
+        <GrantProposals
+          identity={identity}
+          busy={props.busy}
+          targetName={(id) => {
+            const named: Array<{ id: string; name: string }> = [...(servers.data?.servers ?? []), ...(agents.data?.agents ?? []), ...(connectors.data?.connectors ?? [])];
+            return named.find((t) => t.id === id)?.name ?? `Not loaded (${id})`;
+          }}
+          ask={props.ask}
         />
       )}
     </Card>
@@ -922,6 +1016,386 @@ function GrantEditor(props: {
           </>
         )}
         <p>A grant never exceeds what the identity&apos;s stewards hold; the gateway refuses one that would.</p>
+      </div>
+    </Modal>
+  );
+}
+
+/** an identity's PUBLIC credentials: list, add, revoke (never delete) */
+function IdentityCredentials(props: {
+  identity: WorkloadIdentityDetailView;
+  busy: boolean;
+  active: boolean;
+  inactiveReason: string;
+  onAdd: () => void;
+  ask: (c: Confirmation) => void;
+}) {
+  const credentials = useQuery({ queryKey: workloadIdentityKeys.credentials(props.identity.id), queryFn: () => listIdentityCredentials(props.identity.id) });
+  const now = Date.now();
+  return (
+    <>
+      <div className={s.heading}>
+        <h2>Public credentials</h2>
+        {props.active ? (
+          <Button disabled={props.busy} onClick={props.onAdd}>
+            Add public credential
+          </Button>
+        ) : (
+          <Unavailable label="Add public credential" reason={props.inactiveReason} />
+        )}
+      </div>
+      <p>
+        {props.identity.activeCredentialCount === 1 ? "1 credential is" : `${props.identity.activeCredentialCount} credentials are`} active
+        (not revoked, not expired). Only public halves are registered; private keys stay with the workload. An in-process agent
+        uses its grant directly and needs none.
+      </p>
+      {credentials.isError ? (
+        <ErrorState message="Public credentials could not be read. No empty list is inferred." onRetry={() => void credentials.refetch()} />
+      ) : (
+        <Table<WorkloadCredentialView>
+          rows={credentials.data?.items}
+          loading={credentials.isPending}
+          rowKey={(c) => c.id}
+          empty={<EmptyState title="No public credentials" body="Nothing can sign in as this identity from outside the gateway." />}
+          columns={[
+            { key: "kind", header: "Kind", render: (c) => credentialKindLabels[c.kind] ?? c.kind },
+            { key: "fact", header: "Public fact", render: (c) => <span className={s.identifier}>{credentialFact(c)}</span> },
+            { key: "until", header: "Valid until", render: (c) => dateLabel(c.notAfter) },
+            {
+              key: "state",
+              header: "Status",
+              render: (c) => {
+                const state = credentialState(c, now);
+                return <Badge tone={state === "live" ? "ok" : state === "revoked" ? "danger" : "neutral"}>{state}</Badge>;
+              },
+            },
+            {
+              key: "revoke",
+              header: "Revoke",
+              render: (c) =>
+                c.revokedAt !== null ? (
+                  <Unavailable size="sm" label="Revoke credential" reason="This credential is already revoked; a revoked credential is never revived." />
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={props.busy}
+                    aria-label={`Revoke ${credentialKindLabels[c.kind] ?? c.kind} ${credentialFact(c)}`}
+                    onClick={() =>
+                      props.ask({
+                        title: "Revoke public credential?",
+                        label: "Revoke credential",
+                        danger: true,
+                        okMessage: "Credential revoked.",
+                        body: "Every token this credential authenticated, or that is bound to its key, is refused, and so is every delegation grant it authenticated with their descendants. A revoked credential is never revived; register a new key instead.",
+                        run: () => revokeIdentityCredential(props.identity.id, c.id),
+                      })
+                    }
+                  >
+                    Revoke
+                  </Button>
+                ),
+            },
+          ]}
+        />
+      )}
+    </>
+  );
+}
+
+/** OWNER DECISION 1: proposals from observed use, accepted only through the grant-set replace */
+function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boolean; targetName: (id: string) => string; ask: (c: Confirmation) => void }) {
+  const [requested, setRequested] = useState(false);
+  const proposals = useQuery({
+    queryKey: workloadIdentityKeys.proposals(props.identity.id),
+    queryFn: () => getGrantProposals(props.identity.id),
+    enabled: requested,
+  });
+  const data = proposals.data;
+  const held = data ? data.proposals.filter((p) => p.heldByStewards) : [];
+  return (
+    <>
+      <div className={s.heading}>
+        <h2>Proposed grants from observed use</h2>
+        <Button disabled={props.busy || proposals.isFetching} onClick={() => (requested ? void proposals.refetch() : setRequested(true))}>
+          {requested ? "Refresh proposals" : "Propose grants from observed use"}
+        </Button>
+      </div>
+      <p>
+        Built from this identity&apos;s governed calls in the last 30 days, allowed and refused. Reading proposals changes nothing;
+        accepting them replaces the own grant set, and only what a steward holds is included.
+      </p>
+      {!requested ? null : proposals.isPending ? (
+        <SkeletonBlock lines={3} />
+      ) : proposals.isError || !data ? (
+        <ErrorState message="Proposals could not be read. Nothing is proposed." onRetry={() => void proposals.refetch()} />
+      ) : (
+        <>
+          <Table<IdentityGrantProposal>
+            rows={data.proposals}
+            rowKey={(p) => JSON.stringify(p.grant)}
+            empty={<EmptyState title="Nothing to propose" body="Every call observed in the window is already covered by this identity's own grants." />}
+            columns={[
+              { key: "grant", header: "Grant", render: (p) => proposalLabel(p.grant) },
+              { key: "target", header: "Target", render: (p) => props.targetName(proposalTargetId(p.grant)) },
+              { key: "observed", header: "Observed", render: (p) => `${p.observedCalls} call(s), ${p.refusedCalls} refused; last ${dateLabel(p.lastObservedAt)}` },
+              {
+                key: "held",
+                header: "Stewards",
+                render: (p) => (p.heldByStewards ? <Badge tone="ok">held</Badge> : <Badge tone="warn">no steward holds it</Badge>),
+              },
+            ]}
+          />
+          {data.unproposable > 0 && <p>{data.unproposable} observed call(s) cannot become an own grant (for example a connector call that named no object).</p>}
+          {data.truncated && <p>Only the most recent proposals are shown.</p>}
+          {held.length === 0 ? (
+            <Unavailable label="Accept proposals" reason="No proposal is held by a steward, so accepting would change nothing." />
+          ) : (
+            <Button
+              variant="primary"
+              disabled={props.busy}
+              onClick={() =>
+                props.ask({
+                  title: "Accept proposed grants?",
+                  label: "Accept proposals",
+                  danger: false,
+                  okMessage: "Proposed grants accepted.",
+                  body: `Adds ${held.length} grant(s) that a steward holds. This replaces all of the identity's direct grants and roles at revision ${data.revision}; if another change landed first, nothing is replaced.`,
+                  run: () => replaceIdentityGrants(props.identity.id, data.proposedSet),
+                })
+              }
+            >
+              Accept proposals
+            </Button>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: CreateWorkloadIdentityBody, what: string) => void }) {
+  const pickers = useQuery({ queryKey: workloadIdentityKeys.pickers, queryFn: getIdentityPickerSources });
+  const [kind, setKind] = useState<WorkloadIdentityKind>("worker_runtime");
+  const [subjectId, setSubjectId] = useState("");
+  const [identifier, setIdentifier] = useState("");
+  const [stewards, setStewards] = useState<string[]>([]);
+  const [stewardChoice, setStewardChoice] = useState("");
+  const [environments, setEnvironments] = useState<string[]>([]);
+  const [envChoice, setEnvChoice] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const column = SUBJECT_COLUMN[kind];
+  const subjects = kind === "agent" || kind === "builder_agent" || kind === "engine_runner" ? pickers.data?.subjects[kind] ?? [] : [];
+  const sponsors = pickers.data?.sponsors ?? [];
+  const sponsorLabel = (id: string) => sponsors.find((p) => p.id === id)?.label ?? id;
+
+  const save = () => {
+    const out = createIdentityBody({ kind, subjectId, identifier, stewardIds: stewards, environments });
+    if ("error" in out) return setError(out.error);
+    const subject = subjects.find((x) => x.id === subjectId)?.label;
+    props.onSave(out.body, `an identity for the ${workloadKindLabels[kind].toLowerCase()}${subject ? ` ${subject}` : ""}`);
+  };
+
+  return (
+    <Modal
+      open
+      title="Add workload identity"
+      onClose={props.onClose}
+      actions={
+        <>
+          <Button onClick={props.onClose}>Cancel</Button>
+          <Button variant="primary" disabled={!pickers.data} onClick={save}>
+            Review identity
+          </Button>
+        </>
+      }
+    >
+      <div className={s.stack}>
+        {error && <p role="alert">{error}</p>}
+        {pickers.isError && <ErrorState message="The choices for this form could not be read. Nothing can be created until they load." onRetry={() => void pickers.refetch()} />}
+        {pickers.data?.truncated && <p>Some lists were cut to their first 1,000 entries.</p>}
+        <Field label="Kind">
+          <Select
+            value={kind}
+            onChange={(e) => {
+              setKind(e.target.value as WorkloadIdentityKind);
+              setSubjectId("");
+              setIdentifier("");
+              setError(null);
+            }}
+          >
+            {WORKLOAD_IDENTITY_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {workloadKindLabels[k]}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {column && (
+          <Field label="For" help="Only subjects that have no identity yet are offered; each has at most one, ever.">
+            <Select value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
+              <option value="">{pickers.isPending ? "Loading…" : subjects.length ? "Choose one" : "None without an identity"}</option>
+              {subjects.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
+        {EXTERNAL_IDENTITY_KINDS.includes(kind) && (
+          <Field label="SPIFFE ID (optional)" help="Leave empty for the default identifier. Enter an exact ID only when your own SPIRE issues it.">
+            <Input value={identifier} onChange={(e) => setIdentifier(e.target.value)} autoComplete="off" spellCheck={false} />
+          </Field>
+        )}
+        <fieldset>
+          <legend>Stewards</legend>
+          {stewards.length > 0 && (
+            <ul className={s.chips} aria-label="Chosen stewards">
+              {stewards.map((id) => (
+                <li key={id} className={s.chip}>
+                  {sponsorLabel(id)}
+                  <Button size="sm" variant="ghost" aria-label={`Remove steward ${sponsorLabel(id)}`} onClick={() => setStewards(stewards.filter((x) => x !== id))}>
+                    ×
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className={s.actions}>
+            <Field label="Add a steward" help={`At least one, at most ${WORKLOAD_IDENTITY_MAX_STEWARDS}. Only enabled people are offered.`}>
+              <Select value={stewardChoice} onChange={(e) => setStewardChoice(e.target.value)}>
+                <option value="">Choose a person</option>
+                {sponsors
+                  .filter((p) => !stewards.includes(p.id))
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} · {p.email}
+                    </option>
+                  ))}
+              </Select>
+            </Field>
+            <Button
+              disabled={!stewardChoice}
+              onClick={() => {
+                setStewards([...stewards, stewardChoice]);
+                setStewardChoice("");
+              }}
+            >
+              Add steward
+            </Button>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Allowed environments</legend>
+          {environments.length === 0 ? (
+            <p>None allowed: the identity is refused in every environment until one is added.</p>
+          ) : (
+            <ul className={s.chips} aria-label="Chosen environments">
+              {environments.map((env) => (
+                <li key={env} className={s.chip}>
+                  <code>{env}</code>
+                  <Button size="sm" variant="ghost" aria-label={`Remove environment ${env}`} onClick={() => setEnvironments(environments.filter((x) => x !== env))}>
+                    ×
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className={s.actions}>
+            <Field label="Add an environment" help="The names in use on this gateway. Add others later with Edit stewards and environments.">
+              <Select value={envChoice} onChange={(e) => setEnvChoice(e.target.value)}>
+                <option value="">Choose an environment</option>
+                {(pickers.data?.environments ?? [])
+                  .filter((env) => !environments.includes(env))
+                  .map((env) => (
+                    <option key={env} value={env}>
+                      {env}
+                    </option>
+                  ))}
+              </Select>
+            </Field>
+            <Button
+              disabled={!envChoice}
+              onClick={() => {
+                setEnvironments([...environments, envChoice]);
+                setEnvChoice("");
+              }}
+            >
+              Add environment
+            </Button>
+          </div>
+        </fieldset>
+        <p>A new identity has no grants of its own, and its grants never exceed what its stewards hold.</p>
+      </div>
+    </Modal>
+  );
+}
+
+function CredentialDialog(props: { onClose: () => void; onSave: (body: Parameters<typeof addIdentityCredential>[1], what: string) => void }) {
+  const [draft, setDraft] = useState<CredentialDraft>({ kind: "jwk", jwkText: "", certificatePem: "", selfSigned: false, spiffeId: "", notAfterDate: "" });
+  const [error, setError] = useState<string | null>(null);
+  const save = () => {
+    const out = credentialBody(draft, Date.now());
+    if ("error" in out) return setError(out.error);
+    props.onSave(out.body, `a ${credentialKindLabels[draft.kind].toLowerCase()}`);
+  };
+  return (
+    <Modal
+      open
+      title="Add public credential"
+      onClose={props.onClose}
+      actions={
+        <>
+          <Button onClick={props.onClose}>Cancel</Button>
+          <Button variant="primary" onClick={save}>
+            Review credential
+          </Button>
+        </>
+      }
+    >
+      <div className={s.stack}>
+        {error && <p role="alert">{error}</p>}
+        <p>Paste only the public half. A private key is refused before anything is sent.</p>
+        <Field label="Credential kind">
+          <Select
+            value={draft.kind}
+            onChange={(e) => {
+              setDraft({ ...draft, kind: e.target.value as WorkloadCredentialKind });
+              setError(null);
+            }}
+          >
+            {WORKLOAD_CREDENTIAL_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {credentialKindLabels[k]}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {draft.kind === "jwk" && (
+          <Field label="Public key (JSON Web Key)" help="An Ed25519 (OKP) or P-256 (EC) public key.">
+            <Textarea rows={5} value={draft.jwkText} onChange={(e) => setDraft({ ...draft, jwkText: e.target.value })} spellCheck={false} />
+          </Field>
+        )}
+        {draft.kind === "x509" && (
+          <>
+            <Field label="Certificate (PEM)" help="The workload's own client certificate; only its fingerprint, URI SAN and subject are kept.">
+              <Textarea rows={8} value={draft.certificatePem} onChange={(e) => setDraft({ ...draft, certificatePem: e.target.value })} spellCheck={false} />
+            </Field>
+            <label>
+              <input type="checkbox" checked={draft.selfSigned} onChange={(e) => setDraft({ ...draft, selfSigned: e.target.checked })} /> Self-signed (matched by
+              fingerprint, no CA chain)
+            </label>
+          </>
+        )}
+        {draft.kind === "spiffe_id" && (
+          <Field label="SPIFFE ID" help="It signs in only when the gateway has a trust bundle for its trust domain.">
+            <Input value={draft.spiffeId} onChange={(e) => setDraft({ ...draft, spiffeId: e.target.value })} autoComplete="off" spellCheck={false} />
+          </Field>
+        )}
+        <Field label="Valid until (optional)" help={`Empty: the longest the gateway allows, at most ${WORKLOAD_CREDENTIAL_MAX_DAYS} days and never past a certificate's own expiry.`}>
+          <Input type="date" value={draft.notAfterDate} onChange={(e) => setDraft({ ...draft, notAfterDate: e.target.value })} />
+        </Field>
       </div>
     </Modal>
   );
