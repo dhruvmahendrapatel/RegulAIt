@@ -6,8 +6,9 @@
 -- pinned in test/regulait-authz-spec-dev-1.rockspec) and a scripted stand-in
 -- for the gateway, and checks every byte the gateway checks:
 --
---   * the key's RFC 7638 thumbprint against RFC 8037 Appendix A.3's published
---     vector, so the client id the plugin names is the one the gateway derives;
+--   * the RFC 7638 thumbprint against RFC 8037 Appendix A.3's published vector
+--     (its PUBLIC key only), so the client id the plugin names is the one the
+--     gateway derives, and the key's raw public half as the JWK `x`;
 --   * the client assertion (RFC 7523): signature, iss = sub = the thumbprint
 --     URI, aud = the issuer's token endpoint, kid, a short exp;
 --   * each DPoP proof (RFC 9449): signature by the same key, typ, the embedded
@@ -118,30 +119,26 @@ local workload = require "kong.plugins.regulait-authz.workload"
 ------------------------------------------------------------------------------
 -- fixtures
 ------------------------------------------------------------------------------
--- RFC 8037 Appendix A.1 / A.3: a published Ed25519 test key and its thumbprint
--- (a test vector, not a secret). The PEM armour label is assembled at run time
--- so the source carries no literal private-key header.
-local RFC8037_D = "nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A"
+-- RFC 8037 Appendix A.2 / A.3: a published Ed25519 PUBLIC key and its RFC 7638
+-- thumbprint. Only the public half is used: no key material is committed.
 local RFC8037_X = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
 local RFC8037_JKT = "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"
-local LABEL = "PRIVATE" .. " KEY"
-local function pem_of(der, label)
-  local body = b64encode(der):gsub(("."):rep(64), "%0\n"):gsub("\n$", "")
-  return "-----BEGIN " .. label .. "-----\n" .. body .. "\n-----END " .. label .. "-----\n"
-end
--- PKCS#8 for Ed25519: a fixed 16-byte prefix and the 32-byte seed (RFC 8410 §7)
-local PKCS8_ED25519_PREFIX = string.char(0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20)
-local RFC_PEM = pem_of(PKCS8_ED25519_PREFIX .. b64url_decode(RFC8037_D), LABEL)
+local function b64url(s) return (b64encode(s, true):gsub("%+", "-"):gsub("/", "_")) end
+-- the plugin's key, generated for this run
+local KEY = assert(pkey.new({ type = "Ed25519" }))
+local KEY_PEM = KEY:tostring("private", "PEM")
+-- an Ed25519 SubjectPublicKeyInfo ends with the 32-byte public key
+local KEY_X = b64url(KEY:tostring("public", "DER"):sub(-32))
 
 local ISSUER = "https://regulait.example"
 local PDP_URL = "http://regulait-gateway:3000"
 local function conf(extra)
-  local c = { pdp_url = PDP_URL, issuer = ISSUER, pdp_client_key = RFC_PEM, timeout_ms = 2000 }
+  local c = { pdp_url = PDP_URL, issuer = ISSUER, pdp_client_key = KEY_PEM, timeout_ms = 2000 }
   for k, v in pairs(extra or {}) do c[k] = v end
   return c
 end
 
-local VERIFIER = assert(pkey.new(RFC_PEM))
+local VERIFIER = KEY
 local function sha256_b64url(s)
   return b64encode(assert(assert(digest.new("sha256")):final(s)), true):gsub("%+", "-"):gsub("/", "_")
 end
@@ -184,17 +181,20 @@ end)
 
 ------------------------------------------------------------------------------
 describe("ADR-0188 S7: the PDP client's key", function()
-  it("names itself by the RFC 7638 thumbprint the gateway derives (RFC 8037 A.3 vector)", function()
-    local k = assert(workload.load_key(RFC_PEM))
-    assert.are.equal(RFC8037_X, k.jwk.x)
-    assert.are.equal(RFC8037_JKT, k.jkt)
-    assert.are.equal("urn:ietf:params:oauth:jwk-thumbprint:sha-256:" .. RFC8037_JKT, k.client_id)
+  it("computes the RFC 7638 thumbprint the gateway derives (RFC 8037 A.3 vector)", function()
+    assert.are.equal(RFC8037_JKT, workload.jwk_thumbprint(RFC8037_X))
+  end)
+
+  it("names itself by its key's raw public half and that thumbprint", function()
+    local k = assert(workload.load_key(KEY_PEM))
+    assert.are.equal(KEY_X, k.jwk.x)
+    assert.are.equal(workload.jwk_thumbprint(KEY_X), k.jkt)
+    assert.are.equal("urn:ietf:params:oauth:jwk-thumbprint:sha-256:" .. k.jkt, k.client_id)
   end)
 
   it("takes the same key as one line of base64url PKCS#8 DER (an env vault holds one line)", function()
-    local one_line = (b64encode(PKCS8_ED25519_PREFIX .. b64url_decode(RFC8037_D), true):gsub("%+", "-"):gsub("/", "_"))
-    local k = assert(workload.load_key(one_line))
-    assert.are.equal(RFC8037_JKT, k.jkt)
+    local k = assert(workload.load_key(b64url(KEY:tostring("private", "DER"))))
+    assert.are.equal(workload.jwk_thumbprint(KEY_X), k.jkt)
   end)
 
   it("refuses a public key, a key of another type, and garbage", function()
@@ -239,8 +239,9 @@ describe("ADR-0188 S7: the self token and the check", function()
     local a = jws(f.client_assertion)
     assert.is_true(a.signed)
     assert.are.equal("EdDSA", a.header.alg)
-    assert.are.equal(RFC8037_JKT, a.header.kid)
-    local id = "urn:ietf:params:oauth:jwk-thumbprint:sha-256:" .. RFC8037_JKT
+    local jkt = workload.jwk_thumbprint(KEY_X)
+    assert.are.equal(jkt, a.header.kid)
+    local id = "urn:ietf:params:oauth:jwk-thumbprint:sha-256:" .. jkt
     assert.are.equal(id, a.claims.iss)
     assert.are.equal(id, a.claims.sub)
     assert.are.equal(ISSUER .. "/oauth/token", a.claims.aud)
@@ -254,7 +255,7 @@ describe("ADR-0188 S7: the self token and the check", function()
     for _, p in ipairs({ first, second }) do
       assert.is_true(p.signed)
       assert.are.equal("dpop+jwt", p.header.typ)
-      assert.are.same({ kty = "OKP", crv = "Ed25519", x = RFC8037_X }, p.header.jwk)
+      assert.are.same({ kty = "OKP", crv = "Ed25519", x = KEY_X }, p.header.jwk)
       assert.are.equal("POST", p.claims.htm)
       assert.are.equal(ISSUER .. "/oauth/token", p.claims.htu)
       assert.is_nil(p.claims.ath)

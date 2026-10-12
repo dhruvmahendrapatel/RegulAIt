@@ -62,6 +62,12 @@ local function jti()
   return b64url(assert(rand.bytes(18)))
 end
 
+-- RFC 7638: the required members of an Ed25519 JWK, lexicographic, no whitespace
+local function jwk_thumbprint(x)
+  return b64url(sha256('{"crv":"Ed25519","kty":"OKP","x":"' .. x .. '"}'))
+end
+M.jwk_thumbprint = jwk_thumbprint
+
 -- The configured key: an Ed25519 private key in PEM. Anything else is a
 -- configuration error the handler reports, never a key it guesses at.
 local function load_key(pem)
@@ -85,8 +91,7 @@ local function load_key(pem)
   local der = assert(key:tostring("public", "DER"))
   -- an Ed25519 SubjectPublicKeyInfo is a fixed 12-byte prefix and the 32-byte key
   local x = b64url(der:sub(-32))
-  -- RFC 7638: the required members, lexicographic, no whitespace
-  local jkt = b64url(sha256('{"crv":"Ed25519","kty":"OKP","x":"' .. x .. '"}'))
+  local jkt = jwk_thumbprint(x)
   cached = { key = key, jwk = { kty = "OKP", crv = "Ed25519", x = x }, jkt = jkt, client_id = M.THUMBPRINT_URI_PREFIX .. jkt }
   keys[pem] = cached
   return cached

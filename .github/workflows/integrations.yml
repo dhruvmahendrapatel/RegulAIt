@@ -119,7 +119,7 @@ jobs:
           luajit "$ROCKS_TREE/lib/luarocks/rocks-5.1/busted/2.3.0-1/bin/busted" -o TAP | tee "$RUNNER_TEMP/busted.tap"
           n=$(grep -cE '^ok ' "$RUNNER_TEMP/busted.tap")
           echo "passed: $n"
-          test "$n" -ge 42
+          test "$n" -ge 43
 
   kong-adapter:
     runs-on: ubuntu-latest
