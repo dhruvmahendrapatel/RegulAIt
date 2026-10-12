@@ -58,7 +58,7 @@ import { recordRiskAcceptance } from "./risk-tolerance.js";
 import { writeUseCaseDecisionRecord } from "./decision-regression.js";
 import { assertAiBomSignoffPossible, prepareAiBomSignoff, runAiBomSignoffs, type AiBomSignoff } from "./ai-bom-signoff.js";
 import { AiBomError } from "./ai-bom.js";
-import { requireStepUp } from "./step-up.js";
+import { checkStepUp, isStepUpPrompt } from "./step-up.js";
 import { syncVendorForInstance } from "./vendors.js";
 import type { FastifyInstance } from "fastify";
 import {
@@ -2884,12 +2884,12 @@ export function registerUseCaseRoutes(
     // with the refusal code, written on the root handle, so never inside a
     // transaction the refusal rolled back
     const context: { from?: string; workflowInstanceId?: string; instanceStatus?: string } = {};
-    const auditRefusal = async (code: string) => {
+    const auditRefusal = async (code: string, extra: Record<string, unknown> = {}) => {
       await db.insert(auditLog).values({
         userId: req.authCtx.userId ?? NO_IDENTITY,
         objectType: "ai_use_case",
         objectId: useCaseId,
-        detail: { phase: "resync", ...context, code },
+        detail: { phase: "resync", ...context, code, ...extra },
         effect: "deny",
         ruleId: "use-case-resync-refused",
         ruleChain: [],
@@ -2946,14 +2946,18 @@ export function registerUseCaseRoutes(
       throw err;
     }
     // the step-up an approval decision asks for: this applies an approval
-    const su = await requireStepUp(db, req, reply, {
+    const su = await checkStepUp(db, req, {
       kind: "approval_decide",
       facts: { op: "use_case_resync", useCaseId, workflowInstanceId: instanceId },
     });
     if (!su.ok) {
-      // requireStepUp has sent its own refusal; its status names which one
-      await auditRefusal(`step_up_${reply.statusCode}`);
-      return reply;
+      // the same codes every protected route answers with. A prompt the admin can answer (`step_up_required`
+      // naming a method) is the first half of the action, not a refusal, so it is not recorded as one; a refusal
+      // nobody here can answer (an API key or the bootstrap credential, no method enrolled) is, under its own code
+      if (!isStepUpPrompt(su.body)) {
+        await auditRefusal(String(su.body.error), typeof su.body.credential === "string" ? { credential: su.body.credential } : {});
+      }
+      return reply.status(su.status).send(su.body);
     }
     type Out =
       | { kind: "in_step"; status: string; instanceStatus: string }
