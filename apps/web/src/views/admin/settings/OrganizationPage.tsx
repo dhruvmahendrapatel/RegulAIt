@@ -15,6 +15,7 @@ import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminK
 import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 import { api as stepUpApi, putOrgSettings, withStepUp } from "../../../stepup/stepUp";
+import { OrgSettingsCard } from "./OrgSettingsCard";
 
 const CLEAR = "__clear__";
 
@@ -415,6 +416,9 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
+      {/* ADR-0117: which international national identifiers are detected (ships empty) */}
+      <OrgSettingsCard title="2a · International identifiers (ADR-0117)" keys={["piiInternationalCategories"]} testId="org-pii-international" />
+
       <Card title="3 · Custom LLM providers (ADR-0034)">
         <SectionShell
           title="Master switch"
@@ -574,6 +578,13 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           </Field>
         </SectionShell>
       </Card>
+
+      {/* ADR-0186 / ADR-0105 / ADR-0046: how tool-call approvals are signed, counted, how long they stay spendable, and the bulk fences */}
+      <OrgSettingsCard
+        title="5a · Approval safeguards"
+        keys={["approvalSignatureMode", "toolApprovalSensitiveQuorum", "approvalTtlHours", "approvalBulkMaxItems", "approvalBulkSensitiveBlocked"]}
+        testId="org-approval-safeguards"
+      />
 
       <Card title="5b · AI use-case dispatch gate (ADR-0080)">
         <SectionShell

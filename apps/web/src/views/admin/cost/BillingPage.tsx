@@ -23,7 +23,8 @@ import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
-import { KV, QueryGate, Stat, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams } from "../adminKit";
+import { KV, QueryGate, Stat, downloadCsv, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams } from "../adminKit";
+import { useToast } from "../../../ui/toast";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -122,6 +123,15 @@ interface ReconcileResult {
   note: string;
 }
 
+/** a refused statement export in words (GET /v1/billing/statements/:id/export) */
+export function statementExportRefusal(status: number, body: { error?: string; detail?: string } | null): string {
+  if (body?.error === "billing_scope_not_entitled") {
+    return "You are not entitled to this statement's scope, so it was not exported. The refusal is in the audit log.";
+  }
+  if (body?.error === "unknown_billing_statement") return "This statement no longer exists. Reload the page.";
+  return `The export was refused (HTTP ${status}${body?.error ? `: ${body.error}` : ""})${body?.detail ? `. ${body.detail}` : ""}`;
+}
+
 const monthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
 const nextMonthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();
 
@@ -134,6 +144,32 @@ export default function BillingPage() {
     queryKey: ["admin", "billing-overview"],
     queryFn: () => api.get<Overview>("/v1/billing/overview"),
   });
+
+  // §4 chargeback/showback: the export is a download, and it records one shipment per (period, backend)
+  const { toast } = useToast();
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const exportStatement = async (s: StatementRow, format: "csv" | "json") => {
+    setExporting(s.id);
+    setExportError(null);
+    try {
+      const ok = await downloadCsv(
+        `/v1/billing/statements/${encodeURIComponent(s.id)}/export?format=${format}`,
+        `statement-${s.id}.${format}`,
+        setExportError,
+        statementExportRefusal,
+      );
+      if (ok) {
+        toast(`Statement v${s.version} exported as ${format.toUpperCase()}`, "success");
+        void overview.refetch();
+      }
+    } catch (err) {
+      // e.g. the body could not be read: never an unhandled rejection with no message
+      setExportError(`The export failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExporting(null);
+    }
+  };
 
   // --- rate card authoring ---
   const [cardName, setCardName] = useState("standard");
@@ -528,8 +564,32 @@ export default function BillingPage() {
                     header: "Issued",
                     render: (s) => (s.issuedAt ? ago(s.issuedAt) : <span className={v.faint}>draft</span>),
                   },
+                  {
+                    key: "x",
+                    header: "Export",
+                    render: (s) => (
+                      <div className={v.row}>
+                        {(["csv", "json"] as const).map((format) => (
+                          <Button
+                            key={format}
+                            size="sm"
+                            aria-label={`Export statement v${s.version} as ${format.toUpperCase()}`}
+                            disabled={exporting !== null}
+                            onClick={() => void exportStatement(s, format)}
+                          >
+                            {format.toUpperCase()}
+                          </Button>
+                        ))}
+                      </div>
+                    ),
+                  },
                 ]}
               />
+            )}
+            {exportError && (
+              <p className={v.errLine} role="alert">
+                {exportError}
+              </p>
             )}
           </Card>
 

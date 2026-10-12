@@ -33,6 +33,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, Field, Meter, Select, Textarea } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
+import { GroupRoleImportCard, ImportHistoryCard } from "./OnboardingImportsCards";
 
 interface WizardStep {
   key: string;
@@ -282,6 +283,10 @@ export default function FirstRunPage() {
                 </Card>
               );
             })}
+
+            {/* ADR-0054: group → role mappings by import, and the record of every import */}
+            <GroupRoleImportCard onImported={invalidate} />
+            <ImportHistoryCard />
 
             <Card>
               <strong style={{ fontSize: "var(--text-sm)" }}>Replay this setup elsewhere</strong>

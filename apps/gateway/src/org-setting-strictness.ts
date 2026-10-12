@@ -281,11 +281,22 @@ export const ORG_SETTING_STRICTNESS: { readonly [K in WritableOrgSettingKey]: St
   budgetHardBlockPct: atMost(100),
   approvalQuorum: notEqual("all"),
   checkReportsAllowUnbound: notEqual(false),
+  // ADR-0046: a larger bulk cap lets one action decide more approvals at once; the fence off lets bulk reach
+  // approvals on PII-blocking projects (U3: writable through this PUT, judged like every other key)
+  approvalBulkMaxItems: atMost(25),
+  approvalBulkSensitiveBlocked: notEqual(true),
   approvalDelegationEnabled: notEqual(IDENTITY.approvalDelegationEnabled),
   // B4S-02 (owner principle): naming a default infra-remediation approver
   // decides who is offered those approvals; strict = nobody named by default
   infraApproverUserId: rule(null, (v) => v !== null),
   approvalTtlHours: atMost(72),
+
+  // --- model risk (ADR-0045 / ADR-0086; the same rule as POST /v1/mrm/enforcement) ---
+  mrmExpiryWarnDays: exempt(
+    "how early the registry lists a sign-off as expiring soon; it informs only, and a lapsed sign-off is refused on its validUntil whatever this is",
+  ),
+  mrmStalenessRecertEnabled: notEqual(true),
+  mrmStalenessRecertThreshold: atMost(1),
 
   // --- audit retention ------------------------------------------------------
   autoPruneEnabled: exempt(

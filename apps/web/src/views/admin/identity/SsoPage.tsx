@@ -30,6 +30,7 @@ import { QueryGate, optionEls, roleOpts, useAction, useRoles, useUsers } from ".
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
+import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 
 export default function SsoPage() {
   return (
@@ -44,6 +45,8 @@ export default function SsoPage() {
         <SamlCard />
         <LinkRequestsCard />
         <SessionsPolicyCard />
+        {/* ADR-0186 A: which actions need a fresh second proof, and how long one lasts */}
+        <OrgSettingsCard title="Step-up for sensitive actions" keys={["stepUpMode", "stepUpMaxAgeSeconds", "stepUpActions"]} testId="sso-step-up-settings" />
       </div>
     </>
   );

@@ -321,6 +321,80 @@ describe("settings endpoint — admin-only, partial update, audited", () => {
   });
 });
 
+describe("U3: the review-workbench bulk fences and the model-risk dials are writable through PUT", () => {
+  const lastOrgAudit = async () =>
+    (
+      await db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.objectType, "org_settings"))
+        .orderBy(desc(auditLog.at))
+        .limit(1)
+    )[0]!;
+
+  it("GET reports the strict defaults of all five", async () => {
+    const g = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
+    expect(g.statusCode).toBe(200);
+    const s = g.json().settings;
+    expect(s.approvalBulkMaxItems).toBe(25);
+    expect(s.approvalBulkSensitiveBlocked).toBe(true);
+    expect(s.mrmExpiryWarnDays).toBe(30);
+    expect(s.mrmStalenessRecertEnabled).toBe(true);
+    expect(s.mrmStalenessRecertThreshold).toBe(1);
+  });
+
+  it("a tightening write is stored and audited with no relaxation named", async () => {
+    const r = await putOrg({ approvalBulkMaxItems: 10, mrmExpiryWarnDays: 45 });
+    expect(r.settings.approvalBulkMaxItems).toBe(10);
+    expect(r.settings.mrmExpiryWarnDays).toBe(45);
+    const row = await lastOrgAudit();
+    expect((row.detail as { changed: Record<string, unknown> }).changed).toEqual({
+      approvalBulkMaxItems: 10,
+      mrmExpiryWarnDays: 45,
+    });
+    expect((row.detail as { relaxed?: string[] }).relaxed).toBeUndefined();
+    // the model-risk surface reads the same column
+    const mrm = await app.inject({ method: "GET", headers: AUTH, url: "/v1/mrm/status" });
+    expect(mrm.json().warnDays).toBe(45);
+  });
+
+  it("a relaxation is stored and named under detail.relaxed (old -> new)", async () => {
+    await putOrg({
+      approvalBulkMaxItems: 100,
+      approvalBulkSensitiveBlocked: false,
+      mrmStalenessRecertEnabled: false,
+      mrmStalenessRecertThreshold: 5,
+    });
+    const row = await lastOrgAudit();
+    const detail = row.detail as { relaxed?: string[]; transitions: Record<string, { from: unknown; to: unknown }> };
+    expect(detail.relaxed).toEqual(
+      expect.arrayContaining([
+        "approvalBulkMaxItems",
+        "approvalBulkSensitiveBlocked",
+        "mrmStalenessRecertEnabled",
+        "mrmStalenessRecertThreshold",
+      ]),
+    );
+    expect(detail.transitions.approvalBulkMaxItems).toEqual({ from: 25, to: 100 });
+    expect(row.reason).toContain("RELAXED from the strict default");
+    const mrm = await app.inject({ method: "GET", headers: AUTH, url: "/v1/mrm/status" });
+    expect(mrm.json().stalenessRecertEnabled).toBe(false);
+    expect(mrm.json().stalenessRecertThreshold).toBe(5);
+  });
+
+  it("out-of-range values are refused and nothing is saved", async () => {
+    await putOrg({ approvalBulkMaxItems: 0 }, 400);
+    await putOrg({ approvalBulkMaxItems: 501 }, 400);
+    await putOrg({ mrmExpiryWarnDays: -1 }, 400);
+    await putOrg({ mrmExpiryWarnDays: 3651 }, 400);
+    await putOrg({ mrmStalenessRecertThreshold: 0 }, 400);
+    await putOrg({ mrmStalenessRecertThreshold: 100_001 }, 400);
+    await putOrg({ approvalBulkSensitiveBlocked: "no" }, 400);
+    const g = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
+    expect(g.json().settings.approvalBulkMaxItems).toBe(25);
+  });
+});
+
 describe("optimizer governance — the ceiling model", () => {
   it("defaults preserve behaviour: a dispatch routes and writes a model_routing ledger row", async () => {
     const before = await routingEventCount(umaId);

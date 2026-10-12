@@ -7,6 +7,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit";
 import { QueryGate, readCurrentOrgSettings, reconfirmNeeded, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
+import { OrgSettingsCard } from "./OrgSettingsCard";
 
 interface MemoryStore {
   kind: string;
@@ -33,6 +34,8 @@ export default function RetentionPage() {
           {settings.data && <RetentionSettings key={JSON.stringify(settings.data.settings)} settings={settings.data.settings} />}
         </QueryGate>
       </Card>
+      {/* ADR-0021 A4 / B7c: per-deploy-mode audit retention overrides and shadow-canary evidence retention */}
+      <OrgSettingsCard title="Audit and evidence retention" keys={["modeAuditRetention", "canaryObservationRetentionDays"]} testId="audit-evidence-retention" />
       <Card title="Memory-store inventory">
         <p>Counts and dates only; stored content is never loaded here. An evidence hold keeps incident records past their retention limit.</p>
         <Table<MemoryStore> rows={inventory.data?.stores ?? []} rowKey={(row) => row.kind}
