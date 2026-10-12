@@ -248,10 +248,14 @@ jobs:
       # `KNOWN_UI_GAPS` list that this step prints loudly and whose count may
       # only go down. A list entry that no longer matches fails the step, so
       # the lists cannot rot.
-      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c), and every route has UI or a reason
-        run: |
-          node scripts/preflight-ui-affordances.mjs
-          node scripts/preflight-ui-route-census.mjs
+      #
+      # Two steps, and the census runs even when the affordance step failed
+      # (`success() || failure()`), so both reports always show in one run.
+      - name: Pre-flight — every governed object the UI lists can be added and removed from it (B9c)
+        run: node scripts/preflight-ui-affordances.mjs
+      - name: Pre-flight — every gateway route has UI or a reason (route census)
+        if: success() || failure()
+        run: node scripts/preflight-ui-route-census.mjs
 
       # AgentCoordination.md stays a CURRENT-STATE file: one Live-status row per
       # agent, one Status line per task, inboxes acked within 12h, a line

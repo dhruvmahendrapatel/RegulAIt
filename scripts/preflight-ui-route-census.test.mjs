@@ -196,10 +196,23 @@ describe("route census: allow-list patterns", () => {
   });
 
   it("every real MACHINE_ONLY entry is a valid pattern with a reason", () => {
-    for (const [key, reason] of MACHINE_ONLY) {
+    for (const [key, entry] of MACHINE_ONLY) {
       expect(validatePattern(key), key).toBeNull();
+      const reason = typeof entry === "string" ? entry : entry.reason;
       expect(reason.length, key).toBeGreaterThan(12);
+      if (key.endsWith("/*")) expect(Number.isInteger(entry.matches), key).toBe(true);
     }
+  });
+
+  it("a pattern pins how many routes it covers: a new route under the prefix fails the run", () => {
+    const routes = [route("POST /v1/engine-runner/lease"), route("POST /v1/engine-runner/register")];
+    const machineOnly = new Map([["* /v1/engine-runner/*", { reason: "runner channel, runner credential only", matches: 2 }]]);
+    const ui = { get: new Set(), post: new Set(), put: new Set(), patch: new Set(), del: new Set() };
+    expect(census({ routes, ui, ...empty, machineOnly }).failures).toEqual([]);
+    const grown = census({ routes: [...routes, route("POST /v1/engine-runner/new-door")], ui, ...empty, machineOnly });
+    expect(grown.failures.map((f) => `${f.kind} ${f.key}`)).toEqual(["pattern-count * /v1/engine-runner/*"]);
+    const unpinned = census({ routes, ui, ...empty, machineOnly: new Map([["* /v1/engine-runner/*", "runner channel, runner credential only"]]) });
+    expect(unpinned.failures.map((f) => f.kind)).toEqual(["pattern-count", "bad-entry"]);
   });
 });
 
@@ -226,7 +239,7 @@ describe("route census: the gate", () => {
     const out = census({
       routes: r,
       ui: { get: new Set(["/v1/new"]), post: new Set(), put: new Set(), patch: new Set(), del: new Set() },
-      fileText: () => "api.post(pr.url, {})",
+      fileText: () => 'api.post(pr.url, {}); propose("Hold?", `/v1/held`);',
       machineOnly: new Map([["POST /v1/x/sweep", "cron sweep: run by the scheduler"]]),
       superseded: new Map([["GET /v1/old", { replacement: "GET /v1/new", reason: "the new read" }]]),
       indirect: new Map([["POST /v1/held", { file: "f.tsx", evidence: "api.post(pr.url", reason: "state" }]]),
@@ -247,7 +260,7 @@ describe("route census: lists cannot rot", () => {
     const out = census({
       routes: [route("GET /v1/called")],
       ui,
-      machineOnly: new Map([["* /v1/gone/*", "removed collection, kept by mistake"]]),
+      machineOnly: new Map([["* /v1/gone/*", { reason: "removed collection, kept by mistake", matches: 0 }]]),
       superseded: new Map([["GET /v1/gone-old", { replacement: "GET /v1/called", reason: "r" }]]),
       indirect: new Map([["POST /v1/gone-held", { file: "f", evidence: "e", reason: "r" }]]),
       knownGaps: new Map([["GET /v1/gone-gap", { does: "d", tracking: "t" }]]),
@@ -275,7 +288,22 @@ describe("route census: lists cannot rot", () => {
     const indirect = new Map([["GET /v1/uncalled", { file: "f.tsx", evidence: "api.get(view.href", reason: "r" }]]);
     expect(kinds(census({ routes, ui, ...empty, indirect, fileText: () => "nothing here" }))).toEqual(["stale GET /v1/uncalled"]);
     expect(kinds(census({ routes, ui, ...empty, indirect, fileText: () => null }))).toEqual(["stale GET /v1/uncalled"]);
-    expect(kinds(census({ routes, ui, ...empty, indirect, fileText: () => "x = api.get(view.href, h)" }))).toEqual([]);
+    // the shared call text alone does not keep the entry alive: the route's own path must still be written there
+    expect(kinds(census({ routes, ui, ...empty, indirect, fileText: () => "x = api.get(view.href, h)" }))).toEqual(["stale GET /v1/uncalled"]);
+    expect(kinds(census({ routes, ui, ...empty, indirect, fileText: () => 'x = api.get(view.href, h); const href = "/v1/uncalled";' }))).toEqual([]);
+    // `pathIn`: the literal may live in another file (the Decision BOM's model)
+    const split = new Map([["GET /v1/uncalled", { file: "a.ts", pathIn: "b.ts", evidence: "api.get(view.href", reason: "r" }]]);
+    const files = { "a.ts": "api.get(view.href)", "b.ts": "if (href !== `/v1/uncalled`) fail();" };
+    expect(kinds(census({ routes, ui, ...empty, indirect: split, fileText: (f) => files[f] ?? null }))).toEqual([]);
+  });
+
+  it("a superseded scheduler door is stale once its job is no longer named in scheduler-jobs.ts", () => {
+    const r = [route("POST /v1/x/sweep"), route("POST /v1/scheduler/jobs/:name/run")];
+    const u = { get: new Set(), post: new Set(["/v1/scheduler/jobs/:x/run"]), put: new Set(), patch: new Set(), del: new Set() };
+    const superseded = new Map([["POST /v1/x/sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "x-sweep", reason: "same function" }]]);
+    const jobs = (text) => (f) => (f === "apps/gateway/src/scheduler-jobs.ts" ? text : null);
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs('xSweep: "x-sweep",') }))).toEqual([]);
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs('ySweep: "y-sweep",') }))).toEqual(["stale POST /v1/x/sweep"]);
   });
 
   it("a 501 stub on any list is stale, and a route on two lists is refused", () => {
@@ -308,9 +336,15 @@ describe("route census: KNOWN_UI_GAPS only shrinks", () => {
     expect(out.failures.map((f) => f.kind)).toEqual(["bad-entry"]);
   });
 
-  it("THE PINNED BOUND: the real list is at most 15 and the max equals it (lower this number as gaps close; never raise it)", () => {
-    expect(KNOWN_UI_GAPS_MAX).toBeLessThanOrEqual(15);
+  // THE PINS. Every list's size is fixed here, so adding an entry anywhere is a
+  // deliberate edit to this file too (and both files are CODEOWNERS-reviewed).
+  // KNOWN_UI_GAPS_MAX only ever goes DOWN: lower it as gaps close, never raise it.
+  it("THE PINNED SIZES: known gaps, machine-only, superseded and indirect entries", () => {
+    expect(KNOWN_UI_GAPS_MAX).toBe(22);
     expect(KNOWN_UI_GAPS.size).toBe(KNOWN_UI_GAPS_MAX);
+    expect(MACHINE_ONLY.size).toBe(40);
+    expect(SUPERSEDED.size).toBe(14);
+    expect(INDIRECT_UI_CALLS.size).toBe(5);
     for (const [key, g] of KNOWN_UI_GAPS) {
       expect(g.does, key).toBeTruthy();
       expect(g.tracking, key).toBeTruthy();

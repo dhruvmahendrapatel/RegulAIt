@@ -38,16 +38,18 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { norm, scanNotBuilt, scanWeb, segmentMatch } from "./preflight-ui-affordances.mjs";
+import { literalPathsIn, norm, scanNotBuilt, scanWeb, segmentMatch } from "./preflight-ui-affordances.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * MACHINE-ONLY BY DESIGN. Keys are `"VERB /path"` (the registry's spelling) or
- * a pattern: VERB may be `*`, and a path ending in `/*` covers everything
- * under that prefix. A pattern must name at least two segments under `/v1`
- * with a literal collection (never `/v1/*`, `/*` or `/v1/:x/*`; see validatePattern). Group by category; one line of
- * reason per entry.
+ * MACHINE-ONLY BY DESIGN. Keys are `"VERB /path"` (the registry's spelling),
+ * with a one-line reason. A PATTERN (VERB may be `*`; a path ending in `/*`
+ * covers everything under that prefix) is used only for a credentialed
+ * machine surface, has a literal collection (never `/v1/*`, `/*` or
+ * `/v1/:x/*`; see validatePattern), and pins how many routes it covers as
+ * `{ reason, matches }`: a new route under the prefix changes the count and
+ * fails the run, so it cannot hide there.
  */
 export const MACHINE_ONLY = new Map([
   // ---- the SPA shell, health and API docs --------------------------------
@@ -55,9 +57,8 @@ export const MACHINE_ONLY = new Map([
   ["GET /admin", "shell: legacy admin entry point, redirects into the SPA"],
   ["GET /app", "shell: legacy app entry point, redirects into the SPA"],
   ["GET /ui", "shell: serves the SPA's index.html (the page itself, not a call it makes)"],
-  ["GET /ui/*", "shell: serves the SPA's static assets and deep links"],
+  ["GET /ui/*", { reason: "shell: serves the SPA's static assets and deep links", matches: 1 }],
   ["GET /health", "health: the load balancer / container liveness probe"],
-  ["GET /v1/health/schedulers", "health: scheduler liveness for monitoring; the Jobs page reads /v1/scheduler/jobs"],
   ["GET /v1/openapi.json", "docs: the published OpenAPI document (ADR-0053), read by SDK generators"],
   ["GET /v1/api/versioning", "docs: the published versioning/deprecation policy (ADR-0053), read by API clients"],
 
@@ -65,9 +66,16 @@ export const MACHINE_ONLY = new Map([
   ["GET /auth/oidc/:providerId/start", "auth plumbing: the OIDC redirect to the IdP (the sign-in page links /login, which leads here)"],
   ["GET /auth/oidc/callback", "auth plumbing: the IdP's redirect back with the authorization code"],
   ["GET /auth/oidc/providers", "auth plumbing: public OIDC discovery; the sign-in page reads /auth/sign-in-options"],
-  ["* /auth/saml/*", "auth plumbing: SAML start, ACS (the IdP's POST-back) and SP metadata the IdP admin downloads"],
-  ["GET /.well-known/*", "auth plumbing: RFC 9728 protected-resource metadata and the issuer JWKS, fetched by MCP/OAuth clients"],
-  ["POST /oauth/*", "auth plumbing: RFC 6749/7009/7662 token, revocation and introspection endpoints for workload clients"],
+  ["GET /auth/saml/:providerId/start", "auth plumbing: the SAML redirect to the IdP"],
+  ["POST /auth/saml/:providerId/acs", "auth plumbing: the IdP's POST-back (assertion consumer service)"],
+  ["GET /auth/saml/:providerId/metadata", "auth plumbing: SP metadata the IdP admin downloads (the SSO page shows its URL)"],
+  ["GET /auth/saml/providers", "auth plumbing: public SAML discovery; the sign-in page reads /auth/sign-in-options"],
+  ["GET /.well-known/oauth-protected-resource", "auth plumbing: RFC 9728 protected-resource metadata, fetched by MCP/OAuth clients"],
+  ["GET /.well-known/oauth-protected-resource/mcp/:serverId", "auth plumbing: RFC 9728 metadata for one MCP server, fetched by MCP clients"],
+  ["GET /.well-known/jwks.json", "auth plumbing: the issuer's public JWKS, fetched by relying parties"],
+  ["POST /oauth/token", "auth plumbing: RFC 6749 token endpoint for workload clients"],
+  ["POST /oauth/token/revocation", "auth plumbing: RFC 7009 token revocation for workload clients"],
+  ["POST /oauth/token/introspection", "auth plumbing: RFC 7662 token introspection for resource servers"],
   ["POST /v1/delegations/proofs", "auth plumbing: an agent proves a delegation chain (ADR-0188); called by agent runtimes"],
 
   // ---- public verification: keys an outside verifier needs -------------------
@@ -87,47 +95,51 @@ export const MACHINE_ONLY = new Map([
   ["POST /v1/gates/deploy", "CI gate: the deploy gate a customer's pipeline calls before it ships"],
 
   // ---- runner and executor channels (credentialed machines) ----------------
-  ["* /v1/engine-runner/*", "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts)"],
-  ["* /v1/executor-channel/*", "executor channel: only an enrolled executor reaches these (ADR-0190)"],
+  ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts)", matches: 6 }],
+  ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190)", matches: 7 }],
 
   // ---- inbound callbacks and provisioning -----------------------------------
   ["POST /v1/pm/webhooks/:connectionName", "inbound callback: PM-tool webhooks, signature-verified in route (ADR-0061)"],
-  ["POST /v1/chatops/:connectionName/*", "inbound callback: Slack/Teams interactions, events, messages and bot traffic (ADR-0061, ADR-0173)"],
-  ["* /scim/v2/*", "inbound provisioning: the IdP's SCIM 2.0 client, with a SCIM bearer token (the SCIM page manages tokens)"],
-
-  // ---- cron sweeps: what the scheduler (or an operator's cron) drives -------
-  ["POST /v1/config-versions/observations/prune", "cron sweep: retention prune of config observations, run by the scheduler"],
-  ["POST /v1/certification-campaigns/expiry-sweep", "cron sweep: closes expired certification campaigns, run by the scheduler"],
-  ["POST /v1/redteam/scheduled-sweep", "cron sweep: the scheduled red-team sweep driver (ADR-0064)"],
-  ["POST /v1/builder/schedules/sweep", "cron sweep: fires due builder-agent schedules, run by the scheduler"],
-  ["POST /v1/governance/recertification/sweep", "cron sweep: opens due recertifications, run by the scheduler"],
+  ["POST /v1/chatops/:connectionName/interactions", "inbound callback: Slack/Teams button interactions, signature-verified in route (ADR-0061)"],
+  ["POST /v1/chatops/:connectionName/events", "inbound callback: Slack Events API to builder agents (ADR-0173)"],
+  ["POST /v1/chatops/:connectionName/messages", "inbound callback: Teams outgoing webhook to builder agents (ADR-0173)"],
+  ["POST /v1/chatops/:connectionName/bot", "inbound callback: the Teams Bot Framework endpoint (ADR-0173 batch 2b)"],
+  ["* /scim/v2/*", { reason: "inbound provisioning: the IdP's SCIM 2.0 client, with a SCIM bearer token (the SCIM page manages tokens)", matches: 13 }],
 ]);
 
 /**
  * SUPERSEDED: an older route the UI no longer needs because a newer one it
  * calls does the same job. `replacement` must itself be a route the UI calls.
+ * A replacement that returns only the newest N rows (no paging or filters)
+ * does NOT supersede a list route: that is a KNOWN_UI_GAP. `job`, when set,
+ * names the scheduler job the replacement runs; it must exist in
+ * apps/gateway/src/scheduler-jobs.ts.
  */
 export const SUPERSEDED = new Map([
-  ["GET /v1/billing/periods", { replacement: "GET /v1/billing/overview", reason: "the overview carries the periods list" }],
-  ["GET /v1/billing/rate-cards", { replacement: "GET /v1/billing/overview", reason: "the overview carries the rate cards" }],
-  ["GET /v1/billing/statements", { replacement: "GET /v1/billing/overview", reason: "the overview carries the statements" }],
-  ["GET /v1/reports/definitions", { replacement: "GET /v1/reports/overview", reason: "the overview carries every definition with its schedules and run count" }],
-  ["GET /v1/reports/runs", { replacement: "GET /v1/reports/overview", reason: "the overview carries the run counts the page shows" }],
-  ["GET /v1/reports/schedules", { replacement: "GET /v1/reports/overview", reason: "the overview nests each definition's schedules" }],
-  ["GET /v1/spend/anomalies", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries the anomalies" }],
-  ["GET /v1/spend/monitor-policies", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries the policies" }],
-  ["GET /v1/spend/scheduled-changes", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries the scheduled changes" }],
+  ["GET /v1/reports/definitions", { replacement: "GET /v1/reports/overview", reason: "the overview carries every definition (unpaged, all rows) with its schedules and run count" }],
+  ["GET /v1/reports/schedules", { replacement: "GET /v1/reports/overview", reason: "the overview nests every definition's schedules (unpaged, all rows)" }],
+  ["GET /v1/spend/monitor-policies", { replacement: "GET /v1/spend/monitor-overview", reason: "the monitor overview carries every policy (unpaged, all rows)" }],
   ["GET /v1/scim/tokens", { replacement: "GET /v1/scim/status", reason: "the SCIM status carries the token list" }],
   ["GET /v1/org/settings/assurance-gate-mode", { replacement: "GET /v1/org/settings", reason: "the settings read carries assuranceGateMode; the page writes it through the dedicated PUT" }],
   ["POST /v1/agents/:agentId/owner", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the steward (the ADR-0089 owner column) in one audited save" }],
   ["POST /v1/agents/:agentId/lifecycle", { replacement: "PATCH /v1/agents/:agentId/stewardship", reason: "ADR-0168 stewardship sets the lifecycle status in the same save" }],
   ["GET /v1/licenses/:id", { replacement: "GET /v1/licenses", reason: "the history list carries every full license row the detail returns" }],
+  // manual "run now" doors for scheduler jobs: the Scheduler page runs the SAME
+  // function through POST /v1/scheduler/jobs/:name/run (`job` is checked
+  // against scheduler-jobs.ts)
+  ["POST /v1/config-versions/observations/prune", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "canary-observation-prune-sweep", reason: "the job runs the same prune function" }],
+  ["POST /v1/certification-campaigns/expiry-sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "certification-expiry-sweep", reason: "the job runs the same expiry sweep" }],
+  ["POST /v1/redteam/scheduled-sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "redteam-sweep", reason: "the job runs runScheduledRedTeamSweep, as this door does" }],
+  ["POST /v1/builder/schedules/sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "builder-agent-schedules", reason: "the job runs runBuilderScheduleSweep, as this door does" }],
+  ["POST /v1/governance/recertification/sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "use-case-recertification", reason: "the job runs runUseCaseRecertificationSweep, as this door does" }],
   ["POST /v1/risks/:riskId/accept", { replacement: "POST /v1/risks/:riskId/acceptances", reason: "ADR-0180 §6: /accept is a wrapper over the acceptance write path the panel calls" }],
 ]);
 
 /**
  * INDIRECT UI CALLS: the SPA calls the route, but through a value no static
- * scan can follow. `evidence` is text that must still appear in `file`.
+ * scan can follow. `evidence` (the call) must still appear in `file`, AND the
+ * route's own path must still be written as a literal in `pathIn` (default
+ * `file`), so one shared call text cannot keep a removed button's entry alive.
  */
 export const INDIRECT_UI_CALLS = new Map([
   ...[
@@ -148,6 +160,7 @@ export const INDIRECT_UI_CALLS = new Map([
     {
       file: "apps/web/src/views/admin/governance/bomB4Api.ts",
       evidence: "api.getBlob(view.bundleHref",
+      pathIn: "apps/web/src/views/admin/governance/bomModel.ts",
       reason: "the Decision BOM names its bundle href; bomModel.ts checks it equals this route, then the download fetches it",
     },
   ],
@@ -161,6 +174,13 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
+  ["GET /v1/health/schedulers", { does: "scheduler liveness: each job's last tick and failures", tracking: "PR #374 review: admins must SEE failed ticks; the Scheduler page reads /v1/scheduler/jobs, not this" }],
+  ["GET /v1/reports/runs", { does: "report run history, filterable", tracking: "PR #374 review: the reports overview carries counts only, not the runs" }],
+  ["GET /v1/billing/periods", { does: "every billing period (paged)", tracking: "PR #374 review: the billing overview returns only the newest 25; paged list view pending (ui-gaps-details)" }],
+  ["GET /v1/billing/rate-cards", { does: "every rate card (paged)", tracking: "PR #374 review: the billing overview returns only the newest 25; paged list view pending" }],
+  ["GET /v1/billing/statements", { does: "every billing statement, filterable", tracking: "PR #374 review: the billing overview returns only the newest 25; paged list view pending" }],
+  ["GET /v1/spend/anomalies", { does: "spend anomalies, filterable by status", tracking: "PR #374 review: the monitor overview returns only the newest 25; paged list view pending" }],
+  ["GET /v1/spend/scheduled-changes", { does: "scheduled spend-limit changes", tracking: "PR #374 review: the monitor overview returns only the newest 25; paged list view pending" }],
   ["GET /v1/receipts", { does: "pages through signed decision receipts", tracking: "UI census 2026-10-12: receipts panel shows status, range export and verify, no list" }],
   ["GET /v1/receipts/:auditId", { does: "the signed receipt envelope(s) for one decision", tracking: "UI census 2026-10-12: audit row / decision record has no receipt view" }],
   ["GET /v1/cost-imports/:importId", { does: "an imported cost batch with its source lines", tracking: "UI census 2026-10-12: Cost consolidation lists and revokes imports, cannot open one" }],
@@ -184,7 +204,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 15;
+export const KNOWN_UI_GAPS_MAX = 22;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 
@@ -221,6 +241,12 @@ export function validatePattern(key) {
   }
   return null;
 }
+
+/** where the scheduler job names a SUPERSEDED `job` must appear live */
+const SCHEDULER_JOBS_FILE = "apps/gateway/src/scheduler-jobs.ts";
+
+/** is a MACHINE_ONLY key a prefix pattern (rather than one exact route)? */
+const isPattern = (key) => key.endsWith("/*");
 
 /** does a list key (exact or pattern) cover the route? */
 export function keyCovers(key, route) {
@@ -300,8 +326,12 @@ export function census({
       if (!all.has(key)) fail("stale", key, `listed as ${name} but the gateway serves no such route`);
     }
   }
-  for (const key of machineOnly.keys()) {
-    if (!routes.some((r) => keyCovers(key, r))) fail("stale", key, "machine-only entry covers no route the gateway serves");
+  for (const [key, entry] of machineOnly) {
+    const covered = routes.filter((r) => keyCovers(key, r)).length;
+    if (covered === 0) fail("stale", key, "machine-only entry covers no route the gateway serves");
+    else if (isPattern(key) && entry?.matches !== covered) {
+      fail("pattern-count", key, `the pattern covers ${covered} routes but pins ${entry?.matches}: a route was added or removed under it; review it, then update \`matches\``);
+    }
   }
 
   const counts = { total: routes.length, ui: 0, stubs: 0, machineOnly: 0, superseded: 0, indirect: 0, knownGaps: 0, gaps: 0 };
@@ -334,17 +364,24 @@ export function census({
     }
     if (superseded.has(key)) {
       counts.superseded += 1;
-      const { replacement } = superseded.get(key);
+      const { replacement, job } = superseded.get(key);
       if (!all.has(replacement)) fail("stale", key, `superseded by ${replacement}, which the gateway does not serve`);
       else if (!reached.has(replacement)) fail("stale", key, `superseded by ${replacement}, which the UI does not call either`);
+      if (job !== undefined && !(fileText(SCHEDULER_JOBS_FILE) ?? "").includes(`"${job}"`)) {
+        fail("stale", key, `superseded by scheduler job '${job}', which ${SCHEDULER_JOBS_FILE} no longer names`);
+      }
       continue;
     }
     if (indirect.has(key)) {
       counts.indirect += 1;
-      const { file, evidence } = indirect.get(key);
+      const { file, evidence, pathIn = file } = indirect.get(key);
       const text = fileText(file);
+      const pathText = fileText(pathIn);
       if (text === null) fail("stale", key, `indirect-call evidence file ${file} does not exist`);
       else if (!text.includes(evidence)) fail("stale", key, `indirect-call evidence '${evidence}' is no longer in ${file}`);
+      else if (pathText === null || !segmentMatch(norm(r.path), literalPathsIn(pathText, pathIn))) {
+        fail("stale", key, `the route's own path is no longer written in ${pathIn}`);
+      }
       continue;
     }
     if (knownGaps.has(key)) {
@@ -366,8 +403,10 @@ export function census({
   for (const [key, entry] of superseded) {
     if (!entry?.replacement || !entry?.reason) fail("bad-entry", key, "a superseded entry needs `replacement` and `reason`");
   }
-  for (const [key, reason] of machineOnly) {
+  for (const [key, entry] of machineOnly) {
+    const reason = typeof entry === "string" ? entry : entry?.reason;
     if (typeof reason !== "string" || reason.length < 12) fail("bad-entry", key, "a machine-only entry needs a reason a reviewer can check");
+    if (isPattern(key) && !Number.isInteger(entry?.matches)) fail("bad-entry", key, "a pattern entry pins `matches`, the number of routes it covers");
   }
   return { counts, byCategory, failures };
 }

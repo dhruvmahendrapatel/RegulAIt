@@ -520,6 +520,16 @@ export function uiCallPaths(src, verb, globalDefs = new Map(), globalWrap = new 
   return uiCalls(src, globalDefs, globalWrap)[verb];
 }
 
+/** every route path written as a literal anywhere in a file (any verb, called or not), normalized */
+export function literalPathsIn(src, fileName = "ui.tsx") {
+  const sf = parse(src, fileName);
+  const out = new Set();
+  walkNodes(sf, (n) => {
+    for (const p of literalPaths(literalParts(n, sf))) for (const q of expandLiteralUnions(p, src)) out.add(norm(q));
+  });
+  return out;
+}
+
 /**
  * The string-literal union a file declares for `name` (`kind: "servers" | "connectors"`),
  * or null. Parsed by hand, not by a regex over the file (M-074: linear, no backtracking).
