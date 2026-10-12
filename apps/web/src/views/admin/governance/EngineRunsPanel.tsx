@@ -35,6 +35,7 @@ import {
   userOpts,
 } from "../adminKit";
 import { EngineProvenanceChip, EngineRunStatusBadge, EngineVerdictBadge } from "./EngineRunBadges";
+import { EngineSchedulesCard } from "../integrations/EngineSchedulesCard";
 import {
   RUN_END_TEXT,
   engineRunItemView,
@@ -240,6 +241,14 @@ export function EngineRunsPanel(props: { surface: EngineSurface }) {
         {start.outcome && !start.outcome.ok && <OutcomePanel outcome={start.outcome} testId="engine-run-refusal" />}
         {started && start.outcome?.ok && <StartedNotice run={started.run} approvalId={started.approvalId} />}
       </Card>
+
+      {/* ADR-0187: the same run, repeated on a schedule */}
+      <EngineSchedulesCard
+        request={problem ? null : runRequestBody(form)}
+        problem={problem}
+        engineName={(id) => engineById.get(id as EngineInfo["id"])?.displayName ?? id}
+        agentName={(id) => agentName.get(id) ?? id.slice(0, 8)}
+      />
 
       <Card title="Engine runs">
         <Table

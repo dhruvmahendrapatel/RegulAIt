@@ -13,7 +13,7 @@
  *  Anything the gateway sends that cannot be read is shown as unreadable, never
  *  as a default or an empty list.
  */
-import { useEffect, useId, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt } from "../../../../api/format";
@@ -47,6 +47,8 @@ import {
   type RegisterDraft,
   type UnrecordedRefusal,
 } from "./isolationModel";
+// loaded on first Manage: the Engines page does not pay for the lifecycle surface until it is used
+const ExecutorDetail = lazy(() => import("./ExecutorDetail").then((m) => ({ default: m.ExecutorDetail })));
 import v from "../../../views.module.css";
 
 const isolationKeys = {
@@ -267,6 +269,7 @@ const rowKey = (r: ExecutorRow) => ("unreadable" in r ? `unreadable-${r.index}` 
 
 function ExecutorsCard() {
   const [registering, setRegistering] = useState(false);
+  const [managing, setManaging] = useState<string | null>(null);
   const q = useQuery({ queryKey: isolationKeys.executors, retry: false, refetchInterval: 60_000, queryFn: () => api.get<unknown>("/v1/executors") });
   // re-judge on this screen so a report never stays green past its expiry
   const [now, setNow] = useState(() => Date.now());
@@ -284,6 +287,7 @@ function ExecutorsCard() {
       ? "Registering an executor is available once the executor list has loaded."
       : null;
   return (
+    <>
     <Card
       title="Executors"
       actions={
@@ -352,6 +356,18 @@ function ExecutorsCard() {
                 render: (r) => ("unreadable" in r || r.lastSeenAt === null ? "Never" : <span title={fmtAt(new Date(r.lastSeenAt).toISOString())}>{ago(new Date(r.lastSeenAt).toISOString())}</span>),
               },
               { key: "open", header: "Open work", render: (r) => ("unreadable" in r ? "Not reported" : String(r.openOffers)) },
+              {
+                // ADR-0190 I3: detail, self-test history and the lifecycle acts
+                key: "manage",
+                header: "Manage",
+                align: "right",
+                render: (r) =>
+                  "unreadable" in r ? null : (
+                    <Button size="sm" variant="ghost" aria-label={`Manage executor ${r.name}`} aria-pressed={managing === r.id} onClick={() => setManaging(managing === r.id ? null : r.id)}>
+                      Manage
+                    </Button>
+                  ),
+              },
             ]}
             empty={<EmptyState title="No executors registered" body="With no executor, every isolable call is refused (no_executor). Nothing runs with weaker isolation instead." />}
           />
@@ -359,6 +375,12 @@ function ExecutorsCard() {
       </div>
       {registering && <RegisterExecutorDialog onClose={() => setRegistering(false)} />}
     </Card>
+    {managing && (
+      <Suspense fallback={<p role="status">Loading the executor…</p>}>
+        <ExecutorDetail key={managing} executorId={managing} onClose={() => setManaging(null)} />
+      </Suspense>
+    )}
+    </>
   );
 }
 
@@ -497,8 +519,10 @@ export function ExecutionProfileSelector(props: { context: string; targetKind: A
   const value = draft ?? current?.assigned?.id ?? "";
   const changed = current !== null && value !== (current.assigned?.id ?? "");
   const save = async () => {
-    const path = `/v1/execution-profile-assignments/${props.targetKind}/${encodeURIComponent(props.targetId)}`;
-    const ok = await act.run(() => withStepUp((h) => stepApi.put(path, { profileId: value === "" ? null : value }, h)), "Execution profile saved");
+    const ok = await act.run(
+      () => withStepUp((h) => stepApi.put(`/v1/execution-profile-assignments/${props.targetKind}/${encodeURIComponent(props.targetId)}`, { profileId: value === "" ? null : value }, h)),
+      "Execution profile saved",
+    );
     if (ok) {
       setDraft(null);
       await assignment.refetch();
