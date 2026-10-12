@@ -6,6 +6,7 @@ import http from "node:http";
 import { createRequire } from "node:module";
 import { approvals, createDb, eq, mcpTools, and, sql } from "../../../packages/db/dist/index.js";
 import { executeGovernedToolCall } from "../../gateway/dist/mcp-proxy.js";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 // Use the gateway's pinned MCP SDK, not a second test implementation of the protocol.
 const require = createRequire(new URL("../../gateway/package.json", import.meta.url));
@@ -15,7 +16,7 @@ const { ListToolsRequestSchema, CallToolRequestSchema } = require("@modelcontext
 const state = JSON.parse(readFileSync(new URL("./.e2e-state.json", import.meta.url), "utf8"));
 const db = createDb(`${process.env.E2E_PG ?? "postgres://regulait:regulait@localhost:5432"}/${process.env.E2E_DB ?? "regulait_wt_spa"}`);
 const base = state.baseUrl as string;
-const password = "E2e-Admin-Phase2!";
+const password = E2E_PASSWORDS.admin;
 const manifest: Array<Record<string, unknown>> = [];
 const received: unknown[] = [];
 let upstream: http.Server;

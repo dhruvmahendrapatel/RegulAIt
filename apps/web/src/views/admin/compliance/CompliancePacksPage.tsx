@@ -26,6 +26,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, RemoveButton, Stat, useAction } from "../adminKit";
 import { packRatios, pctText } from "./packRatios";
+import { PackDetailCard, PackReportsCard } from "./PackRecords";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -241,6 +242,8 @@ export default function CompliancePacksPage() {
   const testedBy = useTestedBy(scorecardPackId, scorecard?.period ?? null);
   const [diffView, setDiffView] = useState<DiffResponse | null>(null);
   const [period, setPeriod] = useState("current_quarter");
+  // ADR-0058: one pack's controls + attestations, and its stored reports
+  const [detailPack, setDetailPack] = useState<Pack | null>(null);
 
   /** the active version per framework — what a draft/retired version is
    * reviewed AGAINST */
@@ -394,6 +397,13 @@ export default function CompliancePacksPage() {
                             Diff vs active
                           </Button>
                         ) : null}
+                        <Button
+                          aria-label={`Details of ${p.framework} v${p.version}`}
+                          aria-pressed={detailPack?.id === p.id}
+                          onClick={() => setDetailPack(detailPack?.id === p.id ? null : p)}
+                        >
+                          Details
+                        </Button>
                         <Button variant="primary" disabled={act.busy} onClick={() => void evaluate(p)}>
                           Evaluate
                         </Button>
@@ -436,6 +446,14 @@ export default function CompliancePacksPage() {
           )}
         </QueryGate>
       </Card>
+
+      {detailPack ? <PackDetailCard key={detailPack.id} packId={detailPack.id} onClose={() => setDetailPack(null)} /> : null}
+
+      <PackReportsCard
+        packId={detailPack?.id ?? null}
+        packLabel={detailPack ? `${detailPack.framework} v${detailPack.version}` : null}
+        onClearPack={() => setDetailPack(null)}
+      />
 
       {diffView ? (
         <Card

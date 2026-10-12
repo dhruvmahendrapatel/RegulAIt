@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { CREDENTIAL_SAFE_ARTIFACTS } from "./playwright.credential-safe";
 
 /**
  * The REAL seeded-database demo journey (`e2e/demo-intake.spec.ts`), then the
@@ -38,6 +39,7 @@ export default defineConfig({
     browserName: "chromium",
     launchOptions: process.env.E2E_CHROMIUM_EXECUTABLE ? { executablePath: process.env.E2E_CHROMIUM_EXECUTABLE } : undefined,
     viewport: { width: 1400, height: 900 },
-    trace: "retain-on-failure",
+    // no trace, no video: a trace keeps every typed password (playwright.credential-safe.ts)
+    ...CREDENTIAL_SAFE_ARTIFACTS,
   },
 });

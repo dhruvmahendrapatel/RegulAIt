@@ -51,6 +51,7 @@ import {
   type RowRefusal,
 } from "../adminKit";
 import a from "../admin.module.css";
+import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
 import v from "../../views.module.css";
 
 interface Signature {
@@ -289,6 +290,7 @@ export default function ShadowAiPage() {
   const [evidence, setEvidence] = useState(EXAMPLE);
   const [preview, setPreview] = useState<unknown>(null);
   const [dispositionFor, setDispositionFor] = useState<string | null>(null);
+  const [remediationFor, setRemediationFor] = useState<string | null>(null);
   const [disposition, setDisposition] = useState("sanctioned");
   const [reason, setReason] = useState("");
 
@@ -486,6 +488,14 @@ export default function ShadowAiPage() {
                     <div className={v.stackTight} style={{ alignItems: "flex-start", whiteSpace: "nowrap" }}>
                       <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
                       <Button variant="ghost" onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                      <Button
+                        variant="ghost"
+                        aria-label={`Remediation plan for ${r.subject}`}
+                        aria-pressed={remediationFor === r.id}
+                        onClick={() => setRemediationFor(remediationFor === r.id ? null : r.id)}
+                      >
+                        Remediation plan
+                      </Button>
                     </div>
                   ),
                 },
@@ -493,6 +503,15 @@ export default function ShadowAiPage() {
             />
           )}
         </QueryGate>
+
+        {remediationFor ? (
+          <ShadowRemediationPanel
+            key={remediationFor}
+            findingId={remediationFor}
+            onClose={() => setRemediationFor(null)}
+            onLinked={refresh}
+          />
+        ) : null}
 
         {dispositionFor ? (
           <section className={a.subSection}>

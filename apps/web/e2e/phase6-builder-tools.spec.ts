@@ -25,6 +25,7 @@ import { readFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -32,10 +33,10 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
   passwords: { admin: string; dana: string; avery: string };
   baseUrl: string;
 };
-const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
-const DANA_PASSWORD = "E2e-Rewrite-2026!";
+const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
+const DANA_PASSWORD = E2E_PASSWORDS.dana;
 /** phase2's key-custody journey replaces Avery's one-time password with this */
-const AVERY_PASSWORD = "E2e-Avery-Custody!";
+const AVERY_PASSWORD = E2E_PASSWORDS.averyCustody;
 const CSRF = { "x-regulait-csrf": "1" };
 /** an org-settings write as Ada, stepped up with her authenticator (B4S-06: the
  * bootstrap credential passes a step-up only until an admin can give one). From her

@@ -23,6 +23,7 @@ import { passTotp } from "./totp-sign-in";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -31,8 +32,8 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
 
-const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
-const DANA_PASSWORD = "E2e-Rewrite-2026!"; // what phase1 settles dana on
+const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
+const DANA_PASSWORD = E2E_PASSWORDS.dana; // what phase1 settles dana on
 
 /** Order-independent sign-in, copied from the phase4-7 / zz- specs (M-017). */
 async function signIn(page: Page, email: string, candidates: string[], settleOn: string) {

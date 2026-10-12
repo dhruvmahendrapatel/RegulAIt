@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { CREDENTIAL_SAFE_ARTIFACTS } from "./playwright.credential-safe";
 
 /**
  * Web e2e: a REAL gateway (built dist, seeded demo dataset, its own scratch
@@ -31,6 +32,7 @@ export default defineConfig({
       ? { executablePath: process.env.E2E_CHROMIUM_EXECUTABLE }
       : undefined,
     viewport: { width: 1400, height: 900 },
-    trace: "retain-on-failure",
+    // no trace, no video: a trace keeps every typed password (playwright.credential-safe.ts)
+    ...CREDENTIAL_SAFE_ARTIFACTS,
   },
 });

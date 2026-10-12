@@ -32,6 +32,8 @@ import http from "node:http";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
+import { snapshotEgressAllowHosts, type EgressAllowSnapshot } from "./egress-allow-restore";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -42,7 +44,7 @@ const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
 
 /** the password phase2 rotates the seeded one-time admin credential to */
-const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
+const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
 
 const PROVIDER = "e2e-local-llama";
 const IMDS = "169.254.169.254";
@@ -114,6 +116,8 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
   const hits: Array<{ url: string; auth: string | null }> = [];
   let originalCapability: boolean | undefined;
   let seededHosts: Array<{ id: string; host: string; allowPrivateRanges: boolean; allowPlaintextHttp: boolean; note: string | null }> = [];
+  /** M-068 / M-078: the two hosts the journeys allow-list, as they were before it */
+  let egressSnapshot: EgressAllowSnapshot | undefined;
 
   test.beforeAll(async ({ browser }) => {
     // A real local OpenAI-compatible endpoint: the shape Ollama / vLLM /
@@ -169,17 +173,25 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
       const deleted = await page.request.delete(`${state.baseUrl}/v1/egress-allow-hosts/${host.id}`, { headers: { "x-regulait-csrf": "1" } });
       expect(deleted.ok()).toBe(true);
     }
-
+    // every host the journeys below allow-list (IMDS, then 127.0.0.1 with its
+    // opt-ins) is put back per entry in afterAll, whatever a failing test left
+    egressSnapshot = await snapshotEgressAllowHosts(page.request, state.baseUrl, [IMDS, "127.0.0.1"]);
   });
 
   test.afterAll(async () => {
     try {
-      for (const host of seededHosts) {
-        const restored = await page.request.post(`${state.baseUrl}/v1/egress-allow-hosts`, { headers: { "x-regulait-csrf": "1" }, data: {
-          host: host.host, allowPrivateRanges: host.allowPrivateRanges, allowPlaintextHttp: host.allowPlaintextHttp,
-          ...(host.note ? { note: host.note } : {}),
-        } });
-        expect(restored.ok()).toBe(true);
+      // this spec's own hosts first, then the demo rows it borrowed: a demo row
+      // for the same host is re-added after, so it ends as the seed had it
+      try {
+        await egressSnapshot?.restore(page.request);
+      } finally {
+        for (const host of seededHosts) {
+          const restored = await page.request.post(`${state.baseUrl}/v1/egress-allow-hosts`, { headers: { "x-regulait-csrf": "1" }, data: {
+            host: host.host, allowPrivateRanges: host.allowPrivateRanges, allowPlaintextHttp: host.allowPlaintextHttp,
+            ...(host.note ? { note: host.note } : {}),
+          } });
+          expect(restored.ok()).toBe(true);
+        }
       }
     } finally {
       try {

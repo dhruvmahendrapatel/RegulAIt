@@ -48,6 +48,7 @@ import { QueryGate, optionEls, useAction, useUsers, userOpts } from "../adminKit
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { AbacNewVersionForm, AbacSimulateCard, AbacSuiteCard } from "./AbacTools";
 
 const STARTER = `forbid (
   principal,
@@ -308,7 +309,10 @@ export default function AbacPoliciesPage() {
           </Card>
         </QueryGate>
 
-        {selected && <PolicyDetail policyId={selected} />}
+        {selected && <PolicyDetail policyId={selected} currentSchema={schema.data?.current ?? null} />}
+
+        <AbacSimulateCard />
+        <AbacSuiteCard />
 
         <Card title="The attribute schema a policy may reference">
           <p className={v.faint}>
@@ -339,9 +343,10 @@ export default function AbacPoliciesPage() {
 }
 
 /** Version history + activate/rollback + the test runner, for one policy. */
-function PolicyDetail(props: { policyId: string }) {
+function PolicyDetail(props: { policyId: string; currentSchema: string | null }) {
   const act = useAction();
   const [testRun, setTestRun] = useState<AbacTestRun | null>(null);
+  const [editing, setEditing] = useState(false);
   const detail = useQuery({
     queryKey: ["admin", "abac-policy", props.policyId],
     queryFn: () => api.get<AbacPolicyDetail>(`/v1/abac/policies/${props.policyId}`),
@@ -453,6 +458,24 @@ function PolicyDetail(props: { policyId: string }) {
               </div>
             ))}
           </div>
+        )}
+        <div className={v.row} style={{ marginTop: "var(--s2)" }}>
+          <Button size="sm" aria-expanded={editing} onClick={() => setEditing((e) => !e)}>
+            {editing ? "Close the editor" : "Edit — add a new version"}
+          </Button>
+        </div>
+        {editing && detail.data && (
+          <AbacNewVersionForm
+            key={`${props.policyId}:${versions.length}`}
+            policyId={props.policyId}
+            currentSchema={props.currentSchema}
+            policy={detail.data.policy}
+            versions={versions}
+            onCreated={() => {
+              setEditing(false);
+              void detail.refetch();
+            }}
+          />
         )}
         {versions.length > 0 && (
           <details style={{ marginTop: "var(--s2)" }}>

@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { CREDENTIAL_SAFE_ARTIFACTS } from "./playwright.credential-safe";
 
 /**
  * X38 model-artifact journeys: the actual gateway on its own prepared, disposable
@@ -10,5 +11,7 @@ export default defineConfig({
   timeout: 240_000, expect: { timeout: 15_000 }, reporter: [["list"]],
   use: { baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:3148", browserName: "chromium",
     launchOptions: process.env.E2E_CHROMIUM_EXECUTABLE ? { executablePath: process.env.E2E_CHROMIUM_EXECUTABLE } : undefined,
-    viewport: { width: 1440, height: 1000 }, trace: "retain-on-failure" },
+    viewport: { width: 1440, height: 1000 },
+    // no trace, no video: a trace keeps every typed password (playwright.credential-safe.ts)
+    ...CREDENTIAL_SAFE_ARTIFACTS },
 });

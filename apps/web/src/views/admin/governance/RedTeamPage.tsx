@@ -158,6 +158,9 @@ export default function RedTeamPage() {
   const [pSeverity, setPSeverity] = useState("high");
   const [pInput, setPInput] = useState("");
   const [pForbidden, setPForbidden] = useState("");
+  // ADR-0057: a published library changes only by minting version N+1
+  const [mintNote, setMintNote] = useState("");
+  const [minted, setMinted] = useState<{ libraryId: string; note: string } | null>(null);
 
   // --- run form
   const [runAgent, setRunAgent] = useState("");
@@ -304,10 +307,36 @@ export default function RedTeamPage() {
           {selectedLibrary && libDetail.data ? (
             <Card title={`${libDetail.data.library.name} v${libDetail.data.library.version}`}>
               {libDetail.data.frozen ? (
-                <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
-                  This version is published and immutable — every result stamped with it stays readable. Mint the
-                  next version to add attacks.
-                </div>
+                <form
+                  aria-label="Mint the next library version"
+                  className={a.formRow}
+                  style={{ marginBottom: "var(--s2)" }}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void act.run(async () => {
+                      const minted = await api.post<{ library: LibraryRow; copiedProbes: number; note: string }>(
+                        `/v1/redteam/libraries/${selectedLibrary}/versions`,
+                        mintNote.trim() ? { note: mintNote.trim() } : {},
+                      );
+                      setMintNote("");
+                      setMinted({ libraryId: minted.library.id, note: minted.note });
+                      await libraries.refetch();
+                      setSelectedLibrary(minted.library.id);
+                      return `v${minted.library.version} minted as a draft with ${minted.copiedProbes} probes copied — add attacks, then publish`;
+                    });
+                  }}
+                >
+                  <div className={v.faint} id="redteam-frozen-note" style={{ flexBasis: "100%" }}>
+                    This version is published and immutable — every result stamped with it stays readable. Mint the
+                    next version to add attacks: it starts as a draft with every probe copied, and this version is untouched.
+                  </div>
+                  <Field label="Note for the new version (optional)" grow>
+                    <Input value={mintNote} maxLength={4000} aria-describedby="redteam-frozen-note" onChange={(e) => setMintNote(e.target.value)} />
+                  </Field>
+                  <Button type="submit" disabled={act.busy}>
+                    Mint next version
+                  </Button>
+                </form>
               ) : (
                 <form
                   className={a.formRow}
@@ -367,6 +396,11 @@ export default function RedTeamPage() {
                   </Button>
                 </form>
               )}
+              {minted && minted.libraryId === selectedLibrary && !libDetail.data.frozen ? (
+                <p className={v.faint} role="status">
+                  {minted.note}
+                </p>
+              ) : null}
               <Table
                 rows={libDetail.data.probes}
                 rowKey={(r) => r.id}

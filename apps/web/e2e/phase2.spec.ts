@@ -27,6 +27,7 @@ import { steppedUpAs } from "./demo-credentials";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -36,7 +37,7 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
 
-const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
+const ADMIN_PASSWORD = E2E_PASSWORDS.admin;
 
 interface ConsoleTracker {
   errors: string[];
@@ -732,8 +733,8 @@ test("key custody enforced: the key card explains the state instead of offering 
   await dev.getByLabel("Password", { exact: true }).fill(state.passwords.avery);
   await dev.getByRole("button", { name: "Sign in" }).click();
   await dev.getByLabel("Current (one-time) password").fill(state.passwords.avery);
-  await dev.getByLabel("New password", { exact: true }).fill("E2e-Avery-Custody!");
-  await dev.getByLabel("Confirm new password").fill("E2e-Avery-Custody!");
+  await dev.getByLabel("New password", { exact: true }).fill(E2E_PASSWORDS.averyCustody);
+  await dev.getByLabel("Confirm new password").fill(E2E_PASSWORDS.averyCustody);
   await dev.getByRole("button", { name: "Set password & continue" }).click();
   await expect(dev.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
 

@@ -42,7 +42,7 @@
  * and `mrmEnforced`, so `afterAll` restores the exact pre-existing values and
  * removes every object it created. Everything is `llm-` prefixed.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -72,6 +72,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { setOrgSettingsForTest } from "./testing/strict-data-posture.js";
@@ -257,6 +258,13 @@ beforeAll(async () => {
     payload: { userId: maraId, role: "member" },
   });
 }, 90_000);
+
+// M-068 / M-078, per entry: the loopback entry the egress test creates is removed
+// after THAT test, even when an assertion fails before its own DELETE.
+const perTest = trackEgressAllowHosts();
+afterEach(async () => {
+  (await perTest.removeAll(app, AUTH)).assertRemoved();
+});
 
 afterAll(async () => {
   // Restore the singleton EXACTLY — a leaked `mrmEnforced` or a leaked
@@ -1025,7 +1033,7 @@ describe("a training backend's endpoint is adjudicated by the existing egress gu
       url: "/v1/egress-allow-hosts",
       headers: AUTH,
       payload: {
-        host: "127.0.0.1",
+        host: perTest.trackHost("127.0.0.1"),
         allowPrivateRanges: true,
         allowPlaintextHttp: true,
         note: "llm training backend test",

@@ -208,6 +208,7 @@ describe("a typed login host is adjudicated like a typed baseUrl", () => {
 
 describe("once the host is allow-listed the gate opens — and the upstream body is still not relayed", () => {
   it("the login host is reached, a non-JSON upstream body is withheld, a JSON error is relayed", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowEntryId, which afterAll removes
     const allow = await post("/v1/egress-allow-hosts", {
       host: FAKE_HOST,
       allowPrivateRanges: true,
