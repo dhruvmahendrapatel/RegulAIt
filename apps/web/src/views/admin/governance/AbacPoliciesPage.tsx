@@ -48,6 +48,7 @@ import { QueryGate, optionEls, useAction, useUsers, userOpts } from "../adminKit
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { AbacNewVersionForm, AbacSimulateCard, AbacSuiteCard } from "./AbacTools";
 
 const STARTER = `forbid (
   principal,
@@ -310,6 +311,9 @@ export default function AbacPoliciesPage() {
 
         {selected && <PolicyDetail policyId={selected} />}
 
+        <AbacSimulateCard />
+        <AbacSuiteCard />
+
         <Card title="The attribute schema a policy may reference">
           <p className={v.faint}>
             Anything not declared here is a validation error at write time — never a policy that
@@ -342,6 +346,7 @@ export default function AbacPoliciesPage() {
 function PolicyDetail(props: { policyId: string }) {
   const act = useAction();
   const [testRun, setTestRun] = useState<AbacTestRun | null>(null);
+  const [editing, setEditing] = useState(false);
   const detail = useQuery({
     queryKey: ["admin", "abac-policy", props.policyId],
     queryFn: () => api.get<AbacPolicyDetail>(`/v1/abac/policies/${props.policyId}`),
@@ -453,6 +458,23 @@ function PolicyDetail(props: { policyId: string }) {
               </div>
             ))}
           </div>
+        )}
+        <div className={v.row} style={{ marginTop: "var(--s2)" }}>
+          <Button size="sm" aria-expanded={editing} onClick={() => setEditing((e) => !e)}>
+            {editing ? "Close the editor" : "Edit — add a new version"}
+          </Button>
+        </div>
+        {editing && detail.data && (
+          <AbacNewVersionForm
+            key={`${props.policyId}:${versions.length}`}
+            policyId={props.policyId}
+            policy={detail.data.policy}
+            versions={versions}
+            onCreated={() => {
+              setEditing(false);
+              void detail.refetch();
+            }}
+          />
         )}
         {versions.length > 0 && (
           <details style={{ marginTop: "var(--s2)" }}>
