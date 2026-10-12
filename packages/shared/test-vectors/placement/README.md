@@ -6,8 +6,8 @@ and its review. Written from ADR text only; no shared source, product test, cont
 These are semantic requests and expected decision projections, not HTTP DTOs. `placement_eligible` means only that the
 isolation constraint can be met; it never authorizes a sponsor, actor, grant or upstream call.
 
-Counts: 137 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, and 6 pinned by slice I2, see
-below), 7 revised, 48 new (6 of them added by slice I2).
+Counts: 140 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, and 6 pinned by slice I2, see
+below), 7 revised, 51 new (9 of them added by slice I2).
 48 carry `"pendingBranch": "b6-isolation-i3@cee8a67c…"`: every vector that cites an
 amendment from K to W, whose text is not yet on `main` (the checker enforces this marker both ways). Find them with
 `grep -n pendingBranch placement-semantic-corpus.json`.
@@ -104,6 +104,10 @@ product's own functions (that file, not this checker, is the I2 conformance clai
   `stdio-floor-relaxed-sensitivity-holds`, `every-floor-relaxed-L1` (a relaxed floor lowers only itself, never below
   L1) and `assurance-no_identity-overrides-relaxed-profile` (an unknown agent stays at L3 whatever looser profile it
   was assigned).
+- **Security review M1 (PR #373):** `middle-actor-attested-below-placement`, `middle-actor-attested-below-grant` and
+  the control `live-placement-attested-at-both`. An actor's placement stays live only while its executor attests at
+  the stricter of the grant's class and the placement's own requirement; the checker recomputes it from the three
+  classes each vector states.
 
 ## Checks
 
@@ -112,7 +116,7 @@ product's own functions (that file, not this checker, is the I2 conformance clai
 every refusal reason and selection with amendment P's precedence, checks the T predicate, the V URL rule, the K window,
 the U probe rule, the pending markers, the unresolved fact behind each `policy_unresolved` (owner decision B) and
 that no vector uses a retired enforcement mode (owner decision A) and the shapes slice I2 pinned (items 11 and 12),
-then proves it rejects 24 deliberate corruptions.
+then proves it rejects 25 deliberate corruptions.
 Self-consistency only;
 not I2 conformance or runtime attestation.
 
@@ -257,6 +261,9 @@ not I2 conformance or runtime attestation.
 | `stdio-floor-relaxed-sensitivity-holds` | main | Decision 3; Decision 7 items 1–2; Decision 11 isolation floors | claude-new (I2) |
 | `every-floor-relaxed-L1` | main | Decision 1; Decision 7 items 1–2; Decision 11 isolation floors | claude-new (I2) |
 | `assurance-no_identity-overrides-relaxed-profile` | main | Decision 7 item 5; Decision 2 | claude-new (I2) |
+| `middle-actor-attested-below-placement` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
+| `middle-actor-attested-below-grant` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
+| `live-placement-attested-at-both` | main | Decision 8 third bullet; Test strategy: Delegation | claude-new (I2, review M1) |
 
 ## History
 

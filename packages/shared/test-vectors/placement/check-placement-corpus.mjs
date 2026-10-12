@@ -156,6 +156,20 @@ export function checkPlacementCorpus(c) {
       // a child that names no class inherits its parent's (decision 8)
       if (e.storedChildClass !== undefined) assert.equal(e.storedChildClass, q.childRequestedClass ?? q.parentRequiredClass, v.id);
     }
+    // review M1 (slice I2): an actor's placement holds only while its executor attests at the STRICTER of the grant's
+    // class and the placement's own requirement; recomputed here wherever a vector states the three classes
+    if (Array.isArray(q.actorPlacements) && q.actorPlacements.some((a) => a.attestedClass !== undefined)) {
+      const failure = q.actorPlacements
+        .map((a) => {
+          if (a.executorQuarantined) return 'executor_quarantined';
+          if (!a.executorActive) return 'executor_not_active';
+          const needed = Math.max(ranks[a.grantClass] ?? 0, ranks[a.placementRequiredClass]);
+          return a.attestation !== 'fresh_passing' || ranks[a.attestedClass] < needed ? 'executor_attestation_stale' : null;
+        })
+        .find((f) => f !== null) ?? null;
+      assert.equal(e.liveFailure, failure, v.id);
+      assert.equal(e.outcome, failure ? 'refuse' : 'live', v.id);
+    }
     // amendment item 12 (pinned by slice I2): the live-chain refusal is actor-chain-invalid, nothing reaches the upstream
     if (v.id.startsWith('middle-actor-') && e.gap === null) {
       assert.equal(e.outcome, 'refuse', v.id);
@@ -238,6 +252,7 @@ export const PLACEMENT_MUTATIONS = [
   ['refused child created', (c) => { find(c, 'delegation-L2-L1').expectedProjection.grantsCreated = 1; }],
   ['live-chain refusal under another rule', (c) => { find(c, 'middle-actor-executor-stale').expectedProjection.ruleId = 'execution-profile'; }],
   ['child inherits a lower class', (c) => { find(c, 'delegation-L3-inherit').expectedProjection.storedChildClass = 'L2'; }],
+  ['placement class ignored at use', (c) => { const e = find(c, 'middle-actor-attested-below-placement').expectedProjection; e.outcome = 'live'; e.liveFailure = null; }],
   ['relaxed sensitivity lowers code_exec', (c) => { const e = find(c, 'code_exec-relaxed-sensitivity-keeps-L3').expectedProjection; e.requiredClass = 'L1'; e.minimumSelectableClass = 'L1'; e.selectedClassAtLeast = 'L1'; }],
 ];
 

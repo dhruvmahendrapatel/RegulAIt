@@ -37,6 +37,8 @@ import {
   eq,
   executionOffers,
   executionPlacements,
+  inArray,
+  mcpServers,
   runMigrations,
   sql,
   type Db,
@@ -68,6 +70,9 @@ let app: ReturnType<typeof buildApp>;
 let adminId: string;
 let adminAuth: { authorization: string };
 let memberAuth: { authorization: string };
+/** a stdio MCP server every mcp_stdio call here names (its own profile is a floor of the call) */
+let stdioId: string;
+let remoteId: string;
 const restores: Array<() => Promise<void>> = [];
 const rows = <R>(r: unknown) => (r as { rows: R[] }).rows;
 type Method = "GET" | "PUT" | "POST";
@@ -151,11 +156,16 @@ beforeAll(async () => {
   adminAuth = { authorization: `Bearer ${(await inject("POST", `/v1/users/${adminId}/keys`, AUTH, { name: "i2" })).json().token}` };
   const mem = await inject("POST", "/v1/users", AUTH, { email: `i2-member-${RUN}@example.com`, displayName: `i2 member ${RUN}` });
   memberAuth = { authorization: `Bearer ${(await inject("POST", `/v1/users/${mem.json().id}/keys`, AUTH, { name: "i2" })).json().token}` };
+  const sName = `i2-stdio-${RUN}`;
+  stdioId = (await db.insert(mcpServers).values({ name: sName, url: `stdio:${sName}`, transport: "stdio", stdioCommand: "/opt/mcp/bin/i2", stdioArgs: [], stdioCommandDigest: "0".repeat(64) }).returning())[0]!.id;
+  remoteId = (await db.insert(mcpServers).values({ name: `i2-remote-${RUN}`, url: "https://mcp.example.com/i2" }).returning())[0]!.id;
 }, 120_000);
 
 afterAll(async () => {
   for (const r of restores.reverse()) await r();
   await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, TAG));
+  // a server a workload identity's profile assignment never names; best effort (a later suite may hold a reference)
+  await db.delete(mcpServers).where(inArray(mcpServers.id, [stdioId, remoteId])).catch(() => undefined);
   await app.close();
 });
 
@@ -208,7 +218,7 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const ex = await newExecutor("l2-reg", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
     const { agentId } = await newAgent("reg");
     const projectId = await newProject("regulated");
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], actorUserId: adminId });
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], actorUserId: adminId });
     expect(d.kind).toBe("refused");
     if (d.kind !== "refused") return;
     expect(d.code).toBe("class_below_required");
@@ -229,7 +239,7 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const ex = await newExecutor("l2-pub", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
     const { agentId } = await newAgent("pub");
     const projectId = await newProject("public");
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 1 });
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 1 });
     expect(d.kind).toBe("offered");
     if (d.kind !== "offered") return;
     expect(d.executorId).toBe(ex);
@@ -245,7 +255,7 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const ex = await newExecutor("l2-tag", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
     const { agentId } = await newAgent("tag");
     const projectId = await newProject("public", [TAG]);
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
     expect(d).toMatchObject({ kind: "refused", code: "class_below_required" });
     if (d.kind === "refused" && d.requirement.kind === "required") expect(d.requirement).toMatchObject({ requiredClass: "microvm", requiredBy: "compliance_tag" });
     // lowering the tag's floor is a loosening: the settings_relax step-up an API key cannot give
@@ -258,7 +268,7 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const { agentId } = await newAgent("unres");
     const projectId = await newProject(null);
     const before = rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from execution_placements`))[0]!.n;
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
     expect(d).toMatchObject({ kind: "refused", code: "policy_unresolved", placementId: null, envelope: { statusCode: 409, error: "execution_profile_unavailable", ruleId: "execution-profile", reason: "policy_unresolved" } });
     expect(await offersFor(ex)).toBe(0);
     expect(rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from execution_placements`))[0]!.n).toBe(before);
@@ -278,14 +288,14 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const l2 = await newExecutor("l2-unk", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }, { digest: MICROVM_DIGEST, cls: "user_space_kernel" }]);
     const { agentId } = await newAgent("noid", false);
     const projectId = await newProject("public");
-    const refused = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [l2] });
+    const refused = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [l2] });
     expect(refused).toMatchObject({ kind: "refused", code: "class_below_required" });
     if (refused.kind === "refused" && refused.requirement.kind === "required") {
       expect(refused.requirement).toMatchObject({ requiredClass: "microvm", requiredBy: "unknown_agent", agentAssurance: "no_identity" });
       expect(refused.requirement.profile).toMatchObject({ name: "restricted-microvm", source: "most_restrictive" });
     }
     const l3 = await newExecutor("l3-unk", "kata", [{ digest: MICROVM_DIGEST, cls: "microvm" }]);
-    const offered = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [l3], ttlSeconds: 1 });
+    const offered = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [l3], ttlSeconds: 1 });
     expect(offered).toMatchObject({ kind: "offered", executorId: l3, attestedClass: "microvm" });
   });
 
@@ -293,8 +303,27 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const stale = await newExecutor("stale", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel", expired: true }]);
     const { agentId } = await newAgent("stale");
     const projectId = await newProject("internal");
-    expect(await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [stale] })).toMatchObject({ kind: "refused", code: "attestation_stale" });
-    expect(await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] })).toMatchObject({ kind: "refused", code: "no_executor" });
+    expect(await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [stale] })).toMatchObject({ kind: "refused", code: "attestation_stale" });
+    expect(await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] })).toMatchObject({ kind: "refused", code: "no_executor" });
+  });
+
+  it("an mcp_stdio call with no server, or with a server that is not stdio, does not resolve (never the agent's floor)", async () => {
+    const { agentId } = await newAgent("no-server");
+    const projectId = await newProject("public");
+    for (const mcpServerId of [undefined, remoteId, randomUUID()]) {
+      const d = await decidePlacement(db, { workloadKind: "mcp_stdio", ...(mcpServerId ? { mcpServerId } : {}), projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
+      expect(d, String(mcpServerId)).toMatchObject({ kind: "refused", code: "policy_unresolved", placementId: null });
+      if (d.kind === "refused") expect(d.requirement).toMatchObject({ kind: "unresolved", fact: "configuredProfileFloor" });
+    }
+  });
+
+  it("malformed project classifications do not resolve (never read as no tags)", async () => {
+    const { agentId } = await newAgent("bad-tags");
+    const projectId = await newProject("public");
+    await db.execute(sql`update projects set classifications = '{"hipaa": true}'::jsonb where id = ${projectId}`);
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
+    expect(d).toMatchObject({ kind: "refused", code: "policy_unresolved" });
+    if (d.kind === "refused") expect(d.requirement).toMatchObject({ kind: "unresolved", fact: "complianceFloors" });
   });
 
   it("a non-isolable kind is never placed: in_gateway or external", async () => {
@@ -309,11 +338,11 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     const rootId = randomUUID();
     await db.execute(sql`insert into delegation_grants (id, root_grant_id, depth, depth_limit, sponsor_user_id, actor_identity_id, scope, environment, binding_kind, expires_at, required_isolation_class)
       values (${rootId}, ${rootId}, 0, 3, ${adminId}, ${identityId}, '[]'::jsonb, ${ENV}, 'in_process', now() + interval '1 hour', 'microvm')`);
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, parentGrantId: rootId, imageDigest: IMAGE, onlyExecutorIds: [ex] });
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, parentGrantId: rootId, imageDigest: IMAGE, onlyExecutorIds: [ex] });
     expect(d).toMatchObject({ kind: "refused", code: "class_below_required" });
     if (d.kind === "refused" && d.requirement.kind === "required") expect(d.requirement.requiredBy).toBe("parent_grant");
     // a parent grant that does not exist is a fact that does not resolve
-    const missing = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, parentGrantId: randomUUID(), imageDigest: IMAGE, onlyExecutorIds: [ex] });
+    const missing = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, parentGrantId: randomUUID(), imageDigest: IMAGE, onlyExecutorIds: [ex] });
     expect(missing).toMatchObject({ kind: "refused", code: "policy_unresolved" });
   });
 });
@@ -422,6 +451,92 @@ describe("ADR-0190 decision 8: delegation-isolation and the live chain", () => {
       "executor_attestation_stale",
     );
   });
+
+  /** a placed placement on a kata executor attesting microvm for the restricted-microvm profile */
+  async function l3Placement(name: string) {
+    const ex = await newExecutor(`m1-${name}`, "kata", [{ digest: MICROVM_DIGEST, cls: "microvm" }]);
+    const placementId = rows<{ id: string }>(
+      await db.execute(sql`insert into execution_placements (audit_id, workload_kind, required_class, required_by, enforcement, profile_digest, executor_id, applied_class, report_sha256, outcome)
+        values (${randomUUID()}, 'mcp_stdio', 'microvm', 'data_sensitivity', 'enforce', ${MICROVM_DIGEST}, ${ex}, 'microvm', ${"f".repeat(64)}, 'placed') returning id`),
+    )[0]!.id;
+    return { ex, placementId };
+  }
+  const rootOn = (actor: { agentId: string; identityId: string | null }, placementId: string, cls: "user_space_kernel" | "microvm") =>
+    createRootGrant(db, {
+      sponsorUserId: adminId,
+      actorIdentityId: actor.identityId!,
+      scope: scopeOf(actor.agentId),
+      capMicros: null,
+      ttlMs: 3_600_000,
+      environment: ENV,
+      projectId: null,
+      binding: { kind: "in_process" },
+      isolation: { requiredClass: cls, placementId },
+    });
+
+  it("review M1: a grant naming less than its placement's class is refused delegation-isolation and audited; nothing created", async () => {
+    const { placementId } = await l3Placement("low-grant");
+    const actor = await newAgent("m1-low");
+    const refused = await rootOn(actor, placementId, "user_space_kernel").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(refused).toBeInstanceOf(DelegationRefusedError);
+    expect((refused as DelegationRefusedError).ruleId).toBe("delegation-isolation");
+    expect((await db.select().from(delegationGrants).where(eq(delegationGrants.executionPlacementId, placementId))).length).toBe(0);
+    const [audited] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "delegation-isolation"), sql`${auditLog.detail} ->> 'executionPlacementId' = ${placementId}`));
+    expect(audited?.detail).toMatchObject({ phase: "create", requestedIsolationClass: "user_space_kernel" });
+    // the database refuses it too (the guard trigger)
+    const rootId = randomUUID();
+    const direct = await db
+      .execute(sql`insert into delegation_grants (id, root_grant_id, depth, depth_limit, sponsor_user_id, actor_identity_id, scope, environment, binding_kind, expires_at, required_isolation_class, execution_placement_id)
+        values (${rootId}, ${rootId}, 0, 3, ${adminId}, ${actor.identityId}, '[]'::jsonb, ${ENV}, 'in_process', now() + interval '1 hour', 'user_space_kernel', ${placementId})`)
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(String((direct as Error)?.message ?? "") + String((direct as { cause?: Error })?.cause?.message ?? "")).toMatch(/at least its placement's requirement/);
+  });
+
+  it("review M1: an L3 placement is no longer live once its executor attests only below L3", async () => {
+    const { ex, placementId } = await l3Placement("drop");
+    const actor = await newAgent("m1-drop");
+    const root = await rootOn(actor, placementId, "microvm");
+    expect((await loadLiveChain(db, root.id))!.failure).toBeNull();
+    // a newer passing self-test, but only at L1: the placement required L3
+    await db.execute(sql`insert into executor_attestations (executor_id, profile_digest, class, report_sha256, report, verdict, observed_at, expires_at)
+      values (${ex}, ${MICROVM_DIGEST}, 'hardened_container', ${"1".repeat(64)}, '{}'::jsonb, 'pass', now() + interval '1 second', now() + interval '1 hour')`);
+    expect((await loadLiveChain(db, root.id))!.failure).toEqual({ index: 0, code: "executor_attestation_stale" });
+  });
+
+  it("a placement belongs to one actor in one chain: another actor's grant naming it is refused (code and trigger), audited", async () => {
+    const { placementId } = await l3Placement("owned");
+    const owner = await newAgent("own-a");
+    await rootOn(owner, placementId, "microvm");
+    const intruder = await newAgent("own-b");
+    const refused = await rootOn(intruder, placementId, "microvm").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect((refused as DelegationRefusedError).code).toBe("placement_bound_elsewhere");
+    const [audited] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "delegation_grant"), sql`${auditLog.detail} ->> 'code' = 'placement_bound_elsewhere'`, sql`${auditLog.detail} ->> 'executionPlacementId' = ${placementId}`));
+    expect(audited).toMatchObject({ effect: "deny" });
+    const rootId = randomUUID();
+    const direct = await db
+      .execute(sql`insert into delegation_grants (id, root_grant_id, depth, depth_limit, sponsor_user_id, actor_identity_id, scope, environment, binding_kind, expires_at, required_isolation_class, execution_placement_id)
+        values (${rootId}, ${rootId}, 0, 3, ${adminId}, ${intruder.identityId}, '[]'::jsonb, ${ENV}, 'in_process', now() + interval '1 hour', 'microvm', ${placementId})`)
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    expect(String((direct as Error)?.message ?? "") + String((direct as { cause?: Error })?.cause?.message ?? "")).toMatch(/another actor's or another chain's/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -493,7 +608,7 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
     expect((await inject("POST", `/v1/execution-profiles/${name}/retire`, adminAuth, {})).statusCode).toBe(409);
     expect((await inject("POST", `/v1/execution-profiles/${name}/versions`, adminAuth, { body: customBody(name, { minClass: "microvm", resources: { ...SHIPPED_EXECUTION_PROFILES.restricted.resources, cpuMillis: 500 } }) })).statusCode).toBe(409);
     const projectId = await newProject("public");
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
     expect(d).toMatchObject({ kind: "refused", code: "profile_retired" });
   });
 
@@ -514,7 +629,7 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
     // the configured profile is now a floor of every call the agent makes
     const ex = await newExecutor("l2-assign", "gvisor", [{ digest: created.json().digest, cls: "user_space_kernel" }]);
     const projectId = await newProject("public");
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
+    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
     expect(d).toMatchObject({ kind: "refused", code: "class_below_required" });
     if (d.kind === "refused" && d.requirement.kind === "required") expect(d.requirement).toMatchObject({ requiredBy: "configured_profile", requiredClass: "microvm" });
     const down = await inject("PUT", `/v1/execution-profile-assignments/agent/${agentId}`, adminAuth, { profileId: null });

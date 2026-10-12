@@ -5090,6 +5090,158 @@
       },
       "note": "An agent with no identity runs only under the most restrictive profile (L3), whatever looser profile it was assigned; an L2 executor cannot take it.",
       "origin": "claude-new"
+    },
+    {
+      "id": "middle-actor-attested-below-placement",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": false,
+            "attestation": "fresh_passing",
+            "grantClass": "L2",
+            "placementRequiredClass": "L3",
+            "attestedClass": "L2"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": null,
+        "ruleId": "actor-chain-invalid",
+        "liveFailure": "executor_attestation_stale",
+        "failingActor": "synthetic-middle"
+      },
+      "note": "Review M1: the placement required L3; an executor now attesting only L2 no longer holds it, even though the grant named L2.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "middle-actor-attested-below-grant",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": false,
+            "attestation": "fresh_passing",
+            "grantClass": "L3",
+            "placementRequiredClass": "L2",
+            "attestedClass": "L2"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "upstreamContacts": 0,
+        "gap": null,
+        "ruleId": "actor-chain-invalid",
+        "liveFailure": "executor_attestation_stale",
+        "failingActor": "synthetic-middle"
+      },
+      "note": "The grant requires L3: an L2 attestation fails it whatever the placement required.",
+      "origin": "claude-new"
+    },
+    {
+      "id": "live-placement-attested-at-both",
+      "adrSections": [
+        "Decision 8 third bullet",
+        "Test strategy: Delegation"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L2",
+        "agentAssurance": "known",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "operation": "live_chain_use",
+        "actorPlacements": [
+          {
+            "actor": "synthetic-middle",
+            "executorActive": true,
+            "executorQuarantined": false,
+            "attestation": "fresh_passing",
+            "grantClass": "L3",
+            "placementRequiredClass": "L3",
+            "attestedClass": "L3"
+          }
+        ]
+      },
+      "expectedProjection": {
+        "outcome": "live",
+        "upstreamContacts": null,
+        "gap": null,
+        "ruleId": null,
+        "liveFailure": null
+      },
+      "note": "The control: an active, fresh executor attesting at the stricter of the two classes keeps the actor live.",
+      "origin": "claude-new"
     }
   ]
 }

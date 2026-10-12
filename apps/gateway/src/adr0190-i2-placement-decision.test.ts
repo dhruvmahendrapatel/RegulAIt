@@ -32,7 +32,10 @@ import {
   EXECUTION_PROFILE_RULE_ID,
   executionProfileUnavailable,
   ISOLATION_ROUTES,
+  grantCoversPlacement,
+  isolationClassSatisfies,
   livePlacementFailure,
+  livePlacementRequiredClass,
   NO_AUTONOMY_CLASS_FLOOR,
   NON_ISOLABLE_EXECUTION,
   SHIPPED_EXECUTION_PROFILES,
@@ -79,6 +82,11 @@ describe("ADR-0190 decision 7: the required class is the MAX of every floor", ()
     ["a relaxed stdio floor (L1) with the strict sensitivity floor (L2)", { workloadKindFloor: L.L1 }, L.L2, "data_sensitivity"],
     ["every floor relaxed to L1 is still L1, never L0", { workloadKindFloor: L.L1, sensitivityFloor: L.L1, configuredProfileFloor: L.L1 }, L.L1, "workload_kind"],
     ["byoc_worker has no kind floor of its own", { workloadKind: "byoc_worker", workloadKindFloor: null }, L.L2, "data_sensitivity"],
+    // THE TIE-BREAK: when several floors give the same (highest) class, the first in decision 7's order is named
+    // (workload kind, sensitivity, compliance tag, autonomy, configured profile, unknown agent, parent grant)
+    ["a tie: a regulated project and an unknown agent (both L3) name the sensitivity", { sensitivity: "regulated", sensitivityFloor: L.L3, agentAssurance: "no_identity" }, L.L3, "data_sensitivity"],
+    ["a tie: a configured L3 profile and an unknown agent name the configured profile", { configuredProfileFloor: L.L3, agentAssurance: "no_identity" }, L.L3, "configured_profile"],
+    ["a tie: a compliance tag and the parent at L3 name the tag", { complianceFloors: [L.L3], parentRequiredClass: L.L3 }, L.L3, "compliance_tag"],
   ];
   it.each(cases)("%s", (_name, over, cls, by) => {
     const r = computeRequiredClass(base(over));
@@ -184,6 +192,16 @@ describe("ADR-0190 decision 8: delegation-isolation and the live chain", () => {
     expect((mapped as { error: string }).error).toBe("invalid_grant");
   });
 
+  it("review M1: the class a placement must still hold is the stricter of the grant's and the placement's; a grant never names less than its placement", () => {
+    expect(livePlacementRequiredClass(L.L2, L.L3)).toBe(L.L3);
+    expect(livePlacementRequiredClass(L.L3, L.L2)).toBe(L.L3);
+    expect(livePlacementRequiredClass(null, L.L2)).toBe(L.L2);
+    expect(grantCoversPlacement(L.L3, L.L2)).toBe(true);
+    expect(grantCoversPlacement(L.L3, L.L3)).toBe(true);
+    expect(grantCoversPlacement(L.L2, L.L3)).toBe(false);
+    expect(grantCoversPlacement(null, L.L1)).toBe(false);
+  });
+
   it("amendment item 12: a placement holds only on an active, unquarantined, freshly attested executor", () => {
     expect(livePlacementFailure({ executorStatus: "active", attestationFresh: true, attestedClassSatisfies: true })).toBeNull();
     expect(livePlacementFailure({ executorStatus: "revoked", attestationFresh: true, attestedClassSatisfies: true })).toBe("executor_not_active");
@@ -286,16 +304,36 @@ describe("ADR-0190 placement vectors I2 owns, against the product", () => {
   });
 
   const liveChain = corpus.vectors.filter((v) => v.semanticRequest.operation === "live_chain_use");
+  it("includes vectors that exercise the attested class against the placement's and the grant's class (review M1)", () => {
+    expect(liveChain.filter((v) => (v.semanticRequest.actorPlacements as Array<{ attestedClass?: string }>).some((p) => p.attestedClass)).length).toBeGreaterThanOrEqual(3);
+  });
   it.each(liveChain.map((v) => [v.id, v] as const))("%s", (_id, v) => {
-    const placements = v.semanticRequest.actorPlacements as Array<{ executorActive: boolean; executorQuarantined: boolean; attestation: string }>;
-    const failures = placements.map((p) =>
-      livePlacementFailure({
+    const placements = v.semanticRequest.actorPlacements as Array<{
+      executorActive: boolean;
+      executorQuarantined: boolean;
+      attestation: string;
+      grantClass?: string;
+      placementRequiredClass?: string;
+      attestedClass?: string;
+    }>;
+    const failures = placements.map((p) => {
+      // where the vector states the classes, the product decides whether the attestation still satisfies
+      const satisfies =
+        p.attestedClass === undefined
+          ? true
+          : isolationClassSatisfies(
+              toClass(p.attestedClass) as RequirableIsolationClass,
+              livePlacementRequiredClass((toClass(p.grantClass) ?? null) as RequirableIsolationClass | null, toClass(p.placementRequiredClass) as RequirableIsolationClass),
+            );
+      return livePlacementFailure({
         executorStatus: p.executorQuarantined ? "quarantined" : p.executorActive ? "active" : "revoked",
         attestationFresh: p.attestation === "fresh_passing",
-        attestedClassSatisfies: true,
-      }),
-    );
-    expect(failures.some((f) => f !== null)).toBe(v.expectedProjection.outcome === "refuse");
+        attestedClassSatisfies: satisfies,
+      });
+    });
+    const failure = failures.find((f) => f !== null) ?? null;
+    expect(failure !== null).toBe(v.expectedProjection.outcome === "refuse");
+    if (v.expectedProjection.liveFailure !== undefined) expect(failure).toBe(v.expectedProjection.liveFailure);
   });
 
   const nonIsolable = corpus.vectors.filter((v) => v.id.startsWith("non-isolable-"));
