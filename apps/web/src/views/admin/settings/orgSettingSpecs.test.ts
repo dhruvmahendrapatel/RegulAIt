@@ -91,6 +91,12 @@ describe("the batch-4, batch-5 and identity rows mirror @regulait/shared", () =>
     }
   });
 
+  it("the step-up action copy counts every action kind", () => {
+    const count = BATCH4_SPECS.stepUpActions!.control.kind === "set" ? BATCH4_SPECS.stepUpActions!.control.options.length : 0;
+    expect(count).toBe(7);
+    expect(BATCH4_SPECS.stepUpActions!.strict.startsWith("All seven:")).toBe(true);
+  });
+
   it("the vocabularies are the shared ones, in the same order", async () => {
     const [b4, ic, p, adm] = [await batch4(), await identityContract(), await pii(), await admission()];
     const opts = (key: string) => {

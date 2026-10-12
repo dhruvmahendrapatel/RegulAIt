@@ -206,8 +206,12 @@ function SettingRow(props: {
             <>
               <strong>This is weaker than the strict default.</strong> {spec.relaxed}
             </>
+          ) : pending && sameValue(pending.value, spec.strictDefault) ? (
+            <>This is the strict default. {spec.strict}</>
           ) : (
-            spec.strict
+            <>
+              {pending?.to} is at least as strict as the strict default ({describeValue(spec, spec.strictDefault)}).
+            </>
           )}
         </p>
         <p>The change is audited.{pending?.stepUp ? " It loosens the current value, so you will be asked to confirm it's you." : ""}</p>

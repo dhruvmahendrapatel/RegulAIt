@@ -784,7 +784,14 @@ export async function downloadCsv(
   /** optional: the refusal in the caller's words (it knows the route's codes) */
   describe?: (status: number, body: { error?: string; detail?: string } | null) => string | null,
 ): Promise<boolean> {
-  const res = await fetch(path, { credentials: "include" });
+  let res: Response;
+  try {
+    res = await fetch(path, { credentials: "include" });
+  } catch {
+    // the request never reached the gateway (offline, blocked, reset): say so rather than reject silently
+    onError("The download could not reach the gateway. Check the connection and try again.");
+    return false;
+  }
   if (!res.ok) {
     // name the refusal (e.g. a signed export with no signing key) instead of a bare status code
     const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;

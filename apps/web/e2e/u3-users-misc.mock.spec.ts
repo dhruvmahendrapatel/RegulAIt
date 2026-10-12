@@ -370,10 +370,13 @@ test.describe("U3: billing statement export", () => {
     });
     await page.route(`**/v1/billing/statements/${U(60)}/export*`, (route) => {
       n += 1;
-      if (n === 1) return json(route, { error: "billing_scope_not_entitled" }, 403);
+      if (n === 1) return route.abort("connectionreset");
+      if (n === 2) return json(route, { error: "billing_scope_not_entitled" }, 403);
       return route.fulfill({ status: 200, contentType: "text/csv", body: "dimension,billedUsd\nmodel,120\n" });
     });
     await page.goto("/ui/admin/billing");
+    await page.getByRole("button", { name: "Export statement v1 as CSV" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "could not reach the gateway" })).toBeVisible();
     await page.getByRole("button", { name: "Export statement v1 as CSV" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "not entitled" })).toBeVisible();
     const download = page.waitForEvent("download");

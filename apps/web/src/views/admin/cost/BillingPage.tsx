@@ -163,6 +163,9 @@ export default function BillingPage() {
         toast(`Statement v${s.version} exported as ${format.toUpperCase()}`, "success");
         void overview.refetch();
       }
+    } catch (err) {
+      // e.g. the body could not be read: never an unhandled rejection with no message
+      setExportError(`The export failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setExporting(null);
     }

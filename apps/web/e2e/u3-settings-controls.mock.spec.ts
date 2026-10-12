@@ -170,6 +170,7 @@ test.describe("U3: approval safeguards on Organization", () => {
     await row.getByRole("button", { name: "Review change" }).click();
     const dialog = page.getByRole("dialog", { name: "Change most approvals in one bulk action?" });
     await expect(dialog).toContainText("25 approvals → 10 approvals");
+    await expect(dialog).toContainText("10 approvals is at least as strict as the strict default (25 approvals).");
     await expect(dialog).not.toContainText("confirm it's you");
     await dialog.getByRole("button", { name: "Save setting" }).click();
     await expect(dialog).toBeHidden();

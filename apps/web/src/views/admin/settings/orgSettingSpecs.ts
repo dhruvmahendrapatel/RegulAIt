@@ -182,8 +182,8 @@ export const BATCH4_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     label: "Actions that need a step-up",
     strictDefault: STEP_UP_ALL,
     strict:
-      "All six: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys " +
-      "and changing an owner.",
+      "All seven: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner and managing agent identities.",
     relaxed: "Each action removed from the list can be done with the session alone.",
     control: { kind: "set", options: STEP_UP_ACTION_KINDS },
     isRelaxed: (v) => missingAny(v, STEP_UP_ALL),
