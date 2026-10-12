@@ -58,6 +58,7 @@
  * The `op`s: `execution_profile_create`/`_version`/`_assign`,
  * `executor_reenable`, `executor_declared_class`, `receipt_key_retire`,
  * `mcp_registry_create`/`_update` (enabling a registry or opening its private
+ * ranges), `mcp_server_create`/`_update` (opening an MCP server's private
  * ranges), `agent_expected_served_model` and
  * `agent_create_expected_served_model` (relaxing the served-model drift check).
  *

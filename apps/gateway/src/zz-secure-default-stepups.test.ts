@@ -5,6 +5,7 @@
  * marker (ADR-0115).
  *
  *  - MCP registry: enabling (create or update), allowing private ranges (create or update);
+ *  - MCP server: allowing private ranges (create or update);
  *  - agent expected served model: setting or changing it (PUT, and at agent create);
  *  - PATCH and POST /v1/mrm/cards: a `[redacted:…]` marker in any text field → 400 `redacted_text_refused`.
  *
@@ -25,6 +26,7 @@ import {
   eq,
   inArray,
   mcpRegistries,
+  mcpServers,
   modelCards,
   ORG_SETTINGS_ID,
   runMigrations,
@@ -39,6 +41,7 @@ import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -49,14 +52,17 @@ const BOOT = `sds-boot-${RUN}`;
 const AUTH = { authorization: `Bearer ${BOOT}` };
 const ORIGIN = "http://localhost";
 const CSRF = { "x-regulait-csrf": "1" };
-// a public address literal: the egress guard decides it without a DNS lookup, and nothing is ever fetched
-const REGISTRY_URL = "https://93.184.216.34/";
+// a public address literal: the egress guard decides it without a DNS lookup, and nothing is ever fetched. A public
+// MCP or registry destination needs an egress allow entry; this suite adds one for this host and removes it in afterAll
+const PUBLIC_HOST = "93.184.216.34";
+const REGISTRY_URL = `https://${PUBLIC_HOST}/`;
+let allowHostId: string | undefined;
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreIdentity: (() => Promise<void>) | undefined;
-const created = { users: [] as string[], sessions: [] as string[], registries: [] as string[], agents: [] as string[], cards: [] as string[] };
+const created = { users: [] as string[], sessions: [] as string[], registries: [] as string[], servers: [] as string[], agents: [] as string[], cards: [] as string[] };
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
 
 type Method = "GET" | "PUT" | "POST" | "PATCH";
@@ -113,6 +119,14 @@ beforeAll(async () => {
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await db.execute(STRICT_SQL);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  const allow = await app.inject({
+    method: "POST",
+    url: "/v1/egress-allow-hosts",
+    headers: AUTH,
+    payload: { host: PUBLIC_HOST, note: `sds ${RUN}: a public MCP/registry destination (never contacted)` },
+  });
+  expect(allow.statusCode, allow.body).toBe(201);
+  allowHostId = allow.json().id as string;
   const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `sds-${RUN}@example.com`, displayName: "sds admin", isAdmin: true } });
   expect(u.statusCode, u.body).toBe(201);
   const id = u.json().id as string;
@@ -139,6 +153,16 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  // M-068: the allow entry goes first, while the app is open; its outcome is asserted after every other restore
+  const allowRemoval = await removeEgressAllowEntry(app, admin?.key ?? AUTH, { id: allowHostId });
+  try {
+    await restoreAll();
+  } finally {
+    allowRemoval.assertRemoved();
+  }
+});
+
+async function restoreAll() {
   await db.execute(STRICT_SQL);
   await restoreIdentity?.();
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
@@ -146,6 +170,7 @@ afterAll(async () => {
   if (created.cards.length > 0) await db.delete(modelCards).where(inArray(modelCards.id, created.cards));
   if (created.agents.length > 0) await db.delete(agents).where(inArray(agents.id, created.agents));
   if (created.registries.length > 0) await db.delete(mcpRegistries).where(inArray(mcpRegistries.id, created.registries));
+  if (created.servers.length > 0) await db.delete(mcpServers).where(inArray(mcpServers.id, created.servers));
   await db.delete(stepUpGrants).where(inArray(stepUpGrants.userId, created.users));
   await db.delete(webauthnChallenges).where(inArray(webauthnChallenges.userId, created.users));
   await forgetStepUpMethodsForTest(db, created.users);
@@ -153,7 +178,7 @@ afterAll(async () => {
   await db.delete(authSessions).where(inArray(authSessions.id, created.sessions));
   app.server.closeAllConnections();
   await app.close();
-});
+}
 
 describe("MCP registry: enabling and private ranges are relaxations", () => {
   it("create: the strict defaults need nothing; enabled or private ranges allowed needs a bound step-up, audited", async () => {
@@ -216,6 +241,65 @@ describe("MCP registry: enabling and private ranges are relaxations", () => {
     expect(disabled.statusCode, disabled.body).toBe(200);
     expect(disabled.json().enabled).toBe(false);
     expect((await lastAudit("mcp-registry-configured", id))!.detail).toMatchObject({ relaxation: false });
+  });
+});
+
+describe("MCP server: opening private ranges is a relaxation", () => {
+  it("POST /v1/servers: inherit and deny need nothing; allow needs a bound step-up and is audited", async () => {
+    const plain = await asAdmin("POST", "/v1/servers", { name: `sds-srv-plain-${RUN}`, url: `${REGISTRY_URL}mcp` });
+    expect(plain.statusCode, plain.body).toBe(201);
+    created.servers.push(plain.json().id);
+    const denied = await asAdmin("POST", "/v1/servers", { name: `sds-srv-deny-${RUN}`, url: `${REGISTRY_URL}mcp`, allowPrivateRanges: false });
+    expect(denied.statusCode, denied.body).toBe(201);
+    created.servers.push(denied.json().id);
+
+    const name = `sds-srv-open-${RUN}`;
+    const ok = await relaxThroughStepUp("POST", "/v1/servers", { name, url: `${REGISTRY_URL}mcp`, allowPrivateRanges: true }, {
+      op: "mcp_server_create",
+      name,
+      url: `${REGISTRY_URL}mcp`,
+      values: { allowPrivateRanges: true },
+    });
+    expect(ok.statusCode, ok.body).toBe(201);
+    created.servers.push(ok.json().id);
+    expect(ok.json().allowPrivateRanges).toBe(true);
+    expect((await db.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.name, name))).length).toBe(1);
+    expect((await lastAudit("mcp-server-registered", ok.json().id))!.detail).toMatchObject({
+      relaxation: true,
+      relaxed: { allowPrivateRanges: true },
+      stepUp: "passkey",
+    });
+    expect((await lastAudit("mcp-server-registered", plain.json().id))!.detail).toMatchObject({ relaxation: false });
+  });
+
+  it("PATCH /v1/servers/:id: allowing needs a bound step-up; denying and inheriting a closed default do not; each change is audited", async () => {
+    const r = await asAdmin("POST", "/v1/servers", { name: `sds-srv-upd-${RUN}`, url: `${REGISTRY_URL}mcp` });
+    expect(r.statusCode, r.body).toBe(201);
+    const id = r.json().id as string;
+    created.servers.push(id);
+    const url = `/v1/servers/${id}`;
+
+    const opened = await relaxThroughStepUp("PATCH", url, { allowPrivateRanges: true }, { op: "mcp_server_update", serverId: id, values: { allowPrivateRanges: true } });
+    expect(opened.statusCode, opened.body).toBe(200);
+    expect(opened.json().allowPrivateRanges).toBe(true);
+    expect((await lastAudit("mcp-server-private-ranges-changed", id))!.detail).toMatchObject({
+      from: { allowPrivateRanges: null },
+      to: { allowPrivateRanges: true },
+      relaxation: true,
+      stepUp: "passkey",
+    });
+
+    // tightening, even through an API key
+    const closed = await viaKey("PATCH", url, { allowPrivateRanges: false });
+    expect(closed.statusCode, closed.body).toBe(200);
+    expect(closed.json().allowPrivateRanges).toBe(false);
+    expect((await lastAudit("mcp-server-private-ranges-changed", id))!.detail).toMatchObject({ to: { allowPrivateRanges: false }, relaxation: false });
+    // back to inherit while the org default is closed (the strict value): not a relaxation
+    const [org] = await db.execute(sql`SELECT mcp_private_ranges_default AS d FROM org_settings WHERE id = ${ORG_SETTINGS_ID}`).then((x) => (x as unknown as { rows: Array<{ d: boolean }> }).rows);
+    expect(org!.d).toBe(false);
+    const inherit = await viaKey("PATCH", url, { allowPrivateRanges: null });
+    expect(inherit.statusCode, inherit.body).toBe(200);
+    expect(inherit.json().allowPrivateRanges).toBeNull();
   });
 });
 

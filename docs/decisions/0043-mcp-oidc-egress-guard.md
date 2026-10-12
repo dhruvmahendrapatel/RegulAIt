@@ -242,3 +242,13 @@ validated-address pin, same SNI/cert-verification-preserved behaviour.
   an allow entry in `beforeAll`, five fixture URLs moved.
 - `pnpm -r build` clean; migrations 0001–0049 apply cleanly to a freshly created database; full
   gateway suite green.
+
+## As built — 2026-10-12: opening a server's private ranges needs a step-up
+
+A server's `allowPrivateRanges` is tri-state: inherit the org default (`mcpPrivateRangesDefault`, closed under
+ADR-0181), allow, or deny. Opening it is a relaxation, so it now needs a `settings_relax` step-up (ADR-0186 As built
+2026-10-12). That covers `POST /v1/servers` with `true`; `PATCH /v1/servers/:id` to `true`; and a PATCH moving an
+explicit deny back to inherit while the org default is open. Denying, and inheriting a closed default, need nothing.
+The step-up is asked after the route's own refusals (transport, licence, owner, egress), and the update is a
+compare-and-set. Every change of the posture is audited (`mcp-server-private-ranges-changed`, both values, the
+relaxation and its step-up method). Before this, a posture change on PATCH wrote no audit row at all.

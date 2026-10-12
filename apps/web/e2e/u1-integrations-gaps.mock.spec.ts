@@ -223,7 +223,8 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expect.poll(() => sent(calls, "PATCH", `/v1/mcp-registries/${REGISTRY.id}`)).toEqual([{ enabled: true }]);
     // disabling it again is tightening: sent once, no step-up asked (wait for the list to show it enabled first)
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole("row").filter({ hasText: "internal-mirror" })).toContainText(/\benabled\b/);
+    // the State cell, not the row: a row's text joins its cells with no separator, so a word boundary never matches
+    await expect(page.getByRole("row").filter({ hasText: "internal-mirror" }).getByRole("cell", { name: "enabled", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Edit registry internal-mirror" }).click();
     const again = page.getByRole("dialog", { name: "Edit registry internal-mirror" });
     await again.getByLabel("Scheduled pulls").selectOption("off");
@@ -270,6 +271,51 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
     expect(su.attempts[1]!.body).toEqual({ reason: "Reviewed the tool descriptions with security" });
     // the harness answered the first attempt; only the resent one reached the gateway mock
     expect(calls.filter((c) => c.path.endsWith("/admission/clear"))).toHaveLength(1);
+  });
+
+  test("allowing a server's private ranges is stepped up at registration and on edit; denying them is not", async ({ page }) => {
+    const calls = await mockApi(page, [
+      ["GET", /^\/v1\/servers$/, () => ({ body: { servers: [CLEAN] } })],
+      ["POST", /^\/v1\/servers$/, ({ body }) => ({ status: 201, body: { ...CLEAN, id: U(402), admissionState: "unscanned", ...body } })],
+      ["PATCH", /^\/v1\/servers\/([^/]+)$/, ({ body }) => ({ body: { ...CLEAN, ...body } })],
+    ]);
+    const opens = (b: unknown) => (b as Json).allowPrivateRanges === true;
+    const reg = await requireStepUpOn(page, {
+      method: "POST",
+      path: "/v1/servers",
+      kind: "settings_relax",
+      when: opens,
+      facts: (b) => ({ op: "mcp_server_create", name: (b as Json).name, url: (b as Json).url, values: { allowPrivateRanges: true } }),
+    });
+    await page.goto("/ui/admin/mcp-servers");
+    const form = page.getByRole("form", { name: "Register an MCP server" });
+    await form.getByLabel("Name").fill("lan-tools", { timeout: 30_000 });
+    await form.getByLabel("URL").fill("http://10.0.0.5/mcp");
+    await form.getByLabel("Private ranges (ADR-0043)").selectOption("true");
+    await form.getByRole("button", { name: "Register" }).click();
+    await confirmStepUp(page);
+    await reg.expectResentOnce();
+    expect(reg.attempts[1]!.body).toMatchObject({ name: "lan-tools", url: "http://10.0.0.5/mcp", allowPrivateRanges: true });
+    await expect.poll(() => sent(calls, "POST", "/v1/servers").length).toBe(1);
+
+    const edit = await requireStepUpOn(page, {
+      method: "PATCH",
+      path: `/v1/servers/${CLEAN.id}`,
+      kind: "settings_relax",
+      when: opens,
+      facts: () => ({ op: "mcp_server_update", serverId: CLEAN.id, values: { allowPrivateRanges: true } }),
+    });
+    const posture = page.getByLabel("Private-range posture for search");
+    await posture.selectOption("true");
+    await posture.locator("xpath=..").getByRole("button", { name: "Save" }).click();
+    await confirmStepUp(page);
+    await edit.expectResentOnce();
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${CLEAN.id}`)).toEqual([{ allowPrivateRanges: true }]);
+    // denying them is tightening: sent once, never refused for a step-up
+    await posture.selectOption("false");
+    await posture.locator("xpath=..").getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${CLEAN.id}`)).toEqual([{ allowPrivateRanges: true }, { allowPrivateRanges: false }]);
+    expect(edit.attempts).toHaveLength(2);
   });
 
   test("a reserved tool name is refused in words; the preview lists what discovery shows", async ({ page }) => {

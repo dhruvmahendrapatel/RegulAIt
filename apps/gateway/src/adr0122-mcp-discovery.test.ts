@@ -65,10 +65,17 @@ const discover = (mode: "preview" | "apply" = "preview") =>
     payload: { content: evidence, mode },
   });
 
+// opening an MCP server's private ranges is a settings_relax step-up (ADR-0186 A); this suite drives it with the
+// bootstrap credential and is not about step-up, so it turns step-up off for its run (proved in
+// zz-secure-default-stepups.test.ts) and puts the strict policy back in afterAll (M-068)
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+let restoreStepUpPolicy: (() => Promise<void>) | undefined;
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  restoreStepUpPolicy = await relaxStepUpForTest(db);
 
   // Register ONE of the two hosts. `allowPrivateRanges` is irrelevant here —
   // nothing is connected to; the row exists only to be diffed against.
@@ -82,6 +89,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreStepUpPolicy?.();
   await app.close();
 });
 

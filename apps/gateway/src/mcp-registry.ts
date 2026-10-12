@@ -1118,12 +1118,27 @@ export function registryUpdateRelaxations(
 ): Record<string, boolean | null> | null {
   const out: Record<string, boolean | null> = {};
   if (body.enabled === true && !before.enabled) out.enabled = true;
-  if (body.allowPrivateRanges !== undefined) {
-    const next = body.allowPrivateRanges ?? null;
-    if (next === true && before.allowPrivateRanges !== true) out.allowPrivateRanges = true;
-    else if (next === null && before.allowPrivateRanges === false && orgPrivateRangesDefault) out.allowPrivateRanges = null;
-  }
+  const ranges = privateRangesRelaxation(before.allowPrivateRanges, body.allowPrivateRanges, orgPrivateRangesDefault);
+  if (ranges) Object.assign(out, ranges);
   return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * ADR-0180/0186 A: does an UPDATE of a tri-state `allowPrivateRanges` (an MCP registry's or an MCP server's)
+ * relax it? Allowing private ranges where they were not explicitly allowed does; so does moving an explicit deny
+ * back to "inherit" while the org default is open (the effective posture opens). Denying, inheriting a closed
+ * default and an unchanged value do not. Returns the relaxed value, or null.
+ */
+export function privateRangesRelaxation(
+  before: boolean | null,
+  next: boolean | null | undefined,
+  orgPrivateRangesDefault: boolean,
+): { allowPrivateRanges: boolean | null } | null {
+  if (next === undefined) return null;
+  const value = next ?? null;
+  if (value === true && before !== true) return { allowPrivateRanges: true };
+  if (value === null && before === false && orgPrivateRangesDefault) return { allowPrivateRanges: null };
+  return null;
 }
 
 function relaxationText(relaxed: Record<string, boolean | null>): string {

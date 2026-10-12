@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { changeDescriptorSchema, createModelCardSchema, scrubAuditText, startInstanceSchema, updateModelCardSchema } from "@regulait/shared";
-import { registryCreateRelaxations, registryUpdateRelaxations } from "./mcp-registry.js";
+import { privateRangesRelaxation, registryCreateRelaxations, registryUpdateRelaxations } from "./mcp-registry.js";
 import { cardFieldsWithScrubMarker } from "./mrm.js";
 import { remediationStartBody, SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai.js";
 import { isStepUpPrompt } from "./step-up.js";
@@ -39,6 +39,22 @@ describe("MCP registry relaxations", () => {
     const denied = { enabled: false, allowPrivateRanges: false };
     expect(registryUpdateRelaxations(denied, { allowPrivateRanges: null }, false)).toBeNull();
     expect(registryUpdateRelaxations(denied, { allowPrivateRanges: null }, true)).toEqual({ allowPrivateRanges: null });
+  });
+});
+
+describe("private-range relaxation (MCP servers and registries share it)", () => {
+  it("opening relaxes; denying, inheriting a closed default and unchanged values do not", () => {
+    expect(privateRangesRelaxation(null, undefined, true)).toBeNull();
+    expect(privateRangesRelaxation(null, true, false)).toEqual({ allowPrivateRanges: true });
+    expect(privateRangesRelaxation(false, true, false)).toEqual({ allowPrivateRanges: true });
+    expect(privateRangesRelaxation(true, true, false)).toBeNull();
+    expect(privateRangesRelaxation(true, false, true)).toBeNull();
+    expect(privateRangesRelaxation(true, null, false)).toBeNull();
+    // deny -> inherit opens the posture only when the org default is open
+    expect(privateRangesRelaxation(false, null, false)).toBeNull();
+    expect(privateRangesRelaxation(false, null, true)).toEqual({ allowPrivateRanges: null });
+    // inherit -> inherit changes nothing
+    expect(privateRangesRelaxation(null, null, true)).toBeNull();
   });
 });
 

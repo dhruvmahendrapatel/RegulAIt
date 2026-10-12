@@ -202,12 +202,19 @@ async function mcpClientFor(serverId: string): Promise<Client> {
   return client;
 }
 
+// opening an MCP server's private ranges is a settings_relax step-up (ADR-0186 A); this suite drives it with the
+// bootstrap credential and is not about step-up, so it turns step-up off for its run (proved in
+// zz-secure-default-stepups.test.ts) and puts the strict policy back in afterAll (M-068)
+import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+let restoreStepUpPolicy: (() => Promise<void>) | undefined;
+
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreStrictAdmission = await relaxStrictAdmissionForTest(db);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { requireMcpAttribution: false });
+  restoreStepUpPolicy = await relaxStepUpForTest(db);
   upstream = await startUpstream();
   await startIdp();
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
@@ -241,6 +248,7 @@ afterAll(async () => {
   try {
     // leave the shared database in the posture it FOUND (ADR-0181 ships private ranges closed)
     await restoreStrictAdmission?.();
+    await restoreStepUpPolicy?.();
     app.server.closeAllConnections();
     await restoreSb2Gates();
     await app.close();
