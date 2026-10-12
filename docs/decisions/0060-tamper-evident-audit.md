@@ -663,3 +663,25 @@ the reason. An install that takes the default is told, in the product, that it
 has accident-resistance and not evidence. The weaker default can never
 masquerade as the stronger one — which is what makes leaving it weak
 acceptable.
+
+## As built — 2026-10-12: `audit_log.at` is the database clock
+
+The chained writer (`packages/db/src/audit-chain.ts`) stamped a row whose caller named no `at` with the
+gateway's process clock (`new Date()`). Every timestamp an audit row is compared with (rate-limit windows,
+sweeps, domain rows stamped `now()`) is on the database clock, so a replica whose clock drifted wrote audit
+rows that disagreed with them (M-075).
+
+The writer now reads the database clock **under the chain lock**, as
+`date_trunc('milliseconds', clock_timestamp())`, and hashes and stores that value. It is truncated to
+milliseconds in SQL because a JavaScript `Date` holds milliseconds: the value in `content_hash` is the value in
+the column, so the chain stays verifiable.
+
+`clock_timestamp()` was chosen over `now()`. `now()` is the time the enclosing transaction started, so a
+transaction that waited on the chain lock, or did other work before its audit insert, would stamp a time
+earlier than rows already ahead of it in `seq`, and `at` would run backwards along the chain. Read after the
+lock, `at` never decreases along `seq` and records when the row's place in the chain was fixed. A caller
+that names its own `at` keeps it (the hash covers exactly that value).
+
+The live rate-limit window (`governed-evaluate.ts`, which counts `allow` rows by `at`) moved to the
+database clock in the same change; a replay keeps its recorded instant. Tests: `audit-chain.test.ts`
+("M-075: audit_log.at is stamped on the database clock").

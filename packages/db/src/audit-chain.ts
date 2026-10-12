@@ -153,12 +153,20 @@ type AuditInsertValues = Partial<AuditChainFields> & Record<string, unknown>;
  * one row and the database would store a different one, and every such row
  * would report as tampered on the first verification.
  *
- * `at` in particular: `now()` has MICROSECOND resolution and JavaScript's
- * `Date` has milliseconds. Letting the column default would store a timestamp
- * the hash could never reproduce.
+ * `at` in particular: Postgres timestamps have MICROSECOND resolution and
+ * JavaScript's `Date` has milliseconds. Letting the column default would store
+ * a timestamp the hash could never reproduce.
+ *
+ * `dbNow` is the DATABASE clock (M-075), read by the writer under the chain
+ * lock and already truncated to milliseconds there, so the value hashed here
+ * is exactly the value stored. It is never the gateway's process clock: the
+ * timestamps an audit row is compared with (rate-limit windows, sweeps, domain
+ * rows stamped `now()`) are on the database clock, and a replica whose clock
+ * drifted would otherwise stamp the chain out of order. A caller that names
+ * its own `at` keeps it.
  */
-function resolveDefaults(v: AuditInsertValues): AuditChainFields & Record<string, unknown> {
-  const at = v.at instanceof Date ? v.at : v.at != null ? new Date(v.at as string) : new Date();
+function resolveDefaults(v: AuditInsertValues, dbNow: Date): AuditChainFields & Record<string, unknown> {
+  const at = v.at instanceof Date ? v.at : v.at != null ? new Date(v.at as string) : dbNow;
   return {
     ...v,
     id: (v.id as string | undefined) ?? randomUUID(),
@@ -216,6 +224,14 @@ export async function appendChainedAuditRows(
   // 0067 has not run (impossible here, it created the row) or someone deleted
   // it. Starting a fresh chain from the genesis constant is the only sane
   // behaviour: verification will separately report the missing genesis.
+  // M-075: the rows' time on the DATABASE clock, read after the lock. `clock_timestamp()`, not `now()`:
+  // `now()` is when the enclosing transaction STARTED, so a transaction that waited on this lock (or did
+  // other work before its audit insert) would stamp a time earlier than rows already ahead of it in `seq`,
+  // and `at` would run backwards along the chain. Read under the lock, `at` never decreases along `seq` and
+  // records when the rows' place in the chain was fixed. Truncated to milliseconds in SQL (what a `Date`
+  // holds), so the value hashed below is the value stored.
+  const dbNow = await auditChainClock(tx);
+
   let prevHash = tip[0]?.rowHash ?? AUDIT_GENESIS_PREV_HASH;
   let nextSeq = (tip[0]?.seq ?? AUDIT_GENESIS_SEQ - 1) + 1;
 
@@ -237,7 +253,7 @@ export async function appendChainedAuditRows(
     // helpers, for the same reason chaining is (see this file's header): a
     // raw `db.insert(auditLog)` written next month is scrubbed without its
     // author knowing this line exists. Convention could not promise that.
-    const resolved = resolveDefaults(raw);
+    const resolved = resolveDefaults(raw, dbNow);
     // ADR-0188 decision 19: the boundary decides the version, never the caller
     const version = auditChainVersionAt(nextSeq, v2FromSeq);
     // ADR-0188 S4: stamp the acting agent from the async context (a row that names its own actor keeps it)
@@ -292,6 +308,18 @@ export async function appendChainedAuditRows(
   // row committed without its marker.
   await captureDecisionFacts(tx as never, rows);
   return out;
+}
+
+/**
+ * The audit chain's clock (M-075): the database's `clock_timestamp()`, truncated to milliseconds. The writer
+ * calls it under the chain lock; `appendChainedAuditRows` says why it is not `now()`.
+ */
+export async function auditChainClock(tx: { execute: (query: SQL) => PromiseLike<unknown> }): Promise<Date> {
+  const res = (await tx.execute(sql`select date_trunc('milliseconds', clock_timestamp()) as "at"`)) as { rows?: Array<{ at: Date | string }> };
+  const at = res.rows?.[0]?.at;
+  const d = at instanceof Date ? at : typeof at === "string" ? new Date(at) : null;
+  if (!d || Number.isNaN(d.getTime())) throw new Error("audit-chain: the database clock could not be read; nothing was appended");
+  return d;
 }
 
 /**

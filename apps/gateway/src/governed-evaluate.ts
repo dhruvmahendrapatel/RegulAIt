@@ -639,7 +639,9 @@ export async function governedEvaluate(
     const conditions = [
       eq(auditLog.userId, userId),
       eq(auditLog.effect, "allow"),
-      gte(auditLog.at, windowStart),
+      // M-075: `audit_log.at` is stamped on the database clock (audit-chain.ts), so the live window is
+      // measured on that clock too, never this replica's (a replay keeps its own recorded instant above)
+      gte(auditLog.at, sql`now() - make_interval(secs => ${l.windowSeconds})`),
       // ADR-0127 — count EXECUTIONS, not questions. `/v1/evaluate` and the G9
       // authorization callout answer "what would you decide" and run nothing,
       // but they wrote an `allow` row like any other, so a preview spent the
