@@ -33,6 +33,15 @@ export interface OrgRemediation {
   createdAt: string;
 }
 
+/** words for a status; "waiting for approval" rather than the code */
+export const REMEDIATION_STATUS_WORDS: Record<RemediationStatus, string> = {
+  pending_approval: "Waiting for approval",
+  applied: "Applied",
+  denied: "Denied",
+  failed: "Failed",
+};
+const statusWords = (s: string) => REMEDIATION_STATUS_WORDS[s as RemediationStatus] ?? humanize(s);
+
 export const remediationTone = (status: string): Tone =>
   status === "applied" ? "ok" : status === "pending_approval" ? "info" : status === "denied" || status === "failed" ? "danger" : "warn";
 
@@ -57,7 +66,7 @@ export function RemediationsCard() {
             <option value="">Any status</option>
             {REMEDIATION_STATUSES.map((s) => (
               <option key={s} value={s}>
-                {humanize(s)}
+                {statusWords(s)}
               </option>
             ))}
           </Select>
@@ -65,13 +74,13 @@ export function RemediationsCard() {
       </div>
       <QueryGate loading={list.isLoading} error={list.error} onRetry={() => void list.refetch()}>
         <Table<OrgRemediation>
-          rows={list.data?.proposals ?? []}
+          rows={Array.isArray(list.data?.proposals) ? list.data.proposals : []}
           rowKey={(r) => r.id}
-          empty={<span className={v.faint}>{status ? `No ${humanize(status).toLowerCase()} remediations.` : "No remediation has been proposed from any alert."}</span>}
+          empty={<span className={v.faint}>{status ? `No remediations with status “${statusWords(status).toLowerCase()}”.` : "No remediation has been proposed from any alert."}</span>}
           columns={[
             { key: "title", header: "Remediation", render: (r) => <span>{r.title}</span> },
             { key: "kind", header: "Kind", render: (r) => <code>{r.kind}</code> },
-            { key: "status", header: "Status", render: (r) => <Badge tone={remediationTone(r.status)}>{humanize(r.status)}</Badge> },
+            { key: "status", header: "Status", render: (r) => <Badge tone={remediationTone(r.status)}>{statusWords(r.status)}</Badge> },
             { key: "proposed", header: "Proposed", render: (r) => `${who(r.proposedByUserId)} · ${ago(r.createdAt)}`, sort: (r) => r.createdAt },
             {
               key: "decided",

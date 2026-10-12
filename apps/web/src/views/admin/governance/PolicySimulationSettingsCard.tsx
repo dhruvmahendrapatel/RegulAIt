@@ -35,7 +35,9 @@ export function PolicySimulationSettingsCard() {
   return (
     <Card title="Blast-radius settings">
       <QueryGate loading={settings.isLoading} error={settings.error} onRetry={() => void settings.refetch()}>
-        {settings.data ? (
+        {settings.data && !settings.data.settings ? (
+          <p className={v.faint}>This gateway does not report the blast-radius settings.</p>
+        ) : settings.data ? (
           <SettingsEditor
             key={settings.data.settings.updatedAt ?? "initial"}
             data={settings.data}

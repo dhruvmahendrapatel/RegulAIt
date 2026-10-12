@@ -57,7 +57,7 @@ export function EvalsSummaryCard(props: { onOpenRun?: (runId: string) => void })
   const [confirm, setConfirm] = useState(false);
   const [sweep, setSweep] = useState<DriftSweepResult | null>(null);
   const summary = useQuery({ queryKey: ["admin", "eval-summary"], queryFn: () => api.get<EvalsSummary>("/v1/evals/summary") });
-  const s = summary.data;
+  const s = summary.data && Array.isArray(summary.data.recent) ? summary.data : null;
   return (
     <Card
       title="Drift — recent runs across every dataset"

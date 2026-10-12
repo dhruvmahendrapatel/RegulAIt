@@ -65,7 +65,7 @@ export function SchedulerJobHistory(props: { name: string }) {
             { key: "err", header: "Error", render: (r) => r.error ?? <span className={v.faint}>—</span> },
           ]}
         />
-        {(runs.data?.runs.length ?? 0) >= limit ? (
+        {(runs.data?.runs?.length ?? 0) >= limit ? (
           <p className={v.faint}>Showing the latest {limit}. Older runs are kept; choose a larger number to see more.</p>
         ) : null}
       </QueryGate>

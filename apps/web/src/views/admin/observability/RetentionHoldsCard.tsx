@@ -46,7 +46,7 @@ export function RetentionHoldsCard() {
     const u = users.data?.users.find((x) => x.id === id);
     return u ? u.displayName || u.email : null;
   };
-  const rows = holds.data?.holds ?? [];
+  const rows = Array.isArray(holds.data?.holds) ? holds.data.holds : [];
   const set = <K extends keyof ReleaseForm>(k: K, value: ReleaseForm[K]) => {
     setProblem(null);
     setForm((f) => ({ ...f, [k]: value }));
@@ -63,7 +63,7 @@ export function RetentionHoldsCard() {
     <Card title="Retention holds">
       <p className={v.faint} id={ids.intro}>
         A hold keeps a trace past the retention floor
-        {holds.data ? ` (${holds.data.retention.floorDays} days; a hold lasts at most ${holds.data.retention.maxHoldDays} days)` : ""}.
+        {holds.data?.retention ? ` (${holds.data.retention.floorDays} days; a hold lasts at most ${holds.data.retention.maxHoldDays} days)` : ""}.
         Holds are placed by automation rules. Releasing one ends it now and is recorded with your reference.
       </p>
       <div className={a.formRow}>

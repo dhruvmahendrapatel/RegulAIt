@@ -56,7 +56,8 @@ function ContentEvaluationCard() {
     queryKey: ["admin", "trace-evaluations", days],
     queryFn: () => api.get<TraceEvaluationSummary>(`/v1/governance/trace-evaluations?days=${days}`),
   });
-  const s = summary.data;
+  // a gateway that answers without the summary shape is shown as not reported, never as zeros
+  const s = summary.data?.totals ? summary.data : null;
   return (
     <Card
       title="Content evaluation of model calls"
@@ -113,7 +114,7 @@ function ContentEvaluationCard() {
               Last evaluated: {s.lastEvaluatedAt ? ago(s.lastEvaluatedAt) : "never — run an evaluation before reading an empty table as clean"}
             </p>
             <Table<AgentTraceSummary>
-              rows={s.agents}
+              rows={s.agents ?? []}
               rowKey={(r) => r.agentId}
               empty={<span className={v.faint}>No evaluated model calls by any agent in this window.</span>}
               columns={[
@@ -130,9 +131,9 @@ function ContentEvaluationCard() {
                 { key: "attempts", header: "Input attempts", render: (r) => <span className={v.faint}>{detectorList(r.attemptsByDetector)}</span> },
               ]}
             />
-            <p className={v.faint}>{s.notes.method}</p>
-            <p className={v.faint}>{s.notes.leaks}</p>
-            <p className={v.faint}>{s.notes.coverage}</p>
+            <p className={v.faint}>{s.notes?.method}</p>
+            <p className={v.faint}>{s.notes?.leaks}</p>
+            <p className={v.faint}>{s.notes?.coverage}</p>
           </div>
         ) : null}
       </QueryGate>
