@@ -1,10 +1,10 @@
 ---
-phase: batch-6-identity-bom-isolation-slices
-last_updated: 2026-10-11
+phase: batch-6-hardening-before-s7-and-i4
+last_updated: 2026-10-12
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-11-session-01.md
+last_session: sessions/2026-10-12-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,38 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-12 - every built API route has UI or a stated reason; the installer sets the first admin.** Full record:
+[sessions/2026-10-12-session-01.md](sessions/2026-10-12-session-01.md).
+- **Merged (UTC 2026-10-12):**
+  - #365 review follow-ups for BOM verify, isolation and posture cards; #366 the installer asks for the first admin
+    (ADR-0194: no default password ships anywhere, and the bootstrap token is retired once the admin exists);
+  - #367 governance, policy and audit screens (U2); #369 integrations and identity screens (U1); #371 settings, users
+    and misc screens (U3); #370 test hygiene (no hardcoded demo passwords, credential-safe artifacts, per-entry egress
+    cleanup); #372 engines expiry tests pinned to one clock;
+  - #368 ADR-0188 S6: the identity admin routes go live with the workload identity UI (migration 0193);
+  - #373 ADR-0190 I2 placement decision (migration 0194);
+  - #374 route census in CI: every gateway route, all verbs, needs a screen or a stated reason;
+  - #375 the last 22 screens (U4): `KNOWN_UI_GAPS` is 0. The mocked UI suite moved from 3 to 5 CI shards, because
+    3 shards ran 12:30-14:35 against the 15-minute cap and one was cancelled at it.
+- **Outcome:** every built API route now has UI or is explicitly classified, and CI blocks a new unexplained route.
+- **Owner run:** the owner ran the stack locally on Docker, set the admin password through the installer flow and
+  signed in.
+- **Last migration:** 0194.
+- **Open owner items:**
+  - the source of project sensitivity for I2 (today the strictest use case, failing closed with no use case);
+  - the EU AI Act Art. 50 legal review;
+  - the I7 OpenShell go/no-go;
+  - 5 Dependabot alerts on main (4 high, 1 moderate);
+  - one demo-prep warn line the owner has not yet shared.
+- **Next, in order:**
+  1. Evidence and clock Lows: deny-audit rows, the `audit_log.at` database clock, the receipt-key retire action.
+  2. Backend secure-by-default step-up gaps: MCP registry enable, private ranges and `expectedServedModel`; plus a
+     server-side refusal of `[redacted:` scrub markers on `PATCH /v1/mrm/cards/:id`.
+  3. The shadow-AI remediation-plan body fix.
+  4. ADR-0188 S7, S8 and S9.
+  5. ADR-0189 B8 runbooks.
+  6. ADR-0190 I4 (stdio under gVisor).
 
 **2026-10-11 (night) - sign-off lookahead merged; Codex work adopted; branches cleaned up.**
 - **Sign-off lookahead (#357):** the executor checks sign-off in its claim transaction before any external effect, and
@@ -4865,6 +4897,10 @@ ADR-0009 (2026-07-24) chose the product stack: TypeScript
 end-to-end — Fastify gateway + official MCP SDK, hand-rolled pure policy kernel (typed
 `Decision` object, no OPA/Cedar), Postgres + Drizzle, pnpm-workspace monorepo
 (`apps/gateway`, `packages/policy-kernel`, `packages/db`, `packages/shared`).
+
+Batch 6 status (2026-10-12): ADR-0188 (agent and workload identity) is built through S6, with S7-S9 next; ADR-0190
+(isolation and execution profiles) is built through I2, with I4 next and the I2 sensitivity source open for the owner;
+ADR-0194 (the installer sets the first admin, no default password) is accepted and built (#366).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
