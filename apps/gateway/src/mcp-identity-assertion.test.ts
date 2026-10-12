@@ -27,13 +27,15 @@ import {
 } from "@regulait/shared";
 import { jwksDocument } from "./identity-signing-keys.js";
 import { pairwiseSubject } from "./delegated-token.js";
+import { classifyUpstreamError } from "./upstream-retry.js";
 import {
-  IdentityAssertionDestinationError,
+  IdentityAssertionRefusedError,
   identityAssertionMiddleware,
   identityPropagationUpdate,
   jsonRpcRequestMethod,
   OutboundIdentity,
   outboundIdentityFor,
+  pairwiseActor,
   refuseIdentityPropagationOnStdio,
   signIdentityAssertion,
 } from "./mcp-identity-assertion.js";
@@ -178,6 +180,35 @@ describe("S8 — the holder and the middleware", () => {
   const body = (method: string, id: number | null = 1) =>
     JSON.stringify(id === null ? { jsonrpc: "2.0", method } : { jsonrpc: "2.0", id, method, params: {} });
 
+  /** a stand-in for the egress-guarded fetch: it runs the holder's beforeSend (as the guard does) unless `blocked` */
+  function guard(id: OutboundIdentity, opts: { blocked?: boolean } = {}) {
+    const seen: Array<{ method: string | null; header: string | null }> = [];
+    const inner = async (input: string | URL, init?: RequestInit) => {
+      if (opts.blocked) throw new Error("egress refused (stand-in): nothing sent");
+      await id.beforeSend(init);
+      seen.push({ method: jsonRpcRequestMethod(init?.body), header: new Headers(init?.headers).get(IDENTITY_ASSERTION_HEADER) });
+      return new Response("{}", { status: 200 });
+    };
+    return { seen, fetch: identityAssertionMiddleware(id)(inner) };
+  }
+  function armed(id: OutboundIdentity, method = "tools/call", opts: { recordFails?: boolean } = {}) {
+    const log = { minted: 0, recorded: [] as string[], refused: [] as string[] };
+    id.arm(method, {
+      mint: async () => {
+        const n = ++log.minted;
+        return {
+          assertion: `assertion-${n}`,
+          record: async () => {
+            if (opts.recordFails) throw new Error("audit write failed");
+            log.recorded.push(`assertion-${n}`);
+          },
+        };
+      },
+      refuse: async (_m, code) => void log.refused.push(code),
+    });
+    return log;
+  }
+
   it("recognises one JSON-RPC request message only", () => {
     expect(jsonRpcRequestMethod(body("tools/call"))).toBe("tools/call");
     expect(jsonRpcRequestMethod(body("notifications/initialized", null))).toBeNull();
@@ -192,22 +223,15 @@ describe("S8 — the holder and the middleware", () => {
     expect(outboundIdentityFor({ url: `${AUD}?k=v`, identityPropagation: "signed_assertion" })!.audience).toBe(AUD);
   });
 
-  it("sends nothing unarmed; once armed, one fresh assertion per request of that method only; strips a forged header", async () => {
-    const seen: Array<{ url: string; method: string | null; header: string | null }> = [];
-    const inner = async (input: string | URL, init?: RequestInit) => {
-      const h = new Headers(init?.headers);
-      seen.push({ url: String(input), method: jsonRpcRequestMethod(init?.body), header: h.get(IDENTITY_ASSERTION_HEADER) });
-      return new Response("{}", { status: 200 });
-    };
+  it("sends nothing unarmed; once armed, one fresh assertion per request of that method only, recorded when sent; strips a forged header", async () => {
     const id = new OutboundIdentity(AUD);
-    const fetch = identityAssertionMiddleware(id)(inner);
+    const { seen, fetch } = guard(id);
     const post = (b: string, headers: Record<string, string> = {}) => fetch(AUD, { method: "POST", body: b, headers });
     // unarmed: the pre-decision connect (initialize, a manifest sync) carries nothing, and a forged header is removed
     await post(body("initialize"), { [IDENTITY_ASSERTION_HEADER]: "forged" });
     await post(body("tools/list"));
-    let n = 0;
-    id.arm("tools/call", async () => `assertion-${++n}`);
-    await post(body("notifications/initialized", null));
+    const log = armed(id);
+    await post(body("notifications/initialized", null), { [IDENTITY_ASSERTION_HEADER]: "forged" });
     await post(body("tools/call"));
     await post(body("tools/call", 2));
     await post(body("resources/read", 3));
@@ -221,24 +245,53 @@ describe("S8 — the holder and the middleware", () => {
       ["resources/read", null],
       [null, null],
     ]);
+    expect(log.recorded).toEqual(["assertion-1", "assertion-2"]);
     expect(id.sent).toBe(2);
     id.disarm();
     await post(body("tools/call", 4));
     expect(seen.at(-1)!.header).toBeNull();
   });
 
-  it("never sends an assertion to another origin: the request is refused before it leaves", async () => {
-    let calls = 0;
+  it("an assertion the egress guard refuses is never recorded as issued", async () => {
     const id = new OutboundIdentity(AUD);
-    id.arm("tools/call", async () => "assertion");
-    const fetch = identityAssertionMiddleware(id)(async () => {
-      calls += 1;
-      return new Response("{}");
-    });
-    await expect(fetch("https://elsewhere.example.com/mcp", { method: "POST", body: body("tools/call") })).rejects.toBeInstanceOf(
-      IdentityAssertionDestinationError,
-    );
-    expect(calls).toBe(0);
+    const { fetch } = guard(id, { blocked: true });
+    const log = armed(id);
+    await expect(fetch(AUD, { method: "POST", body: body("tools/call") })).rejects.toThrow(/egress refused/);
+    expect(log.minted).toBe(1);
+    expect(log.recorded).toEqual([]);
+    expect(id.sent).toBe(0);
+  });
+
+  it("a request bound for another origin, or whose disclosure cannot be audited, is our own refusal: denied, not sent, not retried", async () => {
+    const other = new OutboundIdentity(AUD);
+    const a = guard(other);
+    const la = armed(other);
+    const err = await a.fetch("https://elsewhere.example.com/mcp", { method: "POST", body: body("tools/call") }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(IdentityAssertionRefusedError);
+    expect((err as IdentityAssertionRefusedError).code).toBe("destination_mismatch");
+    expect(la.refused).toEqual(["destination_mismatch"]);
+    expect(la.minted).toBe(0);
+    expect(a.seen).toEqual([]);
+    expect(classifyUpstreamError(err)).toEqual({ retryable: false, why: "our_own_refusal" });
+
+    const unaudited = new OutboundIdentity(AUD);
+    const b = guard(unaudited);
+    const lb = armed(unaudited, "tools/call", { recordFails: true });
+    const err2 = await b.fetch(AUD, { method: "POST", body: body("tools/call") }).catch((e: unknown) => e);
+    expect((err2 as IdentityAssertionRefusedError).code).toBe("audit_failed");
+    expect(lb.refused).toEqual(["audit_failed"]);
+    expect(b.seen).toEqual([]);
+    expect(classifyUpstreamError(err2).why).toBe("our_own_refusal");
+  });
+
+  it("agents are pairwise per audience, domain-separated from the person's sub", () => {
+    const agent = CHAIN[1]!.identityId;
+    const here = pairwiseActor(PAIRWISE_KEY, AUD, agent);
+    expect(here).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(pairwiseActor(PAIRWISE_KEY, AUD, agent)).toBe(here);
+    expect(pairwiseActor(PAIRWISE_KEY, "https://other.example.com/mcp", agent)).not.toBe(here);
+    expect(here).not.toContain(agent);
+    expect(here).not.toBe(pairwiseSubject(PAIRWISE_KEY, AUD, agent));
   });
 });
 

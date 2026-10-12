@@ -44,7 +44,7 @@ export const ASSERTION_CLAIMS: ReadonlyArray<{ claim: string; meaning: string }>
   { claim: "iss", meaning: "this deployment's public URL (REGULAIT_PUBLIC_URL)" },
   { claim: "aud", meaning: "this server's URL, without query, fragment or credentials" },
   { claim: "sub", meaning: "the person the call is for, as a pairwise id: stable for this server, unlinkable across servers; never an email, name or user id" },
-  { claim: "act", meaning: "only when an agent acts: the chain of agent identities (SPIFFE IDs), the acting agent outermost" },
+  { claim: "act", meaning: "only when an agent acts: the chain of agents, the acting agent outermost, each as a pairwise id for this server (never its global workload id)" },
   { claim: "iat / exp", meaning: "a 60-second lifetime" },
   { claim: "jti", meaning: "unique per assertion: the upstream's replay key" },
 ];
@@ -77,7 +77,7 @@ export function regulaitIdentityVerifier({ issuer, audience }) {
     seen.set(payload.jti, payload.exp);
     const actors = [];
     for (let a = payload.act; a; a = a.act) actors.unshift(a.sub);
-    // subject: the pairwise id of the person; actors: root first, the acting agent last
+    // subject: the pairwise id of the person; actors: the pairwise ids of the agents, root first, acting agent last
     return { subject: payload.sub, actors };
   };
 }

@@ -565,6 +565,8 @@ export async function guardedMcpConnect(
       privateLan: { openByDefault: dest.posture.openByDefault },
       ...(deps.resolve ? { resolve: deps.resolve } : {}),
       ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      // ADR-0188 S8: an assertion's "issued" row is written once the destination is allowed, before it leaves
+      ...(deps.outboundIdentity ? { beforeSend: (init?: RequestInit) => deps.outboundIdentity!.beforeSend(init) } : {}),
     });
     launch = {
       transport: dest.transport,

@@ -69,7 +69,7 @@ import {
   McpEgressBlockedError,
   type McpUpstreamRow,
 } from "./mcp-egress.js";
-import { armOutboundIdentity, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
+import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { timeouts } from "./timeouts.js";
 import {
   attemptsForToolKind,
@@ -2275,7 +2275,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
           ...(workloadGrantId ? { delegationGrantId: workloadGrantId } : {}),
         }).catch(async (err: unknown) => {
           // the same named policy refusal a tools/call raises post-hijack
-          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
+          if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
             await finishTrace(db, protocolTrace, "denied");
             throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
           }
@@ -2414,7 +2414,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
         // answers. It is the SAME named policy refusal the manifest handler
         // raises post-hijack — never a generic internal error, and never the
         // breaker's "retry later".
-        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError) {
+        if (err instanceof McpAdmissionHeldError || err instanceof McpEgressBlockedError || err instanceof IdentityAssertionRefusedError) {
           await finishTrace(db, toolTrace, "denied");
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
         }

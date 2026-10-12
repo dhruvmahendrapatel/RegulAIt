@@ -32,7 +32,8 @@ export function IdentityPropagationCell(props: { server: McpServer }) {
   const stored = identityPropagationOf(props.server);
   const [value, setValue] = useState(stored);
   const [confirming, setConfirming] = useState(false);
-  if (props.server.transport === "stdio") return <>Not applicable</>;
+  // `data-identity-propagation`: a stable hook for the screen tests (never a column position)
+  if (props.server.transport === "stdio") return <span data-identity-propagation="">Not applicable</span>;
   const save = (next: IdentityPropagation) =>
     void act.run(
       () =>
@@ -43,7 +44,7 @@ export function IdentityPropagationCell(props: { server: McpServer }) {
   return (
     // the registry rows are clickable (they toggle the cards below); editing here, and the confirmation (rendered
     // in place), must not also toggle the row
-    <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+    <span data-identity-propagation="" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
       <form
         className={v.row}
         aria-label={`Identity to upstream for ${props.server.name}`}
@@ -80,8 +81,8 @@ export function IdentityPropagationCell(props: { server: McpServer }) {
         confirmLabel="Send a signed assertion"
         body={
           <p>
-            Every allowed call to {props.server.name} will carry a signed assertion of who it is for (a pairwise id, never an email or name) and
-            which agent is acting. This shares identity data with a third party, so it relaxes the strict default and asks you to confirm
+            Every allowed call to {props.server.name} will carry a signed assertion of who it is for and which agent is acting, each as a pairwise
+            id for this server (never an email, a name or a global agent id). This shares identity data with a third party, so it relaxes the strict default and asks you to confirm
             it&apos;s you. The change is audited, and it turns off again if the server&apos;s URL changes.
           </p>
         }
@@ -127,7 +128,7 @@ export function McpIdentityAssertionCard(props: { server: McpServer | undefined 
               </li>
             ))}
           </ul>
-          <p>Never sent: the person&apos;s email, name or user id, roles, project, grant, tool arguments, scope or budget.</p>
+          <p>Never sent: the person&apos;s email, name or user id, an agent&apos;s global workload id, roles, project, grant, tool arguments, scope or budget.</p>
           <details>
             <summary>Verification example for the upstream operator (JavaScript, jose)</summary>
             <pre className={a.snippet} data-testid="mcp-identity-verify-example">

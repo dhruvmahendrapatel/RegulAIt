@@ -138,7 +138,13 @@ import {
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
-import { auditIdentityPropagationChange, identityPropagationUpdate, refuseIdentityPropagationOnStdio } from "./mcp-identity-assertion.js";
+import {
+  auditIdentityPropagationChange,
+  identityPropagationUpdate,
+  lockIdentityAudiences,
+  refuseIdentityPropagationOnStdio,
+  refuseSharedIdentityAudience,
+} from "./mcp-identity-assertion.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
   AUTH_REFUSAL_DETAIL,
@@ -2159,6 +2165,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           },
         }
       : null;
+    // ADR-0188 S8: two opted-in servers never share an audience (asked before any step-up; re-checked under a lock below)
+    if (identity.relaxed) {
+      const shared = await refuseSharedIdentityAudience(db, serverId, nextUrl);
+      if (shared) return reply.status(shared.status).send(shared.body);
+    }
     // ADR-0185 I9 — an owner named on PATCH goes through the same audited change as PUT …/owner. A refused
     // request changes NOTHING: the owner target is validated (its refusal audited by the one owner writer) and
     // both step-ups are looked at (not spent) before anything is written; then the ranges grant is spent, the
@@ -2210,6 +2221,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const touchesPosture = body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
       const out = await db.transaction(async (tx): Promise<Patched> => {
+        if (identity.relaxed) {
+          await lockIdentityAudiences(tx);
+          const shared = await refuseSharedIdentityAudience(tx, serverId, nextUrl);
+          if (shared) return { refused: { status: shared.status, body: shared.body } };
+        }
         const [written] = await tx
           .update(mcpServers)
           .set(patch)

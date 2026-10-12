@@ -1265,14 +1265,24 @@ in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle
    `act` when an agent acts. Nothing else is sent.
    - `sub` is the person, as the S3 pairwise subject (an HMAC of the audience and the user id, keyed from the data key).
      It is stable for one server and cannot be linked across servers.
-   - `act` is rebuilt from the stored chain by `actClaimFromChain`, the same function the delegated tokens use. The
-     acting agent is outermost, and each link is the agent's SPIFFE ID.
-   - Never sent: the email, display name, user id, roles, project, grant id, environment, tool arguments, scope and
-     budget.
+   - `act` is the stored chain in RFC 8693 nesting (`actClaimFromChain`, the same function the delegated tokens use),
+     the acting agent outermost. Each agent is named by a **pairwise** id: an HMAC of (audience, workload identity id)
+     under the S3 pairwise key, domain-separated from `sub` (`pairwiseActor`).
+   - Never sent: the email, display name, user id, an agent's SPIFFE ID or any admin-typed identifier, roles, project,
+     grant id, environment, tool arguments, scope and budget.
 
    *Why:* OWNER DECISION 6 asks for "pairwise subjects and no email or name". An upstream needs to recognise a person
-   and an agent, not to know who they are. Agent SPIFFE IDs are not pairwise. Agents are not people, and decision 8
-   names the chain itself.
+   and an agent, not to know who they are. The first build sent each agent's global SPIFFE ID. The #379 security
+   review (MEDIUM) showed that two upstreams could then join on `act.sub`, and through it on the person, which undoes
+   the pairwise `sub`; and an external identifier is admin-typed text that can carry a name. So agents are pairwise by
+   default (ADR-0180). The audit row keeps the internal identity ids beside the pairwise ids, so an operator can map
+   one back.
+
+   *Not built yet:* the review also asked for a separate, opt-in per-server relaxation, "disclose agent workload IDs"
+   (a `settings_relax` step-up bound to `{op: "mcp_server_update", serverId, url, values}`, audited, reset by a url
+   move, in the compare-and-set, with a UI confirmation). It needs a new `mcp_servers` column (there is no JSON
+   settings column, and `identity_propagation`'s CHECK allows two values). It waits for a migration number to be
+   coordinated with S7 (0195). Until then the only behaviour is the strict one.
 2. **The format, from standards (ADR-0176).**
    - It is an RFC 7519 JWT, signed with EdDSA by the issuer's current key. It verifies against the existing S3 JWKS
      (`/.well-known/jwks.json`) with any JOSE library.
@@ -1292,7 +1302,9 @@ in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle
 3. **Decision 5 and sender constraint.** The assertion carries no `cnf`. Decision 5's invariant is about access
    tokens, which grant use of a RegulAIt resource and so must be bound to their holder. The assertion grants nothing
    at RegulAIt (item 2). It is provenance that the gateway presents once, over the egress-guarded connection, to the
-   one audience it names. Replay is bounded by the 60 s lifetime and the per-request `jti`.
+   one audience it names. Replay is bounded by the 60 s lifetime and the per-request `jti`. **Scope of decision 5:** a
+   `typ`-distinct provenance JWT that grants nothing at RegulAIt is outside decision 5's sender-binding invariant; the
+   invariant still covers every token RegulAIt accepts.
 4. **When it is sent.**
    - One holder is created per governed call (`outboundIdentityFor`) and installed on that call's connection. It uses
      the MCP SDK's fetch middleware hook (`createMiddleware`) over the egress-guarded fetch.
@@ -1304,15 +1316,22 @@ in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle
      nothing.
    - A forged value in the header is removed.
    - A request to any origin other than the one the assertion names is refused before it leaves.
+   - The signing key is captured when the holder is armed, so nothing is re-selected at send time.
    - In-process chains (S4) and workload callers (S5, through the proxy route, which now receives the data key) send
      their chain in `act`.
 5. **Fail closed, and audit every disclosure.**
    - An opted-in server never receives a call without its assertion. If there is no issuer (`REGULAIT_PUBLIC_URL`), no
-     data key, no canonical audience, no active signing key, or the server is stdio, the call is refused before
-     anything is contacted. The refusal is a `mcp-identity-assertion-unavailable` decision deny with a `code`. That
-     makes `mcp-identity-assertion.ts` a B2 decision writer (ADR-0189), and it is now on the B2 list.
-   - Every assertion sent writes `mcp-identity-assertion-issued`. The row holds the `jti`, `kid`, audience, pairwise
-     `sub`, the method and the actor chain's identity ids. It never holds the token.
+     data key, no canonical audience, no active signing key, or the server is stdio, the call is refused before the
+     call or any identity is sent. The refusal is a `mcp-identity-assertion-unavailable` decision deny with a `code`.
+     That makes `mcp-identity-assertion.ts` a B2 decision writer (ADR-0189), and it is now on the B2 list.
+   - A refusal at send time (a request bound for another origin, a signature or an audit write that fails) writes the
+     same deny and throws `IdentityAssertionRefusedError`, which `classifyUpstreamError` names as our own refusal:
+     never retried, never charged to the upstream's breaker, and mapped to "Denied by policy" on the proxy route.
+   - Every assertion sent writes `mcp-identity-assertion-issued`. The row is written in the egress guard's
+     `beforeSend` hook (which now receives the request's init): after the destination check allowed the request and
+     just before it leaves. A request the guard refuses leaves no row, and a request whose row cannot be written is not
+     sent. The row holds the `jti`, `kid`, audience, pairwise `sub`, the method, the pairwise actor ids and the
+     identity ids they stand for. It never holds the token.
 6. **The setting is a relaxation (ADR-0180), following the #378 pattern.**
    - `PATCH /v1/servers/:serverId` accepts `identityPropagation`.
    - Turning it on needs a `settings_relax` step-up. The facts are `{op: "mcp_server_update", serverId, url, values:
@@ -1323,11 +1342,19 @@ in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle
      value, audited with `resetByUrlMove`, and no step-up is needed. A url move that keeps it on is a relaxation bound
      to the new url.
    - The compare-and-set of that write now also compares `identity_propagation`.
+   - **One audience, one opted-in server.** Turning it on for a server whose canonical audience equals another opted-in
+     server's is refused `409 identity_audience_shared`, before any step-up, and again under a transaction-scoped
+     advisory lock inside the write so two concurrent opt-ins cannot both pass. An assertion for one would otherwise
+     verify at the other. The canonicalisation is stated exactly in the format doc, which points operators to the
+     audience the server's card shows.
    - A stdio server is refused with `409 identity_propagation_unsupported`: it has no HTTP request to carry the
      header. It may still be set to `none`.
    - No route was added, so the route census is unchanged at 0 known UI gaps.
 7. **UI and documentation.**
-   - The MCP servers registry has an "Identity to upstream" column, saved through `withStepUp`.
+   - The MCP servers registry has an "Identity to upstream" column, saved through `withStepUp`. Turning it on is
+     confirmed first (what is shared, that it relaxes the strict default, that a url move turns it off).
+   - The Playwright mock spec (`u1-integrations-gaps.mock.spec.ts`) covers turning it on (confirmation, step-up,
+     resent once), off (no step-up), the card, the stdio refusal and axe; cells are found by a `data-` hook.
    - A selected server shows a card. The card has the format, the claims, the audience for that server and the
      verification example.
    - The example in the doc is run verbatim against a live JWKS in the route's format by
@@ -1340,8 +1367,7 @@ Open after S8:
   new subject for the same person after a rotation. The doc says so, and the data-key rotation runbook should too.
 - **Upstream replay sets across replicas** are the upstream's concern. The doc says to keep the `jti` set in shared
   storage.
-- **No Playwright mock spec yet** for the new column. The model is unit-tested, and the step-up and audit paths are
-  covered by `zz-adr0188-s8-outbound-identity.test.ts`.
+- **The "disclose agent workload IDs" relaxation** (item 1) waits for a coordinated migration number.
 
 ## Test strategy
 

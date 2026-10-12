@@ -19,11 +19,17 @@ When it is on:
 - Every governed `tools/call` (and the request of every governed protocol method, such as `resources/read`) carries a
   fresh assertion. Each request gets its own `jti`. Nothing is sent on `initialize`, notifications, the event stream, or
   any connection opened before the call was allowed.
-- Every assertion sent is audited (`mcp-identity-assertion-issued`). The audit row holds the `jti`, the signing key id,
-  the audience, the pairwise subject and the actor chain, but never the token itself.
+- Every assertion sent is audited (`mcp-identity-assertion-issued`). The row is written after the gateway's egress
+  check allowed the request and just before it leaves, so a request the egress guard refuses leaves no "issued" row,
+  and a request whose row cannot be written is not sent. The row holds the `jti`, the signing key id, the audience,
+  the pairwise subject and the pairwise actor ids (with the internal identity ids they stand for), but never the token.
 - If RegulAIt cannot make an assertion, the call is refused and audited (`mcp-identity-assertion-unavailable`). It is
   never sent without one. This happens when there is no public URL, no data key, no active signing key, or the server
-  is a stdio server.
+  is a stdio server; the call and any identity are refused before either is sent. A refusal at send time (a request
+  bound for another origin, or an audit row that cannot be written) is refused the same way.
+- Two servers that receive assertions may not share an audience: turning it on for a server whose canonical URI
+  (below) equals another opted-in server's is refused (409 `identity_audience_shared`), because an assertion for one
+  would verify at the other.
 
 ## The format
 
@@ -35,17 +41,29 @@ A JWS (RFC 7515) compact JWT (RFC 7519), signed with EdDSA (Ed25519, RFC 8037).
 | header `typ` | `regulait-mcp-identity+jwt` (explicit typing, RFC 8725 §3.11). It is never `at+jwt`, so it cannot be used as a RegulAIt access token, and an access token cannot pass for it. |
 | header `kid` | the signing key, as listed in the JWKS |
 | `iss` | the RegulAIt deployment's public URL (`REGULAIT_PUBLIC_URL`) |
-| `aud` | the server's canonical URI: scheme, host, port and path of its registered URL. There is no query, fragment or credentials, so a secret in a URL query never ends up in a token. |
+| `aud` | the server's canonical URI (exact rule below). There is no query, fragment or credentials, so a secret in a URL query never ends up in a token. |
 | `sub` | the person the call is for, as a **pairwise** subject. It is an HMAC of the audience and the person's internal id. It is stable for one server, so the upstream can recognise a returning person, but it cannot be linked across servers. It is never an email, a name or a user id. |
-| `act` | only when an agent acts. This is the RFC 8693 §4.1 nested actor claim: `act.sub` is the acting agent's SPIFFE ID, and a nested `act` is the agent that delegated to it, back to the root. |
+| `act` | only when an agent acts. This is the RFC 8693 §4.1 nested actor claim: `act.sub` is the acting agent and a nested `act` is the agent that delegated to it, back to the root. Each agent is named by a **pairwise** id: an HMAC of the audience and the agent's internal workload identity id, under the same key as `sub` but domain-separated from it. It is stable for one server and cannot be linked across servers. It is never the agent's global SPIFFE ID or any admin-typed identifier. |
 | `iat`, `exp` | issued-at and expiry; the lifetime is 60 seconds |
 | `jti` | unique per assertion; use it as the replay key |
 
 No other claim is sent. In particular, the assertion does not include the person's email, display name, user id,
 roles, the project, the delegation grant, the environment, the tool arguments, the scope or the budget.
 
-The `sub` changes for everyone if the server's URL changes (the audience is part of the HMAC), or if the RegulAIt
-deployment rotates its data key.
+The `sub` and the actor ids change for everyone if the server's canonical URI changes (the audience is part of the
+HMAC), or if the RegulAIt deployment rotates its data key.
+
+### The audience, exactly
+
+`aud` is the server's registered URL after WHATWG URL parsing, reduced to `scheme://host[:port]path`:
+
+- the scheme and host are lower-cased, and a default port (`:443` for https, `:80` for http) is dropped;
+- the query, the fragment and any `user:password@` are dropped;
+- the path is kept as parsed: a URL with no path gets `/` (`https://mcp.example.com` → `https://mcp.example.com/`),
+  and a trailing slash on a longer path is kept, so `/mcp` and `/mcp/` are different audiences.
+
+Upstream operators: do not derive the value yourself. The MCP servers page shows the exact audience for each server
+(select the server; the "Identity sent to this upstream" card), and that is the string to configure as `audience`.
 
 ### Why this header and not `Authorization`
 
@@ -92,7 +110,7 @@ export function regulaitIdentityVerifier({ issuer, audience }) {
     seen.set(payload.jti, payload.exp);
     const actors = [];
     for (let a = payload.act; a; a = a.act) actors.unshift(a.sub);
-    // subject: the pairwise id of the person; actors: root first, the acting agent last
+    // subject: the pairwise id of the person; actors: the pairwise ids of the agents, root first, acting agent last
     return { subject: payload.sub, actors };
   };
 }

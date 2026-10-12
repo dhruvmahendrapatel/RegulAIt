@@ -173,6 +173,7 @@ const CODE_SENTENCES: Record<string, string> = {
   // compare-and-set on what its step-up was decided on; the screens that make one read the refusal here
   changed_concurrently: "Someone changed this while you were saving, so nothing was written. Reload and repeat the change",
   // ADR-0188 S8: a stdio MCP server has no HTTP request to carry an identity assertion
+  identity_audience_shared: "Another MCP server already receives identity assertions for this same address, so an assertion for one would be accepted by the other. Nothing was saved",
   identity_propagation_unsupported: "This server runs as a local (stdio) process, so it cannot receive an identity assertion. Nothing was saved",
   unavailable: "This record isn't available — it may not exist, or it may belong to someone else",
   not_found: "No such record",

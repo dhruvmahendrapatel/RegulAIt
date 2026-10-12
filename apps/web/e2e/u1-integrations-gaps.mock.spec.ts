@@ -351,9 +351,9 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("MCP servers — identity to upstream (ADR-0188 S8)", () => {
-  // the registry table's columns: ... 8 private ranges, 9 identity to upstream, 10 proxy id (0-based index 8)
-  const IDENTITY_CELL = 8;
   const row = (page: Page, name: string) => page.getByRole("link", { name: `Show tools on ${name}`, exact: true });
+  /** the identity cell's content, by its stable hook (never a column position) */
+  const identityCell = (page: Page, name: string) => row(page, name).locator("[data-identity-propagation]");
 
   test("turning it on is confirmed, then stepped up and resent once; turning it off asks nothing; the card shows the format", async ({ page }) => {
     const SRV: Json = { ...CLEAN, id: U(410), name: "search", url: "https://search.example.test/mcp?key=s3cret", identityPropagation: "none" };
@@ -383,7 +383,7 @@ test.describe("MCP servers — identity to upstream (ADR-0188 S8)", () => {
     await setting.selectOption("signed_assertion");
     await form.getByRole("button", { name: "Save" }).click();
     const confirm = page.getByRole("dialog", { name: "Send caller identity to search?" });
-    await expect(confirm).toContainText("pairwise id, never an email or name");
+    await expect(confirm).toContainText("pairwise id for this server (never an email, a name or a global agent id)");
     await axeMcpServers(page, "identity to upstream confirmation");
     await confirm.getByRole("button", { name: "Send a signed assertion" }).click();
     await confirmStepUp(page);
@@ -432,7 +432,7 @@ test.describe("MCP servers — identity to upstream (ADR-0188 S8)", () => {
       })],
     ]);
     await page.goto("/ui/admin/mcp-servers");
-    await expect(row(page, "local-files").locator("td").nth(IDENTITY_CELL)).toHaveText("Not applicable", { timeout: 30_000 });
+    await expect(identityCell(page, "local-files")).toHaveText("Not applicable", { timeout: 30_000 });
     await expect(page.getByLabel("Identity sent to upstream local-files")).toHaveCount(0);
 
     const setting = page.getByLabel("Identity sent to upstream legacy");
@@ -443,7 +443,7 @@ test.describe("MCP servers — identity to upstream (ADR-0188 S8)", () => {
     await page.getByRole("dialog", { name: "Send caller identity to legacy?" }).getByRole("button", { name: "Send a signed assertion" }).click();
     await expect(form.getByRole("alert")).toContainText("cannot receive an identity assertion");
     expect(sent(calls, "PATCH", `/v1/servers/${LEGACY.id}`)).toEqual([{ identityPropagation: "signed_assertion" }]);
-    await expect(row(page, "legacy").locator("td").nth(IDENTITY_CELL)).toContainText("cannot receive an identity assertion");
+    await expect(identityCell(page, "legacy")).toContainText("cannot receive an identity assertion");
     await axeMcpServers(page, "identity refusal");
   });
 });

@@ -37,7 +37,12 @@
  *   sub  the person the call is for, PAIRWISE: an HMAC of (aud, user id) under
  *        the S3 pairwise key. Stable for one server, unlinkable across servers;
  *        never the user id, an email, a name or a role
- *   act  only when an agent acts: the chain of SPIFFE identifiers
+ *   act  only when an agent acts: the chain (RFC 8693 nesting, acting agent
+ *        outermost), each agent named by a PAIRWISE id: an HMAC of (aud,
+ *        workload identity id) under the same key, domain-separated from
+ *        `sub`. Never the global SPIFFE ID: two upstreams could join on it
+ *        (and through it on the person), and an external identifier is
+ *        admin-typed text that can carry a name (ADR-0180)
  *   iat, exp  a 60 s lifetime; jti  unique per assertion (the upstream's
  *        replay key)
  * Not sent: the user id, email, display name, roles, project, delegation grant
@@ -57,14 +62,19 @@ export const IDENTITY_ASSERTION_CLAIMS = ["iss", "aud", "sub", "act", "iat", "ex
 export const IDENTITY_PROPAGATION_CHANGED_RULE_ID = "mcp-server-identity-propagation-changed";
 export const IDENTITY_ASSERTION_ISSUED_RULE_ID = "mcp-identity-assertion-issued";
 export const IDENTITY_ASSERTION_UNAVAILABLE_RULE_ID = "mcp-identity-assertion-unavailable";
+/** the PATCH refusal when another opted-in server has the same canonical audience (an assertion would verify at both) */
+export const IDENTITY_AUDIENCE_SHARED = "identity_audience_shared" as const;
 /** the PATCH refusal for a stdio server, which has no HTTP request to carry a header */
 export const IDENTITY_PROPAGATION_UNSUPPORTED = "identity_propagation_unsupported" as const;
 
 /**
  * The upstream's canonical URI: `scheme://host[:port]/path`, lower-case scheme
  * and host, default port dropped, no credentials, query or fragment (the MCP
- * authorization spec's canonical server URI). Null for anything that is not an
- * absolute http(s) URL. Parsed with `URL`, never a regular expression.
+ * authorization spec's canonical server URI). The path is kept exactly as the
+ * WHATWG URL parser normalises it: a root URL keeps its single `/`, and a
+ * trailing slash on a longer path is kept (`/mcp` and `/mcp/` differ).
+ * Null for anything that is not an absolute http(s) URL. Parsed with `URL`,
+ * never a regular expression.
  */
 export function canonicalMcpAudience(url: string): string | null {
   let u: URL;
