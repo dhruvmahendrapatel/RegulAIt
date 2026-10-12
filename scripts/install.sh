@@ -96,8 +96,13 @@ Secrets
   --data-key <hex64>               REGULAIT_DATA_KEY. Also read from the
                                    environment or from an existing .env.
                                    Generated (and printed once) if absent.
-  --admin-token <tok>              REGULAIT_BOOTSTRAP_TOKEN used to create the
-                                   first admin. Generated if absent.
+  --admin-token <tok>              REGULAIT_BOOTSTRAP_TOKEN, the identity-less
+                                   break-glass admin credential. Generated if
+                                   absent, and RETIRED by the installer once the
+                                   first admin exists (ADR-0194), also when you
+                                   pass it on a first install. Passing it AFTER
+                                   it was retired re-opens that door on purpose
+                                   (break-glass) until a run without it.
   --db-password <pw>               Postgres password. Generated on a first
                                    install; preserved on every re-run.
   --receipt-key-file <host path>   ADR-0189 R25: a receipt signing key YOU
@@ -107,6 +112,19 @@ Secrets
                                    preserved on every re-run. Omitted: the
                                    install generates its own key (see
                                    docs/deployment/INSTALL.md).
+
+First admin (ADR-0194)
+  An interactive install asks for the first admin's username (default
+  "admin"), email and password (twice, not echoed) once the stack is up. The
+  org password policy is checked before anything is created. The password is
+  never written to .env, a compose file, a log, shell history or audit detail.
+  Non-interactive (--yes, or no terminal): set these in the environment.
+    REGULAIT_FIRST_ADMIN_PASSWORD_FILE  a file holding the password, mode 0600
+                                        or stricter (never a command argument)
+    REGULAIT_FIRST_ADMIN_EMAIL          required with the file
+    REGULAIT_FIRST_ADMIN_USERNAME       default: admin
+  Without the file a non-interactive install skips the step; see the summary
+  for the manual path. A deployment that already has an admin skips it too.
 
 Air-gapped
   --image-bundle <path.tar>        `docker load` this image bundle before
@@ -143,6 +161,14 @@ SAML_ENTITY_ID="${REGULAIT_SAML_ENTITY_ID-}"
 SAML_CLOCK_SKEW="${REGULAIT_SAML_CLOCK_SKEW_MINUTES-}"
 DATA_KEY="${REGULAIT_DATA_KEY:-}"
 ADMIN_TOKEN="${REGULAIT_BOOTSTRAP_TOKEN:-}"
+ADMIN_TOKEN_FLAG=0
+# ADR-0194: 1 once the installer has retired the bootstrap token (recorded in .env, read back on re-runs)
+BOOTSTRAP_RETIRED=0
+# 1 only when --admin-token re-opens a token an earlier run retired (break-glass); never on a first install
+TOKEN_REOPENED=0
+FIRST_ADMIN_PASSWORD_FILE="${REGULAIT_FIRST_ADMIN_PASSWORD_FILE:-}"
+FIRST_ADMIN_USERNAME="${REGULAIT_FIRST_ADMIN_USERNAME:-}"
+FIRST_ADMIN_EMAIL="${REGULAIT_FIRST_ADMIN_EMAIL:-}"
 DB_PASSWORD="${REGULAIT_DB_PASSWORD:-}"
 # ADR-0189 R25 item 12: an operator-managed receipt key (host path + key id). Empty = install-generated.
 RECEIPT_KEY_FILE="${REGULAIT_RECEIPT_KEY_HOST_FILE:-}"
@@ -173,7 +199,7 @@ while [ $# -gt 0 ]; do
     --saml-entity-id)  SAML_ENTITY_ID="${2:-}"; shift 2 ;;
     --saml-clock-skew) SAML_CLOCK_SKEW="${2:-}"; shift 2 ;;
     --data-key)      DATA_KEY="${2:-}"; shift 2 ;;
-    --admin-token)   ADMIN_TOKEN="${2:-}"; shift 2 ;;
+    --admin-token)   ADMIN_TOKEN="${2:-}"; ADMIN_TOKEN_FLAG=1; shift 2 ;;
     --db-password)   DB_PASSWORD="${2:-}"; shift 2 ;;
     --receipt-key-file) RECEIPT_KEY_FILE="${2:-}"; shift 2 ;;
     --receipt-key-id)   RECEIPT_KEY_ID="${2:-}"; shift 2 ;;
@@ -349,6 +375,7 @@ if [ -f "$ENV_FILE" ]; then
   PRIOR_SEED="$(env_get "$ENV_FILE" SEED_DEMO)"
   [ -n "$DATA_KEY" ]     || DATA_KEY="$(env_get "$ENV_FILE" REGULAIT_DATA_KEY)"
   [ -n "$ADMIN_TOKEN" ]  || ADMIN_TOKEN="$(env_get "$ENV_FILE" REGULAIT_BOOTSTRAP_TOKEN)"
+  PRIOR_RETIRED="$(env_get "$ENV_FILE" REGULAIT_BOOTSTRAP_RETIRED)"
   [ -n "$DB_PASSWORD" ]  || DB_PASSWORD="$(env_get "$ENV_FILE" REGULAIT_DB_PASSWORD)"
   if [ -z "$RECEIPT_KEY_FILE" ] && [ -z "$RECEIPT_KEY_ID" ]; then
     RECEIPT_KEY_FILE="$(env_get "$ENV_FILE" REGULAIT_RECEIPT_KEY_HOST_FILE)"
@@ -519,9 +546,47 @@ BANNER
   fi
 fi
 
-[ -n "$ADMIN_TOKEN" ] || { ADMIN_TOKEN="$(rand_token)"; GENERATED_ADMIN_TOKEN=1; }
-if [ "$ADMIN_TOKEN" = "dev-bootstrap" ]; then
-  die "REGULAIT_BOOTSTRAP_TOKEN is the published dev default 'dev-bootstrap'. That token authenticates as a full admin with no user identity (apps/gateway/src/auth.ts). Pass --admin-token, or drop it and one will be generated."
+# ADR-0194: once the installer has retired the bootstrap token (the first admin exists), a re-run keeps it
+# retired: no token is generated and none is written. Only an explicit --admin-token re-opens the door (a
+# break-glass recovery the operator chose); a token merely exported in the shell is ignored.
+if [ "${PRIOR_RETIRED:-}" = "1" ]; then
+  if [ "$ADMIN_TOKEN_FLAG" = "1" ] && [ -n "$ADMIN_TOKEN" ]; then
+    TOKEN_REOPENED=1
+    warn "--admin-token re-opens the retired bootstrap token: a full-admin credential with no user identity. Retire it again by re-running this installer without --admin-token once you are done."
+  else
+    if [ -n "$ADMIN_TOKEN" ]; then
+      warn "REGULAIT_BOOTSTRAP_TOKEN is set in the environment but this install retired the bootstrap token (ADR-0194); it is ignored. Pass --admin-token to re-open it on purpose."
+    fi
+    ADMIN_TOKEN=""
+    BOOTSTRAP_RETIRED=1
+  fi
+fi
+if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
+  ok "bootstrap token: retired (the first admin exists; ADR-0194)"
+else
+  [ -n "$ADMIN_TOKEN" ] || { ADMIN_TOKEN="$(rand_token)"; GENERATED_ADMIN_TOKEN=1; }
+  if [ "$ADMIN_TOKEN" = "dev-bootstrap" ]; then
+    die "REGULAIT_BOOTSTRAP_TOKEN is the published dev default 'dev-bootstrap'. That token authenticates as a full admin with no user identity (apps/gateway/src/auth.ts). Pass --admin-token, or drop it and one will be generated."
+  fi
+fi
+
+# ADR-0194 — the first admin, non-interactive half: validated here so --check proves it.
+# shellcheck source-path=SCRIPTDIR source=lib/first-admin.sh
+. "$SCRIPT_DIR/lib/first-admin.sh"
+FIRST_ADMIN_USERNAME="$(printf '%s' "${FIRST_ADMIN_USERNAME:-admin}" | tr '[:upper:]' '[:lower:]')"
+if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
+  problem="$(fa_password_file_problem "$FIRST_ADMIN_PASSWORD_FILE")"
+  [ -z "$problem" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE: $problem"
+  [ -n "$FIRST_ADMIN_EMAIL" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is set but REGULAIT_FIRST_ADMIN_EMAIL is not: the first admin needs an email."
+  problem="$(fa_username_problem "$FIRST_ADMIN_USERNAME")"
+  [ -z "$problem" ] || die "REGULAIT_FIRST_ADMIN_USERNAME: $problem"
+  problem="$(fa_email_problem "$FIRST_ADMIN_EMAIL")"
+  [ -z "$problem" ] || die "REGULAIT_FIRST_ADMIN_EMAIL: $problem"
+  ok "first admin: from REGULAIT_FIRST_ADMIN_PASSWORD_FILE (mode checked; the password is never printed), username '$FIRST_ADMIN_USERNAME'"
+elif [ "$ASSUME_YES" != "1" ] && [ -t 0 ]; then
+  ok "first admin: asked for interactively once the stack is up"
+else
+  info "first admin: non-interactive and no REGULAIT_FIRST_ADMIN_PASSWORD_FILE — the step will be skipped (manual path in the summary)"
 fi
 
 # The Postgres password is only honoured on FIRST initdb. If the volume already
@@ -730,10 +795,24 @@ COMPOSE_PROJECT_NAME=$PROJECT
 # A deliberate rotation is declared with REGULAIT_DATA_KEY_ROTATED_FROM=<old fp>
 # (single-use; remove it once consumed). Nothing re-encrypts existing ciphertext.
 REGULAIT_DATA_KEY=$DATA_KEY
-# Authenticates as a full admin with no user identity. Used ONCE to create the
-# first real admin, then should be removed from this file and the stack
-# restarted.
+ENV
+  if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
+    cat <<'ENV'
+# REGULAIT_BOOTSTRAP_TOKEN was RETIRED by the installer once the first admin
+# existed (ADR-0194). compose.install.yml pins it to the empty string (absent
+# here, docker-compose.yml would fall back to its published dev default, which
+# the gateway refuses). Re-open it deliberately with --admin-token.
+REGULAIT_BOOTSTRAP_RETIRED=1
+ENV
+  else
+    cat <<ENV
+# Authenticates as a full admin with no user identity. It exists to create the
+# first real admin; the installer retires it (removes it from this file and
+# restarts the gateway) as soon as an admin exists (ADR-0194).
 REGULAIT_BOOTSTRAP_TOKEN=$ADMIN_TOKEN
+ENV
+  fi
+  cat <<ENV
 REGULAIT_DB_PASSWORD=$DB_PASSWORD
 REGULAIT_DATABASE_URL=postgres://regulait:$DB_PASSWORD@db:5432/regulait
 ENV
@@ -839,6 +918,11 @@ YML
   [ -z "$HSTS" ]            || printf '      REGULAIT_HSTS: "%s"\n' "$HSTS"
   [ -z "$SAML_ENTITY_ID" ]  || printf '      REGULAIT_SAML_ENTITY_ID: "%s"\n' "$SAML_ENTITY_ID"
   [ -z "$SAML_CLOCK_SKEW" ] || printf '      REGULAIT_SAML_CLOCK_SKEW_MINUTES: "%s"\n' "$SAML_CLOCK_SKEW"
+  if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
+    # ADR-0194: the retired bootstrap token is pinned EMPTY (= no bootstrap credential). Leaving it unset
+    # would let docker-compose.yml's `${REGULAIT_BOOTSTRAP_TOKEN:-dev-bootstrap}` default back in.
+    printf '      REGULAIT_BOOTSTRAP_TOKEN: ""\n'
+  fi
   if [ -n "$RECEIPT_KEY_FILE" ]; then
     # ADR-0189 R25 item 12: the operator-managed receipt key, read-only. Both values passed the
     # allowlists above, so neither can break out of its quotes or be interpolated by compose.
@@ -897,6 +981,7 @@ if [ "$CHECK_ONLY" = "1" ]; then
   info "rendered: $OVERRIDE_FILE"
   info "rendered: $VERSION_FILE"
   info "would run: docker compose ${COMPOSE_ARGS[*]} up -d"
+  info "then: the first-admin step (ADR-0194), and retire the bootstrap token once an admin exists"
   exit 0
 fi
 
@@ -963,6 +1048,83 @@ case "$RECEIPT_KEY_RC:$RECEIPT_KEY_LINE" in
 esac
 
 # ===========================================================================
+# 5b. THE FIRST ADMIN, THEN THE BOOTSTRAP TOKEN IS RETIRED (ADR-0194)
+#
+# Created THROUGH THE GATEWAY (first-admin.js in its container: the same
+# validators, policy check, seat gate and audit rows as the HTTP path), with
+# the password on the runner's stdin only. Re-running on a deployment that
+# already has an admin changes nothing here, and retires a token still live.
+# ===========================================================================
+step "First admin (ADR-0194)"
+first_admin_exec() {
+  docker compose "${COMPOSE_ARGS[@]}" exec -T gateway node apps/gateway/dist/first-admin.js "$@"
+}
+FIRST_ADMIN_STATE="skipped"   # created | exists | skipped | failed
+FIRST_ADMIN_NAME=""
+FA_STATUS_RC=0
+FA_STATUS_LINE="$(first_admin_exec --status </dev/null 2>&1)" || FA_STATUS_RC=$?
+case "$FA_STATUS_RC" in
+  3)
+    ok "an active admin already exists — skipped, nothing changed"
+    FIRST_ADMIN_STATE="exists" ;;
+  0)
+    if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
+      FA_USERNAME="$FIRST_ADMIN_USERNAME"
+      FA_EMAIL="$FIRST_ADMIN_EMAIL"
+      FA_RC=0
+      first_admin_from_file "$FIRST_ADMIN_PASSWORD_FILE" || FA_RC=$?
+      case "$FA_RC" in
+        0) ok "$FA_OUTPUT"; FIRST_ADMIN_STATE="created"; FIRST_ADMIN_NAME="$FA_USERNAME" ;;
+        3) ok "$FA_OUTPUT"; FIRST_ADMIN_STATE="exists" ;;
+        *) die "the first admin was NOT created (exit $FA_RC):
+  $FA_OUTPUT
+
+  Nothing was changed and the bootstrap token is still in $ENV_FILE. Fix the
+  input (REGULAIT_FIRST_ADMIN_PASSWORD_FILE / _USERNAME / _EMAIL) and re-run." ;;
+      esac
+    elif [ "$ASSUME_YES" != "1" ] && [ -t 0 ]; then
+      create_now=""
+      read -r -p "  Create the first admin now? [Y/n]: " create_now || create_now="n"
+      case "$create_now" in
+        n|N|no|NO) info "skipped at your request — the manual path is in the summary below" ;;
+        *)
+          info "the password is checked against the org policy (12+ characters, 3 of: lowercase, uppercase, digits, symbols, by default)"
+          FA_RC=0
+          first_admin_interactive || FA_RC=$?
+          case "$FA_RC" in
+            0) FIRST_ADMIN_STATE="created"; FIRST_ADMIN_NAME="$FA_USERNAME" ;;
+            3) FIRST_ADMIN_STATE="exists" ;;
+            *) warn "the first admin was not created; the bootstrap token stays until one exists (manual path in the summary)"
+               FIRST_ADMIN_STATE="failed" ;;
+          esac ;;
+      esac
+    else
+      info "non-interactive and no REGULAIT_FIRST_ADMIN_PASSWORD_FILE — skipped (manual path in the summary)"
+    fi ;;
+  *)
+    warn "${FA_STATUS_LINE:-the gateway could not be reached to check for an admin}"
+    warn "the first-admin step did not run; the bootstrap token stays until an admin exists (manual path in the summary)"
+    FIRST_ADMIN_STATE="failed" ;;
+esac
+
+# Retire the bootstrap token once an admin exists — unless the operator re-opened it on purpose this run.
+TOKEN_RETIRED_NOW=0
+if { [ "$FIRST_ADMIN_STATE" = "created" ] || [ "$FIRST_ADMIN_STATE" = "exists" ]; } \
+   && [ "$BOOTSTRAP_RETIRED" != "1" ] && [ "$TOKEN_REOPENED" != "1" ]; then
+  BOOTSTRAP_RETIRED=1
+  ADMIN_TOKEN=""
+  render_env      | write_if_changed "$ENV_FILE"
+  render_override | write_if_changed "$OVERRIDE_FILE"
+  chmod 644 "$OVERRIDE_FILE"
+  docker compose "${COMPOSE_ARGS[@]}" up -d --no-build || die "restarting the gateway to retire the bootstrap token FAILED.
+  $ENV_FILE and $OVERRIDE_FILE already say the token is retired, but the RUNNING
+  gateway still accepts the old token. Fix the cause (docker compose -p $PROJECT logs gateway)
+  and re-run this installer: it converges and restarts the gateway."
+  TOKEN_RETIRED_NOW=1
+  ok "bootstrap token retired: removed from $(basename "$ENV_FILE"), pinned empty in $(basename "$OVERRIDE_FILE"), gateway restarted"
+fi
+
+# ===========================================================================
 # 6. POST-INSTALL SUMMARY
 # ===========================================================================
 if [ "$TLS" = "none" ]; then
@@ -988,22 +1150,73 @@ if [ "$TLS" = "internal" ]; then cat <<'SUMMARY'
 SUMMARY
 fi
 
-cat <<SUMMARY
+case "$FIRST_ADMIN_STATE" in
+  created|exists)
+    if [ "$FIRST_ADMIN_STATE" = "created" ]; then
+      FA_HEADLINE="Created: '$FIRST_ADMIN_NAME'. Sign in at the URL above with the password you chose.
+    The first sign-in enrols an authenticator app (MFA is required for admins)."
+    elif [ "$SEED_DEMO" = "1" ]; then
+      # --seed-demo: the demo seed made its personas first, so the demo admin IS the existing admin
+      FA_HEADLINE="The demo dataset is loaded (--seed-demo), so its personas are the admins
+    (admin@regulait.local) and you were not asked for one. Their one-time passwords are
+    printed once in the gateway log (docker compose -p $PROJECT logs gateway). To use your
+    own account, sign in as the demo admin, create your admin under Admin -> Users, then
+    deactivate the demo personas. With the token retired, the demo seed that re-runs at
+    each gateway start can no longer act and logs a failure; the loaded data stays."
+    else
+      FA_HEADLINE="An admin already exists; this run did not change any account."
+    fi
+    if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
+      FA_TOKEN_LINE="The bootstrap token is retired."
+      if [ "$TOKEN_RETIRED_NOW" = "1" ]; then
+        FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
+      fi
+    elif [ "$TOKEN_REOPENED" = "1" ]; then
+      FA_TOKEN_LINE="The bootstrap token is OPEN: you re-opened it with --admin-token. Re-run without
+    --admin-token to retire it again."
+    else
+      FA_TOKEN_LINE="The bootstrap token is still live: re-run this installer to retire it."
+    fi
+    cat <<SUMMARY
 
   ${C_BLD}FIRST ADMIN${C_RST}
-    The bootstrap token authenticates as an admin with no user identity. Use it
-    exactly once to create your first real admin, then delete
-    REGULAIT_BOOTSTRAP_TOKEN from $ENV_FILE and restart:
+    $FA_HEADLINE
+    $FA_TOKEN_LINE
+    To turn this account off later: deactivate it once another admin exists, or
+    after SSO is set up make email sign-in break_glass_only or sso_only (Admin -> SSO).
+SUMMARY
+    ;;
+  *)
+    if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
+      # retired earlier, yet no active admin now: there is no live token to print
+      cat <<SUMMARY
+
+  ${C_BLD}FIRST ADMIN${C_RST} — none active, and the bootstrap token is retired
+    Re-run this installer in a terminal to be asked for an admin, or
+    non-interactively with REGULAIT_FIRST_ADMIN_PASSWORD_FILE (a 0600 file) and
+    REGULAIT_FIRST_ADMIN_EMAIL set. To use the manual path instead, re-open the
+    token on purpose: re-run with --admin-token "\$(openssl rand -hex 24)".
+SUMMARY
+    else
+    cat <<SUMMARY
+
+  ${C_BLD}FIRST ADMIN${C_RST} — not created by this run
+    Re-run this installer in a terminal to be asked for it, or non-interactively
+    with REGULAIT_FIRST_ADMIN_PASSWORD_FILE (a 0600 file) and
+    REGULAIT_FIRST_ADMIN_EMAIL set. The manual fallback, with the bootstrap
+    token (an admin with no user identity):
 
       curl -sS $API/v1/users \\
         -H "Authorization: Bearer $ADMIN_TOKEN" \\
         -H 'Content-Type: application/json' \\
-        -d '{"username":"admin","email":"admin@your.org","isAdmin":true}'
+        -d '{"email":"admin@your.org","displayName":"Admin","isAdmin":true}'
 
-      # then, to retire the bootstrap door:
-      sed -i '/^REGULAIT_BOOTSTRAP_TOKEN=/d' $ENV_FILE
-      docker compose -p $PROJECT up -d
+    then issue that user a one-time password (POST /v1/users/<id>/set-initial-password)
+    and RE-RUN THIS INSTALLER: it sees the admin and retires the bootstrap token.
 SUMMARY
+    fi
+    ;;
+esac
 
 if [ -n "$OIDC_ISSUER" ]; then
 cat <<SUMMARY
@@ -1033,8 +1246,10 @@ cat <<SUMMARY
                            Then attest it: Admin -> Settings -> Data key custody.
 SUMMARY
 if [ "$SHOW_SECRETS" = "1" ]; then printf '                           %s\n' "$DATA_KEY"; fi
+if [ "$BOOTSTRAP_RETIRED" != "1" ]; then
+  printf '    * REGULAIT_BOOTSTRAP_TOKEN — until the first admin exists (the installer then retires it).\n'
+fi
 cat <<SUMMARY
-    * REGULAIT_BOOTSTRAP_TOKEN — until you have created the first admin.
     * REGULAIT_DB_PASSWORD — it is only settable at first initdb.
 
   ${C_BLD}BACK UP${C_RST}
