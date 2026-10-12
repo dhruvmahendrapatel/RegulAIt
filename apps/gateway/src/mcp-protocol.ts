@@ -546,10 +546,9 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
   // ONLY NOW does anything reach the upstream: admission + egress first
   // (AER-024), then the breaker, then the connect.
   await preflightUpstream(db, serverRow);
-  const breaker = await breakerAdmits(db, serverRow);
-  if (breaker) return { kind: "upstream_circuit_open", reason: breaker.reason, retryAfterMs: breaker.refusedUntilMs };
   // ADR-0188 S8 (decision 8): an opted-in server's request for this method carries a signed assertion of who it is
-  // for and who is acting; armed here, after the decision and before the connect, so a refusal sends nothing
+  // for and who is acting. Armed here, after the decision and before the breaker election and the connect, so a
+  // refusal sends nothing and spends no half-open probe.
   const outboundIdentity = outboundIdentityFor(serverRow);
   if (outboundIdentity) {
     const armed = await armOutboundIdentity(outboundIdentity, method, {
@@ -563,6 +562,8 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     });
     if (!armed.ok) return { kind: "denied", decision: armed.decision };
   }
+  const breaker = await breakerAdmits(db, serverRow);
+  if (breaker) return { kind: "upstream_circuit_open", reason: breaker.reason, retryAfterMs: breaker.refusedUntilMs };
   let upstream: Client | null = null;
   try {
     try {

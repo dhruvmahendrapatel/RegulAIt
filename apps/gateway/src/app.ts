@@ -2268,7 +2268,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
             (rangesRelaxed ? " — a relaxation of the strict default" : ""),
         });
       }
-      if (identity.write !== null) {
+      // a url move that keeps it on writes no identity column, and is still a relaxation on the trail
+      if (identity.write !== null || identity.relaxed) {
         await auditIdentityPropagationChange(db, {
           userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
           serverId,

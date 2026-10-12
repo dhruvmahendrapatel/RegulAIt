@@ -318,23 +318,33 @@ describe("S8 — fail closed", () => {
 });
 
 describe("S8 — the opt-in does not follow the url", () => {
-  it("keeping it on at a new url needs a step-up bound to that url; a silent url move turns it off, audited", async () => {
+  it("keeping it on at a new url is a step-up bound to that url, audited; a silent url move turns it off, audited", async () => {
     const moved = `${up.url}/v2`;
     const keep = await patchServer(adminKey, { url: moved, identityPropagation: "signed_assertion" });
     expect(keep.statusCode, keep.body).toBe(403);
     expect(keep.json().action.body).toEqual({ op: "mcp_server_update", serverId, url: moved, values: { identityPropagation: "signed_assertion" } });
+    // with the step-up it moves and stays on; no identity column changes, and the relaxation is still on the trail
+    const kept = await relaxStepUpAround(db, () => patchServer(adminKey, { url: moved, identityPropagation: "signed_assertion" }));
+    expect(kept.statusCode, kept.body).toBe(200);
+    expect(kept.json()).toMatchObject({ url: moved, identityPropagation: "signed_assertion" });
+    expect((await lastAudit("mcp-server-identity-propagation-changed", serverId))!.detail).toMatchObject({
+      from: { identityPropagation: "signed_assertion" },
+      to: { identityPropagation: "signed_assertion" },
+      url: moved,
+      relaxation: true,
+    });
 
-    const silent = await patchServer(AUTH, { url: moved });
+    // a url move that says nothing about identity turns it off: no step-up, audited
+    const silent = await patchServer(adminKey, { url: up.url });
     expect(silent.statusCode, silent.body).toBe(200);
-    expect(silent.json()).toMatchObject({ url: moved, identityPropagation: "none" });
+    expect(silent.json()).toMatchObject({ url: up.url, identityPropagation: "none" });
     const row = await lastAudit("mcp-server-identity-propagation-changed", serverId);
     expect(row!.detail).toMatchObject({ from: { identityPropagation: "signed_assertion" }, to: { identityPropagation: "none" }, relaxation: false, resetByUrlMove: true });
     // and the next call sends nothing
     const got = await received(() => call());
+    expect(got.length).toBeGreaterThan(0);
     expect(got.every((r) => r.assertion === null)).toBe(true);
-    // turning it off asks for nothing
-    const back = await patchServer(AUTH, { url: up.url });
-    expect(back.statusCode, back.body).toBe(200);
+    // an explicit none asks for nothing either
     expect((await patchServer(adminKey, { identityPropagation: "none" })).statusCode).toBe(200);
   });
 });
