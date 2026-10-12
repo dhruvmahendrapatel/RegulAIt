@@ -401,7 +401,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           version: current.version,
           imageDigest: current.imageDigest,
           detail:
-            `engine ${engineId}'s build runs the engine process as the runner's own user, so a compromised engine could read the runner token ` +
+            `engine ${engineId}'s build runs the engine process as the runner's own user, so a compromised engine could read the runner key ` +
             "(it can lease this engine's runs and post their results; it cannot reach any other route). " +
             `To enable it anyway, send acceptCredentialIsolationRisk: true naming this build (expectedVersion ${current.version}, expectedDigest ${current.imageDigest ?? "none"}) with a step-up; an isolating build (ADR-0187 slice B5-P2) needs no acceptance.`,
         });
@@ -443,7 +443,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           effect: "allow",
           ruleId: "engine-credential-isolation-risk-accepted",
           ruleChain: [],
-          reason: `engine ${engineId} enabled although its engine process can read the runner token: the admin accepted that risk with a step-up (ADR-0187 decision 79)`,
+          reason: `engine ${engineId} enabled although its engine process can read the runner key: the admin accepted that risk with a step-up (ADR-0187 decision 79)`,
         });
       }
       if (Object.keys(transitions).length > 0) {

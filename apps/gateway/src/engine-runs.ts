@@ -1360,7 +1360,7 @@ function leaseHardGate(
     return {
       next: "reenrol_required",
       error: "engine_runner_reenrol_required",
-      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+      detail: "this runner key was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
     };
   }
   if (!engine || !engine.enabled) {
@@ -1395,7 +1395,7 @@ function leaseAdmission(
     return {
       next: "reenrol_required",
       error: "engine_runner_reenrol_required",
-      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+      detail: "this runner key was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
     };
   }
   // PR #205 review round 10 [85]: a runner whose registered build is not the CURRENT manifest build
