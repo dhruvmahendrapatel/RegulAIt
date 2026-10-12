@@ -84,6 +84,7 @@ import {
 } from "@regulait/shared";
 import { completeExecutorRequest, NO_IDENTITY, sendExecutorRefusal, verifyExecutorProofHeader, type ExecutorAuth, type ExecutorProofHeaderResult } from "./executor-channel-auth.js";
 import { databaseNow } from "./delegation.js";
+import { attestationCounts, freshAttestation } from "./executor-attestation.js";
 import { loadOrgSettings } from "./org-settings.js";
 
 export interface ExecutorChannelOptions {
@@ -167,38 +168,8 @@ export async function verifyReportSignature(auth: ExecutorAuth, signed: SignedEx
 // Attestations (decision 6)
 // ---------------------------------------------------------------------------
 
-export interface FreshAttestationRow {
-  class: AppliedIsolationKind;
-  expiresAt: Date;
-  reportSha256: string;
-}
-
-/**
- * Amendment T: THE ONE PREDICATE for "this attestation row still counts". A row
- * counts only if it was observed after the executor's last re-enable (both
- * stamped by the database): a quarantine voids every earlier verdict, even one
- * whose `expires_at` has not passed, so a re-enabled executor takes no work
- * before a new `pass`. Every reader of attestations for placement uses this.
- */
-export function attestationCounts(executorId: string) {
-  return and(
-    eq(executorAttestations.executorId, executorId),
-    sql`${executorAttestations.observedAt} > coalesce((SELECT ${executors.reenabledAt} FROM ${executors} WHERE ${executors.id} = ${executorId}), '-infinity'::timestamptz)`,
-  );
-}
-
-/** the executor's latest counting attestation for a profile, if it is a fresh `pass` on the database clock */
-export async function freshAttestation(db: Db, executorId: string, profileDigest: string, now: Date): Promise<FreshAttestationRow | null> {
-  const [row] = await db
-    .select({ class: executorAttestations.class, expiresAt: executorAttestations.expiresAt, verdict: executorAttestations.verdict, reportSha256: executorAttestations.reportSha256 })
-    .from(executorAttestations)
-    .where(and(attestationCounts(executorId), eq(executorAttestations.profileDigest, profileDigest)))
-    .orderBy(desc(executorAttestations.observedAt), desc(executorAttestations.createdAt))
-    .limit(1);
-  // the LATEST report decides: a fail after a pass withdraws the class until the next pass
-  if (!row || row.verdict !== "pass" || row.expiresAt.getTime() <= now.getTime()) return null;
-  return { class: row.class, expiresAt: row.expiresAt, reportSha256: row.reportSha256 };
-}
+// amendment T's one predicate lives in `executor-attestation.ts` (the live delegation chain applies it too)
+export { attestationCounts, freshAttestation, type FreshAttestationRow } from "./executor-attestation.js";
 
 // ---------------------------------------------------------------------------
 // Quarantine (decision 6)
@@ -270,18 +241,28 @@ async function withdrawOpenOffers(db: Db, executorId: string): Promise<void> {
  */
 const ENFORCEMENT = "enforce" as const;
 
+/**
+ * What a governed caller adds to the audit row of a placement it asked for (slice I2): the person the call runs
+ * for, and the requirement's evidence (every floor and which one won, decision 7; ids and fixed vocabularies only).
+ */
+export interface PlacementAuditContext {
+  userId?: string;
+  detail?: Record<string, unknown>;
+}
+
 async function refusedPlacement(
   db: Db,
   o: Pick<ExecutionOfferRow, "id" | "workloadKind" | "requiredClass" | "requiredBy" | "profileDigest"> & { executorId: string | null },
   code: ExecutionRefusalReason,
+  context: PlacementAuditContext = {},
 ): Promise<string> {
   const auditId = await auditExecutor(db, {
-    userId: NO_IDENTITY,
+    userId: context.userId ?? NO_IDENTITY,
     objectType: "execution_placement",
     objectId: o.id,
     ruleId: "execution-refused",
     effect: "deny",
-    detail: { offerId: o.id, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, profileDigest: o.profileDigest, executorId: o.executorId, code },
+    detail: { offerId: o.id, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, profileDigest: o.profileDigest, executorId: o.executorId, code, ...(context.detail ?? {}) },
     reason: `placement refused (${code}): no executor with a fresh attestation at ${o.requiredClass} took it (ADR-0190 decision 7; no fallback)`,
   });
   const [row] = await db
@@ -319,6 +300,8 @@ export interface OfferPlacementInput {
   ttlSeconds?: number;
   /** consider only these executors (a placement affinity, and the seam a test uses to pick its own executor) */
   onlyExecutorIds?: readonly string[];
+  /** slice I2: the caller's audit context, written on every refusal row of this placement */
+  audit?: PlacementAuditContext;
 }
 
 export type OfferPlacementOutcome =
@@ -345,7 +328,7 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
   });
   if (unresolved) {
     await auditExecutor(db, {
-      userId: NO_IDENTITY,
+      userId: input.audit?.userId ?? NO_IDENTITY,
       objectType: "execution_placement",
       objectId: null,
       ruleId: "execution-refused",
@@ -355,6 +338,7 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
         unresolvedFact: unresolved,
         profileDigest: typeof input.profileDigest === "string" && /^[0-9a-f]{64}$/.test(input.profileDigest) ? input.profileDigest : null,
         code: "policy_unresolved",
+        ...(input.audit?.detail ?? {}),
       },
       reason: `placement refused (policy_unresolved): the policy fact ${unresolved} did not resolve (ADR-0190 decision 7, amendment item 15; never defaulted)`,
     });
@@ -364,17 +348,17 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
   const refuse = async (code: ExecutionRefusalReason): Promise<OfferPlacementOutcome> => ({
     kind: "refused",
     code,
-    placementId: await refusedPlacement(db, { id: randomUUID(), ...input, executorId: null }, code),
+    placementId: await refusedPlacement(db, { id: randomUUID(), ...input, executorId: null }, code, input.audit),
   });
   const profile = await profileByDigest(db, input.profileDigest);
   if (!profile) {
     await auditExecutor(db, {
-      userId: NO_IDENTITY,
+      userId: input.audit?.userId ?? NO_IDENTITY,
       objectType: "execution_placement",
       objectId: null,
       ruleId: "execution-refused",
       effect: "deny",
-      detail: { workloadKind: input.workloadKind, requiredClass: input.requiredClass, requiredBy: input.requiredBy, profileDigest: input.profileDigest, code: "profile_retired" },
+      detail: { workloadKind: input.workloadKind, requiredClass: input.requiredClass, requiredBy: input.requiredBy, profileDigest: input.profileDigest, code: "profile_retired", ...(input.audit?.detail ?? {}) },
       reason: "placement refused (profile_retired): no execution profile has that digest (ADR-0190 decision 7)",
     });
     return { kind: "refused", code: "profile_retired", placementId: null };

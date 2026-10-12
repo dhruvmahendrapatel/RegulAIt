@@ -1037,12 +1037,14 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/ai-bom/spdx-fields/:subjectKind/:subjectId": "internal",
   "PUT /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property": "internal",
   "POST /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property/withdraw": "internal",
-  // --- ADR-0190 (batch 6 item 3) I1: 501 stubs until their slices land
+  // --- ADR-0190 (batch 6 item 3): I1 registered these as 501 stubs; I2 and I3 built them
   "GET /v1/execution-profiles": "internal",
   "POST /v1/execution-profiles": "internal",
   "GET /v1/execution-profiles/:name": "internal",
   "POST /v1/execution-profiles/:name/versions": "internal",
   "POST /v1/execution-profiles/:name/retire": "internal",
+  "GET /v1/execution-profile-assignments/:targetKind/:targetId": "internal",
+  "PUT /v1/execution-profile-assignments/:targetKind/:targetId": "internal",
   "GET /v1/executors": "internal",
   "POST /v1/executors": "internal",
   "GET /v1/executors/:executorId": "internal",
@@ -1973,12 +1975,14 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/ai-bom/spdx-fields/:subjectKind/:subjectId": "audit",
   "PUT /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property": "audit",
   "POST /v1/ai-bom/spdx-fields/:subjectKind/:subjectId/:property/withdraw": "audit",
-  // --- ADR-0190 (batch 6 item 3) I1: 501 stubs until their slices land
+  // --- ADR-0190 (batch 6 item 3): I1 registered these as 501 stubs; I2 and I3 built them
   "GET /v1/execution-profiles": "isolation",
   "POST /v1/execution-profiles": "isolation",
   "GET /v1/execution-profiles/:name": "isolation",
   "POST /v1/execution-profiles/:name/versions": "isolation",
   "POST /v1/execution-profiles/:name/retire": "isolation",
+  "GET /v1/execution-profile-assignments/:targetKind/:targetId": "isolation",
+  "PUT /v1/execution-profile-assignments/:targetKind/:targetId": "isolation",
   "GET /v1/executors": "isolation",
   "POST /v1/executors": "isolation",
   "GET /v1/executors/:executorId": "isolation",

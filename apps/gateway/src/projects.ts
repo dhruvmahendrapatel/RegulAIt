@@ -2114,6 +2114,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       redteamGatingClasses: body.redteamGatingClasses ?? null,
       redteamMinTrials: body.redteamMinTrials ?? null,
       redteamFailOnSeverity: body.redteamFailOnSeverity ?? null,
+      // ADR-0190 decision 7 item 3: the isolation floor this framework forces (MAX-composed; null = no opinion)
+      minIsolationClass: body.minIsolationClass ?? null,
     };
     // ADR-0074 — THIS ROUTE IS CREATE-*OR-UPDATE*, and the update half was a
     // silent no-op for enforcement.
