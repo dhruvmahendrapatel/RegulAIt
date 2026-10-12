@@ -3,24 +3,26 @@
  * request it receives (method and `RegulAIt-Identity-Assertion` header):
  *
  *  - the strict default (`none`) sends nothing, on any request;
- *  - turning it on is a relaxation: an admin's API key is refused `step_up_required` with facts bound to the
- *    server, the url and the value; done with step-up, it is audited as a relaxation;
+ *  - turning it on is a relaxation: an API key is refused `step_up_required`; a person in a browser session is
+ *    asked for a step-up bound to the server, its url and the value, and with the passkey grant it is saved and
+ *    audited as a relaxation;
+ *  - a second opted-in server with the same canonical audience is refused 409 before any step-up;
  *  - a person's tools/call carries exactly one assertion, on the tools/call request only, verifiable against the
  *    gateway's own JWKS route, with the documented claims (pairwise sub, no act) and its own audited jti;
- *  - an in-process agent's call carries the chain in `act`;
- *  - a governed protocol call (resources/read) carries one too;
- *  - the MCP proxy route carries it (the data key reaches the route);
- *  - fail closed: no data key → refused, audited, and the upstream sees nothing at all;
- *  - a url move turns it off (audited); keeping it on at a new url needs a step-up bound to that url.
+ *  - an in-process agent's call carries the chain in `act`, each agent as a PAIRWISE id (never its SPIFFE ID);
+ *  - a governed protocol call (resources/read) and the MCP proxy route carry one too;
+ *  - ZERO UPSTREAM CONTACT on every refusal: no data key, no issuer, no active signing key, the protocol path's
+ *    refusal, a policy deny and an approval hold on an opted-in server; none of them writes an "issued" row;
+ *  - a url move turns it off; keeping it on at a new url needs a step-up bound to that url.
  *
- * Global state (M-068): org settings this file changes are put back, and the issuer key it activated is retired
- * in afterAll (the S5 pattern).
+ * Global state (M-068): org settings this file changes are put back, the issuer keys it activated are retired, and
+ * the admin's passkey, sessions and step-up grants are removed (B4S-06) in afterAll.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet } from "jose";
@@ -28,19 +30,38 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { and, auditLog, createDb, desc, eq, identitySigningKeys, ORG_SETTINGS_ID, orgSettings, runMigrations, sql, type Db } from "@regulait/db";
-import { canonicalMcpAudience, IDENTITY_ASSERTION_HEADER, IDENTITY_ASSERTION_TYP, IDENTITY_SIGNING_KEY_ENV } from "@regulait/shared";
+import {
+  and,
+  auditLog,
+  authSessions,
+  createDb,
+  desc,
+  eq,
+  identitySigningKeys,
+  inArray,
+  ORG_SETTINGS_ID,
+  orgSettings,
+  runMigrations,
+  sql,
+  stepUpGrants,
+  webauthnChallenges,
+  webauthnCredentials,
+  type Db,
+} from "@regulait/db";
+import { canonicalMcpAudience, IDENTITY_ASSERTION_HEADER, IDENTITY_ASSERTION_TYP, IDENTITY_SIGNING_KEY_ENV, STEP_UP_HEADER } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { deriveIdentitySecrets, pairwiseSubject } from "./delegated-token.js";
 import { configuredIdentitySigningKeys, rotateIdentitySigningKey } from "./identity-signing-keys.js";
+import { pairwiseActor } from "./mcp-identity-assertion.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { executeGovernedProtocolCall } from "./mcp-protocol.js";
 import { startInProcessChain, toolScopeItems } from "./in-process-delegation.js";
+import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { grantOwnGrantsForTest } from "./testing/agent-own-grants.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
-import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -49,10 +70,14 @@ const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url
 const RUN = randomBytes(3).toString("hex");
 const BOOT = `s8-boot-${RUN}`;
 const AUTH = { authorization: `Bearer ${BOOT}` };
-const ISSUER = "http://127.0.0.1:4418";
+// the deployment's public URL: the issuer, and the passkey relying party's origin (a host name, not an IP literal)
+const ISSUER = "http://localhost";
+const CSRF = { "x-regulait-csrf": "1" };
 const DATA_KEY = "s8-synthetic-data-key-".padEnd(64, "q");
 const PAIRWISE = deriveIdentitySecrets(DATA_KEY).pairwiseKey;
 const TOOL = `s8_read_${RUN}`;
+const UNGRANTED = `s8_ungranted_${RUN}`;
+const HELD = `s8_held_${RUN}`;
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 process.env.REGULAIT_PUBLIC_URL = ISSUER;
 
@@ -60,12 +85,17 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let gatewayUrl: string;
 let keyDir: string;
+let nextKeyFile: string;
 let up: { url: string; seen: Array<{ method: string | null; assertion: string | null }>; close: () => Promise<void> };
 let serverId: string;
+let twinId: string;
+let agentId: string;
 let userId: string;
 let adminKey: { authorization: string };
+let admin: { id: string; session: string; auth: SoftAuthenticator };
 let priorMethods: string[] = [];
 const restores: Array<() => Promise<void>> = [];
+const sessions: string[] = [];
 
 async function startUpstream() {
   const seen: Array<{ method: string | null; assertion: string | null }> = [];
@@ -84,9 +114,11 @@ async function startUpstream() {
         const h = req.headers[IDENTITY_ASSERTION_HEADER.toLowerCase()];
         seen.push({ method: req.method === "POST" ? method : `${req.method}`, assertion: typeof h === "string" ? h : null });
         const server = new McpServer({ name: "s8-upstream", version: "0.0.1" });
-        server.registerTool(TOOL, { description: "s8 read", inputSchema: {}, annotations: { readOnlyHint: true } }, async () => ({
-          content: [{ type: "text", text: "ok" }],
-        }));
+        for (const name of [TOOL, UNGRANTED, HELD]) {
+          server.registerTool(name, { description: "s8", inputSchema: {}, annotations: { readOnlyHint: name === TOOL } }, async () => ({
+            content: [{ type: "text", text: "ok" }],
+          }));
+        }
         server.registerResource("readme", "file:///s8/readme.md", { mimeType: "text/markdown" }, async (uri) => ({
           contents: [{ uri: uri.href, mimeType: "text/markdown", text: "s8 readme" }],
         }));
@@ -134,9 +166,44 @@ async function verifyAgainstJwks(assertion: string, audience: string) {
 
 const lastAudit = async (ruleId: string, server: string) =>
   (await db.select().from(auditLog).where(and(eq(auditLog.ruleId, ruleId), eq(auditLog.serverId, server))).orderBy(desc(auditLog.seq)).limit(1))[0];
+const issuedCount = async () =>
+  (await db.select({ id: auditLog.id }).from(auditLog).where(and(eq(auditLog.ruleId, "mcp-identity-assertion-issued"), eq(auditLog.serverId, serverId)))).length;
 
-const patchServer = (headers: Record<string, string>, payload: Record<string, unknown>, id = serverId) =>
-  app.inject({ method: "PATCH", url: `/v1/servers/${id}`, headers, payload });
+const patchByKey = (payload: Record<string, unknown>, id = serverId) =>
+  app.inject({ method: "PATCH", url: `/v1/servers/${id}`, headers: adminKey, payload });
+const patchBySession = (payload: Record<string, unknown>, extra: Record<string, string> = {}, id = serverId) =>
+  app.inject({ method: "PATCH", url: `/v1/servers/${id}`, headers: { ...CSRF, ...extra }, cookies: { regulait_session: admin.session }, payload });
+
+/** a passkey step-up grant for exactly `action` (the facts the gateway asked for) */
+async function grantFor(action: { kind: string; body: Record<string, unknown> }): Promise<string> {
+  const asAdmin = (url: string, payload: unknown) =>
+    app.inject({ method: "POST", url, headers: CSRF, cookies: { regulait_session: admin.session }, payload: payload as object });
+  const o = await asAdmin("/v1/auth/step-up/options", { action });
+  expect(o.statusCode, o.body).toBe(200);
+  const v = await asAdmin("/v1/auth/step-up/verify", { stepUpId: o.json().stepUpId, method: "passkey", response: admin.auth.authenticate(o.json().passkey.options) });
+  expect(v.statusCode, v.body).toBe(200);
+  return v.json().stepUpToken as string;
+}
+
+/**
+ * A relaxing PATCH: an API key is refused (an API key cannot confirm who is acting, and its refusal names no
+ * action); the person is asked for a step-up bound to exactly `facts`; with that grant it is done.
+ */
+async function relaxThroughStepUp(payload: Record<string, unknown>, facts: Record<string, unknown>) {
+  const key = await patchByKey(payload);
+  expect(key.statusCode, key.body).toBe(403);
+  expect(key.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", credential: "api_key" });
+  const asked = await patchBySession(payload);
+  expect(asked.statusCode, asked.body).toBe(403);
+  expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", methods: ["passkey"] });
+  expect(asked.json().action).toEqual({ kind: "settings_relax", body: facts });
+  const token = await grantFor(asked.json().action);
+  return patchBySession(payload, { [STEP_UP_HEADER]: token });
+}
+
+function writeKey(file: string): void {
+  writeFileSync(file, generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }).toString(), { mode: 0o600 });
+}
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
@@ -156,8 +223,9 @@ beforeAll(async () => {
     WHERE id = ${ORG_SETTINGS_ID}`);
 
   keyDir = mkdtempSync(path.join(os.tmpdir(), "s8-issuer-"));
-  const pem = generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }).toString();
-  writeFileSync(path.join(keyDir, "issuer.pem"), pem, { mode: 0o600 });
+  writeKey(path.join(keyDir, "issuer.pem"));
+  nextKeyFile = path.join(keyDir, "next.pem");
+  writeKey(nextKeyFile);
   process.env[IDENTITY_SIGNING_KEY_ENV] = path.join(keyDir, "issuer.pem");
   const k0 = (await configuredIdentitySigningKeys())[0]!;
   const recorded = await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys);
@@ -167,26 +235,73 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   up = await startUpstream();
-  const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: `s8-server-${RUN}`, url: up.url } });
+  const inject = (method: "POST", url: string, payload: unknown) => app.inject({ method, url, headers: AUTH, payload: payload as object });
+  const s = await inject("POST", "/v1/servers", { name: `s8-server-${RUN}`, url: up.url });
   expect(s.statusCode, s.body).toBe(201);
   serverId = s.json().id;
   expect(s.json().identityPropagation).toBe("none");
-  expect((await app.inject({ method: "POST", headers: AUTH, url: `/v1/servers/${serverId}/tools`, payload: { name: TOOL, kind: "read" } })).statusCode).toBe(201);
-  const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email: `s8-user-${RUN}@example.com`, displayName: `s8 user ${RUN}` } });
+  // a second server whose canonical audience is the same (the query is not part of it)
+  const twin = await inject("POST", "/v1/servers", { name: `s8-twin-${RUN}`, url: `${up.url}?tenant=b` });
+  expect(twin.statusCode, twin.body).toBe(201);
+  twinId = twin.json().id;
+  for (const [name, kind] of [[TOOL, "read"], [UNGRANTED, "write"], [HELD, "write"]] as const) {
+    expect((await inject("POST", `/v1/servers/${serverId}/tools`, { name, kind })).statusCode).toBe(201);
+  }
+  const u = await inject("POST", "/v1/users", { email: `s8-user-${RUN}@example.com`, displayName: `s8 user ${RUN}` });
   expect(u.statusCode, u.body).toBe(201);
   userId = u.json().id;
-  for (const toolName of [TOOL, "mcp:resources"]) {
-    expect((await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/tools", payload: { userId, serverId, toolName } })).statusCode).toBe(201);
+  for (const toolName of [TOOL, HELD, "mcp:resources"]) {
+    expect((await inject("POST", "/v1/grants/tools", { userId, serverId, toolName })).statusCode).toBe(201);
   }
-  const adm = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email: `s8-admin-${RUN}@example.com`, displayName: `s8 admin ${RUN}`, isAdmin: true } });
+  const adm = await inject("POST", "/v1/users", { email: `s8-admin-${RUN}@example.com`, displayName: `s8 admin ${RUN}`, isAdmin: true });
   expect(adm.statusCode, adm.body).toBe(201);
-  adminKey = { authorization: `Bearer ${(await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${adm.json().id}/keys`, payload: { name: "s8" } })).json().token}` };
+  const adminId = adm.json().id as string;
+  adminKey = { authorization: `Bearer ${(await inject("POST", `/v1/users/${adminId}/keys`, { name: "s8" })).json().token}` };
+  const ag = await inject("POST", "/v1/agents", { name: `s8-agent-${RUN}`, provider: "mock", tier: 0, model: "mock-1" });
+  expect(ag.statusCode, ag.body).toBe(201);
+  agentId = ag.json().id;
+  // an approval rule on HELD: the next call by the user queues for the admin
+  const rule = await inject("POST", "/v1/rules/approvals", { userId, serverId, toolName: HELD, approverUserId: adminId });
+  expect(rule.statusCode, rule.body).toBe(201);
+
+  // the admin's browser session and passkey, enrolled LAST: from here the bootstrap credential passes no step-up (B4S-06)
+  const token = "rgls_" + randomBytes(32).toString("hex");
+  const [sess] = await db
+    .insert(authSessions)
+    .values({
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+      userId: adminId,
+      origin: "password",
+      expiresAt: new Date(Date.now() + 3_600_000),
+      idleExpiresAt: new Date(Date.now() + 3_600_000),
+      idleMinutes: 60,
+    })
+    .returning({ id: authSessions.id });
+  sessions.push(sess!.id);
+  admin = { id: adminId, session: token, auth: new SoftAuthenticator({ origin: ISSUER }) };
+  const opt = await app.inject({ method: "POST", url: "/v1/auth/passkeys/registration-options", headers: CSRF, cookies: { regulait_session: token }, payload: {} });
+  expect(opt.statusCode, opt.body).toBe(200);
+  const reg = await app.inject({
+    method: "POST",
+    url: "/v1/auth/passkeys",
+    headers: CSRF,
+    cookies: { regulait_session: token },
+    payload: { challengeId: opt.json().challengeId, response: admin.auth.register(opt.json().options), label: "s8" },
+  });
+  expect(reg.statusCode, reg.body).toBe(201);
 }, 120_000);
 
 afterAll(async () => {
   try {
     await db.execute(sql`update identity_signing_keys set retired_at = now() where activated_at is not null and retired_at is null and revoked_at is null`);
     for (const r of restores.reverse()) await r();
+    if (admin) {
+      await db.delete(stepUpGrants).where(eq(stepUpGrants.userId, admin.id));
+      await db.delete(webauthnChallenges).where(eq(webauthnChallenges.userId, admin.id));
+      await forgetStepUpMethodsForTest(db, [admin.id]);
+      await db.delete(webauthnCredentials).where(eq(webauthnCredentials.userId, admin.id));
+    }
+    if (sessions.length > 0) await db.delete(authSessions).where(inArray(authSessions.id, sessions));
     if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
     else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;
     delete process.env[IDENTITY_SIGNING_KEY_ENV];
@@ -198,8 +313,10 @@ afterAll(async () => {
   }
 });
 
-const call = (dataKey: string | undefined = DATA_KEY, delegationGrantId?: string) =>
-  executeGovernedToolCall(db, dataKey, { userId, serverId, toolName: TOOL, ...(delegationGrantId ? { delegationGrantId } : {}) });
+/** a governed tools/call by the user; `dataKey` is passed through as given (no default: undefined means none) */
+const callWith = (dataKey: string | undefined, toolName = TOOL, delegationGrantId?: string) =>
+  executeGovernedToolCall(db, dataKey, { userId, serverId, toolName, ...(delegationGrantId ? { delegationGrantId } : {}) });
+const call = () => callWith(DATA_KEY);
 
 describe("S8 — the strict default sends nothing", () => {
   it("identity_propagation none: the call is served and no request carries an assertion", async () => {
@@ -210,18 +327,11 @@ describe("S8 — the strict default sends nothing", () => {
 });
 
 describe("S8 — turning it on is an audited relaxation", () => {
-  it("an API key is refused step_up_required, bound to the server, its url and the value; with step-up it is saved and audited", async () => {
-    const refused = await patchServer(adminKey, { identityPropagation: "signed_assertion" });
-    expect(refused.statusCode, refused.body).toBe(403);
-    expect(refused.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
-    expect(refused.json().action).toEqual({
-      kind: "settings_relax",
-      body: { op: "mcp_server_update", serverId, url: up.url, values: { identityPropagation: "signed_assertion" } },
-    });
-    const [still] = await db.execute(sql`select identity_propagation from mcp_servers where id = ${serverId}`).then((r) => (r as unknown as { rows: Array<{ identity_propagation: string }> }).rows);
-    expect(still!.identity_propagation).toBe("none");
-
-    const ok = await relaxStepUpAround(db, () => patchServer(adminKey, { identityPropagation: "signed_assertion" }));
+  it("an API key is refused; the person's step-up is bound to the server, its url and the value; saved and audited", async () => {
+    const ok = await relaxThroughStepUp(
+      { identityPropagation: "signed_assertion" },
+      { op: "mcp_server_update", serverId, url: up.url, values: { identityPropagation: "signed_assertion" } },
+    );
     expect(ok.statusCode, ok.body).toBe(200);
     expect(ok.json().identityPropagation).toBe("signed_assertion");
     const row = await lastAudit("mcp-server-identity-propagation-changed", serverId);
@@ -230,8 +340,17 @@ describe("S8 — turning it on is an audited relaxation", () => {
       to: { identityPropagation: "signed_assertion" },
       relaxation: true,
       relaxed: { identityPropagation: "signed_assertion" },
+      stepUp: "passkey",
       audience: canonicalMcpAudience(up.url),
     });
+  });
+
+  it("a second server with the same canonical audience is refused 409 before any step-up, and nothing is saved", async () => {
+    const refused = await patchBySession({ identityPropagation: "signed_assertion" }, {}, twinId);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toBe("identity_audience_shared");
+    const [twin] = (await db.execute(sql`select identity_propagation from mcp_servers where id = ${twinId}`) as unknown as { rows: Array<{ identity_propagation: string }> }).rows;
+    expect(twin!.identity_propagation).toBe("none");
   });
 });
 
@@ -260,10 +379,8 @@ describe("S8 — a signed assertion on every allowed call", () => {
     expect(new Set(jtis).size).toBe(2);
   });
 
-  it("an in-process agent's call carries the chain in act", async () => {
-    const ag = await app.inject({ method: "POST", headers: AUTH, url: "/v1/agents", payload: { name: `s8-agent-${RUN}`, provider: "mock", tier: 0, model: "mock-1" } });
-    expect(ag.statusCode, ag.body).toBe(201);
-    const identityId = await grantOwnGrantsForTest(db, { kind: "agent", id: ag.json().id }, { tools: [{ serverId, toolName: TOOL }] });
+  it("an in-process agent's call carries the chain in act, as a pairwise id (never its SPIFFE ID)", async () => {
+    const identityId = await grantOwnGrantsForTest(db, { kind: "agent", id: agentId }, { tools: [{ serverId, toolName: TOOL }] });
     const [ident] = (await db.execute(sql`select identifier from workload_identities where id = ${identityId}`) as unknown as { rows: Array<{ identifier: string }> }).rows;
     const chain = await startInProcessChain(db, {
       sponsorUserId: userId,
@@ -271,14 +388,17 @@ describe("S8 — a signed assertion on every allowed call", () => {
       context: { runId: randomUUID() },
       hops: [{ identityId, scope: toolScopeItems([{ serverId, toolName: TOOL, kind: "read" }]), capMicros: null }],
     });
-    const got = await received(async () => expect((await call(DATA_KEY, chain.leafGrantId)).kind).toBe("allowed"));
+    const got = await received(async () => expect((await callWith(DATA_KEY, TOOL, chain.leafGrantId)).kind).toBe("allowed"));
     const carrying = got.filter((r) => r.assertion !== null);
     expect(carrying).toHaveLength(1);
-    const { payload } = await verifyAgainstJwks(carrying[0]!.assertion!, canonicalMcpAudience(up.url)!);
-    expect(payload.act).toEqual({ sub: ident!.identifier });
-    expect(payload.sub).toBe(pairwiseSubject(PAIRWISE, canonicalMcpAudience(up.url)!, userId));
+    const aud = canonicalMcpAudience(up.url)!;
+    const { payload } = await verifyAgainstJwks(carrying[0]!.assertion!, aud);
+    expect(payload.act).toEqual({ sub: pairwiseActor(PAIRWISE, aud, identityId) });
+    expect(JSON.stringify(payload)).not.toContain(ident!.identifier);
+    expect(JSON.stringify(payload)).not.toContain(identityId);
+    expect(payload.sub).toBe(pairwiseSubject(PAIRWISE, aud, userId));
     const issued = await lastAudit("mcp-identity-assertion-issued", serverId);
-    expect(issued!.detail).toMatchObject({ actorChain: [identityId] });
+    expect(issued!.detail).toMatchObject({ actorChain: [identityId], act: [pairwiseActor(PAIRWISE, aud, identityId)] });
   });
 
   it("a governed protocol call (resources/read) carries one, on that request only", async () => {
@@ -295,7 +415,11 @@ describe("S8 — a signed assertion on every allowed call", () => {
     const client = new Client({ name: "s8-client", version: "0.0.1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${gatewayUrl}/mcp/${serverId}`), { requestInit: { headers: { authorization: `Bearer ${key.json().token}` } } }));
     try {
-      const got = await received(() => client.callTool({ name: TOOL, arguments: {} }));
+      let result: unknown;
+      const got = await received(async () => {
+        result = await client.callTool({ name: TOOL, arguments: {} });
+      });
+      expect((result as { isError?: boolean }).isError ?? false, JSON.stringify(result)).toBe(false);
       expect(got.filter((r) => r.assertion !== null).map((r) => r.method)).toEqual(["tools/call"]);
     } finally {
       await client.close();
@@ -303,28 +427,69 @@ describe("S8 — a signed assertion on every allowed call", () => {
   });
 });
 
-describe("S8 — fail closed", () => {
-  it("no data key (no pairwise key): refused and audited, and the upstream receives nothing at all", async () => {
+describe("S8 — every refusal on an opted-in server: zero upstream contact, nothing issued", () => {
+  async function refusedWithoutContact(fn: () => Promise<{ kind: string; decision?: { ruleId: string } }>, expected: { kind: string; ruleId?: string }) {
+    const before = await issuedCount();
+    let out: { kind: string; decision?: { ruleId: string } } | undefined;
     const got = await received(async () => {
-      const out = await call(undefined);
-      expect(out.kind).toBe("denied");
-      expect((out as { decision: { ruleId: string } }).decision.ruleId).toBe("mcp-identity-assertion-unavailable");
+      out = await fn();
     });
+    expect(out!.kind).toBe(expected.kind);
+    if (expected.ruleId) expect(out!.decision!.ruleId).toBe(expected.ruleId);
     expect(got).toEqual([]);
-    const row = await lastAudit("mcp-identity-assertion-unavailable", serverId);
-    expect(row).toMatchObject({ effect: "deny", userId });
-    expect(row!.detail).toMatchObject({ code: "pairwise_key_unavailable", method: "tools/call" });
+    expect(await issuedCount()).toBe(before);
+  }
+
+  it("no data key (no pairwise key): refused and audited", async () => {
+    await refusedWithoutContact(() => callWith(undefined), { kind: "denied", ruleId: "mcp-identity-assertion-unavailable" });
+    expect((await lastAudit("mcp-identity-assertion-unavailable", serverId))!.detail).toMatchObject({ code: "pairwise_key_unavailable", method: "tools/call" });
+  });
+
+  it("no issuer (REGULAIT_PUBLIC_URL unset): refused and audited", async () => {
+    delete process.env.REGULAIT_PUBLIC_URL;
+    try {
+      await refusedWithoutContact(() => call(), { kind: "denied", ruleId: "mcp-identity-assertion-unavailable" });
+    } finally {
+      process.env.REGULAIT_PUBLIC_URL = ISSUER;
+    }
+    expect((await lastAudit("mcp-identity-assertion-unavailable", serverId))!.detail).toMatchObject({ code: "issuer_not_configured" });
+  });
+
+  it("the protocol path's refusal (no data key)", async () => {
+    await refusedWithoutContact(
+      () => executeGovernedProtocolCall(db, { userId, serverId, method: "resources/read", params: { uri: "file:///s8/readme.md" } }) as Promise<{ kind: string; decision?: { ruleId: string } }>,
+      { kind: "denied", ruleId: "mcp-identity-assertion-unavailable" },
+    );
+    expect((await lastAudit("mcp-identity-assertion-unavailable", serverId))!.detail).toMatchObject({ code: "pairwise_key_unavailable", method: "resources/read" });
+  });
+
+  it("a policy deny (an ungranted tool) never arms and never contacts", async () => {
+    await refusedWithoutContact(() => callWith(DATA_KEY, UNGRANTED), { kind: "denied" });
+  });
+
+  it("an approval hold never arms and never contacts", async () => {
+    await refusedWithoutContact(() => callWith(DATA_KEY, HELD), { kind: "approval_required" });
+  });
+
+  it("no active signing key: refused and audited; a rotation brings it back", async () => {
+    await db.execute(sql`update identity_signing_keys set retired_at = now() where activated_at is not null and retired_at is null and revoked_at is null`);
+    await refusedWithoutContact(() => call(), { kind: "denied", ruleId: "mcp-identity-assertion-unavailable" });
+    expect((await lastAudit("mcp-identity-assertion-unavailable", serverId))!.detail).toMatchObject({ code: "signing_key_unavailable" });
+    process.env[IDENTITY_SIGNING_KEY_ENV] = nextKeyFile;
+    const k1 = (await configuredIdentitySigningKeys())[0]!;
+    await rotateIdentitySigningKey(db, { kid: k1.kid, actorUserId: "00000000-0000-0000-0000-000000000000" });
+    const got = await received(async () => expect((await call()).kind).toBe("allowed"));
+    expect(got.filter((r) => r.assertion !== null)).toHaveLength(1);
   });
 });
 
 describe("S8 — the opt-in does not follow the url", () => {
   it("keeping it on at a new url is a step-up bound to that url, audited; a silent url move turns it off, audited", async () => {
     const moved = `${up.url}/v2`;
-    const keep = await patchServer(adminKey, { url: moved, identityPropagation: "signed_assertion" });
-    expect(keep.statusCode, keep.body).toBe(403);
-    expect(keep.json().action.body).toEqual({ op: "mcp_server_update", serverId, url: moved, values: { identityPropagation: "signed_assertion" } });
-    // with the step-up it moves and stays on; no identity column changes, and the relaxation is still on the trail
-    const kept = await relaxStepUpAround(db, () => patchServer(adminKey, { url: moved, identityPropagation: "signed_assertion" }));
+    const kept = await relaxThroughStepUp(
+      { url: moved, identityPropagation: "signed_assertion" },
+      { op: "mcp_server_update", serverId, url: moved, values: { identityPropagation: "signed_assertion" } },
+    );
     expect(kept.statusCode, kept.body).toBe(200);
     expect(kept.json()).toMatchObject({ url: moved, identityPropagation: "signed_assertion" });
     expect((await lastAudit("mcp-server-identity-propagation-changed", serverId))!.detail).toMatchObject({
@@ -334,8 +499,8 @@ describe("S8 — the opt-in does not follow the url", () => {
       relaxation: true,
     });
 
-    // a url move that says nothing about identity turns it off: no step-up, audited
-    const silent = await patchServer(adminKey, { url: up.url });
+    // a url move that says nothing about identity turns it off: no step-up (an API key may do it), audited
+    const silent = await patchByKey({ url: up.url });
     expect(silent.statusCode, silent.body).toBe(200);
     expect(silent.json()).toMatchObject({ url: up.url, identityPropagation: "none" });
     const row = await lastAudit("mcp-server-identity-propagation-changed", serverId);
@@ -345,6 +510,6 @@ describe("S8 — the opt-in does not follow the url", () => {
     expect(got.length).toBeGreaterThan(0);
     expect(got.every((r) => r.assertion === null)).toBe(true);
     // an explicit none asks for nothing either
-    expect((await patchServer(adminKey, { identityPropagation: "none" })).statusCode).toBe(200);
+    expect((await patchByKey({ identityPropagation: "none" })).statusCode).toBe(200);
   });
 });
