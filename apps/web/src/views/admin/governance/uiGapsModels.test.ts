@@ -71,7 +71,7 @@ describe("shadow-AI remediation workflow body", () => {
       ...plan,
       workflowRequest: {
         ...plan.workflowRequest,
-        body: { change: { description: "Pull app.example (openai) into governance", paths: [], changeType: "shadow-ai-remediation", environment: "unstated", targetSystem: "app.example" } },
+        body: { change: { description: "Pull app.example (example-provider) into governance", paths: [], changeType: "shadow-ai-remediation", environment: "unstated", targetSystem: "app.example" } },
       },
     };
     const built = startInstanceBody(host, { ...startFormFrom(host), environment: "production", projectId: "p1" });

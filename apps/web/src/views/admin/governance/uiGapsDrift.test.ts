@@ -48,7 +48,7 @@ describe("shadow-AI environment", () => {
     steps: [],
     workflowRequest: {
       route: "POST /v1/workflows/instances",
-      body: { change: { description: "Pull app.example (openai) into governance — shadow-AI finding f1", paths: [], changeType: "shadow-ai-remediation", environment: "unstated", targetSystem: "app.example" } },
+      body: { change: { description: "Pull app.example (example-provider) into governance — shadow-AI finding f1", paths: [], changeType: "shadow-ai-remediation", environment: "unstated", targetSystem: "app.example" } },
       needsInput: ["change.environment"],
     },
     note: "",

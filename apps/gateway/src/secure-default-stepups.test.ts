@@ -84,7 +84,7 @@ describe("model-card writes refuse the presentation-scrub marker", () => {
 });
 
 describe("shadow-AI remediation plan body", () => {
-  const finding = { id: "00000000-0000-4000-8000-0000000000aa", subject: "acme/billing", subjectKind: "repo", provider: "openai" };
+  const finding = { id: "00000000-0000-4000-8000-0000000000aa", subject: "acme/billing", subjectKind: "repo", provider: "example-provider" };
 
   it("validates against the real workflow start schema, with no field it does not accept", () => {
     const body = remediationStartBody(finding);
