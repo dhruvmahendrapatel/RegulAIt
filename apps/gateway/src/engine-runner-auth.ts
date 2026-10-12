@@ -1,31 +1,34 @@
 /**
- * ADR-0187 B5-F — RUNNER CREDENTIALS and THE RUNNER ROUTE ALLOW-LIST.
+ * ADR-0187 B5-F — RUNNER CREDENTIALS and THE RUNNER ROUTE ALLOW-LIST, and
+ * ADR-0188 S7 — THE PDP CLIENT'S ONE ROUTE.
  *
- * Two credentials, both stored only as sha256 (the `hashToken` every other
- * credential uses):
+ * Two runner credentials:
  *   - `rgee_…` a ONE-TIME enrolment token, minted by an admin on the Engines
- *     page for one engine, at most 60 minutes, spent by the register route;
- *   - `rge_…`  the runner token that register hands back. It reaches exactly
- *     `ENGINE_RUNNER_ROUTES` (lease, heartbeat, artifact, result) and nothing
- *     else, for its own engine only.
+ *     page for one engine, at most 60 minutes, spent by the register route
+ *     (stored only as sha256, the `hashToken` every other credential uses);
+ *   - the runner's OWN KEY (S7, OWNER DECISION 8: the `rge_` bearer token is
+ *     retired). The runner generates it, registers its public half at
+ *     enrolment as its workload identity's credential, and presents a
+ *     DPoP-bound self token from `POST /oauth/token` (`oauth/workload-self.ts`).
+ *     It reaches exactly `ENGINE_RUNNER_ROUTES` (lease, self-test, key rotation,
+ *     heartbeat, artifact, result) and nothing else, for its own engine only.
  *
- * Neither is a user (`userId` null, never admin). The allow-list is enforced by
+ * A PDP client (a data-plane proxy, S7: the `pdp` virtual key is retired) is a
+ * workload identity of kind `pdp` with a registered key and a self token that
+ * reaches `POST /v1/authz/check` and nothing else.
+ *
+ * None is a user (`userId` null, never admin). The allow-lists are enforced by
  * `registerEngineRunnerScopeHook`, which runs right after authentication and
  * BEFORE the admin gate, the same way the virtual-key ceiling does: a route
- * added tomorrow is unreachable on a runner token until it is named in the
+ * added tomorrow is unreachable on either credential until it is named in the
  * shared list. It also runs the other way: a runner route refuses every
- * credential that is not a runner token (a person or an API key cannot lease
- * work or post a result).
+ * credential that is not a runner's (a person or an API key cannot lease work
+ * or post a result).
  */
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, engineEnrollmentTokens, engineRunners, eq, gt, sql, type Db } from "@regulait/db";
-import {
-  ENGINE_ENROLLMENT_ROUTES,
-  ENGINE_ENROLLMENT_TOKEN_PREFIX,
-  ENGINE_RUNNER_ROUTES,
-  ENGINE_RUNNER_TOKEN_PREFIX,
-} from "@regulait/shared";
+import { and, engineEnrollmentTokens, eq, gt, sql, type Db } from "@regulait/db";
+import { ENGINE_ENROLLMENT_ROUTES, ENGINE_ENROLLMENT_TOKEN_PREFIX, ENGINE_RUNNER_ROUTES } from "@regulait/shared";
 import { hashToken } from "./token-hash.js";
 import type { AuthContext, AuthRefusal } from "./auth.js";
 
@@ -33,10 +36,13 @@ export const RUNNER_ROUTE_SET: ReadonlySet<string> = new Set<string>(ENGINE_RUNN
 export const ENROLLMENT_ROUTE_SET: ReadonlySet<string> = new Set<string>(ENGINE_ENROLLMENT_ROUTES);
 /** every route only a runner credential reaches */
 export const ALL_RUNNER_ROUTES: ReadonlySet<string> = new Set<string>([...ENGINE_RUNNER_ROUTES, ...ENGINE_ENROLLMENT_ROUTES]);
+/** ADR-0188 S7 (AER-027 kept): THE PDP CLIENT'S ENTIRE WORLD */
+export const PDP_CLIENT_ROUTES: ReadonlySet<string> = new Set<string>(["POST /v1/authz/check"]);
 
-// PR #205 review [54]: the gateway no longer mints runner tokens. The runner generates its own
-// (`generateRunnerSecret`, packages/engine-runner) and registers only its sha256 — `hashToken`
-// over the same `rge_` string — so nothing secret ever travels back to it.
+
+// PR #205 review [54], ADR-0188 S7: the gateway never mints a runner credential. The runner generates
+// its own KEY (packages/engine-runner) and registers only the public half, so nothing secret ever
+// travels back to it, and nothing a gateway stores could ever authenticate as it.
 
 export function generateEnrollmentToken(): { token: string; tokenHash: string } {
   const token = ENGINE_ENROLLMENT_TOKEN_PREFIX + randomBytes(32).toString("hex");
@@ -44,13 +50,14 @@ export function generateEnrollmentToken(): { token: string; tokenHash: string } 
 }
 
 /**
- * Resolve a presented bearer to a runner or enrolment context, a refusal, or
- * null when the token is not an engine credential at all (the caller then
- * tries the other credential kinds). An enrolment token is only CHECKED here
- * (unexpired); the register route spends it atomically. PR #205 review [54]: a SPENT, unexpired
+ * Resolve a presented bearer to an enrolment context, a refusal, or null when
+ * the token is not an enrolment token (the caller then tries the other
+ * credential kinds). An enrolment token is only CHECKED here (unexpired); the
+ * register route spends it atomically. PR #205 review [54]: a SPENT, unexpired
  * enrolment token still authenticates — to the register route only, where it can do nothing but
- * replay the registration it already made (same runner-token hash → same runner; any other hash
- * is refused). It never mints a second runner.
+ * replay the registration it already made (the same key → the same runner; any other key is
+ * refused). It never mints a second runner. ADR-0188 S7: no bearer value resolves to a RUNNER any
+ * more (the `rge_` token is retired); a runner authenticates with its key (`oauth/workload-self.ts`).
  */
 export async function resolveEngineCredential(db: Db, token: string): Promise<AuthContext | AuthRefusal | null> {
   if (token.startsWith(ENGINE_ENROLLMENT_TOKEN_PREFIX)) {
@@ -68,23 +75,14 @@ export async function resolveEngineCredential(db: Db, token: string): Promise<Au
       engineId: row.engineId,
     };
   }
-  if (token.startsWith(ENGINE_RUNNER_TOKEN_PREFIX)) {
-    const [row] = await db
-      .select({ id: engineRunners.id, engineId: engineRunners.engineId, revokedAt: engineRunners.revokedAt })
-      .from(engineRunners)
-      .where(eq(engineRunners.tokenHash, hashToken(token)));
-    if (!row) return null;
-    if (row.revokedAt !== null) return "engine_runner_revoked";
-    await db.update(engineRunners).set({ lastSeenAt: new Date() }).where(eq(engineRunners.id, row.id));
-    return { userId: null, isAdmin: false, via: "engine-runner", engineRunnerId: row.id, engineId: row.engineId };
-  }
   return null;
 }
 
-/** the routes a context may reach, or null when it is not an engine credential */
+/** the routes a context may reach, or null when it is not a runner, enrolment or PDP-client credential */
 export function engineCredentialRoutes(ctx: { via: string }): ReadonlySet<string> | null {
   if (ctx.via === "engine-runner") return RUNNER_ROUTE_SET;
   if (ctx.via === "engine-enrollment") return ENROLLMENT_ROUTE_SET;
+  if (ctx.via === "pdp") return PDP_CLIENT_ROUTES;
   return null;
 }
 
@@ -97,6 +95,12 @@ export function registerEngineRunnerScopeHook(app: FastifyInstance): void {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     const allowed = req.authCtx ? engineCredentialRoutes(req.authCtx) : null;
     if (allowed) {
+      if (!allowed.has(route) && req.authCtx.via === "pdp") {
+        return reply.status(403).send({
+          error: "workload_scope",
+          detail: `a PDP client's token may only reach ${[...allowed].join(", ")}; '${route}' is not one of them.`,
+        });
+      }
       if (!allowed.has(route)) {
         return reply.status(403).send({
           error: "engine_runner_scope",
@@ -113,7 +117,7 @@ export function registerEngineRunnerScopeHook(app: FastifyInstance): void {
         error: "engine_runner_token_required",
         detail: enrol
           ? "registering a runner needs a one-time enrolment token (rgee_…) minted on the Engines page"
-          : "this route is for engine runners only: present the runner token (rge_…) registration returned",
+          : "this route is for engine runners only: present the runner's DPoP-bound token (POST /oauth/token with the key it registered)",
       });
     }
   });

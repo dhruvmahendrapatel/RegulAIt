@@ -125,16 +125,19 @@ export interface AuthContext {
    * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
    * but is NEVER admin, whatever the owner is, and reaches only the routes in
    * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
-  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload";
+  via: "bootstrap" | "api-key" | "session" | "virtual-key" | "engine-runner" | "engine-enrollment" | "workload" | "pdp";
   /** AER-027: which allow-list this virtual key is bound to. 'dispatch' is
-   *  ADR-0066's model surfaces; 'pdp' is `POST /v1/authz/check` and nothing
-   *  else; ADR-0187 'engine' is the compat model routes, pinned to one project.
-   *  Set only when `via === "virtual-key"`. */
+   *  ADR-0066's model surfaces; ADR-0187 'engine' is the compat model routes,
+   *  pinned to one project. 'pdp' is retired (ADR-0188 S7, migration 0195: no
+   *  live pdp key can exist; a PDP client is `via === "pdp"`). Set only when
+   *  `via === "virtual-key"`. */
   virtualKeyPurpose?: "dispatch" | "pdp" | "engine";
-  /** ADR-0187: the runner (`via === "engine-runner"`) or enrolment token
+  /** ADR-0187: the runner (`via === "engine-runner"`: since ADR-0188 S7 its
+   * DPoP-bound self token, never a bearer value) or enrolment token
    * (`via === "engine-enrollment"`) a sidecar runner presented, and its engine.
    * Neither is a user: `userId` is null and `isAdmin` false, and each reaches
-   * only its own route allow-list (`ENGINE_RUNNER_ROUTES`). */
+   * only its own route allow-list (`ENGINE_RUNNER_ROUTES`). ADR-0188 S7: a PDP
+   * client (`via === "pdp"`) likewise reaches `POST /v1/authz/check` only. */
   engineRunnerId?: string;
   engineEnrollmentTokenId?: string;
   /** PR #205 review [54]: the enrolment token was already spent (it can only replay its registration) */
@@ -147,6 +150,8 @@ export interface AuthContext {
    * only by `workloadPreHandler` (`oauth/resource.ts`), only on the routes in
    * `WORKLOAD_ROUTES`. */
   workloadIdentityId?: string;
+  /** ADR-0188 S7: the registered credential that authenticated a runner's or a PDP client's self token */
+  workloadCredentialId?: string;
   delegationGrantId?: string;
   /** S4+S5 follow-up: every identity on the grant's stored path, root first (decision 25), for the audit stamp */
   actorChain?: string[];
@@ -252,10 +257,12 @@ export async function authenticate(
   // silently carried admin would be the exact opposite of what it is for. Its
   // `userId` IS the owner, so every downstream entitlement check evaluates the
   // owner's grants, which is what makes the key a CEILING rather than a bypass.
-  // ADR-0187 — SIDECAR ENGINE RUNNERS. The `rge_` (runner) and `rgee_`
-  // (one-time enrolment) prefixes are disjoint from `rgl_`/`rglv_`, so this
-  // branch changes no other credential's path. Neither resolves to a user and
-  // neither is admin; the route hook then confines each to its allow-list.
+  // ADR-0187 — SIDECAR ENGINE RUNNERS. The `rgee_` (one-time enrolment) prefix
+  // is disjoint from `rgl_`/`rglv_`, so this branch changes no other
+  // credential's path. It resolves to no user and is never admin; the route
+  // hook then confines it to the register route. ADR-0188 S7: the `rge_`
+  // runner token is retired; a runner authenticates with its key's DPoP-bound
+  // self token (`workloadPreHandler`), never with a bearer value.
   const engineCred = await resolveEngineCredential(db, token);
   if (engineCred !== null) return engineCred;
 

@@ -59,9 +59,16 @@ import {
   UseDpopNonce,
   type OIDCProviderError,
 } from "oidc-provider/lib/helpers/errors.js";
-import { auditLog, delegationGrants, eq, type Db, type DelegationGrantRow } from "@regulait/db";
+import { auditLog, delegationGrants, engineRunners, eq, type Db, type DelegationGrantRow } from "@regulait/db";
 import {
   CLIENT_ASSERTION_MAX_AGE_SECONDS,
+  CLIENT_CREDENTIALS_GRANT_TYPE,
+  clientCredentialsRequestSchema,
+  CREDENTIAL_NOT_AFTER_RESPONSE_MEMBER,
+  CREDENTIAL_ROTATE_AFTER_RESPONSE_MEMBER,
+  CREDENTIAL_ROTATE_AT_FRACTION,
+  WORKLOAD_SELF_KINDS,
+  type WorkloadSelfKind,
   DELEGATION_DEPTH_CEILING,
   DELEGATION_ERROR_CODES,
   DPOP_PROOF_MAX_AGE_SECONDS,
@@ -91,6 +98,7 @@ import { clientJwks, findWorkloadClient, matchCertificateCredential, type Certif
 import { deploymentEnvironment, gatewayResource, identityIssuer, identitySecretsFor, OAUTH_TOKEN_ROUTE_PATH, tokenEndpointUrl } from "./common.js";
 import { rootCapFor, verifyDelegationProof, type VerifiedDelegationProof } from "./delegation-proof.js";
 import { presentedClientCertificate } from "./x509.js";
+import { mintWorkloadSelfToken, selfKindForResource } from "./workload-self.js";
 
 /** the form parameters the exchange grant reads (everything else is stripped by the provider) */
 export const EXCHANGE_PARAMS = [
@@ -108,6 +116,9 @@ export const EXCHANGE_PARAMS = [
   "expires_at",
   "idempotency_key",
 ] as const;
+
+/** ADR-0188 S7: the form parameters the self-token grant reads (`client_credentials`) */
+export const SELF_TOKEN_PARAMS = ["resource"] as const;
 
 /** the bound on the raw form body (a subject token, an actor token and a scope list fit well inside) */
 export const TOKEN_BODY_LIMIT_BYTES = 96 * 1024;
@@ -147,6 +158,8 @@ interface Preflight {
   resource: string;
   root?: { proof: VerifiedDelegationProof };
   child?: { parentGrantId: string; body: DelegationBody; idempotencyKey: string; subjectCredentialId: string | null; claim: { key: string; expiresAt: Date } };
+  /** ADR-0188 S7: a self token (`client_credentials`) for an engine runner or a PDP client */
+  self?: { kind: WorkloadSelfKind; credentialNotBefore: Date; credentialNotAfter: Date };
 }
 
 interface RequestState {
@@ -167,6 +180,10 @@ interface RequestState {
   mtls?: { clientId: string; match: CertificateMatch } | null;
   /** what to audit */
   outcome?: { grantId: string; parentGrantId: string | null; jti: string; actorIdentityId: string };
+  /** ADR-0188 S7: a self token that was issued (audited as such, never as a delegation) */
+  selfOutcome?: { identityId: string; kind: WorkloadSelfKind; jti: string; credentialId: string };
+  /** the grant type the request named (the audit row says which kind of token was asked for) */
+  grantType: string | null;
   /** S5 review item 5: a grant made for this request that was revoked because the request timed out */
   revokedOnAbort?: string;
   /** S5 review item 5: settles when the grant handler has finished (the audit row waits for it) */
@@ -206,8 +223,11 @@ function adapterFor(db: Db) {
       const s = state();
       const client = await findWorkloadClient(db, id, s.now);
       if (!client) return undefined;
-      const base = { client_id: id, grant_types: [TOKEN_EXCHANGE_GRANT_TYPE], response_types: [], redirect_uris: [] };
-      if (s.mtls && s.mtls.clientId === id) {
+      // ADR-0188 S7: an engine runner or a PDP client may also take a self token; a thumbprint-named client may ONLY
+      const self = (WORKLOAD_SELF_KINDS as readonly string[]).includes(client.identity.kind);
+      const grantTypes = client.alias ? [CLIENT_CREDENTIALS_GRANT_TYPE] : self ? [TOKEN_EXCHANGE_GRANT_TYPE, CLIENT_CREDENTIALS_GRANT_TYPE] : [TOKEN_EXCHANGE_GRANT_TYPE];
+      const base = { client_id: id, grant_types: grantTypes, response_types: [], redirect_uris: [] };
+      if (s.mtls && s.mtls.clientId === id && !client.alias) {
         // decision 21: the certificate was validated and matched BEFORE the provider ran; the provider is told the
         // outcome through certificateAuthorized/certificateSubjectMatches. The SAN property only satisfies its schema.
         return { ...base, token_endpoint_auth_method: "tls_client_auth", tls_client_auth_san_uri: id };
@@ -321,6 +341,50 @@ export function mapDelegationRefusal(e: DelegationRefusedError): OIDCProviderErr
     default:
       return refuse(new InvalidGrant(e.message), e.code);
   }
+}
+
+/**
+ * ADR-0188 S7 — the SELF-TOKEN preflight (`client_credentials`), run in the
+ * assertion hook before the provider claims anything: the request's DPoP proof
+ * (our profile; a self token is ALWAYS DPoP-bound), the one control-plane
+ * resource for the client's kind, a live identity of that kind in this
+ * environment, and, for a runner, a runner that is not revoked.
+ */
+async function selfPreflight(ctx: KoaContextLike, s: RequestState): Promise<Preflight> {
+  const raw: Record<string, string> = {};
+  for (const k of ["grant_type", "resource", "client_assertion_type", "client_assertion", "client_id"]) {
+    const v = param(ctx, k);
+    if (v !== undefined) raw[k] = v;
+  }
+  const parsed = clientCredentialsRequestSchema.safeParse(raw);
+  if (!parsed.success) throw refuse(new InvalidRequest("the self-token request is malformed"), "request_malformed");
+  const clientId = ctx.oidc.client.clientId;
+  const client = await findWorkloadClient(s.db, clientId, s.now);
+  if (!client) throw refuse(new InvalidClientAuth("unknown client"), "client_unknown");
+  const kind = client.identity.kind as WorkloadSelfKind;
+  if (!(WORKLOAD_SELF_KINDS as readonly string[]).includes(kind)) throw refuse(new InvalidClientAuth("this client may not take a self token"), "self_token_kind");
+  if (selfKindForResource(s.issuer, parsed.data.resource) !== kind) throw refuse(new InvalidTarget("a self token names its own control-plane resource"), "invalid_target");
+  if (!client.identity.environments.includes(deploymentEnvironment())) throw refuse(new InvalidClientAuth("this identity is not allowed in this environment"), "identity_environment");
+  const authCredentialId = s.assertionCredentialId;
+  const credential = client.credentials.find((c) => c.id === authCredentialId);
+  if (!authCredentialId || !credential) throw refuse(new InvalidClientAuth("no authenticating credential"), "credential_unknown");
+  if (kind === "engine_runner") {
+    const [runner] = client.identity.engineRunnerId
+      ? await s.db.select({ revokedAt: engineRunners.revokedAt }).from(engineRunners).where(eq(engineRunners.id, client.identity.engineRunnerId))
+      : [];
+    if (!runner) throw refuse(new InvalidClientAuth("no such engine runner"), "engine_runner_unknown");
+    if (runner.revokedAt !== null) throw refuse(new InvalidClientAuth("this engine runner was revoked"), "engine_runner_revoked");
+  }
+  const dpop = await requestDpop(ctx, s);
+  if (!dpop) throw refuse(new InvalidDpopProof("a DPoP proof is required"), "dpop_required");
+  s.dpopIat = dpop.iat;
+  return {
+    client,
+    authCredentialId,
+    binding: { kind: "dpop", thumbprint: dpop.thumbprint, dpopJti: dpop.jti },
+    resource: parsed.data.resource,
+    self: { kind, credentialNotBefore: credential.notBefore, credentialNotAfter: credential.notAfter },
+  };
 }
 
 async function preflight(ctx: KoaContextLike, s: RequestState): Promise<Preflight> {
@@ -596,6 +660,42 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
   });
 }
 
+/**
+ * ADR-0188 S7 — THE SELF-TOKEN GRANT (`client_credentials`): `private_key_jwt`
+ * only (the preflight ran in the assertion hook, before the assertion's claim),
+ * then the request's DPoP proof is claimed and the token minted, bound to the
+ * DPoP key. No grant, no sponsor: the token reaches its own control-plane route
+ * and nothing else (`workload-self.ts`).
+ */
+async function selfToken(provider: Provider, ctx: KoaContextLike): Promise<void> {
+  const s = state();
+  const pf = s.preflight;
+  // an mTLS client sends no assertion, so no preflight exists: S7 issues self tokens to private_key_jwt clients only
+  if (!pf?.self) throw refuse(new InvalidClientAuth("a self token needs private_key_jwt client authentication"), "self_token_auth_method");
+  s.phase = "as_dpop";
+  await checkDpopReplay(provider, ctx, { jti: pf.binding.dpopJti! }, ctx.oidc.client.clientId, InvalidDpopProof);
+  if (s.aborted) throw refuse(new InvalidGrant("request timeout"), "timeout");
+  const minted = await mintWorkloadSelfToken(s.db, {
+    identityId: pf.client.identity.id,
+    identifier: pf.client.identity.identifier,
+    kind: pf.self.kind,
+    authCredentialId: pf.authCredentialId,
+    jkt: pf.binding.thumbprint,
+    issuer: s.issuer,
+    env: deploymentEnvironment(),
+  });
+  s.selfOutcome = { identityId: pf.client.identity.id, kind: pf.self.kind, jti: minted.jti, credentialId: pf.authCredentialId };
+  ctx.body = {
+    ...buildTokenResponse(provider, { accessToken: minted.accessToken, tokenType: minted.tokenType, expiresIn: minted.expiresIn }),
+    // RFC 6749 §5.1 allows extra members: when the key that authenticated this stops being accepted, and from when
+    // its holder should rotate it (two thirds into its window; decision 12)
+    [CREDENTIAL_NOT_AFTER_RESPONSE_MEMBER]: Math.floor(pf.self.credentialNotAfter.getTime() / 1000),
+    [CREDENTIAL_ROTATE_AFTER_RESPONSE_MEMBER]: Math.floor(
+      (pf.self.credentialNotBefore.getTime() + (pf.self.credentialNotAfter.getTime() - pf.self.credentialNotBefore.getTime()) * CREDENTIAL_ROTATE_AT_FRACTION) / 1000,
+    ),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The provider (one per issuer and database)
 // ---------------------------------------------------------------------------
@@ -678,12 +778,14 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
         }
       }
       if (!s.assertionCredentialId) throw refuse(new InvalidClientAuth("client assertion key"), "assertion_key");
-      s.preflight = await preflight(ctx, s);
+      s.preflight = ctx.oidc.params.grant_type === CLIENT_CREDENTIALS_GRANT_TYPE ? await selfPreflight(ctx, s) : await preflight(ctx, s);
     },
   });
   // the Koa app sees only requests the gateway reconstructed; it trusts the forwarded scheme and host WE set
   provider.proxy = true;
   provider.registerGrantType(TOKEN_EXCHANGE_GRANT_TYPE, (ctx) => exchange(provider, ctx), EXCHANGE_PARAMS);
+  // ADR-0188 S7: the workload self token (engine runners and PDP clients); the provider's own client_credentials is off
+  provider.registerGrantType(CLIENT_CREDENTIALS_GRANT_TYPE, (ctx) => selfToken(provider, ctx), SELF_TOKEN_PARAMS);
   // expose our public RegulAIt error_code (decision 15) on the refusals that carry one
   // and write the audit row BEFORE the response leaves (decision 20: the provider runs outside Fastify's hooks)
   provider.use(async (ctx, next) => {
@@ -707,6 +809,30 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
 // ---------------------------------------------------------------------------
 
 async function auditTokenRequest(db: Db, s: RequestState | null, status: number, clientId: string | null): Promise<void> {
+  // ADR-0188 S7: a self-token request is audited as itself, against the identity, never as a delegation
+  if (s?.grantType === CLIENT_CREDENTIALS_GRANT_TYPE) {
+    const issued = status < 400 && !!s.selfOutcome;
+    await db.insert(auditLog).values({
+      userId: "00000000-0000-0000-0000-000000000000",
+      objectType: "workload_identity",
+      objectId: s.selfOutcome?.identityId ?? s.preflight?.client.identity.id ?? null,
+      detail: {
+        phase: "client-credentials",
+        route: `POST ${OAUTH_TOKEN_ROUTE_PATH}`,
+        status,
+        code: issued ? null : (s.code ?? (status >= 500 ? "server_error" : "refused")),
+        clientId,
+        ...(issued ? { kind: s.selfOutcome!.kind, tokenJti: s.selfOutcome!.jti, credentialId: s.selfOutcome!.credentialId } : {}),
+      },
+      effect: issued ? "allow" : "deny",
+      ruleId: issued ? "workload-token-issued" : "workload-token-refused",
+      ruleChain: [],
+      reason: issued
+        ? "a workload self token was issued to an engine runner or a PDP client (ADR-0188 S7)"
+        : "a workload self-token request was refused (ADR-0188 S7)",
+    });
+    return;
+  }
   const ok = status < 400 && !!s?.outcome;
   await db.insert(auditLog).values({
     userId: "00000000-0000-0000-0000-000000000000",
@@ -765,7 +891,8 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
   const form = new URLSearchParams(req.body.toString("utf8"));
   const clientId = clientIdOf(form);
   const now = await databaseNow(db);
-  const s: RequestState = { db, issuer, secrets, now, phase: "client_assertion", aborted: false, clientId };
+  const grantTypes = form.getAll("grant_type");
+  const s: RequestState = { db, issuer, secrets, now, phase: "client_assertion", aborted: false, clientId, grantType: grantTypes.length === 1 ? grantTypes[0]!.slice(0, 200) : null };
 
   // decision 21: a client certificate is matched to a registered credential BEFORE the provider sees the request,
   // and only when the client sent no assertion (one mechanism per request)

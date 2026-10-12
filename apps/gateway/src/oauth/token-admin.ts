@@ -35,6 +35,7 @@ import { ISSUER_JWS_ALG } from "../identity-signing-keys.js";
 import { clientJwks, findWorkloadClient, matchCertificateCredential, type WorkloadClient } from "./clients.js";
 import { deploymentEnvironment, identityIssuer, tokenEndpointUrl } from "./common.js";
 import { presentedClientCertificate } from "./x509.js";
+import { storedSelfToken } from "./workload-self.js";
 
 const BODY_LIMIT = 32 * 1024;
 
@@ -88,8 +89,11 @@ export async function authenticateWorkloadClient(db: Db, req: FastifyRequest, fo
   return m.ok ? { ok: true, client, credentialId: m.credentialId } : { ok: false, code: m.code };
 }
 
-/** the issued_tokens row and grant actor of a presented token string, if it is one of ours */
-async function ownToken(db: Db, token: string): Promise<{ jti: string; actorIdentityId: string; grantId: string } | null> {
+/**
+ * the issued_tokens row and its holder of a presented token string, if it is one of ours: a delegated token's
+ * grant actor, or (ADR-0188 S7) a self token's subject identity
+ */
+async function ownToken(db: Db, token: string): Promise<{ jti: string; actorIdentityId: string; grantId: string | null } | null> {
   let jti: unknown;
   try {
     jti = decodeJwt(token).jti;
@@ -98,11 +102,13 @@ async function ownToken(db: Db, token: string): Promise<{ jti: string; actorIden
   }
   if (typeof jti !== "string" || jti.length === 0 || jti.length > 128) return null;
   const [row] = await db
-    .select({ jti: issuedTokens.jti, grantId: issuedTokens.grantId, actorIdentityId: delegationGrants.actorIdentityId })
+    .select({ jti: issuedTokens.jti, grantId: issuedTokens.grantId, grantActor: delegationGrants.actorIdentityId, subject: issuedTokens.subjectIdentityId })
     .from(issuedTokens)
-    .innerJoin(delegationGrants, eq(delegationGrants.id, issuedTokens.grantId))
+    .leftJoin(delegationGrants, eq(delegationGrants.id, issuedTokens.grantId))
     .where(eq(issuedTokens.jti, jti));
-  return row ?? null;
+  if (!row) return null;
+  const actorIdentityId = row.grantId !== null ? row.grantActor : row.subject;
+  return actorIdentityId ? { jti: row.jti, grantId: row.grantId, actorIdentityId } : null;
 }
 
 async function audit(db: Db, phase: "token-revocation" | "token-introspection", effect: "allow" | "deny", detail: Record<string, unknown>) {
@@ -199,7 +205,11 @@ export function registerTokenAdminEndpoints(app: FastifyInstance, db: Db): void 
       }
       // one audience, a single string, as the token endpoint mints it (S5 review item 7)
       if (typeof claims.aud !== "string") return inactive("token_invalid");
-      const rest = await storedAndLive(db, claims, binding, key.row, { env: deploymentEnvironment() }, b.now);
+      // ADR-0188 S7: a self token is judged by its own stored-row and identity checks, a delegated one by the live chain
+      const rest =
+        own.grantId === null
+          ? await storedSelfToken(db, claims, binding, key.row, { env: deploymentEnvironment(), issuer: b.issuer }, b.now)
+          : await storedAndLive(db, claims, binding, key.row, { env: deploymentEnvironment() }, b.now);
       if (!rest.ok) return inactive(rest.code);
       await audit(db, "token-introspection", "allow", { tokenJti: own.jti, grantId: own.grantId, clientIdentityId: b.auth.client.identity.id });
       return reply

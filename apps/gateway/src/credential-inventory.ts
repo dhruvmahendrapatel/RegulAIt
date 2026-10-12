@@ -276,7 +276,7 @@ export async function computeCredentialInventory(
       ownerKind: "owner",
       scope:
         k.purpose === "pdp"
-          ? "authorization checks only (no dispatch)"
+          ? "retired PDP key (ADR-0188 S7: PDP clients are workload identities now)"
           : [
               models.length ? `models: ${models.slice(0, 5).join(", ")}${models.length > 5 ? ` (+${models.length - 5})` : ""}` : "any model its owner may use",
               k.budgetUsd === null ? "no budget" : `budget $${k.budgetUsd}`,

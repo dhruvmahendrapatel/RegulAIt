@@ -70,21 +70,16 @@ export const VIRTUAL_KEY_ALLOWED_ROUTES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * AER-027 — THE PDP CREDENTIAL'S ENTIRE WORLD.
- *
- * One route. A data-plane proxy holds this to ask "may this run?" and can do
- * nothing else with it: not dispatch a model, not read a ledger, not mint
- * another key. Before this, the only credential that could reach an
- * admin-gated `/v1/authz/check` was an ADMINISTRATOR API KEY, so compromising
- * the most exposed component in a deployment was equivalent to compromising
- * the control plane.
- *
- * THE SEPARATION RUNS BOTH WAYS, and that is deliberate rather than tidy: a
- * dispatch key cannot ask authorization questions about other people, and a
- * pdp key cannot spend anybody's budget. Two capabilities that happen to share
- * a credential mechanism are still two capabilities.
+ * AER-027 — THE PDP CREDENTIAL'S ENTIRE WORLD is one route, `POST
+ * /v1/authz/check`. ADR-0188 S7 (OWNER DECISION 8) retired the `pdp` virtual
+ * key that carried it: a bearer string a data-plane proxy held. A PDP client is
+ * now a workload identity of kind `pdp` with a registered key and a DPoP-bound
+ * self token (`PDP_CLIENT_ROUTES` in `engine-runner-auth.ts`). A row with
+ * purpose `pdp` can only be a revoked one (migration 0195's CHECK), and
+ * `routesForPurpose` gives it the empty set like any purpose this build does
+ * not issue. The separation still runs both ways: a dispatch key cannot ask an
+ * authorization question about anyone.
  */
-export const PDP_KEY_ALLOWED_ROUTES: ReadonlySet<string> = new Set(["POST /v1/authz/check"]);
 
 /**
  * ADR-0187 — A RUN-SCOPED ENGINE KEY'S ENTIRE WORLD: the compat model routes
@@ -105,7 +100,7 @@ export type VirtualKeyPurpose = "dispatch" | "pdp" | "engine";
  *  EMPTY set rather than a default — a credential whose purpose this build does
  *  not understand reaches nothing, which is the only safe reading of it. */
 export function routesForPurpose(purpose: string | null | undefined): ReadonlySet<string> {
-  if (purpose === "pdp") return PDP_KEY_ALLOWED_ROUTES;
+  // a retired `pdp` purpose (ADR-0188 S7) falls through to the empty set, like any purpose this build does not issue
   if (purpose === "engine") return ENGINE_KEY_ALLOWED_ROUTES;
   if (purpose === "dispatch" || purpose == null) return VIRTUAL_KEY_ALLOWED_ROUTES;
   return new Set<string>();
@@ -388,13 +383,10 @@ const createSchema = z.object({
   expiresAt: z.string().datetime().nullable().optional(),
   /** admin-only: pin the platform credential this key proxies to */
   upstreamCredentialId: z.string().uuid().nullable().optional(),
-  /** AER-027 — WHICH ALLOW-LIST THIS KEY IS BOUND TO. Defaults to 'dispatch',
-   *  so an existing caller that never heard of this field gets exactly the key
-   *  it always got. 'pdp' mints the authorization-question credential a
-   *  data-plane proxy holds: one route, never admin, and unable to dispatch.
-   *  ADMIN-ONLY, because a pdp key asks about OTHER PEOPLE — the endpoint
-   *  believes the subject in the request body — so issuing one is a decision
-   *  about everybody's entitlements, not just the owner's. */
+  /** AER-027 — WHICH ALLOW-LIST THIS KEY IS BOUND TO. Defaults to 'dispatch'.
+   *  'pdp' is RETIRED (ADR-0188 S7, OWNER DECISION 8): it is still parsed so
+   *  the refusal can say what replaced it (410 `pdp_key_retired`), and nothing
+   *  is ever minted for it. */
   purpose: z.enum(["dispatch", "pdp"]).optional(),
 });
 
@@ -446,17 +438,15 @@ export function registerVirtualKeyRoutes(app: FastifyInstance, db: Db) {
     // A non-admin may issue keys ONLY for themselves. Issuing on behalf of
     // someone else would be minting a credential against another human's
     // entitlements, which is a widening dressed as a convenience.
-    // A pdp key is not the owner's credential in the way a dispatch key is: the
-    // callout believes the subject in the request BODY, so this key can ask
-    // about anyone in the deployment. Issuing one is therefore a decision about
-    // everybody's entitlements and stays admin-only, even for a caller minting
-    // it "for themselves".
-    if (body.purpose === "pdp" && !req.authCtx.isAdmin) {
-      return reply.status(403).send({
-        error: "pdp_key_admin_only",
+    // ADR-0188 S7 (OWNER DECISION 8): the 'pdp' virtual key was a bearer string a data-plane proxy held. It is
+    // retired with no grace period; a PDP client is a workload identity of kind 'pdp' with a registered key, which
+    // asks with a DPoP-bound token from POST /oauth/token (private_key_jwt). Nothing is minted here for it.
+    if (body.purpose === "pdp") {
+      return reply.status(410).send({
+        error: "pdp_key_retired",
         detail:
-          "a 'pdp' virtual key can ask authorization questions about ANY user, because the callout " +
-          "believes the subject in the request body. Issuing one is an administrator act.",
+          "'pdp' virtual keys are retired (ADR-0188 S7). Create a workload identity of kind 'pdp' (Workload identities), " +
+          "bind the proxy's public key to it, and have the proxy authenticate with private_key_jwt and DPoP.",
       });
     }
     if (!req.authCtx.isAdmin && ownerId !== actor) {

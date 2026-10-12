@@ -25,7 +25,7 @@
  * `client_secret_*` does not exist.
  */
 import { and, eq, isNull, workloadCredentials, workloadIdentities, type Db, type WorkloadCredentialRow } from "@regulait/db";
-import type { WorkloadClientAuthMethod } from "@regulait/shared";
+import { JWK_THUMBPRINT_URI_PREFIX, WORKLOAD_SELF_KINDS, type WorkloadClientAuthMethod } from "@regulait/shared";
 import { credentialLiveAt } from "../delegation.js";
 import { loadOrgSettings } from "../org-settings.js";
 import { loadTrustConfig, selfSignedCertificateFacts, spiffeIdParts, validateClientCertificate, type PresentedCertificate } from "./x509.js";
@@ -35,11 +35,22 @@ export interface WorkloadClient {
   /** live credentials only */
   credentials: WorkloadCredentialRow[];
   methods: ReadonlySet<WorkloadClientAuthMethod>;
+  /**
+   * ADR-0188 S7: the client named itself by its key's RFC 9278 JWK thumbprint
+   * URI, not its identifier. Only an engine runner or a PDP client may, only
+   * for the `client_credentials` grant, and only that ONE key authenticates it.
+   */
+  alias?: boolean;
 }
+
+/** an RFC 7638 SHA-256 thumbprint (43 base64url characters), checked without a regular expression */
+const isThumbprint = (v: string) =>
+  v.length === 43 && [...v].every((c) => (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-" || c === "_");
 
 /** the client a `client_id` names, with its live credentials; null if unknown */
 export async function findWorkloadClient(db: Db, clientId: string, now: Date): Promise<WorkloadClient | null> {
   if (typeof clientId !== "string" || clientId.length === 0 || clientId.length > 2048) return null;
+  if (clientId.startsWith(JWK_THUMBPRINT_URI_PREFIX)) return findClientByThumbprint(db, clientId.slice(JWK_THUMBPRINT_URI_PREFIX.length), now);
   const [identity] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.identifier, clientId));
   if (!identity) return null;
   const creds = await db
@@ -52,6 +63,27 @@ export async function findWorkloadClient(db: Db, clientId: string, now: Date): P
     // a suspended or revoked identity authenticates nothing
     credentials: identity.status === "active" ? creds.filter((c) => credentialLiveAt(c, identity.id, now)) : [],
     methods: new Set(org.workloadClientAuthMethods as WorkloadClientAuthMethod[]),
+  };
+}
+
+/**
+ * ADR-0188 S7: an engine runner or a PDP client named by its key's thumbprint
+ * (RFC 9278), so it needs to hold nothing but its key. One key authenticates
+ * one identity, ever (S6), so the thumbprint names exactly one identity; the
+ * client is that identity with that ONE credential, when it is live.
+ */
+async function findClientByThumbprint(db: Db, jkt: string, now: Date): Promise<WorkloadClient | null> {
+  if (!isThumbprint(jkt)) return null;
+  const [cred] = await db.select().from(workloadCredentials).where(and(eq(workloadCredentials.jwkThumbprint, jkt), eq(workloadCredentials.kind, "jwk")));
+  if (!cred) return null;
+  const [identity] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.id, cred.identityId));
+  if (!identity || !(WORKLOAD_SELF_KINDS as readonly string[]).includes(identity.kind)) return null;
+  const org = await loadOrgSettings(db);
+  return {
+    identity,
+    credentials: identity.status === "active" && cred.revokedAt === null && credentialLiveAt(cred, identity.id, now) ? [cred] : [],
+    methods: new Set(org.workloadClientAuthMethods as WorkloadClientAuthMethod[]),
+    alias: true,
   };
 }
 

@@ -1360,7 +1360,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // it is the same one decision read once more.
     //
     // This changes exactly ONE route's behaviour: `POST /v1/authz/check` with a
-    // 'pdp' key. Every dispatch route a virtual key can reach is already in
+    // PDP client's self token (ADR-0188 S7 retired the 'pdp' key that did this). Every dispatch route a virtual key can reach is already in
     // NON_ADMIN_ROUTES, so a dispatch key gains nothing here. Making the
     // endpoint plainly non-admin instead would have let ANY authenticated user
     // ask authorization questions about anyone, which is worse than the problem.
@@ -3047,6 +3047,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // and the ledger should not blur them.
       credential: req.authCtx.via,
       ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+      // ADR-0188 S7: a PDP client is a workload identity (the pdp virtual key is retired)
+      ...(req.authCtx.workloadIdentityId ? { workloadIdentityId: req.authCtx.workloadIdentityId } : {}),
       ...(body.proxyConsumer
         ? { proxyConsumer: { id: body.proxyConsumer.id, username: body.proxyConsumer.username ?? null } }
         : {}),
