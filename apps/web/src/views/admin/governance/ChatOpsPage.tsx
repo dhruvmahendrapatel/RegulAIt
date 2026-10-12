@@ -25,6 +25,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, reconfirmNeeded, StaleAfterWrite, useAction, useConnectors, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
+import { BuilderRoutesCard, PostApprovalCard } from "./ChatOpsPostAndRoutes";
 
 /**
  * The ChatOps providers a workspace can be registered for. A hand-maintained
@@ -443,6 +444,10 @@ export default function ChatOpsPage() {
           </Button>
         </div>
       </Card>
+
+      {/* mirror one approval into a channel; which channel each builder agent answers on */}
+      <PostApprovalCard connections={connections.data?.connections ?? []} />
+      <BuilderRoutesCard />
 
       <Card title="Chat ↔ regulAIt identity links">
         <p className={v.faint}>{links.data?.posture ?? ""}</p>
