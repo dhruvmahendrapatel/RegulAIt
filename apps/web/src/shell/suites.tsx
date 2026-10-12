@@ -236,10 +236,11 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // ADR-0175 A7 — beside the keys it inventories: every stored non-human
       // credential (keys, tokens, provider and integration secrets) with its
       // owner, age, use and flags, read-only, linking to where each is managed.
-      // ADR-0188 S6: the workload identities page is a preview without its own
-      // entry until its create/revoke/credential routes are built; `also` gives
-      // it this suite's sidebar meanwhile.
-      { label: "Credentials", to: "/admin/credentials", also: ["/admin/workload-identities"] },
+      { label: "Credentials", to: "/admin/credentials" },
+      // ADR-0188 S6: each agent principal's own identity, stewards, public
+      // credentials and own grants, and a run's delegation tree. Beside the
+      // credential inventory, in this group (ADR-0177 §3: no new group).
+      { label: "Workload identities", to: "/admin/workload-identities" },
       { label: "SSO & sessions", to: "/admin/sso" },
       { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
       // ADR-0038: where an IdP group becomes a role — and where the ones that

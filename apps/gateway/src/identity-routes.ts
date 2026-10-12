@@ -1,8 +1,8 @@
 /**
  * ADR-0188 (batch 6 item 1) — per-agent and workload identity, and constrained
- * delegation. FOUNDATION STUB (slice S1): every route the design names is
- * registered here, under its auth class, and answers 501 `{error: "not_built"}`
- * until its slice lands. The route list, auth classes and request bodies are
+ * delegation. Slice S1 registered every route the design names here, under its
+ * auth class, as a 501 `{error: "not_built"}` stub until its slice landed; S6
+ * built the last of them, so no identity route answers 501 any more. The route list, auth classes and request bodies are
  * `IDENTITY_ROUTES` and the zod schemas in `@regulait/shared`
  * (`identity/contract.ts`); `zz-adr0188-s1-foundation.test.ts` pins that this
  * file registers exactly that list.
@@ -10,7 +10,7 @@
  * BUILT IN S3: the JWKS document and the issuer signing-key routes (list,
  * rotate, revoke), over `identity-signing-keys.ts`. BUILT IN S5 (`oauth/`):
  * the token endpoint, revocation, introspection, the delegation proof and the
- * delegation-grant admin routes. Every other route below is still the S1 stub.
+ * delegation-grant admin routes.
  *
  * BUILT IN S4 (`workload-identity-admin.ts`): the identity list and detail, and
  * an identity's own grant set (read, and replace under an `identity_manage`
@@ -39,7 +39,6 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { Db } from "@regulait/db";
 import {
-  IDENTITY_NOT_BUILT,
   IDENTITY_SIGNING_KID_PATTERN,
   revokeIdentitySigningKeySchema,
   rotateIdentitySigningKeySchema,
@@ -56,6 +55,7 @@ import {
   rotateIdentitySigningKey,
 } from "./identity-signing-keys.js";
 import { workloadIdentityAdminHandlers } from "./workload-identity-admin.js";
+import { workloadIdentityS6Handlers } from "./oauth/identity-admin.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const kidParam = z.object({ kid: z.string().regex(IDENTITY_SIGNING_KID_PATTERN) });
@@ -73,8 +73,8 @@ function signingKeyRefusal(reply: FastifyReply, err: unknown) {
 }
 
 export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}): void {
-  const notBuilt = async (_req: unknown, reply: FastifyReply) => reply.status(501).send(IDENTITY_NOT_BUILT);
   const s4 = workloadIdentityAdminHandlers(db);
+  const s6 = workloadIdentityS6Handlers(db);
   // public: the issuer's PUBLIC keys (decision 5) — active, and retired ones
   // inside their overlap; never a revoked key. Short cache: a revocation must
   // reach verifiers quickly.
@@ -86,18 +86,18 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   registerOAuthRoutes(app, db, { dataKey: opts.dataKey });
   // admin: identities, credentials, an agent's own grants
   app.get("/v1/workload-identities", s4.list);
-  app.post("/v1/workload-identities", notBuilt);
+  app.post("/v1/workload-identities", s6.create);
   app.get("/v1/workload-identities/:identityId", s4.get);
   app.patch("/v1/workload-identities/:identityId", s4.patch);
-  app.post("/v1/workload-identities/:identityId/revoke", notBuilt);
-  app.get("/v1/workload-identities/:identityId/credentials", notBuilt);
-  app.post("/v1/workload-identities/:identityId/credentials", notBuilt);
-  app.delete("/v1/workload-identities/:identityId/credentials/:credentialId", notBuilt);
+  app.post("/v1/workload-identities/:identityId/revoke", s6.revoke);
+  app.get("/v1/workload-identities/:identityId/credentials", s6.listCredentials);
+  app.post("/v1/workload-identities/:identityId/credentials", s6.addCredential);
+  app.delete("/v1/workload-identities/:identityId/credentials/:credentialId", s6.revokeCredential);
   app.get("/v1/workload-identities/:identityId/grants", s4.getGrants);
   app.put("/v1/workload-identities/:identityId/grants", s4.putGrants);
-  app.get("/v1/workload-identities/:identityId/grant-proposals", notBuilt);
+  app.get("/v1/workload-identities/:identityId/grant-proposals", s6.grantProposals);
   // admin: what the identity forms may offer (sponsors, subjects, environments, grant targets)
-  app.get("/v1/identity/picker-sources", notBuilt);
+  app.get("/v1/identity/picker-sources", s6.pickerSources);
   // admin: the issuer's signing keys (public halves only; every write needs an
   // `identity_manage` step-up and is audited inside identity-signing-keys.ts)
   app.get("/v1/identity/signing-keys", async (_req, reply) => {
