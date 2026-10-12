@@ -5,7 +5,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { EmptyState, Field, Fieldset, Input, RecordError, Table } from "./kit";
+import { EmptyState, Field, Fieldset, Input, RecordError, Table, Tabs, tabIds } from "./kit";
+// Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
+import { Digest } from "../views/admin/governance/BomEvidencePanel";
 
 type Row = { id: string; name: string };
 const columns = [{ key: "name", header: "Name", render: (r: Row) => r.name }];
@@ -132,5 +134,75 @@ describe("Fieldset — a group of boxes is named as a group, not by a label (AER
     expect(html.match(/type="checkbox"/g)).toHaveLength(2);
     expect(html).toContain("aria-label=\"Sectors: Healthcare\"");
     expect(html).toContain("aria-label=\"Sectors: Payments\"");
+  });
+});
+
+describe("Tabs — ids tie each tab to its panel, and only the selected tab names one", () => {
+  const tabs = [
+    { id: "overview", label: "Overview" },
+    { id: "risks", label: "Risks" },
+    { id: "audit", label: "Audit" },
+  ];
+  /** each rendered tab's attributes, in order */
+  const tabAttrs = (html: string) =>
+    [...html.matchAll(/<button([^>]*)>/g)].map((m) => {
+      const attr = (name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(m[1]!)?.[1];
+      return { id: attr("id"), controls: attr("aria-controls"), selected: attr("aria-selected"), tabIndex: attr("tabindex"), role: attr("role") };
+    });
+
+  it("tabIds builds the tab and panel ids from one prefix", () => {
+    expect(tabIds("uc", "risks")).toEqual({ tab: "uc-tab-risks", panel: "uc-panel-risks" });
+  });
+
+  it("with idPrefix: every tab has its id; ONLY the selected tab has aria-controls, naming its panel", () => {
+    const html = renderToStaticMarkup(<Tabs tabs={tabs} active="risks" onChange={() => {}} idPrefix="uc" />);
+    expect(html).toContain('role="tablist"');
+    expect(tabAttrs(html)).toEqual([
+      { id: "uc-tab-overview", controls: undefined, selected: "false", tabIndex: "-1", role: "tab" },
+      { id: "uc-tab-risks", controls: "uc-panel-risks", selected: "true", tabIndex: "0", role: "tab" },
+      { id: "uc-tab-audit", controls: undefined, selected: "false", tabIndex: "-1", role: "tab" },
+    ]);
+    // never a dangling reference to a panel that is not rendered
+    expect(html).not.toContain("uc-panel-overview");
+    expect(html).not.toContain("uc-panel-audit");
+  });
+
+  it("without idPrefix: no ids and no aria-controls at all", () => {
+    const html = renderToStaticMarkup(<Tabs tabs={tabs} active="overview" onChange={() => {}} />);
+    for (const t of tabAttrs(html)) {
+      expect(t.id).toBeUndefined();
+      expect(t.controls).toBeUndefined();
+    }
+  });
+
+  it("an active id that matches no tab selects nothing and keeps the first tab as the tab stop", () => {
+    const html = renderToStaticMarkup(<Tabs tabs={tabs} active="gone" onChange={() => {}} idPrefix="uc" />);
+    const attrs = tabAttrs(html);
+    expect(attrs.map((t) => t.selected)).toEqual(["false", "false", "false"]);
+    expect(attrs.map((t) => t.tabIndex)).toEqual(["0", "-1", "-1"]);
+    expect(attrs.every((t) => t.controls === undefined)).toBe(true);
+  });
+});
+
+describe("Digest — sighted users see a prefix, assistive tech gets the full value", () => {
+  const value = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+  it("hides the truncated prefix from assistive tech and gives it the whole digest", () => {
+    const html = renderToStaticMarkup(<Digest value={value} />);
+    // the visible prefix is aria-hidden …
+    expect(html).toContain(`<span aria-hidden="true">${value.slice(0, 16)}…</span>`);
+    // … and the full value is in the accessible text (visually hidden, not aria-hidden)
+    const srOnly = /<span style="([^"]*)">([^<]*)<\/span>/.exec(html);
+    expect(srOnly?.[2]).toBe(value);
+    expect(srOnly?.[1]).toContain("position:absolute");
+    expect(srOnly?.[1]).toContain("clip:rect(0, 0, 0, 0)");
+    // and the pointer tooltip carries it too
+    expect(html).toContain(`title="${value}"`);
+  });
+
+  it("a value shorter than the prefix is still given whole", () => {
+    const html = renderToStaticMarkup(<Digest value="abc" />);
+    expect(html).toContain('<span aria-hidden="true">abc…</span>');
+    expect(html).toMatch(/<span style="[^"]*">abc<\/span>/);
   });
 });
