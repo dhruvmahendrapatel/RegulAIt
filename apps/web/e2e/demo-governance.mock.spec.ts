@@ -120,15 +120,22 @@ async function mock(route: Route) {
 async function shotBoth(page: Page, name: string) {
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate((next) => { document.documentElement.dataset.theme = next; localStorage.setItem("regulait.theme", next); window.scrollTo(0, 0); }, theme);
-    // let colour transitions (button fills, theme switch) settle so a review shot never shows a mid-transition slab
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: path.join(SHOTS, `${name}-${theme}.png`), fullPage: true });
+    // colour transitions (button fills, theme switch) are fast-forwarded to their end state, so a review shot
+    // never shows a mid-transition slab and no fixed wait is spent per shot (18 shots in the first test)
+    await page.screenshot({ path: path.join(SHOTS, `${name}-${theme}.png`), fullPage: true, animations: "disabled" });
   }
 }
 
 test.beforeEach(async ({ page }) => { await page.route("**/*", async (route) => route.request().resourceType() === "document" || !new URL(route.request().url()).pathname.startsWith("/v1") && !new URL(route.request().url()).pathname.startsWith("/auth") ? route.continue() : mock(route)); });
 
 test("enterprise governance demo surfaces render and complete their core actions", async ({ page }) => {
+  // ITS OWN BUDGET, NOT THE CONFIG'S 60s. This one test walks seven surfaces
+  // (intake, trust, a use case and its tabs, alerts, graph, regulatory, MCP
+  // discovery) and takes 18 full-page review shots (light and dark). Measured on
+  // a dev box: 55s with the shots skipped, 66s with them, after the fixed waits
+  // were removed (300ms per shot, 4s for the alert toasts). 60s left no margin
+  // and timed out on a cold Vite; 120s still fails a genuinely hung page.
+  test.setTimeout(120_000);
   await page.goto("/ui/admin/governance/intake");
   // UXJ-06: the page opens blank; the worked example is loaded on request
   await page.getByRole("button", { name: "Fill in an example" }).click();
@@ -205,7 +212,13 @@ test("enterprise governance demo surfaces render and complete their core actions
   await page.getByLabel("Independent approver").selectOption("reviewer");
   await page.getByRole("button", { name: "Propose…" }).click();
   await expect(page.getByText("pending approval")).toBeVisible();
-  await page.waitForTimeout(4_000);
+  // the review shot must not catch the action toasts: wait for them to leave
+  // (they auto-dismiss after 3.8s) rather than a fixed 4s
+  await page.waitForFunction(
+    () => !Array.from(document.querySelectorAll('[aria-live="polite"]')).some((el) => getComputedStyle(el).position === "fixed" && el.childElementCount > 0),
+    null,
+    { timeout: 5_000 },
+  );
   await shotBoth(page, "06-governance-alerts");
 
   await page.goto("/ui/admin/governance/graph");
