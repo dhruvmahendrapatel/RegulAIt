@@ -146,6 +146,27 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
       if (m.profilesStatus !== 200) return json(route, { error: "forbidden" }, m.profilesStatus);
       return json(route, m.placementsBody !== undefined ? m.placementsBody : PLACEMENTS);
     }
+    return json(route, { error: "not_found" }, 404);
+  });
+  await page.route("**/v1/identity/picker-sources", (route) =>
+    json(route, {
+      sponsors: [],
+      subjects: { agent: [], builder_agent: [], engine_runner: [] },
+      environments: [],
+      servers: [],
+      agents: [],
+      connectors: [],
+      roles: [],
+      workerIdentities: [
+        { id: "11111111-1111-4111-8111-111111111111", label: "spiffe://example.org/regulait/worker_runtime/gvisor-b" },
+        { id: "22222222-2222-4222-8222-222222222222", label: "spiffe://example.org/regulait/worker_runtime/kata-a" },
+      ],
+      truncated: false,
+    }),
+  );
+  await page.route(/\/v1\/execution-profile-assignments\//, async (route) => {
+    const req = route.request();
+    const p = new URL(req.url()).pathname;
     const assign = /^\/v1\/execution-profile-assignments\/([a-z_]+)\/([^/]+)$/.exec(p);
     if (assign) {
       const key = `${assign[1]}/${decodeURIComponent(assign[2]!)}`;
@@ -399,7 +420,9 @@ test("Engines: registering an executor sends the strict body and grants no class
   await page.getByRole("button", { name: "Register executor", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Register an executor" });
   await expect(dialog).toContainText("Registering grants no isolation class");
-  await dialog.getByLabel("Worker identity id", { exact: true }).fill("11111111-1111-4111-8111-111111111111");
+  // ADR-0188 S6: chosen from the gateway's worker identities, never typed
+  await expect(dialog.getByLabel("Worker identity", { exact: true }).locator("option")).toHaveCount(3);
+  await dialog.getByLabel("Worker identity", { exact: true }).selectOption("11111111-1111-4111-8111-111111111111");
   await dialog.getByLabel("Executor name", { exact: true }).fill("gvisor-b");
   await dialog.getByLabel("Backend", { exact: true }).selectOption("gvisor");
   await dialog.getByLabel("Runtime version", { exact: true }).fill("release-20260901.0");

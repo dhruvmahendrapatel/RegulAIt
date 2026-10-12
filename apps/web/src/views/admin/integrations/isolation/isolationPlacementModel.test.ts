@@ -18,6 +18,7 @@ import {
   newProfileBody,
   profileNameOk,
   versionBody,
+  parseWorkerIdentities,
 } from "./isolationModel";
 
 const at = "2026-10-12T10:00:00.000Z";
@@ -64,6 +65,18 @@ describe("a new profile", () => {
     expect(versionBody({}, "a")).toBeNull();
     for (const ok of ["ab", "team-new", "a1"]) expect(profileNameOk(ok)).toBe(true);
     for (const bad of ["a", "Team", "1ab", "team_new", "a".repeat(64), ""]) expect(profileNameOk(bad)).toBe(false);
+  });
+});
+
+describe("worker identities for registering an executor (ADR-0188 S6 picker sources)", () => {
+  it("offers only well-formed options; an unreadable answer is null, never an empty list", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    expect(parseWorkerIdentities({ workerIdentities: [{ id, label: "spiffe://x/w" }, { id: "nope", label: "y" }, { id }], truncated: true })).toEqual({
+      options: [{ id, label: "spiffe://x/w" }],
+      truncated: true,
+    });
+    expect(parseWorkerIdentities({ workerIdentities: [] })).toEqual({ options: [], truncated: false });
+    for (const bad of [null, {}, { workerIdentities: "x" }, []]) expect(parseWorkerIdentities(bad)).toBeNull();
   });
 });
 

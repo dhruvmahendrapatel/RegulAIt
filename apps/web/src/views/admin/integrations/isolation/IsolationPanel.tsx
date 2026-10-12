@@ -35,6 +35,7 @@ import {
   MISMATCH_TEXT,
   parseAssignment,
   parseExecutors,
+  parseWorkerIdentities,
   parsePlacements,
   parseProfiles,
   profileText,
@@ -501,6 +502,9 @@ function RegisterExecutorDialog(props: { onClose: () => void }) {
     if (await act.run(() => api.post("/v1/executors", out.body), `Executor ${out.body.name} registered`)) props.onClose();
   };
   const allowed = draft.backend ? BACKEND_CLASSES[draft.backend] : [];
+  // ADR-0188 S6: the worker_runtime identities to choose from (no free-text id)
+  const sources = useQuery({ queryKey: ["admin", "identity", "picker-sources"], retry: false, queryFn: () => api.get<unknown>("/v1/identity/picker-sources") });
+  const workers = sources.data === undefined ? null : parseWorkerIdentities(sources.data);
   return (
     <Modal
       open
@@ -527,19 +531,29 @@ function RegisterExecutorDialog(props: { onClose: () => void }) {
           Registering grants no isolation class. Each class counts only once the executor passes a self-test for it, and every
           report is software-attested. The gateway records the registration in its audit log.
         </p>
-        <Field label="Worker identity id">
-          <Input
+        <Field label="Worker identity">
+          <Select
             value={draft.workloadIdentityId}
-            maxLength={36}
-            autoComplete="off"
-            spellCheck={false}
+            disabled={workers === null}
             aria-describedby={identityHelpId}
-            onChange={(e) => setDraft({ ...draft, workloadIdentityId: e.target.value.trim() })}
-          />
+            onChange={(e) => setDraft({ ...draft, workloadIdentityId: e.target.value })}
+          >
+            <option value="">{workers === null ? "Not available" : workers.options.length === 0 ? "No worker identity to choose" : "Choose a worker identity"}</option>
+            {(workers?.options ?? []).map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
         </Field>
         <p id={identityHelpId} className={v.dim}>
-          The id of the active worker_runtime workload identity the executor authenticates as, from its enrolment. The gateway refuses
-          any other kind of identity, or one that is not in service.
+          {sources.isPending
+            ? "Loading the worker identities…"
+            : workers === null
+              ? sources.isError
+                ? unavailableText("worker identities", availabilityOf(sources.error))
+                : "The gateway's worker identities could not be read, so none can be chosen."
+              : `The active worker_runtime workload identity the executor authenticates as (enrol it under Workload identities first). The gateway refuses any other kind of identity, or one that is not in service.${workers.truncated ? " The list is cut short: not every identity is shown." : ""}`}
         </p>
         <Field label="Executor name">
           <Input value={draft.name} maxLength={63} autoComplete="off" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />

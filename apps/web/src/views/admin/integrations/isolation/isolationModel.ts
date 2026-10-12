@@ -384,9 +384,25 @@ const hex = (c: string) => digit(c) || (c >= "a" && c <= "f") || (c >= "A" && c 
 export const uuidOk = (s: string) =>
   s.length === 36 && [...s].every((c, i) => ([8, 13, 18, 23].includes(i) ? c === "-" : hex(c)));
 
+/**
+ * `GET /v1/identity/picker-sources` `workerIdentities` (ADR-0188 S6): the active worker_runtime identities an
+ * executor may be registered against, as `{id, label}` (the label is the SPIFFE identifier). Null when the answer
+ * cannot be read; a malformed option is dropped from the choices (it could not be sent anyway), and `truncated`
+ * says when the gateway capped the list.
+ */
+export function parseWorkerIdentities(value: unknown): { options: Array<{ id: string; label: string }>; truncated: boolean } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v.workerIdentities)) return null;
+  const options = v.workerIdentities
+    .filter((o): o is { id: string; label: string } => o !== null && typeof o === "object" && uuidOk(String((o as { id?: unknown }).id ?? "")) && str((o as { label?: unknown }).label))
+    .map((o) => ({ id: o.id, label: o.label }));
+  return { options, truncated: v.truncated === true };
+}
+
 /** the body to post, or what is wrong with the draft. The gateway re-checks all of it. */
 export function registerBody(d: RegisterDraft): { error: string } | { body: RegisterBody } {
-  if (!uuidOk(d.workloadIdentityId)) return { error: "Worker identity id: the identity's UUID, for example 8d4b1f8e-0000-4000-8000-000000000001." };
+  if (!uuidOk(d.workloadIdentityId)) return { error: "Choose the worker identity the executor authenticates as." };
   if (!executorNameOk(d.name)) return { error: "Name: 2 to 63 characters, lower-case letters, digits and hyphens, starting with a letter." };
   if (!d.backend) return { error: "Choose the backend." };
   if (!runtimeVersionOk(d.runtimeVersion)) return { error: "Runtime version: 1 to 128 characters, letters, digits and . _ + -" };
