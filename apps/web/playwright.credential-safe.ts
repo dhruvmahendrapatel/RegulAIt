@@ -12,7 +12,14 @@
  *    before it is shared.
  *  - A SCREENSHOT on failure. Password fields render as bullets, so a
  *    screenshot shows where the journey stopped without the value.
+ *  - NO error-context.md. Its page snapshot lists every input's value,
+ *    passwords included; PLAYWRIGHT_NO_COPY_PROMPT turns it off. Set here, so
+ *    only the configs that import this module (not the mock suites) lose it;
+ *    the runner and every worker load the config, so all of them see it.
  */
+// error-context.md would record typed passwords (input values in its page snapshot)
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
+
 export const CREDENTIAL_SAFE_ARTIFACTS = {
   trace: "off",
   video: "off",
