@@ -70,6 +70,7 @@ class RunnerKeyTaken extends Error {}
 import { bindPreparedCredentialTx, IdentityAdminError } from "./oauth/identity-admin.js";
 import { ensureIdentityFor } from "./in-process-delegation.js";
 import { databaseNow } from "./delegation.js";
+import { workloadIssuerPosture } from "./oauth/common.js";
 import { endActiveRunsOfEngineTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -354,7 +355,9 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       const v = await view(id);
       if (v) out.push(v);
     }
-    return { engines: out, taxonomyVersion: taxonomyOf(opts).version };
+    // ADR-0188 S7: runners authenticate with tokens the issuer (REGULAIT_PUBLIC_URL) signs and names; without it
+    // no runner can authenticate, and the page says so rather than leaving runners "offline" unexplained
+    return { engines: out, taxonomyVersion: taxonomyOf(opts).version, runnerIssuer: workloadIssuerPosture() };
   });
 
   app.get("/v1/engines/:engineId", async (req, reply) => {
@@ -801,7 +804,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
   // ADR-0188 S7: the runner rotates its own key (decision 12)
   registerRunnerKeyRotationRoute(app, db);
 
-  // ---- POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] --
+  // ---- POST /v1/engine-runner/self-test (runner self token) — PR #205 review [53]
   // A runner refreshes its own report: the lease refuses a report older than 24 hours, and before
   // this route only registration (a new enrolment token) accepted one. Evaluated exactly like
   // registration's report (manifest, digest, version, switches, egress, freshness) and audited.
@@ -828,7 +831,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       return reply.status(409).send({
         error: "engine_runner_reenrol_required",
         next: "reenrol_required" satisfies EngineRunnerNext,
-        detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+        detail: "this runner key was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
       });
     }
     // PR #205 review round 10 [85]: a report of a build that is not the CURRENT manifest build (an

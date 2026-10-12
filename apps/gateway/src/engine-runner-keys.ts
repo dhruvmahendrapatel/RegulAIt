@@ -37,12 +37,14 @@ import {
   type WorkloadPublicJwk,
 } from "@regulait/shared";
 import { databaseNow } from "./delegation.js";
-import { WORKLOAD_PROOF_ALGS } from "./delegated-token.js";
+import { claimReplay, WORKLOAD_PROOF_ALGS } from "./delegated-token.js";
 import { bindPreparedCredentialTx, IdentityAdminError, prepareCredential, type PreparedCredential } from "./oauth/identity-admin.js";
 import { identityIssuer } from "./oauth/common.js";
 
 /** the system actor of a runner's own registration and rotation (no person acted) */
 export const RUNNER_ACTOR_ID = "00000000-0000-0000-0000-000000000000";
+/** live keys a runner identity may hold at once: its current key and, during a rotation, the next one */
+export const RUNNER_MAX_LIVE_KEYS = 2;
 /** the route a runner rotates its key on (also the `aud` of the rotation proof, under the issuer) */
 export const RUNNER_KEY_ROTATION_PATH = "/v1/engine-runner/credentials";
 
@@ -74,11 +76,16 @@ export async function runnerHoldsKey(db: Db, runnerId: string, jkt: string): Pro
 
 /**
  * Verify a re-enrolling runner's SUPERSEDE proof: signed by a LIVE registered
- * key (`kid` = its thumbprint) of a live runner of `engineId`, naming exactly
- * the new key (`jkt`), at most 5 minutes old. Returns that runner's id, or
- * null (an unprovable claim supersedes nothing, as an unknown token did).
+ * key (`kid` = its thumbprint: not revoked, inside its window now, so a key
+ * already rotated out or expired proves nothing) of an ACTIVE identity of a
+ * live runner of `engineId`, naming exactly the new key (`jkt`), `aud` this
+ * issuer, at most 5 minutes old, and used ONCE (its `jti` is claimed in the
+ * replay store). Returns that runner's id, or null (an unprovable claim
+ * supersedes nothing, as an unknown token did).
  */
 export async function verifySupersedeProof(db: Db, jws: string, engineId: string, newJkt: string, now: Date): Promise<string | null> {
+  const issuer = identityIssuer();
+  if (!issuer) return null;
   let kid: unknown;
   try {
     kid = decodeProtectedHeader(jws).kid;
@@ -90,21 +97,38 @@ export async function verifySupersedeProof(db: Db, jws: string, engineId: string
     .select({ publicJwk: workloadCredentials.publicJwk, runnerId: workloadIdentities.engineRunnerId })
     .from(workloadCredentials)
     .innerJoin(workloadIdentities, eq(workloadIdentities.id, workloadCredentials.identityId))
-    .where(and(eq(workloadCredentials.jwkThumbprint, kid), isNull(workloadCredentials.revokedAt), eq(workloadIdentities.kind, "engine_runner")));
+    .where(
+      and(
+        eq(workloadCredentials.jwkThumbprint, kid),
+        isNull(workloadCredentials.revokedAt),
+        // live NOW, on the database clock: a rotated-out (not_after moved to the rotation) or expired key proves nothing
+        sql`${workloadCredentials.notBefore} <= now() AND ${workloadCredentials.notAfter} > now()`,
+        eq(workloadIdentities.kind, "engine_runner"),
+        eq(workloadIdentities.status, "active"),
+      ),
+    );
   if (!cred?.publicJwk || !cred.runnerId) return null;
   const j = cred.publicJwk as unknown as JWK;
+  let jti: string;
+  let exp: number;
   try {
     const { payload } = await jwtVerify(jws, await importJWK(j, j.kty === "OKP" ? "EdDSA" : "ES256"), {
       algorithms: [...WORKLOAD_PROOF_ALGS],
       typ: RUNNER_SUPERSEDE_PROOF_TYP,
+      audience: issuer,
       currentDate: now,
-      requiredClaims: ["iat"],
+      requiredClaims: ["iat", "jti", "aud"],
     });
     const nowS = Math.floor(now.getTime() / 1000);
     if (payload.jkt !== newJkt || payload.iat! < nowS - CLIENT_ASSERTION_MAX_AGE_SECONDS || payload.iat! > nowS + DPOP_PROOF_MAX_FUTURE_SECONDS) return null;
+    if (typeof payload.jti !== "string" || payload.jti.length === 0 || payload.jti.length > 200) return null;
+    jti = payload.jti;
+    exp = payload.iat! + CLIENT_ASSERTION_MAX_AGE_SECONDS + DPOP_PROOF_MAX_FUTURE_SECONDS;
   } catch {
     return null;
   }
+  // one use: the existing replay store (decision 14), keyed apart from client assertions by its prefix
+  if (!(await claimReplay(db, "client_assertion", `runner-supersede:${kid}:${jti}`, new Date(exp * 1000)))) return null;
   const [runner] = await db
     .select({ id: engineRunners.id })
     .from(engineRunners)
@@ -178,15 +202,39 @@ export function registerRunnerKeyRotationRoute(app: FastifyInstance, db: Db): vo
     }
     const out = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
-      const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for("share");
+      // one rotation at a time per runner: the identity row is locked FOR UPDATE, so a concurrent rotation waits and
+      // then re-reads the authenticating key below, which the first one has already rotated out
+      const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for("update");
       if (!ident || ident.status !== "active") return new IdentityAdminError("identity_not_active", 409, "this runner's identity is not active");
+      // the key this request authenticated with must still be LIVE, on the database clock (clock_timestamp, not the
+      // transaction's start: a rotation that waited on the lock sees the moment it runs). A token whose key was
+      // already rotated out rotates nothing: any number of live keys is what decision 12 rules out.
+      const [current] = await t
+        .select({ id: workloadCredentials.id })
+        .from(workloadCredentials)
+        .where(
+          and(
+            eq(workloadCredentials.id, oldCredentialId),
+            eq(workloadCredentials.identityId, identityId),
+            isNull(workloadCredentials.revokedAt),
+            sql`${workloadCredentials.notAfter} > clock_timestamp()`,
+          ),
+        )
+        .for("update");
+      if (!current) return new IdentityAdminError("credential_not_live", 409, "the key this token was issued to is no longer live (already rotated, expired or revoked)");
+      // at most RUNNER_MAX_LIVE_KEYS during the overlap: the authenticating key and the new one
+      const liveRows = (await t.execute(
+        sql`SELECT count(*)::int AS live FROM workload_credentials WHERE identity_id = ${identityId} AND revoked_at IS NULL AND not_after > clock_timestamp()`,
+      )) as unknown as { rows: Array<{ live: number }> };
+      const live = liveRows.rows[0]?.live ?? 0;
+      if (live >= RUNNER_MAX_LIVE_KEYS) return new IdentityAdminError("runner_key_limit", 409, `a runner holds at most ${RUNNER_MAX_LIVE_KEYS} live keys during a rotation`);
       const bound = await bindPreparedCredentialTx(t, identityId, prepared, RUNNER_ACTOR_ID, now);
       if (bound instanceof IdentityAdminError) return bound;
       // decision 12: rotation is not revocation. The old key's window ends now (it mints nothing new); tokens it
       // already authenticated live to their own expiry. Database clock, never before the row's own start.
       const [retired] = await t
         .update(workloadCredentials)
-        .set({ notAfter: sql`LEAST(${workloadCredentials.notAfter}, GREATEST(now(), ${workloadCredentials.notBefore} + interval '1 microsecond'))` })
+        .set({ notAfter: sql`LEAST(${workloadCredentials.notAfter}, GREATEST(clock_timestamp(), ${workloadCredentials.notBefore} + interval '1 microsecond'))` })
         .where(and(eq(workloadCredentials.id, oldCredentialId), eq(workloadCredentials.identityId, identityId), isNull(workloadCredentials.revokedAt)))
         .returning({ id: workloadCredentials.id });
       await auditRotation(

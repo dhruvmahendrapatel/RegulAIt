@@ -38,8 +38,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes } from "node:crypto";
-import { decodeJwt, SignJWT } from "jose";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { calculateJwkThumbprint, decodeJwt, SignJWT, type JWK } from "jose";
 import {
   and,
   auditLog,
@@ -47,6 +47,7 @@ import {
   createDb,
   delegationGrants,
   desc,
+  engineRunners,
   engineRuns,
   eq,
   interceptionSettings,
@@ -67,7 +68,7 @@ import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxAgentEntitlementsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
-import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+import { forgetStepUpMethodsForTest, relaxStepUpAround } from "./testing/step-up-posture.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 
@@ -158,10 +159,10 @@ async function enrolRunner(): Promise<{ id: string; caller: Caller; client: Test
 /** NEW PATH (ADR-0188 S7): a PDP client is a workload identity of kind `pdp` with a registered key */
 async function provisionPdp(): Promise<{ identityId: string; credentialId: string; caller: Caller; client: TestWorkloadClient; revoke: () => Promise<void> }> {
   const client = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "pdp" });
-  const created = await inject("POST", "/v1/workload-identities", AUTH, { kind: "pdp", sponsorUserIds: [admin.id], environments: [ENV] });
+  const created = await relaxStepUpAround(db, () => inject("POST", "/v1/workload-identities", AUTH, { kind: "pdp", sponsorUserIds: [admin.id], environments: [ENV] }));
   expect(created.statusCode, created.body).toBe(201);
   const identityId = created.json().id as string;
-  const bound = await inject("POST", `/v1/workload-identities/${identityId}/credentials`, AUTH, { kind: "jwk", publicJwk: client.publicJwk });
+  const bound = await relaxStepUpAround(db, () => inject("POST", `/v1/workload-identities/${identityId}/credentials`, AUTH, { kind: "jwk", publicJwk: client.publicJwk }));
   expect(bound.statusCode, bound.body).toBe(201);
   const credentialId = bound.json().id as string;
   return {
@@ -170,7 +171,7 @@ async function provisionPdp(): Promise<{ identityId: string; credentialId: strin
     client,
     caller: client,
     revoke: async () => {
-      expect((await inject("DELETE", `/v1/workload-identities/${identityId}/credentials/${credentialId}`, AUTH)).statusCode).toBe(200);
+      expect((await relaxStepUpAround(db, () => inject("DELETE", `/v1/workload-identities/${identityId}/credentials/${credentialId}`, AUTH))).statusCode).toBe(200);
     },
   };
 }
@@ -581,10 +582,10 @@ describe("S7 — the token endpoint's self-token grant refuses what it must", ()
 
   it("an agent identity cannot take a self token (only engine runners and PDP clients)", async () => {
     const agentId = await makeAgent(`s7-not-self-${RUN}`, `s7-not-self-model-${RUN}`);
-    const created = await inject("POST", "/v1/workload-identities", AUTH, { kind: "agent", agentId, sponsorUserIds: [admin.id], environments: [ENV] });
+    const created = await relaxStepUpAround(db, () => inject("POST", "/v1/workload-identities", AUTH, { kind: "agent", agentId, sponsorUserIds: [admin.id], environments: [ENV] }));
     expect(created.statusCode, created.body).toBe(201);
     const agentKey = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
-    expect((await inject("POST", `/v1/workload-identities/${created.json().id}/credentials`, AUTH, { kind: "jwk", publicJwk: agentKey.publicJwk })).statusCode).toBe(201);
+    expect((await relaxStepUpAround(db, () => inject("POST", `/v1/workload-identities/${created.json().id}/credentials`, AUTH, { kind: "jwk", publicJwk: agentKey.publicJwk }))).statusCode).toBe(201);
     // named by thumbprint: not a self-token client at all; named by its identifier: not of a self-token kind
     expect((await agentKey.tokenRequest()).statusCode).toBe(401);
     const byIdentifier = await agentKey.tokenRequest({ form: { client_assertion: await agentKey.assertion({ sub: created.json().identifier }) } });
@@ -631,6 +632,98 @@ describe("S7 — key rotation (decision 12) and revocation", () => {
     }
   });
 
+  // ---- review of #380, MEDIUM 1 and 2: one rotation per key, and a rotated-out key proves nothing ----
+
+  /** a rotation proof by `next` (the key rotated TO) */
+  const rotationProofBy = (next: TestWorkloadClient) =>
+    new SignJWT({})
+      .setProtectedHeader({ alg: "EdDSA", typ: "regulait-key-rotation+jwt", jwk: next.publicJwk })
+      .setAudience(`${ORIGIN}/v1/engine-runner/credentials`)
+      .setIssuedAt()
+      .sign(next.privateKey);
+  const liveKeysOf = async (identityId: string) =>
+    (
+      (await db.execute(
+        sql`SELECT count(*)::int AS n FROM workload_credentials WHERE identity_id = ${identityId} AND revoked_at IS NULL AND not_after > clock_timestamp()`,
+      )) as unknown as { rows: Array<{ n: number }> }
+    ).rows[0]!.n;
+
+  it("a token whose key was already rotated out rotates nothing: a second rotation on the same token is 409", async () => {
+    const runner = await enrolRunner();
+    try {
+      const [ident] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.engineRunnerId, runner.id));
+      const first = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+      const r1 = await call(runner.caller, "POST", "/v1/engine-runner/credentials", { publicJwk: first.publicJwk, proof: await rotationProofBy(first) });
+      expect(r1.statusCode, r1.body).toBe(201);
+      // the SAME (still unexpired) token, another new key: the key it was issued to is no longer live
+      const second = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+      const r2 = await call(runner.caller, "POST", "/v1/engine-runner/credentials", { publicJwk: second.publicJwk, proof: await rotationProofBy(second) });
+      expect(r2.statusCode, r2.body).toBe(409);
+      expect(r2.json().error).toBe("credential_not_live");
+      expect(await liveKeysOf(ident!.id)).toBe(1);
+    } finally {
+      await runner.revoke();
+    }
+  });
+
+  it("concurrent rotations on one token leave exactly ONE new key", async () => {
+    const runner = await enrolRunner();
+    try {
+      const [ident] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.engineRunnerId, runner.id));
+      const keys = [0, 1, 2].map(() => new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" }));
+      const answers = await Promise.all(
+        keys.map(async (k) => call(runner.caller, "POST", "/v1/engine-runner/credentials", { publicJwk: k.publicJwk, proof: await rotationProofBy(k) })),
+      );
+      const codes = answers.map((a) => a.statusCode).sort();
+      expect(codes, answers.map((a) => a.body).join(" | ")).toEqual([201, 409, 409]);
+      expect(await liveKeysOf(ident!.id)).toBe(1);
+      const creds = await db.select().from(workloadCredentials).where(eq(workloadCredentials.identityId, ident!.id));
+      expect(creds).toHaveLength(2); // the enrolled key (rotated out) and the ONE new key
+    } finally {
+      await runner.revoke();
+    }
+  });
+
+  it("a supersede proof by a rotated-out key supersedes nothing; one by the live key does", async () => {
+    const runner = await enrolRunner();
+    try {
+      const oldJkt = await runner.client.jkt();
+      const next = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+      expect((await call(runner.caller, "POST", "/v1/engine-runner/credentials", { publicJwk: next.publicJwk, proof: await rotationProofBy(next) })).statusCode).toBe(201);
+      const supersede = async (signer: TestWorkloadClient, kid: string) => {
+        const fresh = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+        const proof = await new SignJWT({ jkt: await calculateJwkThumbprint(fresh.publicJwk as JWK, "sha256") })
+          .setProtectedHeader({ alg: "EdDSA", typ: "regulait-runner-supersede+jwt", kid })
+          .setAudience(ORIGIN)
+          .setJti(randomUUID())
+          .setIssuedAt()
+          .sign(signer.privateKey);
+        const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: `s7-sup-${RUN}` });
+        const r = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${t.json().token}` }, {
+          name: `s7-sup-${randomBytes(2).toString("hex")}`,
+          ...PF_BUILD(),
+          selfTest: selfTest(),
+          publicJwk: fresh.publicJwk,
+          supersedes: proof,
+        });
+        expect(r.statusCode, r.body).toBe(201);
+        return r.json() as { runnerId: string; supersededRunnerId: string | null };
+      };
+      // the enrolled key was rotated out: its proof is a claim nobody can make good on
+      const stale = await supersede(runner.client, oldJkt);
+      expect(stale.supersededRunnerId).toBeNull();
+      const [still] = await db.select({ revokedAt: engineRunners.revokedAt }).from(engineRunners).where(eq(engineRunners.id, runner.id));
+      expect(still!.revokedAt).toBeNull();
+      // the control: the LIVE key supersedes this runner
+      const live = await supersede(next, await next.jkt());
+      expect(live.supersededRunnerId).toBe(runner.id);
+      await inject("DELETE", `/v1/engine-runners/${stale.runnerId}`, admin.key);
+      await inject("DELETE", `/v1/engine-runners/${live.runnerId}`, admin.key);
+    } finally {
+      await inject("DELETE", `/v1/engine-runners/${runner.id}`, admin.key);
+    }
+  });
+
   it("revoking a key refuses every token it authenticated at the next use (decision 12)", async () => {
     const pdp = await provisionPdp();
     const ask = () => call(pdp.caller, "POST", "/v1/authz/check", { userId: alice.id, serverId, toolName: TOOL });
@@ -638,5 +731,56 @@ describe("S7 — key rotation (decision 12) and revocation", () => {
     await pdp.revoke();
     const after = await ask();
     expect(after.statusCode, after.body).toBe(401);
+  });
+});
+
+describe("S7 — review of #380: what else a self token must not do", () => {
+  it("INFO 7: the DPoP proof must be signed by the key that authenticated the client", async () => {
+    const runner = await enrolRunner();
+    try {
+      const other = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+      const r = await runner.client.tokenRequest({ dpop: await other.proof("POST", `${ORIGIN}/oauth/token`) });
+      expect(r.statusCode, r.body).toBe(400);
+      expect((r.json() as { error: string }).error).toBe("invalid_dpop_proof");
+      expect((await runner.client.tokenRequest()).statusCode).toBe(200);
+    } finally {
+      await runner.revoke();
+    }
+  });
+
+  it("a self token is no subject_token: token exchange with it issues nothing", async () => {
+    const runner = await enrolRunner();
+    try {
+      const token = await runner.client.token();
+      const r = await runner.client.tokenRequest({
+        form: {
+          grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+          subject_token: token,
+          subject_token_type: "urn:ietf:params:oauth:token-type:access_token",
+          requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+          resource: `${ORIGIN}/v1/chat/completions`,
+        },
+      });
+      expect([400, 401], r.body).toContain(r.statusCode);
+      expect((r.json() as { access_token?: string }).access_token).toBeUndefined();
+    } finally {
+      await runner.revoke();
+    }
+  });
+
+  it("a suspended identity takes no new token and its live token is refused", async () => {
+    const pdp = await provisionPdp();
+    try {
+      const ask = () => call(pdp.caller, "POST", "/v1/authz/check", { userId: alice.id, serverId, toolName: TOOL });
+      expect((await ask()).statusCode).toBe(200);
+      await db.update(workloadIdentities).set({ status: "suspended" }).where(eq(workloadIdentities.id, pdp.identityId));
+      const live = await ask();
+      expect(live.statusCode, live.body).toBe(401);
+      pdp.client.reset();
+      expect((await pdp.client.tokenRequest()).statusCode).toBe(401);
+    } finally {
+      await db.update(workloadIdentities).set({ status: "active" }).where(eq(workloadIdentities.id, pdp.identityId));
+      await pdp.revoke();
+    }
   });
 });

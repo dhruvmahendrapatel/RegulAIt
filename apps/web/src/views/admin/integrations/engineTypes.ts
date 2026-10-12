@@ -81,6 +81,8 @@ export interface Engine {
 export interface EnginesResponse {
   engines: Engine[];
   taxonomyVersion: number;
+  /** ADR-0188 S7: the issuer runners take their tokens from (absent from a gateway before S7) */
+  runnerIssuer?: { configured: boolean; issuer: string | null; note: string };
 }
 
 /** PATCH /v1/engines/:engineId */

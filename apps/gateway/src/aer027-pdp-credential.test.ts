@@ -33,6 +33,7 @@ import { createDb, runMigrations, users, mcpServers, mcpTools, toolGrants, type 
 import { buildApp } from "./app.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
 import { deploymentEnvironment } from "./oauth/common.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -108,20 +109,26 @@ beforeAll(async () => {
 
   // the PDP client: a `pdp` workload identity, sponsored, scoped to this deployment's environment, holding a key
   pdp = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "pdp" });
-  const created = await app.inject({
-    method: "POST",
-    url: "/v1/workload-identities",
-    headers: AUTH,
-    payload: { kind: "pdp", sponsorUserIds: [ownerId], environments: [deploymentEnvironment()] },
-  });
+  // identity_manage needs a step-up: relaxed for these setup calls only (another suite on the shared database may
+  // have left an admin with a step-up method, which closes the bootstrap credential's first-admin allowance)
+  const created = await relaxStepUpAround(db, () =>
+    app.inject({
+      method: "POST",
+      url: "/v1/workload-identities",
+      headers: AUTH,
+      payload: { kind: "pdp", sponsorUserIds: [ownerId], environments: [deploymentEnvironment()] },
+    }),
+  );
   expect(created.statusCode, created.body).toBe(201);
   pdpIdentityId = created.json().id as string;
-  const bound = await app.inject({
-    method: "POST",
-    url: `/v1/workload-identities/${pdpIdentityId}/credentials`,
-    headers: AUTH,
-    payload: { kind: "jwk", publicJwk: pdp.publicJwk },
-  });
+  const bound = await relaxStepUpAround(db, () =>
+    app.inject({
+      method: "POST",
+      url: `/v1/workload-identities/${pdpIdentityId}/credentials`,
+      headers: AUTH,
+      payload: { kind: "jwk", publicJwk: pdp.publicJwk },
+    }),
+  );
   expect(bound.statusCode, bound.body).toBe(201);
   pdpCredentialId = bound.json().id as string;
   dispatchToken = (await mintKey(`aer027-dispatch-${randomUUID()}`, "dispatch")).token;
@@ -245,11 +252,13 @@ describe("AER-027 — the credential is still a credential", () => {
 
   it("a REVOKED PDP key stops asking: its live token is refused and no new one is issued", async () => {
     expect((await ask(pdp)).statusCode).toBe(200);
-    const revoked = await app.inject({
-      method: "DELETE",
-      url: `/v1/workload-identities/${pdpIdentityId}/credentials/${pdpCredentialId}`,
-      headers: AUTH,
-    });
+    const revoked = await relaxStepUpAround(db, () =>
+      app.inject({
+        method: "DELETE",
+        url: `/v1/workload-identities/${pdpIdentityId}/credentials/${pdpCredentialId}`,
+        headers: AUTH,
+      }),
+    );
     expect(revoked.statusCode, revoked.body).toBe(200);
     const res = await ask(pdp);
     expect(res.statusCode, res.body).toBe(401);

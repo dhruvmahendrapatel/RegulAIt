@@ -38,6 +38,7 @@ import { approvalSigningPosture } from "./approval-signatures.js";
 import { bootstrapStepUpPosture } from "./step-up.js";
 import { receiptSigningKeyPosture } from "./receipt-signing-key.js";
 import { identitySigningKeyConfiguration } from "./identity-signing-keys.js";
+import { workloadIssuerPosture } from "./oauth/common.js";
 import type { FastifyInstance } from "fastify";
 import {
   auditLog,
@@ -369,6 +370,8 @@ export function registerPosturePresetRoutes(
       // ADR-0188 S7: where the identity issuer's signing key came from (reported, never a control; a
       // missing key already refuses every self token and delegated token)
       identitySigningKey: await identitySigningKeyConfiguration(process.env),
+      // ADR-0188 S7: no REGULAIT_PUBLIC_URL means no runner or PDP client can authenticate ("issuer not configured")
+      workloadIssuer: workloadIssuerPosture(),
     };
   });
 

@@ -219,6 +219,14 @@ export default function EnginesPage() {
       />
       <div className={v.stack}>
         <QueryGate loading={engines.isLoading} error={engines.error} onRetry={() => void engines.refetch()}>
+          {engines.data?.runnerIssuer && !engines.data.runnerIssuer.configured && (
+            // ADR-0188 S7: without the issuer no runner can authenticate; say why rather than show runners offline
+            <Card title="Issuer not configured">
+              <p>
+                <Badge tone="danger">Runners cannot authenticate</Badge> {engines.data.runnerIssuer.note}
+              </p>
+            </Card>
+          )}
           {list.length === 0 ? (
             <Card>
               <EmptyState title="No engines are registered" body="The gateway reported no engine rows. Engines arrive with the gateway's migrations; nothing can run until they exist." />

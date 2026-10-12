@@ -527,7 +527,7 @@ describe("PR #205 review: the runner's life", () => {
     const restartLogs: string[] = [];
     const restarted = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: ORIGIN, http: runnerHttp });
     await runRunnerLoop(restarted, adapter, { ...loopOpts(store, spent, restartLogs, [], 1), workRoot });
-    expect(restartLogs[0]).toBe("using the stored runner token");
+    expect(restartLogs[0]).toBe("using the stored runner key");
     expect(restartLogs.some((l) => l.startsWith(`run ${runId}: posted`))).toBe(true);
     expect((await runRow(runId)).status).toBe("completed");
 
@@ -864,7 +864,7 @@ describe("PR #205 review round 5: the runner state machine against the real gate
       selfTest: await report(),
       publicJwk: (await runnerKeyMaterial(generateRunnerSecret())).publicJwk,
       // a proof by a key no runner holds supersedes nothing
-      supersedes: await supersedeProof(generateRunnerSecret(), generateRunnerSecret()),
+      supersedes: await supersedeProof(generateRunnerSecret(), generateRunnerSecret(), ORIGIN),
     });
     expect(r.statusCode, r.body).toBe(201);
     expect(r.json().supersededRunnerId).toBeNull();
@@ -1082,7 +1082,7 @@ describe("PR #205 review round 7: supersession ends runs in its transaction; lea
     engineVersion: MANIFEST.promptfoo.version,
     selfTest: await report(),
     publicJwk: (await runnerKeyMaterial(secret)).publicJwk,
-    ...(supersedes ? { supersedes: await supersedeProof(supersedes, secret) } : {}),
+    ...(supersedes ? { supersedes: await supersedeProof(supersedes, secret, ORIGIN) } : {}),
   });
   const newRunner = async (label: string) => {
     const secret = generateRunnerSecret();
@@ -1344,7 +1344,7 @@ describe("PR #205 review round 9: credential-isolation gate, the judge at lease,
       const plain = await asAdminOn(legacy, { enabled: true });
       expect(plain.statusCode, plain.body).toBe(409);
       expect(plain.json()).toMatchObject({ error: "engine_credential_isolation_missing" });
-      expect(plain.json().detail).toMatch(/runner token/);
+      expect(plain.json().detail).toMatch(/runner key/);
       expect(await enabled()).toBe(false);
       // accepting it is a relaxation: the step-up binds to it
       // B5W-07 (decision 178): the refusal names the build, and the acceptance names it back

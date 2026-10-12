@@ -30,6 +30,24 @@ export function identityIssuer(env: NodeJS.ProcessEnv = process.env): string | n
 
 export const tokenEndpointUrl = (issuer: string) => `${issuer}${OAUTH_TOKEN_ROUTE_PATH}`;
 
+/**
+ * ADR-0188 S7: whether workloads (engine runners, PDP clients) can take a self token at all. The issuer is
+ * REGULAIT_PUBLIC_URL; unset (or invalid) means the token endpoint refuses every request (503), which fails
+ * closed. Reported on `GET /v1/engines` and `GET /v1/org/posture`; it blocks nothing by itself.
+ */
+export function workloadIssuerPosture(): { configured: boolean; issuer: string | null; note: string } {
+  const issuer = identityIssuer();
+  return issuer
+    ? { configured: true, issuer, note: "Engine runners and PDP clients take their tokens from this issuer." }
+    : {
+        configured: false,
+        issuer: null,
+        note:
+          "Issuer not configured: REGULAIT_PUBLIC_URL is not set, so no engine runner or PDP client can authenticate. " +
+          "Set it to this deployment's https origin (scripts/install.sh --public-url) and give the runners the same value.",
+      };
+}
+
 /** the environment external tokens are minted for and accepted in */
 export function deploymentEnvironment(env: NodeJS.ProcessEnv = process.env): string {
   return resolveDeployMode(env);

@@ -35,7 +35,7 @@
  */
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { decodeJwt, decodeProtectedHeader } from "jose";
-import { auditLog, engineRunners, eq, type Db } from "@regulait/db";
+import { auditLog, engineRunners, eq, sql, type Db } from "@regulait/db";
 import { verifyDelegatedToken, ACCESS_TOKEN_TYP } from "../delegated-token.js";
 import { databaseNow } from "../delegation.js";
 import { findWorkloadClient, matchCertificateCredential } from "./clients.js";
@@ -244,7 +244,8 @@ async function authenticateSelfRequest(
   const { identity, authCredentialId, runner } = v.subject;
   if (kind === "engine_runner") {
     // the ADR-0187 last-seen stamp the runner's bearer path kept
-    await db.update(engineRunners).set({ lastSeenAt: new Date() }).where(eq(engineRunners.id, runner!.id));
+    // M-075: the database clock, as every other stamp on this row
+    await db.update(engineRunners).set({ lastSeenAt: sql`now()` }).where(eq(engineRunners.id, runner!.id));
     return {
       kind: "ok",
       ctx: { userId: null, isAdmin: false, via: "engine-runner", engineRunnerId: runner!.id, engineId: runner!.engineId, workloadIdentityId: identity.id, workloadCredentialId: authCredentialId },

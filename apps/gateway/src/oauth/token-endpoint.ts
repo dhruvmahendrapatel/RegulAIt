@@ -377,6 +377,11 @@ async function selfPreflight(ctx: KoaContextLike, s: RequestState): Promise<Pref
   }
   const dpop = await requestDpop(ctx, s);
   if (!dpop) throw refuse(new InvalidDpopProof("a DPoP proof is required"), "dpop_required");
+  // a self token is bound to the SAME key that authenticated the client: a workload cannot bind its token to some
+  // other key it holds (or a key that is not registered at all)
+  if (!credential.jwkThumbprint || dpop.thumbprint !== credential.jwkThumbprint) {
+    throw refuse(new InvalidDpopProof("the DPoP proof must be signed by the key that authenticated the client"), "dpop_key_mismatch");
+  }
   s.dpopIat = dpop.iat;
   return {
     client,
