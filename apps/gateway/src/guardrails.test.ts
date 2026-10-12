@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -295,7 +297,7 @@ beforeAll(async () => {
   restoreSb2Gates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false });
   gwUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
-  const egressAllowed = await app.inject({
+  const egressAllowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     url: "/v1/egress-allow-hosts",
     headers: AUTH,
@@ -305,7 +307,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "guardrail suite: local upstream MCP server",
     },
-  });
+  }));
   expect(egressAllowed.statusCode).toBe(201);
   loopbackAllowHostId = egressAllowed.json().id;
 

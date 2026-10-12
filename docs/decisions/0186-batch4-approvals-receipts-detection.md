@@ -847,3 +847,18 @@ PR #378 review follow-ups:
 - **Test-only helpers.** `relaxStepUpForTest` and `forgetStepUpMethodsForTest` throw outside a test runner.
   `step-up-posture-guard.test.ts` pins, statically, that no product source imports them.
 
+PR #378 recheck:
+- **Allow-list upserts.** `POST /v1/egress-allow-hosts` always locks the host's row and re-decides the relaxation
+  under the lock. A write decided as "no relaxation" (a note edit re-sending opt-ins that were on) that would now turn
+  an opt-in back on answers 409 `changed_concurrently`. The grant is spent inside that transaction, after the
+  re-decision, so a 409 never burns it.
+- **Server PATCH.** Every `PATCH /v1/servers/:id` that touches the private ranges or the url compare-and-sets both,
+  and spends its ranges grant inside that transaction, after the compare-and-set.
+- **Registry import.** The step-up binds the entry's `remoteUrl`. The server row is written under a share lock on
+  the registry row, and only if the inherited posture is unchanged (409 `changed_concurrently` otherwise).
+- **Host spelling.** Hosts are bound in their normalised spelling (lower case, no trailing dot), so a grant serves
+  any spelling of the same host.
+- **Suite setup.** Gateway suites post their opt-in allow entries through `relaxStepUpAround`, which turns step-up
+  off for that one call and puts the policy back as found. They no longer depend on no admin on the shared database
+  having a step-up method.
+

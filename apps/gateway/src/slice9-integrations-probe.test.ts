@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,13 +122,13 @@ beforeAll(async () => {
 
   // the loopback allow entry the gitlab fake upstream needs (the same opt-ins
   // an air-gapped operator uses; connection-egress.test.ts precedent)
-  const allowed = await app.inject({
+  const allowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST", headers: AUTH, url: "/v1/egress-allow-hosts",
     payload: {
       host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true,
       note: "s9 probe: local fake GitLab",
     },
-  });
+  }));
   expect(allowed.statusCode).toBe(201);
   allowHostId = allowed.json().id;
 });

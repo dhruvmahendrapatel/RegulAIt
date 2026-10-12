@@ -14,6 +14,8 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -182,12 +184,12 @@ describe("egress allow-list: default-deny before anything else", () => {
     expect(res.json().error).toBe("egress_blocked");
     // it is refused on the SCHEME first (no plaintext opt-in) — and adding
     // that opt-in still leaves the link-local range block underneath
-    const withPlaintext = await app.inject({
+    const withPlaintext = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("169.254.169.254"), allowPlaintextHttp: true, note: "still must not work" },
-    });
+    }));
     expect(withPlaintext.statusCode).toBe(201);
     const again = await app.inject({
       method: "POST",
@@ -207,7 +209,7 @@ describe("egress allow-list: default-deny before anything else", () => {
 
   it("records the allow-list entry — and the private/plaintext opt-ins — in the audit trail", async () => {
     // egress-allow-cleanup: afterAll — the loopback entry the later lifecycle tests use; afterAll removes it by host
-    const res = await app.inject({
+    const res = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
@@ -217,7 +219,7 @@ describe("egress allow-list: default-deny before anything else", () => {
         allowPlaintextHttp: true,
         note: "local self-hosted model server (air-gapped shape)",
       },
-    });
+    }));
     expect(res.statusCode).toBe(201);
     allowHostId = res.json().id;
 
@@ -559,12 +561,12 @@ describe("registration, connection test, and enablement", () => {
 
       // restore for the teardown assertions below
       // egress-allow-cleanup: afterAll — the file's loopback entry, removed by host
-      const re = await app.inject({
+      const re = await relaxStepUpAround(db, () => app.inject({
         method: "POST",
         headers: AUTH,
         url: "/v1/egress-allow-hosts",
         payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true },
-      });
+      }));
       allowHostId = re.json().id;
     });
 

@@ -15,6 +15,8 @@
  * "refused" is proved as "the receiver saw nothing", not "the call errored".
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
@@ -242,12 +244,12 @@ beforeAll(async () => {
   await new Promise<void>((r) => collector.listen(0, "127.0.0.1", r));
   collectorPort = (collector.address() as { port: number }).port;
 
-  const allow = await app.inject({
+  const allow = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "b4o suite: loopback upstreams" },
-  });
+  }));
   expect([201, 409]).toContain(allow.statusCode);
   if (allow.statusCode === 201) allowHostId = allow.json().id as string;
 

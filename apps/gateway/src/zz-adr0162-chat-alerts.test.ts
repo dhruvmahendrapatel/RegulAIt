@@ -12,6 +12,8 @@
  */
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,9 +83,9 @@ beforeAll(async () => {
 
   const existing = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
   if (existing.length === 0) {
-    const allow = await call("POST", "/v1/egress-allow-hosts", AUTH, {
+    const allow = await relaxStepUpAround(db, () => call("POST", "/v1/egress-allow-hosts", AUTH, {
       host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "adr0162 suite: local fake Slack",
-    });
+    }));
     expect([200, 201]).toContain(allow.statusCode);
     addedAllow = true;
   }
@@ -184,9 +186,9 @@ describe("ADR-0162 governance alerts in chat", () => {
       await call("PATCH", `/v1/chatops/connections/${connectionId}`, admin.auth, { notifyAlertMinSeverity: "medium" });
       expect((await call("POST", "/v1/governance/monitor/evaluate", admin.auth)).statusCode).toBe(200);
     } finally {
-      await call("POST", "/v1/egress-allow-hosts", AUTH, {
+      await relaxStepUpAround(db, () => call("POST", "/v1/egress-allow-hosts", AUTH, {
         host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "adr0162 suite: local fake Slack",
-      });
+      }));
     }
   });
 });

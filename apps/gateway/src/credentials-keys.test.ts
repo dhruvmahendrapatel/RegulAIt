@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, it, afterAll } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, createDb, eq, modelCredentials, runMigrations, userModelCredentials, type Db } from "@regulait/db";
@@ -63,7 +65,7 @@ beforeAll(async () => {
   // destination. This suite stores overrides pointed at a loopback address, so
   // it allow-lists that host explicitly with the private-range opt-in, exactly
   // as an air-gapped operator would (the same pattern as custom-providers.test.ts).
-  const allowed = await app.inject({
+  const allowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -73,7 +75,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "credential-surface suite: local fake endpoints",
     },
-  });
+  }));
   expect(allowed.statusCode).toBe(201);
   loopbackAllowHostId = allowed.json().id;
 

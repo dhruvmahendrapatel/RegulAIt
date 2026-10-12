@@ -658,6 +658,13 @@ function auditWhere(q: AuditFilterInput, from: Date | null, to: Date | null): SQ
   return conds.length === 0 ? undefined : conds.length === 1 ? conds[0] : and(...conds);
 }
 
+/** a step-up refused inside a write's transaction: thrown so the write rolls back, answered after it */
+class StepUpRefusedInTx extends Error {
+  constructor(readonly status: number, readonly body: Record<string, unknown>) {
+    super("step_up_refused_in_transaction");
+  }
+}
+
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // trustProxy (ADR-0029, NARROWED by ADR-0031 item 3): the deployed stack runs
   // behind a Caddy TLS terminator, so the socket peer is the proxy, not the
@@ -2182,31 +2189,46 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // owner, below) changes no column here — no empty UPDATE is issued
     if (Object.keys(patch).length > 0) {
       let rangesStepUp: string | null = null;
-      if (rangesStepUpArgs) {
-        const su = await requireStepUp(db, req, reply, rangesStepUpArgs);
-        if (!su.ok) return reply;
-        rangesStepUp = su.method;
-      }
-      const [written] = await db
-        .update(mcpServers)
-        .set(patch)
-        // Class A: a relaxation decided on an unlocked read is written only if the posture it rested on is unchanged
-        .where(
-          rangesRelaxed
-            ? and(
-                eq(mcpServers.id, serverId),
-                before.allowPrivateRanges === null
-                  ? isNull(mcpServers.allowPrivateRanges)
-                  : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
-              )
-            : eq(mcpServers.id, serverId),
-        )
-        .returning();
-      if (!written) {
-        if (rangesRelaxed) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
-        return reply.status(404).send({ error: "unknown_server" });
-      }
-      row = written;
+      // Class A, for EVERY write that touches the egress posture (relaxing or not): it applies only if the private
+      // ranges AND the url it was decided on are unchanged, so a concurrent change (another admin closing the ranges,
+      // or moving the url) is never overwritten by a write decided against the old values. The ranges grant is
+      // spent inside the same transaction AFTER that compare-and-set, so a 409 never burns it.
+      const touchesPosture = body.allowPrivateRanges !== undefined || body.url !== undefined;
+      type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
+      const out = await db.transaction(async (tx): Promise<Patched> => {
+        const [written] = await tx
+          .update(mcpServers)
+          .set(patch)
+          .where(
+            touchesPosture
+              ? and(
+                  eq(mcpServers.id, serverId),
+                  before.allowPrivateRanges === null
+                    ? isNull(mcpServers.allowPrivateRanges)
+                    : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
+                  eq(mcpServers.url, before.url),
+                )
+              : eq(mcpServers.id, serverId),
+          )
+          .returning();
+        if (!written) {
+          return touchesPosture
+            ? { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } }
+            : { refused: { status: 404, body: { error: "unknown_server" } } };
+        }
+        if (rangesStepUpArgs) {
+          // claimed on the root handle: single use, and its refusal row survives this transaction's rollback
+          const su = await checkStepUp(db, req, rangesStepUpArgs);
+          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body);
+          rangesStepUp = su.method;
+        }
+        return { row: written };
+      }).catch((err: unknown) => {
+        if (err instanceof StepUpRefusedInTx) return { refused: { status: err.status, body: err.body } } as Patched;
+        throw err;
+      });
+      if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
+      row = out.row;
       // the private-range posture decides which network space this server's url may reach: every change of it is
       // on the trail with both values, and an opening one as a relaxation with its step-up
       if (body.allowPrivateRanges !== undefined && (body.allowPrivateRanges ?? null) !== before.allowPrivateRanges) {

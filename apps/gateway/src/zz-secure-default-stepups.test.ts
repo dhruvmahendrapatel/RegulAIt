@@ -44,6 +44,7 @@ import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { importRegistryEntry } from "./mcp-registry.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -509,6 +510,125 @@ describe("model cards refuse a presentation-scrub marker", () => {
     // the same edit without the mask is saved
     const edited = await asAdmin("PATCH", `/v1/mrm/cards/${cardId}`, { limitations: "English and French" });
     expect(edited.statusCode, edited.body).toBe(200);
+  });
+});
+
+describe("recheck: spellings, fail-closed import, concurrency and url binding", () => {
+  it("a host is bound in its normalised spelling: a grant made for one spelling serves another of the same host", async () => {
+    const host = `sds-spell-${RUN}.lan.example.test`;
+    // egress-allow-cleanup: afterAll — the id lands in created.allowHosts, which afterAll removes
+    const asked = await asAdmin("POST", "/v1/egress-allow-hosts", { host: `${host.toUpperCase()}.`, allowPrivateRanges: true });
+    expect(asked.statusCode, asked.body).toBe(403);
+    // the facts carry the normalised host (lower case, no trailing dot): by design, the gateway's one spelling
+    expect(asked.json().action).toEqual({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { allowPrivateRanges: true } } });
+    const token = await grantFor(asked.json().action);
+    // egress-allow-cleanup: afterAll — the same host, removed in afterAll
+    const ok = await asAdmin("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true }, { [STEP_UP_HEADER]: token });
+    expect(ok.statusCode, ok.body).toBe(201);
+    created.allowHosts.push(ok.json().id);
+    // a different host is a different binding
+    const other = await grantFor({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { allowPrivateRanges: true } } });
+    // egress-allow-cleanup: refused — a grant for another host never writes
+    const wrong = await asAdmin("POST", "/v1/egress-allow-hosts", { host: `x${host}`, allowPrivateRanges: true }, { [STEP_UP_HEADER]: other });
+    expect(wrong.statusCode, wrong.body).toBe(403);
+  });
+
+  it("a re-send decided as no relaxation is refused 409 when a concurrent admin turned the opt-in off meanwhile", async () => {
+    const host = `sds-race-${RUN}.lan.example.test`;
+    // egress-allow-cleanup: afterAll — the id lands in created.allowHosts, which afterAll removes
+    const opened = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true }, {
+      op: "egress_allow_host",
+      host,
+      values: { allowPrivateRanges: true },
+    });
+    expect(opened.statusCode, opened.body).toBe(201);
+    created.allowHosts.push(opened.json().id);
+    // another admin's write, held open: it turns the opt-in off but has not committed
+    const other = await db.$client.connect();
+    try {
+      await other.query("begin");
+      await other.query("update egress_allow_hosts set allow_private_ranges = false where host = $1", [host]);
+      // a note edit re-sending the opt-in as on: decided on the committed row (on), so no step-up is asked for…
+      // egress-allow-cleanup: afterAll — the same host, removed in afterAll
+      const pending = asAdmin("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true, note: "edited" });
+      // …and it waits on the row lock the write takes before re-deciding
+      for (let i = 0; i < 100; i += 1) {
+        const r = await db.execute(sql`select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock' and query ilike '%egress_allow_hosts%'`);
+        if ((r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n > 0) break;
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      await other.query("commit");
+      const res = await pending;
+      // under the lock the write is now a relaxation it was not stepped up for: nothing is written
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("changed_concurrently");
+    } finally {
+      await other.query("rollback").catch(() => undefined);
+      other.release();
+    }
+    const [row] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host));
+    expect(row!.allowPrivateRanges).toBe(false);
+  });
+
+  it("importRegistryEntry with no step-up check refuses an import that opens private ranges", async () => {
+    const name = `sds-noop-reg-${RUN}`;
+    const reg = await relaxThroughStepUp("POST", "/v1/mcp-registries", { name, url: REGISTRY_URL, allowPrivateRanges: true }, {
+      op: "mcp_registry_create",
+      name,
+      url: REGISTRY_URL,
+      values: { allowPrivateRanges: true },
+    });
+    expect(reg.statusCode, reg.body).toBe(201);
+    created.registries.push(reg.json().id);
+    const [entry] = await db
+      .insert(mcpRegistryEntries)
+      .values({ registryId: reg.json().id, upstreamName: `io.example.test/sds-noop-${RUN}`, upstreamVersion: "1.0.0", kind: "remote", remoteUrl: `${REGISTRY_URL}sds-noop`, remoteTransport: "streamable-http" })
+      .returning();
+    const out = await importRegistryEntry(db, entry!.id, {});
+    expect(out.ok).toBe(false);
+    expect(out.ok ? null : out.refusal).toMatchObject({ status: 403, body: { error: "step_up_required", actionKind: "settings_relax" } });
+    expect((await db.select({ id: mcpServers.id }).from(mcpServers).where(eq(mcpServers.url, `${REGISTRY_URL}sds-noop`))).length).toBe(0);
+  });
+
+  it("a server or registry PATCH that moves the url binds it: a grant without the url is refused", async () => {
+    const srv = await asAdmin("POST", "/v1/servers", { name: `sds-srv-url-${RUN}`, url: `${REGISTRY_URL}url-a` });
+    expect(srv.statusCode, srv.body).toBe(201);
+    const serverId = srv.json().id as string;
+    created.servers.push(serverId);
+    const body = { url: `${REGISTRY_URL}url-b`, allowPrivateRanges: true };
+    const noUrl = await grantFor({ kind: "settings_relax", body: { op: "mcp_server_update", serverId, values: { allowPrivateRanges: true } } });
+    expect((await asAdmin("PATCH", `/v1/servers/${serverId}`, body, { [STEP_UP_HEADER]: noUrl })).statusCode).toBe(403);
+    const ok = await relaxThroughStepUp("PATCH", `/v1/servers/${serverId}`, body, { op: "mcp_server_update", serverId, url: body.url, values: { allowPrivateRanges: true } });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({ url: body.url, allowPrivateRanges: true });
+
+    const r = await asAdmin("POST", "/v1/mcp-registries", { name: `sds-reg-url-${RUN}`, url: REGISTRY_URL });
+    expect(r.statusCode, r.body).toBe(201);
+    const registryId = r.json().id as string;
+    created.registries.push(registryId);
+    const rbody = { url: `${REGISTRY_URL}moved`, enabled: true };
+    const rNoUrl = await grantFor({ kind: "settings_relax", body: { op: "mcp_registry_update", registryId, values: { enabled: true } } });
+    expect((await asAdmin("PATCH", `/v1/mcp-registries/${registryId}`, rbody, { [STEP_UP_HEADER]: rNoUrl })).statusCode).toBe(403);
+    const rok = await relaxThroughStepUp("PATCH", `/v1/mcp-registries/${registryId}`, rbody, { op: "mcp_registry_update", registryId, url: rbody.url, values: { enabled: true } });
+    expect(rok.statusCode, rok.body).toBe(200);
+  });
+
+  it("a refused server PATCH changes nothing: no grant, or an unknown owner, leaves name, owner and ranges as they were", async () => {
+    const srv = await asAdmin("POST", "/v1/servers", { name: `sds-srv-atomic-${RUN}`, url: `${REGISTRY_URL}atomic` });
+    expect(srv.statusCode, srv.body).toBe(201);
+    const serverId = srv.json().id as string;
+    created.servers.push(serverId);
+    const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    const noGrant = await asAdmin("PATCH", `/v1/servers/${serverId}`, { name: `sds-srv-atomic-renamed-${RUN}`, allowPrivateRanges: true, ownerUserId: admin.id });
+    expect(noGrant.statusCode, noGrant.body).toBe(403);
+    const unknownOwner = await asAdmin("PATCH", `/v1/servers/${serverId}`, { name: `sds-srv-atomic-renamed-${RUN}`, ownerUserId: "00000000-0000-4000-8000-00000000dead" });
+    expect(unknownOwner.statusCode, unknownOwner.body).toBe(422);
+    const [after] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    expect({ name: after!.name, ownerUserId: after!.ownerUserId, allowPrivateRanges: after!.allowPrivateRanges }).toEqual({
+      name: before!.name,
+      ownerUserId: before!.ownerUserId,
+      allowPrivateRanges: before!.allowPrivateRanges,
+    });
   });
 });
 

@@ -31,6 +31,8 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -140,12 +142,12 @@ const invokeConnector = (connectorId: string, payload: Record<string, unknown>) 
   });
 
 async function allowLoopback(note: string): Promise<string> {
-  const res = await app.inject({
+  const res = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note },
-  });
+  }));
   expect(res.statusCode).toBe(201);
   return res.json().id as string;
 }
@@ -332,14 +334,14 @@ describe("write time: the endpoints refuse a destination before it is ever store
   });
 
   it("allow-listing the IMDS address does NOT make it reachable — the range check is separate", async () => {
-    const allowed = await app.inject({
+    const allowed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       // the plaintext opt-in too, so nothing cheaper can be what refuses it:
       // the only thing left standing is the blocked-range check itself
       payload: { host: perTest.trackHost("169.254.169.254"), allowPlaintextHttp: true, note: "deliberate SSRF test" },
-    });
+    }));
     expect(allowed.statusCode).toBe(201);
     const res = await app.inject({
       method: "POST",
@@ -356,12 +358,12 @@ describe("write time: the endpoints refuse a destination before it is ever store
     // `.internal` is where GCP/Azure park their metadata services. Allow-list
     // the exact host first, so the refusal is the SUFFIX rule doing its job
     // rather than default-deny answering before it gets a turn.
-    const gcp = await app.inject({
+    const gcp = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("metadata.google.internal"), allowPlaintextHttp: true, note: "test" },
-    });
+    }));
     expect(gcp.statusCode).toBe(201);
     for (const [baseUrl, code] of [
       ["http://metadata.google.internal/computeMetadata/v1/", "blocked_host_suffix"],

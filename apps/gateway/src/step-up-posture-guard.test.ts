@@ -13,7 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const SKIP_DIRS = new Set(["node_modules", "dist", "build", ".turbo", "coverage", "artifacts", "test-results", "playwright-report"]);
 const SOURCE = /\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/;
 const TEST = /\.(?:test|spec)\.(?:ts|tsx|mts|js|mjs)$/;
-const NAMES = ["step-up-posture", "relaxStepUpForTest", "forgetStepUpMethodsForTest"];
+const NAMES = ["step-up-posture", "relaxStepUpForTest", "forgetStepUpMethodsForTest", "relaxStepUpAround"];
 
 function walk(dir: string, out: string[]): void {
   for (const name of readdirSync(dir)) {
@@ -49,7 +49,7 @@ describe("the step-up relax helpers stay test fixtures", () => {
   });
 
   it("the helpers refuse to run outside a test runner", async () => {
-    const { relaxStepUpForTest, forgetStepUpMethodsForTest } = await import("./testing/step-up-posture.js");
+    const { relaxStepUpForTest, forgetStepUpMethodsForTest, relaxStepUpAround } = await import("./testing/step-up-posture.js");
     const saved = { vitest: process.env.VITEST, nodeEnv: process.env.NODE_ENV };
     delete process.env.VITEST;
     process.env.NODE_ENV = "production";
@@ -58,6 +58,9 @@ describe("the step-up relax helpers stay test fixtures", () => {
       const db = new Proxy({}, { get: () => { throw new Error("the database was reached"); } }) as never;
       await expect(relaxStepUpForTest(db)).rejects.toThrow(/test fixture/);
       await expect(forgetStepUpMethodsForTest(db, ["00000000-0000-4000-8000-000000000001"])).rejects.toThrow(/test fixture/);
+      let ran = false;
+      await expect(relaxStepUpAround(db, async () => { ran = true; })).rejects.toThrow(/test fixture/);
+      expect(ran).toBe(false);
     } finally {
       if (saved.vitest === undefined) delete process.env.VITEST;
       else process.env.VITEST = saved.vitest;

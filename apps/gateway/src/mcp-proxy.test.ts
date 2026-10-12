@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import { enrolAdminTotpForTest } from "./testing/identity-posture.js";
 import { createHmac } from "node:crypto";
@@ -184,7 +186,7 @@ beforeAll(async () => {
   // connector `baseUrl`s and its Jira/Linear/Asana/monday/generic-webhook PM
   // connections, all of which point at loopback fakes and all of which are now
   // guarded at write time and on every outbound call.
-  const egressAllowed = await app.inject({
+  const egressAllowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -194,7 +196,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "mcp-proxy suite: local fake provider endpoints",
     },
-  });
+  }));
   expect(egressAllowed.statusCode).toBe(201);
   loopbackAllowHostId = egressAllowed.json().id;
 

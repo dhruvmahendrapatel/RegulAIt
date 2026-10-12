@@ -849,7 +849,8 @@ export async function importRegistryEntry(
   const relaxation = inheritedRanges === true;
   let stepUpMethod: string | null = null;
   if (relaxation) {
-    const facts = { op: "mcp_registry_import", registryId: entry.registryId, entryId: entry.id, values: { allowPrivateRanges: true } };
+    // the url the opened server will dial is bound too, so a grant made for one endpoint is refused for another
+    const facts = { op: "mcp_registry_import", registryId: entry.registryId, entryId: entry.id, url: entry.remoteUrl, values: { allowPrivateRanges: true } };
     if (!opts.stepUp) {
       return {
         ok: false,
@@ -883,12 +884,23 @@ export async function importRegistryEntry(
     }),
     now,
   );
-  const [row] = await db
+  // Class A: the posture this import inherits (and its step-up, when it opens private ranges) was decided on an
+  // unlocked read of the registry. The server row is written under a share lock on the registry row, and only if
+  // that posture is still what was decided on; otherwise nothing is created (409 changed_concurrently).
+  const remoteUrl = entry.remoteUrl; // narrowed above (a remote entry has one)
+  const row = await db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select({ allowPrivateRanges: mcpRegistries.allowPrivateRanges })
+      .from(mcpRegistries)
+      .where(eq(mcpRegistries.id, entry.registryId))
+      .for("share");
+    if ((locked?.allowPrivateRanges ?? null) !== inheritedRanges) return null;
+    const [inserted] = await tx
     .insert(mcpServers)
     .values({
       releaseSeenAt,
       name: localServerNameFor(entry.upstreamName),
-      url: entry.remoteUrl,
+      url: remoteUrl,
       // ADR-0043's tri-state, inherited from the registry that vouched for it.
       allowPrivateRanges: inheritedRanges,
       // ADR-0097: EXPLICIT, and deliberately not `grandfathered`. A server that
@@ -902,7 +914,10 @@ export async function importRegistryEntry(
       registryLastSyncedAt: entry.lastSyncedAt,
     })
     .returning();
-  if (!row) throw new Error("import failed to create server row");
+    if (!inserted) throw new Error("import failed to create server row");
+    return inserted;
+  });
+  if (!row) return { ok: false, refusal: { status: 409, body: { error: "changed_concurrently", detail: "the registry's private-range posture changed while this import was being checked, so nothing was imported: try again" } } };
 
   await db
     .update(mcpRegistryEntries)

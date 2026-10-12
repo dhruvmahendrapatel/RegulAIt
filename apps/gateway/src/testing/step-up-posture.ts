@@ -59,6 +59,31 @@ export async function relaxStepUpForTest(db: Db): Promise<() => Promise<void>> {
 }
 
 /**
+ * PR #378: step-up off for ONE setup call, then the policy put back exactly as found. A suite that allow-lists its
+ * loopback doubles with the private-range / plaintext opt-ins (a stepped-up relaxation, ADR-0186 A) through the
+ * bootstrap credential cannot rely on first-admin setup: another suite on the shared database may already have an
+ * admin with a step-up method. Scoped to the call, not the suite, so nothing else the suite does runs relaxed.
+ * The call (and its egress route literal) stays in the suite, where the egress-cleanup preflight reads it.
+ */
+export async function relaxStepUpAround<T>(db: Db, call: () => Promise<T>): Promise<T> {
+  assertUnderTest("relaxStepUpAround");
+  await loadOrgSettings(db); // the singleton exists
+  const [found] = await db
+    .select({ mode: orgSettings.stepUpMode })
+    .from(orgSettings)
+    .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  await db.update(orgSettings).set({ stepUpMode: "off" }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  try {
+    return await call();
+  } finally {
+    await db
+      .update(orgSettings)
+      .set({ stepUpMode: found?.mode ?? BATCH4_STRICT_DEFAULTS.stepUpMode })
+      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  }
+}
+
+/**
  * B4S-06 (M-068: global state is removed before the suite ends). The bootstrap
  * credential passes a step-up only while no ACTIVE admin has a usable step-up
  * method, and every suite shares one database — so a suite that leaves an admin

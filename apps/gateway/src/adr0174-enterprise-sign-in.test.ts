@@ -37,6 +37,8 @@
  * licences and persona rows it touches are restored in afterAll.
  */
 import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { createServer, type Server } from "node:http";
 import { createHash, createSign, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -259,10 +261,10 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await startIdp();
-  const egress = await app.inject({
+  const egress = await relaxStepUpAround(db, () => app.inject({
     method: "POST", headers: AUTH, url: "/v1/egress-allow-hosts",
     payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: "adr0174 suite: local fake OIDC IdP" },
-  });
+  }));
   // the route upserts by host, so it is 201 even when the row already exists
   expect(egress.statusCode, egress.body).toBe(201);
   loopbackAllowHostId = egress.json().id;

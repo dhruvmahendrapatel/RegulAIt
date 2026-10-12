@@ -33,7 +33,7 @@ import {
   type CustomModelProviderRow,
   type Db,
 } from "@regulait/db";
-import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import {
   createCustomModelProviderSchema,
   createEgressAllowHostSchema,
@@ -303,28 +303,37 @@ export function registerCustomProviderRoutes(
     // ranges and every private-range check. Opting a host INTO private ranges or plaintext http relaxes those
     // checks, so turning either opt-in on (a new entry, or an upsert that widens an existing one) needs a
     // settings_relax step-up bound to the host and the opt-ins it turns on. Turning them off needs nothing.
+    /** the opt-ins this write turns on, against a stored row (or none) */
+    const relaxationsAgainst = (stored: { allowPrivateRanges: boolean; allowPlaintextHttp: boolean } | undefined) => {
+      const out: Record<string, true> = {};
+      if (values.allowPrivateRanges && !stored?.allowPrivateRanges) out.allowPrivateRanges = true;
+      if (values.allowPlaintextHttp && !stored?.allowPlaintextHttp) out.allowPlaintextHttp = true;
+      return out;
+    };
     const [existing] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host));
-    const relaxed: Record<string, true> = {};
-    if (values.allowPrivateRanges && !existing?.allowPrivateRanges) relaxed.allowPrivateRanges = true;
-    if (values.allowPlaintextHttp && !existing?.allowPlaintextHttp) relaxed.allowPlaintextHttp = true;
+    const relaxed = relaxationsAgainst(existing);
     const relaxation = Object.keys(relaxed).length > 0;
-    let stepUp: string | null = null;
+    const stepUpArgs = { kind: "settings_relax" as const, facts: { op: "egress_allow_host", host, values: relaxed } };
+    // looked at (not spent) here, so a request without a grant is answered at once; SPENT inside the transaction,
+    // after the row is locked and the relaxation re-decided, so a concurrent change never burns it
     if (relaxation) {
-      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "egress_allow_host", host, values: relaxed } });
-      if (!su.ok) return reply;
-      stepUp = su.method;
+      const look = await checkStepUp(db, req, stepUpArgs, { spend: false });
+      if (!look.ok) return reply.status(look.status).send(look.body);
     }
-    const row = await db.transaction(async (tx) => {
-      // Class A: the step-up was decided on the row as read; a relaxing write applies only if it is unchanged
+    type Out = { row: typeof egressAllowHosts.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
+    const out = await db.transaction(async (tx): Promise<Out> => {
+      // ALWAYS locked and re-decided, relaxing or not: a write decided as "no relaxation" (a note edit re-sending
+      // opt-ins that were on) must not turn an opt-in back on that a concurrent admin just turned off
+      const [now] = await tx.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host)).for("update");
+      if (JSON.stringify(relaxationsAgainst(now)) !== JSON.stringify(relaxed)) {
+        return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
+      }
+      let stepUp: string | null = null;
       if (relaxation) {
-        const [now] = await tx.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host)).for("update");
-        const same =
-          (now === undefined && existing === undefined) ||
-          (now !== undefined &&
-            existing !== undefined &&
-            now.allowPrivateRanges === existing.allowPrivateRanges &&
-            now.allowPlaintextHttp === existing.allowPlaintextHttp);
-        if (!same) return null;
+        // the single-use claim is made on the root handle, so a refusal row written by it survives this rollback
+        const su = await checkStepUp(db, req, stepUpArgs);
+        if (!su.ok) return { refused: { status: su.status, body: su.body } };
+        stepUp = su.method;
       }
       const [written] = await tx
         .insert(egressAllowHosts)
@@ -340,7 +349,7 @@ export function registerCustomProviderRoutes(
         detail: {
           phase: "egress_allow_host",
           ...values,
-          ...(existing ? { from: { allowPrivateRanges: existing.allowPrivateRanges, allowPlaintextHttp: existing.allowPlaintextHttp } } : {}),
+          ...(now ? { from: { allowPrivateRanges: now.allowPrivateRanges, allowPlaintextHttp: now.allowPlaintextHttp } } : {}),
           relaxation,
           ...(relaxation ? { relaxed, stepUp } : {}),
         },
@@ -353,10 +362,10 @@ export function registerCustomProviderRoutes(
           (values.allowPlaintextHttp ? " WITH plaintext http" : "") +
           (relaxation ? " (a relaxation, confirmed with a step-up)" : ""),
       });
-      return written!;
+      return { row: written! };
     });
-    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
-    return reply.status(201).send(row);
+    if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
+    return reply.status(201).send(out.row);
   });
 
   app.delete("/v1/egress-allow-hosts/:hostId", async (req, reply) => {

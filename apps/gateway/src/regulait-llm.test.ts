@@ -43,6 +43,8 @@
  * removes every object it created. Everything is `llm-` prefixed.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -1028,7 +1030,7 @@ describe("a training backend's endpoint is adjudicated by the existing egress gu
 
   it("accepts an allow-listed endpoint, then REFUSES the job once the allow-list is withdrawn", async () => {
     // allow 127.0.0.1 explicitly, with both opt-ins the guard demands
-    const host = await app.inject({
+    const host = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       url: "/v1/egress-allow-hosts",
       headers: AUTH,
@@ -1038,7 +1040,7 @@ describe("a training backend's endpoint is adjudicated by the existing egress gu
         allowPlaintextHttp: true,
         note: "llm training backend test",
       },
-    });
+    }));
     expect(host.statusCode).toBe(201);
     const hostId = host.json().id as string;
 

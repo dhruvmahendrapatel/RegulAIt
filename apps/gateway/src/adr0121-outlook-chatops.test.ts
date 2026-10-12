@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -559,12 +561,12 @@ describe("AER-015 — strict egress admits an outlook connector created without 
     app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { egressCompiledDefaultPolicy } });
 
   const allow = async (host: string, local: boolean) => {
-    const res = await post("/v1/egress-allow-hosts", {
+    const res = await relaxStepUpAround(db, () => post("/v1/egress-allow-hosts", {
       host,
       allowPrivateRanges: local,
       allowPlaintextHttp: local,
       note: `adr0121 ${RUN}: ${local ? "local fake Entra login host" : "the compiled Graph host"}`,
-    });
+    }));
     expect(res.statusCode, res.body).toBe(201);
     return res.json().id as string;
   };

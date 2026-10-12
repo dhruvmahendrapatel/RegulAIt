@@ -25,6 +25,8 @@
  */
 import { autoGrantCreatedAgentsForTest } from "./testing/agent-own-grants.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -159,7 +161,7 @@ beforeAll(async () => {
   // address, so it allow-lists that host explicitly with the private-range and
   // plaintext opt-ins, exactly as an air-gapped operator would (the same
   // pattern as custom-providers.test.ts).
-  const egressAllowed = await app.inject({
+  const egressAllowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -169,7 +171,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "org-settings suite: local fake endpoints",
     },
-  });
+  }));
   expect(egressAllowed.statusCode).toBe(201);
   loopbackAllowHostId = egressAllowed.json().id;
 

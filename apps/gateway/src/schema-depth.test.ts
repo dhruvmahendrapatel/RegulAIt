@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -240,7 +242,7 @@ beforeAll(async () => {
   // opt-ins — exactly what an air-gapped operator does, and exactly what
   // mcp-proxy.test.ts / custom-providers.test.ts already do. Explicit rather
   // than inherited: sibling suites empty this table.
-  const egressAllowed = await app.inject({
+  const egressAllowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -250,7 +252,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "schema-depth suite: local fake connector upstreams",
     },
-  });
+  }));
   expect(egressAllowed.statusCode).toBe(201);
   loopbackAllowHostId = egressAllowed.json().id;
 

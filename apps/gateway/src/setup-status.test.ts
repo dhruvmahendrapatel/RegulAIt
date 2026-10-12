@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+// an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 // ADR-0181: this file registers a LOCAL MCP double (127.0.0.1 / localhost, registered seconds ago) to pin
 // unrelated behaviour, not the strict admission defaults — relaxed explicitly here, restored in afterAll.
@@ -149,7 +151,7 @@ beforeAll(async () => {
   // so a real vendor hostname would make this suite depend on DNS. Explicit
   // rather than inherited — a sibling file's entry is not this file's fixture,
   // and this file's entry is not a sibling's: afterAll removes it (M-068).
-  const egressAllowed = await app.inject({
+  const egressAllowed = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
@@ -159,7 +161,7 @@ beforeAll(async () => {
       allowPlaintextHttp: true,
       note: "setup-status suite: loopback PM-connection fixture",
     },
-  });
+  }));
   expect(egressAllowed.statusCode).toBe(201);
   loopbackAllowHostId = egressAllowed.json().id;
   // deactivate every ACTIVE non-admin user so the non_admin_user step starts
