@@ -381,6 +381,12 @@ importers:
       '@regulait/shared':
         specifier: workspace:*
         version: link:../shared
+      jose:
+        specifier: 6.2.12
+        version: 6.2.12
+      oauth4webapi:
+        specifier: 3.8.8
+        version: 3.8.8
       write-file-atomic:
         specifier: 8.0.0
         version: 8.0.0

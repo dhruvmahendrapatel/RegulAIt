@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENGINE_MANIFEST, evaluateRunnerSelfTest, PROMPTFOO_ENGINE_VERSION, type EngineLease } from "@regulait/shared";
-import { FileRunnerTokenStore, generateRunnerSecret, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
+import { FileRunnerKeyStore, generateRunnerSecret, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
 import { promptfooAdapter } from "./adapter.js";
 import { buildPromptfooConfig, planPromptfooRun, RUN_KEY_ENV } from "./config.js";
 import { DONE_FILE, ExchangePromptfooExecutor, promptfooWorkerTick, RESULTS_FILE } from "./exchange.js";
@@ -114,7 +114,7 @@ describe("B5-P2: the runner hands promptfoo to the worker", () => {
     const v = await volumes();
     // the runner's credential, where the runner keeps it (its state volume)
     const token = generateRunnerSecret();
-    await new FileRunnerTokenStore(path.join(v.state, "runner-token")).save(token);
+    await new FileRunnerKeyStore(path.join(v.state, "runner-key")).save(token);
     // even an enrolment token in the worker's own environment never reaches promptfoo
     savedEnrolment = process.env.REGULAIT_ENGINE_ENROLLMENT_TOKEN;
     process.env.REGULAIT_ENGINE_ENROLLMENT_TOKEN = "rgee_synthetic_enrolment_token_for_the_test";
@@ -153,7 +153,7 @@ describe("B5-P2: the runner hands promptfoo to the worker", () => {
         expect(c.env[RUN_KEY_ENV]).toBe(KEY);
         expect(Object.values(c.env).join("\n")).not.toContain(token);
         expect(Object.keys(c.env)).not.toContain("REGULAIT_ENGINE_ENROLLMENT_TOKEN");
-        expect(Object.values(c.env).some((x) => x.startsWith("rge_") || x.startsWith("rgee_"))).toBe(false);
+        expect(Object.values(c.env).some((x) => x.startsWith("rgek_") || x.startsWith("rgee_"))).toBe(false);
         expect(c.cwd!.startsWith(v.work)).toBe(true);
         expect(c.env.HOME!.startsWith(v.work)).toBe(true);
       }
@@ -179,7 +179,7 @@ describe("B5-P2: the runner hands promptfoo to the worker", () => {
     await mkdir(path.join(v.jobs, badId));
     await writeFile(path.join(v.jobs, badId, "job.json"), JSON.stringify({ runId: badId, baseUrl: GATEWAY, apiKey: KEY, config: evil, deadlineAt: lease().deadlineAt }));
     await mkdir(path.join(v.jobs, junkId));
-    await writeFile(path.join(v.jobs, junkId, "job.json"), JSON.stringify({ runId: junkId, baseUrl: GATEWAY, apiKey: KEY, config, deadlineAt: lease().deadlineAt, runnerToken: "rge_x" }));
+    await writeFile(path.join(v.jobs, junkId, "job.json"), JSON.stringify({ runId: junkId, baseUrl: GATEWAY, apiKey: KEY, config, deadlineAt: lease().deadlineAt, runnerToken: "rgek_x" }));
     expect(await promptfooWorkerTick({ jobsRoot: v.jobs, resultsRoot: v.results, workRoot: v.work, promptfoo: { entrypoint: "/x/entrypoint.js", run: worker.run } })).toBe(1);
     expect(worker.calls).toEqual([]);
     const done = async (id: string) => JSON.parse(await readFile(path.join(v.results, id, DONE_FILE), "utf8")) as { refused: string | null; generated: boolean };
@@ -283,7 +283,7 @@ describe("B5-P2: the worker proves the runner's credential is out of its reach",
   it("each way the credential could be in reach is named, and the switch is false", async () => {
     const v = await volumes();
     // the runner's state volume mounted here too
-    await new FileRunnerTokenStore(path.join(v.state, "runner-token")).save(generateRunnerSecret());
+    await new FileRunnerKeyStore(path.join(v.state, "runner-key")).save(generateRunnerSecret());
     // the runner's process visible (a shared PID namespace)
     const proc = await fakeProc({ "1": ["node", "/app/dist/worker-main.js"], "9": ["node", "/app/dist/main.js"] });
     const env = { PATH: "/usr/bin", REGULAIT_ENGINE_ENROLLMENT_TOKEN: "", LEAKED: generateRunnerSecret() };

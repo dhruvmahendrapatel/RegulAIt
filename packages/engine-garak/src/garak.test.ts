@@ -407,7 +407,7 @@ describe("B5-G exchange: the runner never runs garak, the worker never holds the
     // each garak process saw only its allow-listed environment: the run's key, never a runner credential
     for (const s of seen) {
       expect(s.env["OPENAICOMPATIBLE_API_KEY"]).toBe("rglv_synthetic");
-      expect(Object.keys(s.env).some((k) => /ENROLLMENT|RUNNER_TOKEN|STATE/.test(k))).toBe(false);
+      expect(Object.keys(s.env).some((k) => /ENROLLMENT|RUNNER_TOKEN|RUNNER_KEY|STATE/.test(k))).toBe(false);
       expect(s.args.slice(0, 3)).toEqual(["-I", "-m", "garak"]);
     }
     const body = mapGarakRun(planGarakRun(["promptinject.hijackhatehumans", "encoding.injectbase64"]), outcomes);
@@ -550,8 +550,8 @@ describe("B5-G worker self-test", () => {
     expect(j.usageDataEnv["HF_HUB_OFFLINE"]).toBe(false);
     await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: { ...okEnv, REGULAIT_ENGINE_ENROLLMENT_TOKEN: "rgee_synthetic" }, egress, credentialPaths: [] });
     expect((await judgeWorkerSelfTest(root)).failures).toContain("worker_sees_runner_credential");
-    const tokenFile = path.join(root, "runner-token");
-    await writeFile(tokenFile, "rge_synthetic");
+    const tokenFile = path.join(root, "runner-key");
+    await writeFile(tokenFile, "rgek_synthetic");
     await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: okEnv, egress, credentialPaths: [tokenFile] });
     expect((await judgeWorkerSelfTest(root)).failures).toContain("worker_sees_runner_credential");
     await writeWorkerSelfTest(root, { garakVersion: "0.17.0", env: okEnv, egress: { ...egress, connect: async () => "connected" as const }, credentialPaths: [] });

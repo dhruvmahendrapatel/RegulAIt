@@ -17,7 +17,7 @@
 import { createReadStream } from "node:fs";
 import { open, rename } from "node:fs/promises";
 import path from "node:path";
-import { ArtifactFetchError, downloadArtifact, type EngineAdapter } from "@regulait/engine-runner";
+import { ArtifactFetchError, downloadArtifact, type ArtifactSource, type EngineAdapter } from "@regulait/engine-runner";
 import {
   ARTIFACT_FORMAT_PLANS,
   detectArtifactFormat,
@@ -30,14 +30,11 @@ import {
 import type { ScanExecutor } from "./exchange.js";
 
 export interface ModelscanAdapterOptions {
-  gatewayUrl: string;
-  /** the runner's current token (read from its own token store at fetch time) */
-  token: () => Promise<string | null>;
+  /** ADR-0188 S7: who fetches the artifact — the runner client, with its DPoP-bound self token */
+  artifacts: ArtifactSource;
   executor: ScanExecutor;
   /** the scanner's time limit is the run's remaining time less this margin (to report before the deadline) */
   reportMarginMs?: number;
-  /** seam for tests */
-  fetch?: Parameters<typeof downloadArtifact>[0]["fetch"];
 }
 
 class Cancelled extends Error {}
@@ -95,7 +92,7 @@ export function modelscanAdapter(opts: ModelscanAdapterOptions): EngineAdapter {
     try {
       const fetched = path.join(dir, "fetched.bin");
       try {
-        await downloadArtifact({ gatewayUrl: opts.gatewayUrl, token: await opts.token(), artifact, destPath: fetched, deadlineAt: lease.deadlineAt, signal: ctx.signal, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
+        await downloadArtifact({ source: opts.artifacts, artifact, destPath: fetched, deadlineAt: lease.deadlineAt, signal: ctx.signal });
       } catch (e) {
         if (ctx.signal.aborted) throw new Cancelled("cancelled");
         const code = e instanceof ArtifactFetchError ? e.code : "artifact_http";

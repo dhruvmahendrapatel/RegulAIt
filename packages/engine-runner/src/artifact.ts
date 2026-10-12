@@ -1,6 +1,6 @@
 /**
  * ADR-0187 B5-M — fetch a run's model artifact from the gateway
- * (`GET /v1/engine-runner/artifacts/:artifactId`, runner token) into a file, streaming, with every
+ * (`GET /v1/engine-runner/artifacts/:artifactId`, the runner's self token) into a file, streaming, with every
  * guarantee checked here rather than trusted:
  *   - the bytes written never exceed the size the lease named (a longer body is cut off and refused);
  *   - the sha256 of what was written must equal the lease's, and the length its size;
@@ -8,34 +8,37 @@
  *   - the request is bounded by the run's deadline (and the abort signal).
  * Any failure throws `ArtifactFetchError`; the adapter reports the run `failed`, never clean.
  *
- * A separate module (not a RunnerClient method) so the runner client stays as it is; the token comes
- * from the caller (the runner's own token store). Stdlib only.
+ * A separate module: the request itself is the runner client's (`RunnerClient.artifact`, ADR-0188 S7:
+ * its DPoP-bound self token, never a bearer value), handed in by the caller. Stdlib only here.
  */
 import { createHash } from "node:crypto";
 import { open, rm } from "node:fs/promises";
 
 export class ArtifactFetchError extends Error {
   constructor(
-    readonly code: "artifact_http" | "artifact_too_long" | "artifact_short" | "artifact_sha256_mismatch" | "artifact_timeout" | "artifact_no_token" | "artifact_aborted",
+    readonly code: "artifact_http" | "artifact_too_long" | "artifact_short" | "artifact_sha256_mismatch" | "artifact_timeout" | "artifact_no_credential" | "artifact_aborted",
     message: string,
   ) {
     super(message);
   }
 }
 
+/** who fetches the artifact: the runner client (`RunnerClient` has this method), or a test's stand-in */
+export interface ArtifactSource {
+  artifact(artifactId: string, signal: AbortSignal): Promise<Response>;
+}
+
 export interface ArtifactFetchOptions {
-  gatewayUrl: string;
-  token: string | null;
+  /** ADR-0188 S7: the runner client (its self token), or null when the runner holds no key */
+  source: ArtifactSource | null;
   artifact: { id: string; sha256: string; size: number };
   destPath: string;
   deadlineAt: string;
   signal?: AbortSignal;
-  /** seam for tests (default: global fetch) */
-  fetch?: (url: string, init: { method: string; headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
 }
 
 export async function downloadArtifact(opts: ArtifactFetchOptions): Promise<{ bytes: number; sha256: string }> {
-  if (!opts.token) throw new ArtifactFetchError("artifact_no_token", "the runner holds no token to fetch the artifact with");
+  if (!opts.source) throw new ArtifactFetchError("artifact_no_credential", "the runner holds no key to fetch the artifact with");
   // PR #212 review [4234946096]: a signal that is ALREADY aborted never fires its event, so it is
   // checked here: nothing is opened and nothing is fetched
   if (opts.signal?.aborted) throw new ArtifactFetchError("artifact_aborted", "the run was cancelled before the artifact was fetched");
@@ -48,17 +51,13 @@ export async function downloadArtifact(opts: ArtifactFetchOptions): Promise<{ by
     timedOut = true;
     abort.abort();
   }, remaining);
-  const f = opts.fetch ?? ((url, init) => fetch(url, init));
+  const source = opts.source;
   const fh = await open(opts.destPath, "wx", 0o600);
   let ok = false;
   try {
     let res: Response;
     try {
-      res = await f(`${opts.gatewayUrl.replace(/\/$/, "")}/v1/engine-runner/artifacts/${encodeURIComponent(opts.artifact.id)}`, {
-        method: "GET",
-        headers: { authorization: `Bearer ${opts.token}` },
-        signal: abort.signal,
-      });
+      res = await source.artifact(opts.artifact.id, abort.signal);
     } catch (e) {
       if (timedOut) throw new ArtifactFetchError("artifact_timeout", "the artifact did not arrive before the run's deadline");
       throw e;

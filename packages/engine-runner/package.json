@@ -19,6 +19,8 @@
   },
   "dependencies": {
     "@regulait/shared": "workspace:*",
+    "jose": "6.2.12",
+    "oauth4webapi": "3.8.8",
     "write-file-atomic": "8.0.0"
   },
   "devDependencies": {

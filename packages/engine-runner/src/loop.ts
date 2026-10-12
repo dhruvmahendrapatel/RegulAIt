@@ -1,14 +1,18 @@
 /**
- * ADR-0187 — THE RUNNER'S LIFE, shared by every engine shim: a runner token that survives a
+ * ADR-0187 — THE RUNNER'S LIFE, shared by every engine shim: a runner credential that survives a
  * restart, and a loop that is an explicit STATE MACHINE driven by one gateway signal.
  *
- * Token (decisions 49, 54 and 72). The runner generates its own token, persists it on its own
- * volume (`FileRunnerTokenStore`: mode 0600, written atomically, never logged) as a PENDING
- * enrolment, together with the token it supersedes, BEFORE it registers, and sends only its hash,
- * so a lost response or a crash loses nothing: a restart that finds a pending enrolment resumes it
- * with the same secret and `supersedes`. The stored token is replaced, and the pending record
- * dropped, only after the gateway answered 201. At start a stored token is used and the enrolment
- * token is ignored. The state volume is never deleted.
+ * Key (decisions 49, 54 and 72; ADR-0188 S7, OWNER DECISION 8: the `rge_` bearer token is retired).
+ * The runner generates its own KEY, persists it on its own volume (`FileRunnerKeyStore`: mode 0600,
+ * written atomically, never logged) as a PENDING enrolment, together with the key it supersedes,
+ * BEFORE it registers, and sends only its PUBLIC half, so a lost response or a crash loses nothing: a
+ * restart that finds a pending enrolment resumes it with the same key and `supersedes`. The stored key
+ * is replaced, and the pending record dropped, only after the gateway answered 201. At start a stored
+ * key is used and the enrolment token is ignored. The state volume is never deleted. The key
+ * authenticates with `private_key_jwt` and DPoP-bound tokens (`RunnerClient`), and is ROTATED when the
+ * gateway says so (decision 12): the next key is persisted first (`<file>.next`), bound with the
+ * current key's token, then promoted; a restart that finds a next key tries it as the credential
+ * before rotating again.
  *
  * States (PR #205 review round 5, decision 67 — the table is in the ADR and `transition` below):
  *   enrolling    no credential yet: register with the enrolment token
@@ -26,30 +30,35 @@
  */
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { ENGINE_RUNNER_TOKEN_PREFIX, type EngineRunnerNext, type RunnerSelfTest } from "@regulait/shared";
+import { type EngineRunnerNext, type RunnerSelfTest } from "@regulait/shared";
 import { removeFileDurable, writeFileDurable } from "./durable.js";
-import { generateRunnerSecret, retryRetainedResults, RunnerHttpError, RunnerMalformedResponseError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
+import { generateRunnerSecret, isRunnerKeySecret } from "./key.js";
+import { retryRetainedResults, RunnerHttpError, RunnerMalformedResponseError, runOnce, type EngineAdapter, type RunnerClient, type RunOnceOptions } from "./runner.js";
 
 /**
- * PR #205 review round 6 [72]: an enrolment under way — the new secret, and the token it supersedes
- * (a build change) or null. Persisted BEFORE the registration leaves; the stored token is replaced
+ * PR #205 review round 6 [72]: an enrolment under way — the new key, and the key it supersedes
+ * (a build change) or null. Persisted BEFORE the registration leaves; the stored key is replaced
  * and this record deleted only after the gateway answered 201. A restart that finds one resumes it
- * with the same secret and the same `supersedes` (the gateway replays a same-hash registration).
+ * with the same key and the same `supersedes` (the gateway replays a same-key registration).
  */
 export interface PendingEnrolment {
   secret: string;
   supersedes: string | null;
 }
 
-export interface RunnerTokenStore {
+export interface RunnerKeyStore {
   load(): Promise<string | null>;
-  save(token: string): Promise<void>;
+  save(key: string): Promise<void>;
   loadPending(): Promise<PendingEnrolment | null>;
   savePending(pending: PendingEnrolment): Promise<void>;
   clearPending(): Promise<void>;
+  /** ADR-0188 S7 (decision 12): the key a rotation under way moves to, persisted before the rotation leaves */
+  loadNext(): Promise<string | null>;
+  saveNext(key: string): Promise<void>;
+  clearNext(): Promise<void>;
 }
 
-const isRunnerToken = (t: unknown): t is string => typeof t === "string" && t.startsWith(ENGINE_RUNNER_TOKEN_PREFIX) && /^[\x21-\x7e]+$/.test(t);
+const isRunnerKey = (t: unknown): t is string => isRunnerKeySecret(t);
 
 /**
  * write a file atomically AND durably, 0600, in a 0700 directory (PR #205 review round 13 [96]: the
@@ -69,25 +78,44 @@ async function readOrNull(file: string): Promise<string | null> {
 }
 
 /**
- * The runner token on the runner's own volume: 0600, atomic replace, nothing else in the file. The
- * pending enrolment (round 6 [72]) sits beside it in `<file>.pending`, same mode, same atomic write.
+ * The runner's key on its own volume: 0600, atomic replace, nothing else in the file. The pending
+ * enrolment (round 6 [72]) sits beside it in `<file>.pending`, and a rotation's next key (S7) in
+ * `<file>.next`, same mode, same atomic write. A file that holds anything else (an `rge_` token a
+ * runner kept before S7) is not a key: the runner re-enrols (no grandfathering, ADR-0180).
  */
-export class FileRunnerTokenStore implements RunnerTokenStore {
+export class FileRunnerKeyStore implements RunnerKeyStore {
   constructor(readonly file: string) {}
 
   get pendingFile(): string {
     return `${this.file}.pending`;
   }
 
-  async load(): Promise<string | null> {
-    const text = await readOrNull(this.file);
-    const token = text?.trim() ?? null;
-    // a file that does not hold a runner token is not used (and not echoed)
-    return isRunnerToken(token) ? token : null;
+  get nextFile(): string {
+    return `${this.file}.next`;
   }
 
-  async save(token: string): Promise<void> {
-    await writeAtomic(this.file, `${token}\n`);
+  async load(): Promise<string | null> {
+    const text = await readOrNull(this.file);
+    const key = text?.trim() ?? null;
+    // a file that does not hold a runner key is not used (and not echoed)
+    return isRunnerKey(key) ? key : null;
+  }
+
+  async save(key: string): Promise<void> {
+    await writeAtomic(this.file, `${key}\n`);
+  }
+
+  async loadNext(): Promise<string | null> {
+    const key = (await readOrNull(this.nextFile))?.trim() ?? null;
+    return isRunnerKey(key) ? key : null;
+  }
+
+  async saveNext(key: string): Promise<void> {
+    await writeAtomic(this.nextFile, `${key}\n`);
+  }
+
+  async clearNext(): Promise<void> {
+    await removeFileDurable(this.nextFile);
   }
 
   async loadPending(): Promise<PendingEnrolment | null> {
@@ -95,7 +123,7 @@ export class FileRunnerTokenStore implements RunnerTokenStore {
     if (text === null) return null;
     try {
       const p = JSON.parse(text) as { secret?: unknown; supersedes?: unknown };
-      if (isRunnerToken(p.secret) && (p.supersedes === null || isRunnerToken(p.supersedes))) return { secret: p.secret, supersedes: p.supersedes };
+      if (isRunnerKey(p.secret) && (p.supersedes === null || isRunnerKey(p.supersedes))) return { secret: p.secret, supersedes: p.supersedes };
     } catch {
       // unreadable: treated as absent below
     }
@@ -204,7 +232,7 @@ export function transition(state: RunnerState, event: RunnerEvent, ctx: Transiti
 // ---------------------------------------------------------------------------
 
 export interface RunnerLoopOptions extends RunOnceOptions {
-  store: RunnerTokenStore;
+  store: RunnerKeyStore;
   /** the one-time enrolment token from the environment, or null */
   enrollmentToken: string | null;
   /** what registration reports (built fresh each time: the self-test is current) */
@@ -230,17 +258,64 @@ export interface RunnerLoopOptions extends RunOnceOptions {
 }
 
 const MESSAGE_FIRST =
-  "this runner has no stored token and no enrolment token is set: " +
+  "this runner has no stored key and no enrolment token is set: " +
   "mint an enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner";
 const MESSAGE_INTERRUPTED =
-  "an enrolment was interrupted (its new secret is kept as a pending enrolment) and it could not be completed: " +
+  "an enrolment was interrupted (its new key is kept as a pending enrolment) and it could not be completed: " +
   "set REGULAIT_ENGINE_ENROLLMENT_TOKEN to the token it was started with, or mint a new enrolment token on the Engines page and set that, and restart the runner";
 const MESSAGE_REVOKED =
-  "the gateway refused this runner's token (revoked or unknown) and no unused enrolment token is set: " +
+  "the gateway refused this runner's key (revoked, unknown or past its window) and no unused enrolment token is set: " +
   "mint a new enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner";
 const MESSAGE_REENROL =
-  "this runner's token was registered for another build (the image or engine version changed) and no unused enrolment token is set: " +
+  "this runner's key was registered for another build (the image or engine version changed) and no unused enrolment token is set: " +
   "mint a new enrolment token on the Engines page, set REGULAIT_ENGINE_ENROLLMENT_TOKEN and restart the runner (the old registration is revoked when it re-enrols)";
+
+/** does the client's current key get a self token from the gateway? */
+async function keyAuthenticates(client: RunnerClient): Promise<boolean> {
+  try {
+    await client.probeToken();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ADR-0188 S7 (decision 12): rotate the runner's key. The next key is persisted FIRST (`<file>.next`),
+ * then bound with the current key's token, then promoted to the stored key. A lost answer is safe: the
+ * next start (or the next attempt) tries the next key as the credential before rotating again. Returns
+ * the new key, or null when the rotation did not complete (logged; retried on a later visit).
+ */
+async function rotateKey(client: RunnerClient, opts: RunnerLoopOptions): Promise<string | null> {
+  let next = await opts.store.loadNext();
+  if (!next) {
+    next = generateRunnerSecret();
+    await opts.store.saveNext(next);
+  }
+  try {
+    await client.rotateKey(next);
+  } catch (e) {
+    // the key may already be bound (a lost answer): it then authenticates, and is promoted
+    if (e instanceof RunnerHttpError && e.code === "credential_already_registered") {
+      const before = await opts.store.load();
+      client.useKey(next);
+      if (!(await keyAuthenticates(client))) {
+        if (before) client.useKey(before);
+        // a next key bound elsewhere, or refused: drop it; a fresh one is generated at the next attempt
+        await opts.store.clearNext();
+        opts.log?.("a key rotation's new key is registered but does not authenticate this runner; a new one will be generated");
+        return null;
+      }
+    } else {
+      opts.log?.(`key rotation did not complete (${whyOf(e)}); will retry`);
+      return null;
+    }
+  }
+  await opts.store.save(next);
+  await opts.store.clearNext();
+  opts.log?.("rotated this runner's key (the old key mints no new token)");
+  return next;
+}
 
 /** a definitive answer or a transient failure, from anything a runner route threw */
 function eventOf(e: unknown): RunnerEvent {
@@ -289,13 +364,26 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
     }
   }
   let state: RunnerState = interrupted ? (interrupted.supersedes ? "reenrolling" : "enrolling") : stored ? "leasing" : "enrolling";
-  if (stored && !interrupted) {
-    client.useToken(stored);
-    opts.log?.("using the stored runner token");
+  // ADR-0188 S7: a rotation interrupted by a crash or a restart. If its next key already authenticates (the
+  // rotation committed), it IS the credential; otherwise it stays as the next key and the rotation runs again
+  let credential = stored;
+  const next = stored && !interrupted ? await opts.store.loadNext() : null;
+  if (next && stored) {
+    client.useKey(next);
+    if (await keyAuthenticates(client)) {
+      await opts.store.save(next);
+      await opts.store.clearNext();
+      credential = next;
+      opts.log?.("a key rotation had completed before a restart: the new key is this runner's credential");
+    }
+  }
+  if (credential && !interrupted) {
+    client.useKey(credential);
+    opts.log?.("using the stored runner key");
   }
   if (interrupted) opts.log?.("resuming an interrupted enrolment");
   /** the credential in use (what a re-enrolment after a build change supersedes) */
-  let held: string | null = stored;
+  let held: string | null = credential;
   /** the enrolment token is tried at most once per process (it is single-use) */
   let enrolmentTried = !!interrupted;
   /** an enrolment in progress: the same secret, body and `supersedes` on every retry (persisted: round 6 [72]) */
@@ -375,7 +463,7 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
         // enrolment token that expired meanwhile no longer strands a registered runner.
         if (pending?.confirm) {
           const p = pending;
-          client.useToken(p.secret);
+          client.useKey(p.secret);
           let authenticated = false;
           let event: RunnerEvent = { kind: "next", next: "ok" };
           try {
@@ -525,6 +613,12 @@ export async function runRunnerLoop(client: RunnerClient, adapter: EngineAdapter
       case "leasing": {
         if (opts.maxIterations !== undefined && leasingVisits >= opts.maxIterations) return;
         leasingVisits++;
+        // ADR-0188 S7 (decision 12): rotate the key when the gateway's last token answer said it is due. A
+        // failure is logged and tried again on a later visit; the key keeps working until its window ends.
+        if (client.rotationDue(clock())) {
+          const rotated = await rotateKey(client, opts);
+          if (rotated) held = rotated;
+        }
         // round 5 [68]: retained results are delivered (or dropped) before any new work. Round 11 [90]:
         // from the persistent retain root (and the work root, for any crash leftovers there)
         let retained = 0;

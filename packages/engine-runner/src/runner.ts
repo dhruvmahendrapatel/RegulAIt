@@ -12,16 +12,19 @@
  * that an engine that throws or exits badly is reported as `failed`, never as
  * a clean result.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm } from "node:fs/promises";
+import * as oauth from "oauth4webapi";
 import {
+  CREDENTIAL_ROTATE_AFTER_RESPONSE_MEMBER,
   ENGINE_RESULT_VERSION,
   ENGINE_RUNNER_NEXT,
-  ENGINE_RUNNER_TOKEN_PREFIX,
   engineHeartbeatResponseSchema,
   engineLeaseResponseSchema,
+  engineRunnerKeyRotationResponseSchema,
   engineRunnerRegisterResponseSchema,
   engineRunnerSelfTestResponseSchema,
+  WORKLOAD_SELF_RESOURCE_PATHS,
   type EngineId,
   type EngineLease,
   type EngineResultEnvelope,
@@ -30,14 +33,29 @@ import {
 } from "@regulait/shared";
 import { fsyncDir, writeFileDurable } from "./durable.js";
 import { probeEgress, type EgressProbeOptions } from "./egress.js";
+import { isRunnerKeySecret, rotationProof, runnerKeyMaterial, supersedeProof } from "./key.js";
+
+/** what a runner request returns: the status, the JSON body, and (S7) the headers the OAuth flows read */
+export interface RunnerHttpResponse {
+  status: number;
+  json(): Promise<unknown>;
+  /** ADR-0188 S7: `DPoP-Nonce` and `WWW-Authenticate` are read from here (a `fetch` Response has them) */
+  headers?: Headers | Record<string, unknown>;
+}
 
 export interface RunnerHttp {
-  (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }): Promise<{ status: number; json(): Promise<unknown> }>;
+  (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }): Promise<RunnerHttpResponse | Response>;
 }
 
 export interface RunnerClientOptions {
   /** the gateway on the engines network, e.g. http://gateway:3000 */
   gatewayUrl: string;
+  /**
+   * ADR-0188 S7: the gateway's ISSUER (`REGULAIT_PUBLIC_URL`, the same value the gateway reads). Every
+   * DPoP proof names the request as the gateway sees it, under the issuer, while the request itself goes
+   * to `gatewayUrl` on the engines network. Default: `gatewayUrl` (when the two are the same).
+   */
+  issuer?: string;
   http?: RunnerHttp;
   /**
    * PR #205 review round 11 [89]: every request (response body included) is bounded by this many ms
@@ -55,18 +73,21 @@ export class RunnerTimeoutError extends Error {}
  * did not match the route's answer schema. It is not an answer: the server may well have committed
  * (a lease, a registration), but the runner cannot learn what. It is TRANSIENT, exactly like a
  * timeout (decision 94): each caller retries according to its route's idempotency — the lease with
- * the SAME request id, registration by confirming the same secret, heartbeats and self-tests as
+ * the SAME request id, registration by confirming the same key, heartbeats and self-tests as
  * they are. It is deliberately not a `RunnerHttpError`: it carries no refusal and no `next`.
  */
 export class RunnerMalformedResponseError extends Error {
   constructor(
-    readonly route: "register" | "lease" | "self-test" | "heartbeat",
+    readonly route: RunnerRoute,
     readonly status: number,
     readonly why: "unparseable" | "schema" | "unexpected_status",
   ) {
     super(`${route} answered ${status} with a body that is not a valid answer (${why}); treated as transient`);
   }
 }
+
+/** the runner routes a refusal can name (S7 adds the token endpoint and key rotation) */
+export type RunnerRoute = "register" | "lease" | "self-test" | "heartbeat" | "token" | "rotate";
 
 /** what `call` read: the status, and the body only when it parsed (`parsed: false` = the body was not JSON) */
 interface CallAnswer {
@@ -81,27 +102,15 @@ function refusalOf(a: CallAnswer): { error?: unknown; next?: unknown } {
 }
 const is2xx = (status: number) => status >= 200 && status < 300;
 
-/**
- * PR #205 review [54]: the runner's own token — `rge_` and 256 bits from the OS CSPRNG. The
- * gateway stores only `runnerTokenHash` of it (the same sha256 hex its auth hashes presented
- * tokens with).
- */
-export function generateRunnerSecret(): string {
-  return ENGINE_RUNNER_TOKEN_PREFIX + randomBytes(32).toString("hex");
-}
-export function runnerTokenHash(secret: string): string {
-  return createHash("sha256").update(secret).digest("hex");
-}
-
 /** the gateway's `next` signal, when it gave a known one (PR #205 review round 5) */
 function nextOf(json: { next?: unknown }): EngineRunnerNext | null {
   return typeof json.next === "string" && (ENGINE_RUNNER_NEXT as readonly string[]).includes(json.next) ? (json.next as EngineRunnerNext) : null;
 }
 
-/** a refusal from a runner route, with the gateway's error code and `next` signal (never the token) */
+/** a refusal from a runner route, with the gateway's error code and `next` signal (never the key or a token) */
 export class RunnerHttpError extends Error {
   constructor(
-    readonly route: "register" | "lease" | "self-test" | "heartbeat",
+    readonly route: RunnerRoute,
     readonly status: number,
     readonly code: string | null,
     /** PR #205 review round 5: the one signal the runner's state machine acts on, when the gateway gave it */
@@ -117,81 +126,236 @@ export interface RunnerBuild {
   engineVersion: string;
 }
 
-/** the five runner routes, nothing else */
+/** a body read once from a Response: JSON when it parses, `parsed: false` when it does not */
+async function answerOf(res: Response): Promise<CallAnswer> {
+  if (res.status === 204) return { status: 204, parsed: true, body: null };
+  try {
+    return { status: res.status, parsed: true, body: await res.json() };
+  } catch {
+    return { status: res.status, parsed: false, body: null };
+  }
+}
+
+/** a test seam's `{status, json}` as a fetch Response, so `oauth4webapi` reads it as it reads the real one */
+async function asResponse(r: RunnerHttpResponse | Response): Promise<Response> {
+  if (r instanceof Response) return r;
+  const headers = new Headers();
+  if (r.headers instanceof Headers) r.headers.forEach((v, k) => headers.set(k, v));
+  else if (r.headers) for (const [k, v] of Object.entries(r.headers)) if (v !== undefined && v !== null) headers.set(k, Array.isArray(v) ? v.join(", ") : String(v));
+  if (r.status === 204 || r.status === 304) return new Response(null, { status: r.status, headers });
+  let text: string;
+  try {
+    text = JSON.stringify(await r.json());
+  } catch {
+    // a body that did not parse stays unparseable (round [101]: never read as an empty answer)
+    text = "\u0000not json";
+  }
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  return new Response(text, { status: r.status, headers });
+}
+
+/** the RFC 6749 error and RegulAIt `error_code` of a token-endpoint refusal */
+function tokenRefusal(e: unknown): { status: number; code: string | null } | null {
+  if (e instanceof oauth.ResponseBodyError) {
+    const c = e.cause as { error_code?: unknown };
+    return { status: e.status, code: typeof c.error_code === "string" ? c.error_code : e.error };
+  }
+  return null;
+}
+
+/** the runner routes (lease, self-test, rotation, heartbeat, artifact, result) and its enrolment, nothing else */
 export class RunnerClient {
-  private token: string | null = null;
+  /** ADR-0188 S7: the runner's own key (a `rgek_` secret); never sent, never logged */
+  private key: string | null = null;
+  /** the current DPoP-bound self token and when it expires (epoch ms) */
+  private access: { token: string; expiresAt: number } | null = null;
+  private dpop: oauth.DPoPHandle | null = null;
+  /** when the gateway says this key should be rotated (epoch ms), from the last token response */
+  private rotateAfterMs: number | null = null;
   private readonly http: RunnerHttp;
+  private readonly issuer: string;
+  private readonly gateway: string;
   constructor(private readonly opts: RunnerClientOptions) {
-    this.http = opts.http ?? ((url, init) => fetch(url, init) as unknown as ReturnType<RunnerHttp>);
+    this.http = opts.http ?? ((url, init) => fetch(url, init));
+    this.gateway = opts.gatewayUrl.replace(/\/$/, "");
+    this.issuer = (opts.issuer ?? opts.gatewayUrl).replace(/\/$/, "");
   }
 
-  private async call(method: string, path: string, bearer: string, body?: unknown, deadlineAt?: string): Promise<CallAnswer> {
-    // PR #205 review round 11 [89]: bounded — the request and its body are aborted after the
-    // timeout, or at the run's deadline when that is sooner (never below 1 ms)
+  /**
+   * PR #205 review round 11 [89]: bounded — the request and its body are aborted after the timeout,
+   * or at the run's deadline when that is sooner (never below 1 ms). `send` receives the signal.
+   */
+  private async bounded<T>(label: string, deadlineAt: string | undefined, send: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const bound = Math.max(1, Math.min(this.opts.requestTimeoutMs ?? 30_000, deadlineAt ? Date.parse(deadlineAt) - Date.now() : Number.POSITIVE_INFINITY));
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         abort.abort();
-        reject(new RunnerTimeoutError(`${method} ${path} took longer than ${bound} ms`));
+        reject(new RunnerTimeoutError(`${label} took longer than ${bound} ms`));
       }, bound);
     });
     try {
-      return await Promise.race([
-        (async () => {
-          // B5-P: a JSON content-type is sent only with a body — the gateway (Fastify) refuses an empty
-          // body declared as JSON with 400, which made every bodiless lease fail against the real app
-          const res = await this.http(`${this.opts.gatewayUrl.replace(/\/$/, "")}${path}`, {
-            method,
-            headers: { authorization: `Bearer ${bearer}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
-            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-            signal: abort.signal,
-          });
-          // the body is read inside the bound too (a stalled body is a stalled request). PR #205
-          // follow-up [101]: a body that does not parse is REPORTED (`parsed: false`), never turned
-          // into null — a null lease reads as "no work", and the committed run would be orphaned
-          if (res.status === 204) return { status: 204, parsed: true, body: null };
-          try {
-            return { status: res.status, parsed: true, body: await res.json() };
-          } catch {
-            return { status: res.status, parsed: false, body: null };
-          }
-        })(),
-        timedOut,
-      ]);
+      return await Promise.race([send(abort.signal), timedOut]);
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /** exchange a one-time enrolment token for this runner's token */
+  /** a request with a bearer value (only the one-time enrolment token, to register) */
+  private async call(method: string, path: string, bearer: string, body?: unknown): Promise<CallAnswer> {
+    return this.bounded(`${method} ${path}`, undefined, async (signal) => {
+      // B5-P: a JSON content-type is sent only with a body — the gateway (Fastify) refuses an empty
+      // body declared as JSON with 400, which made every bodiless lease fail against the real app
+      const res = await this.http(`${this.gateway}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${bearer}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal,
+      });
+      // the body is read inside the bound too (a stalled body is a stalled request). PR #205
+      // follow-up [101]: a body that does not parse is REPORTED (`parsed: false`), never turned
+      // into null — a null lease reads as "no work", and the committed run would be orphaned
+      return answerOf(await asResponse(res));
+    });
+  }
+
+  /** `oauth4webapi`'s fetch: the URL it signs is under the issuer; the request goes to the gateway on the engines network */
+  private readonly viaGateway = async (url: string, init: { method: string; headers: Record<string, string>; body?: unknown; signal?: AbortSignal | undefined }): Promise<Response> => {
+    if (!url.startsWith(`${this.issuer}/`)) throw new Error("the runner sends nothing outside its gateway");
+    const body = typeof init.body === "string" ? init.body : init.body instanceof URLSearchParams ? init.body.toString() : undefined;
+    return asResponse(
+      await this.http(`${this.gateway}${url.slice(this.issuer.length)}`, {
+        method: init.method,
+        headers: { ...init.headers },
+        ...(body !== undefined ? { body } : {}),
+        ...(init.signal ? { signal: init.signal } : {}),
+      }),
+    );
+  };
+
+  private oauthOptions(signal: AbortSignal) {
+    return {
+      [oauth.customFetch]: this.viaGateway,
+      // the issuer is https in production; parsePublicUrl admits http for loopback only (a laptop demo, tests)
+      [oauth.allowInsecureRequests]: this.issuer.startsWith("http:"),
+      signal,
+    };
+  }
+
   /**
-   * Register with a one-time enrolment token. PR #205 review [54]: `runnerSecret` is the runner's
-   * OWN token (`generateRunnerSecret`), already persisted by the caller; only its sha256 is sent and
-   * nothing secret comes back. Retrying with the same secret after a lost response returns the same
-   * runner.
+   * ADR-0188 S7: a DPoP-bound self token from `POST /oauth/token` (`client_credentials`,
+   * `private_key_jwt` as the key's RFC 9278 thumbprint client id, resource = the runner routes),
+   * cached until 30 s before it expires. A `use_dpop_nonce` answer is retried once with the nonce the
+   * gateway gave (RFC 9449 §8). A refusal (the key is unknown, revoked or past its window; the runner
+   * is revoked) is a 401 to the caller: the loop then re-enrols or stops and says so.
+   */
+  private async token(route: RunnerRoute, signal: AbortSignal): Promise<string> {
+    if (this.access && this.access.expiresAt - Date.now() > 30_000) return this.access.token;
+    if (!this.key) throw new Error("runner is not registered");
+    const m = await runnerKeyMaterial(this.key);
+    const as: oauth.AuthorizationServer = { issuer: this.issuer, token_endpoint: `${this.issuer}/oauth/token` };
+    const client: oauth.Client = { client_id: m.clientId };
+    this.dpop ??= oauth.DPoP(client, m.cryptoKeyPair);
+    // the gateway requires the assertion's `aud` to be exactly its token endpoint URL (S5 review item 7)
+    const auth = oauth.PrivateKeyJwt({ key: m.cryptoKeyPair.privateKey, kid: m.jkt }, { [oauth.modifyAssertion]: (_h, p) => void (p.aud = as.token_endpoint) });
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await oauth.clientCredentialsGrantRequest(as, client, auth, { resource: `${this.issuer}${WORKLOAD_SELF_RESOURCE_PATHS.engine_runner}` }, {
+          DPoP: this.dpop,
+          ...this.oauthOptions(signal),
+        });
+        const r = await oauth.processClientCredentialsResponse(as, client, res);
+        const rotate = r[CREDENTIAL_ROTATE_AFTER_RESPONSE_MEMBER];
+        this.rotateAfterMs = typeof rotate === "number" ? rotate * 1000 : null;
+        this.access = { token: r.access_token, expiresAt: Date.now() + (r.expires_in ?? 60) * 1000 };
+        return r.access_token;
+      } catch (e) {
+        if (oauth.isDPoPNonceError(e) && attempt === 0) continue;
+        const refusal = tokenRefusal(e);
+        if (refusal && refusal.status < 500 && refusal.status !== 408 && refusal.status !== 429) {
+          // the gateway refused the key or the runner: the same answer as a revoked runner token gave
+          throw new RunnerHttpError(route, 401, refusal.code, "revoked");
+        }
+        if (refusal) throw new RunnerHttpError(route, refusal.status, refusal.code);
+        throw e;
+      }
+    }
+  }
+
+  /**
+   * A runner-route request with the self token and a fresh DPoP proof (`oauth4webapi`). A
+   * `use_dpop_nonce` challenge is retried once with the gateway's nonce; any other 401 drops the token
+   * and retries once with a new one (a token the gateway no longer accepts, e.g. revoked with a key),
+   * and a second 401 is the answer.
+   */
+  private async authorized(route: RunnerRoute, method: string, path: string, body?: unknown, deadlineAt?: string): Promise<CallAnswer> {
+    return answerOf(await this.authorizedResponse(route, method, path, body, deadlineAt));
+  }
+
+  private async authorizedResponse(route: RunnerRoute, method: string, path: string, body?: unknown, deadlineAt?: string, streamSignal?: AbortSignal): Promise<Response> {
+    const send = async (signal: AbortSignal) => {
+      let nonceRetried = false;
+      let refreshed = false;
+      for (;;) {
+        const token = await this.token(route, signal);
+        const headers = new Headers(body !== undefined ? { "content-type": "application/json" } : {});
+        try {
+          return await oauth.protectedResourceRequest(token, method, new URL(`${this.issuer}${path}`), headers, body !== undefined ? JSON.stringify(body) : null, {
+            DPoP: this.dpop!,
+            ...this.oauthOptions(signal),
+          });
+        } catch (e) {
+          if (!(e instanceof oauth.WWWAuthenticateChallengeError)) throw e;
+          if (oauth.isDPoPNonceError(e) && !nonceRetried) {
+            nonceRetried = true;
+            continue;
+          }
+          const res = e.response;
+          if (res.status === 401 && !refreshed) {
+            const peek = await answerOf(res.clone());
+            // a revoked runner is final; anything else may be a token the gateway stopped accepting: get a new one, once
+            if (refusalOf(peek).next !== "revoked") {
+              refreshed = true;
+              this.access = null;
+              continue;
+            }
+          }
+          return res;
+        }
+      }
+    };
+    // a streamed body (the artifact) is bounded by its reader, whose signal aborts it at the run's deadline
+    return streamSignal ? send(streamSignal) : this.bounded(`${method} ${path}`, deadlineAt, send);
+  }
+
+  /**
+   * Register with a one-time enrolment token. PR #205 review [54], ADR-0188 S7: `runnerSecret` is the
+   * runner's OWN key (`generateRunnerSecret`), already persisted by the caller; only its PUBLIC half is
+   * sent and nothing secret comes back. Retrying with the same key after a lost response returns the
+   * same runner.
    */
   async register(
     enrollmentToken: string,
     runnerSecret: string,
     body: { name: string; imageDigest: string; engineVersion: string; selfTest: RunnerSelfTest },
-    /** round 5 [67]: the runner token this registration replaces (a build change), as proof of possession */
+    /** round 5 [67]: the key this registration replaces (a build change); it signs the proof of possession */
     supersedes?: string,
   ) {
+    const m = await runnerKeyMaterial(runnerSecret);
     const res = await this.call("POST", "/v1/engine-runner/register", enrollmentToken, {
       ...body,
-      tokenHash: runnerTokenHash(runnerSecret),
-      ...(supersedes ? { supersedes } : {}),
+      publicJwk: m.publicJwk,
+      ...(supersedes && isRunnerKeySecret(supersedes) ? { supersedes: await supersedeProof(supersedes, runnerSecret) } : {}),
     });
     // PR #205 follow-up [101]: a 2xx that is not a well-formed 201 answer is transient (the
-    // registration may have committed: the loop confirms the same secret, decision 77), never a refusal
+    // registration may have committed: the loop confirms the same key, decision 77), never a refusal
     if (is2xx(res.status)) {
       if (res.status !== 201) throw new RunnerMalformedResponseError("register", res.status, "unexpected_status");
       if (!res.parsed) throw new RunnerMalformedResponseError("register", res.status, "unparseable");
       const answer = engineRunnerRegisterResponseSchema.safeParse(res.body);
       if (!answer.success) throw new RunnerMalformedResponseError("register", res.status, "schema");
-      this.token = runnerSecret;
+      this.useKey(runnerSecret);
       return answer.data;
     }
     const json = refusalOf(res);
@@ -203,7 +367,7 @@ export class RunnerClient {
    * same signal a lease gives (a passing report leases when the engine is on, waits when it is off).
    */
   async submitSelfTest(selfTest: RunnerSelfTest): Promise<{ passed: boolean; failures: string[]; next: EngineRunnerNext | null }> {
-    const res = await this.call("POST", "/v1/engine-runner/self-test", this.bearer(), { selfTest });
+    const res = await this.authorized("self-test", "POST", "/v1/engine-runner/self-test", { selfTest });
     // PR #205 follow-up [101]: a 2xx that is not a well-formed answer is transient (resubmitting a
     // report is idempotent: it overwrites the stored one with the same verdict)
     if (is2xx(res.status)) {
@@ -217,13 +381,47 @@ export class RunnerClient {
     throw new RunnerHttpError("self-test", res.status, typeof json.error === "string" ? json.error : null, nextOf(json));
   }
 
-  useToken(token: string): void {
-    this.token = token;
+  /** ADR-0188 S7: get a self token NOW with the current key (a probe that it authenticates); throws on a refusal */
+  async probeToken(): Promise<void> {
+    this.requireKey();
+    this.access = null;
+    await this.bounded("POST /oauth/token", undefined, (signal) => this.token("token", signal));
   }
 
-  private bearer(): string {
-    if (!this.token) throw new Error("runner is not registered");
-    return this.token;
+  /** use this key from now on (a stored key at start, or a registration's or rotation's new key) */
+  useKey(secret: string): void {
+    if (secret === this.key) return;
+    this.key = secret;
+    this.access = null;
+    this.dpop = null;
+    this.rotateAfterMs = null;
+  }
+
+  /** ADR-0188 decision 12: the gateway asked (in the last token response) for this key to be rotated by now */
+  rotationDue(nowMs: number = Date.now()): boolean {
+    return this.rotateAfterMs !== null && nowMs >= this.rotateAfterMs;
+  }
+
+  /**
+   * ADR-0188 S7, decision 12: rotate to `newSecret` (already persisted by the caller). The request is
+   * authenticated by the CURRENT key's token; the new key proves possession with its own JWS. On 201 the
+   * client switches to the new key; the old one mints nothing new.
+   */
+  async rotateKey(newSecret: string): Promise<void> {
+    const m = await runnerKeyMaterial(newSecret);
+    const path = "/v1/engine-runner/credentials";
+    const res = await this.authorized("rotate", "POST", path, { publicJwk: m.publicJwk, proof: await rotationProof(newSecret, `${this.issuer}${path}`) });
+    if (res.status === 201 && res.parsed && engineRunnerKeyRotationResponseSchema.safeParse(res.body).success) {
+      this.useKey(newSecret);
+      return;
+    }
+    if (is2xx(res.status)) throw new RunnerMalformedResponseError("rotate", res.status, res.parsed ? "schema" : "unparseable");
+    const json = refusalOf(res);
+    throw new RunnerHttpError("rotate", res.status, typeof json.error === "string" ? json.error : null, nextOf(json));
+  }
+
+  private requireKey(): void {
+    if (!this.key) throw new Error("runner is not registered");
   }
 
   /**
@@ -233,7 +431,8 @@ export class RunnerClient {
    * gateway returns the run that attempt leased (key rotated) instead of leasing a second one.
    */
   async lease(build: RunnerBuild, requestId?: string): Promise<EngineLease | null> {
-    const res = await this.call("POST", "/v1/engine-runner/lease", this.bearer(), {
+    this.requireKey();
+    const res = await this.authorized("lease", "POST", "/v1/engine-runner/lease", {
       imageDigest: build.imageDigest,
       engineVersion: build.engineVersion,
       ...(requestId ? { requestId } : {}),
@@ -254,7 +453,7 @@ export class RunnerClient {
   }
 
   async heartbeat(runId: string, phase: "starting" | "running" | "uploading", progress: number, deadlineAt?: string): Promise<{ cancel: boolean }> {
-    const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/heartbeat`, this.bearer(), { phase, progress }, deadlineAt);
+    const res = await this.authorized("heartbeat", "POST", `/v1/engine-runner/runs/${runId}/heartbeat`, { phase, progress }, deadlineAt);
     // PR #205 review round 10 [83]: a 5xx, 408 or 429 says nothing about the lease — it is thrown
     // (transient, retried by the caller); any other refusal (401, 404, 409) is definitive: stop
     if (res.status >= 500 || res.status === 408 || res.status === 429) throw new RunnerHttpError("heartbeat", res.status, null);
@@ -271,11 +470,20 @@ export class RunnerClient {
   }
 
   async result(runId: string, envelope: EngineResultEnvelope, deadlineAt?: string): Promise<number> {
-    const res = await this.call("POST", `/v1/engine-runner/runs/${runId}/result`, this.bearer(), envelope, deadlineAt);
+    const res = await this.authorized("lease", "POST", `/v1/engine-runner/runs/${runId}/result`, envelope, deadlineAt);
     // PR #205 follow-up [101]: the STATUS is the whole answer here (the body is never read): a 2xx means
     // the gateway stored the result, whatever followed it on the wire. A retry is safe either way: after
     // a stored result it gets a definitive 409 `engine_run_finished`
     return res.status;
+  }
+
+  /**
+   * ADR-0187 B5-M, S7: `GET /v1/engine-runner/artifacts/:id` with the self token, the body STREAMED to
+   * the caller (`downloadArtifact` bounds it by the lease's size and the run's deadline).
+   */
+  async artifact(artifactId: string, signal: AbortSignal): Promise<Response> {
+    this.requireKey();
+    return this.authorizedResponse("lease", "GET", `/v1/engine-runner/artifacts/${encodeURIComponent(artifactId)}`, undefined, undefined, signal);
   }
 }
 

@@ -20,6 +20,7 @@ import {
   type EngineLease,
   type EngineResultEnvelope,
 } from "@regulait/shared";
+import type { ArtifactSource } from "@regulait/engine-runner";
 import { modelscanAdapter } from "./adapter.js";
 import type { ScanExecutor } from "./exchange.js";
 
@@ -41,8 +42,9 @@ export function leaseFor(bytes: Buffer, deadlineMs = 60_000): EngineLease {
   };
 }
 
-export function fakeFetch(bytes: Buffer, status = 200): () => Promise<Response> {
-  return async () => new Response(status === 200 ? new Uint8Array(bytes) : null, { status });
+/** the runner client's artifact GET, faked (ADR-0188 S7: the real one carries the runner's DPoP-bound self token) */
+export function fakeArtifacts(bytes: Buffer, status = 200): ArtifactSource {
+  return { artifact: async () => new Response(status === 200 ? new Uint8Array(bytes) : null, { status }) };
 }
 
 /** run the adapter, then judge as the gateway does */
@@ -50,7 +52,7 @@ export async function scanAndJudge(bytes: Buffer, makeExecutor: (root: string) =
   const root = await mkdtemp(path.join(tmpdir(), "b5m-"));
   try {
     const lease = leaseFor(bytes);
-    const adapter = modelscanAdapter({ gatewayUrl: "http://gateway.test", token: async () => "rge_test", executor: makeExecutor(root), fetch: fakeFetch(opts.fetchBytes ?? bytes) });
+    const adapter = modelscanAdapter({ artifacts: fakeArtifacts(opts.fetchBytes ?? bytes), executor: makeExecutor(root) });
     const body = await adapter(lease, { workDir: root, signal: opts.signal ?? new AbortController().signal, progress: () => undefined });
     const envelope: EngineResultEnvelope = engineResultEnvelopeSchema.parse({ version: ENGINE_RESULT_VERSION, runId: lease.runId, engineId: "modelscan", engineVersion: "0.8.8", ...body });
     const normalised = normaliseEngineResult({

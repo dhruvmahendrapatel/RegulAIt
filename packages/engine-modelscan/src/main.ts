@@ -9,7 +9,7 @@
  * switch. No listening port. The token is never logged.
  */
 import path from "node:path";
-import { buildSelfTest, FileRunnerTokenStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError } from "@regulait/engine-runner";
+import { buildSelfTest, FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST, type RunnerSelfTest } from "@regulait/shared";
 import { modelscanAdapter } from "./adapter.js";
 import { ExchangeScanExecutor } from "./exchange.js";
@@ -32,14 +32,16 @@ async function main(): Promise<void> {
   const engineVersion = installedModelscanVersion();
   const jobsRoot = process.env.REGULAIT_MODELSCAN_JOBS_DIR ?? "/jobs";
   const resultsRoot = process.env.REGULAIT_MODELSCAN_RESULTS_DIR ?? "/results";
-  const client = new RunnerClient({ gatewayUrl });
+  // ADR-0188 S7: the runner authenticates with its own key (private_key_jwt + DPoP); each proof names the request
+  // under the gateway's issuer (REGULAIT_PUBLIC_URL), the same value the gateway is configured with
+  const client = new RunnerClient({ gatewayUrl, ...(process.env.REGULAIT_PUBLIC_URL ? { issuer: process.env.REGULAIT_PUBLIC_URL } : {}) });
   const stateDir = process.env.REGULAIT_RUNNER_STATE_DIR ?? "/state";
-  const store = new FileRunnerTokenStore(path.join(stateDir, "runner-token"));
+  const store = new FileRunnerKeyStore(path.join(stateDir, "runner-key"));
   const executor = new ExchangeScanExecutor(jobsRoot, resultsRoot);
   // PR #212 review [4234946104]: at start this runner holds no run, so no job of any run may remain
   const stale = await executor.reconcile(null);
   if (stale.length) console.log(`modelscan runner: removed ${stale.length} job(s) left by an earlier process`);
-  await runRunnerLoop(client, modelscanAdapter({ gatewayUrl, token: () => store.load(), executor }), {
+  await runRunnerLoop(client, modelscanAdapter({ artifacts: client, executor }), {
     engineId: "modelscan",
     engineVersion,
     imageDigest,

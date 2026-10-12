@@ -5,19 +5,52 @@
  * 60, 64 and round 5's 67, 68, 69). Against the real gateway: apps/gateway/src/zz-b5-promptfoo.test.ts.
  */
 import { describe, expect, it } from "vitest";
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey } from "node:crypto";
 import fs from "node:fs";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { EngineRunnerNext } from "@regulait/shared";
-import { FileRunnerTokenStore, pinnedImageDigest, RUNNER_STATES, RunnerFatalError, RunnerObsoleteBuildError, runRunnerLoop, transition, type RunnerEvent, type RunnerState } from "./loop.js";
+import { generateRunnerSecret } from "./key.js";
+import { FileRunnerKeyStore, pinnedImageDigest, RUNNER_STATES, RunnerFatalError, RunnerObsoleteBuildError, runRunnerLoop, transition, type RunnerEvent, type RunnerState } from "./loop.js";
 import { QUARANTINED_RESULT_PREFIX, RETAINED_RESULT_FILE, RunnerClient, type RunnerHttp } from "./runner.js";
 
-const STORED = `rge_${"7".repeat(64)}`;
+// ADR-0188 S7: a runner's credential is its own KEY (the `rge_` bearer token is retired). Synthetic keys,
+// generated per run; the scripted gateway below names a key by its RFC 7638 thumbprint, never by its secret.
+const STORED = generateRunnerSecret();
+const K5 = generateRunnerSecret();
+const K6 = generateRunnerSecret();
+const K8 = generateRunnerSecret();
+const K9 = generateRunnerSecret();
 const DIGEST = `sha256:${"a".repeat(64)}`;
-const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+/** the RFC 7638 thumbprint of an Ed25519 public JWK (its members in lexical order) */
+const jwkKid = (jwk: { x: string }) => createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${jwk.x}"}`).digest("base64url");
+/** the thumbprint of a runner key secret: what the gateway records the key by */
+const kid = (secret: string) =>
+  jwkKid(createPrivateKey({ key: Buffer.from(secret.slice("rgek_".length), "base64url"), format: "der", type: "pkcs8" }).export({ format: "jwk" }) as { x: string });
+/** how the scripted gateway records a request authenticated by a key's self token */
+const bearer = (secret: string) => `Key ${kid(secret)}`;
+const KEY_SECRET = /^rgek_[A-Za-z0-9_-]{60,}$/;
+const b64json = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as Record<string, unknown>;
+/** a registration body as the scripted gateway records it: the key by thumbprint (`tokenHash`), the superseded key by the proof's `kid` */
+function normalise(raw: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!raw || !raw["publicJwk"]) return raw;
+  return {
+    ...Object.fromEntries(Object.entries(raw).filter(([k]) => k !== "publicJwk" && k !== "supersedes")),
+    tokenHash: jwkKid(raw["publicJwk"] as { x: string }),
+    ...(typeof raw["supersedes"] === "string" ? { supersedes: String(b64json(raw["supersedes"].split(".")[0]!).kid) } : {}),
+  };
+}
+/** ADR-0188 S7: the token endpoint in front of a hand-built fake gateway (every key gets a token naming it) */
+function withTokenEndpoint(inner: RunnerHttp): RunnerHttp {
+  return async (url, init) => {
+    if (new URL(url).pathname !== "/oauth/token") return inner(url, init);
+    const assertion = new URLSearchParams(init.body ?? "").get("client_assertion") ?? "";
+    const sub = String(b64json(assertion.split(".")[1] ?? "").sub ?? "");
+    return { status: 200, headers: { "content-type": "application/json" }, json: async () => ({ access_token: `tok-${sub.slice(sub.lastIndexOf(":") + 1)}`, token_type: "DPoP", expires_in: 300 }) };
+  };
+}
 
 // ---------------------------------------------------------------------------
 // THE TABLE
@@ -103,10 +136,13 @@ function gateway(script: Script) {
   let ri = 0;
   let si = 0;
   let resi = 0;
-  const http: RunnerHttp = async (url, init) => {
+  const inner: RunnerHttp = async (url, init) => {
     const p = new URL(url).pathname;
-    const body = init.body ? (JSON.parse(init.body) as Record<string, unknown>) : null;
-    calls.push({ path: p, bearer: init.headers.authorization ?? "", body });
+    // ADR-0188 S7: the token endpoint (in front, `withTokenEndpoint`) answers every key; the real refusals
+    // are the gateway suites'. A registration is recorded with its key by thumbprint (`normalise`).
+    const body = normalise(init.body ? (JSON.parse(init.body) as Record<string, unknown>) : null);
+    const auth = init.headers.authorization ?? "";
+    calls.push({ path: p, bearer: auth.startsWith("DPoP tok-") ? `Key ${auth.slice("DPoP tok-".length)}` : auth, body });
     if (p.endsWith("/register")) {
       const list = script.register ?? [201];
       const step = list[Math.min(ri++, list.length - 1)]!;
@@ -138,7 +174,7 @@ function gateway(script: Script) {
     return { status: step.status, json: async () => (step.error || step.next ? { error: step.error ?? "x", ...(step.next ? { next: step.next } : {}) } : null) };
   };
   const count = (suffix: string) => calls.filter((c) => c.path.endsWith(suffix)).length;
-  return { calls, count, client: new RunnerClient({ gatewayUrl: "http://gateway.test", http }) };
+  return { calls, count, client: new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(inner) }) };
 }
 
 const selfTest = () => ({
@@ -165,7 +201,7 @@ async function opts(over: Record<string, unknown> = {}) {
       engineVersion: "1",
       imageDigest: DIGEST,
       workRoot: path.join(dir, "work"),
-      store: new FileRunnerTokenStore(path.join(dir, "state", "runner-token")),
+      store: new FileRunnerKeyStore(path.join(dir, "state", "runner-key")),
       enrollmentToken: "rgee_synthetic_enrolment" as string | null,
       registration,
       backoffMs: 10,
@@ -245,7 +281,7 @@ describe("PR #205 round 13 [95]: a replica with an outdated manifest refuses reg
     const { o } = await opts({ maxIterations: 1 });
     await runRunnerLoop(g.client, adapter, o);
     expect(g.count("/register")).toBe(8);
-    expect(await o.store.load()).toMatch(/^rge_[0-9a-f]{64}$/);
+    expect(await o.store.load()).toMatch(KEY_SECRET);
   });
 });
 
@@ -313,8 +349,8 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const reg = g.calls.find((c) => c.path.endsWith("/register"))!;
     const secret = (await o.store.load())!;
     expect(secret).not.toBe(STORED);
-    expect(reg.body).toMatchObject({ tokenHash: sha(secret), supersedes: STORED });
-    expect(g.calls.at(-1)!.bearer).toBe(`Bearer ${secret}`);
+    expect(reg.body).toMatchObject({ tokenHash: kid(secret), supersedes: kid(STORED) });
+    expect(g.calls.at(-1)!.bearer).toBe(bearer(secret));
     expect(logs.some((l) => /previous registration r0 is revoked/.test(l))).toBe(true);
     expect(logs.join("\n")).not.toContain(secret);
     expect(logs.join("\n")).not.toContain(STORED);
@@ -325,7 +361,7 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const { o } = await opts({ maxIterations: 2 });
     await o.store.save(STORED);
     await runRunnerLoop(g.client, adapter, o);
-    expect(g.calls.find((c) => c.path.endsWith("/register"))!.body).toMatchObject({ supersedes: STORED });
+    expect(g.calls.find((c) => c.path.endsWith("/register"))!.body).toMatchObject({ supersedes: kid(STORED) });
   });
 
   it("round 6 [72]: the stored token is untouched until the registration lands; a crash after persisting the pending enrolment is resumed on restart, `supersedes` and all", async () => {
@@ -333,7 +369,7 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const { o } = await opts({ maxIterations: 1 });
     await o.store.save(STORED);
     // the process dies right after the pending enrolment is written (before any request leaves)
-    const crashing = Object.assign(Object.create(Object.getPrototypeOf(o.store) as object) as FileRunnerTokenStore, o.store, {
+    const crashing = Object.assign(Object.create(Object.getPrototypeOf(o.store) as object) as FileRunnerKeyStore, o.store, {
       savePending: async (p: { secret: string; supersedes: string | null }) => {
         await o.store.savePending(p);
         throw new Error("killed");
@@ -350,8 +386,8 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const second = gateway({ lease: [{ status: 401, error: "engine_runner_token_required" }, { status: 204 }] });
     await runRunnerLoop(second.client, adapter, o);
     const reg = second.calls.find((c) => c.path.endsWith("/register"))!;
-    expect(reg.body).toMatchObject({ tokenHash: sha(pending.secret), supersedes: STORED });
-    expect(second.calls[0]).toMatchObject({ path: "/v1/engine-runner/lease", bearer: `Bearer ${pending.secret}` }); // the probe, never the old token
+    expect(reg.body).toMatchObject({ tokenHash: kid(pending.secret), supersedes: kid(STORED) });
+    expect(second.calls[0]).toMatchObject({ path: "/v1/engine-runner/lease", bearer: bearer(pending.secret) }); // the probe, never the old token
     expect(second.calls[1]!.path).toBe("/v1/engine-runner/register");
     expect(await o.store.load()).toBe(pending.secret);
     expect(await o.store.loadPending()).toBeNull();
@@ -369,7 +405,7 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const second = gateway({ lease: [{ status: 204 }], register: [401] });
     await runRunnerLoop(second.client, adapter, o);
     expect(second.count("/register")).toBe(0);
-    expect(second.calls[0]).toMatchObject({ path: "/v1/engine-runner/lease", bearer: `Bearer ${pending.secret}` });
+    expect(second.calls[0]).toMatchObject({ path: "/v1/engine-runner/lease", bearer: bearer(pending.secret) });
     expect(await o.store.load()).toBe(pending.secret);
     expect(await o.store.loadPending()).toBeNull();
     expect(logs.some((l) => /had registered: its secret is this runner's credential/.test(l))).toBe(true);
@@ -378,14 +414,14 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
   it("round 8 [77]: a secret the gateway refuses (401) is registered again; `already registered` after that stops (revoked)", async () => {
     const { o } = await opts({ maxIterations: 1 });
     await o.store.save(STORED);
-    await o.store.savePending({ secret: `rge_${"9".repeat(64)}`, supersedes: STORED });
+    await o.store.savePending({ secret: K9, supersedes: STORED });
     // not registered: the probe is refused, the registration goes ahead with the same secret
     const fresh = gateway({ lease: [{ status: 401, error: "engine_runner_token_required" }, { status: 204 }] });
     await runRunnerLoop(fresh.client, adapter, o);
     expect(fresh.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease", "/v1/engine-runner/register", "/v1/engine-runner/lease"]);
-    expect(fresh.calls[1]!.body).toMatchObject({ tokenHash: sha(`rge_${"9".repeat(64)}`), supersedes: STORED });
+    expect(fresh.calls[1]!.body).toMatchObject({ tokenHash: kid(K9), supersedes: kid(STORED) });
     // registered but revoked: the probe is refused AND the hash is already registered: stop
-    await o.store.savePending({ secret: `rge_${"6".repeat(64)}`, supersedes: null });
+    await o.store.savePending({ secret: K6, supersedes: null });
     const revoked = gateway({ lease: [{ status: 401, error: "engine_runner_revoked" }], register: [409] });
     const http = (revoked.client as unknown as { http: RunnerHttp }).http;
     (revoked.client as unknown as { http: RunnerHttp }).http = async (url, init) =>
@@ -401,13 +437,13 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
 
   it("round 12 [92]: registered, credential lost, then revoked: the dead secret is discarded and a NEW one registers with the unused enrolment token", async () => {
     const { o, logs } = await opts({ maxIterations: 1 });
-    const dead = `rge_${"5".repeat(64)}`;
+    const dead = K5;
     await o.store.savePending({ secret: dead, supersedes: null });
     // the dead secret: refused as a credential (revoked) and its hash already registered
     const g = gateway({ lease: [{ status: 401, error: "engine_runner_revoked" }, { status: 204 }] });
     const http = (g.client as unknown as { http: RunnerHttp }).http;
     (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
-      if (url.endsWith("/register") && (JSON.parse(init.body!) as { tokenHash: string }).tokenHash === sha(dead)) {
+      if (url.endsWith("/register") && jwkKid((JSON.parse(init.body!) as { publicJwk: { x: string } }).publicJwk) === kid(dead)) {
         await http(url, init);
         return { status: 409, json: async () => ({ error: "engine_runner_already_registered" }) };
       }
@@ -416,12 +452,12 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     await runRunnerLoop(g.client, adapter, o);
     const regs = g.calls.filter((c) => c.path.endsWith("/register"));
     expect(regs).toHaveLength(2);
-    expect(regs[0]!.body!["tokenHash"]).toBe(sha(dead));
+    expect(regs[0]!.body!["tokenHash"]).toBe(kid(dead));
     const fresh = (await o.store.load())!;
     expect(fresh).not.toBe(dead);
-    expect(regs[1]!.body!["tokenHash"]).toBe(sha(fresh));
+    expect(regs[1]!.body!["tokenHash"]).toBe(kid(fresh));
     expect(await o.store.loadPending()).toBeNull();
-    expect(g.calls.at(-1)).toMatchObject({ path: "/v1/engine-runner/lease", bearer: `Bearer ${fresh}` });
+    expect(g.calls.at(-1)).toMatchObject({ path: "/v1/engine-runner/lease", bearer: bearer(fresh) });
     expect(logs.some((l) => /secret was revoked: registering a new one/.test(l))).toBe(true);
   });
 
@@ -445,12 +481,12 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     await runRunnerLoop(g.client, adapter, o);
     const secret = (await o.store.load())!;
     expect(g.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/register", "/v1/engine-runner/lease", "/v1/engine-runner/lease"]);
-    expect(g.calls[1]!.bearer).toBe(`Bearer ${secret}`);
+    expect(g.calls[1]!.bearer).toBe(bearer(secret));
     expect(await o.store.loadPending()).toBeNull();
   });
 
   it("round 7 [74]: a crash after the new token was stored but before the pending record was deleted: the stored token is used, the stale record dropped", async () => {
-    const SECRET = `rge_${"8".repeat(64)}`;
+    const SECRET = K8;
     // exactly that state: the stored token IS the pending secret; and no enrolment token is set
     const { o, logs } = await opts({ enrollmentToken: null, maxIterations: 1 });
     await o.store.save(SECRET);
@@ -458,18 +494,18 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const g = gateway({ lease: [{ status: 204 }] });
     await runRunnerLoop(g.client, adapter, o);
     expect(g.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease"]);
-    expect(g.calls[0]!.bearer).toBe(`Bearer ${SECRET}`);
+    expect(g.calls[0]!.bearer).toBe(bearer(SECRET));
     expect(await o.store.loadPending()).toBeNull();
     expect(logs.some((l) => /stale pending record is removed/.test(l))).toBe(true);
   });
 
   it("round 7 [74]: a stale record that cannot be deleted never blocks the committed credential", async () => {
-    const SECRET = `rge_${"8".repeat(64)}`;
+    const SECRET = K8;
     const { o, logs } = await opts({ enrollmentToken: null, maxIterations: 1 });
     await o.store.save(SECRET);
     await o.store.savePending({ secret: SECRET, supersedes: null });
     let tries = 0;
-    const stuck = Object.assign(Object.create(Object.getPrototypeOf(o.store) as object) as FileRunnerTokenStore, o.store, {
+    const stuck = Object.assign(Object.create(Object.getPrototypeOf(o.store) as object) as FileRunnerKeyStore, o.store, {
       clearPending: async () => {
         tries++;
         throw new Error("EROFS");
@@ -478,19 +514,19 @@ describe("round 5 [67]: reenrol_required (the build changed under a stored crede
     const g = gateway({ lease: [{ status: 204 }] });
     await runRunnerLoop(g.client, adapter, { ...o, store: stuck });
     expect(tries).toBe(3);
-    expect(g.calls[0]!.bearer).toBe(`Bearer ${SECRET}`);
+    expect(g.calls[0]!.bearer).toBe(bearer(SECRET));
     expect(logs.some((l) => /could not be removed/.test(l))).toBe(true);
   });
 
   it("round 6 [72]: an interrupted enrolment with no enrolment token stops and KEEPS the pending record", async () => {
     const { o } = await opts({ enrollmentToken: null });
     await o.store.save(STORED);
-    await o.store.savePending({ secret: `rge_${"9".repeat(64)}`, supersedes: STORED });
+    await o.store.savePending({ secret: K9, supersedes: STORED });
     // round 8 [77]: the secret is tried directly first (refused here: it never registered)
     const g = gateway({ lease: [{ status: 401, error: "engine_runner_token_required" }] });
     await expect(runRunnerLoop(g.client, adapter, o)).rejects.toThrow(/enrolment was interrupted/);
     expect(g.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease"]);
-    expect(await o.store.loadPending()).toEqual({ secret: `rge_${"9".repeat(64)}`, supersedes: STORED });
+    expect(await o.store.loadPending()).toEqual({ secret: K9, supersedes: STORED });
     // a pending record that is not valid is never used
     await writeFile(o.store.pendingFile, JSON.stringify({ secret: "not-a-token", supersedes: null }));
     expect(await o.store.loadPending()).toBeNull();
@@ -514,7 +550,7 @@ describe("revoked (decision 49): re-enrol once with an unused enrolment token, e
     await expect(runRunnerLoop(g.client, adapter, o)).rejects.toBeInstanceOf(RunnerFatalError);
     const regs = g.calls.filter((c) => c.path.endsWith("/register"));
     expect(regs).toHaveLength(1);
-    expect(regs[0]!.body!["tokenHash"]).not.toBe(sha(STORED));
+    expect(regs[0]!.body!["tokenHash"]).not.toBe(kid(STORED));
     expect(regs[0]!.body).not.toHaveProperty("supersedes");
   });
 
@@ -643,12 +679,12 @@ describe("decisions 49 and 54: the runner's own token, persisted before it regis
     };
     await runRunnerLoop(first.client, adapter, o);
     const secret = await o.store.load();
-    expect(secret).toMatch(/^rge_[0-9a-f]{64}$/);
+    expect(secret).toMatch(KEY_SECRET);
     expect(pendingAtRegister).toEqual({ secret, supersedes: null }); // persisted before the request left
     expect(storedAtRegister).toBeNull(); // the stored token is written only after the 201 (round 6 [72])
     expect(await o.store.loadPending()).toBeNull();
     const reg = first.calls.find((c) => c.path.endsWith("/register"))!;
-    expect(reg.body!["tokenHash"]).toBe(sha(secret!));
+    expect(reg.body!["tokenHash"]).toBe(kid(secret!));
     expect(JSON.stringify(reg.body)).not.toContain(secret!);
     expect((await stat(o.store.file)).mode & 0o777).toBe(0o600);
     expect(logs.join("\n")).not.toContain(secret!);
@@ -656,7 +692,7 @@ describe("decisions 49 and 54: the runner's own token, persisted before it regis
     const second = gateway({ register: [401], lease: [{ status: 204 }] });
     await runRunnerLoop(second.client, adapter, o);
     expect(second.calls.map((c) => c.path)).toEqual(["/v1/engine-runner/lease"]);
-    expect(second.calls[0]!.bearer).toBe(`Bearer ${secret}`);
+    expect(second.calls[0]!.bearer).toBe(bearer(secret!));
   });
 
   it("[54] a lost register response is retried with the SAME secret (the gateway replays the same runner)", async () => {
@@ -666,12 +702,12 @@ describe("decisions 49 and 54: the runner's own token, persisted before it regis
     const regs = g.calls.filter((c) => c.path.endsWith("/register"));
     expect(regs).toHaveLength(2);
     expect(regs[0]!.body!["tokenHash"]).toBe(regs[1]!.body!["tokenHash"]);
-    expect(regs[0]!.body!["tokenHash"]).toBe(sha((await o.store.load())!));
+    expect(regs[0]!.body!["tokenHash"]).toBe(kid((await o.store.load())!));
   });
 
   it("a first start with no enrolment token stops and says what to do", async () => {
     const { o } = await opts({ enrollmentToken: null });
-    await expect(runRunnerLoop(gateway({ lease: [{ status: 204 }] }).client, adapter, o)).rejects.toThrow(/no stored token and no enrolment token/);
+    await expect(runRunnerLoop(gateway({ lease: [{ status: 204 }] }).client, adapter, o)).rejects.toThrow(/no stored key and no enrolment token/);
   });
 
   it("decision 55: the runner starts only from a digest-pinned image reference that agrees with the reported digest", () => {
@@ -726,7 +762,7 @@ describe("PR #205 round 15 [99]: after the lease is acquired, nothing re-leases 
       if (resultCalls === 1) throw new Error("ECONNRESET");
       return { status: 200, json: async () => ({}) };
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http) });
     let adapterRuns = 0;
     const counting = async () => {
       adapterRuns++;
@@ -790,7 +826,7 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
       results.push(p);
       return { status: 200, json: async () => ({}) };
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http) });
     const counting = async () => {
       adapterRuns++;
       return { status: "completed" as const, items: [], notRun: [], rawReport: null };
@@ -812,7 +848,7 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
     const http = (g.client as unknown as { http: RunnerHttp }).http;
     (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
       if (url.endsWith("/register")) {
-        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: JSON.parse(init.body!) as Record<string, unknown> });
+        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: normalise(JSON.parse(init.body!) as Record<string, unknown>) });
         return { status: 201, json: async () => JSON.parse('{"runnerId":"r1","selfT') };
       }
       return http(url, init);
@@ -821,11 +857,11 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
     await runRunnerLoop(g.client, adapter, o);
     const reg = g.calls.find((c) => c.path.endsWith("/register"))!;
     const stored = await o.store.load();
-    expect(stored).toMatch(/^rge_[0-9a-f]{64}$/);
-    expect(reg.body!["tokenHash"]).toBe(sha(stored!));
+    expect(stored).toMatch(KEY_SECRET);
+    expect(reg.body!["tokenHash"]).toBe(kid(stored!));
     // the secret authenticated a lease: no second registration was needed
     expect(g.count("/register")).toBe(1);
-    expect(g.calls.filter((c) => c.path.endsWith("/lease")).every((c) => c.bearer === `Bearer ${stored}`)).toBe(true);
+    expect(g.calls.filter((c) => c.path.endsWith("/lease")).every((c) => c.bearer === bearer(stored!))).toBe(true);
   });
 
   it("#210 review: a truncated 201 on the LAST permitted attempt is still confirmed before the cap stops anything", async () => {
@@ -833,7 +869,7 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
     const http = (g.client as unknown as { http: RunnerHttp }).http;
     (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
       if (url.endsWith("/register")) {
-        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: JSON.parse(init.body!) as Record<string, unknown> });
+        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: normalise(JSON.parse(init.body!) as Record<string, unknown>) });
         return { status: 201, json: async () => JSON.parse('{"runnerId":"r1","selfT') };
       }
       return http(url, init);
@@ -841,9 +877,9 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
     const { o } = await opts({ maxIterations: 1, registerAttempts: 1 });
     await runRunnerLoop(g.client, adapter, o);
     const stored = await o.store.load();
-    expect(stored).toMatch(/^rge_[0-9a-f]{64}$/);
+    expect(stored).toMatch(KEY_SECRET);
     expect(g.count("/register")).toBe(1);
-    expect(g.calls.some((c) => c.path.endsWith("/lease") && c.bearer === `Bearer ${stored}`)).toBe(true);
+    expect(g.calls.some((c) => c.path.endsWith("/lease") && c.bearer === bearer(stored!))).toBe(true);
   });
 
   it("#210 review: at the cap, a confirmation the gateway refuses (401) stops the loop", async () => {
@@ -851,7 +887,7 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
     const http = (g.client as unknown as { http: RunnerHttp }).http;
     (g.client as unknown as { http: RunnerHttp }).http = async (url, init) => {
       if (url.endsWith("/register")) {
-        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: JSON.parse(init.body!) as Record<string, unknown> });
+        g.calls.push({ path: "/v1/engine-runner/register", bearer: "", body: normalise(JSON.parse(init.body!) as Record<string, unknown>) });
         return { status: 201, json: async () => JSON.parse('{"runnerId":"r1","selfT') };
       }
       return http(url, init);

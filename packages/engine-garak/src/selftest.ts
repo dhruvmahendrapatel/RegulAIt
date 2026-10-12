@@ -5,7 +5,7 @@
  * container. garak runs in the worker, so the worker probes from inside its own container (the same
  * probe: name resolution, a TCP connect by name, and a public literal address), checks every usage-data
  * switch in its own environment, checks that it can see no runner credential (no enrolment token in its
- * environment, no runner token file), and writes the outcome with the garak version it runs to
+ * environment, no runner key file), and writes the outcome with the garak version it runs to
  * `results/.worker-selftest.json`. The runner reports each switch as set only when that report sets it,
  * and the switch `REGULAIT_GARAK_WORKER_SELFTEST` only when the report is fresh, names the pinned version,
  * reached nothing outside and saw no runner credential. A missing, stale or failing worker report fails
@@ -23,7 +23,8 @@ export const WORKER_SELF_TEST_FILE = ".worker-selftest.json";
 /** how old a worker report may be (the worker rewrites it every hour) */
 export const WORKER_SELF_TEST_MAX_AGE_MS = 2 * 3600 * 1000;
 /** the runner credential's locations a worker must not see (the runner's defaults) */
-export const RUNNER_CREDENTIAL_PATHS = ["/state/runner-token", "/state/runner-token.pending"] as const;
+// ADR-0188 S7: the runner's KEY, its pending enrolment and a rotation's next key (the `rge_` token file is retired)
+export const RUNNER_CREDENTIAL_PATHS = ["/state/runner-key", "/state/runner-key.pending", "/state/runner-key.next"] as const;
 export const RUNNER_CREDENTIAL_ENV = ["REGULAIT_ENGINE_ENROLLMENT_TOKEN"] as const;
 
 const reportSchema = z

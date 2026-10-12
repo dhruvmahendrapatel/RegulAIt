@@ -10,8 +10,24 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { EngineLease } from "@regulait/shared";
 import { writeFileDurable } from "./durable.js";
-import { FileRunnerTokenStore } from "./loop.js";
+import { FileRunnerKeyStore } from "./loop.js";
 import { RETAINED_RESULT_FILE, runOnce, RunnerClient, type RunnerHttp } from "./runner.js";
+import { generateRunnerSecret } from "./key.js";
+
+/** ADR-0188 S7: a synthetic runner key (the `rge_` bearer token is retired) */
+const TEST_KEY = generateRunnerSecret();
+const [K1, K2, K3, K4] = [generateRunnerSecret(), generateRunnerSecret(), generateRunnerSecret(), generateRunnerSecret()];
+
+/**
+ * ADR-0188 S7: the gateway's token endpoint, faked for these protocol tests — every key gets a DPoP token
+ * (the real `client_credentials` grant and its refusals are pinned by the gateway suites). Not recorded.
+ */
+function withTokenEndpoint(inner: RunnerHttp): RunnerHttp {
+  return async (url, init) =>
+    new URL(url).pathname === "/oauth/token"
+      ? { status: 200, headers: { "content-type": "application/json" }, json: async () => ({ access_token: "s7-test-token", token_type: "DPoP", expires_in: 300 }) }
+      : inner(url, init);
+}
 
 const restore: Array<() => void> = [];
 afterEach(() => {
@@ -54,24 +70,24 @@ describe("PR #205 round 13 [96]: durable writes", () => {
 
   it("a crash before the rename leaves the previous token complete (never a truncated one)", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "durable-"));
-    const store = new FileRunnerTokenStore(path.join(dir, "runner-token"));
-    const first = `rge_${"1".repeat(64)}`;
+    const store = new FileRunnerKeyStore(path.join(dir, "runner-token"));
+    const first = K1;
     await store.save(first);
     const realRename = fs.rename;
     (fs as { rename: typeof fs.rename }).rename = ((_a: fs.PathLike, _b: fs.PathLike, cb: (e: NodeJS.ErrnoException | null) => void) =>
       cb(Object.assign(new Error("simulated crash"), { code: "EIO" }))) as typeof fs.rename;
     restore.push(() => ((fs as { rename: typeof fs.rename }).rename = realRename));
-    await expect(store.save(`rge_${"2".repeat(64)}`)).rejects.toThrow(/simulated crash/);
+    await expect(store.save(K2)).rejects.toThrow(/simulated crash/);
     restore.pop()!();
     expect(await store.load()).toBe(first);
   });
 
   it("the token store and the pending record are written durably", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "durable-"));
-    const store = new FileRunnerTokenStore(path.join(dir, "runner-token"));
+    const store = new FileRunnerKeyStore(path.join(dir, "runner-token"));
     const counts = await spySyncs();
-    await store.save(`rge_${"3".repeat(64)}`);
-    await store.savePending({ secret: `rge_${"4".repeat(64)}`, supersedes: null });
+    await store.save(K3);
+    await store.savePending({ secret: K4, supersedes: null });
     expect(counts.file).toBeGreaterThanOrEqual(2);
     expect(counts.dir).toBeGreaterThanOrEqual(2);
   });
@@ -94,8 +110,8 @@ describe("PR #205 round 13 [96]: durable writes", () => {
       if (p.endsWith("/heartbeat")) return { status: 200, json: async () => ({ cancel: false }) };
       throw new Error("ECONNRESET");
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http) });
+    client.useKey(TEST_KEY);
     const work = await mkdtemp(path.join(tmpdir(), "durable-work-"));
     const retain = await mkdtemp(path.join(tmpdir(), "durable-retain-"));
     const counts = await spySyncs();
