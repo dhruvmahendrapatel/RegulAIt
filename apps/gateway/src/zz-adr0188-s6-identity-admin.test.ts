@@ -412,7 +412,7 @@ describe("GET /v1/workload-identities/:id/grant-proposals", () => {
     for (const a of [held, already]) expect((await grantUserAgent(steward.id, a)).statusCode).toBeLessThan(300);
     const ident = await agentIdentity("prop-subject", steward.id);
     await putIdentityGrants(db, ident.id, { tools: [], servers: [], agents: [{ agentId: already, allowedModes: ["plan"] }], connectors: [], roleIds: [], revision: 0 }, null);
-    const server = await inject("POST", "/v1/servers", AUTH, { name: `s6-prop-server-${RUN}`, url: "http://127.0.0.1:9" });
+    const server = await inject("POST", "/v1/servers", AUTH, { name: `s6-prop-server-${RUN}`, url: "http://127.0.0.1:9", allowPrivateRanges: true });
     expect(server.statusCode, server.body).toBe(201);
 
     // observed decisions, stamped with the identity as the acting agent the way the governed paths stamp them
