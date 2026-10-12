@@ -2868,6 +2868,19 @@ export function registerAgentConnectorRoutes(
         return reply.status(status).send({ error, detail });
       }
     }
+    // ADR-0175/0180: an expected served model relaxes the served-model drift check (the strict default measures
+    // drift against the configured model). Creating an agent with one is the same relaxation as setting it later:
+    // a settings_relax step-up bound to the new agent's name and the value, asked after every other refusal.
+    const expected = body.expectedServedModel ?? null;
+    let expectedStepUp: string | null = null;
+    if (expected !== null) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "agent_create_expected_served_model", name: body.name, expectedServedModel: expected },
+      });
+      if (!su.ok) return reply;
+      expectedStepUp = su.method;
+    }
     const [row] = await db
       .insert(agents)
       .values({
@@ -2880,9 +2893,21 @@ export function registerAgentConnectorRoutes(
         model: body.model ?? null,
         systemPrompt: body.systemPrompt ?? null,
         customProviderId: body.customProviderId ?? null,
-        expectedServedModel: body.expectedServedModel ?? null,
+        expectedServedModel: expected,
       })
       .returning();
+    if (expected !== null) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "agent",
+        objectId: row!.id,
+        detail: { phase: "expected-served-model", action: "create", from: null, to: expected, relaxation: true, stepUp: expectedStepUp, receiptClass: "configuration" },
+        effect: "allow",
+        ruleId: "agent-expected-served-model-set",
+        ruleChain: [],
+        reason: `agent '${row!.name}' created with expected served model '${expected}' — a relaxation of the served-model drift check`,
+      });
+    }
     return reply.status(201).send(row);
   });
 
@@ -2901,29 +2926,59 @@ export function registerAgentConnectorRoutes(
     if (!existing) return reply.status(404).send({ error: "unknown_agent" });
     // D4 DFX2: the drift baseline is how the incident's model behaviour is evaluated
     if (await agentEvidenceHoldRefused(db, req, reply, agentId, "expected served model")) return reply;
+    // ADR-0180/0186 A: setting or changing the expected served model relaxes the served-model drift check (calls
+    // reporting that model stop counting as drift): a settings_relax step-up bound to this agent and the new value,
+    // asked after the evidence-hold refusal so a refused write never spends the grant. Clearing it restores the
+    // strict default and needs nothing; re-sending the stored value changes nothing and needs nothing.
+    const relaxation = body.expectedServedModel !== null && body.expectedServedModel !== existing.expected;
+    let stepUp: string | null = null;
+    if (relaxation) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "agent_expected_served_model", agentId, expectedServedModel: body.expectedServedModel },
+      });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
     // X15-H01: re-checked inside the write's own transaction, serialised with hold creation
     const row = await withAgentEvidenceHold(db, req, reply, agentId, "expected served model", async (db) => {
       const [row] = await db
         .update(agents)
         .set({ expectedServedModel: body.expectedServedModel })
-        .where(eq(agents.id, agentId))
+        // Class A: compare-and-set on the value the step-up was decided on
+        .where(
+          and(
+            eq(agents.id, agentId),
+            existing.expected === null ? isNull(agents.expectedServedModel) : eq(agents.expectedServedModel, existing.expected),
+          ),
+        )
         .returning();
+      if (!row) return null;
       await db.insert(auditLog).values({
         userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
         objectType: "agent",
         objectId: agentId,
-        detail: { phase: "expected-served-model", from: existing.expected, to: body.expectedServedModel, receiptClass: "configuration" },
+        detail: {
+          phase: "expected-served-model",
+          from: existing.expected,
+          to: body.expectedServedModel,
+          relaxation,
+          ...(relaxation ? { stepUp } : {}),
+          receiptClass: "configuration",
+        },
         effect: "allow",
         ruleId: "agent-expected-served-model-set",
         ruleChain: [],
         reason:
           body.expectedServedModel === null
             ? `expected served model of agent '${existing.name}' cleared — drift is measured against its configured model`
-            : `expected served model of agent '${existing.name}' set to '${body.expectedServedModel}'`,
+            : `expected served model of agent '${existing.name}' set to '${body.expectedServedModel}'` +
+              (relaxation ? " — a relaxation of the served-model drift check" : ""),
       });
       return row;
     });
     if (row === EVIDENCE_HOLD_REFUSED) return reply;
+    if (row === null) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return reply.send(row);
   });
 

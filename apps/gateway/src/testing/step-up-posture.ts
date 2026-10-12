@@ -2,10 +2,12 @@
  * ADR-0186 A test fixture: the strict step-up defaults, and the honest way a
  * suite about something ELSE copes with them.
  *
- * Under the strict defaults (`step_up_mode = required`, all six actions) a
- * settings relaxation, a break-glass change, an evidence-hold override, a
- * passkey change and an owner change each need a fresh step-up from a person
- * in a browser session, and an API key can never give one. A suite that pins
+ * Under the strict defaults (`step_up_mode = required`, every kind in
+ * `STEP_UP_ACTION_KINDS`, seven today) an approval decision, a settings
+ * relaxation, a break-glass change, an evidence-hold override, a passkey
+ * change, an owner change and an identity administration write each need a
+ * fresh step-up from a person in a browser session, and an API key can never
+ * give one. A suite that pins
  * pre-0186 behaviour by driving those actions through an API key turns
  * step-up off for its own run, explicitly, and puts the strict values back in
  * its afterAll (M-068: global state is removed before the spec ends) — the

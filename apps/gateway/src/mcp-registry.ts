@@ -124,6 +124,7 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { REGISTRATION_ADMISSION_STATE } from "./mcp-admission.js";
 import { recordSighting } from "./release-age.js";
 import { createHash } from "node:crypto";
@@ -1090,6 +1091,49 @@ export const updateMcpRegistrySchema = z
 const uuidParam = z.object({ registryId: z.string().uuid() });
 const entryParam = z.object({ entryId: z.string().uuid() });
 
+/**
+ * ADR-0180/0186 A: the values a registry CREATE relaxes from the strict defaults (disabled; private ranges
+ * inherited from the org default), or null. Allowing private ranges explicitly is the relaxation; inheriting
+ * the org default (itself a stepped-up setting when it is open) and denying them are not.
+ */
+export function registryCreateRelaxations(body: {
+  enabled?: boolean | undefined;
+  allowPrivateRanges?: boolean | null | undefined;
+}): Record<string, boolean> | null {
+  const out: Record<string, boolean> = {};
+  if (body.enabled === true) out.enabled = true;
+  if (body.allowPrivateRanges === true) out.allowPrivateRanges = true;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * ADR-0180/0186 A: the values a registry UPDATE relaxes, or null. Enabling a disabled registry; allowing private
+ * ranges where they were not explicitly allowed; and moving an explicit deny back to "inherit" while the org
+ * default is open (the registry's effective posture opens). Disabling and denying are tightening.
+ */
+export function registryUpdateRelaxations(
+  before: { enabled: boolean; allowPrivateRanges: boolean | null },
+  body: { enabled?: boolean | undefined; allowPrivateRanges?: boolean | null | undefined },
+  orgPrivateRangesDefault: boolean,
+): Record<string, boolean | null> | null {
+  const out: Record<string, boolean | null> = {};
+  if (body.enabled === true && !before.enabled) out.enabled = true;
+  if (body.allowPrivateRanges !== undefined) {
+    const next = body.allowPrivateRanges ?? null;
+    if (next === true && before.allowPrivateRanges !== true) out.allowPrivateRanges = true;
+    else if (next === null && before.allowPrivateRanges === false && orgPrivateRangesDefault) out.allowPrivateRanges = null;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function relaxationText(relaxed: Record<string, boolean | null>): string {
+  const parts: string[] = [];
+  if (relaxed.enabled === true) parts.push("enabled (the scheduled sweep pulls it)");
+  if (relaxed.allowPrivateRanges === true) parts.push("private ranges allowed");
+  else if ("allowPrivateRanges" in relaxed) parts.push("private ranges inherit the open org default");
+  return parts.join("; ");
+}
+
 /** Admin-only through the default gate (none of these appear in
  * NON_ADMIN_ROUTES): configuring a registry, pulling one, and importing an
  * entry are all acts that change what governed objects exist. */
@@ -1104,6 +1148,20 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
       deps,
     });
     if (refusal) return reply.status(400).send(refusal);
+    // ADR-0180/0186 A: a registry is created disabled and inheriting the org's private-range default (the strict
+    // values). Creating it enabled, or with private ranges explicitly allowed, is a relaxation: a settings_relax
+    // step-up bound to this registry and exactly the relaxed values, asked AFTER the egress refusal so a refused
+    // URL never spends the grant.
+    const relaxed = registryCreateRelaxations(body);
+    let stepUp: string | null = null;
+    if (relaxed) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "mcp_registry_create", name: body.name, url: body.url, values: relaxed },
+      });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
     const [row] = await db
       .insert(mcpRegistries)
       .values({
@@ -1117,11 +1175,22 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
       userId: req.authCtx.userId ?? NIL_USER,
       objectType: "mcp_server",
       objectId: row!.id,
-      detail: { phase: "registry-configure", action: "create", name: body.name, url: body.url, enabled: row!.enabled },
+      detail: {
+        phase: "registry-configure",
+        action: "create",
+        name: body.name,
+        url: body.url,
+        enabled: row!.enabled,
+        allowPrivateRanges: row!.allowPrivateRanges,
+        relaxation: relaxed !== null,
+        ...(relaxed ? { relaxed, stepUp } : {}),
+      },
       effect: "allow",
       ruleId: mcpRegistryRuleIds.configured,
       ruleChain: [],
-      reason: `Configured MCP registry '${body.name}' (${row!.enabled ? "enabled" : "disabled"}). Configuring a registry imports nothing.`,
+      reason:
+        `Configured MCP registry '${body.name}' (${row!.enabled ? "enabled" : "disabled"}). Configuring a registry imports nothing.` +
+        (relaxed ? ` Relaxed from the strict default: ${relaxationText(relaxed)}.` : ""),
     });
     return reply.status(201).send(row);
   });
@@ -1158,6 +1227,20 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
       });
       if (refusal) return reply.status(400).send(refusal);
     }
+    // ADR-0180/0186 A: enabling a registry, or opening its private ranges, is a relaxation (a settings_relax
+    // step-up bound to this registry and the relaxed values); disabling it or closing its ranges is tightening
+    // and needs nothing. Asked after the egress refusal, so a refused write never spends the grant.
+    const org = await loadOrgSettings(db);
+    const relaxed = registryUpdateRelaxations(before, body, org.mcpPrivateRangesDefault);
+    let stepUp: string | null = null;
+    if (relaxed) {
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "mcp_registry_update", registryId, values: relaxed },
+      });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
     const [row] = await db
       .update(mcpRegistries)
       .set({
@@ -1165,17 +1248,44 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
         ...(body.allowPrivateRanges !== undefined ? { allowPrivateRanges: body.allowPrivateRanges ?? null } : {}),
       })
-      .where(eq(mcpRegistries.id, registryId))
+      // Class A: a relaxation decided on an unlocked read is written only if what it rested on is unchanged
+      .where(
+        relaxed
+          ? and(
+              eq(mcpRegistries.id, registryId),
+              eq(mcpRegistries.enabled, before.enabled),
+              before.allowPrivateRanges === null
+                ? isNull(mcpRegistries.allowPrivateRanges)
+                : eq(mcpRegistries.allowPrivateRanges, before.allowPrivateRanges),
+            )
+          : eq(mcpRegistries.id, registryId),
+      )
       .returning();
+    if (!row) {
+      if (relaxed) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+      return reply.status(404).send({ error: "unknown_registry" });
+    }
     await db.insert(auditLog).values({
       userId: req.authCtx.userId ?? NIL_USER,
       objectType: "mcp_server",
       objectId: registryId,
-      detail: { phase: "registry-configure", action: "update", name: before.name, url: row!.url, enabled: row!.enabled },
+      detail: {
+        phase: "registry-configure",
+        action: "update",
+        name: before.name,
+        url: row.url,
+        enabled: row.enabled,
+        from: { enabled: before.enabled, allowPrivateRanges: before.allowPrivateRanges },
+        to: { enabled: row.enabled, allowPrivateRanges: row.allowPrivateRanges },
+        relaxation: relaxed !== null,
+        ...(relaxed ? { relaxed, stepUp } : {}),
+      },
       effect: "allow",
       ruleId: mcpRegistryRuleIds.configured,
       ruleChain: [],
-      reason: `Updated MCP registry '${before.name}' (${row!.enabled ? "enabled" : "disabled"}).`,
+      reason:
+        `Updated MCP registry '${before.name}' (${row.enabled ? "enabled" : "disabled"}).` +
+        (relaxed ? ` Relaxed: ${relaxationText(relaxed)}.` : ""),
     });
     return reply.send(row);
   });

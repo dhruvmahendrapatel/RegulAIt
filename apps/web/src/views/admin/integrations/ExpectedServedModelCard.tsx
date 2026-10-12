@@ -6,11 +6,12 @@
  * was expected. By default (the strict value) that is the agent's configured
  * model id. An endpoint whose configured id is a deployment name reports the
  * model behind it, so without this every call reads as drift. Setting it
- * changes what counts as drift, so it is confirmed and says so; clearing it
- * returns to the strict default. Nothing about the call itself changes.
+ * changes what counts as drift, so it is confirmed and says so, and the gateway
+ * asks for a `settings_relax` step-up; clearing it returns to the strict
+ * default and asks for nothing. Nothing about the call itself changes.
  */
 import { useId, useState } from "react";
-import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { AdminAgent } from "../../../api/adminTypes";
 import { Button, Card, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
 import { agentOpts, optionEls, useAction } from "../adminKit";
@@ -38,7 +39,8 @@ export function ExpectedServedModelCard(props: { agents: AdminAgent[] }) {
   const stored = agent?.expectedServedModel ?? null;
   const save = (body: { expectedServedModel: string | null }) =>
     void act.run(
-      () => api.put(`/v1/agents/${agentId}/expected-served-model`, body),
+      // setting it is a relaxation the gateway confirms with a step-up (settings_relax); clearing it asks nothing
+      () => withStepUp((h) => stepUpApi.put(`/v1/agents/${agentId}/expected-served-model`, body, h)),
       body.expectedServedModel === null
         ? "Expected served model cleared: drift is measured against the configured model again"
         : `Expected served model set to ${body.expectedServedModel}`,

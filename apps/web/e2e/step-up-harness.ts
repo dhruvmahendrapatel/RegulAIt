@@ -28,7 +28,14 @@ export interface StepUpHarness {
 
 export async function requireStepUpOn(
   page: Page,
-  opts: { method: string; path: string | RegExp; kind: string; facts?: (body: unknown) => Record<string, unknown> },
+  opts: {
+    method: string;
+    path: string | RegExp;
+    kind: string;
+    facts?: (body: unknown) => Record<string, unknown>;
+    /** only a request whose body this accepts needs the step-up (a tightening write on the same route passes) */
+    when?: (body: unknown) => boolean;
+  },
 ): Promise<StepUpHarness> {
   const h: StepUpHarness = {
     attempts: [],
@@ -70,6 +77,7 @@ export async function requireStepUpOn(
     } catch {
       body = null;
     }
+    if (opts.when && !opts.when(body)) return route.fallback();
     h.attempts.push({ header, body });
     if (header) return route.fallback();
     return json(

@@ -99,8 +99,8 @@ export function stepUpRefusalOf(err: unknown): { action: StepUpAction; methods: 
   return { action, methods };
 }
 
-/** at most one step-up per action kind rides one request (the gateway reads at most six) */
-const MAX_STEP_UPS = 6;
+/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, seven today) */
+const MAX_STEP_UPS = 7;
 
 /**
  * Run `call`, stepping up when it is refused for that, and retrying it with
