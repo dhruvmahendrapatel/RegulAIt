@@ -320,10 +320,17 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
   it("malformed project classifications do not resolve (never read as no tags)", async () => {
     const { agentId } = await newAgent("bad-tags");
     const projectId = await newProject("public");
-    await db.execute(sql`update projects set classifications = '{"hipaa": true}'::jsonb where id = ${projectId}`);
-    const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
-    expect(d).toMatchObject({ kind: "refused", code: "policy_unresolved" });
-    if (d.kind === "refused") expect(d.requirement).toMatchObject({ kind: "unresolved", fact: "complianceFloors" });
+    // M-068: every suite shares this database, and other readers walk ALL projects' classifications as a list
+    // (rule-versioning's divergence report answered 500 on an object here), so the malformed value is
+    // array-shaped (a non-string tag) and is restored before the test ends
+    await db.execute(sql`update projects set classifications = '[1]'::jsonb where id = ${projectId}`);
+    try {
+      const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
+      expect(d).toMatchObject({ kind: "refused", code: "policy_unresolved" });
+      if (d.kind === "refused") expect(d.requirement).toMatchObject({ kind: "unresolved", fact: "complianceFloors" });
+    } finally {
+      await db.execute(sql`update projects set classifications = '[]'::jsonb where id = ${projectId}`);
+    }
   });
 
   it("a non-isolable kind is never placed: in_gateway or external", async () => {
