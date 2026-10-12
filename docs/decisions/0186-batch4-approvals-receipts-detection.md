@@ -793,3 +793,8 @@ restart first), and the last active recorded key (`409 receipt_key_only_active`:
 its first signature). The Enforcement posture page lists the recorded keys and offers Retire only where the
 gateway would accept it. A writer that loses the registration race on a key id now re-reads the row and refuses
 (`ReceiptKeyError`) when it records a different public key or is retired.
+
+PR #377 review: both refusals are decided once before the step-up is spent (so a refused retire never burns
+the grant) and again under the lock. The AI BOM and Decision BOM signers read their key row `FOR SHARE` in the
+transaction that stores the signature, so a retire waits for a signature in flight and a signer that starts
+after it sees the key retired. Lock order everywhere: the key row, then the audit chain lock.

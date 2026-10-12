@@ -312,6 +312,11 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     expect((await retire("bad key", boot)).statusCode).toBe(400);
     expect((await retire("x21-never-recorded", boot)).statusCode).toBe(404);
 
+    // a refusal is decided before the step-up is asked for, so it never spends a grant: the admin's key (which can
+    // never step up) gets the 409, not a step-up demand
+    const preChecked = await retire("fixture-2", admin);
+    expect(preChecked.statusCode).toBe(409);
+    expect(preChecked.json().error).toBe("receipt_key_in_use");
     // the key this gateway signs with is refused, and the refusal is audited
     const inUse = await retire("fixture-2", boot);
     expect(inUse.statusCode).toBe(409);
@@ -338,7 +343,33 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     // retire every other active key; the last active one is refused even when it is not in use
     clearKey();
     const active = (await db.select().from(receiptSigningKeys)).filter((k) => !k.retiredAt && k.keyId !== "fixture-2");
-    for (const k of active) expect((await retire(k.keyId, boot)).statusCode).toBe(200);
+    expect(active.length).toBeGreaterThan(0);
+    // PR #377 review: a BOM signer reads its key row FOR SHARE in the transaction that stores the signature, so a
+    // retire waits for a signature in flight (and a signer that starts after the retire sees it retired)
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const holding = new Promise<void>((r) => (held = r));
+    const signer = db.transaction(async (tx) => {
+      const [k] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, active[0]!.keyId)).for("share");
+      expect(k!.retiredAt).toBeNull();
+      held();
+      await gate;
+    });
+    await holding;
+    let settled = false;
+    const waiting = retire(active[0]!.keyId, boot).then((r) => { settled = true; return r; });
+    await new Promise((r) => setTimeout(r, 750));
+    expect(settled, "the retire waited for the signer holding the key row").toBe(false);
+    release();
+    await signer;
+    expect((await waiting).statusCode).toBe(200);
+    for (const k of active.slice(1)) expect((await retire(k.keyId, boot)).statusCode).toBe(200);
+    // and both BOM signers take that row lock where they sign (the reads the review named)
+    const { readFileSync } = await import("node:fs");
+    for (const file of ["decision-bom.ts", "ai-bom.ts"]) {
+      expect(readFileSync(path.join(ROOT, "apps/gateway/src", file), "utf8"), file).toMatch(/\.from\(receiptSigningKeys\)\.where\(eq\(receiptSigningKeys\.keyId, [a-z.]+\.keyId\)\)\.for\("share"\)/);
+    }
     const last = await retire("fixture-2", boot);
     expect(last.statusCode).toBe(409);
     expect(last.json().error).toBe("receipt_key_only_active");
