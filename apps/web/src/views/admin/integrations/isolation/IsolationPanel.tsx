@@ -5,33 +5,47 @@
  *
  * Honest about what the gateway serves (isolationModel.ts):
  *  - Executors are live (I3) and shown with the gateway's own freshness verdict.
- *  - Profiles and placements answer 501 until slice I2. The cards say so and
- *    show nothing invented. A success body is not decoded either: its shape is
- *    not frozen, so the card says this console cannot read it yet.
- *  - No route assigns a profile to an agent or an MCP server, so the selector
- *    is disabled and says why.
+ *  - Profiles and placements are live (I2): every version with the fields it
+ *    loosens against `restricted`, and every placement decision, including the
+ *    refusals decided before a placement row could exist (`policy_unresolved`).
+ *  - The selector assigns a profile to an agent or a stdio MCP server (I2). A
+ *    looser profile is a relaxation: the gateway asks for the step-up.
+ *  Anything the gateway sends that cannot be read is shown as unreadable, never
+ *  as a default or an empty list.
  */
 import { useEffect, useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt } from "../../../../api/format";
+import { api as stepApi, withStepUp } from "../../../../stepup/stepUp";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, Select, Table } from "../../../../ui/kit";
 import { useAction } from "../../adminKit";
 import {
+  assignableProfiles,
   availabilityOf,
   BACKEND_CLASSES,
   BACKENDS,
   classText,
   executorReading,
   MISMATCH_TEXT,
+  parseAssignment,
   parseExecutors,
+  parsePlacements,
+  parseProfiles,
+  profileText,
   registerBody,
   REFUSAL_REASONS,
   REFUSAL_TEXT,
+  refusalText,
+  REQUIRED_BY_TEXT,
+  type AssignmentTargetKind,
   type Availability,
   type Backend,
   type Executor,
+  type Placement,
+  type ProfileVersion,
   type RegisterDraft,
+  type UnrecordedRefusal,
 } from "./isolationModel";
 import v from "../../../views.module.css";
 
@@ -39,6 +53,7 @@ const isolationKeys = {
   profiles: ["admin", "isolation", "execution-profiles"] as const,
   executors: ["admin", "isolation", "executors"] as const,
   placements: ["admin", "isolation", "execution-placements"] as const,
+  assignment: (kind: string, id: string) => ["admin", "isolation", "assignment", kind, id] as const,
 };
 
 function unavailableText(what: string, a: Availability): string {
@@ -47,21 +62,37 @@ function unavailableText(what: string, a: Availability): string {
   return `${what[0]!.toUpperCase()}${what.slice(1)} could not be read: ${a.message}`;
 }
 
-/** a read whose success body is not frozen yet: only its failure is interpreted */
-function useUndecodedRead(queryKey: readonly string[], path: string) {
-  return useQuery({ queryKey, retry: false, queryFn: () => api.get<unknown>(path) });
+export function IsolationPanel() {
+  return (
+    <>
+      <ProfilesCard />
+      <ExecutorsCard />
+      <PlacementsCard />
+    </>
+  );
 }
 
-function UndecodedCard(props: { title: string; what: string; intro: string; q: ReturnType<typeof useUndecodedRead>; children?: React.ReactNode }) {
+type Unreadable = { unreadable: true; index: number };
+const isUnreadable = (r: object): r is Unreadable => "unreadable" in r;
+const unreadableKey = (r: Unreadable) => `unreadable-${r.index}`;
+
+function ReadFailure(props: { what: string; q: { isError: boolean; error: unknown; isPending: boolean }; parsed: unknown }) {
   const { q } = props;
-  const body = q.isPending
-    ? "Loading…"
-    : q.isError
-      ? unavailableText(props.what, availabilityOf(q.error))
-      : `The gateway answered, but this console cannot read ${props.what} yet. Nothing is shown rather than a guessed value.`;
+  if (q.isError) return <EmptyState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} body={unavailableText(props.what, availabilityOf(q.error))} />;
+  if (!q.isPending && props.parsed === null)
+    return <EmptyState title={`${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} body={`The gateway's ${props.what} could not be read. Nothing is shown rather than a guessed value.`} />;
+  return null;
+}
+
+type ProfileRow = ProfileVersion | Unreadable;
+
+function ProfilesCard() {
+  const q = useQuery({ queryKey: isolationKeys.profiles, retry: false, queryFn: () => api.get<unknown>("/v1/execution-profiles") });
+  const rows = q.data === undefined ? null : parseProfiles(q.data);
+  const failed = q.isError || (!q.isPending && rows === null);
   return (
     <Card
-      title={props.title}
+      title="Execution profiles"
       actions={
         <Button size="sm" variant="ghost" disabled={q.isFetching} onClick={() => void q.refetch()}>
           Check again
@@ -69,35 +100,141 @@ function UndecodedCard(props: { title: string; what: string; intro: string; q: R
       }
     >
       <div className={v.stack}>
-        <p className={v.dim}>{props.intro}</p>
-        <EmptyState title={q.isPending ? `Loading ${props.what}` : `${props.what[0]!.toUpperCase()}${props.what.slice(1)} unavailable`} body={body} />
-        {props.children}
+        <p className={v.dim}>
+          A profile fixes a workload's filesystem, network, process and resource controls, and the probes its sandbox must report before it
+          receives input. Each version is immutable; a change is a new version. A retired profile makes its calls unavailable; it never falls
+          back to a weaker one.
+        </p>
+        {failed ? (
+          <ReadFailure what="execution profiles" q={q} parsed={rows} />
+        ) : (
+          <Table<ProfileRow>
+            rows={rows ?? []}
+            rowKey={(r) => (isUnreadable(r) ? unreadableKey(r) : r.id)}
+            loading={q.isPending}
+            columns={[
+              {
+                key: "name",
+                header: "Profile",
+                render: (r) =>
+                  isUnreadable(r) ? (
+                    "Unreadable record"
+                  ) : (
+                    <span>
+                      {r.name} v{r.version} {r.shipped && <Badge tone="neutral">Shipped</Badge>}
+                    </span>
+                  ),
+              },
+              { key: "class", header: "Minimum class", render: (r) => (isUnreadable(r) ? "Not reported" : classText(r.minClass)) },
+              {
+                key: "status",
+                header: "Status",
+                render: (r) =>
+                  isUnreadable(r) ? <Badge tone="neutral">Unmeasured</Badge> : r.retiredAt !== null ? <Badge tone="danger">Retired</Badge> : <Badge tone="ok">Live</Badge>,
+              },
+              {
+                key: "relaxed",
+                header: "Looser than restricted",
+                render: (r) => (isUnreadable(r) ? "Not reported" : r.relaxations.length === 0 ? "None" : r.relaxations.join(", ")),
+              },
+              { key: "digest", header: "Digest", render: (r) => (isUnreadable(r) ? "Not reported" : <code title={r.digest}>{r.digest.slice(0, 12)}</code>) },
+            ]}
+            empty={<EmptyState title="No execution profiles" body="The gateway reported no profiles, so every isolable call is refused." />}
+          />
+        )}
       </div>
     </Card>
   );
 }
 
-export function IsolationPanel() {
-  const profiles = useUndecodedRead(isolationKeys.profiles, "/v1/execution-profiles");
-  const placements = useUndecodedRead(isolationKeys.placements, "/v1/execution-placements");
+type PlacementRow = Placement | Unreadable;
+
+function outcomeBadge(p: Placement) {
+  if (p.outcome === "placed") return <Badge tone="ok">Placed</Badge>;
+  if (p.outcome === "mismatch") return <Badge tone="danger">Mismatch</Badge>;
+  return <Badge tone="warn">Refused</Badge>;
+}
+
+function PlacementsCard() {
+  const q = useQuery({ queryKey: isolationKeys.placements, retry: false, queryFn: () => api.get<unknown>("/v1/execution-placements?limit=50") });
+  const parsed = q.data === undefined ? null : parsePlacements(q.data);
+  const failed = q.isError || (!q.isPending && parsed === null);
   return (
-    <>
-      <UndecodedCard
-        title="Execution profiles"
-        what="execution profiles"
-        intro="A profile fixes a workload's filesystem, network, process and resource controls, and the probes its sandbox must report before it receives input. A missing profile makes a call unavailable; it never falls back to a weaker one."
-        q={profiles}
-      />
-      <ExecutorsCard />
-      <UndecodedCard
-        title="Placement decisions"
-        what="placement decisions"
-        intro="Every isolable call is placed on an executor at or above its required class, or refused before any upstream contact with 409 execution_profile_unavailable and one fixed reason. There is no fallback to a lower class."
-        q={placements}
-      >
+    <Card
+      title="Placement decisions"
+      actions={
+        <Button size="sm" variant="ghost" disabled={q.isFetching} onClick={() => void q.refetch()}>
+          Check again
+        </Button>
+      }
+    >
+      <div className={v.stack}>
+        <p className={v.dim}>
+          Every isolable call is placed on an executor at or above its required class, or refused before any upstream contact with 409
+          execution_profile_unavailable and one fixed reason. There is no fallback to a lower class. Evidence is software-attested.
+        </p>
+        {failed ? (
+          <ReadFailure what="placement decisions" q={q} parsed={parsed} />
+        ) : (
+          <>
+            <Table<PlacementRow>
+              rows={parsed?.placements ?? []}
+              rowKey={(r) => (isUnreadable(r) ? unreadableKey(r) : r.id)}
+              loading={q.isPending}
+              columns={[
+                { key: "at", header: "When", render: (r) => (isUnreadable(r) ? "Not reported" : <span title={fmtAt(new Date(r.createdAt).toISOString())}>{ago(new Date(r.createdAt).toISOString())}</span>) },
+                { key: "kind", header: "Workload", render: (r) => (isUnreadable(r) ? "Unreadable record" : r.workloadKind) },
+                {
+                  key: "required",
+                  header: "Required",
+                  render: (r) => (isUnreadable(r) ? "Not reported" : `${classText(r.requiredClass)}, set by ${REQUIRED_BY_TEXT[r.requiredBy] ?? r.requiredBy}`),
+                },
+                { key: "outcome", header: "Outcome", render: (r) => (isUnreadable(r) ? <Badge tone="neutral">Unmeasured</Badge> : outcomeBadge(r)) },
+                {
+                  key: "detail",
+                  header: "Reason or placement",
+                  render: (r) =>
+                    isUnreadable(r) ? (
+                      "Not reported"
+                    ) : r.outcome === "placed" ? (
+                      `${classText(r.appliedClass)} on ${r.executorName ?? "an executor"}`
+                    ) : (
+                      <span>
+                        <code>{r.refusalCode}</code> <span className={v.faint}>{refusalText(r.refusalCode)}</span>
+                      </span>
+                    ),
+                },
+              ]}
+              empty={<EmptyState title="No placement decisions yet" body="No isolable call has been placed or refused." />}
+            />
+            {parsed && parsed.unrecorded.length > 0 && <UnrecordedRefusals rows={parsed.unrecorded} />}
+          </>
+        )}
         <RefusalReasons />
-      </UndecodedCard>
-    </>
+      </div>
+    </Card>
+  );
+}
+
+function UnrecordedRefusals(props: { rows: Array<UnrecordedRefusal | Unreadable> }) {
+  return (
+    <div>
+      <h3 className={v.sectionTitle}>Refused before any placement</h3>
+      <p className={v.dim}>A policy fact did not resolve, or the profile digest named no profile: refused before any executor was offered work.</p>
+      <ul className={v.stackTight}>
+        {props.rows.map((r) =>
+          isUnreadable(r) ? (
+            <li key={unreadableKey(r)}>Unreadable record</li>
+          ) : (
+            <li key={r.auditId}>
+              <code>{r.code ?? "not reported"}</code>
+              {r.unresolvedFact && <span className={v.faint}> · the fact {r.unresolvedFact} did not resolve</span>}
+              <span className={v.faint}> · {ago(new Date(r.at).toISOString())}</span>
+            </li>
+          ),
+        )}
+      </ul>
+    </div>
   );
 }
 
@@ -329,24 +466,78 @@ function RegisterExecutorDialog(props: { onClose: () => void }) {
 }
 
 /**
- * Where an agent or a local MCP server would pick its execution profile. The
- * gateway has no route to assign one, and the profile list is not built yet,
- * so the control is disabled and says why. It never shows a choice it cannot
- * save, and it never picks a weaker profile on its own.
+ * Where an agent or a local MCP server picks its execution profile (decision 7
+ * item 5): `PUT /v1/execution-profile-assignments/:kind/:id`. Choosing a
+ * profile looser than the one in force (or than `restricted`) is a
+ * relaxation: the gateway asks for a step-up, and audits every assignment. It
+ * never picks a profile on its own, and an unknown agent still runs only under
+ * the most restrictive profile whatever is assigned here.
  */
-export function ExecutionProfileSelector(props: { context: string }) {
+export function ExecutionProfileSelector(props: { context: string; targetKind: AssignmentTargetKind; targetId: string }) {
   const reasonId = useId();
+  const act = useAction();
+  const assignment = useQuery({
+    queryKey: isolationKeys.assignment(props.targetKind, props.targetId),
+    retry: false,
+    queryFn: () => api.get<unknown>(`/v1/execution-profile-assignments/${props.targetKind}/${encodeURIComponent(props.targetId)}`),
+  });
+  const profiles = useQuery({ queryKey: isolationKeys.profiles, retry: false, queryFn: () => api.get<unknown>("/v1/execution-profiles") });
+  const current = assignment.data === undefined ? null : parseAssignment(assignment.data);
+  const list = profiles.data === undefined ? null : parseProfiles(profiles.data);
+  const [draft, setDraft] = useState<string | null>(null);
+  const loading = assignment.isPending || profiles.isPending;
+  const blocked = assignment.isError
+    ? unavailableText("this assignment", availabilityOf(assignment.error))
+    : profiles.isError
+      ? unavailableText("execution profiles", availabilityOf(profiles.error))
+      : !loading && (current === null || list === null)
+        ? "The gateway's answer could not be read, so nothing is selected and nothing can be saved."
+        : null;
+  const options = list ? assignableProfiles(list) : [];
+  const value = draft ?? current?.assigned?.id ?? "";
+  const changed = current !== null && value !== (current.assigned?.id ?? "");
+  const save = async () => {
+    const path = `/v1/execution-profile-assignments/${props.targetKind}/${encodeURIComponent(props.targetId)}`;
+    const ok = await act.run(() => withStepUp((h) => stepApi.put(path, { profileId: value === "" ? null : value }, h)), "Execution profile saved");
+    if (ok) {
+      setDraft(null);
+      await assignment.refetch();
+    }
+  };
+  const describedBy = blocked || loading ? reasonId : undefined;
   return (
     <div className={v.stackTight} data-testid="execution-profile-selector">
       <Field label={`Execution profile · ${props.context}`}>
-        <Select disabled value="" aria-describedby={reasonId} onChange={() => undefined}>
-          <option value="">Not available yet</option>
+        <Select disabled={blocked !== null || loading || act.busy} value={value} aria-describedby={describedBy} onChange={(e) => setDraft(e.target.value)}>
+          <option value="">Shipped default · restricted</option>
+          {options
+            .filter((o) => !o.shipped || o.name !== "restricted")
+            .map((o) => (
+              <option key={o.id} value={o.id}>
+                {profileText(o)}
+              </option>
+            ))}
+          {current?.assigned && !options.some((o) => o.id === current.assigned!.id) && <option value={current.assigned.id}>{`${profileText(current.assigned)} (retired)`}</option>}
         </Select>
       </Field>
-      <p id={reasonId} className={v.dim}>
-        Assigning an execution profile is not available yet: this gateway has no route to assign one, and it does not serve the
-        profile list (it answers 501, not built). Nothing is selected here, and no weaker profile is ever chosen on your behalf.
-      </p>
+      {blocked || loading ? (
+        <p id={reasonId} className={v.dim}>
+          {blocked ?? "Loading the profile in force…"}
+        </p>
+      ) : (
+        <p className={v.dim}>
+          In force: {current ? `${profileText(current.effective)} (${current.source === "assigned" ? "assigned" : "the shipped default"})` : "not reported"}. A
+          looser profile is an audited relaxation that needs a step-up.
+        </p>
+      )}
+      {changed && (
+        <div>
+          <Button size="sm" variant="primary" disabled={act.busy} onClick={() => void save()}>
+            Save execution profile
+          </Button>
+        </div>
+      )}
+      {act.error && <p role="alert">{act.error}</p>}
     </div>
   );
 }

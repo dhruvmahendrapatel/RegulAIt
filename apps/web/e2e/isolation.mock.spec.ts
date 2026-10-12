@@ -2,8 +2,8 @@
  * ADR-0190 slice I9: the isolation UI on the real Engines, MCP servers and
  * agent builder pages, against HTTP mocks shaped like the gateway today:
  *  - `/v1/org/settings` and `/v1/executors` are built (I1, I3);
- *  - `/v1/execution-profiles` and `/v1/execution-placements` answer 501 (I2);
- *  - no route assigns a profile to an agent or an MCP server.
+ *  - `/v1/execution-profiles`, `/v1/execution-placements` and
+ *    `/v1/execution-profile-assignments/:kind/:id` are built (I2).
  */
 import { expect, test, type Page, type Route } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
@@ -61,14 +61,50 @@ interface IsolationMock {
   /** held until resolved: the executor list stays loading */
   executorsGate?: Promise<void>;
   registered: unknown[];
+  /** I2: a status other than 200 for the profile and placement reads */
+  profilesStatus: number;
+  placementsBody?: unknown;
+  /** I2: profile assignment by `kind/id`, and the PUT bodies received */
+  assignments: Record<string, string | null>;
+  assignWrites: Array<{ path: string; body: unknown }>;
 }
+
+const AT = "2026-10-12T10:00:00.000Z";
+const prof = (over: Record<string, unknown>) => ({ version: 1, digest: "9".repeat(64), shipped: true, retiredAt: null, createdAt: AT, relaxations: [], ...over });
+const PROFILES = [
+  prof({ id: "p-restricted", name: "restricted", minClass: "user_space_kernel" }),
+  prof({ id: "p-microvm", name: "restricted-microvm", minClass: "microvm", digest: "8".repeat(64) }),
+  prof({ id: "p-engine", name: "engine-worker", minClass: "user_space_kernel", digest: "7".repeat(64), relaxations: ["filesystem.workDir", "resources", "secrets"] }),
+  prof({ id: "p-loose", name: "team-loose", minClass: "hardened_container", shipped: false, digest: "6".repeat(64), relaxations: ["minClass"] }),
+  prof({ id: "p-old", name: "team-old", minClass: "microvm", shipped: false, digest: "5".repeat(64), retiredAt: AT }),
+];
+const PLACEMENTS = {
+  placements: [
+    { id: "pl-1", workloadKind: "mcp_stdio", requiredClass: "microvm", requiredBy: "data_sensitivity", outcome: "refused", refusalCode: "class_below_required", appliedClass: null, executorName: null, profileName: "restricted", profileVersion: 1, createdAt: AT },
+    { id: "pl-2", workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", outcome: "placed", refusalCode: null, appliedClass: "user_space_kernel", executorName: "gvisor-fresh", profileName: "restricted", profileVersion: 1, createdAt: AT },
+  ],
+  refusalsWithoutPlacement: [{ auditId: "a-1", at: AT, code: "policy_unresolved", unresolvedFact: "sensitivity", workloadKind: "mcp_stdio" }],
+  attestationStrength: "software_attested",
+};
 
 async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<IsolationMock> {
   await installBuilderMock(page, { isAdmin: true });
   await installEnginesMock(page);
   const now = Date.now();
-  const m: IsolationMock = { writes: [], stored: { ...strict }, envelope: undefined, failReads: false, failReadsAfterWrite: false, executorsStatus: 200, registered: [], ...init };
-  await page.route(/\/v1\/(org\/settings|executors|execution-profiles|execution-placements)(\/|\?|$)/, async (route) => {
+  const m: IsolationMock = {
+    writes: [],
+    stored: { ...strict },
+    envelope: undefined,
+    failReads: false,
+    failReadsAfterWrite: false,
+    executorsStatus: 200,
+    registered: [],
+    profilesStatus: 200,
+    assignments: {},
+    assignWrites: [],
+    ...init,
+  };
+  await page.route(/\/v1\/(org\/settings|executors|execution-profiles|execution-placements|execution-profile-assignments)(\/|\?|$)/, async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
     if (p === "/v1/org/settings" && req.method() === "GET") {
@@ -91,7 +127,27 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
       if (m.executorsStatus !== 200) return json(route, { error: "forbidden" }, m.executorsStatus);
       return json(route, m.executorsBody !== undefined ? m.executorsBody : { executors: executors(now) });
     }
-    return json(route, { error: "not_built" }, 501);
+    if (p === "/v1/execution-profiles") {
+      if (m.profilesStatus !== 200) return json(route, { error: "forbidden" }, m.profilesStatus);
+      return json(route, { profiles: PROFILES, reference: "restricted" });
+    }
+    if (p === "/v1/execution-placements") {
+      if (m.profilesStatus !== 200) return json(route, { error: "forbidden" }, m.profilesStatus);
+      return json(route, m.placementsBody !== undefined ? m.placementsBody : PLACEMENTS);
+    }
+    const assign = /^\/v1\/execution-profile-assignments\/([a-z_]+)\/([^/]+)$/.exec(p);
+    if (assign) {
+      const key = `${assign[1]}/${decodeURIComponent(assign[2]!)}`;
+      if (req.method() === "PUT") {
+        const body = req.postDataJSON() as { profileId: string | null };
+        m.assignWrites.push({ path: p, body });
+        m.assignments[key] = body.profileId;
+      }
+      const id = m.assignments[key] ?? null;
+      const assigned = id ? PROFILES.find((x) => x.id === id)! : null;
+      return json(route, { target: { kind: assign[1], id: assign[2] }, assigned, effective: assigned ?? PROFILES[0], source: assigned ? "assigned" : "shipped_default" });
+    }
+    return json(route, { error: "not_found" }, 404);
   });
   return m;
 }
@@ -112,12 +168,22 @@ async function openEngines(page: Page) {
   await expect(page.getByRole("heading", { name: "Engines", exact: true, level: 1 })).toBeVisible();
 }
 
-test("Engines: profiles and placements say 501, executors show the gateway's verdicts, and every refusal reason is named", async ({ page }) => {
+test("Engines: profiles and placements are live, executors show the gateway's verdicts, and every refusal reason is named", async ({ page }) => {
   await setup(page);
   await openEngines(page);
-  await expect(page.getByText("Execution profiles unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText("Placement decisions unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText(/This gateway has not built execution profiles yet \(it answers 501/)).toBeVisible();
+  const profileRow = (name: string) => page.getByRole("row").filter({ hasText: new RegExp(`^${name} v1`) });
+  await expect(profileRow("restricted").getByText("Live", { exact: true })).toBeVisible();
+  await expect(profileRow("restricted")).toContainText("None");
+  await expect(profileRow("team-loose")).toContainText("L1 · Hardened container");
+  await expect(profileRow("team-loose")).toContainText("minClass");
+  await expect(profileRow("team-old").getByText("Retired", { exact: true })).toBeVisible();
+  const placement = (text: string) => page.getByRole("row").filter({ hasText: text });
+  await expect(placement("set by the project's data sensitivity").getByText("Refused", { exact: true })).toBeVisible();
+  await expect(placement("set by the project's data sensitivity")).toContainText("class_below_required");
+  await expect(placement("on gvisor-fresh").getByText("Placed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Refused before any placement", { exact: true })).toBeVisible();
+  await expect(page.getByText("· the fact sensitivity did not resolve")).toBeVisible();
+  await expect(page.getByText(/answers 501/)).toHaveCount(0);
   for (const code of ["no_executor", "attestation_stale", "class_below_required", "executor_quarantined", "profile_retired", "policy_unresolved", "execution_profile_mismatch"])
     await expect(page.locator("dt code").filter({ hasText: new RegExp(`^${code}$`) })).toBeVisible();
 
@@ -257,8 +323,20 @@ test("settings: malformed envelopes and a retired warn keep Engines usable and e
   await axe(page);
 });
 
-test("builder and MCP: profile assignment is disabled with its reason; a remote server is external", async ({ page }) => {
+test("Engines: an unreadable placement list and a refused profile read are unavailable, never empty", async ({ page }) => {
+  const m = await setup(page, { placementsBody: { placements: "none" } });
+  await openEngines(page);
+  await expect(page.getByText("Placement decisions unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText("No placement decisions yet", { exact: true })).toHaveCount(0);
+  m.profilesStatus = 403;
+  await openEngines(page);
+  await expect(page.getByText("You are not allowed to read execution profiles.", { exact: true })).toBeVisible();
+  await expect(page.getByText("No execution profiles", { exact: true })).toHaveCount(0);
+});
+
+test("builder and MCP: a stricter profile is assigned without step-up, a looser one is resent once with it; a remote server is external", async ({ page }) => {
   const st = await installBuilderMock(page, { isAdmin: true });
+  const m = await setup(page);
   const agent = st.agents.find((a) => a.name === "Intake reviewer")!;
   await page.goto(`/ui/builder/agents/${agent.id}`);
   await expect(page.getByRole("heading", { level: 1, name: "Intake reviewer" })).toBeVisible();
@@ -266,8 +344,24 @@ test("builder and MCP: profile assignment is disabled with its reason; a remote 
   if (await configure.isVisible()) await configure.click();
   await page.locator("#configure-panel").getByRole("button", { name: /^Autonomy/ }).click();
   const agentSelect = page.getByLabel("Execution profile · agent", { exact: true });
-  await expect(agentSelect).toBeDisabled();
-  await expect(agentSelect).toHaveAccessibleDescription(/no route to assign one/);
+  await expect(agentSelect).toBeEnabled();
+  await expect(agentSelect).toHaveValue("");
+  await expect(page.getByText(/In force: restricted v1 · L2 · User-space kernel sandbox \(the shipped default\)/)).toBeVisible();
+  // a retired profile is never offered
+  await expect(agentSelect.locator("option", { hasText: "team-old" })).toHaveCount(0);
+  await agentSelect.selectOption("p-microvm");
+  await page.getByRole("button", { name: "Save execution profile", exact: true }).click();
+  await expect.poll(() => m.assignWrites.length).toBe(1);
+  expect(m.assignWrites[0]).toEqual({ path: `/v1/execution-profile-assignments/builder_agent/${agent.id}`, body: { profileId: "p-microvm" } });
+  await expect(page.getByText(/In force: restricted-microvm v1 · L3 · MicroVM sandbox \(assigned\)/)).toBeVisible();
+
+  const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/execution-profile-assignments/builder_agent/${agent.id}`, kind: "settings_relax" });
+  await agentSelect.selectOption("p-loose");
+  await page.getByRole("button", { name: "Save execution profile", exact: true }).click();
+  await confirmStepUp(page);
+  await su.expectResentOnce();
+  expect(su.attempts[0]!.body).toEqual({ profileId: "p-loose" });
+  await expect(page.getByText(/In force: team-loose v1 · L1 · Hardened container \(assigned\)/)).toBeVisible();
 
   await page.route("**/v1/servers", (route) =>
     json(route, {
@@ -281,7 +375,9 @@ test("builder and MCP: profile assignment is disabled with its reason; a remote 
   await page.goto("/ui/admin/mcp-servers");
   await expect(page.getByRole("heading", { level: 1, name: "MCP servers", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Show tools on Synthetic stdio" }).click();
-  await expect(page.getByLabel("Execution profile · Synthetic stdio", { exact: true })).toBeDisabled();
+  const serverSelect = page.getByLabel("Execution profile · Synthetic stdio", { exact: true });
+  await expect(serverSelect).toBeEnabled();
+  await expect(serverSelect).toHaveValue("");
   await page.getByRole("link", { name: "Show tools on Synthetic remote" }).click();
   await expect(page.getByText(/This is a remote MCP server: it runs on its own host, which RegulAIt does not isolate/)).toBeVisible();
   await axe(page);
