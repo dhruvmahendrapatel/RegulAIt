@@ -788,7 +788,13 @@ export interface WorkloadIdentityRevokeResult {
   /** unexpired external tokens naming the identity (as actor, or authenticated by one of its credentials) */
   tokensRevoked: number;
   /** delegation grants revoked (`identity_revoked`, descendants `cascade`) */
-  grantsRevoked: string[];
+  grantsRevoked: string[];  /**
+   * the grant cascade runs after the revocation commits (security review Low 6): `incomplete` means some grant could
+   * not be ended on the record (a `workload-identity-cascade-incomplete` row says which); each is still refused at
+   * its next use, because what it rests on is revoked
+   */
+  cascade: "complete" | "incomplete";
+  grantsNotRevoked: string[];
 }
 
 /** `DELETE /v1/workload-identities/:identityId/credentials/:credentialId` (S6): revoked, never deleted */
@@ -797,7 +803,13 @@ export interface WorkloadCredentialRevokeResult {
   /** unexpired tokens it authenticated or that are bound to its key (decision 12) */
   tokensRevoked: number;
   /** grants it authenticated, and their descendants (`credential_revoked` / `cascade`) */
-  grantsRevoked: string[];
+  grantsRevoked: string[];  /**
+   * the grant cascade runs after the revocation commits (security review Low 6): `incomplete` means some grant could
+   * not be ended on the record (a `workload-identity-cascade-incomplete` row says which); each is still refused at
+   * its next use, because what it rests on is revoked
+   */
+  cascade: "complete" | "incomplete";
+  grantsNotRevoked: string[];
 }
 
 /**
@@ -826,6 +838,12 @@ export interface IdentityGrantProposal {
   lastObservedAt: string;
   /** false: no steward holds it, so the PUT would refuse it (422 `grant_exceeds_stewards`); left out of `proposedSet` */
   heldByStewards: boolean;
+  /**
+   * true: every observation was a refusal by the actor's own allow-list (it never ran). Never pre-selected: an admin
+   * opts in per item (security review Medium 3). Only `allow` decisions and `actor-allow-list` refusals are counted;
+   * a Cedar forbid, sponsor denial, guardrail or any other refusal never becomes a proposal.
+   */
+  refusalOnly: boolean;
 }
 
 /** `GET /v1/workload-identities/:identityId/grant-proposals` */
@@ -837,7 +855,9 @@ export interface IdentityGrantProposalsView {
   /** the grant-set revision the proposals were computed against */
   revision: number;
   proposals: IdentityGrantProposal[];
-  /** the current set plus every proposal its stewards hold, at `revision`: the body of the accepting PUT */
+  /** the identity's own grant set at `revision`: the base an admin's per-item selection is merged onto */
+  currentSet: PutAgentGrants;
+  /** the default selection: `currentSet` plus every steward-held proposal that is not `refusalOnly` */
   proposedSet: PutAgentGrants;
   /** observed decisions that can never become an own grant (a connector call naming no object, a target since deleted) */
   unproposable: number;
@@ -852,6 +872,9 @@ export interface IdentityPickerOption {
 
 /** each picker list holds at most this many options (`truncated` says one was cut) */
 export const IDENTITY_PICKER_MAX = 1000;
+/** a server's tool list in the picker holds at most this many names, and all servers together at most the total */
+export const IDENTITY_PICKER_TOOLS_PER_SERVER = 500;
+export const IDENTITY_PICKER_TOOLS_TOTAL = 5000;
 
 /**
  * `GET /v1/identity/picker-sources`: what the identity forms may offer. Only
@@ -876,7 +899,7 @@ export interface IdentityPickerSourcesView {
   roles: IdentityPickerOption[];
   /** S6: active `worker_runtime` identities (label = identifier), for the executor registration picker (ADR-0190) */
   workerIdentities: IdentityPickerOption[];
-  /** S6: true when any list above reached `IDENTITY_PICKER_MAX` */
+  /** S6: true when any list above reached `IDENTITY_PICKER_MAX`, or a tool list its per-server or total cap */
   truncated: boolean;
 }
 

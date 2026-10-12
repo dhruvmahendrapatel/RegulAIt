@@ -1,7 +1,7 @@
 /**
  * ADR-0188 S6 — the workload identities page against a mocked gateway (no
- * database). The page is a preview: routed, not in the navigation. These
- * check that it reads the live S4/S5/S6 routes, that every write is confirmed
+ * database). The page is in the Identity & Access navigation. These check
+ * that it reads the live S4/S5/S6 routes, that every write is confirmed
  * and resent once through the identity_manage step-up with the same body, that
  * a stale grant revision is refused rather than reported as saved, that a
  * private key is refused in the browser before anything is sent, and that no
@@ -42,9 +42,13 @@ const UNHELD_AGENT = U(13);
 const PROPOSALS = {
   identityId: IDENTITY.id, windowDays: 30, since: ISO, revision: 4, unproposable: 1, truncated: false,
   proposals: [
-    { grant: { kind: "agent", agentId: AGENT.id, allowedModes: ["execute"] }, observedCalls: 3, refusedCalls: 3, lastObservedAt: ISO, heldByStewards: true },
-    { grant: { kind: "agent", agentId: UNHELD_AGENT, allowedModes: ["execute"] }, observedCalls: 1, refusedCalls: 1, lastObservedAt: ISO, heldByStewards: false },
+    // allowed before, refused since: pre-selected
+    { grant: { kind: "agent", agentId: AGENT.id, allowedModes: ["execute"] }, observedCalls: 3, refusedCalls: 2, lastObservedAt: ISO, heldByStewards: true, refusalOnly: false },
+    // never ran: offered, but only by ticking it (security review Medium 3)
+    { grant: { kind: "agent", agentId: AGENT.id, allowedModes: ["review"] }, observedCalls: 2, refusedCalls: 2, lastObservedAt: ISO, heldByStewards: true, refusalOnly: true },
+    { grant: { kind: "agent", agentId: UNHELD_AGENT, allowedModes: ["execute"] }, observedCalls: 1, refusedCalls: 1, lastObservedAt: ISO, heldByStewards: false, refusalOnly: true },
   ],
+  currentSet: { tools: [{ serverId: SERVER.id, toolName: "read_record" }], servers: [], connectors: [], roleIds: [ROLE.id], agents: [], revision: 4 },
   proposedSet: {
     tools: [{ serverId: SERVER.id, toolName: "read_record" }], servers: [], connectors: [], roleIds: [ROLE.id],
     agents: [{ agentId: AGENT.id, allowedModes: ["execute"] }], revision: 4,
@@ -162,7 +166,7 @@ async function openIdentity(page: Page) {
   await expect(page.getByRole("heading", { name: IDENTITY.identifier })).toBeVisible();
 }
 
-test.describe("ADR-0188 S6: workload identities (preview)", () => {
+test.describe("ADR-0188 S6: workload identities", () => {
   test.beforeEach(() => {
     current = null;
   });
@@ -170,15 +174,15 @@ test.describe("ADR-0188 S6: workload identities (preview)", () => {
     expect(current?.unmatched ?? [], "every /v1 call this page makes is mocked deliberately").toEqual([]);
   });
 
-  test("lists identities from the live route, stays out of the navigation, and calls no stub", async ({ page }) => {
+  test("lists identities from the live route, is in the Identity & Access navigation, and calls no stub", async ({ page }) => {
     const m = await mockApi(page);
     await page.goto("/ui/admin/workload-identities");
     await expect(page.getByRole("heading", { name: "Workload identities" })).toBeVisible();
     const row = page.getByRole("row", { name: new RegExp(IDENTITY.identifier) });
     await expect(row).toContainText("Avery Admin");
     await expect(row).toContainText("dev");
-    await expect(page.getByRole("note").filter({ hasText: "not in the navigation" })).toBeVisible();
-    await expect(page.locator('a[href*="workload-identities"]')).toHaveCount(0);
+    await expect(page.getByRole("note").filter({ hasText: "cannot be undone" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Workload identities" }).first()).toHaveAttribute("href", /\/admin\/workload-identities$/);
 
     // S6 built the last stub: every control is live
     expect(IDENTITY_ROUTES_NOT_BUILT).toEqual([]);
@@ -390,5 +394,27 @@ test.describe("ADR-0188 S6: workload identities (preview)", () => {
     await su.expectResentOnce();
     expect(su.attempts[1]!.body).toEqual(PROPOSALS.proposedSet);
     await expect(page.getByText("Proposed grants accepted.")).toBeVisible();
+  });
+
+  test("a proposal that never ran is not pre-selected, and is added only when ticked", async ({ page }) => {
+    await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/workload-identities/${IDENTITY.id}/grants`, kind: "identity_manage" });
+    await openIdentity(page);
+    await page.getByRole("button", { name: "Propose grants from observed use" }).click();
+    const allowedBefore = page.getByRole("checkbox", { name: `Include Agent invocation; modes: execute on ${AGENT.name}` });
+    const neverRan = page.getByRole("checkbox", { name: `Include Agent invocation; modes: review on ${AGENT.name}` });
+    await expect(allowedBefore).toBeChecked();
+    await expect(neverRan).not.toBeChecked();
+    await expect(page.getByRole("row", { name: /modes: review/ })).toContainText("Never ran: every call was refused for lack of this grant.");
+    // the proposal no steward holds cannot be selected at all
+    await expect(page.getByRole("row", { name: /no steward holds it/ }).getByRole("checkbox")).toHaveCount(0);
+    await neverRan.check();
+    await page.getByRole("button", { name: "Accept proposals" }).click();
+    const confirm = page.getByRole("dialog", { name: "Accept proposed grants?" });
+    await expect(confirm).toContainText("never been allowed to use");
+    await confirm.getByRole("button", { name: "Accept proposals" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ ...PROPOSALS.currentSet, agents: [{ agentId: AGENT.id, allowedModes: ["execute", "review"] }] });
   });
 });

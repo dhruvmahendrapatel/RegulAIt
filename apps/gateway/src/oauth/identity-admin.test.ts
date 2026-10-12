@@ -6,10 +6,12 @@
  * `zz-adr0188-s6-identity-admin.test.ts`.
  */
 import { describe, expect, it } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, webcrypto } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { calculateJwkThumbprint } from "jose";
 import { makeCert } from "../testing/x509-fixtures.js";
 import { certificateThumbprint, SPIFFE_TRUST_BUNDLES_ENV } from "./x509.js";
-import { IdentityAdminError, identityCreateStepUp, credentialAddStepUp, prepareCredential, type PreparedCredential } from "./identity-admin.js";
+import { IdentityAdminError, identityCreateStepUp, credentialAddStepUp, prepareCredential, withProposals, type PreparedCredential } from "./identity-admin.js";
 
 const NOW = new Date();
 const NO_ENV: NodeJS.ProcessEnv = {};
@@ -113,5 +115,48 @@ describe("step-up facts bind exactly the write", () => {
     const c2 = credentialAddStepUp(id, { kind: "spiffe_id", spiffeId: "spiffe://example.org/b" });
     expect(c1.facts).toMatchObject({ op: "credential_add", identityId: id });
     expect(c1.facts.credentialDigest).not.toBe(c2.facts.credentialDigest);
+  });
+});
+
+describe("security review fixes (PR #368), without a database", () => {
+  it("Low 5: a certificate credential carries its PUBLIC KEY's RFC 7638 thumbprint, the same value its JWK would", async () => {
+    const cert = await makeCert({ name: "s6-spki" });
+    const out = await ok(prepareCredential({ kind: "x509", certificatePem: cert.pem, selfSigned: true }, NOW, NO_ENV));
+    const jwk = (await webcrypto.subtle.exportKey("jwk", cert.key.publicKey)) as { kty: string; crv: string; x: string; y: string };
+    const asJwk = await ok(prepareCredential({ kind: "jwk", publicJwk: { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y } }, NOW, NO_ENV));
+    expect(out.spkiThumbprint).toBe(await calculateJwkThumbprint({ kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }, "sha256"));
+    expect(out.spkiThumbprint).toBe(asJwk.jwkThumbprint);
+    expect(asJwk.spkiThumbprint).toBeNull();
+  });
+
+  it("Medium 3: proposals merge onto a set without changing it, per target", () => {
+    const set = { tools: [], servers: [], agents: [{ agentId: "a", allowedModes: ["plan"] }], connectors: [], roleIds: [], revision: 3 };
+    const out = withProposals(set, [
+      { kind: "agent", agentId: "a", allowedModes: ["execute"] },
+      { kind: "connector", connectorId: "c", mode: "read", allowedObjects: ["x"] },
+      { kind: "connector", connectorId: "c", mode: "readwrite", allowedObjects: ["y"] },
+    ]);
+    expect(out.agents).toEqual([{ agentId: "a", allowedModes: ["plan", "execute"] }]);
+    expect(out.connectors).toEqual([{ connectorId: "c", mode: "readwrite", allowedObjects: ["x", "y"] }]);
+    expect(out.revision).toBe(3);
+    expect(set.agents[0]!.allowedModes).toEqual(["plan"]);
+  });
+
+  it("Medium 2: migration 0193 is the next journal entry, its `when` strictly after the previous, and spells the query's index predicates", () => {
+    const root = new URL("../../../../packages/db/migrations/", import.meta.url);
+    const journal = JSON.parse(readFileSync(new URL("meta/_journal.json", root), "utf8")) as { entries: Array<{ idx: number; when: number; tag: string }> };
+    const at = journal.entries.findIndex((e) => e.tag === "0193_identity_s6_review");
+    expect(at).toBeGreaterThan(0);
+    const mine = journal.entries[at]!;
+    expect(mine.idx).toBe(journal.entries[at - 1]!.idx + 1);
+    for (const e of journal.entries.slice(0, at)) expect(mine.when).toBeGreaterThan(e.when);
+    for (const e of journal.entries.slice(at + 1)) expect(e.when).toBeGreaterThan(mine.when);
+    const migration = readFileSync(new URL("0193_identity_s6_review.sql", root), "utf8");
+    const source = readFileSync(new URL("./identity-admin.ts", import.meta.url), "utf8");
+    expect(migration).toContain(`WHERE "actor_identity_id" IS NOT NULL AND ("detail" ->> 'receiptClass') = 'decision'`);
+    expect(migration).toContain(`WHERE "actor_identity_id" IS NULL AND "detail" ? 'delegation' AND ("detail" ->> 'receiptClass') = 'decision'`);
+    expect(source).toContain("where actor_identity_id = ${identityId} and (detail ->> 'receiptClass') = 'decision' and at > ${since}");
+    expect(source).toContain("where actor_identity_id is null and detail ? 'delegation' and (detail ->> 'receiptClass') = 'decision'");
+    expect(source).toContain("set local statement_timeout");
   });
 });

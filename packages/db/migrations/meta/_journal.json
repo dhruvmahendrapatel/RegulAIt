@@ -1282,6 +1282,13 @@
       "when": 1785127000000,
       "tag": "0192_ai_bom_signoff_audit_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 193,
+      "version": "7",
+      "when": 1785128000000,
+      "tag": "0193_identity_s6_review",
+      "breakpoints": true
     }
   ]
 }

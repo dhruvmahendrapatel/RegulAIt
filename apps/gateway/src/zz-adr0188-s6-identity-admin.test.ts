@@ -14,7 +14,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, webcrypto } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   and,
@@ -37,9 +37,9 @@ import {
 import { stepUpActionDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { resolveDeployMode } from "./deploy-posture.js";
-import { createRootGrant } from "./delegation.js";
+import { createRootGrant, loadLiveChain } from "./delegation.js";
 import { agentScopeItem, resolveTrustDomain } from "./in-process-delegation.js";
-import { identityCreateStepUp } from "./oauth/identity-admin.js";
+import { grantCascadeTestHooks, identityCreateStepUp } from "./oauth/identity-admin.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -404,38 +404,76 @@ describe("credentials", () => {
 });
 
 describe("GET /v1/workload-identities/:id/grant-proposals", () => {
-  it("proposes what was observed and not granted; proposedSet holds only what a steward holds; accepted through the PUT", async () => {
+  it("proposes only allowed use and own-allow-list refusals; refusal-only items are never pre-selected; accepted through the PUT; the read is audited", async () => {
     const steward = await mkUser("prop-steward");
     const held = await mkAgent("prop-held");
+    const neverRan = await mkAgent("prop-never-ran");
     const unheld = await mkAgent("prop-unheld");
     const already = await mkAgent("prop-already");
-    for (const a of [held, already]) expect((await grantUserAgent(steward.id, a)).statusCode).toBeLessThan(300);
+    const forbidden = await mkAgent("prop-forbidden");
+    const sponsorDenied = await mkAgent("prop-sponsor-denied");
+    for (const a of [held, neverRan, already, forbidden, sponsorDenied]) expect((await grantUserAgent(steward.id, a)).statusCode).toBeLessThan(300);
     const ident = await agentIdentity("prop-subject", steward.id);
     await putIdentityGrants(db, ident.id, { tools: [], servers: [], agents: [{ agentId: already, allowedModes: ["plan"] }], connectors: [], roleIds: [], revision: 0 }, null);
     const server = await inject("POST", "/v1/servers", AUTH, { name: `s6-prop-server-${RUN}`, url: "http://127.0.0.1:9", allowPrivateRanges: true });
     expect(server.statusCode, server.body).toBe(201);
 
     // observed decisions, stamped with the identity as the acting agent the way the governed paths stamp them
-    const stamp = { actorIdentityId: ident.id, delegationGrantId: randomUUID(), actorChain: [ident.id] };
+    // a REAL grant: from the v2 boundary on, decision-fact capture refuses a row naming a grant that does not exist
+    const realGrant = await createRootGrant(db, {
+      sponsorUserId: steward.id,
+      actorIdentityId: ident.id,
+      scope: [agentScopeItem(already, "plan")],
+      capMicros: null,
+      environment: ENV,
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+      projectId: null,
+      binding: { kind: "in_process" },
+    });
+    const stamp = { actorIdentityId: ident.id, delegationGrantId: realGrant.id, actorChain: [ident.id] };
     const decision = (values: Record<string, unknown>) =>
-      runWithAuditActor(stamp, () => db.insert(auditLog).values({ userId: steward.id, ruleChain: [], reason: "s6 observed", ...values } as never));
+      // the insert must RUN inside the actor context: a drizzle query is a lazy thenable, so returning it unawaited
+      // executes it after `run` has returned, with no stamp (the CI failure on bee0a47: no row named the identity)
+      runWithAuditActor(stamp, async () => {
+        await db.insert(auditLog).values({ userId: steward.id, ruleChain: [], reason: "s6 observed", ...values } as never);
+      });
+    // guard the fixture itself: every observed row really carries the identity
+    const stampedRows = async () =>
+      (
+        await db.execute<{ n: string }>(
+          sql`select count(*) as n from audit_log where actor_identity_id = ${ident.id} or (actor_identity_id is null and detail->'delegation'->>'actorIdentityId' = ${ident.id})`,
+        )
+      ).rows[0]!.n;
+    // held: allowed once (sponsor_only at the time), then refused twice for lack of its own grant
+    await decision({ objectType: "agent", objectId: held, effect: "allow", ruleId: "agent-allow-list", detail: { mode: "execute", receiptClass: "decision" } });
     for (let i = 0; i < 2; i++) await decision({ objectType: "agent", objectId: held, effect: "deny", ruleId: "actor-allow-list", detail: { phase: "delegated-dispatch", mode: "execute", receiptClass: "decision" } });
+    // never ran: refused for lack of its own grant only
+    await decision({ objectType: "agent", objectId: neverRan, effect: "deny", ruleId: "actor-allow-list", detail: { mode: "execute", receiptClass: "decision" } });
     await decision({ objectType: "agent", objectId: unheld, effect: "deny", ruleId: "actor-allow-list", detail: { mode: "execute", receiptClass: "decision" } });
     await decision({ objectType: "agent", objectId: already, effect: "allow", ruleId: "agent-allow-list", detail: { mode: "plan", receiptClass: "decision" } });
+    // NOT evidence of use (security review Medium 3): a Cedar forbid, a sponsor denial, an approval hold
+    await decision({ objectType: "agent", objectId: forbidden, effect: "deny", ruleId: "abac-forbid", detail: { mode: "execute", receiptClass: "decision" } });
+    await decision({ objectType: "agent", objectId: sponsorDenied, effect: "deny", ruleId: "agent-allow-list", detail: { mode: "execute", receiptClass: "decision" } });
+    await decision({ objectType: "agent", objectId: sponsorDenied, effect: "require_approval", ruleId: "approval-required", detail: { mode: "execute", receiptClass: "decision" } });
     // unproposable: a tool the server does not have, and a connector call that named no object
     await decision({ objectType: "mcp_tool", serverId: server.json().id, toolName: "no_such_tool", effect: "deny", ruleId: "actor-allow-list", detail: { receiptClass: "decision" } });
     await decision({ objectType: "connector", objectId: randomUUID(), effect: "deny", ruleId: "actor-allow-list", detail: { operation: "read", receiptClass: "decision" } });
-    // not a decision, and not this identity: ignored
+    // not a decision: ignored
     await decision({ objectType: "agent", objectId: unheld, effect: "allow", ruleId: "x", detail: { mode: "execute", receiptClass: "configuration" } });
 
+    expect(Number(await stampedRows())).toBe(12);
+    const reads = (await auditRows(ident.id, "workload-identity-proposals-read")).length;
     const r = await inject("GET", `/v1/workload-identities/${ident.id}/grant-proposals`, AUTH);
     expect(r.statusCode, r.body).toBe(200);
     const view = r.json();
     expect(view).toMatchObject({ identityId: ident.id, windowDays: 30, revision: 1, unproposable: 2, truncated: false });
     const byAgent = new Map(view.proposals.map((p: { grant: { agentId?: string } }) => [p.grant.agentId, p]));
-    expect(byAgent.get(held)).toMatchObject({ grant: { kind: "agent", agentId: held, allowedModes: ["execute"] }, observedCalls: 2, refusedCalls: 2, heldByStewards: true });
-    expect(byAgent.get(unheld)).toMatchObject({ grant: { kind: "agent", agentId: unheld, allowedModes: ["execute"] }, observedCalls: 1, heldByStewards: false });
-    expect(byAgent.has(already)).toBe(false);
+    expect(byAgent.get(held)).toMatchObject({ grant: { kind: "agent", agentId: held, allowedModes: ["execute"] }, observedCalls: 3, refusedCalls: 2, heldByStewards: true, refusalOnly: false });
+    expect(byAgent.get(neverRan)).toMatchObject({ observedCalls: 1, refusedCalls: 1, heldByStewards: true, refusalOnly: true });
+    expect(byAgent.get(unheld)).toMatchObject({ observedCalls: 1, heldByStewards: false, refusalOnly: true });
+    for (const a of [already, forbidden, sponsorDenied]) expect(byAgent.has(a), a).toBe(false);
+    expect(view.currentSet).toEqual({ tools: [], servers: [], agents: [{ agentId: already, allowedModes: ["plan"] }], connectors: [], roleIds: [], revision: 1 });
+    // the default selection: steward-held AND allowed at least once
     expect(view.proposedSet.revision).toBe(1);
     expect(view.proposedSet.agents).toEqual(
       expect.arrayContaining([
@@ -443,19 +481,21 @@ describe("GET /v1/workload-identities/:id/grant-proposals", () => {
         { agentId: held, allowedModes: ["execute"] },
       ]),
     );
-    expect(view.proposedSet.agents.some((g: { agentId: string }) => g.agentId === unheld)).toBe(false);
-    // reading changed nothing
+    expect(view.proposedSet.agents.map((g: { agentId: string }) => g.agentId).sort()).toEqual([already, held].sort());
+    // reading changed nothing but its own audit row
     expect((await inject("GET", `/v1/workload-identities/${ident.id}/grants`, AUTH)).json().revision).toBe(1);
+    expect((await auditRows(ident.id, "workload-identity-proposals-read")).length).toBe(reads + 1);
 
     // accepted through the ordinary grant PUT (step-up and steward check)
     const accept = await inject("PUT", `/v1/workload-identities/${ident.id}/grants`, AUTH, view.proposedSet);
     expect(accept.statusCode, accept.body).toBe(200);
     expect(accept.json().revision).toBe(2);
     const after = (await inject("GET", `/v1/workload-identities/${ident.id}/grant-proposals`, AUTH)).json();
-    expect(after.proposals.map((p: { grant: { agentId?: string } }) => p.grant.agentId)).toEqual([unheld]);
+    expect(after.proposals.map((p: { grant: { agentId?: string } }) => p.grant.agentId).sort()).toEqual([neverRan, unheld].sort());
     expect((await inject("GET", `/v1/workload-identities/${randomUUID()}/grant-proposals`, AUTH)).statusCode).toBe(404);
   });
 });
+
 
 describe("GET /v1/identity/picker-sources", () => {
   it("offers enabled people, subjects with no identity, environments in use and active workers", async () => {
@@ -556,5 +596,102 @@ describe("authorisation and step-up", () => {
     } finally {
       await db.update(users).set({ totpEnabled: false }).where(eq(users.id, admin.id));
     }
+  });
+});
+
+describe("security review fixes (PR #368)", () => {
+  it("Low 4: revoking an identity also revokes a token bound to one of its keys, even on another identity's grant", async () => {
+    const a = await credentialedIdentity("bind-a");
+    const b = await credentialedIdentity("bind-b");
+    // B's grant, authenticated by B's credential, but its token is bound to A's registered key
+    const grant = await createRootGrant(db, {
+      sponsorUserId: b.steward.id,
+      actorIdentityId: b.ident.id,
+      scope: [agentScopeItem(b.x, "execute")],
+      capMicros: null,
+      environment: ENV,
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+      projectId: null,
+      binding: { kind: "dpop", thumbprint: a.credential.jwkThumbprint, authCredentialId: b.credential.id, audience: AUDIENCE },
+    });
+    const jti = randomBytes(24).toString("base64url");
+    await db.insert(issuedTokens).values({
+      jti, grantId: grant.id, authCredentialId: b.credential.id, signingKid, bindingKind: "dpop", bindingThumbprint: a.credential.jwkThumbprint,
+      audience: AUDIENCE, env: ENV, issuedAt: sql`now()`, expiresAt: sql`now() + interval '300 seconds'`,
+    } as never);
+    const r = await inject("POST", `/v1/workload-identities/${a.ident.id}/revoke`, AUTH, {});
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().tokensRevoked).toBe(1);
+    const [tok] = await db.select().from(issuedTokens).where(eq(issuedTokens.jti, jti));
+    expect(tok!.revokedAt).not.toBeNull();
+    // B's grant itself is not A's to end
+    const [g] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, grant.id));
+    expect(g!.revokedAt).toBeNull();
+  });
+
+  it("Low 5: one key authenticates one identity ever, whether registered as a JWK or inside a certificate", async () => {
+    const steward = await mkUser("spki-steward");
+    const mk = async () => (await inject("POST", "/v1/workload-identities", AUTH, { kind: "worker_runtime", sponsorUserIds: [steward.id], environments: [] })).json().id as string;
+    const [one, two, three, four] = [await mk(), await mk(), await mk(), await mk()];
+    // a key registered as a JWK, then inside a certificate on another identity
+    const certA = await makeCert({ name: `s6-spki-a-${RUN}` });
+    const jwkA = (await webcrypto.subtle.exportKey("jwk", certA.key.publicKey)) as { x: string; y: string };
+    const asJwk = await inject("POST", `/v1/workload-identities/${one}/credentials`, AUTH, { kind: "jwk", publicJwk: { kty: "EC", crv: "P-256", x: jwkA.x, y: jwkA.y } });
+    expect(asJwk.statusCode, asJwk.body).toBe(201);
+    const inCert = await inject("POST", `/v1/workload-identities/${two}/credentials`, AUTH, { kind: "x509", certificatePem: certA.pem, selfSigned: true });
+    expect(inCert.statusCode, inCert.body).toBe(409);
+    expect(inCert.json().error).toBe("credential_already_registered");
+    // and the other way round
+    const certB = await makeCert({ name: `s6-spki-b-${RUN}` });
+    const jwkB = (await webcrypto.subtle.exportKey("jwk", certB.key.publicKey)) as { x: string; y: string };
+    const certFirst = await inject("POST", `/v1/workload-identities/${three}/credentials`, AUTH, { kind: "x509", certificatePem: certB.pem, selfSigned: true });
+    expect(certFirst.statusCode, certFirst.body).toBe(201);
+    const jwkSecond = await inject("POST", `/v1/workload-identities/${four}/credentials`, AUTH, { kind: "jwk", publicJwk: { kty: "EC", crv: "P-256", x: jwkB.x, y: jwkB.y } });
+    expect(jwkSecond.statusCode, jwkSecond.body).toBe(409);
+    expect(jwkSecond.json().error).toBe("credential_already_registered");
+    const [row] = await db.select().from(workloadCredentials).where(eq(workloadCredentials.id, certFirst.json().id));
+    expect(row!.spkiThumbprint).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    for (const id of [two, four]) expect(await db.select().from(workloadCredentials).where(eq(workloadCredentials.identityId, id))).toHaveLength(0);
+  });
+
+  it("Low 6: a grant cascade that fails after the commit is reported and audited, never a bare 500; use-time refusal holds", async () => {
+    const { steward, x, ident, credential } = await credentialedIdentity("cascade");
+    const { grantId } = await externalGrantWithToken(steward.id, ident.id, x, credential.id, credential.jwkThumbprint);
+    grantCascadeTestHooks.failFor = (id) => id === grantId;
+    try {
+      const r = await inject("DELETE", `/v1/workload-identities/${ident.id}/credentials/${credential.id}`, AUTH);
+      expect(r.statusCode, r.body).toBe(200);
+      expect(r.json()).toMatchObject({ cascade: "incomplete", grantsNotRevoked: [grantId], tokensRevoked: 1 });
+      expect(r.json().credential.revokedAt).not.toBeNull();
+    } finally {
+      grantCascadeTestHooks.failFor = undefined;
+    }
+    const [row] = await auditRows(ident.id, "workload-identity-cascade-incomplete");
+    expect(row).toMatchObject({ effect: "deny" });
+    expect(row!.detail).toMatchObject({ phase: "cascade_incomplete", credentialId: credential.id, grantsNotRevoked: [grantId] });
+    // the grant was not ended on the record, but its next use is refused: what it rests on is revoked
+    const [g] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, grantId));
+    expect(g!.revokedAt).toBeNull();
+    const live = await loadLiveChain(db, grantId);
+    expect(live?.failure).not.toBeNull();
+  });
+
+  it("Low 7: a malformed write is refused 400 with a deny row; the picker read is audited", async () => {
+    const before = (await db.select().from(auditLog).where(eq(auditLog.ruleId, "workload-identity-request-invalid"))).length;
+    const bad = await inject("POST", "/v1/workload-identities", AUTH, { kind: "agent", sponsorUserIds: [], environments: [] });
+    expect(bad.statusCode, bad.body).toBe(400);
+    const badParam = await inject("POST", "/v1/workload-identities/not-a-uuid/credentials", AUTH, { kind: "jwk", publicJwk: publicEd25519() });
+    expect(badParam.statusCode, badParam.body).toBe(400);
+    const rows = await db.select().from(auditLog).where(eq(auditLog.ruleId, "workload-identity-request-invalid")).orderBy(auditLog.seq);
+    expect(rows.length).toBe(before + 2);
+    expect(rows.every((x) => x.effect === "deny")).toBe(true);
+    // the deny row names paths and messages, never the submitted values
+    const mine = rows.slice(-2).map((x) => x.detail as { route: string; issues: unknown[] });
+    expect(mine.map((d) => d.route).sort()).toEqual(["POST /v1/workload-identities", "POST /v1/workload-identities/:identityId/credentials"]);
+    expect(JSON.stringify(mine)).not.toMatch(/"kty"|"crv"|Ed25519/);
+
+    const reads = (await db.select().from(auditLog).where(eq(auditLog.ruleId, "identity-picker-sources-read"))).length;
+    expect((await inject("GET", "/v1/identity/picker-sources", AUTH)).statusCode).toBe(200);
+    expect((await db.select().from(auditLog).where(eq(auditLog.ruleId, "identity-picker-sources-read"))).length).toBe(reads + 1);
   });
 });

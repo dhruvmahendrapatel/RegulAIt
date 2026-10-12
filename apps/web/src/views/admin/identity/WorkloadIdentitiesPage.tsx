@@ -2,8 +2,8 @@
  * ADR-0188 S6 — workload identities: an agent principal's identity, its
  * stewards and environments, its OWN grants, and a run's delegation tree.
  *
- * PREVIEW, NOT IN THE NAVIGATION. The route is registered (`/admin/workload-
- * identities`) but no sidebar entry points at it yet. Every control is wired
+ * In the Identity & Access navigation group (ADR-0177 §3: no new group), beside
+ * the credential inventory, now that every identity route is live. Every control is wired
  * to a live route: the S4 list/detail/PATCH/grants routes, the S5
  * delegation-grant list and cascade revoke, and (S6) creating and revoking an
  * identity, its public credentials, the grant proposals from observed use and
@@ -63,7 +63,10 @@ import {
   identityRefusalSentence,
   nameList,
   orderedDelegationTree,
+  defaultProposalSelection,
+  proposalKey,
   proposalLabel,
+  setWithProposals,
   proposalTargetId,
   remainingMicros,
   stewardsAndEnvironmentsChange,
@@ -201,8 +204,8 @@ export default function WorkloadIdentitiesPage() {
       />
       <div className={s.stack}>
         <p role="note" className={s.preview}>
-          Preview: this page is not in the navigation yet. Everything here reads and changes the live gateway, and every
-          change asks you to confirm it&apos;s you.
+          Every change here is made on the live gateway, asks you to confirm it&apos;s you, and is recorded in the audit log.
+          Revoking an identity or a credential cannot be undone.
         </p>
         {write.failure && (
           <ErrorState title="Change not recorded" message={write.failure} onRetry={() => write.setFailure(null)} />
@@ -1103,16 +1106,32 @@ function IdentityCredentials(props: {
   );
 }
 
-/** OWNER DECISION 1: proposals from observed use, accepted only through the grant-set replace */
+
+/**
+ * OWNER DECISION 1: proposals from observed use, accepted only through the grant-set replace. Least privilege
+ * (security review Medium 3): only allowed calls and the agent's own allow-list refusals are evidence; a proposal that
+ * never ran (refusal only) is never pre-selected, and is added only by ticking it.
+ */
 function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boolean; targetName: (id: string) => string; ask: (c: Confirmation) => void }) {
   const [requested, setRequested] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const proposals = useQuery({
     queryKey: workloadIdentityKeys.proposals(props.identity.id),
     queryFn: () => getGrantProposals(props.identity.id),
     enabled: requested,
   });
   const data = proposals.data;
-  const held = data ? data.proposals.filter((p) => p.heldByStewards) : [];
+  // a fresh read resets the selection to the safe default
+  useEffect(() => {
+    if (data) setSelected(defaultProposalSelection(data.proposals));
+  }, [data]);
+  const chosen = data ? data.proposals.filter((p) => p.heldByStewards && selected.has(proposalKey(p))) : [];
+  const toggle = (key: string, on: boolean) => {
+    const next = new Set(selected);
+    if (on) next.add(key);
+    else next.delete(key);
+    setSelected(next);
+  };
   return (
     <>
       <div className={s.heading}>
@@ -1122,8 +1141,9 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
         </Button>
       </div>
       <p>
-        Built from this identity&apos;s governed calls in the last 30 days, allowed and refused. Reading proposals changes nothing;
-        accepting them replaces the own grant set, and only what a steward holds is included.
+        Built from this identity&apos;s calls in the last 30 days that were allowed, or refused only because it lacked its own grant.
+        Calls refused for any other reason are never proposed. Reading proposals changes nothing. Only what a steward holds can be
+        accepted, and a proposal that never ran is added only if you tick it.
       </p>
       {!requested ? null : proposals.isPending ? (
         <SkeletonBlock lines={3} />
@@ -1133,12 +1153,36 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
         <>
           <Table<IdentityGrantProposal>
             rows={data.proposals}
-            rowKey={(p) => JSON.stringify(p.grant)}
+            rowKey={proposalKey}
             empty={<EmptyState title="Nothing to propose" body="Every call observed in the window is already covered by this identity's own grants." />}
             columns={[
+              {
+                key: "include",
+                header: "Include",
+                render: (p) =>
+                  p.heldByStewards ? (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(proposalKey(p))}
+                      aria-label={`Include ${proposalLabel(p.grant)} on ${props.targetName(proposalTargetId(p.grant))}`}
+                      onChange={(e) => toggle(proposalKey(p), e.target.checked)}
+                    />
+                  ) : (
+                    "Not available"
+                  ),
+              },
               { key: "grant", header: "Grant", render: (p) => proposalLabel(p.grant) },
               { key: "target", header: "Target", render: (p) => props.targetName(proposalTargetId(p.grant)) },
-              { key: "observed", header: "Observed", render: (p) => `${p.observedCalls} call(s), ${p.refusedCalls} refused; last ${dateLabel(p.lastObservedAt)}` },
+              {
+                key: "observed",
+                header: "Observed",
+                render: (p) => (
+                  <>
+                    {p.observedCalls} call(s), {p.refusedCalls} refused; last {dateLabel(p.lastObservedAt)}
+                    {p.refusalOnly && <div>Never ran: every call was refused for lack of this grant.</div>}
+                  </>
+                ),
+              },
               {
                 key: "held",
                 header: "Stewards",
@@ -1148,22 +1192,23 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
           />
           {data.unproposable > 0 && <p>{data.unproposable} observed call(s) cannot become an own grant (for example a connector call that named no object).</p>}
           {data.truncated && <p>Only the most recent proposals are shown.</p>}
-          {held.length === 0 ? (
-            <Unavailable label="Accept proposals" reason="No proposal is held by a steward, so accepting would change nothing." />
+          {chosen.length === 0 ? (
+            <Unavailable label="Accept proposals" reason="No proposal is selected, so accepting would change nothing." />
           ) : (
             <Button
               variant="primary"
               disabled={props.busy}
-              onClick={() =>
+              onClick={() => {
+                const next = setWithProposals(data.currentSet, data.proposals, selected);
                 props.ask({
                   title: "Accept proposed grants?",
                   label: "Accept proposals",
                   danger: false,
                   okMessage: "Proposed grants accepted.",
-                  body: `Adds ${held.length} grant(s) that a steward holds. This replaces all of the identity's direct grants and roles at revision ${data.revision}; if another change landed first, nothing is replaced.`,
-                  run: () => replaceIdentityGrants(props.identity.id, data.proposedSet),
-                })
-              }
+                  body: `Adds the ${chosen.length} selected grant(s)${chosen.some((p) => p.refusalOnly) ? ", including some this identity has never been allowed to use" : ""}. This replaces all of the identity's direct grants and roles at revision ${data.revision}; if another change landed first, nothing is replaced.`,
+                  run: () => replaceIdentityGrants(props.identity.id, next),
+                });
+              }}
             >
               Accept proposals
             </Button>
@@ -1173,6 +1218,7 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
     </>
   );
 }
+
 
 function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: CreateWorkloadIdentityBody, what: string) => void }) {
   const pickers = useQuery({ queryKey: workloadIdentityKeys.pickers, queryFn: getIdentityPickerSources });

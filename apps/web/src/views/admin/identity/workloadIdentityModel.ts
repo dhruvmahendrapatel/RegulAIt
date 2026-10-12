@@ -177,6 +177,8 @@ export interface IdentityGrantProposal {
   refusedCalls: number;
   lastObservedAt: string;
   heldByStewards: boolean;
+  /** every observation was a refusal by the agent's own allow-list: never pre-selected, opted into per item */
+  refusalOnly: boolean;
 }
 /** `GET /v1/workload-identities/:identityId/grant-proposals` */
 export interface IdentityGrantProposalsView {
@@ -185,6 +187,9 @@ export interface IdentityGrantProposalsView {
   since: string;
   revision: number;
   proposals: IdentityGrantProposal[];
+  /** the own grant set at `revision`: the base the admin's selection is merged onto */
+  currentSet: PutAgentGrants;
+  /** the server's default selection (steward-held, allowed at least once) */
   proposedSet: PutAgentGrants;
   unproposable: number;
   truncated: boolean;
@@ -609,6 +614,43 @@ export function proposalLabel(g: IdentityGrantProposalGrant): string {
   if (g.kind === "tool") return `Tool ${g.toolName}`;
   if (g.kind === "agent") return `Agent invocation; modes: ${g.allowedModes.join(", ")}`;
   return `Connector ${g.mode === "read" ? "read" : "read and write"}; objects: ${g.allowedObjects.join(", ")}`;
+}
+
+/** a proposal's key within one view */
+export const proposalKey = (p: IdentityGrantProposal) => JSON.stringify(p.grant);
+
+/**
+ * The proposals selected by default: a steward holds it AND it was allowed at least once. A refusal-only proposal
+ * (it never ran) is never pre-selected; the admin opts into it item by item. One no steward holds is never
+ * selectable (the replace would refuse it).
+ */
+export function defaultProposalSelection(proposals: readonly IdentityGrantProposal[]): Set<string> {
+  return new Set(proposals.filter((p) => p.heldByStewards && !p.refusalOnly).map(proposalKey));
+}
+
+/** `set` plus the selected, steward-held proposals, merged per target; `set` is not changed (mirrors the gateway) */
+export function setWithProposals(set: PutAgentGrants, proposals: readonly IdentityGrantProposal[], selected: ReadonlySet<string>): PutAgentGrants {
+  const out = copySet(set);
+  for (const p of proposals) {
+    if (!p.heldByStewards || !selected.has(proposalKey(p))) continue;
+    const g = p.grant;
+    if (g.kind === "tool") {
+      if (!out.tools.some((x) => x.serverId === g.serverId && x.toolName === g.toolName)) out.tools.push({ serverId: g.serverId, toolName: g.toolName });
+    } else if (g.kind === "agent") {
+      const existing = out.agents.find((x) => x.agentId === g.agentId);
+      if (existing) existing.allowedModes = [...new Set([...existing.allowedModes, ...g.allowedModes])].slice(0, GRANT_SET_LIMITS.modes);
+      else out.agents.push({ agentId: g.agentId, allowedModes: [...g.allowedModes] });
+    } else {
+      const existing = out.connectors.find((x) => x.connectorId === g.connectorId);
+      if (existing) {
+        existing.mode = existing.mode === "readwrite" || g.mode === "readwrite" ? "readwrite" : "read";
+        existing.allowedObjects = [...new Set([...existing.allowedObjects, ...g.allowedObjects])].slice(0, GRANT_SET_LIMITS.objects);
+      } else {
+        out.connectors.push({ connectorId: g.connectorId, mode: g.mode, allowedObjects: [...g.allowedObjects] });
+      }
+    }
+  }
+  return out;
 }
 
 export function proposalTargetId(g: IdentityGrantProposalGrant): string {

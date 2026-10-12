@@ -16,6 +16,9 @@ import {
   WORKLOAD_IDENTITY_MAX_STEWARDS,
   WORKLOAD_IDENTITY_STATUSES,
   createIdentityBody,
+  defaultProposalSelection,
+  proposalKey,
+  setWithProposals,
   credentialBody,
   credentialState,
   delegationRefusalMessages,
@@ -267,5 +270,31 @@ describe("S6: credential body", () => {
     expect(credentialState({ ...c, revokedAt: "2026-10-02T00:00:00Z" }, now)).toBe("revoked");
     expect(credentialState({ ...c, notAfter: "2026-10-02T00:00:00Z" }, now)).toBe("expired");
     expect(credentialState({ ...c, notAfter: "garbage" }, now)).toBe("unmeasured");
+  });
+});
+
+describe("S6 review: proposal selection (least privilege)", () => {
+  const p = (modes: string[], held: boolean, refusalOnly: boolean) => ({
+    grant: { kind: "agent" as const, agentId: U(4), allowedModes: modes },
+    observedCalls: 2,
+    refusedCalls: refusalOnly ? 2 : 1,
+    lastObservedAt: "2026-10-12T00:00:00Z",
+    heldByStewards: held,
+    refusalOnly,
+  });
+  const ran = p(["execute"], true, false);
+  const neverRan = p(["review"], true, true);
+  const unheld = p(["admin"], false, true);
+  const base = { tools: [], servers: [], agents: [{ agentId: U(4), allowedModes: ["plan"] }], connectors: [], roleIds: [], revision: 7 };
+  it("pre-selects only steward-held proposals that ran at least once", () => {
+    expect([...defaultProposalSelection([ran, neverRan, unheld])]).toEqual([proposalKey(ran)]);
+  });
+  it("merges only selected, steward-held proposals onto the set, leaving the set unchanged", () => {
+    const all = new Set([ran, neverRan, unheld].map(proposalKey));
+    const out = setWithProposals(base, [ran, neverRan, unheld], all);
+    expect(out.agents).toEqual([{ agentId: U(4), allowedModes: ["plan", "execute", "review"] }]);
+    expect(out.revision).toBe(7);
+    expect(base.agents[0]!.allowedModes).toEqual(["plan"]);
+    expect(setWithProposals(base, [ran, neverRan], defaultProposalSelection([ran, neverRan])).agents[0]!.allowedModes).toEqual(["plan", "execute"]);
   });
 });
