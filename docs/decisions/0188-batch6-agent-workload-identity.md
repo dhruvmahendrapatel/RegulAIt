@@ -1253,7 +1253,7 @@ independent security review:
    paths only, never the values). The proposals and picker-source reads are audited, because they expose user
    emails.
 
-## As built: slice S8 (2026-10-12)
+## As built: slice S8 (2026-10-12, PR #379)
 
 S8 builds decision 8's gateway-to-upstream hop. A server whose `identity_propagation` is `signed_assertion` gets a
 signed assertion on each call: who the call is for and who is acting. OWNER DECISION 6 keeps `none` as the default.
