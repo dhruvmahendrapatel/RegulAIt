@@ -19,6 +19,7 @@ import {
   profileNameOk,
   versionBody,
   parseWorkerIdentities,
+  parsePlacementDetail,
 } from "./isolationModel";
 
 const at = "2026-10-12T10:00:00.000Z";
@@ -77,6 +78,20 @@ describe("worker identities for registering an executor (ADR-0188 S6 picker sour
     });
     expect(parseWorkerIdentities({ workerIdentities: [] })).toEqual({ options: [], truncated: false });
     for (const bad of [null, {}, { workerIdentities: "x" }, []]) expect(parseWorkerIdentities(bad)).toBeNull();
+  });
+});
+
+describe("one placement's evidence", () => {
+  it("reads the audit row and the report hash; anything else is not reported, and a body without an id is null", () => {
+    expect(parsePlacementDetail({ id: "p", reportSha256: "a".repeat(64), audit: { id: "x", ruleId: "execution-placed", reason: "placed" } })).toEqual({
+      id: "p",
+      auditId: "x",
+      auditRuleId: "execution-placed",
+      auditReason: "placed",
+      reportSha256: "a".repeat(64),
+    });
+    expect(parsePlacementDetail({ id: "p", reportSha256: "zz", audit: null })).toMatchObject({ auditId: null, reportSha256: null });
+    for (const bad of [null, {}, [], { id: 1 }]) expect(parsePlacementDetail(bad)).toBeNull();
   });
 });
 

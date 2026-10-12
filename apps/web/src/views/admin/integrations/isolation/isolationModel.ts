@@ -587,6 +587,22 @@ export function parsePlacements(
   };
 }
 
+/** `GET /v1/execution-placements/:placementId`: the decision with the audit row it was recorded under; null when unreadable */
+export function parsePlacementDetail(value: unknown): { id: string; auditId: string | null; auditRuleId: string | null; auditReason: string | null; reportSha256: string | null } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!str(v.id)) return null;
+  const audit = v.audit !== null && typeof v.audit === "object" && !Array.isArray(v.audit) ? (v.audit as Record<string, unknown>) : null;
+  const text = (x: unknown) => (typeof x === "string" && x.length > 0 && x.length <= 4096 ? x : null);
+  return {
+    id: v.id,
+    auditId: audit ? text(audit.id) : null,
+    auditRuleId: audit ? text(audit.ruleId) : null,
+    auditReason: audit ? text(audit.reason) : null,
+    reportSha256: typeof v.reportSha256 === "string" && /^[0-9a-f]{64}$/.test(v.reportSha256) ? v.reportSha256 : null,
+  };
+}
+
 /** a refusal code in words: decision 7's reasons, or the mismatch */
 export const refusalText = (code: string | null): string =>
   code === "execution_profile_mismatch" ? MISMATCH_TEXT : code && Object.hasOwn(REFUSAL_TEXT, code) ? REFUSAL_TEXT[code as RefusalReason] : "Reason not reported.";

@@ -36,6 +36,7 @@ import {
   parseAssignment,
   parseExecutors,
   parseWorkerIdentities,
+  parsePlacementDetail,
   parsePlacements,
   parseProfiles,
   profileText,
@@ -96,6 +97,8 @@ type ProfileRow = ProfileVersion | Unreadable;
 
 function ProfilesCard() {
   const [creating, setCreating] = useState(false);
+  const [versioning, setVersioning] = useState<ProfileVersion | null>(null);
+  const [retiring, setRetiring] = useState<ProfileVersion | null>(null);
   const q = useQuery({ queryKey: isolationKeys.profiles, retry: false, queryFn: () => api.get<unknown>("/v1/execution-profiles") });
   const rows = q.data === undefined ? null : parseProfiles(q.data);
   const failed = q.isError || (!q.isPending && rows === null);
@@ -126,6 +129,8 @@ function ProfilesCard() {
           </p>
         )}
         {creating && rows && <NewProfileDialog profiles={assignableProfiles(rows)} onClose={() => setCreating(false)} />}
+        {versioning && <NewVersionDialog profile={versioning} onClose={() => setVersioning(null)} />}
+        {retiring && <RetireProfileDialog profile={retiring} onClose={() => setRetiring(null)} />}
         {failed ? (
           <ReadFailure what="execution profiles" q={q} parsed={rows} />
         ) : (
@@ -159,6 +164,23 @@ function ProfilesCard() {
                 render: (r) => (isUnreadable(r) ? "Not reported" : r.relaxations.length === 0 ? "None" : r.relaxations.join(", ")),
               },
               { key: "digest", header: "Digest", render: (r) => (isUnreadable(r) ? "Not reported" : <code title={r.digest}>{r.digest.slice(0, 12)}</code>) },
+              {
+                // a live custom profile's latest version: a new version, or retirement (shipped profiles are the strict reference)
+                key: "manage",
+                header: "Manage",
+                align: "right",
+                render: (r) =>
+                  isUnreadable(r) || r.shipped || r.retiredAt !== null || !isLatestVersion(r, rows ?? []) ? null : (
+                    <span>
+                      <Button size="sm" variant="ghost" aria-label={`New version of ${r.name}`} onClick={() => setVersioning(r)}>
+                        New version
+                      </Button>
+                      <Button size="sm" variant="ghost" aria-label={`Retire ${r.name}`} onClick={() => setRetiring(r)}>
+                        Retire
+                      </Button>
+                    </span>
+                  ),
+              },
             ]}
             empty={<EmptyState title="No execution profiles" body="The gateway reported no profiles, so every isolable call is refused." />}
           />
@@ -248,6 +270,108 @@ function NewProfileDialog(props: { profiles: ProfileVersion[]; onClose: () => vo
   );
 }
 
+/** is this the newest version of its profile in the list? */
+const isLatestVersion = (p: ProfileVersion, rows: ProfileRow[]) =>
+  !rows.some((o) => !isUnreadable(o) && o.name === p.name && o.version > p.version);
+
+/**
+ * `POST /v1/execution-profiles/:name/versions`: version n+1 of a custom profile, from its current body, at a chosen
+ * class. Looser than the version it replaces (or than `restricted`) is a relaxation: step-up, audited.
+ */
+function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void }) {
+  const act = useAction();
+  const formId = useId();
+  const [minClass, setMinClass] = useState<string>(props.profile.minClass);
+  const [problem, setProblem] = useState<string | null>(null);
+  const submit = async () => {
+    if (!isClass(minClass)) return setProblem("Choose the minimum isolation class.");
+    setProblem(null);
+    const name = props.profile.name;
+    const ok = await act.run(async () => {
+      const detail = await api.get<unknown>(`/v1/execution-profiles/${encodeURIComponent(name)}`);
+      const body = newProfileBody(versionBody(detail, props.profile.id), name, minClass);
+      if (!body) throw new Error("The profile's current body could not be read. Nothing was created.");
+      return withStepUp((h) => stepUpApi.post(`/v1/execution-profiles/${encodeURIComponent(name)}/versions`, { body }, h));
+    }, `Execution profile ${name} versioned`);
+    if (ok) props.onClose();
+  };
+  return (
+    <Modal
+      open
+      title={`New version of ${props.profile.name}`}
+      onClose={props.onClose}
+      actions={
+        <>
+          <Button onClick={props.onClose}>Cancel</Button>
+          <Button type="submit" form={formId} variant="primary" disabled={act.busy}>
+            Create version
+          </Button>
+        </>
+      }
+    >
+      <form
+        id={formId}
+        className={v.stack}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <p className={v.dim}>
+          Version {props.profile.version + 1} copies every control of version {props.profile.version}. Running workloads keep the version they
+          started with. A lower class is an audited relaxation and needs a step-up.
+        </p>
+        <Field label="Minimum isolation class">
+          <Select value={minClass} onChange={(e) => setMinClass(e.target.value)}>
+            {CLASSES.map((c) => (
+              <option key={c} value={c}>
+                {classText(c)}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {(problem ?? act.error) && <p role="alert">{problem ?? act.error}</p>}
+      </form>
+    </Modal>
+  );
+}
+
+/**
+ * `POST /v1/execution-profiles/:name/retire`: retiring tightens (every call placed under the profile then refuses
+ * `profile_retired`, never a fallback), so it needs no step-up; the gateway audits it.
+ */
+function RetireProfileDialog(props: { profile: ProfileVersion; onClose: () => void }) {
+  const act = useAction();
+  const name = props.profile.name;
+  const retire = async () => {
+    const ok = await act.run(() => stepUpApi.post(`/v1/execution-profiles/${encodeURIComponent(name)}/retire`, {}), `Execution profile ${name} retired`);
+    if (ok) props.onClose();
+  };
+  return (
+    <Modal
+      open
+      title={`Retire ${name}?`}
+      onClose={props.onClose}
+      actions={
+        <>
+          <Button onClick={props.onClose}>Cancel</Button>
+          <Button variant="primary" disabled={act.busy} onClick={() => void retire()}>
+            Retire profile
+          </Button>
+        </>
+      }
+    >
+      <div className={v.stack}>
+        <p>
+          Every version of {name} is retired. Agents and servers assigned to it are refused (profile_retired) until they are assigned another
+          profile; nothing falls back to weaker isolation. A retired profile is never versioned again.
+        </p>
+        {act.error && <p role="alert">{act.error}</p>}
+      </div>
+    </Modal>
+  );
+}
+
 type PlacementRow = Placement | Unreadable;
 
 function outcomeBadge(p: Placement) {
@@ -257,6 +381,7 @@ function outcomeBadge(p: Placement) {
 }
 
 function PlacementsCard() {
+  const [open, setOpen] = useState<string | null>(null);
   const q = useQuery({ queryKey: isolationKeys.placements, retry: false, queryFn: () => api.get<unknown>("/v1/execution-placements?limit=50") });
   const parsed = q.data === undefined ? null : parsePlacements(q.data);
   const failed = q.isError || (!q.isPending && parsed === null);
@@ -305,15 +430,66 @@ function PlacementsCard() {
                       </span>
                     ),
                 },
+                {
+                  key: "open",
+                  header: "Evidence",
+                  align: "right",
+                  render: (r) =>
+                    isUnreadable(r) ? null : (
+                      <Button size="sm" variant="ghost" aria-label={`Evidence for placement ${r.id}`} aria-pressed={open === r.id} onClick={() => setOpen(open === r.id ? null : r.id)}>
+                        Evidence
+                      </Button>
+                    ),
+                },
               ]}
               empty={<EmptyState title="No placement decisions yet" body="No isolable call has been placed or refused." />}
             />
+            {open && <PlacementEvidence key={open} placementId={open} />}
             {parsed && parsed.unrecorded.length > 0 && <UnrecordedRefusals rows={parsed.unrecorded} />}
           </>
         )}
         <RefusalReasons />
       </div>
     </Card>
+  );
+}
+
+/** `GET /v1/execution-placements/:placementId`: one decision with the audit row it was recorded under */
+function PlacementEvidence(props: { placementId: string }) {
+  const q = useQuery({
+    queryKey: ["admin", "isolation", "execution-placement", props.placementId],
+    retry: false,
+    queryFn: () => api.get<unknown>(`/v1/execution-placements/${encodeURIComponent(props.placementId)}`),
+  });
+  const detail = q.data === undefined ? null : parsePlacementDetail(q.data);
+  return (
+    <div data-testid="placement-evidence">
+      <h3 className={v.sectionTitle}>Placement evidence</h3>
+      {q.isPending ? (
+        <p className={v.dim}>Loading…</p>
+      ) : q.isError ? (
+        <p className={v.dim}>{unavailableText("this placement", availabilityOf(q.error))}</p>
+      ) : !detail ? (
+        <p className={v.dim}>The gateway's answer could not be read. Nothing is shown rather than a guessed value.</p>
+      ) : (
+        <dl className={v.stackTight}>
+          <div>
+            <dt>Audit record</dt>
+            <dd>
+              <code>{detail.auditId ?? "not reported"}</code> {detail.auditRuleId && <span className={v.faint}>({detail.auditRuleId})</span>}
+            </dd>
+          </div>
+          <div>
+            <dt>Recorded reason</dt>
+            <dd className={v.dim}>{detail.auditReason ?? "Not reported."}</dd>
+          </div>
+          <div>
+            <dt>Report</dt>
+            <dd>{detail.reportSha256 ? <code>{detail.reportSha256.slice(0, 16)}</code> : "None (nothing was started)"} · software-attested</dd>
+          </div>
+        </dl>
+      )}
+    </div>
   );
 }
 

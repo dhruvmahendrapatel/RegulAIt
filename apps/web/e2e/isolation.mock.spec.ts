@@ -68,6 +68,8 @@ interface IsolationMock {
   assignments: Record<string, string | null>;
   assignWrites: Array<{ path: string; body: unknown }>;
   profileCreates: unknown[];
+  profileVersions: Array<{ name: string; body: unknown }>;
+  retired: string[];
   builder?: Awaited<ReturnType<typeof installBuilderMock>>;
 }
 
@@ -105,6 +107,8 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
     assignments: {},
     assignWrites: [],
     profileCreates: [],
+    profileVersions: [],
+    retired: [],
     builder,
     ...init,
   };
@@ -135,8 +139,22 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
       m.profileCreates.push(req.postDataJSON());
       return json(route, { ...prof({ id: "p-new", name: "team-new", minClass: "microvm", shipped: false }) }, 201);
     }
-    if (p === "/v1/execution-profiles/restricted") {
-      return json(route, { name: "restricted", versions: [{ ...PROFILES[0], body: { schema: "regulait.execution-profile.v1", name: "restricted", minClass: "user_space_kernel", secrets: "none" } }] });
+    const named = /^\/v1\/execution-profiles\/([a-z0-9-]+)(\/versions|\/retire)?$/.exec(p);
+    if (named && named[2] === "/versions" && req.method() === "POST") {
+      m.profileVersions.push({ name: named[1]!, body: req.postDataJSON() });
+      return json(route, { ...prof({ id: "p-v2", name: named[1], version: 2, minClass: "microvm", shipped: false }) }, 201);
+    }
+    if (named && named[2] === "/retire" && req.method() === "POST") {
+      m.retired.push(named[1]!);
+      return json(route, { name: named[1], versions: [], assignmentsNowRefused: 0 });
+    }
+    if (named && !named[2]) {
+      const pv = PROFILES.find((x) => x.name === named[1]);
+      if (!pv) return json(route, { error: "execution_profile_not_found" }, 404);
+      return json(route, { name: pv.name, versions: [{ ...pv, body: { schema: "regulait.execution-profile.v1", name: pv.name, minClass: pv.minClass, secrets: "none" } }] });
+    }
+    if (p === "/v1/execution-placements/pl-1") {
+      return json(route, { ...PLACEMENTS.placements[0], auditId: "a-pl-1", reportSha256: null, audit: { id: "a-pl-1", at: AT, ruleId: "execution-refused", effect: "deny", reason: "placement refused (class_below_required)", detail: {} } });
     }
     if (p === "/v1/execution-profiles") {
       if (m.profilesStatus !== 200) return json(route, { error: "forbidden" }, m.profilesStatus);
@@ -456,4 +474,31 @@ test("Engines: a new profile starts from a live version, renamed, at the chosen 
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect(m.profileCreates).toEqual([{ body: { schema: "regulait.execution-profile.v1", name: "team-new", minClass: "microvm", secrets: "none" } }]);
+});
+
+test("Engines: a custom profile gets a new version or is retired; shipped ones offer neither; a placement shows its evidence", async ({ page }) => {
+  const m = await setup(page);
+  await openEngines(page);
+  await expect(page.getByRole("button", { name: "New version of restricted", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retire team-old", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "New version of team-loose", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "New version of team-loose" });
+  await dialog.getByLabel("Minimum isolation class", { exact: true }).selectOption("microvm");
+  await dialog.getByRole("button", { name: "Create version", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(m.profileVersions).toEqual([{ name: "team-loose", body: { body: { schema: "regulait.execution-profile.v1", name: "team-loose", minClass: "microvm", secrets: "none" } } }]);
+
+  await page.getByRole("button", { name: "Retire team-loose", exact: true }).click();
+  const retire = page.getByRole("dialog", { name: "Retire team-loose?" });
+  await expect(retire).toContainText("nothing falls back to weaker isolation");
+  await retire.getByRole("button", { name: "Retire profile", exact: true }).click();
+  await expect(retire).toHaveCount(0);
+  expect(m.retired).toEqual(["team-loose"]);
+
+  await page.getByRole("button", { name: "Evidence for placement pl-1", exact: true }).click();
+  const evidence = page.getByTestId("placement-evidence");
+  await expect(evidence).toContainText("a-pl-1");
+  await expect(evidence).toContainText("placement refused (class_below_required)");
+  await expect(evidence).toContainText("None (nothing was started)");
+  await axe(page);
 });
