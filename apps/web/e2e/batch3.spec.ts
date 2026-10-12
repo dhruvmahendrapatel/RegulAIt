@@ -10,11 +10,14 @@ import { expect, test, type Page } from "@playwright/test";
 import { AxeBuilder } from "@axe-core/playwright";
 import { passTotp, reprovisionTotp } from "./totp-sign-in";
 import { activate, escapeToTrigger, expectDialogTrap, typeAt } from "./keyboard-audit";
+import { disposablePassword } from "./demo-credentials";
 
 const state = JSON.parse(readFileSync(fileURLToPath(new URL(".e2e-state.json", import.meta.url)), "utf8")) as { baseUrl: string };
 const BOOT = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
 const RUN = randomUUID();
 const EMAIL = `batch3-${RUN}@example.test`;
+// ADR-0174 §6: never a literal; a fresh password per run for this run's own fixture admin
+const FIXTURE_PASSWORD = disposablePassword("E2E_BATCH3_PASSWORD");
 const SERVER = `batch3-stdio-${RUN}`;
 const CONNECTOR = `batch3-connector-${RUN}`;
 const EXECUTABLE = process.env.E2E_MCP_STDIO_COMMAND;
@@ -47,8 +50,8 @@ test.beforeAll(async ({ browser }) => {
   await page.getByRole("button", { name: "Sign in" }).click();
   await passTotp(page, EMAIL, page.getByLabel("Current (one-time) password"));
   await page.getByLabel("Current (one-time) password").fill(minted.password);
-  await page.getByLabel("New password", { exact: true }).fill("Batch3-Local-Password!");
-  await page.getByLabel("Confirm new password").fill("Batch3-Local-Password!");
+  await page.getByLabel("New password", { exact: true }).fill(FIXTURE_PASSWORD);
+  await page.getByLabel("Confirm new password").fill(FIXTURE_PASSWORD);
   await page.getByRole("button", { name: "Set password & continue" }).click();
   await passTotp(page, EMAIL, page.getByRole("heading", { name: /Welcome back/ }).or(page.getByRole("region", { name: "AI policy acknowledgement" })));
   const literacy = await (await page.request.get(`${state.baseUrl}/v1/me/ai-literacy`)).json();

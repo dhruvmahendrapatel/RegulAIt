@@ -25,6 +25,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { E2E_PASSWORDS } from "./e2e-passwords";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8")) as {
@@ -34,7 +35,7 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
 const SHOTS = process.env.E2E_SHOTS_DIR ?? path.join(here, "screenshots");
 mkdirSync(SHOTS, { recursive: true });
 
-const AVERY_PASSWORD = "E2e-Avery-Context!";
+const AVERY_PASSWORD = E2E_PASSWORDS.averyContext;
 const CSRF = { "x-regulait-csrf": "1" };
 /** a context write is a real transaction (revision + approval + audit row) and
  * then a refetch; on a loaded CI box that round trip can outrun the default
@@ -130,7 +131,7 @@ test("contributor login: one-time password → forced change → Shared context 
     await page.getByRole("button", { name: "Set password & continue" }).click();
   } else {
     // phase2 already consumed the one-time credential (PHASE2_AVERY_PASSWORD)
-    await signIn("E2e-Avery-Custody!");
+    await signIn(E2E_PASSWORDS.averyCustody);
   }
 
   await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();

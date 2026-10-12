@@ -36,13 +36,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * should have a button now"; adding one is a decision, so it should be a diff
  * somebody reviews.
  */
-const DELIBERATELY_API_ONLY = new Map([
-  // TEMPORARY (M-053): ADR-0188 S1 registers revoking a workload credential as
-  // a 501 stub. The workload identities page (S6 preview, adopted from X33)
-  // shows the credentials section disabled, because listing, adding and
-  // revoking credentials are all still 501. Delete this entry when the S6
-  // credential routes go live and the page gains the per-credential Revoke.
-  ["/v1/workload-identities/:x/credentials/:x", "ADR-0188 S1: revoke a workload credential — still a 501 stub; the S6 page's credentials section is disabled until the credential routes are built; remove this entry then"],
+export const DELIBERATELY_API_ONLY = new Map([
+  // (none today). A DELETE that is still a 501 `notBuilt` stub needs no entry:
+  // a stub deletes nothing, so the census skips it until it becomes a real
+  // handler, and an entry for one is reported stale (see staleExemptions).
 ]);
 
 const walk = (dir, out = []) => {
@@ -56,7 +53,7 @@ const walk = (dir, out = []) => {
 };
 
 /** `/v1/grants/agents/:grantId` and `/v1/grants/agents/${id}` both -> `/v1/grants/agents/:x` */
-const norm = (p) =>
+export const norm = (p) =>
   "/" +
   p
     .replace(/\$\{[^}]*\}/g, ":x")
@@ -96,8 +93,54 @@ export function uiCallPaths(src, verb) {
   for (const m of src.matchAll(call)) {
     for (const lit of src.slice(m.index, m.index + 400).matchAll(/[`"'](\/v1\/[^`"']*)[`"']/g)) {
       // a query string is not part of the route
-      out.add(norm(lit[1].split("?")[0]));
+      for (const p of expandLiteralUnions(lit[1].split("?")[0], src)) out.add(norm(p));
     }
+  }
+  return out;
+}
+
+/**
+ * The string-literal union a file declares for `name` (`kind: "servers" | "connectors"`),
+ * or null. Parsed by hand, not by a regex over the file (M-074: linear, no backtracking).
+ */
+export function literalUnionOf(name, src) {
+  for (let at = src.indexOf(name); at !== -1; at = src.indexOf(name, at + name.length)) {
+    const before = src[at - 1];
+    if (before !== undefined && /[\w$.]/.test(before)) continue;
+    let i = at + name.length;
+    while (src[i] === " ") i += 1;
+    if (src[i] !== ":") continue;
+    i += 1;
+    const values = [];
+    for (;;) {
+      while (src[i] === " ") i += 1;
+      if (src[i] !== '"') break;
+      const end = src.indexOf('"', i + 1);
+      if (end === -1) break;
+      values.push(src.slice(i + 1, end));
+      i = end + 1;
+      while (src[i] === " ") i += 1;
+      if (src[i] !== "|") break;
+      i += 1;
+    }
+    if (values.length > 1 && values.every((v) => /^[a-z0-9-]+$/.test(v))) return values;
+  }
+  return null;
+}
+
+/**
+ * `/v1/${kind}/${id}/owner` where the file types `kind` as `"servers" | "connectors"`
+ * is one call to each of `/v1/servers/${id}/owner` and `/v1/connectors/${id}/owner`.
+ * Without the expansion the template collapses to `/v1/:x/:x/owner`, which would
+ * either reach every `…/owner` route (over-count) or none (cry wolf).
+ */
+export function expandLiteralUnions(p, src) {
+  let out = [p];
+  for (const m of p.matchAll(/\$\{([A-Za-z_$][\w$]*)\}/g)) {
+    const values = literalUnionOf(m[1], src);
+    if (!values) continue;
+    out = out.flatMap((q) => values.map((v) => q.split(m[0]).join(v)));
+    if (out.length > 32) return [p];
   }
   return out;
 }
@@ -112,19 +155,41 @@ export function uiCallPaths(src, verb) {
  */
 export function notBuiltRoutes(src) {
   const out = new Set();
+  // ONLY a handler this file defines as a 501 responder counts: a `notBuilt`
+  // imported from elsewhere, or one that came to answer 200, is a real route
+  // and must be reachable like any other
+  if (!fiveOhOneResponders(src).has("notBuilt")) return out;
   for (const m of src.matchAll(/app\.(get|post|put|patch|delete)\(\s*"([^"]+)",\s*notBuilt\)/g)) {
     out.add(`${m[1].toUpperCase()} ${norm(m[2])}`);
   }
   return out;
 }
 
-/** segment-wise match with `:x` as a wildcard on either side */
-const segmentMatch = (route, set) => {
+/** names a file declares as a one-line handler that replies 501 (`const notBuilt = async (_req, reply) => reply.status(501)…`) */
+export function fiveOhOneResponders(src) {
+  const out = new Set();
+  for (const line of src.split("\n")) {
+    const m = /^\s*const\s+([A-Za-z_$][\w$]*)\s*=\s*async\s*\(/.exec(line);
+    if (m && line.includes("=>") && line.includes("reply.status(501)")) out.add(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Segment-wise match with `:x` as a wildcard on either side, EXCEPT the
+ * collection segment (the one after `/v1`): a call that templates the
+ * collection itself (`/v1/${kind}/…`, when `kind` has no declared literal
+ * union to expand) could name any resource, so it is not evidence of reaching
+ * a particular one.
+ */
+export const segmentMatch = (route, set) => {
   if (set.has(route)) return true;
   const want = route.split("/");
   for (const u of set) {
     const got = u.split("/");
-    if (got.length === want.length && got.every((seg, i) => seg === want[i] || seg === ":x" || want[i] === ":x")) return true;
+    if (got.length !== want.length) continue;
+    if (got[2] !== want[2]) continue;
+    if (got.every((seg, i) => seg === want[i] || seg === ":x" || want[i] === ":x")) return true;
   }
   return false;
 };
@@ -173,17 +238,10 @@ function main() {
   }
 
   // A helper may build one segment from a variable the literal shows as a
-  // parameter, so compare segment-wise with `:x` as a wildcard on either side.
-  const isReached = (route) => {
-    if (reached.has(route)) return true;
-    const want = route.split("/");
-    for (const u of reached.keys()) {
-      const got = u.split("/");
-      if (got.length !== want.length) continue;
-      if (got.every((seg, i) => seg === want[i] || seg === ":x" || want[i] === ":x")) return true;
-    }
-    return false;
-  };
+  // parameter, so compare segment-wise with `:x` as a wildcard on either side
+  // (but never for the collection segment; see segmentMatch).
+  const reachedPaths = new Set(reached.keys());
+  const isReached = (route) => segmentMatch(route, reachedPaths);
 
   // ---- the ADD side ------------------------------------------------------
   //
@@ -219,17 +277,22 @@ function main() {
     return 2;
   }
 
-  const orphans = [...served].filter((r) => !isReached(r) && !DELIBERATELY_API_ONLY.has(r)).sort();
-  const staleExemptions = [...DELIBERATELY_API_ONLY.keys()].filter((r) => !served.has(r)).sort();
+  // a DELETE that is still a 501 stub deletes nothing: skipped, like the add side
+  const orphans = [...served].filter((r) => !notBuilt.has(`DELETE ${r}`) && !isReached(r) && !DELIBERATELY_API_ONLY.has(r)).sort();
+  const staleExemptions = [...DELIBERATELY_API_ONLY.keys()]
+    .filter((r) => !served.has(r) || notBuilt.has(`DELETE ${r}`))
+    .sort();
 
+  const stubs = [...served].filter((r) => notBuilt.has(`DELETE ${r}`)).length;
   console.log(
     `affordance parity: ${served.size} DELETE routes, ` +
-      `${served.size - orphans.length - DELIBERATELY_API_ONLY.size} reachable, ` +
-      `${DELIBERATELY_API_ONLY.size} exempt, ${orphans.length} orphaned`,
+      `${served.size - orphans.length - DELIBERATELY_API_ONLY.size - stubs} reachable, ` +
+      `${stubs} still 501 stubs, ${DELIBERATELY_API_ONLY.size} exempt, ${orphans.length} orphaned`,
   );
 
   for (const r of staleExemptions) {
-    console.error(`  STALE EXEMPTION  ${r} — listed as API-only but the gateway no longer serves it`);
+    const why = served.has(r) ? "it is a 501 notBuilt stub, which the census already skips" : "the gateway no longer serves it";
+    console.error(`  STALE EXEMPTION  ${r} — listed as API-only but ${why}`);
   }
   for (const r of orphans) {
     console.error(`  NO UI AFFORDANCE  ${r}`);
