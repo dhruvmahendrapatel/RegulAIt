@@ -404,6 +404,8 @@ export interface McpServer {
   stdio?: { command: string; args: string[] } | null;
   stdioCommandDigest?: string | null;
   admissionState?: string;
+  /** ADR-0188 S8: does each call send this upstream a signed assertion of who it is for? Default `none`. */
+  identityPropagation?: "none" | "signed_assertion";
   ownerUserId?: string | null;
   ownership?: "owned" | "unowned" | "orphaned";
   createdAt?: string;

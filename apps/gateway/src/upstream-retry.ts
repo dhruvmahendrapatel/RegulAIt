@@ -80,6 +80,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
+import { IdentityAssertionRefusedError } from "./mcp-identity-assertion.js";
 import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
 import type { McpUpstreamTransport } from "@regulait/shared";
 
@@ -228,7 +229,8 @@ export interface RetryVerdict {
 export function classifyUpstreamError(err: unknown): RetryVerdict {
   // OURS, not theirs. An adjudication does not become a different adjudication
   // because it is asked again.
-  if (err instanceof McpEgressBlockedError || err instanceof McpAdmissionHeldError) {
+  // ADR-0188 S8: an identity assertion refused at send time (another origin, a failed signature or audit write)
+  if (err instanceof McpEgressBlockedError || err instanceof McpAdmissionHeldError || err instanceof IdentityAssertionRefusedError) {
     return { retryable: false, why: "our_own_refusal" };
   }
   // We already waited exactly as long as the operator said to wait.

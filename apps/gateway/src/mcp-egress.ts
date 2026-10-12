@@ -65,6 +65,7 @@ import {
   type UpstreamLaunch,
 } from "./mcp-transports.js";
 import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
+import { identityAssertionMiddleware, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { timeouts } from "./timeouts.js";
@@ -82,6 +83,12 @@ export interface McpEgressDeps {
    * this function would otherwise read from module state.
    */
   connectDeadlineMs?: number;
+  /**
+   * ADR-0188 S8: the call's outbound identity (an opted-in server only). Its
+   * middleware wraps the guarded fetch, so the assertion rides only requests
+   * the egress guard already allowed; absent = byte-identical to before.
+   */
+  outboundIdentity?: OutboundIdentity | null;
 }
 
 /** Everything one decision needs: the allow-list snapshot and the EFFECTIVE
@@ -553,15 +560,18 @@ export async function guardedMcpConnect(
       release: release!,
     };
   } else {
+    const guarded = createGuardedFetch({
+      allowList: dest.posture.allowList,
+      privateLan: { openByDefault: dest.posture.openByDefault },
+      ...(deps.resolve ? { resolve: deps.resolve } : {}),
+      ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      // ADR-0188 S8: an assertion's "issued" row is written once the destination is allowed, before it leaves
+      ...(deps.outboundIdentity ? { beforeSend: (init?: RequestInit) => deps.outboundIdentity!.beforeSend(init) } : {}),
+    });
     launch = {
       transport: dest.transport,
       url: dest.row.url,
-      fetch: createGuardedFetch({
-        allowList: dest.posture.allowList,
-        privateLan: { openByDefault: dest.posture.openByDefault },
-        ...(deps.resolve ? { resolve: deps.resolve } : {}),
-        ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
-      }),
+      fetch: deps.outboundIdentity ? (identityAssertionMiddleware(deps.outboundIdentity)(guarded) as typeof fetch) : guarded,
     };
   }
 

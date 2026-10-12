@@ -41,6 +41,7 @@
 import type { GovernedActor } from "@regulait/policy-kernel";
 import { DelegationRefusedError } from "./delegation.js";
 import { actorForGrant, delegationRefusalDecision } from "./in-process-delegation.js";
+import { armOutboundIdentity, outboundIdentityFor } from "./mcp-identity-assertion.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -233,6 +234,8 @@ export interface GovernedProtocolCallArgs {
    * refuses, audited; it is never decided as the person alone.
    */
   delegationGrantId?: string | undefined;
+  /** ADR-0188 S8: the gateway data key, which keys the pairwise subject of an outbound identity assertion */
+  dataKey?: string | undefined;
 }
 
 /**
@@ -543,12 +546,28 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
   // ONLY NOW does anything reach the upstream: admission + egress first
   // (AER-024), then the breaker, then the connect.
   await preflightUpstream(db, serverRow);
+  // ADR-0188 S8 (decision 8): an opted-in server's request for this method carries a signed assertion of who it is
+  // for and who is acting. Armed here, after the decision and before the breaker election and the connect, so a
+  // refusal sends nothing and spends no half-open probe.
+  const outboundIdentity = outboundIdentityFor(serverRow);
+  if (outboundIdentity) {
+    const armed = await armOutboundIdentity(outboundIdentity, method, {
+      db,
+      dataKey: args.dataKey,
+      server: serverRow,
+      sponsorUserId: userId,
+      actors: delegatedActor ? delegatedActor.chain.actors : null,
+      toolName: grant,
+      projectId,
+    });
+    if (!armed.ok) return { kind: "denied", decision: armed.decision };
+  }
   const breaker = await breakerAdmits(db, serverRow);
   if (breaker) return { kind: "upstream_circuit_open", reason: breaker.reason, retryAfterMs: breaker.refusedUntilMs };
   let upstream: Client | null = null;
   try {
     try {
-      upstream = await connectUpstream(db, serverRow);
+      upstream = await connectUpstream(db, serverRow, { outboundIdentity });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
         await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
