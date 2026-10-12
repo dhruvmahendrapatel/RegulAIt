@@ -3,8 +3,8 @@
  * two tmpfs-backed volumes (the modelscan layout, decision 104, with one difference: the worker must
  * reach the gateway's model routes, so it sits on the internal `engines` network).
  *
- *   runner (engines network; holds the runner token)          jobs: read-write   results: read-only
- *   worker (engines network; NO runner token, no state volume) jobs: read-only    results: read-write
+ *   runner (engines network; holds the runner key)          jobs: read-write   results: read-only
+ *   worker (engines network; NO runner key, no state volume) jobs: read-only    results: read-write
  *
  * The worker runs garak and never holds the runner credential: it cannot lease, heartbeat, post a
  * result or register. What it holds, for one run at a time, is that run's own virtual key (purpose

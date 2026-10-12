@@ -42,7 +42,7 @@
 # `internal: true` (no route off the host), which the gateway joins and the
 # database and object store do not, and which is NOT in REGULAIT_TRUSTED_PROXIES
 # (a runner cannot speak for a client through forwarding headers). Its only
-# secret is its runner token, which it generates itself and registers (by hash)
+# secret is its runner key, which it generates itself and registers (the public half only)
 # once with a one-time enrolment token.
 # Kubernetes: the same as a deny-all NetworkPolicy except egress to the gateway.
 x-engine-runner: &engine-runner
@@ -511,7 +511,7 @@ services:
   # credential is out of promptfoo's reach.
   #
   #   engine-promptfoo         the runner: the hardened template, on `engines`,
-  #                            its own state volume (the runner token), the job
+  #                            its own state volume (the runner key), the job
   #                            volume read-write, the result volume READ-ONLY.
   #                            It leases, heartbeats and posts results, and
   #                            NEVER runs promptfoo.
@@ -578,7 +578,7 @@ services:
   #
   #   engine-modelscan          the runner: the hardened template, on `engines`
   #                             (reaches only the gateway), its own state volume
-  #                             (the runner token), the job volume read-write,
+  #                             (the runner key), the job volume read-write,
   #                             the result volume READ-ONLY. It fetches the
   #                             artifact (sha256 checked) and never runs
   #                             modelscan.
@@ -646,13 +646,13 @@ services:
   # process that runs garak never holds the runner credential:
   #
   #   engine-garak         the runner: the hardened template, on `engines`, its
-  #                        own state volume (the runner token), the job volume
+  #                        own state volume (the runner key), the job volume
   #                        read-write, the result volume READ-ONLY. It never
   #                        runs garak.
   #   engine-garak-worker  the worker: runs one garak process per probe. It must
   #                        reach the gateway's model routes, so it is on
   #                        `engines` (internal: reaches only the gateway) — but
-  #                        it has NO runner token, NO enrolment token and NO
+  #                        it has NO runner key, NO enrolment token and NO
   #                        state volume: what it holds, for one run at a time, is
   #                        that run's own virtual key (in the job). Read-only
   #                        root, non-root, cap_drop ALL, no-new-privileges; the
@@ -906,7 +906,7 @@ volumes:
   demo_license_keys:
   # ADR-0189 R25 item 12: the install-generated receipt signing key (see the gateway's volumes).
   install_secrets:
-  # ADR-0187 decision 49: the promptfoo runner's own state (its runner token only)
+  # ADR-0187 decision 49: the promptfoo runner's own state (its runner key only)
   engine-promptfoo-state:
   # ADR-0187 B5-P2: the two tmpfs-backed exchange volumes between the promptfoo
   # runner and its worker (a job carries the run's virtual key: never on disk).
@@ -924,7 +924,7 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=160m,uid=10001,gid=10001,mode=0750"
-  # ADR-0187 B5-M: the modelscan runner's own state (its runner token only), and
+  # ADR-0187 B5-M: the modelscan runner's own state (its runner key only), and
   # the two tmpfs-backed exchange volumes between the runner and the scanner
   engine-modelscan-state:
   engine-modelscan-jobs:
@@ -939,7 +939,7 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=64m,uid=10001,gid=10001,mode=0750"
-  # ADR-0187 B5-G: the garak runner's own state (its runner token only), and the
+  # ADR-0187 B5-G: the garak runner's own state (its runner key only), and the
   # two tmpfs-backed exchange volumes between the runner and the worker
   engine-garak-state:
   engine-garak-jobs:

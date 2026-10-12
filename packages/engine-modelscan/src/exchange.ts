@@ -2,7 +2,7 @@
  * ADR-0187 B5-M (decision 104) — HOW THE RUNNER AND THE SCANNER TALK: two containers of one image,
  * and two tmpfs-backed volumes.
  *
- *   runner  (network: engines; holds the runner token)   jobs: read-write   results: read-only
+ *   runner  (network: engines; holds the runner key)   jobs: read-write   results: read-only
  *   scanner (network_mode: none; no token, no state)     jobs: read-only    results: read-write (/out)
  *
  * The scanner can reach nothing at all (no network), never holds the runner credential, and reads

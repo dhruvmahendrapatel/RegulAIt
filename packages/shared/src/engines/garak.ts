@@ -66,7 +66,7 @@ export const GARAK_USAGE_DATA_ENV: Readonly<Record<string, string>> = Object.fre
 
 /**
  * Decision 141: the switch the RUNNER derives from the WORKER's own self-test (the worker runs garak and
- * holds no runner token; its report says its switches are set and that it reaches nothing outside). True
+ * holds no runner key; its report says its switches are set and that it reaches nothing outside). True
  * only when that report is fresh, names the pinned version and passes; else the engine cannot be enabled.
  */
 export const GARAK_WORKER_SELF_TEST_SWITCH = "REGULAIT_GARAK_WORKER_SELFTEST";

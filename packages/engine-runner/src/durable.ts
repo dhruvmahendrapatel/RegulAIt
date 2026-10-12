@@ -1,6 +1,6 @@
 /**
  * PR #205 review round 13 [96]: THE durable write every persisted runner file goes through (the
- * runner token, the pending enrolment record, a retained result envelope). A crash or power loss at
+ * runner key, the pending enrolment record, a retained result envelope). A crash or power loss at
  * any point leaves either the old file or the new one, complete — never a truncated one.
  *
  * Open-source check (ADR-0176): `write-file-atomic` (npm's own, ISC) writes a temp file beside the

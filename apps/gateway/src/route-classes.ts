@@ -736,7 +736,7 @@ export const NON_ADMIN_ROUTES = new Set([
   // checked in-handler (the run-as person must be entitled to the target, as
   // for POST /v1/redteam/runs; an admin sees every run). Enabling, the dials,
   // the self-test, enrolment tokens and runner revocation stay admin-only.
-  // The runner routes are not here: they take a runner token only
+  // The runner routes are not here: they take a runner key only
   // (engine-runner-auth.ts), whose own gate admits them.
   "GET /v1/engines",
   "GET /v1/engines/:engineId",
@@ -797,7 +797,7 @@ export const NON_ADMIN_ROUTES = new Set([
  *  - `user`        any authenticated identity (API key, bootstrap token or
  *                  session cookie); admin-ness is not the gate, though the
  *                  handler still applies the caller's own entitlement;
- *  - `engine-runner` ADR-0187: a runner token (or, to register, a one-time
+ *  - `engine-runner` ADR-0187: a runner key (or, to register, a one-time
  *                  enrolment token) and nothing else — engine-runner-auth.ts;
  *  - `admin`       the DEFAULT. `users.is_admin` is required by the preHandler
  *                  before the handler is ever reached.

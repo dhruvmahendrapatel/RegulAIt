@@ -119,7 +119,7 @@ export const ENGINE_RUNNER_KEY_PREFIX = "rgek_";
 export const ENGINE_ENROLLMENT_TOKEN_PREFIX = "rgee_";
 
 /**
- * THE RUNNER TOKEN'S ENTIRE WORLD (ADR-0187 "Runner API"). A runner token
+ * THE RUNNER CREDENTIAL'S ENTIRE WORLD (ADR-0187 "Runner API"). A runner's self token
  * reaches exactly these routes and nothing else; an enrolment token reaches only
  * the register route. Both are allow-lists: a route added tomorrow is
  * unreachable on either credential until it is named here. No other credential
@@ -155,11 +155,11 @@ export const ENGINE_ENROLLMENT_TTL_MINUTES = { min: 1, max: 60, default: 15 } as
 export const ENGINE_REFUSALS = {
   /** a runner or enrolment token used outside its route allow-list */
   engine_runner_scope: 403,
-  /** a runner route reached with anything but a runner token */
+  /** a runner route reached with anything but a runner's self token */
   engine_runner_token_required: 401,
   /** an enrolment token unknown, used, expired, or for another engine */
   engine_enrollment_invalid: 401,
-  /** a runner token revoked */
+  /** the runner (and so its key and tokens) revoked */
   engine_runner_revoked: 401,
   /** the engine is off: no lease, no run */
   engine_disabled: 409,
@@ -332,10 +332,10 @@ export type RunnerSelfTest = z.infer<typeof runnerSelfTestSchema>;
 /**
  * POST /v1/engine-runner/register (enrolment token as the bearer).
  *
- * PR #205 review [54]: the RUNNER generates its own runner token (`rge_` + 256 CSPRNG bits),
- * persists it before it calls this route, and sends only its sha256 (`tokenHash`). Nothing secret
+ * PR #205 review [54], ADR-0188 S7: the RUNNER generates its own Ed25519 key (`rgek_`),
+ * persists it before it calls this route, and sends only the public JWK (`publicJwk`). Nothing secret
  * comes back, so a lost response loses nothing; a retry with the same enrolment token and the same
- * hash is answered with the same runner (idempotent), a different hash is refused.
+ * key is answered with the same runner (idempotent), a different key is refused.
  */
 export const engineRunnerRegisterSchema = z
   .object({
@@ -375,7 +375,7 @@ export const engineRunnerKeyRotationResponseSchema = z.object({
   retiredCredentialId: z.string().min(1).nullable(),
 });
 
-/** POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] */
+/** POST /v1/engine-runner/self-test (the runner's self token) — PR #205 review [53] */
 export const engineRunnerSelfTestSchema = z.object({ selfTest: runnerSelfTestSchema }).strict();
 
 /**

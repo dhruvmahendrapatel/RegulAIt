@@ -4,7 +4,7 @@
  *
  * The runner builds the job from the lease (adapter.ts): the config the generator wrote and the
  * invariant checked, the gateway base URL, the run-scoped virtual key and the run's deadline. The
- * job carries NOTHING of the runner's own: no runner token, no enrolment token, no state path. The
+ * job carries NOTHING of the runner's own: no runner key, no enrolment token, no state path. The
  * run key is the narrowest credential promptfoo can work with: it reaches only the gateway's compat
  * model routes, for one project, within the run's budget, until the run's deadline, and the gateway
  * revokes it the moment the run is cancelled, times out or ends (ADR-0187 decisions 4 and 5).
@@ -28,7 +28,7 @@ export const promptfooJobSchema = z
     runId: z.string().regex(UUID),
     /** the gateway's compat base URL (the lease's `target.baseUrl`) */
     baseUrl: z.string().min(1).max(2048),
-    /** the run-scoped virtual key (never the runner token) */
+    /** the run-scoped virtual key (never the runner key) */
     apiKey: z.string().min(1).max(512),
     /** the generated promptfoo config (re-checked by `assertGatewayOnly` before promptfoo starts) */
     config: z.record(z.string(), z.unknown()),

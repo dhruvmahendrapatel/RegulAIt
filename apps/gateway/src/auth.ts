@@ -187,7 +187,7 @@ export interface AuthContext {
  */
 export const AUTH_REFUSALS = [
   "disabled",
-  // ADR-0187: a revoked runner token, and an enrolment token that is unknown,
+  // ADR-0187: a revoked runner, and an enrolment token that is unknown,
   // used or expired (only its holder ever sees either)
   "engine_runner_revoked",
   "engine_enrollment_invalid",

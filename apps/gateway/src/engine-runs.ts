@@ -1585,7 +1585,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
   // POST /v1/model-artifacts and the runner's GET /v1/engine-runner/artifacts/:artifactId are B5-M's
   // (model-artifacts.ts)
 
-  // ===== runner routes (runner token only; the scope hook enforces it) ==========
+  // ===== runner routes (runner key only; the scope hook enforces it) ==========
 
   app.post("/v1/engine-runner/lease", async (req, reply) => {
     const runnerId = req.authCtx.engineRunnerId!;

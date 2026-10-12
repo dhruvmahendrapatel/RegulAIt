@@ -106,7 +106,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     judgeSets: [],
     // B5-P2 (ADR-0187 decisions 170 on): promptfoo runs in its own container (the worker) with no
     // state volume, no runner or enrolment token and its own PID namespace; it holds only the run's
-    // virtual key. The runner token stays in the runner container, which never runs promptfoo. The
+    // virtual key. The runner key stays in the runner container, which never runs promptfoo. The
     // worker proves it at run time (the switch above), so decision 79's gate no longer applies.
     credentialIsolation: true,
     // every set that runs here, by class; a set not listed is offensive (fail closed)
@@ -144,7 +144,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     needsModelAccess: false,
     requiresJudge: false,
     judgeSets: [],
-    // B5-M: the scanner already runs in its own container with no network and no runner token
+    // B5-M: the scanner already runs in its own container with no network and no runner key
     // (ADR-0187 decision 104), but the flag stays false until the built image is verified, so
     // decision 79's gate applies: enabling needs the audited, stepped-up acceptance
     credentialIsolation: false,
@@ -188,8 +188,8 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // only with a judge agent behind the gateway, reached with the run's own key (owner decision on open
     // question 24; ADR-0187 decisions 203-206). A run selecting one without a judge is refused.
     judgeSets: garakJudgeSets(),
-    // B5-G (decision 140): two containers from the start. The runner holds the runner token and never
-    // runs garak; the worker runs garak with no runner token and no state volume, and holds only the
+    // B5-G (decision 140): two containers from the start. The runner holds the runner key and never
+    // runs garak; the worker runs garak with no runner key and no state volume, and holds only the
     // run's own virtual key for the run's lifetime. Decision 79's acceptance therefore does not apply.
     credentialIsolation: true,
     // every probe that runs, by class; a probe not listed is offensive (fail closed)

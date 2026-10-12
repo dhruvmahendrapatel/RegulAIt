@@ -1,7 +1,7 @@
 /**
  * ADR-0187 B5-M — the modelscan SCANNER's entrypoint (`node dist/scanner-main.js`), in the scanner
  * container: `network_mode: none`, read-only root, no capabilities, non-root, no state volume and no
- * runner token. It reads jobs from the read-only jobs volume, runs modelscan on each (scan.ts) and
+ * runner key. It reads jobs from the read-only jobs volume, runs modelscan on each (scan.ts) and
  * writes the report to its one writable tmpfs (/out = the results volume). It also writes its own
  * egress self-test there every hour (selftest.ts), which the runner reports to the gateway.
  */

@@ -8398,7 +8398,7 @@ export const virtualKeys = pgTable(
      * NOTHING ELSE: the credential a data-plane proxy holds to ask
      * authorization questions, which before this could only be an admin API
      * key — making proxy compromise equivalent to control-plane admin. The
-     * separation runs BOTH ways: a pdp key cannot dispatch either.
+     * separation ran BOTH ways: a pdp key could not dispatch either.
      * ADR-0188 S7 (migration 0195): 'pdp' keys are retired; the CHECK admits
      * 'pdp' only on a REVOKED row (history), and a PDP client is a workload
      * identity of kind 'pdp' with a registered key. */
@@ -12444,7 +12444,7 @@ export const engineEnrollmentTokens = pgTable(
   (t) => [check("engine_enrollment_tokens_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes'`)],
 );
 
-/** A registered runner. Its `rge_` token reaches only the runner route allow-list. */
+/** A registered runner. Its credential is its workload identity's key (ADR-0188 S7); its self token reaches only the runner route allow-list. */
 export const engineRunners = pgTable(
   "engine_runners",
   {
