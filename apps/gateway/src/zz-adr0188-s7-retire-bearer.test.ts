@@ -21,9 +21,16 @@
  *     nothing else: no admin route, no dispatch, no key minting; taking it back
  *     stops it.
  *
- * Written FIRST against the old bearer path (this version), then switched to
- * the replacement. Each check talks to the credential through one `Caller`, so
- * the switch changes how a request is authenticated and nothing else.
+ * Written FIRST against the old bearer path (commit 942fc5d), then switched to
+ * the replacement (this version). Each property check talks to the credential
+ * through one `Caller`, so the switch changed how a request is authenticated
+ * and nothing else: every property assertion is the one the bearer path met.
+ *
+ * Then what only the new path has: no bearer value authenticates a runner or a
+ * PDP client any more (no grandfathering); a self token never reaches a
+ * governed route; a stolen token is useless off its key; the token endpoint's
+ * refusals; key rotation (decision 12) with audit continuity; revoking a key
+ * refuses what it minted.
  *
  * Global state (M-068): org settings, interception settings and the engines
  * are put back in afterAll; every fixture is scoped by this run's ids.
@@ -32,15 +39,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
+import { decodeJwt, SignJWT } from "jose";
 import {
   and,
+  auditLog,
   authSessions,
   createDb,
   delegationGrants,
+  desc,
   engineRuns,
   eq,
   interceptionSettings,
   INTERCEPTION_SETTINGS_ID,
+  issuedTokens,
+  workloadCredentials,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
@@ -56,6 +68,8 @@ import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxAgentEntitlementsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
+import { deploymentEnvironment } from "./oauth/common.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -68,6 +82,9 @@ const ORIGIN = "http://localhost";
 const CSRF = { "x-regulait-csrf": "1" };
 const DATA_KEY = "s7-synthetic-data-key-".padEnd(64, "q");
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
+// the issuer (the self token's audience and every DPoP proof's htu) and the environment it is minted for
+process.env.REGULAIT_PUBLIC_URL = ORIGIN;
+const ENV = deploymentEnvironment();
 
 const PF_DIGEST = `sha256:${"7".repeat(64)}`;
 const MANIFEST: Record<EngineId, EngineManifestEntry> = {
@@ -112,38 +129,48 @@ interface Caller {
 }
 const call = async (c: Caller, method: Method, url: string, payload?: unknown) => inject(method, url, await c.headers(method, url), payload);
 
-/** OLD PATH: a runner's bearer token, `rge_` + 256 random bits, registered by its sha256 */
-async function enrolRunner(): Promise<{ id: string; caller: Caller; revoke: () => Promise<void> }> {
+/**
+ * NEW PATH (ADR-0188 S7): a runner registers the PUBLIC half of a key it generated; it authenticates with
+ * `private_key_jwt` and a DPoP-bound self token from POST /oauth/token (`client_credentials`).
+ */
+async function enrolRunner(): Promise<{ id: string; caller: Caller; client: TestWorkloadClient; revoke: () => Promise<void> }> {
   const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, { label: `s7-${RUN}` });
   expect(t.statusCode, t.body).toBe(201);
-  const secret = `rge_${randomBytes(32).toString("hex")}`;
+  const client = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
   const r = await inject("POST", "/v1/engine-runner/register", { authorization: `Bearer ${t.json().token}` }, {
     name: `s7-runner-${randomBytes(2).toString("hex")}`,
     ...PF_BUILD(),
     selfTest: selfTest(),
-    tokenHash: createHash("sha256").update(secret).digest("hex"),
+    publicJwk: client.publicJwk,
   });
   expect(r.statusCode, r.body).toBe(201);
   const id = r.json().runnerId as string;
   return {
     id,
-    caller: { headers: async () => ({ authorization: `Bearer ${secret}` }) },
+    client,
+    caller: client,
     revoke: async () => {
       expect((await inject("DELETE", `/v1/engine-runners/${id}`, admin.key)).statusCode).toBe(200);
     },
   };
 }
 
-/** OLD PATH: a 'pdp' virtual key, minted by an admin */
-async function provisionPdp(): Promise<{ caller: Caller; revoke: () => Promise<void> }> {
-  const r = await inject("POST", "/v1/virtual-keys", AUTH, { name: `s7-pdp-${RUN}`, userId: admin.id, purpose: "pdp" });
-  expect(r.statusCode, r.body).toBe(201);
-  const body = r.json() as { id: string; token?: string; key?: string };
-  const token = (body.token ?? body.key)!;
+/** NEW PATH (ADR-0188 S7): a PDP client is a workload identity of kind `pdp` with a registered key */
+async function provisionPdp(): Promise<{ identityId: string; credentialId: string; caller: Caller; client: TestWorkloadClient; revoke: () => Promise<void> }> {
+  const client = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "pdp" });
+  const created = await inject("POST", "/v1/workload-identities", AUTH, { kind: "pdp", sponsorUserIds: [admin.id], environments: [ENV] });
+  expect(created.statusCode, created.body).toBe(201);
+  const identityId = created.json().id as string;
+  const bound = await inject("POST", `/v1/workload-identities/${identityId}/credentials`, AUTH, { kind: "jwk", publicJwk: client.publicJwk });
+  expect(bound.statusCode, bound.body).toBe(201);
+  const credentialId = bound.json().id as string;
   return {
-    caller: { headers: async () => ({ authorization: `Bearer ${token}` }) },
+    identityId,
+    credentialId,
+    client,
+    caller: client,
     revoke: async () => {
-      expect([200, 204]).toContain((await inject("DELETE", `/v1/virtual-keys/${body.id}`, AUTH)).statusCode);
+      expect((await inject("DELETE", `/v1/workload-identities/${identityId}/credentials/${credentialId}`, AUTH)).statusCode).toBe(200);
     },
   };
 }
@@ -219,6 +246,8 @@ beforeAll(async () => {
   // file runs `sponsor_only` (every delegation term still applies) and restores the strict value in afterAll
   restores.push(await relaxAgentEntitlementsForTest(db));
   restores.push(await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" }));
+  // ADR-0188 S7: the issuer signs the runner's and the PDP client's self tokens
+  restores.push(await useTestIssuerKey(db));
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, engines: { manifest: MANIFEST, gatewayBaseUrl: "http://gateway.test/v1" } });
   await app.ready();
   const [prior] = await db.select().from(interceptionSettings).where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
@@ -427,5 +456,187 @@ describe("S7 — the PDP client keeps AER-027's one-question world", () => {
     expect((await call(pdp.caller, "POST", "/v1/authz/check", { userId: alice.id, serverId, toolName: TOOL })).statusCode).toBe(200);
     await pdp.revoke();
     expect((await call(pdp.caller, "POST", "/v1/authz/check", { userId: alice.id, serverId, toolName: TOOL })).statusCode).toBe(401);
+  });
+});
+
+// ===========================================================================
+// What only the new path has
+// ===========================================================================
+describe("S7 — no bearer workload secret authenticates anything (OWNER DECISION 8, no grandfathering)", () => {
+  it("an `rge_`-shaped runner token is not a credential: the runner routes answer 401 to it", async () => {
+    const r = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer rge_${randomBytes(32).toString("hex")}` }, PF_BUILD());
+    expect(r.statusCode, r.body).toBe(401);
+  });
+
+  it("a 'pdp' virtual key can no longer be minted, and no live pdp key row can exist (migration 0195's CHECK)", async () => {
+    const before = (await db.select({ id: virtualKeys.id }).from(virtualKeys)).length;
+    const r = await inject("POST", "/v1/virtual-keys", AUTH, { name: `s7-pdp-retired-${RUN}`, userId: admin.id, purpose: "pdp" });
+    expect(r.statusCode, r.body).toBe(410);
+    expect(r.json().error).toBe("pdp_key_retired");
+    expect((await db.select({ id: virtualKeys.id }).from(virtualKeys)).length).toBe(before);
+    // the database refuses a live one from any writer (a revoked row is history and stays readable)
+    await expect(
+      db.execute(sql`insert into virtual_keys (name, user_id, token_hash, purpose) values (${`s7-live-pdp-${RUN}`}, ${admin.id}, ${createHash("sha256").update(randomBytes(16)).digest("hex")}, 'pdp')`),
+    ).rejects.toThrow();
+    const revoked = await db.execute(
+      sql`insert into virtual_keys (name, user_id, token_hash, purpose, revoked_at) values (${`s7-dead-pdp-${RUN}`}, ${admin.id}, ${createHash("sha256").update(randomBytes(16)).digest("hex")}, 'pdp', now()) returning id`,
+    );
+    expect((revoked as unknown as { rows: unknown[] }).rows).toHaveLength(1);
+  });
+});
+
+describe("S7 — a self token is the workload acting as itself, on its own route only", () => {
+  it("a runner's self token never reaches a governed route (it carries no grant and no sponsor)", async () => {
+    const runner = await enrolRunner();
+    try {
+      for (const [method, url] of [
+        ["POST", "/v1/chat/completions"],
+        ["POST", "/v1/messages"],
+        ["GET", "/v1/models"],
+        ["POST", `/mcp/${serverId}`],
+      ] as const) {
+        const r = await call(runner.caller, method, url, method === "POST" ? {} : undefined);
+        // verified as the RUNNER (its token's audience), then refused by the runner's route allow-list
+        expect(r.statusCode, `${method} ${url} -> ${r.body}`).toBe(403);
+        expect(r.json().error).toBe("engine_runner_scope");
+      }
+      // its token names no grant, no act chain, one control-plane audience, and the runner as itself
+      const claims = decodeJwt(await runner.client.token());
+      expect(claims).toMatchObject({ aud: `${ORIGIN}/v1/engine-runner`, sub: claims.client_id, env: ENV });
+      expect(claims.grant_id).toBeUndefined();
+      expect(claims.act).toBeUndefined();
+      const [row] = await db.select().from(issuedTokens).where(eq(issuedTokens.jti, claims.jti!));
+      expect(row).toMatchObject({ grantId: null, bindingKind: "dpop", bindingThumbprint: await runner.client.jkt() });
+    } finally {
+      await runner.revoke();
+    }
+  });
+
+  it("a PDP client's token does not lease work, and a runner's does not ask authorization questions", async () => {
+    const runner = await enrolRunner();
+    const pdp = await provisionPdp();
+    try {
+      const lease = await call(pdp.caller, "POST", "/v1/engine-runner/lease", PF_BUILD());
+      expect(lease.statusCode, lease.body).toBe(403);
+      expect(lease.json().error).toBe("workload_scope");
+      const ask = await call(runner.caller, "POST", "/v1/authz/check", { userId: alice.id, serverId, toolName: TOOL });
+      expect(ask.statusCode, ask.body).toBe(403);
+      expect(ask.json().error).toBe("engine_runner_scope");
+    } finally {
+      await runner.revoke();
+      await pdp.revoke();
+    }
+  });
+
+  it("a stolen token is useless off its key: no proof, another key's proof, or a replayed proof is 401", async () => {
+    const runner = await enrolRunner();
+    try {
+      const token = await runner.client.token();
+      const url = `${ORIGIN}/v1/engine-runner/lease`;
+      const ath = createHash("sha256").update(token).digest("base64url");
+      const noProof = await inject("POST", "/v1/engine-runner/lease", { authorization: `DPoP ${token}` }, PF_BUILD());
+      expect(noProof.statusCode, noProof.body).toBe(401);
+      const thief = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+      const otherKey = await inject("POST", "/v1/engine-runner/lease", { authorization: `DPoP ${token}`, dpop: await thief.proof("POST", url, { ath }) }, PF_BUILD());
+      expect(otherKey.statusCode, otherKey.body).toBe(401);
+      const proof = await runner.client.proof("POST", url, { ath });
+      expect((await inject("POST", "/v1/engine-runner/lease", { authorization: `DPoP ${token}`, dpop: proof }, PF_BUILD())).statusCode).toBe(204);
+      const replayed = await inject("POST", "/v1/engine-runner/lease", { authorization: `DPoP ${token}`, dpop: proof }, PF_BUILD());
+      expect(replayed.statusCode, replayed.body).toBe(401);
+      expect(replayed.json().code).toBe("dpop_proof_replayed");
+      // a bearer use of the same token is refused (a self token exists only DPoP-bound)
+      expect((await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${token}` }, PF_BUILD())).statusCode).toBe(401);
+    } finally {
+      await runner.revoke();
+    }
+  });
+});
+
+describe("S7 — the token endpoint's self-token grant refuses what it must", () => {
+  it("no DPoP proof, another resource, an unknown key, or a revoked runner: refused, and audited", async () => {
+    const runner = await enrolRunner();
+    const noProof = await runner.client.tokenRequest({ dpop: null });
+    expect(noProof.statusCode, noProof.body).toBe(400);
+    expect((noProof.json() as { error: string }).error).toBe("invalid_dpop_proof");
+    const wrongResource = await runner.client.tokenRequest({ form: { resource: `${ORIGIN}/v1/authz/check` } });
+    expect(wrongResource.statusCode, wrongResource.body).toBe(400);
+    expect((wrongResource.json() as { error: string }).error).toBe("invalid_target");
+    const stranger = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+    const unknown = await stranger.tokenRequest();
+    expect(unknown.statusCode, unknown.body).toBe(401);
+    expect((unknown.json() as { error: string }).error).toBe("invalid_client");
+    expect((await runner.client.tokenRequest()).statusCode).toBe(200);
+    await runner.revoke();
+    const revoked = await runner.client.tokenRequest();
+    expect(revoked.statusCode, revoked.body).toBe(401);
+    expect((revoked.json() as { error: string }).error).toBe("invalid_client");
+    const [refusal] = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "workload-token-refused"), sql`${auditLog.detail} ->> 'code' = 'engine_runner_revoked'`))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(refusal).toBeDefined();
+  });
+
+  it("an agent identity cannot take a self token (only engine runners and PDP clients)", async () => {
+    const agentId = await makeAgent(`s7-not-self-${RUN}`, `s7-not-self-model-${RUN}`);
+    const created = await inject("POST", "/v1/workload-identities", AUTH, { kind: "agent", agentId, sponsorUserIds: [admin.id], environments: [ENV] });
+    expect(created.statusCode, created.body).toBe(201);
+    const agentKey = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+    expect((await inject("POST", `/v1/workload-identities/${created.json().id}/credentials`, AUTH, { kind: "jwk", publicJwk: agentKey.publicJwk })).statusCode).toBe(201);
+    // named by thumbprint: not a self-token client at all; named by its identifier: not of a self-token kind
+    expect((await agentKey.tokenRequest()).statusCode).toBe(401);
+    const byIdentifier = await agentKey.tokenRequest({ form: { client_assertion: await agentKey.assertion({ sub: created.json().identifier }) } });
+    expect([400, 401]).toContain(byIdentifier.statusCode);
+  });
+});
+
+describe("S7 — key rotation (decision 12) and revocation", () => {
+  it("a runner rotates its key: the old key mints nothing new, its live token lasts to expiry, the identity (and audit continuity) is unchanged", async () => {
+    const runner = await enrolRunner();
+    try {
+      const oldToken = await runner.client.token();
+      const [ident] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.engineRunnerId, runner.id));
+      const next = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
+      const rotationProof = (signer: TestWorkloadClient) =>
+        new SignJWT({})
+          .setProtectedHeader({ alg: "EdDSA", typ: "regulait-key-rotation+jwt", jwk: next.publicJwk })
+          .setAudience(`${ORIGIN}/v1/engine-runner/credentials`)
+          .setIssuedAt()
+          .sign(signer.privateKey);
+      // a proof signed by any key but the new one is refused, and nothing is bound
+      const forged = await call(runner.caller, "POST", "/v1/engine-runner/credentials", { publicJwk: next.publicJwk, proof: await rotationProof(runner.client) });
+      expect(forged.statusCode, forged.body).toBe(401);
+      const r = await call(runner.caller, "POST", "/v1/engine-runner/credentials", { publicJwk: next.publicJwk, proof: await rotationProof(next) });
+      expect(r.statusCode, r.body).toBe(201);
+      const creds = await db.select().from(workloadCredentials).where(eq(workloadCredentials.identityId, ident!.id));
+      expect(creds).toHaveLength(2);
+      const retired = creds.find((c) => c.id === r.json().retiredCredentialId)!;
+      expect(retired.revokedAt).toBeNull(); // rotation is not revocation
+      expect(retired.notAfter.getTime()).toBeLessThanOrEqual(Date.now() + 5_000);
+      // the old key mints nothing new; the token it already got still works until it expires
+      runner.client.reset();
+      expect((await runner.client.tokenRequest()).statusCode).toBe(401);
+      const url = `${ORIGIN}/v1/engine-runner/lease`;
+      const ath = createHash("sha256").update(oldToken).digest("base64url");
+      expect((await inject("POST", "/v1/engine-runner/lease", { authorization: `DPoP ${oldToken}`, dpop: await runner.client.proof("POST", url, { ath }) }, PF_BUILD())).statusCode).toBe(204);
+      // the new key works, as the SAME identity
+      expect((await call(next, "POST", "/v1/engine-runner/lease", PF_BUILD())).statusCode).toBe(204);
+      expect(decodeJwt(await next.token()).sub).toBe(ident!.identifier);
+      const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "engine-runner-key-rotated"), eq(auditLog.objectId, ident!.id)));
+      expect(audit).toBeDefined();
+    } finally {
+      await runner.revoke();
+    }
+  });
+
+  it("revoking a key refuses every token it authenticated at the next use (decision 12)", async () => {
+    const pdp = await provisionPdp();
+    const ask = () => call(pdp.caller, "POST", "/v1/authz/check", { userId: alice.id, serverId, toolName: TOOL });
+    expect((await ask()).statusCode).toBe(200);
+    await pdp.revoke();
+    const after = await ask();
+    expect(after.statusCode, after.body).toBe(401);
   });
 });

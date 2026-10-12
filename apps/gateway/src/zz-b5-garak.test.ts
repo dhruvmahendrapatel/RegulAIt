@@ -47,6 +47,7 @@ import { garakAdapter, garakRunnerSelfTest, writeWorkerSelfTest, type GarakExecu
 import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { useTestIssuerKey } from "./testing/workload-client.js";
 import { relaxAgentEntitlementsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
@@ -76,6 +77,8 @@ const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreIdentity: (() => Promise<void>) | undefined;
+// ADR-0188 S7: the runner's own key signs its self tokens' proofs; the issuer signs the tokens
+let restoreIssuerKey: (() => Promise<void>) | undefined;
 let restoreGates: (() => Promise<void>) | undefined;
 // ADR-0188 S4: engine runners register throughout this file (and through the real runner loop), so granting
 // each runner identity its target agents in the fixture is impractical; the file runs `sponsor_only`
@@ -99,7 +102,7 @@ const asAdmin = (method: Method, url: string, payload?: unknown, headers: Record
 const runnerHttp: RunnerHttp = async (url, init) => {
   const u = new URL(url);
   const r = await app.inject({ method: init.method as Method, url: u.pathname, headers: init.headers, ...(init.body !== undefined ? { payload: init.body } : {}) });
-  return { status: r.statusCode, json: async () => (r.body ? JSON.parse(r.body) : null) };
+  return { status: r.statusCode, headers: r.headers as Record<string, unknown>, json: async () => (r.body ? JSON.parse(r.body) : null) };
 };
 
 async function makeUser(email: string, isAdmin = false) {
@@ -233,6 +236,7 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreIssuerKey = await useTestIssuerKey(db);
   restoreAgentEntitlements = await relaxAgentEntitlementsForTest(db);
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" });
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), engines: { manifest: MANIFEST, gatewayBaseUrl: GATEWAY_BASE } });
@@ -274,7 +278,7 @@ beforeAll(async () => {
   const p = await inject("POST", "/v1/projects", AUTH, { name: `b5g-project-${RUN}` });
   expect(p.statusCode, p.body).toBe(201);
   projectId = p.json().id;
-  client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp });
+  client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: ORIGIN, http: runnerHttp });
   workerResults = await mkdtemp(path.join(tmpdir(), "b5g-results-"));
 }, 180_000);
 
@@ -286,6 +290,7 @@ afterAll(async () => {
   await db.update(orgSettings).set({ ...BATCH5_STRICT_DEFAULTS }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   await restoreGates?.();
   await restoreAgentEntitlements?.();
+  await restoreIssuerKey?.();
   await restoreIdentity?.();
   await rm(workerResults, { recursive: true, force: true });
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;

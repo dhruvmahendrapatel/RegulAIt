@@ -71,6 +71,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { engineRunTestHooks, engineRuntime, runEngineRunSweep, runEngineScheduleSweep, setEngineRuntime } from "./engine-runs.js";
 import { setEngineDetectionScrub } from "./engine-scrub.js";
+import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -109,6 +110,8 @@ let restoreGates: (() => Promise<void>) | undefined;
 // each runner identity its target agents in the fixture is impractical; the file runs `sponsor_only`
 // (every delegation term still applies) and restores the strict default in afterAll.
 let restoreAgentEntitlements: (() => Promise<void>) | undefined;
+// ADR-0188 S7: runners authenticate with their own key's DPoP-bound self token, which the issuer signs
+let restoreIssuerKey: (() => Promise<void>) | undefined;
 let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean } | null = null;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
 let alice: { id: string; key: { authorization: string } };
@@ -121,8 +124,14 @@ let otherProjectId: string;
 let pfRunner: Awaited<ReturnType<typeof enrol>>;
 
 type Method = "GET" | "PUT" | "POST" | "PATCH" | "DELETE";
-const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
-  app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
+/** ADR-0188 S7: `headers` may be a runner's key (`TestWorkloadClient`): its self token and a fresh DPoP proof per request */
+const inject = async (method: Method, url: string, headers: Record<string, string> | TestWorkloadClient, payload?: unknown) =>
+  app.inject({
+    method,
+    url,
+    headers: headers instanceof TestWorkloadClient ? await headers.headers(method, url) : headers,
+    ...(payload !== undefined ? { payload: payload as object } : {}),
+  });
 const asAdmin = (method: Method, url: string, payload?: unknown, headers: Record<string, string> = {}) =>
   app.inject({
     method,
@@ -181,26 +190,23 @@ async function enrol(engineId: EngineId, digest: string, version: string, over: 
   const t = await inject("POST", `/v1/engines/${engineId}/enrollment-tokens`, admin.key, { label: "test" });
   expect(t.statusCode, t.body).toBe(201);
   const enrolment = { authorization: `Bearer ${t.json().token}` };
-  // PR #205 review [54]: the runner generates its own token and registers only its hash
-  const token = runnerSecret();
+  // PR #205 review [54], ADR-0188 S7: the runner generates its own KEY and registers only the public half
+  const client = runnerKey();
   const r = await inject("POST", "/v1/engine-runner/register", enrolment, {
     name: `${engineId}-runner-${randomBytes(2).toString("hex")}`,
     imageDigest: digest,
     engineVersion: version,
     selfTest: selfTest(digest, version, over),
-    tokenHash: sha256Hex(token),
+    publicJwk: client.publicJwk,
   });
   expect(r.statusCode, r.body).toBe(201);
   expect(r.json().token).toBeUndefined();
-  return { id: r.json().runnerId as string, token, auth: { authorization: `Bearer ${token}` }, enrolment, selfTest: r.json().selfTest };
+  return { id: r.json().runnerId as string, client, auth: client, enrolment, selfTest: r.json().selfTest };
 }
 
-/** a runner's own token, as the runner core generates it (`rge_` + 256 random bits) */
-function runnerSecret(): string {
-  return `rge_${randomBytes(32).toString("hex")}`;
-}
-function sha256Hex(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
+/** a runner's own key, as the runner core generates it (ADR-0188 S7: the `rge_` bearer token is retired) */
+function runnerKey(): TestWorkloadClient {
+  return new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner" });
 }
 
 /** B5W-07 (ADR-0187 decision 178): an acceptance names the build it is for */
@@ -307,6 +313,7 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   restoreAgentEntitlements = await relaxAgentEntitlementsForTest(db);
+  restoreIssuerKey = await useTestIssuerKey(db);
   restoreGates = await relaxGovernanceGatesForTest(db, {
     mrmEnforced: false,
     dispatchAttributionRequired: false,
@@ -370,6 +377,7 @@ afterAll(async () => {
   await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test suite finished' WHERE revoked_at IS NULL`);
   await db.update(orgSettings).set({ ...BATCH5_STRICT_DEFAULTS }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   await restoreGates?.();
+  await restoreIssuerKey?.();
   await restoreAgentEntitlements?.();
   await restoreIdentity?.();
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
@@ -444,7 +452,7 @@ describe("secure by default", () => {
       imageDigest: wrongDigest,
       engineVersion: MANIFEST.promptfoo.version,
       selfTest: selfTest(wrongDigest, MANIFEST.promptfoo.version, {}),
-      tokenHash: sha256Hex(runnerSecret()),
+      publicJwk: runnerKey().publicJwk,
     });
     expect(wrong.statusCode, wrong.body).toBe(409);
     expect(wrong.json().error).toBe("engine_runner_build_obsolete");
@@ -511,34 +519,39 @@ describe("runner credentials", () => {
     const asLease = await inject("POST", "/v1/engine-runner/lease", enrolment);
     expect(asLease.statusCode).toBe(403);
     expect(asLease.json().error).toBe("engine_runner_scope");
-    const secret = runnerSecret();
-    const body = { name: "once", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: selfTest(PF_DIGEST, MANIFEST.promptfoo.version), tokenHash: sha256Hex(secret) };
+    const once = runnerKey();
+    const body = { name: "once", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, selfTest: selfTest(PF_DIGEST, MANIFEST.promptfoo.version), publicJwk: once.publicJwk };
     const first = await inject("POST", "/v1/engine-runner/register", enrolment, body);
     expect(first.statusCode, first.body).toBe(201);
-    // PR #205 review [54]: a second registration with the spent token mints nothing: the SAME
-    // hash replays the same runner, any other hash is refused
+    // PR #205 review [54], S7: a second registration with the spent token mints nothing: the SAME
+    // key replays the same runner, any other key is refused
     const replayed = await inject("POST", "/v1/engine-runner/register", enrolment, body);
     expect(replayed.statusCode, replayed.body).toBe(201);
     expect(replayed.json()).toMatchObject({ runnerId: first.json().runnerId, replayed: true });
-    const second = await inject("POST", "/v1/engine-runner/register", enrolment, { ...body, tokenHash: sha256Hex(runnerSecret()) });
+    const second = await inject("POST", "/v1/engine-runner/register", enrolment, { ...body, publicJwk: runnerKey().publicJwk });
     expect(second.statusCode, second.body).toBe(401);
     expect(second.json().error).toBe("engine_enrollment_invalid");
-    // a revoked runner token authenticates nothing
+    // a revoked runner's key authenticates nothing: its live token is refused, and no new one is issued
+    expect((await inject("POST", "/v1/engine-runner/lease", once, PF_BUILD())).statusCode).toBe(204);
     const d = await inject("DELETE", `/v1/engine-runners/${first.json().runnerId}`, admin.key);
     expect(d.statusCode).toBe(200);
-    const after = await inject("POST", "/v1/engine-runner/lease", { authorization: `Bearer ${secret}` });
+    const after = await inject("POST", "/v1/engine-runner/lease", once, PF_BUILD());
     expect(after.statusCode).toBe(401);
     expect(after.json().error).toBe("engine_runner_revoked");
+    once.reset();
+    expect((await once.tokenRequest()).statusCode).toBe(401);
   });
 
-  it("a runner or enrolment token cannot be exchanged for a browser session (no-user = bootstrap admin)", async () => {
+  it("a runner's token or an enrolment token cannot be exchanged for a browser session (no-user = bootstrap admin)", async () => {
     const t = await inject("POST", "/v1/engines/promptfoo/enrollment-tokens", admin.key, {});
-    for (const token of [pfRunner.token, t.json().token as string]) {
-      const r = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: token } });
-      expect(r.statusCode, r.body).toBe(403);
-      expect(r.json().error).toBe("credential_not_exchangeable");
-      expect(r.headers["set-cookie"]).toBeUndefined();
-    }
+    const enrol = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: t.json().token as string } });
+    expect(enrol.statusCode, enrol.body).toBe(403);
+    expect(enrol.json().error).toBe("credential_not_exchangeable");
+    expect(enrol.headers["set-cookie"]).toBeUndefined();
+    // ADR-0188 S7: a runner holds no bearer value at all; its DPoP-bound self token is not a key either
+    const self = await app.inject({ method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey: await pfRunner.client.token() } });
+    expect(self.statusCode, self.body).toBe(401);
+    expect(self.headers["set-cookie"]).toBeUndefined();
   });
 
   it("a disabled engine cannot be leased or started", async () => {
