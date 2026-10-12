@@ -2214,4 +2214,4 @@ an accepted decision or needs an owner choice.
 `POST /v1/use-cases/:id/resync` no longer records the ordinary step-up prompt as a `use-case-resync-refused` row
 with the code `step_up_<status>`. A prompt is sent and not recorded, as on every other protected route. A refusal
 nobody can answer (an API key or the bootstrap credential, no method enrolled) is recorded under the body's own code
-(`step_up_required` with its `credential`, or `step_up_unavailable`). See ADR-0186, As built 2026-10-12.
+(`step_up_required` with `credentialKind`, or `step_up_unavailable`). See ADR-0186, As built 2026-10-12.

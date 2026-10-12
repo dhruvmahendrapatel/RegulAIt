@@ -31,7 +31,7 @@ describe("shadow-AI remediation workflow body", () => {
   const plan: RemediationPlan = {
     findingId: "f1",
     subject: "acme/billing",
-    provider: "openai",
+    provider: "example-provider",
     severity: "high",
     replacementAgent: null,
     steps: [],
@@ -40,7 +40,7 @@ describe("shadow-AI remediation workflow body", () => {
       route: "POST /v1/workflows/instances",
       body: {
         change: {
-          description: "Pull acme/billing (openai) into governance — shadow-AI finding f1",
+          description: "Pull acme/billing (example-provider) into governance — shadow-AI finding f1",
           paths: ["acme/billing"],
           changeType: "shadow-ai-remediation",
           environment: "unstated",
@@ -57,7 +57,7 @@ describe("shadow-AI remediation workflow body", () => {
       ok: true,
       body: {
         change: {
-          description: "Pull acme/billing (openai) into governance — shadow-AI finding f1",
+          description: "Pull acme/billing (example-provider) into governance — shadow-AI finding f1",
           paths: ["acme/billing"],
           changeType: "shadow-ai-remediation",
           environment: "production",

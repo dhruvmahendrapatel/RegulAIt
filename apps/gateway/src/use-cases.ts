@@ -2955,7 +2955,7 @@ export function registerUseCaseRoutes(
       // naming a method) is the first half of the action, not a refusal, so it is not recorded as one; a refusal
       // nobody here can answer (an API key or the bootstrap credential, no method enrolled) is, under its own code
       if (!isStepUpPrompt(su.body)) {
-        await auditRefusal(String(su.body.error), typeof su.body.credential === "string" ? { credential: su.body.credential } : {});
+        await auditRefusal(String(su.body.error), typeof su.body.credential === "string" ? { credentialKind: su.body.credential } : {});
       }
       return reply.status(su.status).send(su.body);
     }

@@ -42,7 +42,7 @@ describe("shadow-AI environment", () => {
   const plan: RemediationPlan = {
     findingId: "f1",
     subject: "app.example",
-    provider: "openai",
+    provider: "example-provider",
     severity: "high",
     replacementAgent: null,
     steps: [],

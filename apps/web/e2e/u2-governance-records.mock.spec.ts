@@ -141,7 +141,7 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
     if (p === "/v1/shadow-ai/catalogue") return json(route, { signatures: [], total: 0, enabled: 0, oldestEntryAt: null, posture: "No collector ships." });
     if (p === "/v1/shadow-ai/findings") {
       return json(route, {
-        findings: [{ id: FINDING, subjectKind: "repo", subject: "acme/billing", provider: "openai", signalSources: ["code_scan"], severity: "high", confidence: "high", disposition: "open", observationCount: 3, firstSeenAt: ISO, lastSeenAt: ISO, replacementAgent: null, replacementNote: null, dispositionStale: false }],
+        findings: [{ id: FINDING, subjectKind: "repo", subject: "acme/billing", provider: "example-provider", signalSources: ["code_scan"], severity: "high", confidence: "high", disposition: "open", observationCount: 3, firstSeenAt: ISO, lastSeenAt: ISO, replacementAgent: null, replacementNote: null, dispositionStale: false }],
         coverage: { sources: [], sourcesOn: 1, sourcesPossible: 4, statement: "Coverage reflects only supplied evidence." },
         posture: "Detection is signal, not proof.",
       });
@@ -151,7 +151,7 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
     if (p === "/v1/shadow-ai/discovery/catalog") return json(route, { catalogVersion: 1, total: 0, endpoints: 0, sdks: 0, entries: [], governedHosts: [], posture: "Catalogue only.", limits: "No scan." });
     if (p === `/v1/shadow-ai/findings/${FINDING}/remediation-plan`) {
       return json(route, {
-        findingId: FINDING, subject: "acme/billing", provider: "openai", severity: "high", replacementAgent: null,
+        findingId: FINDING, subject: "acme/billing", provider: "example-provider", severity: "high", replacementAgent: null,
         steps: [
           { step: "register the endpoint in the model catalogue", why: "a governed provider entry makes the traffic routable" },
           { step: "route acme/billing through the compat surface (ADR-0020)", why: "a base URL change", blocked: "no governed replacement is registered for this provider" },
@@ -160,7 +160,7 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
           route: "POST /v1/workflows/instances",
           body: {
             change: {
-              description: `Pull acme/billing (openai) into governance — shadow-AI finding ${FINDING}`,
+              description: `Pull acme/billing (example-provider) into governance — shadow-AI finding ${FINDING}`,
               paths: ["acme/billing"],
               changeType: "shadow-ai-remediation",
               environment: "unstated",
@@ -360,7 +360,7 @@ test.describe("U2: governance records", () => {
     expect(posted(calls, "POST", "/v1/workflows/instances")).toEqual([
       {
         change: {
-          description: `Pull acme/billing (openai) into governance — shadow-AI finding ${FINDING}`,
+          description: `Pull acme/billing (example-provider) into governance — shadow-AI finding ${FINDING}`,
           paths: ["acme/billing"],
           changeType: "shadow-ai-remediation",
           environment: "production",
