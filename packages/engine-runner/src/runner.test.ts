@@ -463,7 +463,7 @@ describe("PR #205 follow-up [101]: the sweep of every runner route for a swallow
 describe("ADR-0188 S7: the runner's own credential, as the gateway's workload profile reads it", () => {
   const b64json = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as Record<string, unknown>;
 
-  it("every JWS the runner sends says alg EdDSA (the gateway refuses the RFC 9864 label oauth4webapi would use)", async () => {
+  it("every JWS the runner sends is an Ed25519 signature labelled as oauth4webapi writes it (RFC 9864 `Ed25519`, accepted by the gateway)", async () => {
     const seen: Array<{ path: string; headers: Record<string, string>; body?: string }> = [];
     const http: RunnerHttp = async (url, init) => {
       const p = new URL(url).pathname;
@@ -477,12 +477,12 @@ describe("ADR-0188 S7: the runner's own credential, as the gateway's workload pr
     const token = seen.find((c) => c.path === "/oauth/token")!;
     const form = new URLSearchParams(token.body ?? "");
     const assertion = form.get("client_assertion")!.split(".");
-    expect(b64json(assertion[0]!).alg).toBe("EdDSA");
+    expect(b64json(assertion[0]!).alg).toBe("Ed25519");
     expect(b64json(assertion[1]!).aud).toBe("https://regulait.example/oauth/token");
     const proofHeader = (h: Record<string, string>) => b64json((h.dpop ?? h.DPoP)!.split(".")[0]!);
-    expect(proofHeader(token.headers).alg).toBe("EdDSA");
+    expect(proofHeader(token.headers).alg).toBe("Ed25519");
     const lease = seen.find((c) => c.path === "/v1/engine-runner/lease")!;
-    expect(proofHeader(lease.headers).alg).toBe("EdDSA");
+    expect(proofHeader(lease.headers).alg).toBe("Ed25519");
   });
 
   it("a runner refuses to start without the issuer, and never guesses one", () => {
@@ -490,5 +490,14 @@ describe("ADR-0188 S7: the runner's own credential, as the gateway's workload pr
     expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "  " })).toThrow(/REGULAIT_PUBLIC_URL is empty/);
     expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "not a url" })).toThrow(/not an absolute URL/);
     expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://regulait.example/" })).toBe("https://regulait.example");
+    // the SAME normalisation as the gateway (parsePublicUrl, @regulait/shared): lowercased host, no default port
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://Host.Example:443" })).toBe("https://host.example");
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://Host.Example:443/base//" })).toBe("https://host.example/base");
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "http://localhost:3000" })).toBe("http://localhost:3000");
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "http://gateway:3000" })).toThrow(/scheme must be https/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://host.example./" })).toThrow(/must not end with a dot/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://host.example/a/../b" })).toThrow(/segments/);
+    // a long run of slashes is trimmed in linear time (no repeating regex)
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: `https://host.example/base${"/".repeat(50_000)}` })).toBe("https://host.example/base");
   });
 });

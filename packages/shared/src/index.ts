@@ -4661,3 +4661,5 @@ export * from "./receipts/verify.js";
 
 // ADR-0187 decisions 185–192: the built-in CyberSecEval eval datasets (pure: pins, mapping, digests).
 export * from "./eval-datasets/cyberseceval.js";
+// ADR-0188 S7: REGULAIT_PUBLIC_URL parsed one way, by the gateway and by engine runners
+export * from "./public-url.js";

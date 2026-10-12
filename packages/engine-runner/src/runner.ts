@@ -164,9 +164,6 @@ function tokenRefusal(e: unknown): { status: number; code: string | null } | nul
 }
 
 /** the runner routes (lease, self-test, rotation, heartbeat, artifact, result) and its enrolment, nothing else */
-/** ADR-0188 S7: the JWS `alg` of every runner assertion and proof (the gateway's workload profile, RFC 8037) */
-export const RUNNER_JWS_ALG = "EdDSA";
-
 export class RunnerClient {
   /** ADR-0188 S7: the runner's own key (a `rgek_` secret); never sent, never logged */
   private key: string | null = null;
@@ -259,20 +256,12 @@ export class RunnerClient {
     const m = await runnerKeyMaterial(this.key);
     const as: oauth.AuthorizationServer = { issuer: this.issuer, token_endpoint: `${this.issuer}/oauth/token` };
     const client: oauth.Client = { client_id: m.clientId };
-    // `oauth4webapi` 3.x labels an Ed25519 key's JWS with the fully-specified `alg` "Ed25519" (RFC 9864). The
-    // gateway's workload profile names the same signature "EdDSA" (RFC 8037; WORKLOAD_PROOF_ALGS) and refuses any
-    // other label, so every JWS this runner sends says "EdDSA". The signature itself is identical.
-    this.dpop ??= oauth.DPoP(client, m.cryptoKeyPair, { [oauth.modifyAssertion]: (h) => void (h.alg = RUNNER_JWS_ALG) });
+    // `oauth4webapi` 3.x labels an Ed25519 key's JWS with the fully-specified `alg` "Ed25519" (RFC 9864); the
+    // gateway accepts it beside "EdDSA" (RFC 8037) for the same signature (WORKLOAD_PROOF_ALGS), so the label is
+    // left as the library writes it
+    this.dpop ??= oauth.DPoP(client, m.cryptoKeyPair);
     // the gateway requires the assertion's `aud` to be exactly its token endpoint URL (S5 review item 7)
-    const auth = oauth.PrivateKeyJwt(
-      { key: m.cryptoKeyPair.privateKey, kid: m.jkt },
-      {
-        [oauth.modifyAssertion]: (h, p) => {
-          h.alg = RUNNER_JWS_ALG;
-          p.aud = as.token_endpoint;
-        },
-      },
-    );
+    const auth = oauth.PrivateKeyJwt({ key: m.cryptoKeyPair.privateKey, kid: m.jkt }, { [oauth.modifyAssertion]: (_h, p) => void (p.aud = as.token_endpoint) });
     for (let attempt = 0; ; attempt++) {
       try {
         const res = await oauth.clientCredentialsGrantRequest(as, client, auth, { resource: `${this.issuer}${WORKLOAD_SELF_RESOURCE_PATHS.engine_runner}` }, {

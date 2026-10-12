@@ -19,7 +19,7 @@
 import { createPrivateKey, generateKeyPairSync, webcrypto, type KeyObject } from "node:crypto";
 import { calculateJwkThumbprint, SignJWT, type JWK } from "jose";
 import type { CryptoKeyPair } from "oauth4webapi";
-import { ENGINE_RUNNER_KEY_PREFIX, JWK_THUMBPRINT_URI_PREFIX, KEY_ROTATION_PROOF_TYP, RUNNER_SUPERSEDE_PROOF_TYP } from "@regulait/shared";
+import { ENGINE_RUNNER_KEY_PREFIX, JWK_THUMBPRINT_URI_PREFIX, KEY_ROTATION_PROOF_TYP, parsePublicUrl, RUNNER_SUPERSEDE_PROOF_TYP } from "@regulait/shared";
 
 /** a runner key secret: `rgek_` + base64url (no padding) of an Ed25519 PKCS#8 DER (48 bytes = 64 characters) */
 export function isRunnerKeySecret(v: unknown): v is string {
@@ -114,24 +114,19 @@ export async function rotationProof(newSecret: string, rotationUrl: string): Pro
 
 /**
  * ADR-0188 S7: the gateway's issuer a runner names in every token request and proof, from
- * `REGULAIT_PUBLIC_URL`. A runner REFUSES to start without it rather than guessing: the address it dials
- * (`REGULAIT_GATEWAY_URL`, e.g. http://gateway:3000) is not the issuer, and a guessed issuer is a refused
- * token on every request. Returns the URL without a trailing slash.
+ * `REGULAIT_PUBLIC_URL`, parsed by the SAME function the gateway uses (`parsePublicUrl`, @regulait/shared):
+ * the host lowercased, a default port dropped, `http` only on loopback, trailing slashes removed. A runner
+ * REFUSES to start without it rather than guessing: the address it dials (`REGULAIT_GATEWAY_URL`, e.g.
+ * http://gateway:3000) is not the issuer, and a guessed issuer is a refused token on every request.
  */
 export function runnerIssuerFromEnv(env: NodeJS.ProcessEnv = process.env): string {
-  const raw = env.REGULAIT_PUBLIC_URL?.trim() ?? "";
-  if (!raw) {
+  const raw = env.REGULAIT_PUBLIC_URL;
+  if (raw === undefined || raw.trim() === "") {
     throw new Error(
       "REGULAIT_PUBLIC_URL is empty: the runner authenticates with tokens the gateway's issuer signs and names, and the issuer is " +
         "the gateway's REGULAIT_PUBLIC_URL. Set it to the same value the gateway has (the installer writes it; compose passes it on).",
     );
   }
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error(`REGULAIT_PUBLIC_URL is not an absolute URL: ${JSON.stringify(raw.slice(0, 200))}`);
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("REGULAIT_PUBLIC_URL must be an http(s) URL");
-  return raw.replace(/\/+$/, "");
+  // throws PublicUrlBootError (its message names what is wrong) exactly where the gateway would refuse to boot
+  return parsePublicUrl(raw)!;
 }

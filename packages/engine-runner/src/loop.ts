@@ -282,9 +282,15 @@ async function keyAuthenticates(client: RunnerClient): Promise<boolean> {
 
 /**
  * ADR-0188 S7 (decision 12): rotate the runner's key. The next key is persisted FIRST (`<file>.next`),
- * then bound with the current key's token, then promoted to the stored key. A lost answer is safe: the
- * next start (or the next attempt) tries the next key as the credential before rotating again. Returns
- * the new key, or null when the rotation did not complete (logged; retried on a later visit).
+ * then bound with the current key's token, then promoted to the stored key.
+ *
+ * A LOST ANSWER (the rotation committed, the 201 never arrived) is recovered here, not by retrying the
+ * rotation: once the gateway has rotated, the OLD key is no longer live, so a retry is refused —
+ * `409 credential_not_live` while the old key's token lasts, a refused token (401) after it expires, or
+ * `409 credential_already_registered` if the next key is named again. On any of those the runner asks
+ * whether the NEXT key authenticates; if it does, the rotation happened and the next key is promoted. A
+ * restart does the same from `<file>.next` (`runRunnerLoop`). Returns the new key, or null when the
+ * rotation did not complete (logged; retried on a later visit).
  */
 async function rotateKey(client: RunnerClient, opts: RunnerLoopOptions): Promise<string | null> {
   let next = await opts.store.loadNext();
@@ -295,15 +301,21 @@ async function rotateKey(client: RunnerClient, opts: RunnerLoopOptions): Promise
   try {
     await client.rotateKey(next);
   } catch (e) {
-    // the key may already be bound (a lost answer): it then authenticates, and is promoted
-    if (e instanceof RunnerHttpError && e.code === "credential_already_registered") {
+    // the rotation may have committed with its answer lost: the next key then authenticates, and is promoted
+    const maybeRotated =
+      e instanceof RunnerHttpError && (e.code === "credential_already_registered" || e.code === "credential_not_live" || e.status === 401);
+    if (maybeRotated) {
       const before = await opts.store.load();
       client.useKey(next);
       if (!(await keyAuthenticates(client))) {
         if (before) client.useKey(before);
-        // a next key bound elsewhere, or refused: drop it; a fresh one is generated at the next attempt
-        await opts.store.clearNext();
-        opts.log?.("a key rotation's new key is registered but does not authenticate this runner; a new one will be generated");
+        if ((e as RunnerHttpError).code === "credential_already_registered") {
+          // a next key bound elsewhere, or refused: drop it; a fresh one is generated at the next attempt
+          await opts.store.clearNext();
+          opts.log?.("a key rotation's new key is registered but does not authenticate this runner; a new one will be generated");
+        } else {
+          opts.log?.(`key rotation did not complete (${whyOf(e)}), and the next key does not authenticate; will retry`);
+        }
         return null;
       }
     } else {

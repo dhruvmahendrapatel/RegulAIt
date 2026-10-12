@@ -720,7 +720,7 @@ describe("decisions 49 and 54: the runner's own token, persisted before it regis
     expect(() => pinnedImageDigest(`regulait/engine-promptfoo@sha256:${"0".repeat(64)}`, `sha256:${"0".repeat(64)}`)).toThrow(/placeholder/);
   });
 
-  it("a state file that does not hold a runner token is not used", async () => {
+  it("a state file that does not hold a runner key is not used", async () => {
     const { o } = await opts();
     await o.store.save(STORED);
     await writeFile(o.store.file, "not a token\n");
@@ -896,5 +896,58 @@ describe("PR #205 follow-up [101]: a 2xx that is not a valid answer is transient
     await expect(runRunnerLoop(g.client, adapter, o)).rejects.toBeInstanceOf(RunnerFatalError);
     expect(g.count("/register")).toBe(1);
     expect(await o.store.load()).toBeNull();
+  });
+});
+
+describe("ADR-0188 S7 (decision 12): a rotation whose answer was lost is recovered, in the real gateway's order", () => {
+  it("the retry is refused 409 credential_not_live (the old key is no longer live); the next key authenticates and is promoted, once", async () => {
+    // the gateway's state: which keys are live (by thumbprint), and whether the rotation committed
+    const live = new Set<string>([kid(STORED)]);
+    let rotations = 0;
+    const calls: Array<{ path: string; bearer: string }> = [];
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      if (p === "/oauth/token") {
+        const assertion = new URLSearchParams(init.body ?? "").get("client_assertion") ?? "";
+        const sub = String(b64json(assertion.split(".")[1] ?? "").sub ?? "");
+        const jkt = sub.slice(sub.lastIndexOf(":") + 1);
+        // a key that is not live gets no token (as the real token endpoint: 401 invalid_client)
+        if (!live.has(jkt)) return { status: 401, headers: { "content-type": "application/json" }, json: async () => ({ error: "invalid_client" }) };
+        // the enrolled key is due for rotation at once; the new key far later
+        const rotateAfter = jkt === kid(STORED) ? 0 : 4_000_000_000;
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          json: async () => ({ access_token: `tok-${jkt}`, token_type: "DPoP", expires_in: 300, regulait_credential_rotate_after: rotateAfter }),
+        };
+      }
+      const auth = init.headers.authorization ?? "";
+      calls.push({ path: p, bearer: auth.startsWith("DPoP tok-") ? `Key ${auth.slice("DPoP tok-".length)}` : auth });
+      if (p.endsWith("/credentials")) {
+        rotations++;
+        const jkt = auth.slice("DPoP tok-".length);
+        // the real order: the authenticating key must still be live, checked before anything is bound
+        if (!live.has(jkt)) return { status: 409, json: async () => ({ error: "credential_not_live" }) };
+        const body = JSON.parse(init.body ?? "{}") as { publicJwk: { x: string } };
+        live.delete(jkt);
+        live.add(jwkKid(body.publicJwk));
+        // committed; the answer is lost on the way back
+        throw new Error("socket hang up");
+      }
+      return { status: 204, json: async () => null };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
+    const { o, logs } = await opts({ maxIterations: 3 });
+    await o.store.save(STORED);
+    await runRunnerLoop(client, async () => ({ items: [] }) as never, o);
+    const stored = (await o.store.load())!;
+    expect(stored).not.toBe(STORED);
+    expect(live.has(kid(stored))).toBe(true);
+    // the lost answer, then ONE refused retry that led to the promotion: no rotation loop, no audit row per visit
+    expect(rotations).toBe(2);
+    expect(await o.store.loadNext()).toBeNull();
+    expect(calls.filter((c) => c.path.endsWith("/lease")).at(-1)!.bearer).toBe(bearer(stored));
+    expect(logs.some((l) => /rotated this runner's key/.test(l))).toBe(true);
+    expect(logs.join("\n")).not.toContain(stored);
   });
 });
