@@ -31,6 +31,8 @@ export const TIMING_FILES = [
   "src/bom/bom-timing.test.ts",
   // ADR-0190 I1: the isolation contract's patterns on 100k adversarial inputs (CodeQL js/redos)
   "src/isolation/isolation-redos-timing.test.ts",
+  // ADR-0188 S7 (review of #380): REGULAIT_PUBLIC_URL's trailing-slash trim on a 200k-slash input (CodeQL js/polynomial-redos)
+  "src/public-url-redos-timing.test.ts",
 ];
 
 export default defineConfig({

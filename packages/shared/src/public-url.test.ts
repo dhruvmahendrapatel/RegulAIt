@@ -35,12 +35,6 @@ describe("parsePublicUrl", () => {
     }
   });
 
-  it("trims a long run of trailing slashes in linear time (no repeating regex: CodeQL js/polynomial-redos)", () => {
-    const started = Date.now();
-    expect(parsePublicUrl(`https://host.example/base${"/".repeat(200_000)}`)).toBe("https://host.example/base");
-    expect(Date.now() - started).toBeLessThan(2_000);
-  });
-
   it("loopback hosts", () => {
     for (const h of ["localhost", "a.localhost", "127.0.0.1", "127.1.2.3", "[::1]"]) expect(isLoopbackHost(h), h).toBe(true);
     for (const h of ["gateway", "127.0.0.1.example", "10.0.0.1", "1270.0.0.1"]) expect(isLoopbackHost(h), h).toBe(false);

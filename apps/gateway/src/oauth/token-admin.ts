@@ -30,7 +30,7 @@ import { decodeJwt, decodeProtectedHeader, importJWK, jwtVerify, type JWK, type 
 import { auditLog, delegationGrants, eq, issuedTokens, sql, type Db } from "@regulait/db";
 import { CLIENT_ASSERTION_MAX_AGE_SECONDS, CLIENT_ASSERTION_TYPE_JWT_BEARER, DPOP_PROOF_MAX_FUTURE_SECONDS, OAUTH_INTROSPECTION_PATH, OAUTH_REVOCATION_PATH } from "@regulait/shared";
 import { databaseNow } from "../delegation.js";
-import { ACCESS_TOKEN_TYP, claimReplay, exactlyOneCnf, issuerKeyFor, jwkOf, storedAndLive } from "../delegated-token.js";
+import { ACCESS_TOKEN_TYP, claimReplay, exactlyOneCnf, issuerKeyFor, jwkOf, storedAndLive, WORKLOAD_PROOF_ALGS } from "../delegated-token.js";
 import { ISSUER_JWS_ALG } from "../identity-signing-keys.js";
 import { clientJwks, findWorkloadClient, matchCertificateCredential, type WorkloadClient } from "./clients.js";
 import { deploymentEnvironment, identityIssuer, tokenEndpointUrl } from "./common.js";
@@ -49,21 +49,26 @@ export async function authenticateWorkloadClient(db: Db, req: FastifyRequest, fo
     if (form.getAll("client_assertion").length !== 1 || form.get("client_assertion_type") !== CLIENT_ASSERTION_TYPE_JWT_BEARER) return { ok: false, code: "assertion_malformed" };
     let unverified: JWTPayload;
     let kid: string | undefined;
+    let alg: string | undefined;
     try {
       unverified = decodeJwt(assertion);
-      kid = decodeProtectedHeader(assertion).kid;
+      ({ kid, alg } = decodeProtectedHeader(assertion));
     } catch {
       return { ok: false, code: "assertion_malformed" };
     }
+    // ADR-0188 S7: an Ed25519 key carries no `alg` member (EdDSA and Ed25519 label the same signature); the label is the
+    // header's, checked against the list and the key type
+    if (typeof alg !== "string" || !(WORKLOAD_PROOF_ALGS as readonly string[]).includes(alg)) return { ok: false, code: "assertion_invalid" };
     if (typeof unverified.sub !== "string" || unverified.iss !== unverified.sub) return { ok: false, code: "assertion_claims" };
     if (form.has("client_id") && form.get("client_id") !== unverified.sub) return { ok: false, code: "client_id_mismatch" };
     const client = await findWorkloadClient(db, unverified.sub, now);
     if (!client) return { ok: false, code: "client_unknown" };
     for (const k of clientJwks(client)) {
       if (kid !== undefined && kid !== k.kid) continue;
+      if ((k.kty === "OKP") !== (alg === "EdDSA" || alg === "Ed25519")) continue;
       let p: JWTPayload;
       try {
-        p = (await jwtVerify(assertion, await importJWK(k as JWK, k.alg), { algorithms: [k.alg!], audience: tokenEndpointUrl(issuer), currentDate: now, requiredClaims: ["iat", "exp", "jti"] })).payload;
+        p = (await jwtVerify(assertion, await importJWK(k as JWK, alg), { algorithms: [alg], audience: tokenEndpointUrl(issuer), currentDate: now, requiredClaims: ["iat", "exp", "jti"] })).payload;
       } catch {
         continue;
       }

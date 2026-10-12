@@ -27,6 +27,7 @@
 import { and, eq, isNull, workloadCredentials, workloadIdentities, type Db, type WorkloadCredentialRow } from "@regulait/db";
 import { JWK_THUMBPRINT_URI_PREFIX, WORKLOAD_SELF_KINDS, type WorkloadClientAuthMethod } from "@regulait/shared";
 import { credentialLiveAt } from "../delegation.js";
+import { importJWK, jwtVerify, type JWK } from "jose";
 import { loadOrgSettings } from "../org-settings.js";
 import { loadTrustConfig, selfSignedCertificateFacts, spiffeIdParts, validateClientCertificate, type PresentedCertificate } from "./x509.js";
 
@@ -166,4 +167,35 @@ export async function matchCertificateCredential(client: WorkloadClient, present
     }
   }
   return { ok: false, code: last };
+}
+
+/** the JWS labels of a workload key's signature: an Ed25519 key signs under both, a P-256 key under ES256 */
+const ED25519_ALGS: ReadonlySet<string> = new Set(["EdDSA", "Ed25519"]);
+const WORKLOAD_ASSERTION_ALGS: ReadonlySet<string> = new Set([...ED25519_ALGS, "ES256"]);
+
+/**
+ * WHICH of the client's live keys signed this `private_key_jwt` assertion (decision 12), or null. The label is the
+ * assertion's own `alg` (an Ed25519 key carries no `alg` member: `EdDSA`, RFC 8037, and `Ed25519`, RFC 9864, label
+ * the same signature), and it must fit the key's type. ADR-0188 S7 (review of #380): the key's `alg` was once read
+ * here, and dropping it from the JWKS refused every Ed25519 client; this is the one place the label is chosen.
+ */
+export async function assertionCredentialOf(
+  client: WorkloadClient,
+  assertion: string,
+  header: { kid?: string; alg?: string },
+  now: Date,
+): Promise<string | null> {
+  const alg = typeof header.alg === "string" && WORKLOAD_ASSERTION_ALGS.has(header.alg) ? header.alg : null;
+  if (!alg) return null;
+  for (const k of clientJwks(client)) {
+    if (header.kid !== undefined && header.kid !== k.kid) continue;
+    if ((k.kty === "OKP") !== ED25519_ALGS.has(alg)) continue;
+    try {
+      await jwtVerify(assertion, await importJWK(k as JWK, alg), { algorithms: [alg], currentDate: now });
+      return client.credentials.find((c) => c.jwkThumbprint === k.kid)?.id ?? null;
+    } catch {
+      // another key of the same client
+    }
+  }
+  return null;
 }

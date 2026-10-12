@@ -94,7 +94,7 @@ import {
   type IdentitySecrets,
 } from "../delegated-token.js";
 import { loadOrgSettings } from "../org-settings.js";
-import { clientJwks, findWorkloadClient, matchCertificateCredential, type CertificateMatch, type WorkloadClient } from "./clients.js";
+import { assertionCredentialOf, clientJwks, findWorkloadClient, matchCertificateCredential, type CertificateMatch, type WorkloadClient } from "./clients.js";
 import { deploymentEnvironment, gatewayResource, identityIssuer, identitySecretsFor, OAUTH_TOKEN_ROUTE_PATH, tokenEndpointUrl } from "./common.js";
 import { rootCapFor, verifyDelegationProof, type VerifiedDelegationProof } from "./delegation-proof.js";
 import { presentedClientCertificate } from "./x509.js";
@@ -775,16 +775,8 @@ export function tokenProviderFor(db: Db, issuer: string): Provider {
       // decision 12: WHICH registered key signed it (the provider verified one of the client's live keys)
       const client = await findWorkloadClient(s.db, ctx.oidc.client.clientId, s.now);
       const assertion = typeof ctx.oidc.params.client_assertion === "string" ? ctx.oidc.params.client_assertion : "";
-      for (const k of client ? clientJwks(client) : []) {
-        if (header.kid !== undefined && header.kid !== k.kid) continue;
-        try {
-          await jwtVerify(assertion, await importJWK(k as JWK, k.alg), { algorithms: [k.alg!], currentDate: s.now });
-          s.assertionCredentialId = client!.credentials.find((c) => c.jwkThumbprint === k.kid)!.id;
-          break;
-        } catch {
-          // another key of the same client
-        }
-      }
+      const signedBy = client ? await assertionCredentialOf(client, assertion, header, s.now) : null;
+      if (signedBy) s.assertionCredentialId = signedBy;
       if (!s.assertionCredentialId) throw refuse(new InvalidClientAuth("client assertion key"), "assertion_key");
       s.preflight = ctx.oidc.params.grant_type === CLIENT_CREDENTIALS_GRANT_TYPE ? await selfPreflight(ctx, s) : await preflight(ctx, s);
     },

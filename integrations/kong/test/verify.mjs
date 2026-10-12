@@ -231,7 +231,8 @@ async function pdpClientControl(base, issuer, privateKey, jwk) {
   };
   const errOf = async (res) => {
     const j = await res.json().catch(() => ({}));
-    return `${res.status} ${j.error ?? ""}${j.error_code ? `/${j.error_code}` : ""}${j.code ? `/${j.code}` : ""}`;
+    // the provider's error_description names the failure class; it never carries key material
+    return `${res.status} ${j.error ?? ""}${j.error_code ? `/${j.error_code}` : ""}${j.code ? `/${j.code}` : ""}${j.error_description ? ` (${String(j.error_description).slice(0, 120)})` : ""}`;
   };
   const steps = [];
   let res = await tokenRequest(null);
@@ -576,7 +577,19 @@ async function main() {
     const control = await pdpClientControl(base, ISSUER, pdpPrivate, { kty, crv, x });
     check("control: the PDP client's key takes a self token and asks, from outside Kong (ADR-0188 S7)",
       control.ok, control.steps.join("; "));
-    if (!control.ok) console.error(`  PDP client control steps: ${control.steps.join("; ")}`);
+    if (!control.ok) {
+      console.error(`  PDP client control steps: ${control.steps.join("; ")}`);
+      // the gateway's own audited reason codes for the refusals (codes only: never a key, token or proof)
+      try {
+        const codes = psqlScalar(
+          "SELECT coalesce(string_agg(code, ', '), '(none)') FROM (SELECT coalesce(detail->>'code', '?') AS code FROM audit_log " +
+            "WHERE rule_id IN ('workload-token-refused', 'workload-token-issued') ORDER BY at DESC LIMIT 6) r",
+        );
+        console.error(`  audited token outcomes (newest first): ${codes}`);
+      } catch (e) {
+        console.error(`  could not read the audited token outcomes: ${e instanceof Error ? e.message.split("\n")[0] : e}`);
+      }
+    }
   }
 
   // AER-034 — a THIRD subject, entitled to the tool AND caught by an approval
