@@ -252,9 +252,9 @@ export default function WorkloadIdentitiesPage() {
           </p>
         </Card>
 
-        <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={rows} ask={ask} />
-
         <IssuerSigningKeysCard busy={write.busy} ask={ask} />
+
+        <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={rows} ask={ask} />
       </div>
 
       {editing && (

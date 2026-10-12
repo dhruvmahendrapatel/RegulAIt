@@ -147,7 +147,7 @@ export function EngineSchedulesCard(props: {
           { key: "created", header: "Created", render: (s) => ago(s.createdAt) },
           {
             key: "toggle",
-            header: "",
+            header: "Switch",
             align: "right",
             render: (s) => <ToggleCell schedule={s} me={me} busy={toggle.busy} onOff={() => setEnabled(s, false)} onOn={() => setTurningOn(s)} />,
           },

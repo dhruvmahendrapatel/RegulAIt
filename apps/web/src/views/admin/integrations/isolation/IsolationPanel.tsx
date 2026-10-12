@@ -221,7 +221,7 @@ function ExecutorsCard() {
               {
                 // ADR-0190 I3: detail, self-test history and the lifecycle acts
                 key: "manage",
-                header: "",
+                header: "Manage",
                 align: "right",
                 render: (r) =>
                   "unreadable" in r ? null : (

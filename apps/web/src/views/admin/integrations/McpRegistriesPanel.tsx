@@ -129,7 +129,7 @@ export function McpRegistriesPanel() {
             },
             {
               key: "actions",
-              header: "",
+              header: "Actions",
               align: "right",
               render: (r) => (
                 <span className={v.row}>
@@ -382,7 +382,7 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
           },
           {
             key: "import",
-            header: "",
+            header: "Import",
             align: "right",
             render: (e) => {
               const can = entryImportability(e);
