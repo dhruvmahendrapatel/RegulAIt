@@ -830,3 +830,20 @@ every other protected route. A prompt (`step_up_required` naming a usable method
 recorded. A refusal nobody can answer is recorded under the body's own code (`step_up_required` with
 `credentialKind` set to the body's `credential`, or `step_up_unavailable`). The detail key is `credentialKind`, not
 `credential`: the audit scrub masks any field named `credential` (ADR-0099), which would erase the value.
+
+PR #378 review follow-ups:
+- **Further relaxations.** `egress_allow_host` (an allow entry's private-range or plaintext opt-in turned on; a plain
+  entry needs nothing, ADR-0034 As built 2026-10-12) and `mcp_registry_import` (an import that inherits a registry's
+  open private ranges, ADR-0101).
+- **A duplicate name never burns a grant.** The relaxing creates (`POST /v1/agents`, `/v1/mcp-registries`,
+  `/v1/servers`) check the name before spending the grant and answer 409 `conflict`.
+- **`PATCH /v1/servers/:id` changes nothing when refused.** It validates the owner target and looks at both step-ups
+  (ranges, owner) without spending them. Then it spends the ranges grant, writes the columns (compare-and-set), and
+  runs the owner change last, which spends its own grant. Only a concurrent change between the look and the owner
+  write can still leave the columns written without the owner.
+- **The url is bound.** The server and registry PATCH facts include `url` when the request moves it.
+- **The agent PUT spends inside the hold transaction.** It looks at the grant first and spends it inside the
+  evidence-hold transaction, after the hold re-check.
+- **Test-only helpers.** `relaxStepUpForTest` and `forgetStepUpMethodsForTest` throw outside a test runner.
+  `step-up-posture-guard.test.ts` pins, statically, that no product source imports them.
+

@@ -2235,17 +2235,18 @@ export const updateOrgSettingsSchema = z
      * false refuses registration/enable and stops every custom dispatch (409). */
     customModelProvidersEnabled: z.boolean().optional(),
     /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
-     * null. true (default) = private-LAN MCP URLs work with zero ceremony;
-     * false = strict, requiring an explicit per-server flag or an allow entry.
+     * null. false (the strict default since ADR-0181) = a private-LAN MCP URL
+     * needs an explicit per-server flag or an allow entry; true = private-LAN
+     * MCP URLs work with zero ceremony (a relaxation, stepped up and audited).
      * IMDS/link-local stays unconditionally blocked either way. */
     mcpPrivateRangesDefault: z.boolean().optional(),
-    /** ADR-0097: the MCP ADMISSION posture. 'off' (default) = no manifest
+    /** ADR-0097: the MCP ADMISSION posture ('enforce' is the strict default since ADR-0181). 'off' = no manifest
      * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
      * every manifest sync is scanned and the verdict/findings are recorded on
      * the server row, but nothing is ever refused. 'enforce' = a server whose
      * scan verdict is `held` is refused BEFORE any upstream connect and
      * contributes no tools to discovery, until an admin clears it with a
-     * reason. Recommended production setting: 'enforce'. */
+     * reason. */
     mcpAdmissionMode: z.enum(MCP_ADMISSION_MODES).optional(),
     /** ADR-0175 A5: the release-age cooldown in days. 0 (default) = off. While
      * on, a newly registered MCP server, a changed manifest, a federated import

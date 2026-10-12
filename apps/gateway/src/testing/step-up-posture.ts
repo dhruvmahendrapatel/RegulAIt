@@ -29,8 +29,21 @@ import {
 } from "@regulait/db";
 import { loadOrgSettings } from "../org-settings.js";
 
+/**
+ * PR #378 review: these helpers turn step-up off or remove people's step-up methods on a database. They are test
+ * fixtures and run only under a test runner (VITEST set, or NODE_ENV=test); anywhere else they throw before touching
+ * anything. `step-up-posture-guard.test.ts` pins, statically, that no product source imports this file.
+ */
+function assertUnderTest(helper: string): void {
+  // vitest sets VITEST; a deployment sets no NODE_ENV=test, so this fails closed everywhere else
+  if (process.env.VITEST === undefined && process.env.NODE_ENV !== "test") {
+    throw new Error(`${helper} is a test fixture: it runs only under a test runner (VITEST set or NODE_ENV=test)`);
+  }
+}
+
 /** turn step-up off for this suite; the returned function restores the strict policy */
 export async function relaxStepUpForTest(db: Db): Promise<() => Promise<void>> {
+  assertUnderTest("relaxStepUpForTest");
   await loadOrgSettings(db); // the singleton exists
   await db.update(orgSettings).set({ stepUpMode: "off" }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   return async () => {
@@ -56,6 +69,7 @@ export async function relaxStepUpForTest(db: Db): Promise<() => Promise<void>> {
  * Nothing else about the accounts changes.
  */
 export async function forgetStepUpMethodsForTest(db: Db, userIds: ReadonlyArray<string | null | undefined>): Promise<void> {
+  assertUnderTest("forgetStepUpMethodsForTest");
   const ids = userIds.filter((id): id is string => typeof id === "string" && id.length > 0);
   if (ids.length === 0) return;
   await db

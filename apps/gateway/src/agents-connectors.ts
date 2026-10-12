@@ -152,7 +152,7 @@ import {
   type ConversationContext,
 } from "./conversations.js";
 import { ownerChangeGate, resolveRegistrationOwner, withOwnership } from "./ownership.js";
-import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import {
   prepareConversationContext,
   type PreparedConversationContext,
@@ -2874,6 +2874,9 @@ export function registerAgentConnectorRoutes(
     const expected = body.expectedServedModel ?? null;
     let expectedStepUp: string | null = null;
     if (expected !== null) {
+      // the name is checked BEFORE the grant is spent, so a duplicate (409, as the unique index would answer) never burns it
+      const [taken] = await db.select({ id: agents.id }).from(agents).where(eq(agents.name, body.name));
+      if (taken) return reply.status(409).send({ error: "conflict", detail: `an agent named '${body.name}' already exists` });
       const su = await requireStepUp(db, req, reply, {
         kind: "settings_relax",
         facts: { op: "agent_create_expected_served_model", name: body.name, expectedServedModel: expected },
@@ -2931,17 +2934,29 @@ export function registerAgentConnectorRoutes(
     // asked after the evidence-hold refusal so a refused write never spends the grant. Clearing it restores the
     // strict default and needs nothing; re-sending the stored value changes nothing and needs nothing.
     const relaxation = body.expectedServedModel !== null && body.expectedServedModel !== existing.expected;
-    let stepUp: string | null = null;
-    if (relaxation) {
-      const su = await requireStepUp(db, req, reply, {
-        kind: "settings_relax",
-        facts: { op: "agent_expected_served_model", agentId, expectedServedModel: body.expectedServedModel },
-      });
-      if (!su.ok) return reply;
-      stepUp = su.method;
+    const stepUpArgs = relaxation
+      ? { kind: "settings_relax" as const, facts: { op: "agent_expected_served_model", agentId, expectedServedModel: body.expectedServedModel } }
+      : null;
+    // looked at (not spent) here, so a request without a grant is answered before the transaction; SPENT inside it,
+    // after the evidence-hold re-check, so a hold placed in between refuses the write without burning the grant
+    if (stepUpArgs) {
+      const look = await checkStepUp(db, req, stepUpArgs, { spend: false });
+      if (!look.ok) return reply.status(look.status).send(look.body);
     }
+    const rootDb = db;
+    let stepUp: string | null = null;
+    let stepUpRefused: { status: number; body: Record<string, unknown> } | null = null;
     // X15-H01: re-checked inside the write's own transaction, serialised with hold creation
     const row = await withAgentEvidenceHold(db, req, reply, agentId, "expected served model", async (db) => {
+      if (stepUpArgs) {
+        // the grant is claimed on the ROOT handle (its single-use claim and any refusal row are not rolled back)
+        const su = await checkStepUp(rootDb, req, stepUpArgs);
+        if (!su.ok) {
+          stepUpRefused = { status: su.status, body: su.body };
+          return null;
+        }
+        stepUp = su.method;
+      }
       const [row] = await db
         .update(agents)
         .set({ expectedServedModel: body.expectedServedModel })
@@ -2978,6 +2993,8 @@ export function registerAgentConnectorRoutes(
       return row;
     });
     if (row === EVIDENCE_HOLD_REFUSED) return reply;
+    const refusedStepUp = stepUpRefused as { status: number; body: Record<string, unknown> } | null;
+    if (refusedStepUp) return reply.status(refusedStepUp.status).send(refusedStepUp.body);
     if (row === null) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return reply.send(row);
   });

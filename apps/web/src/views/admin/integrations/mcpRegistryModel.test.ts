@@ -161,7 +161,14 @@ describe("pinned to the gateway source", () => {
     const gateway = src("../../../../../gateway/src/mcp-registry.ts");
     const app = src("../../../../../gateway/src/app.ts");
     expect(Object.keys(REFUSAL_SENTENCES.import).filter((code) => !gateway.includes(`"${code}"`))).toEqual([]);
-    expect(Object.keys(REFUSAL_SENTENCES.registry).filter((code) => code !== "conflict" && !gateway.includes(`"${code}"`))).toEqual([]);
+    // `changed_concurrently` is the shared compare-and-set refusal a stepped-up registry update answers (step-up.ts)
+    const stepUp = src("../../../../../gateway/src/step-up.ts");
+    expect(gateway).toContain("CHANGED_CONCURRENTLY");
+    expect(
+      Object.keys(REFUSAL_SENTENCES.registry).filter(
+        (code) => code !== "conflict" && !gateway.includes(`"${code}"`) && !(code === "changed_concurrently" && stepUp.includes(`"${code}"`)),
+      ),
+    ).toEqual([]);
     // the registry `conflict` is the global unique-violation handler
     expect(app).toContain('if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });');
   });

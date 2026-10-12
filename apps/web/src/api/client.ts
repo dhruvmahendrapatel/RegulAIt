@@ -169,6 +169,9 @@ const CODE_SENTENCES: Record<string, string> = {
   internal: "Something went wrong on the server — try again, and tell an administrator if it keeps happening",
   internal_error: "Something went wrong on the server — try again, and tell an administrator if it keeps happening",
   conflict: "This conflicts with a record that already exists",
+  // PR #378: a relaxing write (an MCP server's private ranges, an agent's expected served model, ...) is a
+  // compare-and-set on what its step-up was decided on; the screens that make one read the refusal here
+  changed_concurrently: "Someone changed this while you were saving, so nothing was written. Reload and repeat the change",
   unavailable: "This record isn't available — it may not exist, or it may belong to someone else",
   not_found: "No such record",
   unknown_project: "No project with this ID exists",
