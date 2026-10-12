@@ -1270,38 +1270,51 @@ details that the decisions above leave open:
    and a CHECK requires exactly one of the two, with a self token always DPoP-bound. The client id may be the key's
    RFC 9278 thumbprint URI, so a key and the issuer are the whole client configuration. The token response carries
    `regulait_credential_not_after` and `regulait_credential_rotate_after` (two thirds of the key's window), so a
-   client knows when to rotate without a second call. Issued and refused tokens are audited
+   client knows when to rotate without a second call. The DPoP proof must be signed by the same key that
+   authenticated the client (`dpop_key_mismatch`). Issued and refused tokens are audited
    (`workload-token-issued` / `workload-token-refused`). Other workload kinds and agent identities are refused this
-   grant.
+   grant, and a self token is never a `subject_token` or a parent in token exchange. JWS from these clients carry
+   `alg` `EdDSA`: `oauth4webapi` 3.x labels an Ed25519 key `Ed25519` (RFC 9864), so the runner relabels its
+   assertions and proofs (the signature is the same) rather than the gateway widening its algorithm list.
 2. **What the token reaches.** It is recognised by its audience and resolves to `via: "engine-runner"` (the ADR-0187
    runner context: the engine-key ceilings, project pinning and the runner route set, unchanged) or `via: "pdp"`
    (only `POST /v1/authz/check`; anything else answers `403 workload_scope`). Every request re-checks the token row,
    its binding, the credential, the identity's state and environment, and for a runner that the runner is not
-   revoked (`401 engine_runner_revoked`). Revoking a runner, its key or its identity revokes its live tokens.
+   revoked (`401 engine_runner_revoked`). Revoking a runner, its key or its identity revokes its live tokens; a
+   suspended identity's live tokens are refused too. Both kinds keep the ADR-0167 credential rate-limit tier, in a
+   bucket named by their identity (`cred:wid:<identityId>`), and both are judged by `api_key_ip_policy` like an API
+   key (INSTALL.md: allow the `engines` network).
 3. **Runners enrol with a key.** The runner core generates the key on its own state volume (`runner-key`, mode
    0600) and registers only the public JWK with the one-time enrolment token. Registration creates the runner's
    identity (S4's `ensureIdentityFor`) and binds the key through S6's one binding path, so S6 decision 2 holds: one
    key, one identity, ever. A runner superseding its previous registration proves it with a JWS signed by the old
-   key that names the new key's thumbprint. The runner's client is `oauth4webapi` (`clientCredentialsGrantRequest`
+   key that names the new key's thumbprint, `aud` this issuer and a one-use `jti` (claimed in the replay store). The
+   old key must be live now and its identity active: a key already rotated out, or expired, supersedes nothing. The runner's client is `oauth4webapi` (`clientCredentialsGrantRequest`
    with `PrivateKeyJwt` and `DPoP`, then `protectedResourceRequest`); the artifact stream rides the same client.
 4. **Rotation (decision 12).** A runner rotates its own key at two thirds of the key's window:
    `POST /v1/engine-runner/credentials` with its current token and a proof by the new key binds the new key and moves
    the old key's `not_after` to now. The old key mints no new token; tokens it already has live to their own expiry.
+   Rotations of one runner are serialised (the identity row is locked), and the authenticating key must still be live
+   on the database clock, so a token whose key was already rotated out gets `409 credential_not_live`; a runner holds
+   at most two live keys (`409 runner_key_limit`).
    Nothing is revoked, and the identity, and so the audit trail, stays the same. A PDP client's key is rotated by an
    admin in the S6 page: bind the next key, switch the client, revoke the old credential.
 5. **The bearer paths are gone.** `rge_` is no longer a credential (401 everywhere). `engine_runners.token_hash` is
    dropped and every live runner is revoked by the migration, so each runner re-enrols once with a new enrolment
    token. Every live `pdp` virtual key is revoked, a CHECK keeps any `pdp` key revoked, and
    `POST /v1/virtual-keys` with `purpose: "pdp"` answers `410 pdp_key_retired`. `dispatch` and `engine` virtual
-   keys stay, as decision 8 says.
+   keys stay, as decision 8 says. The upgrade's revocations are recorded by the migration itself (its
+   `revoked_at` on each row, and a revoke reason on each runner), not as `audit_log` rows.
 6. **Provisioning.** Without an issuer key no self token can be issued, so a fresh install creates one: the installer
    (`identity-key-init.js`) and the gateway's first boot write `identity-signing-key.pem` to the install secrets
    volume with the receipt key's generator and strict reader, now shared (`ensureInstallKeyFile`: 0600, opened
    O_NOFOLLOW, create-exclusive, never overwritten). `REGULAIT_IDENTITY_SIGNING_KEY` still wins and is how an
    operator rotates the issuer key. `GET /v1/org/posture` (`identitySigningKey`), the signing-keys list and its card
    name the source by key id only. The issuer is `REGULAIT_PUBLIC_URL`: the installer writes `https://<domain>` when
-   Caddy terminates TLS, keeps an operator's value, and warns when it cannot know it. Compose passes the same value
-   to the runners, which still dial `http://gateway:3000`.
+   Caddy terminates TLS, takes `--public-url`, keeps an operator's value, and warns (does not refuse) when it cannot
+   know it: a missing issuer fails closed. Runners refuse to start with an empty `REGULAIT_PUBLIC_URL` and never fall
+   back to the address they dial; the Engines page and `GET /v1/org/posture` (`workloadIssuer`) say "issuer not
+   configured". Compose passes the same value to the runners, which still dial `http://gateway:3000`.
 7. **The Kong adapter (plugin 0.5.0).** `pdp_key` is replaced by `pdp_client_key` (an Ed25519 key, PEM or one-line
    base64url PKCS#8, through a vault reference) and `issuer`. The client is written over `resty.openssl`, which
    Kong bundles: no Lua library does RFC 7523 and RFC 9449 on the client side with EdDSA (ADR-0176 §4), so only the

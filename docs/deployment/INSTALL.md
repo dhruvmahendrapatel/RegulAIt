@@ -440,7 +440,15 @@ exist for that:
 - **`REGULAIT_PUBLIC_URL`.** It is the issuer every token and proof names. The installer writes
   `https://<domain>` when Caddy terminates TLS and keeps a value you set; behind your own terminator
   it warns and leaves it to you. Runners receive the same value through compose (they still dial
-  `http://gateway:3000`).
+  `http://gateway:3000`). Behind your own TLS terminator pass `--public-url https://<host>`;
+  without it the installer warns, and runners and PDP clients stay refused (the Engines page and
+  `GET /v1/org/posture` say "issuer not configured").
+
+**The IP policy applies to runners and PDP clients.** Their self tokens are programmatic header
+credentials, so `api_key_ip_policy` and the session IP allow-list judge them exactly as they judge
+an API key (ADR-0039). If you enforce an allow-list, add the `engines` compose network's
+subnet for the runners (Docker assigns it: `docker network inspect <project>_engines`) and the address your Kong data plane
+reaches the gateway from for the PDP client; otherwise both are refused with `401 ip_not_allowed`.
 
 **Runners** generate their key on first start (`runner-key` on their own state volume, mode `0600`),
 register its public half with the one-time enrolment token, and rotate it themselves before it

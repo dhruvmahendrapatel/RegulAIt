@@ -43,7 +43,7 @@
  * by DIGEST (AER-034) and logs the digests the job ran against.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign as cryptoSign } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -60,7 +60,10 @@ const PROTOCOL_HEADERS = [
   "x-regulait-subject", "x-regulait-server-id", "x-regulait-tool",
   "x-regulait-decision", "x-regulait-reason",
 ];
-const DATA_KEY = "a".repeat(64);
+// A data key generated for THIS run. The gateway refuses to boot a deployed mode
+// (REGULAIT_DEPLOY_MODE=hosted, which the PDP client's environment needs) on the
+// published dev-default key, and it is right to: a fixed key is not a secret.
+const DATA_KEY = randomBytes(32).toString("hex");
 const PG = process.env.E2E_PG ?? "postgres://regulait:regulait@localhost:5432";
 
 /**
@@ -167,6 +170,74 @@ const check = (name, ok, detail = "") => {
 
 const sh = (cmd, args, opts = {}) =>
   execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe", ...opts });
+
+// ---- ADR-0188 S7: the PDP client's credential, exercised from OUTSIDE Kong ----
+//
+// The plugin asks with its own key's DPoP-bound self token. When the Kong run
+// fails, "Kong could not authenticate" has two very different causes: the
+// gateway refusing a correct client, or the plugin building a wrong one. This
+// control takes the SAME key through the SAME protocol from Node (nothing but
+// node:crypto), step by step, and names the step that failed. It prints status
+// codes and the gateway's error codes only: never a key, a token or a proof.
+const b64u = (v) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
+const jws = (privateKey, header, payload) => {
+  const input = `${b64u(header)}.${b64u(payload)}`;
+  return `${input}.${cryptoSign(null, Buffer.from(input), privateKey).toString("base64url")}`;
+};
+async function pdpClientControl(base, issuer, privateKey, jwk) {
+  const jkt = createHash("sha256").update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x })).digest("base64url");
+  const clientId = `urn:ietf:params:oauth:jwk-thumbprint:sha-256:${jkt}`;
+  const now = () => Math.floor(Date.now() / 1000);
+  const proof = (htm, htu, extra = {}) =>
+    jws(privateKey, { alg: "EdDSA", typ: "dpop+jwt", jwk }, { htm, htu, iat: now(), jti: randomUUID(), ...extra });
+  const tokenRequest = (nonce) => {
+    const iat = now();
+    const assertion = jws(privateKey, { alg: "EdDSA", kid: jkt }, {
+      iss: clientId, sub: clientId, aud: `${issuer}/oauth/token`, jti: randomUUID(), iat, exp: iat + 60,
+    });
+    return fetch(`${base}/oauth/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        dpop: proof("POST", `${issuer}/oauth/token`, nonce ? { nonce } : {}),
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        resource: `${issuer}/v1/authz/check`,
+        client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        client_assertion: assertion,
+      }).toString(),
+    });
+  };
+  const errOf = async (res) => {
+    const j = await res.json().catch(() => ({}));
+    return `${res.status} ${j.error ?? ""}${j.error_code ? `/${j.error_code}` : ""}${j.code ? `/${j.code}` : ""}`;
+  };
+  const steps = [];
+  let res = await tokenRequest(null);
+  let nonce = res.headers.get("dpop-nonce");
+  steps.push(`token without nonce: ${res.status === 200 ? "200" : await errOf(res.clone())}${nonce ? " (nonce offered)" : ""}`);
+  if (res.status !== 200) {
+    res = await tokenRequest(nonce);
+    steps.push(`token with nonce: ${res.status === 200 ? "200" : await errOf(res.clone())}`);
+  }
+  if (res.status !== 200) return { ok: false, steps };
+  const token = (await res.json()).access_token;
+  const ath = createHash("sha256").update(token).digest("base64url");
+  const ask = await fetch(`${base}/v1/authz/check`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `DPoP ${token}`,
+      dpop: proof("POST", `${issuer}/v1/authz/check`, { ath, ...(nonce ? { nonce } : {}) }),
+    },
+    body: JSON.stringify({ userId: randomUUID(), serverId: randomUUID(), toolName: "kong-e2e-control" }),
+  });
+  // any answer the PDP decided (200, or a 4xx about the QUESTION) shows the credential was accepted;
+  // a 401 is the credential refused
+  steps.push(`check: ${ask.status === 200 ? "200" : await errOf(ask)}`);
+  return { ok: ask.status !== 401 && ask.status !== 403 && ask.status < 500, steps };
+}
 
 /**
  * BOTH STREAMS, COMBINED. `execFileSync` with `stdio: "pipe"` returns stdout
@@ -481,6 +552,12 @@ async function main() {
   if (bound.status !== 201) throw new Error(`could not bind the PDP client key: ${bound.status} ${JSON.stringify(bound.json).slice(0, 200)}`);
   // one line (an env-file holds one): base64url of the PKCS#8 DER, which the plugin also accepts as PEM
   const pdpKey = pdpPrivate.export({ type: "pkcs8", format: "der" }).toString("base64url");
+  {
+    const control = await pdpClientControl(base, ISSUER, pdpPrivate, { kty, crv, x });
+    check("control: the PDP client's key takes a self token and asks, from outside Kong (ADR-0188 S7)",
+      control.ok, control.steps.join("; "));
+    if (!control.ok) console.error(`  PDP client control steps: ${control.steps.join("; ")}`);
+  }
 
   // AER-034 — a THIRD subject, entitled to the tool AND caught by an approval
   // rule, so the `approval_required` branch can be asserted end to end. It needs

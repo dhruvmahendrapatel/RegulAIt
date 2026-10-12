@@ -78,6 +78,12 @@ Deployment
                                    air_gapped REFUSES letsencrypt (ACME is an
                                    outbound call).
   --acme-email <addr>              Optional ACME account contact (letsencrypt only).
+  --public-url <url>               ADR-0188 S7: this deployment's public origin
+                                   (REGULAIT_PUBLIC_URL), the issuer engine
+                                   runners and PDP clients take tokens from.
+                                   Default: https://<domain> behind Caddy, else
+                                   the value already in .env. Needed when you
+                                   terminate TLS yourself (--tls none).
   --oidc-issuer <url>              Recorded for the post-install summary and
                                    printed as the exact admin call to make.
                                    NOTE: no gateway code reads this env var —
@@ -194,6 +200,7 @@ while [ $# -gt 0 ]; do
     --domain)        DOMAIN="${2:-}"; shift 2 ;;
     --tls)           TLS="${2:-}"; shift 2 ;;
     --acme-email)    ACME_EMAIL="${2:-}"; shift 2 ;;
+    --public-url)    PUBLIC_URL="${2:-}"; shift 2 ;;
     --oidc-issuer)   OIDC_ISSUER="${2:-}"; shift 2 ;;
     --seed-demo)     SEED_DEMO=1; shift ;;
     --no-seed-demo)  SEED_DEMO=0; shift ;;
@@ -376,7 +383,7 @@ if [ -f "$ENV_FILE" ]; then
   PRIOR_EMAIL="$(env_get "$ENV_FILE" REGULAIT_TLS_EMAIL_DIRECTIVE)"
   PRIOR_OIDC="$(env_get "$ENV_FILE" REGULAIT_OIDC_ISSUER)"
   PRIOR_SEED="$(env_get "$ENV_FILE" SEED_DEMO)"
-  PUBLIC_URL="$(env_get "$ENV_FILE" REGULAIT_PUBLIC_URL)"
+  [ -n "$PUBLIC_URL" ] || PUBLIC_URL="$(env_get "$ENV_FILE" REGULAIT_PUBLIC_URL)"
   [ -n "$DATA_KEY" ]     || DATA_KEY="$(env_get "$ENV_FILE" REGULAIT_DATA_KEY)"
   [ -n "$ADMIN_TOKEN" ]  || ADMIN_TOKEN="$(env_get "$ENV_FILE" REGULAIT_BOOTSTRAP_TOKEN)"
   PRIOR_RETIRED="$(env_get "$ENV_FILE" REGULAIT_BOOTSTRAP_RETIRED)"
@@ -476,6 +483,12 @@ fi
 # know it, so it is left for you to set rather than guessed.
 if [ -z "$PUBLIC_URL" ] && [ "$TLS" != "none" ] && [ -n "$DOMAIN" ]; then
   PUBLIC_URL="https://$DOMAIN"
+fi
+if [ -n "$PUBLIC_URL" ]; then
+  # written into .env and compose: only an http(s) origin (optionally a plain base path) of safe characters.
+  # The gateway applies the full rules at boot (https, or http on loopback only) and refuses anything else.
+  url_re='^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*$'
+  [[ "$PUBLIC_URL" =~ $url_re ]] || die "--public-url must be an http(s) origin with an optional plain base path (e.g. https://regulait.acme.example), got $(printf '%q' "$PUBLIC_URL")"
 fi
 if [ -z "$PUBLIC_URL" ]; then
   warn "REGULAIT_PUBLIC_URL is not set: engine runners and PDP clients (the Kong adapter) cannot authenticate until it names this deployment's https origin. Add REGULAIT_PUBLIC_URL=https://<your host> to $ENV_FILE and re-run."
