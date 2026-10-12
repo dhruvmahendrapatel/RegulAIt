@@ -26,7 +26,7 @@ When it is on:
 - If RegulAIt cannot make an assertion, the call is refused and audited (`mcp-identity-assertion-unavailable`). It is
   never sent without one. This happens when there is no public URL, no data key, no active signing key, or the server
   is a stdio server; the call and any identity are refused before either is sent. A refusal at send time (a request
-  bound for another origin, or an audit row that cannot be written) is refused the same way.
+  bound for another origin, the signature fails, or an audit row cannot be written) is refused the same way.
 - Two servers that receive assertions may not share an audience: turning it on for a server whose canonical URI
   (below) equals another opted-in server's is refused (409 `identity_audience_shared`), because an assertion for one
   would verify at the other.
@@ -88,7 +88,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 /**
  * Verify the RegulAIt-Identity-Assertion header of an incoming MCP request.
  *  issuer:   the RegulAIt deployment's public URL, e.g. "https://regulait.example.com"
- *  audience: this server's URL as registered in RegulAIt, without query or fragment,
+ *  audience: the audience shown on the server's card in RegulAIt,
  *            e.g. "https://mcp.example.com/mcp"
  */
 export function regulaitIdentityVerifier({ issuer, audience }) {

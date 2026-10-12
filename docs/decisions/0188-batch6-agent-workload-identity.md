@@ -235,7 +235,8 @@ Rules, enforced in one module (`delegation.ts`) and asserted by tests:
 
 Anything that crosses a process boundary (an external agent calling `/mcp/:serverId` or the compat model routes, a
 remote worker, an engine runner, a data-plane PDP, the outbound MCP hop of decision 8) uses an access token the gateway
-issues:
+issues. *Amended (S8 item 3):* the outbound MCP hop sends a `typ`-distinct provenance JWT that grants nothing at
+RegulAIt, not an access token; it is outside this decision's binding invariant (see "As built: slice S8").
 - **Format:** RFC 9068 JWT access token, signed by the gateway issuer with Ed25519 (`identity_signing_keys`, public
   halves only in the table, JWKS served at `/.well-known/jwks.json`; private key from a deploy-time
   secret, the pattern the receipt key `REGULAIT_RECEIPT_SIGNING_KEY` follows; rotation with overlap, every rotation audited). Claims: `iss`, `sub`
@@ -1282,7 +1283,7 @@ in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle
    (a `settings_relax` step-up bound to `{op: "mcp_server_update", serverId, url, values}`, audited, reset by a url
    move, in the compare-and-set, with a UI confirmation). It needs a new `mcp_servers` column (there is no JSON
    settings column, and `identity_propagation`'s CHECK allows two values). It waits for a migration number to be
-   coordinated with S7 (0195). Until then the only behaviour is the strict one.
+   coordinated with S7: the next migration after S7's 0195 (0196). Until then the only behaviour is the strict one.
 2. **The format, from standards (ADR-0176).**
    - It is an RFC 7519 JWT, signed with EdDSA by the issuer's current key. It verifies against the existing S3 JWKS
      (`/.well-known/jwks.json`) with any JOSE library.
@@ -1324,7 +1325,7 @@ in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle
      data key, no canonical audience, no active signing key, or the server is stdio, the call is refused before the
      call or any identity is sent. The refusal is a `mcp-identity-assertion-unavailable` decision deny with a `code`.
      That makes `mcp-identity-assertion.ts` a B2 decision writer (ADR-0189), and it is now on the B2 list.
-   - A refusal at send time (a request bound for another origin, a signature or an audit write that fails) writes the
+   - A refusal at send time (a request bound for another origin, the signature fails, or an audit write fails) writes the
      same deny and throws `IdentityAssertionRefusedError`, which `classifyUpstreamError` names as our own refusal:
      never retried, never charged to the upstream's breaker, and mapped to "Denied by policy" on the proxy route.
    - Every assertion sent writes `mcp-identity-assertion-issued`. The row is written in the egress guard's

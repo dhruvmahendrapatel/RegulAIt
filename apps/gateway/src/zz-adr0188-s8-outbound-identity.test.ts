@@ -39,6 +39,7 @@ import {
   eq,
   identitySigningKeys,
   inArray,
+  mcpServers,
   ORG_SETTINGS_ID,
   orgSettings,
   runMigrations,
@@ -134,7 +135,8 @@ async function startUpstream() {
   const addr = httpServer.address();
   if (typeof addr !== "object" || !addr) throw new Error("no address");
   return {
-    url: `http://127.0.0.1:${addr.port}/mcp`,
+    // a run-unique path: the audience never equals one a leftover row from another run holds
+    url: `http://127.0.0.1:${addr.port}/mcp-${RUN}`,
     seen,
     close: () =>
       new Promise<void>((r) => {
@@ -292,9 +294,9 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  // B4S-06 first, in its own try: a passkey left behind would close the bootstrap step-up allowance for every later
+  // suite (M-040/M-042), so no failing restore below may skip it
   try {
-    await db.execute(sql`update identity_signing_keys set retired_at = now() where activated_at is not null and retired_at is null and revoked_at is null`);
-    for (const r of restores.reverse()) await r();
     if (admin) {
       await db.delete(stepUpGrants).where(eq(stepUpGrants.userId, admin.id));
       await db.delete(webauthnChallenges).where(eq(webauthnChallenges.userId, admin.id));
@@ -302,6 +304,18 @@ afterAll(async () => {
       await db.delete(webauthnCredentials).where(eq(webauthnCredentials.userId, admin.id));
     }
     if (sessions.length > 0) await db.delete(authSessions).where(inArray(authSessions.id, sessions));
+  } finally {
+    await restoreRest();
+  }
+});
+
+async function restoreRest() {
+  try {
+    // this suite's servers stop receiving identity, so no leftover opted-in row can claim their audience
+    const ids = [serverId, twinId].filter((id): id is string => typeof id === "string");
+    if (ids.length > 0) await db.update(mcpServers).set({ identityPropagation: "none" }).where(inArray(mcpServers.id, ids));
+    await db.execute(sql`update identity_signing_keys set retired_at = now() where activated_at is not null and retired_at is null and revoked_at is null`);
+    for (const r of restores.reverse()) await r();
     if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
     else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;
     delete process.env[IDENTITY_SIGNING_KEY_ENV];
@@ -311,7 +325,7 @@ afterAll(async () => {
     await up?.close();
     if (keyDir) rmSync(keyDir, { recursive: true, force: true });
   }
-});
+}
 
 /** a governed tools/call by the user; `dataKey` is passed through as given (no default: undefined means none) */
 const callWith = (dataKey: string | undefined, toolName = TOOL, delegationGrantId?: string) =>
@@ -464,7 +478,7 @@ describe("S8 — every refusal on an opted-in server: zero upstream contact, not
   });
 
   it("a policy deny (an ungranted tool) never arms and never contacts", async () => {
-    await refusedWithoutContact(() => callWith(DATA_KEY, UNGRANTED), { kind: "denied" });
+    await refusedWithoutContact(() => callWith(DATA_KEY, UNGRANTED), { kind: "denied", ruleId: "default-deny" });
   });
 
   it("an approval hold never arms and never contacts", async () => {

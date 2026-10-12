@@ -55,7 +55,7 @@ export const VERIFY_EXAMPLE = `import { createRemoteJWKSet, jwtVerify } from "jo
 /**
  * Verify the RegulAIt-Identity-Assertion header of an incoming MCP request.
  *  issuer:   the RegulAIt deployment's public URL, e.g. "https://regulait.example.com"
- *  audience: this server's URL as registered in RegulAIt, without query or fragment,
+ *  audience: the audience shown on the server's card in RegulAIt,
  *            e.g. "https://mcp.example.com/mcp"
  */
 export function regulaitIdentityVerifier({ issuer, audience }) {
