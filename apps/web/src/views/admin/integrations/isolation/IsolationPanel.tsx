@@ -33,6 +33,7 @@ import {
   type Executor,
   type RegisterDraft,
 } from "./isolationModel";
+import { ExecutorDetail } from "./ExecutorDetail";
 import v from "../../../views.module.css";
 
 const isolationKeys = {
@@ -130,6 +131,7 @@ const rowKey = (r: ExecutorRow) => ("unreadable" in r ? `unreadable-${r.index}` 
 
 function ExecutorsCard() {
   const [registering, setRegistering] = useState(false);
+  const [managing, setManaging] = useState<string | null>(null);
   const q = useQuery({ queryKey: isolationKeys.executors, retry: false, refetchInterval: 60_000, queryFn: () => api.get<unknown>("/v1/executors") });
   // re-judge on this screen so a report never stays green past its expiry
   const [now, setNow] = useState(() => Date.now());
@@ -147,6 +149,7 @@ function ExecutorsCard() {
       ? "Registering an executor is available once the executor list has loaded."
       : null;
   return (
+    <>
     <Card
       title="Executors"
       actions={
@@ -215,6 +218,18 @@ function ExecutorsCard() {
                 render: (r) => ("unreadable" in r || r.lastSeenAt === null ? "Never" : <span title={fmtAt(new Date(r.lastSeenAt).toISOString())}>{ago(new Date(r.lastSeenAt).toISOString())}</span>),
               },
               { key: "open", header: "Open work", render: (r) => ("unreadable" in r ? "Not reported" : String(r.openOffers)) },
+              {
+                // ADR-0190 I3: detail, self-test history and the lifecycle acts
+                key: "manage",
+                header: "",
+                align: "right",
+                render: (r) =>
+                  "unreadable" in r ? null : (
+                    <Button size="sm" variant="ghost" aria-label={`Manage executor ${r.name}`} aria-pressed={managing === r.id} onClick={() => setManaging(managing === r.id ? null : r.id)}>
+                      Manage
+                    </Button>
+                  ),
+              },
             ]}
             empty={<EmptyState title="No executors registered" body="With no executor, every isolable call is refused (no_executor). Nothing runs with weaker isolation instead." />}
           />
@@ -222,6 +237,8 @@ function ExecutorsCard() {
       </div>
       {registering && <RegisterExecutorDialog onClose={() => setRegistering(false)} />}
     </Card>
+    {managing && <ExecutorDetail key={managing} executorId={managing} onClose={() => setManaging(null)} />}
+    </>
   );
 }
 
