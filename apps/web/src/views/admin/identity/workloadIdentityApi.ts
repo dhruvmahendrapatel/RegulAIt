@@ -29,6 +29,7 @@ import {
   type WorkloadIdentityListView,
   type WorkloadIdentityView,
 } from "./workloadIdentityModel";
+import { kidOk, type DelegationGrantDetailView, type IdentitySigningKeyListView } from "./signingKeyModel";
 
 export const workloadIdentityKeys = {
   root: ["admin", "workload-identities"] as const,
@@ -124,4 +125,32 @@ export function replaceIdentityGrants(identityId: string, set: PutAgentGrants): 
 export function revokeDelegationGrant(grantId: string): Promise<unknown> {
   const path = `/v1/delegation-grants/${seg(grantId)}/revoke`;
   return withStepUp((h) => stepUpApi.post(path, {}, h));
+}
+
+// ---- ADR-0188: the issuer's signing keys, and one delegation grant -----------
+
+export const signingKeyKeys = { list: ["admin", "workload-identities", "signing-keys"] as const };
+
+/** `GET /v1/identity/signing-keys`: every issuer key ever recorded, public halves only */
+export function listSigningKeys(): Promise<IdentitySigningKeyListView> {
+  return api.get<IdentitySigningKeyListView>("/v1/identity/signing-keys");
+}
+
+/** activate a configured key and retire the current signer; `kid` may be omitted when exactly one configured key is unrecorded */
+export function rotateSigningKey(kid: string | null): Promise<{ kid: string; previousKid: string | null }> {
+  if (kid !== null && !kidOk(kid)) return Promise.reject(new Error("That key id could not be read. Copy it exactly, or leave it blank."));
+  const body = deepFreeze(kid ? { kid } : {});
+  return withStepUp((h) => stepUpApi.post<{ kid: string; previousKid: string | null }>("/v1/identity/signing-keys/rotate", body, h));
+}
+
+/** compromise: every token the key signed is refused from now on; never undone */
+export function revokeSigningKey(kid: string): Promise<{ kid: string; tokensRevoked: number }> {
+  if (!kidOk(kid)) return Promise.reject(new Error("That key id could not be read. Refresh the list."));
+  const path = `/v1/identity/signing-keys/${encodeURIComponent(kid)}/revoke`;
+  return withStepUp((h) => stepUpApi.post<{ kid: string; tokensRevoked: number }>(path, {}, h));
+}
+
+/** `GET /v1/delegation-grants/:grantId`: one grant with its incoming and outgoing allocations */
+export function getDelegationGrant(grantId: string): Promise<DelegationGrantDetailView> {
+  return api.get<DelegationGrantDetailView>(`/v1/delegation-grants/${seg(grantId)}`);
 }

@@ -60,6 +60,7 @@ import {
   type WorkloadIdentityDetailView,
   type WorkloadIdentityView,
 } from "./workloadIdentityModel";
+import { DelegationGrantDetail, IssuerSigningKeysCard } from "./IssuerSigningKeys";
 import s from "./workloadIdentities.module.css";
 
 const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Unmeasured");
@@ -250,6 +251,8 @@ export default function WorkloadIdentitiesPage() {
             <code>invalid_target</code>: {delegationRefusalMessages.invalid_target}
           </p>
         </Card>
+
+        <IssuerSigningKeysCard busy={write.busy} ask={ask} />
 
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={rows} ask={ask} />
       </div>
@@ -515,6 +518,7 @@ function RunDelegationTree(props: {
   const [input, setInput] = useState("");
   const [inputError, setInputError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30_000);
@@ -628,6 +632,15 @@ function RunDelegationTree(props: {
               },
             },
             {
+              key: "detail",
+              header: "Detail",
+              render: (r) => (
+                <Button size="sm" variant="ghost" aria-label={`Details of the grant for ${actorLabel(r.grant.actorIdentityId)}`} onClick={() => setDetailId(r.grant.id)}>
+                  Details
+                </Button>
+              ),
+            },
+            {
               key: "revoke",
               header: "Cascade",
               render: (r) =>
@@ -658,6 +671,7 @@ function RunDelegationTree(props: {
         />
       )}
       {runId && tree.data && !problem && <p>Status uses this browser&apos;s clock; the gateway judges expiry on its own clock.</p>}
+      {detailId && <DelegationGrantDetail grantId={detailId} actorLabel={actorLabel} personLabel={props.personLabel} onClose={() => setDetailId(null)} />}
     </Card>
   );
 }
