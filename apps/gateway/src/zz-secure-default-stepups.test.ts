@@ -26,7 +26,9 @@ import {
   eq,
   inArray,
   mcpRegistries,
+  mcpRegistryEntries,
   mcpServers,
+  egressAllowHosts,
   modelCards,
   ORG_SETTINGS_ID,
   runMigrations,
@@ -62,7 +64,7 @@ const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreIdentity: (() => Promise<void>) | undefined;
-const created = { users: [] as string[], sessions: [] as string[], registries: [] as string[], servers: [] as string[], agents: [] as string[], cards: [] as string[] };
+const created = { users: [] as string[], sessions: [] as string[], registries: [] as string[], servers: [] as string[], agents: [] as string[], cards: [] as string[], allowHosts: [] as string[] };
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
 
 type Method = "GET" | "PUT" | "POST" | "PATCH";
@@ -155,10 +157,14 @@ beforeAll(async () => {
 afterAll(async () => {
   // M-068: the allow entry goes first, while the app is open; its outcome is asserted after every other restore
   const allowRemoval = await removeEgressAllowEntry(app, admin?.key ?? AUTH, { id: allowHostId });
+  // the entries the egress-step-up cases created (tightening a removal needs no step-up)
+  const extraRemovals = [];
+  for (const id of created.allowHosts) extraRemovals.push(await removeEgressAllowEntry(app, admin?.key ?? AUTH, { id }));
   try {
     await restoreAll();
   } finally {
     allowRemoval.assertRemoved();
+    for (const r of extraRemovals) r.assertRemoved();
   }
 });
 
@@ -169,8 +175,8 @@ async function restoreAll() {
   else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;
   if (created.cards.length > 0) await db.delete(modelCards).where(inArray(modelCards.id, created.cards));
   if (created.agents.length > 0) await db.delete(agents).where(inArray(agents.id, created.agents));
-  if (created.registries.length > 0) await db.delete(mcpRegistries).where(inArray(mcpRegistries.id, created.registries));
   if (created.servers.length > 0) await db.delete(mcpServers).where(inArray(mcpServers.id, created.servers));
+  if (created.registries.length > 0) await db.delete(mcpRegistries).where(inArray(mcpRegistries.id, created.registries));
   await db.delete(stepUpGrants).where(inArray(stepUpGrants.userId, created.users));
   await db.delete(webauthnChallenges).where(inArray(webauthnChallenges.userId, created.users));
   await forgetStepUpMethodsForTest(db, created.users);
@@ -303,6 +309,117 @@ describe("MCP server: opening private ranges is a relaxation", () => {
   });
 });
 
+describe("egress allow entries: the private-range and plaintext opt-ins are relaxations", () => {
+  it("turning an opt-in on needs a step-up bound to the host and the opt-ins; a plain entry and turning them off need nothing", async () => {
+    const host = `sds-${RUN}.lan.example.test`;
+    // egress-allow-cleanup: afterAll — every id lands in created.allowHosts, which afterAll removes
+    const plain = await viaKey("POST", "/v1/egress-allow-hosts", { host, note: "sds: plain entry" });
+    expect(plain.statusCode, plain.body).toBe(201);
+    created.allowHosts.push(plain.json().id);
+    expect((await lastAudit("egress-allow-host-set", plain.json().id))!.detail).toMatchObject({ relaxation: false });
+
+    // egress-allow-cleanup: afterAll — the same host (an upsert), removed in afterAll
+    const opened = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true }, {
+      op: "egress_allow_host",
+      host,
+      values: { allowPrivateRanges: true },
+    });
+    expect(opened.statusCode, opened.body).toBe(201);
+    expect(opened.json()).toMatchObject({ host, allowPrivateRanges: true, allowPlaintextHttp: false });
+    expect((await lastAudit("egress-allow-host-set", opened.json().id))!.detail).toMatchObject({
+      relaxation: true,
+      relaxed: { allowPrivateRanges: true },
+      stepUp: "passkey",
+      from: { allowPrivateRanges: false, allowPlaintextHttp: false },
+    });
+
+    // re-sending what is stored, and turning plaintext on: only the NEW opt-in is bound
+    // egress-allow-cleanup: afterAll — the same host (an upsert), removed in afterAll
+    const plaintext = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true, allowPlaintextHttp: true }, {
+      op: "egress_allow_host",
+      host,
+      values: { allowPlaintextHttp: true },
+    });
+    expect(plaintext.statusCode, plaintext.body).toBe(201);
+
+    // tightening: both opt-ins off, through an API key, no step-up
+    // egress-allow-cleanup: afterAll — the same host (an upsert), removed in afterAll
+    const closed = await viaKey("POST", "/v1/egress-allow-hosts", { host });
+    expect(closed.statusCode, closed.body).toBe(201);
+    expect(closed.json()).toMatchObject({ allowPrivateRanges: false, allowPlaintextHttp: false });
+    expect((await lastAudit("egress-allow-host-set", closed.json().id))!.detail).toMatchObject({ relaxation: false });
+    expect((await db.select({ id: egressAllowHosts.id }).from(egressAllowHosts).where(eq(egressAllowHosts.host, host))).length).toBe(1);
+  });
+});
+
+describe("MCP registry import: inheriting a registry's open private ranges is a relaxation", () => {
+  it("an import from a registry that allows private ranges needs a bound step-up; the audit row records the posture", async () => {
+    const name = `sds-open-reg-${RUN}`;
+    const reg = await relaxThroughStepUp("POST", "/v1/mcp-registries", { name, url: REGISTRY_URL, allowPrivateRanges: true }, {
+      op: "mcp_registry_create",
+      name,
+      url: REGISTRY_URL,
+      values: { allowPrivateRanges: true },
+    });
+    expect(reg.statusCode, reg.body).toBe(201);
+    const registryId = reg.json().id as string;
+    created.registries.push(registryId);
+    const [entry] = await db
+      .insert(mcpRegistryEntries)
+      .values({
+        registryId,
+        upstreamName: `io.example.test/sds-${RUN}`,
+        upstreamVersion: "1.0.0",
+        kind: "remote",
+        remoteUrl: `${REGISTRY_URL}sds-mcp`,
+        remoteTransport: "streamable-http",
+      })
+      .returning();
+    const url = `/v1/mcp-registries/entries/${entry!.id}/import`;
+    const ok = await relaxThroughStepUp("POST", url, {}, {
+      op: "mcp_registry_import",
+      registryId,
+      entryId: entry!.id,
+      values: { allowPrivateRanges: true },
+    });
+    expect(ok.statusCode, ok.body).toBe(201);
+    created.servers.push(ok.json().serverId);
+    const [server] = await db.select().from(mcpServers).where(eq(mcpServers.id, ok.json().serverId));
+    expect(server!.allowPrivateRanges).toBe(true);
+    expect((await lastAudit("mcp-registry-entry-imported", ok.json().serverId))!.detail).toMatchObject({
+      allowPrivateRanges: true,
+      relaxation: true,
+      relaxed: { allowPrivateRanges: true },
+      stepUp: "passkey",
+    });
+  });
+
+  it("an import from a registry that inherits the org default asks nothing and records no relaxation", async () => {
+    const r = await asAdmin("POST", "/v1/mcp-registries", { name: `sds-inherit-reg-${RUN}`, url: REGISTRY_URL });
+    expect(r.statusCode, r.body).toBe(201);
+    const registryId = r.json().id as string;
+    created.registries.push(registryId);
+    const [entry] = await db
+      .insert(mcpRegistryEntries)
+      .values({
+        registryId,
+        upstreamName: `io.example.test/sds-inherit-${RUN}`,
+        upstreamVersion: "1.0.0",
+        kind: "remote",
+        remoteUrl: `${REGISTRY_URL}sds-inherit-mcp`,
+        remoteTransport: "streamable-http",
+      })
+      .returning();
+    const imported = await viaKey("POST", `/v1/mcp-registries/entries/${entry!.id}/import`, {});
+    expect(imported.statusCode, imported.body).toBe(201);
+    created.servers.push(imported.json().serverId);
+    expect((await lastAudit("mcp-registry-entry-imported", imported.json().serverId))!.detail).toMatchObject({
+      allowPrivateRanges: null,
+      relaxation: false,
+    });
+  });
+});
+
 describe("agent expected served model: setting it relaxes the served-model drift check", () => {
   it("PUT: setting or changing it needs a bound step-up and is audited; clearing and re-sending need nothing", async () => {
     const a = await app.inject({ method: "POST", url: "/v1/agents", headers: AUTH, payload: { name: `sds-agent-${RUN}`, provider: "mock", tier: 1, model: `sds-deploy-${RUN}` } });
@@ -392,5 +509,19 @@ describe("model cards refuse a presentation-scrub marker", () => {
     // the same edit without the mask is saved
     const edited = await asAdmin("PATCH", `/v1/mrm/cards/${cardId}`, { limitations: "English and French" });
     expect(edited.statusCode, edited.body).toBe(200);
+  });
+});
+
+describe("a duplicate name is refused before a grant is asked for", () => {
+  it("relaxing creates of an agent, a registry and a server answer 409, not a step-up prompt", async () => {
+    const reg = await asAdmin("POST", "/v1/mcp-registries", { name: `sds-plain-${RUN}`, url: REGISTRY_URL, enabled: true });
+    expect(reg.statusCode, reg.body).toBe(409);
+    expect(reg.json().error).toBe("conflict");
+    const srv = await asAdmin("POST", "/v1/servers", { name: `sds-srv-plain-${RUN}`, url: `${REGISTRY_URL}mcp`, allowPrivateRanges: true });
+    expect(srv.statusCode, srv.body).toBe(409);
+    expect(srv.json().error).toBe("conflict");
+    const agent = await asAdmin("POST", "/v1/agents", { name: `sds-agent-${RUN}`, provider: "mock", tier: 1, model: "m", expectedServedModel: "x" });
+    expect(agent.statusCode, agent.body).toBe(409);
+    expect(agent.json().error).toBe("conflict");
   });
 });

@@ -432,7 +432,8 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
           setImporting(null);
           if (!e) return;
           void act.run(async () => {
-            const out = await registryCall(() => api.post<RegistryImportResult>(`/v1/mcp-registries/entries/${e.id}/import`), "import");
+            // an import from a registry that allows private ranges is a relaxation the gateway steps up (settings_relax)
+            const out = await registryCall(() => withStepUp((h) => stepUpApi.post<RegistryImportResult>(`/v1/mcp-registries/entries/${e.id}/import`, {}, h)), "import");
             setImported(out);
             await q.refetch();
           }, `Imported ${e.upstreamName}. Nobody can use it until granted.`);

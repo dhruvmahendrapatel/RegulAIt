@@ -446,7 +446,7 @@ export async function checkEgress(
       return {
         ok: false,
         code: "plaintext_http_forbidden",
-        reason: `plaintext http to '${host}' requires the egress allow entry to set allowPlaintextHttp`,
+        reason: `plaintext http to '${host}' requires the egress allow entry to set allowPlaintextHttp (an admin confirms it with a step-up: it relaxes the default)`,
         host,
       };
     }
@@ -467,7 +467,7 @@ export async function checkEgress(
     return {
       ok: false,
       code: "blocked_host_suffix",
-      reason: `host '${host}' names a private namespace; its allow entry must set allowPrivateRanges`,
+      reason: `host '${host}' names a private namespace; its allow entry must set allowPrivateRanges (an admin confirms it with a step-up: it relaxes the default)`,
       host,
     };
   }
@@ -504,7 +504,7 @@ export async function checkEgress(
         return {
           ok: false,
           code: "blocked_address_range",
-          reason: `'${host}' resolves to ${a} — ${why}. Blocked by default; an admin may set allowPrivateRanges on its allow entry if this is a genuine on-prem endpoint.`,
+          reason: `'${host}' resolves to ${a} — ${why}. Blocked by default; an admin may set allowPrivateRanges on its allow entry if this is a genuine on-prem endpoint (confirmed with a step-up).`,
           host,
           addresses,
         };
@@ -613,7 +613,7 @@ async function checkPrivateLanAware(
       reason: allPrivateLan
         ? `host '${host}' is on a private range and private ranges are not permitted for this server — ` +
           `set the server's allowPrivateRanges flag (or the org mcpPrivateRangesDefault), or add an ` +
-          `egress allow entry for it with allowPrivateRanges`
+          `egress allow entry for it with allowPrivateRanges (each of these is a relaxation an admin confirms with a step-up)`
         : `host '${host}' is not in the egress allow-list — a public MCP destination requires an admin ` +
           `allow entry before it can be reached`,
       host,
@@ -625,7 +625,7 @@ async function checkPrivateLanAware(
     return {
       ok: false,
       code: "plaintext_http_forbidden",
-      reason: `plaintext http to '${host}' requires the egress allow entry to set allowPlaintextHttp`,
+      reason: `plaintext http to '${host}' requires the egress allow entry to set allowPlaintextHttp (an admin confirms it with a step-up: it relaxes the default)`,
       host,
     };
   }
@@ -634,7 +634,7 @@ async function checkPrivateLanAware(
     return {
       ok: false,
       code: "blocked_host_suffix",
-      reason: `host '${host}' names a private namespace; its allow entry must set allowPrivateRanges`,
+      reason: `host '${host}' names a private namespace; its allow entry must set allowPrivateRanges (an admin confirms it with a step-up: it relaxes the default)`,
       host,
     };
   }
@@ -650,7 +650,7 @@ async function checkPrivateLanAware(
           code: "blocked_address_range",
           reason:
             `'${host}' resolves to ${a} — a private-range address. Blocked under the strict MCP posture; ` +
-            `set the server's allowPrivateRanges flag or add allowPrivateRanges to its allow entry.`,
+            `set the server's allowPrivateRanges flag or add allowPrivateRanges to its allow entry (either is a relaxation an admin confirms with a step-up).`,
           host,
           addresses,
         };

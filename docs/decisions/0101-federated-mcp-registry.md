@@ -260,3 +260,10 @@ Enabling a registry (at create or update) and allowing its private ranges are re
 asked after the egress refusal. Moving an explicit deny back to inherit while the org default is open also counts.
 Disabling and denying need nothing. The `mcp-registry-configured` audit row records `relaxation`, the relaxed values
 and the step-up method; an update also records `from`/`to`.
+
+**Import (PR #378 review).** An import creates a server that inherits its registry's `allowPrivateRanges`. When
+that is `true`, the import is the same relaxation as registering a server with private ranges allowed. It needs a
+`settings_relax` step-up (`op: "mcp_registry_import"`, `{registryId, entryId, values: {allowPrivateRanges: true}}`),
+asked after every import refusal. A caller of `importRegistryEntry` that passes no step-up check is refused
+(fail closed). The `mcp-registry-entry-imported` row now records `allowPrivateRanges`, `relaxation` and the step-up
+method. A registry PATCH that moves the url binds `url` in its facts too.

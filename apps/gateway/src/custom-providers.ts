@@ -298,26 +298,64 @@ export function registerCustomProviderRoutes(
       note: body.note ?? null,
       createdBy: req.authCtx.userId ?? null,
     };
-    const [row] = await db
-      .insert(egressAllowHosts)
-      .values(values)
-      .onConflictDoUpdate({ target: egressAllowHosts.host, set: values })
-      .returning();
-    // AUDITED: widening what the gateway may connect to is a governance act,
-    // and opting a host into private ranges or plaintext doubly so.
-    await db.insert(auditLog).values({
-      userId: actor(req),
-      objectType: "custom_model_provider",
-      objectId: row!.id,
-      detail: { phase: "egress_allow_host", ...values },
-      effect: "allow",
-      ruleId: "egress-allow-host-set",
-      ruleChain: [],
-      reason:
-        `egress allow-list entry for '${host}'` +
-        (values.allowPrivateRanges ? " WITH private-range access" : "") +
-        (values.allowPlaintextHttp ? " WITH plaintext http" : ""),
+    // ADR-0180/0186 A: a plain entry (a named public host, https only) is ordinary configuration of the
+    // default-deny allow-list, audited and with no step-up: the host still passes DNS pinning, the unconditional
+    // ranges and every private-range check. Opting a host INTO private ranges or plaintext http relaxes those
+    // checks, so turning either opt-in on (a new entry, or an upsert that widens an existing one) needs a
+    // settings_relax step-up bound to the host and the opt-ins it turns on. Turning them off needs nothing.
+    const [existing] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host));
+    const relaxed: Record<string, true> = {};
+    if (values.allowPrivateRanges && !existing?.allowPrivateRanges) relaxed.allowPrivateRanges = true;
+    if (values.allowPlaintextHttp && !existing?.allowPlaintextHttp) relaxed.allowPlaintextHttp = true;
+    const relaxation = Object.keys(relaxed).length > 0;
+    let stepUp: string | null = null;
+    if (relaxation) {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "egress_allow_host", host, values: relaxed } });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const row = await db.transaction(async (tx) => {
+      // Class A: the step-up was decided on the row as read; a relaxing write applies only if it is unchanged
+      if (relaxation) {
+        const [now] = await tx.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host)).for("update");
+        const same =
+          (now === undefined && existing === undefined) ||
+          (now !== undefined &&
+            existing !== undefined &&
+            now.allowPrivateRanges === existing.allowPrivateRanges &&
+            now.allowPlaintextHttp === existing.allowPlaintextHttp);
+        if (!same) return null;
+      }
+      const [written] = await tx
+        .insert(egressAllowHosts)
+        .values(values)
+        .onConflictDoUpdate({ target: egressAllowHosts.host, set: values })
+        .returning();
+      // AUDITED: widening what the gateway may connect to is a governance act,
+      // and opting a host into private ranges or plaintext doubly so.
+      await tx.insert(auditLog).values({
+        userId: actor(req),
+        objectType: "custom_model_provider",
+        objectId: written!.id,
+        detail: {
+          phase: "egress_allow_host",
+          ...values,
+          ...(existing ? { from: { allowPrivateRanges: existing.allowPrivateRanges, allowPlaintextHttp: existing.allowPlaintextHttp } } : {}),
+          relaxation,
+          ...(relaxation ? { relaxed, stepUp } : {}),
+        },
+        effect: "allow",
+        ruleId: "egress-allow-host-set",
+        ruleChain: [],
+        reason:
+          `egress allow-list entry for '${host}'` +
+          (values.allowPrivateRanges ? " WITH private-range access" : "") +
+          (values.allowPlaintextHttp ? " WITH plaintext http" : "") +
+          (relaxation ? " (a relaxation, confirmed with a step-up)" : ""),
+      });
+      return written!;
     });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
     return reply.status(201).send(row);
   });
 

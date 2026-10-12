@@ -11,6 +11,8 @@
  * strict default should refuse.
  */
 import { expect, type APIRequestContext } from "@playwright/test";
+import { ADMIN_EMAIL } from "./admin-api";
+import { steppedUpAs } from "./demo-credentials";
 
 interface AllowHost {
   id: string;
@@ -48,15 +50,13 @@ export async function snapshotEgressAllowHosts(
       for (const [host, was] of before) {
         const current = now.find((row) => row.host === host);
         if (was) {
-          // re-create (an upsert) with the opt-ins it had, whether the spec changed or removed it
-          const res = await req.post(`${baseUrl}/v1/egress-allow-hosts`, {
-            headers: CSRF,
-            data: {
-              host,
-              allowPrivateRanges: was.allowPrivateRanges,
-              allowPlaintextHttp: was.allowPlaintextHttp,
-              ...(was.note ? { note: was.note } : {}),
-            },
+          // re-create (an upsert) with the opt-ins it had, whether the spec changed or removed it. Turning an opt-in
+          // back on is a relaxation (ADR-0186 A): the admin's signed-in request steps up with her authenticator
+          const res = await steppedUpAs(req, ADMIN_EMAIL, "POST", `${baseUrl}/v1/egress-allow-hosts`, {
+            host,
+            allowPrivateRanges: was.allowPrivateRanges,
+            allowPlaintextHttp: was.allowPlaintextHttp,
+            ...(was.note ? { note: was.note } : {}),
           });
           if (!res.ok()) failures.push(`${host}: restore returned ${res.status()} ${await res.text()}`);
         } else if (current) {

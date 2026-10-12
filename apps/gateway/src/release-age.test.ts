@@ -209,6 +209,10 @@ describe("on (7 days)", () => {
       .returning();
     const out = await importRegistryEntry(k.db, entry!.id, {
       deps: { resolve: async () => [{ address: "10.9.9.10", family: 4 }] },
+      // the registry allows private ranges, so the import is a stepped-up relaxation (ADR-0186 A); this suite is about
+      // the release-age gate, so the confirmation is stood in for here (the route's step-up is proved in
+      // zz-secure-default-stepups.test.ts)
+      stepUp: async () => ({ ok: true, method: "test" }),
     });
     expect(out.ok, JSON.stringify(out)).toBe(true);
     const serverId = (out as { ok: true; result: { serverId: string } }).result.serverId;
@@ -278,7 +282,10 @@ describe("on (7 days)", () => {
     const [entry] = await k.db.insert(mcpRegistryEntries).values(values).returning();
     // the registry sweep saw this exact entry version 30 days ago
     await recordSighting(k.db, "registry_entry", registryEntryDigest(values), new Date(Date.now() - 30 * DAY));
-    const out = await importRegistryEntry(k.db, entry!.id, { deps: { resolve: async () => [{ address: "10.9.9.10", family: 4 }] } });
+    const out = await importRegistryEntry(k.db, entry!.id, {
+      deps: { resolve: async () => [{ address: "10.9.9.10", family: 4 }] },
+      stepUp: async () => ({ ok: true, method: "test" }), // as above: the registry allows private ranges
+    });
     expect(out.ok, JSON.stringify(out)).toBe(true);
     const serverId = (out as { ok: true; result: { serverId: string } }).result.serverId;
     // the entry is old enough, so the gate lets the first sync happen …

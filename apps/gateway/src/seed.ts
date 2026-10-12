@@ -318,6 +318,7 @@ if (process.argv.includes("--open-assurance-window")) {
 
 // ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
 // un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
+await seedDemoEgressAllow(); // before Ada enrols: its loopback entries are a stepped-up relaxation (B4S-06)
 const adminMfa = await seedAdminMfa(adminId);
 
 const keys: Record<string, string> = {};
@@ -1662,7 +1663,14 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
 //  - mcpAdmissionMode is enforce: the demo servers are scanned at their first
 //    sync and admitted on a clean manifest, like any other server.
 // ===========================================================================
-async function seedStrictAdmission(): Promise<void> {
+/**
+ * ADR-0181 (SC) + ADR-0186 A: the demo's local MCP hosts are loopback over plaintext http, so their allow entries
+ * opt into private ranges and plaintext — a relaxation, which needs a settings_relax step-up. The bootstrap
+ * credential passes that only during FIRST-ADMIN SETUP (B4S-06), so this runs before Ada enrols her authenticator
+ * (the same pattern as the passwords, grants and stewardship above). Converges on re-seed: a host already on the
+ * allow-list is left alone.
+ */
+async function seedDemoEgressAllow(): Promise<void> {
   const localHosts = [
     ...new Set(
       ["127.0.0.1", "127.0.0.2", process.env.REGULAIT_DEMO_MCP_HOST_REPO, process.env.REGULAIT_DEMO_MCP_HOST_WAREHOUSE].filter(
@@ -1688,6 +1696,9 @@ async function seedStrictAdmission(): Promise<void> {
       note: "demo: the seeded gemini-pro agent's compiled endpoint (strict compiled-egress posture, ADR-0181)",
     });
   }
+}
+
+async function seedStrictAdmission(): Promise<void> {
 
   const historic: Array<[string, string]> = [
     ["repo-tools", "http://127.0.0.1:9/repo-mcp"],

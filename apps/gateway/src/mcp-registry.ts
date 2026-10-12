@@ -124,7 +124,7 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { CHANGED_CONCURRENTLY, checkStepUp, requireStepUp } from "./step-up.js";
 import { REGISTRATION_ADMISSION_STATE } from "./mcp-admission.js";
 import { recordSighting } from "./release-age.js";
 import { createHash } from "node:crypto";
@@ -706,7 +706,17 @@ export type ImportRefusal =
   | { status: 409; body: { error: "not_importable"; reason: string; detail: string } }
   | { status: 409; body: { error: "conflict"; reason: McpImportConflictReason; conflictServerId: string; detail: string } }
   | { status: 409; body: { error: "already_imported"; serverId: string } }
-  | { status: 400; body: { error: "egress_blocked"; code: string; detail: string } };
+  | { status: 400; body: { error: "egress_blocked"; code: string; detail: string } }
+  /** ADR-0186 A: the step-up an opening import needs was not given (the step-up check's own answer) */
+  | { status: number; body: Record<string, unknown> };
+
+/**
+ * ADR-0186 A: how the caller confirms a relaxing import. The HTTP route passes the step-up check (it spends the
+ * grant); a caller that passes nothing gets a fail-closed refusal for an import that opens private ranges.
+ */
+export type ImportStepUp = (
+  facts: Record<string, unknown>,
+) => Promise<{ ok: true; method: string } | { ok: false; status: number; body: Record<string, unknown> }>;
 
 export interface ImportResult {
   serverId: string;
@@ -734,7 +744,7 @@ export interface ImportResult {
 export async function importRegistryEntry(
   db: Db,
   entryId: string,
-  opts: { actorUserId?: string | null; now?: Date; deps?: McpRegistryDeps } = {},
+  opts: { actorUserId?: string | null; now?: Date; deps?: McpRegistryDeps; stepUp?: ImportStepUp } = {},
 ): Promise<{ ok: true; result: ImportResult } | { ok: false; refusal: ImportRefusal }> {
   const now = opts.now ?? new Date();
   const [entry] = await db.select().from(mcpRegistryEntries).where(eq(mcpRegistryEntries.id, entryId));
@@ -831,6 +841,34 @@ export async function importRegistryEntry(
     return { ok: false, refusal: { status: 400, body: { error: "egress_blocked", code: denied.code, detail } } };
   }
 
+  // ADR-0180/0186 A: the new server inherits the registry's private-range posture. When that posture explicitly
+  // allows private ranges, the import creates a server whose url may reach private network space — the same
+  // relaxation as POST /v1/servers with allowPrivateRanges: true — so it needs a settings_relax step-up bound to
+  // the registry, the entry and the value. Asked after every refusal above, so a refused import spends nothing.
+  const inheritedRanges = registry?.allowPrivateRanges ?? null;
+  const relaxation = inheritedRanges === true;
+  let stepUpMethod: string | null = null;
+  if (relaxation) {
+    const facts = { op: "mcp_registry_import", registryId: entry.registryId, entryId: entry.id, values: { allowPrivateRanges: true } };
+    if (!opts.stepUp) {
+      return {
+        ok: false,
+        refusal: {
+          status: 403,
+          body: {
+            error: "step_up_required",
+            actionKind: "settings_relax",
+            methods: [],
+            detail: "this import opens private ranges (inherited from its registry) and nothing here can confirm a step-up",
+          },
+        },
+      };
+    }
+    const su = await opts.stepUp(facts);
+    if (!su.ok) return { ok: false, refusal: { status: su.status, body: su.body } };
+    stepUpMethod = su.method;
+  }
+
   // ADR-0175 A5 — the release-age cooldown ages an import from the first time
   // the registry sweep saw this exact entry release (recorded now if the sweep
   // never did), not from the moment somebody clicked import.
@@ -852,7 +890,7 @@ export async function importRegistryEntry(
       name: localServerNameFor(entry.upstreamName),
       url: entry.remoteUrl,
       // ADR-0043's tri-state, inherited from the registry that vouched for it.
-      allowPrivateRanges: registry?.allowPrivateRanges ?? null,
+      allowPrivateRanges: inheritedRanges,
       // ADR-0097: EXPLICIT, and deliberately not `grandfathered`. A server that
       // arrived from a public directory has no history to be trusted on.
       admissionState: REGISTRATION_ADMISSION_STATE,
@@ -886,6 +924,9 @@ export async function importRegistryEntry(
       url: entry.remoteUrl,
       admissionState: REGISTRATION_ADMISSION_STATE,
       origin: "federated",
+      allowPrivateRanges: row.allowPrivateRanges,
+      relaxation,
+      ...(relaxation ? { relaxed: { allowPrivateRanges: true }, stepUp: stepUpMethod } : {}),
       grantsCreated: 0,
       toolsCreated: 0,
     },
@@ -1170,6 +1211,9 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
     const relaxed = registryCreateRelaxations(body);
     let stepUp: string | null = null;
     if (relaxed) {
+      // the name is checked BEFORE the grant is spent, so a duplicate (409, as the unique index would answer) never burns it
+      const [taken] = await db.select({ id: mcpRegistries.id }).from(mcpRegistries).where(eq(mcpRegistries.name, body.name));
+      if (taken) return reply.status(409).send({ error: "conflict", detail: `an MCP registry named '${body.name}' already exists` });
       const su = await requireStepUp(db, req, reply, {
         kind: "settings_relax",
         facts: { op: "mcp_registry_create", name: body.name, url: body.url, values: relaxed },
@@ -1251,7 +1295,8 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
     if (relaxed) {
       const su = await requireStepUp(db, req, reply, {
         kind: "settings_relax",
-        facts: { op: "mcp_registry_update", registryId, values: relaxed },
+        // the url the relaxed posture applies to is bound too when this request moves it
+        facts: { op: "mcp_registry_update", registryId, ...(body.url !== undefined ? { url: nextUrl } : {}), values: relaxed },
       });
       if (!su.ok) return reply;
       stepUp = su.method;
@@ -1341,6 +1386,11 @@ export function registerMcpRegistryRoutes(app: FastifyInstance, db: Db, deps: Mc
     const out = await importRegistryEntry(db, entryId, {
       actorUserId: req.authCtx.userId ?? null,
       deps,
+      // spends the grant (single use); the refusal, if any, is the import's answer
+      stepUp: async (facts) => {
+        const su = await checkStepUp(db, req, { kind: "settings_relax", facts });
+        return su.ok ? { ok: true, method: su.method } : { ok: false, status: su.status, body: su.body };
+      },
     });
     if (!out.ok) return reply.status(out.refusal.status).send(out.refusal.body);
     return reply.status(201).send(out.result);
