@@ -24,6 +24,15 @@ import p from "./prompts.module.css";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** why one commit could not be read, in words */
+export function commitReadRefusal(e: unknown): string {
+  const code = (e as { payload?: { error?: unknown } } | null)?.payload?.error;
+  if (code === "unknown_commit") return "This prompt has no commit with that hash. Check the hash, or pick a commit from the history.";
+  if (code === "unknown_prompt") return "This prompt is no longer visible to you: it may have been archived, or its sharing changed.";
+  if (code === "validation") return "That is not a full commit hash (64 hexadecimal characters).";
+  return `The commit could not be read: ${errText(e)}`;
+}
+
 const PROMOTION_LABEL: Record<PromptPromotion["status"], [string, Tone]> = {
   pending_approval: ["waiting for approval", "warn"],
   applied: ["promoted", "ok"],
@@ -285,6 +294,16 @@ export default function BuilderPromptDetailPage() {
   const { toast } = useToast();
   const detail = useQuery({ queryKey: pk.prompt(promptId), queryFn: () => promptsApi.get(promptId) });
   const [viewing, setViewing] = useState<string | null>(null);
+  // Batch U4: the commit being viewed is read on its own (GET /v1/prompts/:id/commits/:hash), so a
+  // hash from an audit row or a promotion opens even when it is not in the list in front of you
+  const commitRead = useQuery({
+    queryKey: pk.commit(promptId, viewing ?? ""),
+    enabled: viewing !== null,
+    retry: false,
+    queryFn: () => promptsApi.commitAt(promptId, viewing!),
+  });
+  const [hashDraft, setHashDraft] = useState("");
+  const [hashError, setHashError] = useState<string | null>(null);
   const [moving, setMoving] = useState<PromptCommit | null>(null);
   const [archiving, setArchiving] = useState(false);
   const archive = useMutation({
@@ -319,7 +338,14 @@ export default function BuilderPromptDetailPage() {
   }
   const d = detail.data;
   const latest = d.commits[0] ?? null;
-  const shown = d.commits.find((c) => c.hash === viewing) ?? latest;
+  const listed = viewing ? d.commits.find((c) => c.hash === viewing) : undefined;
+  // the fresh read wins; the list's copy stands in while it loads (it carries the author's name)
+  const shown = viewing
+    ? commitRead.data
+      ? { ...commitRead.data, authorName: commitRead.data.authorName ?? listed?.authorName ?? null }
+      : (listed ?? null)
+    : latest;
+  const commitRefusal = viewing && commitRead.isError ? commitReadRefusal(commitRead.error) : null;
   const tagsAt = (hash: string) => d.tags.filter((t) => t.commitHash === hash);
   const playgroundHref = (hash?: string) => `/builder/playground?prompt=${d.prompt.id}${hash ? `&commit=${hash}` : ""}`;
 
@@ -392,7 +418,42 @@ export default function BuilderPromptDetailPage() {
               </ol>
             )}
           </section>
-          {shown && <CommitView commit={shown} />}
+          <form
+            className={p.row}
+            onSubmit={(e) => {
+              e.preventDefault();
+              const h = hashDraft.trim().toLowerCase();
+              if (!/^[0-9a-f]{64}$/.test(h)) {
+                setHashError("Enter a full commit hash: 64 hexadecimal characters.");
+                return;
+              }
+              setHashError(null);
+              setViewing(h);
+            }}
+          >
+            <Field label="Open a commit by its full hash">
+              <Input value={hashDraft} onChange={(e) => setHashDraft(e.target.value)} spellCheck={false} />
+            </Field>
+            <Button size="sm" type="submit">
+              Open commit
+            </Button>
+          </form>
+          {hashError && (
+            <p className={s.small} role="alert">
+              {hashError}
+            </p>
+          )}
+          {viewing && commitRead.isLoading && !listed && (
+            <p className={s.small} role="status">
+              Loading commit {shortHash(viewing)}…
+            </p>
+          )}
+          {commitRefusal && (
+            <div role="alert" className={p.pane}>
+              <strong>{commitRefusal}</strong>
+            </div>
+          )}
+          {shown && !commitRefusal && <CommitView commit={shown} />}
           {d.commits.length >= 2 && <DiffView promptId={d.prompt.id} commits={d.commits} />}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--s3)", minWidth: 0 }}>

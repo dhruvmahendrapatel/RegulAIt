@@ -52,12 +52,15 @@ jobs:
       # every report, and a cancelled shard hides which specs it would have run
       fail-fast: false
       matrix:
-        # SHARD COUNT: three. Each shard pays ~2–3 billed minutes of setup, so
-        # a fourth would cut the slowest shard to ~5 min for another ~3 billed
-        # minutes a run; three keeps every shard well under the cap. `--shard`
-        # reads the total from strategy.job-total, so adding an entry here is
-        # the whole change, and the coverage job checks the new layout.
-        shard: [1, 2, 3]
+        # SHARD COUNT: five (was three until 2026-10-12). Each shard pays ~2–3
+        # billed minutes of setup. MEASURED 2026-10-12 (PR #375): with three
+        # shards the suite had grown to 12:30–14:35 per shard against the
+        # 15-min cap, and shard 2 of 9ac4be0 was cancelled at the cap. Five
+        # brings each back to roughly 8–9 min with the cap kept, as the note
+        # above asks. `--shard` reads the total from strategy.job-total, so
+        # adding an entry here is the whole change, and the coverage job
+        # checks the new layout.
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

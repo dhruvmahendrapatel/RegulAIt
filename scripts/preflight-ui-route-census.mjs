@@ -174,28 +174,8 @@ export const INDIRECT_UI_CALLS = new Map([
  * until the entry is deleted, and KNOWN_UI_GAPS_MAX is lowered to match.
  */
 export const KNOWN_UI_GAPS = new Map([
-  ["GET /v1/health/schedulers", { does: "scheduler liveness: each job's last tick and failures", tracking: "PR #374 review: admins must SEE failed ticks; the Scheduler page reads /v1/scheduler/jobs, not this" }],
-  ["GET /v1/reports/runs", { does: "report run history, filterable", tracking: "PR #374 review: the reports overview carries counts only, not the runs" }],
-  ["GET /v1/billing/periods", { does: "every billing period (paged)", tracking: "PR #374 review: the billing overview returns only the newest 25; paged list view pending (ui-gaps-details)" }],
-  ["GET /v1/billing/rate-cards", { does: "every rate card (paged)", tracking: "PR #374 review: the billing overview returns only the newest 25; paged list view pending" }],
-  ["GET /v1/billing/statements", { does: "every billing statement, filterable", tracking: "PR #374 review: the billing overview returns only the newest 25; paged list view pending" }],
-  ["GET /v1/spend/anomalies", { does: "spend anomalies, filterable by status", tracking: "PR #374 review: the monitor overview returns only the newest 25; paged list view pending" }],
-  ["GET /v1/spend/scheduled-changes", { does: "scheduled spend-limit changes", tracking: "PR #374 review: the monitor overview returns only the newest 25; paged list view pending" }],
-  ["GET /v1/receipts", { does: "pages through signed decision receipts", tracking: "UI census 2026-10-12: receipts panel shows status, range export and verify, no list" }],
-  ["GET /v1/receipts/:auditId", { does: "the signed receipt envelope(s) for one decision", tracking: "UI census 2026-10-12: audit row / decision record has no receipt view" }],
-  ["GET /v1/cost-imports/:importId", { does: "an imported cost batch with its source lines", tracking: "UI census 2026-10-12: Cost consolidation lists and revokes imports, cannot open one" }],
-  ["PATCH /v1/mrm/cards/:id", { does: "edits a model card's fields (intended use, limitations, …)", tracking: "UI census 2026-10-12: Model risk page can create, sign off, revoke and delete, not edit" }],
-  ["GET /v1/redteam/summary", { does: "red-team posture: what got through recently, ranked by severity", tracking: "UI census 2026-10-12: Red-teaming page" }],
-  ["GET /v1/redteam/findings", { does: "every red-team defeat still standing, newest first", tracking: "UI census 2026-10-12: Red-teaming page" }],
-  ["GET /v1/redteam/runs/:id/trials", { does: "the per-trial record of a red-team run (ADR-0068)", tracking: "UI census 2026-10-12: Red-teaming run drawer" }],
-  ["POST /v1/redteam/runs/:id/evidence", { does: "attaches a red-team run to a model card as evidence", tracking: "UI census 2026-10-12: Red-teaming run drawer / Model risk evidence" }],
-  ["GET /v1/prompts/:promptId/commits/:hash", { does: "reads one prompt commit by hash", tracking: "UI census 2026-10-12: Builder prompts history" }],
-  ["GET /v1/initiatives/:initiativeId", { does: "an initiative with its child projects and their spend", tracking: "UI census 2026-10-12: Cost dashboard initiative drill-down" }],
-  ["GET /v1/llm/jobs/:id", { does: "a training job with its dataset version and artifact", tracking: "UI census 2026-10-12: regulAIt-LLM jobs detail" }],
-  ["GET /v1/billing/rate-cards/:id", { does: "a rate card with its entries", tracking: "UI census 2026-10-12: Billing rate-card detail" }],
-  ["GET /v1/billing/statements/:id", { does: "one billing statement (scope-checked read)", tracking: "UI census 2026-10-12: Billing statement detail (export exists, view does not)" }],
-  ["GET /v1/reports/definitions/:id", { does: "a report definition with its resolved scope and schedules", tracking: "UI census 2026-10-12: Reports definition detail" }],
-  ["GET /v1/reports/runs/:id", { does: "one report run (scope-checked read)", tracking: "UI census 2026-10-12: Reports run history" }],
+  // empty: batch U4 (ui-gaps-details) closed the last 22. A new entry needs a reason and raises nothing:
+  // KNOWN_UI_GAPS_MAX stays 0, so build the screen instead.
 ]);
 
 /**
@@ -204,7 +184,7 @@ export const KNOWN_UI_GAPS = new Map([
  * the number only ever goes down. The census test pins an upper bound too, so
  * raising it is a visible two-file diff.
  */
-export const KNOWN_UI_GAPS_MAX = 22;
+export const KNOWN_UI_GAPS_MAX = 0;
 
 const VERB_KEY = { GET: "get", POST: "post", PUT: "put", PATCH: "patch", DELETE: "del" };
 

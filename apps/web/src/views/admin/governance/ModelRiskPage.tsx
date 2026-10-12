@@ -42,6 +42,7 @@ import { EngineScanEvidenceChip } from "./EngineScanChip";
 import type { ArtifactScan } from "./modelArtifacts";
 import { SpdxFieldsPanel } from "./SpdxFieldsPanel";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { ModelCardEditButton } from "./ModelCardEditButton";
 
 // ADR-0189 B6: an agent's model card shows that agent's AI BOM (R25: a card approval snapshots its agent)
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
@@ -87,6 +88,7 @@ interface ModelCard {
   customProviderId: string | null;
   intendedUse: string;
   limitations: string | null;
+  note?: string | null;
   dataClaims: Record<string, unknown>;
   biasFairness: BiasSlot[];
   standardRefs: string[];
@@ -600,7 +602,10 @@ export default function ModelRiskPage() {
 
           {/* ---------------- one card ---------------- */}
           {detail && (
-            <Card title={`${detail.subjectName ?? "model"} — ${detail.intendedUse}`}>
+            <Card
+              title={`${detail.subjectName ?? "model"} — ${detail.intendedUse}`}
+              actions={<ModelCardEditButton key={detail.id} card={detail} subject={detail.subjectName ?? "this model"} onSaved={refreshAll} />}
+            >
               <div className={v.stack}>
                 <div>
                   <Badge tone={stateTone(detail.state)}>{detail.state}</Badge>{" "}

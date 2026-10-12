@@ -16,7 +16,7 @@
  *    org report shows "org-wide"; anyone else sees the narrowed list, so the
  *    scoping is legible rather than implicit.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
@@ -24,6 +24,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { QueryGate, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams, useUsers, userOpts } from "../adminKit";
 import { EditReportScheduleButton } from "../editForms";
+import { ReportDefinitionDetail, ReportRunDetail, ReportRunsCard } from "./ReportsHistory";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -104,6 +105,13 @@ export default function ReportsPage() {
   const [cadence, setCadence] = useState("monthly");
   const [scheduleFor, setScheduleFor] = useState("");
   const [result, setResult] = useState<GeneratedReport | null>(null);
+  // Batch U4: a definition or a run opened for its full record
+  const [openDefinition, setOpenDefinition] = useState<string | null>(null);
+  const [openRun, setOpenRun] = useState<string | null>(null);
+  // the "Details" button that opened the definition dialog: a run opened from inside that dialog
+  // replaces it, so closing the run hands focus back here (the dialog's own return target is gone)
+  const definitionOpener = useRef<HTMLButtonElement | null>(null);
+  const [runFromDefinition, setRunFromDefinition] = useState(false);
 
   const defs = overview.data?.definitions ?? [];
 
@@ -215,6 +223,16 @@ export default function ReportsPage() {
                         <div className={a.formRow}>
                           <Button
                             size="sm"
+                            aria-label={`Details of ${d.name}`}
+                            onClick={(e) => {
+                              definitionOpener.current = e.currentTarget;
+                              setOpenDefinition(d.id);
+                            }}
+                          >
+                            Details
+                          </Button>
+                          <Button
+                            size="sm"
                             onClick={() =>
                               void act.run(async () => {
                                 const r = await api.post<GeneratedReport>(
@@ -322,6 +340,11 @@ export default function ReportsPage() {
                       header: "",
                       render: (s) => (
                         <div className={v.row}>
+                          {s.lastRunId && (
+                            <Button size="sm" aria-label={`Open the last run of ${s.definition}`} onClick={() => setOpenRun(s.lastRunId)}>
+                              Last run
+                            </Button>
+                          )}
                           <EditReportScheduleButton schedule={s} definitionName={s.definition} users={userOpts(users.data?.users).map((o) => ({ value: o.v, label: o.l }))} usersLoading={users.isLoading} onSaved={() => void overview.refetch()} />
                           <Button
                             size="sm"
@@ -426,8 +449,37 @@ export default function ReportsPage() {
               </div>
             </Card>
           )}
+          <ReportRunsCard definitions={defs.map((d) => ({ id: d.id, name: d.name }))} onOpenRun={(id) => {
+              setRunFromDefinition(false);
+              setOpenRun(id);
+            }}
+          />
         </QueryGate>
       </div>
+      {openDefinition && (
+        <ReportDefinitionDetail key={openDefinition} id={openDefinition} onClose={() => setOpenDefinition(null)} onOpenRun={(id) => {
+            setOpenDefinition(null);
+            setRunFromDefinition(true);
+            setOpenRun(id);
+          }}
+        />
+      )}
+      {openRun && (
+        <ReportRunDetail
+          key={openRun}
+          id={openRun}
+          onClose={() => {
+            setOpenRun(null);
+            if (runFromDefinition) {
+              setRunFromDefinition(false);
+              // after the dialog unmounts and its own focus return has run
+              requestAnimationFrame(() => {
+                if (definitionOpener.current?.isConnected) definitionOpener.current.focus();
+              });
+            }
+          }}
+        />
+      )}
     </>
   );
 }

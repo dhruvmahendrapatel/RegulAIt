@@ -23,6 +23,7 @@ import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
+import { AnomalyHistory, ScheduledChangeHistory } from "./SpendHistory";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -387,6 +388,7 @@ export default function SpendMonitorPage() {
                   ]}
                 />
               )}
+              <AnomalyHistory />
             </div>
           </Card>
 
@@ -467,6 +469,7 @@ export default function SpendMonitorPage() {
                   ]}
                 />
               )}
+              <ScheduledChangeHistory />
             </div>
           </Card>
         </QueryGate>
