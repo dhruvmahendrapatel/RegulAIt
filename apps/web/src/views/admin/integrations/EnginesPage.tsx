@@ -45,6 +45,7 @@ import { KV, QueryGate } from "../adminKit";
 import { EngineStatusBadge } from "./EngineStatusBadge";
 import { IsolationPanel } from "./isolation/IsolationPanel";
 import { IsolationSettingsCard } from "./isolation/IsolationSettings";
+import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import {
   ENGINE_DIAL_LIMITS,
   ENROLLMENT_TTL_MINUTES,
@@ -240,6 +241,17 @@ export default function EnginesPage() {
         {/* ADR-0190 I9: isolation lives under Engines (ADR-0177 §3, no new navigation group) */}
         <IsolationPanel />
         <IsolationSettingsCard />
+        {/* ADR-0187: engine run limits and the model artifact storage quotas (decision 127) */}
+        <OrgSettingsCard
+          title="Engine run limits"
+          keys={["engineMaxRunTimeoutMinutes", "engineDefaultRunBudgetUsd", "engineRunApprovalThresholdUsd", "engineRawReportRetentionDays", "engineSensitiveSetApproval"]}
+          testId="engine-run-limits"
+        />
+        <OrgSettingsCard
+          title="Model artifact storage quotas"
+          keys={["modelArtifactUploaderQuotaMegabytes", "modelArtifactUploaderQuotaCount", "modelArtifactOrgQuotaMegabytes", "modelArtifactOrgQuotaCount"]}
+          testId="model-artifact-quotas"
+        />
       </div>
 
       <ConfirmModal

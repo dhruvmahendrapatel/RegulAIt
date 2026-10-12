@@ -41,6 +41,7 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { EngineScanEvidenceChip } from "./EngineScanChip";
 import type { ArtifactScan } from "./modelArtifacts";
 import { SpdxFieldsPanel } from "./SpdxFieldsPanel";
+import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 
 // ADR-0189 B6: an agent's model card shows that agent's AI BOM (R25: a card approval snapshots its agent)
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
@@ -308,8 +309,8 @@ export default function ModelRiskPage() {
                     <option value="off">off — cards are recorded, nothing is refused</option>
                   </Select>
                 </Field>
-                <Field label={`Warn window (days before validUntil)`}>
-                  <Input readOnly value={status.data?.warnDays ?? 30} />
+                <Field label={`Warn window (days before validUntil; changed below)`}>
+                  <Input readOnly value={status.data?.warnDays ?? "not reported"} />
                 </Field>
                 <Field label="Expiry sweep">
                   <Button
@@ -407,6 +408,9 @@ export default function ModelRiskPage() {
               </div>
             </div>
           </Card>
+
+          {/* the warn window, writable through PUT /v1/org/settings (U3) */}
+          <OrgSettingsCard title="Expiry warning window" keys={["mrmExpiryWarnDays"]} testId="mrm-expiry-warn" />
 
           {/* ---------------- expiring work ---------------- */}
           <Card title="Expiring and lapsed sign-offs">

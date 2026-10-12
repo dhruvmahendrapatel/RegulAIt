@@ -13,6 +13,7 @@ import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { RefusalGuidance } from "../../../api/refusals";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import UserPasskeysPanel from "./UserPasskeysPanel";
+import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import type {
   AdminUser,
   ApiKey,
@@ -259,6 +260,13 @@ export default function UsersPage() {
         )}
 
         <ApiKeysCard />
+        {/* ADR-0098: the lifetime of a key issued with no expiry, and the ceiling on any requested lifetime */}
+        <OrgSettingsCard
+          title="API key lifetimes"
+          keys={["apiKeyDefaultTtlDays", "apiKeyMaxTtlDays"]}
+          testId="api-key-lifetimes"
+          intro={<p className={v.faint}>Applies to keys issued from now on; a key keeps the expiry it was issued with. The default can never be longer than the ceiling.</p>}
+        />
       </div>
 
       <ConfirmModal

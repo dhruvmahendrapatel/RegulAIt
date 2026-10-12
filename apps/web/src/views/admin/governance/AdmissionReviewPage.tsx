@@ -26,6 +26,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Table, Tabs } from "../.
 import { ReasonModal, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { putOrgSettings, api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import ModelArtifactsTab from "./ModelArtifactsTab";
 
 interface ReviewSkill {
@@ -235,6 +236,9 @@ export default function AdmissionReviewPage() {
             ]}
           />
         </Card>
+
+        {/* ADR-0097: whether the manifest scan holds a server (enforce), only records (log), or does not run (off) */}
+        <OrgSettingsCard title="MCP admission scan" keys={["mcpAdmissionMode"]} testId="mcp-admission-mode" />
 
         <Card title="MCP servers held by the manifest scan">
           <p className={v.dim} style={{ marginTop: 0 }}>

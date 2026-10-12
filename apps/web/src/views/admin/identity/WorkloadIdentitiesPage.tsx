@@ -61,6 +61,7 @@ import {
   type WorkloadIdentityView,
 } from "./workloadIdentityModel";
 import s from "./workloadIdentities.module.css";
+import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 
 const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Unmeasured");
 
@@ -250,6 +251,23 @@ export default function WorkloadIdentitiesPage() {
             <code>invalid_target</code>: {delegationRefusalMessages.invalid_target}
           </p>
         </Card>
+
+        {/* ADR-0188 decision 10: least privilege, token lifetime, chain depth, workload sign-in and the root-grant limits */}
+        <OrgSettingsCard
+          title="Agent identity and delegation settings"
+          keys={[
+            "agentEntitlementMode",
+            "delegatedTokenTtlSeconds",
+            "delegationMaxDepth",
+            "workloadClientAuthMethods",
+            "dpopNonceRequired",
+            "workloadKeyMaxAgeDays",
+            "delegationUncappedRootAllowed",
+            "delegationRootDefaultCapMicros",
+            "delegationRootMaxLifetimeSeconds",
+          ]}
+          testId="identity-delegation-settings"
+        />
 
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={rows} ask={ask} />
       </div>
