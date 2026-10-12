@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { findAddGaps, notBuiltRoutes, uiCallPaths } from "./preflight-ui-affordances.mjs";
+import {
+  DELIBERATELY_API_ONLY,
+  expandLiteralUnions,
+  findAddGaps,
+  fiveOhOneResponders,
+  literalUnionOf,
+  notBuiltRoutes,
+  segmentMatch,
+  uiCallPaths,
+} from "./preflight-ui-affordances.mjs";
 
 describe("affordance census: which web calls count as reaching a route", () => {
   it("counts the shared client in every shape it is written in", () => {
@@ -36,6 +45,7 @@ describe("affordance census: which web calls count as reaching a route", () => {
 describe("affordance census: the add side skips routes that are still 501 stubs", () => {
   it("reads the notBuilt registrations, verb and normalized path, and nothing else", () => {
     const src = [
+      "const notBuilt = async (_req: unknown, reply: FastifyReply) => reply.status(501).send(NOT_BUILT);",
       'app.post("/v1/things", notBuilt);',
       'app.delete("/v1/things/:thingId/parts/:partId", notBuilt);',
       'app.get("/v1/things", s4.list);',
@@ -56,5 +66,66 @@ describe("affordance census: the add side skips routes that are still 501 stubs"
     const base = { posted: new Set(["/v1/a/:x/b"]), gotten: new Set(["/v1/a/:x/b"]) };
     expect(findAddGaps({ ...base, uiPost: new Set(["/v1/a/:x/b"]), uiGet: new Set(["/v1/a/:x/b"]) })).toEqual([]);
     expect(findAddGaps({ ...base, uiPost: new Set(), uiGet: new Set() })).toEqual([]);
+  });
+});
+
+describe("affordance census: a notBuilt route counts only when the file defines it as a 501 responder", () => {
+  const regs = 'app.post("/v1/things", notBuilt);\napp.delete("/v1/things/:id", notBuilt);';
+
+  it("a `notBuilt` that is imported, or that answers anything but 501, makes no stub", () => {
+    expect([...notBuiltRoutes(regs)]).toEqual([]);
+    expect([...notBuiltRoutes(`import { notBuilt } from "./elsewhere.js";\n${regs}`)]).toEqual([]);
+    expect([...notBuiltRoutes(`const notBuilt = async (_req, reply) => reply.status(200).send({});\n${regs}`)]).toEqual([]);
+    expect([...notBuiltRoutes(`const notBuilt = async (_req, reply) => reply.status(501).send(X);\n${regs}`)].sort()).toEqual([
+      "DELETE /v1/things/:x",
+      "POST /v1/things",
+    ]);
+  });
+
+  it("finds the 501 responders by name, one-line handlers only", () => {
+    const src = [
+      "  const notBuilt = async (_req: unknown, reply: FastifyReply) => reply.status(501).send(IDENTITY_NOT_BUILT);",
+      "  const ok = async (_req: unknown, reply: FastifyReply) => reply.status(200).send({});",
+      "  const later = reply.status(501);",
+    ].join("\n");
+    expect([...fiveOhOneResponders(src)]).toEqual(["notBuilt"]);
+  });
+
+  it("no exemption names a stub: a stub is skipped already, so an entry for one is stale", () => {
+    expect(DELIBERATELY_API_ONLY.size).toBe(0);
+  });
+});
+
+describe("affordance census: a templated collection segment does not reach unrelated routes", () => {
+  const owner = [
+    'function OwnerForm({ kind, row }: { kind: "servers" | "connectors"; row: OwnedIntegration }) {',
+    "  return api.put(`/v1/${kind}/${row.id}/owner`, { ownerUserId: null });",
+    "}",
+  ].join("\n");
+
+  it("expands a template variable the file types as a string-literal union", () => {
+    expect(literalUnionOf("kind", owner)).toEqual(["servers", "connectors"]);
+    expect(literalUnionOf("row", owner)).toBeNull();
+    expect(expandLiteralUnions("/v1/${kind}/${row.id}/owner", owner)).toEqual([
+      "/v1/servers/${row.id}/owner",
+      "/v1/connectors/${row.id}/owner",
+    ]);
+    expect([...uiCallPaths(owner, "put")].sort()).toEqual(["/v1/connectors/:x/owner", "/v1/servers/:x/owner"]);
+  });
+
+  it("IntegrationOwnership's call reaches the server and connector owner routes, and NOT the agent or alert ones", () => {
+    const ui = uiCallPaths(owner, "put");
+    expect(segmentMatch("/v1/servers/:x/owner", ui)).toBe(true);
+    expect(segmentMatch("/v1/connectors/:x/owner", ui)).toBe(true);
+    expect(segmentMatch("/v1/agents/:x/owner", ui)).toBe(false);
+    expect(segmentMatch("/v1/governance/alerts/:x/owner", ui)).toBe(false);
+  });
+
+  it("an unexpandable collection wildcard reaches nothing; a wildcard further along still matches", () => {
+    const untyped = uiCallPaths("api.put(`/v1/${kind}/${id}/owner`, {})", "put");
+    expect([...untyped]).toEqual(["/v1/:x/:x/owner"]);
+    expect(segmentMatch("/v1/agents/:x/owner", untyped)).toBe(false);
+    // `/v1/grants/${kind}/${id}`: the collection is literal, the kind segment is a wildcard
+    expect(segmentMatch("/v1/grants/agents/:x", new Set(["/v1/grants/:x/:x"]))).toBe(true);
   });
 });
