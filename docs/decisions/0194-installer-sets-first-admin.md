@@ -76,8 +76,20 @@ ADR-0180 (secure by default), and a known default administrator credential is a 
    - restarts the gateway with `up -d --no-build`.
    The manual fallback in INSTALL.md now ends with "re-run the installer to retire the token" instead of the old
    `sed` instruction, which would have hit that refusal.
-3. **Break-glass.** An explicit `--admin-token` re-opens a retired token for recovery. The next installer run
-   without that flag retires it again. A token that is only exported in the shell is ignored.
+3. **Break-glass.** An explicit `--admin-token` re-opens a token only after it has been retired, for recovery. On a
+   first install, the flag only sets the token's value, and the token is retired once the admin exists. The next
+   installer run without the flag retires it again. A token that is only exported in the shell is ignored. If the
+   gateway restart that completes retirement fails, the installer stops and says that the running gateway still
+   accepts the old token. If the token is retired and no admin is active, the summary does not print a manual `curl`.
+   It points to re-running the installer or re-opening the token.
 4. **Unattended installs.** `REGULAIT_FIRST_ADMIN_PASSWORD_FILE` must be a regular, non-empty file with mode 0600 or
    stricter, and `REGULAIT_FIRST_ADMIN_EMAIL` is required with it. Both are checked before anything is rendered.
-   Without the file, a non-interactive run skips the step and prints the manual path.
+   The file must hold one line. It must not be a symlink, it must be owned by the installing user or root, and it
+   must have no UTF-8 byte-order mark and no control characters other than one trailing newline. It is checked again
+   immediately before use. Without the file, a non-interactive run skips the step and prints the manual path.
+5. **Errors never echo secrets.** If the account creation fails, the tool prints only the error type and the
+   Postgres error code, never the driver message, which can carry the email and password hash. A duplicate username
+   or email exits 5.
+6. **Demo seed (`--seed-demo`).** The demo personas count as the existing admin, so the step is skipped and the
+   summary says so. The token is still retired, so the seed that re-runs at each gateway start can no longer
+   authenticate. It logs a failure and the loaded data stays. This is the stricter choice, and it was kept.
