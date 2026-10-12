@@ -34,6 +34,7 @@ import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Table } fr
 import { QueryGate, useAction, useEgressAllowHosts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { EditExternalScorerButton } from "../editForms";
 
 /** the judge-backed kinds an instrument may claim — the registration schema
  * refuses anything else, so the lexical metrics are not even expressible */
@@ -270,6 +271,7 @@ export default function ExternalScorersPage() {
                         >
                           {r.enabled ? "Disable" : "Enable"}
                         </Button>
+                        <EditExternalScorerButton scorer={r} />
                         <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => setRemoving(r)}>
                           Remove
                         </Button>

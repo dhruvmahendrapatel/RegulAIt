@@ -777,13 +777,26 @@ export function ReasonModal(props: {
 // ---- misc display helpers -------------------------------------------------
 
 /** authed CSV download via a transient blob URL (session cookie rides along) */
-export async function downloadCsv(path: string, filename: string, onError: (msg: string) => void) {
-  const res = await fetch(path, { credentials: "include" });
+export async function downloadCsv(
+  path: string,
+  filename: string,
+  onError: (msg: string) => void,
+  /** optional: the refusal in the caller's words (it knows the route's codes) */
+  describe?: (status: number, body: { error?: string; detail?: string } | null) => string | null,
+): Promise<boolean> {
+  let res: Response;
+  try {
+    res = await fetch(path, { credentials: "include" });
+  } catch {
+    // the request never reached the gateway (offline, blocked, reset): say so rather than reject silently
+    onError("The download could not reach the gateway. Check the connection and try again.");
+    return false;
+  }
   if (!res.ok) {
     // name the refusal (e.g. a signed export with no signing key) instead of a bare status code
-    const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    onError(`Download failed (${res.status}${body?.error ? ` — ${body.error}` : ""})`);
-    return;
+    const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;
+    onError(describe?.(res.status, body) ?? `Download failed (${res.status}${body?.error ? ` — ${body.error}` : ""})`);
+    return false;
   }
   const url = URL.createObjectURL(await res.blob());
   const link = document.createElement("a");
@@ -793,6 +806,7 @@ export async function downloadCsv(path: string, filename: string, onError: (msg:
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+  return true;
 }
 
 export function KV(props: { rows: Array<[ReactNode, ReactNode]> }) {

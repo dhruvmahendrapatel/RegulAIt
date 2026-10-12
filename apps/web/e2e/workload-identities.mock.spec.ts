@@ -145,6 +145,17 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
     if (p === "/v1/workload-identities" && method === "POST") {
       return json(route, { ...IDENTITY, id: U(25), kind: "worker_runtime", agentId: null, ...(req.postDataJSON() as object) }, 201);
     }
+    // U3: the identity and delegation settings card on this page (strict defaults)
+    if (p === "/v1/org/settings" && method === "GET") {
+      return json(route, {
+        settings: {
+          agentEntitlementMode: "own_grants", delegatedTokenTtlSeconds: 300, delegationMaxDepth: 3,
+          workloadClientAuthMethods: ["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid"],
+          dpopNonceRequired: true, workloadKeyMaxAgeDays: 90, delegationUncappedRootAllowed: false,
+          delegationRootDefaultCapMicros: 0, delegationRootMaxLifetimeSeconds: 900,
+        },
+      });
+    }
     if (p === "/v1/delegation-grants" && method === "GET") return json(route, TREE);
     if (p === `/v1/delegation-grants/${U(40)}/revoke` && method === "POST") return json(route, { grantId: U(40), revoked: 2 });
     m.unmatched.push(`${method} ${p}`);
