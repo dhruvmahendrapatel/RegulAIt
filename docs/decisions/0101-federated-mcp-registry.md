@@ -251,3 +251,12 @@ registry configuration must never cascade into deleting servers an operator reli
   green under each probe assert the *other* half (pagination and cursor round-trip, egress and
   air-gap, sweep bounds, audit counts, admin-only routing), which is what one would want, but it
   does mean no single probe reddens the file.
+
+## As built — 2026-10-12: enabling a registry and opening its private ranges need a server step-up
+
+Enabling a registry (at create or update) and allowing its private ranges are relaxations of the strict defaults
+(disabled; inherit the org default). The UI confirmed them, but the gateway did not. They now need a
+`settings_relax` step-up (`op: "mcp_registry_create"` / `"mcp_registry_update"`, ADR-0186 As built 2026-10-12),
+asked after the egress refusal. Moving an explicit deny back to inherit while the org default is open also counts.
+Disabling and denying need nothing. The `mcp-registry-configured` audit row records `relaxation`, the relaxed values
+and the step-up method; an update also records `from`/`to`.

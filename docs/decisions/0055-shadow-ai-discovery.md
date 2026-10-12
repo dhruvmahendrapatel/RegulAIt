@@ -277,3 +277,15 @@ catalogue), `shadow_ai_imports` (every evidence file, including the refused ones
 and `shadow_ai_findings` (the correlated inventory). `audit_log.object_type`
 gains `ai_endpoint_signature`, `shadow_ai_import` and `shadow_ai_finding` as a
 TS-only widening — the column has no DB CHECK, so there is no DDL for it.
+
+## As built — 2026-10-12: the remediation plan's workflow body is a valid start request
+
+`GET /v1/shadow-ai/findings/:id/remediation-plan` returned a body that `POST /v1/workflows/instances` rejects: it
+had no description, paths or environment, and it carried an unknown `repoPath`. It now returns a body that passes
+`startInstanceSchema`, pinned by a test. The environment, which only the person knows, is the placeholder
+`unstated`, listed in `needsInput`, and the screen replaces it.
+
+No default assignment rule ships for change type `shadow-ai-remediation`. No migration or seed ships default rules
+or templates (only the demo seeder makes them, through the API), and assigning a workflow on an admin's behalf is
+not secure by default. The plan reports `assignment.ruleConfigured`, the panel says an admin must assign a workflow,
+and the 422 `no_workflow_matches_change` now names the change type and says so.

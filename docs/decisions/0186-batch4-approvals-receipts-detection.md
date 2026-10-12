@@ -798,3 +798,28 @@ PR #377 review: both refusals are decided once before the step-up is spent (so a
 the grant) and again under the lock. The AI BOM and Decision BOM signers read their key row `FOR SHARE` in the
 transaction that stores the signature, so a retire waits for a signature in flight and a signer that starts
 after it sees the key retired. Lock order everywhere: the key row, then the audit chain lock.
+
+## As built — 2026-10-12: three relaxations the UI confirmed now need a server step-up; a prompt is not a deny
+
+Branch `secure-default-stepups`. Three writes were confirmed in the web UI as relaxations but the gateway enforced
+nothing. Each now needs a `settings_relax` step-up bound to `{op, ...}` facts, and its audit row records
+`relaxation`, the relaxed values and the step-up method. Tightening needs nothing.
+
+- `POST /v1/mcp-registries` (`op: "mcp_registry_create"`, `{name, url, values}`): creating a registry enabled, or
+  with `allowPrivateRanges: true`.
+- `PATCH /v1/mcp-registries/:id` (`op: "mcp_registry_update"`, `{registryId, values}`): enabling it; allowing
+  private ranges; moving an explicit deny back to inherit while the org default is open. A stepped-up update is a
+  compare-and-set (409 `changed_concurrently`).
+- `PUT /v1/agents/:id/expected-served-model` (`op: "agent_expected_served_model"`, `{agentId,
+  expectedServedModel}`) when it sets or changes the value, and `POST /v1/agents` with one (`op:
+  "agent_create_expected_served_model"`, `{name, expectedServedModel}`). Clearing it and re-sending the stored
+  value need nothing.
+
+Each is asked after the route's own refusals (egress guard, evidence hold), so a refused write never spends the
+grant. The `step-up.ts` header lists every `settings_relax` `op`.
+
+`POST /v1/use-cases/:id/resync` audited every step-up outcome as `use-case-resync-refused` with code
+`step_up_<status>`, including the ordinary prompt a person answers before the retry. It now reports step-up like
+every other protected route. A prompt (`step_up_required` naming a usable method, `isStepUpPrompt`) is sent and not
+recorded. A refusal nobody can answer is recorded under the body's own code (`step_up_required` with its
+`credential`, `step_up_unavailable`).
