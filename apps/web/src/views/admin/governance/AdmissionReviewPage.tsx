@@ -18,7 +18,7 @@ import { DetectionContentPanel } from "./DetectionContentPanel";
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AdmissionFindingCount, SkillAdmissionState } from "../../../api/types";
 import { PageHeader } from "../../../shell/AppShell";
@@ -243,7 +243,7 @@ export default function AdmissionReviewPage() {
         <Card title="MCP servers held by the manifest scan">
           <p className={v.dim} style={{ marginTop: 0 }}>
             Mode: {mcp.data?.mode ?? "…"}
-            {mcp.data && !mcp.data.enforcing ? " — recorded only, nothing is refused." : ""} Clear a server from the MCP servers page.
+            {mcp.data && !mcp.data.enforcing ? " — recorded only, nothing is refused." : ""} Clear a held server with its Clear hold control on the <Link to="/admin/mcp-servers" style={{ textDecoration: "underline" }}>MCP servers page</Link>.
           </p>
           <Table
             rows={heldServers}

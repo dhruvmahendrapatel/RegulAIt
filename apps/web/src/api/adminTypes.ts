@@ -257,6 +257,8 @@ export interface AdminAgent {
   /** ADR-0034: set iff provider === 'custom' — the DB enforces the pair as a
    * discriminated union, so these two fields are never independently valid. */
   customProviderId?: string | null;
+  /** ADR-0175: the model the endpoint is EXPECTED to report serving (drift baseline); null = the configured model */
+  expectedServedModel?: string | null;
   /** ADR-0089 lifecycle, widened by ADR-0168 item 6 */
   lifecycleStatus?: string;
   lifecycleReason?: string | null;
