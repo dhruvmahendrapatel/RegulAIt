@@ -63,6 +63,7 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { SpdxFieldsPanel } from "../governance/SpdxFieldsPanel";
+import { AddRowsForm, PollJobButton, ValidateDatasetForm } from "./LlmDatasetTools";
 
 // ---------------------------------------------------------------------------
 // types (mirrors of the gateway's read projections)
@@ -640,6 +641,28 @@ export default function RegulAItLlmPage() {
                 ]}
               />
 
+              {!datasetDetail.data.frozen && (
+                <>
+                  <div className={v.sectionTitle} style={{ marginTop: "var(--s3)" }}>
+                    Add rows to this version
+                  </div>
+                  <AddRowsForm
+                    key={selectedDataset}
+                    datasetId={selectedDataset}
+                    label={`${datasetDetail.data.dataset.name} v${datasetDetail.data.dataset.version}`}
+                    onDone={() => {
+                      void datasetDetail.refetch();
+                      void datasets.refetch();
+                    }}
+                  />
+                </>
+              )}
+
+              <div className={v.sectionTitle} style={{ marginTop: "var(--s3)" }}>
+                Check before training
+              </div>
+              <ValidateDatasetForm key={`validate-${selectedDataset}`} datasetId={selectedDataset} backends={backends.data?.backends ?? []} methods={METHODS} dials={METHOD_DIALS} />
+
               <div className={v.sectionTitle} style={{ marginTop: "var(--s3)" }}>
                 Train a model on this version
               </div>
@@ -829,6 +852,17 @@ export default function RegulAItLlmPage() {
                   header: "",
                   render: (r) =>
                     ["running", "queued", "pending_approval"].includes(r.status) ? (
+                      <span className={v.row}>
+                      {r.status === "running" && (
+                        <PollJobButton
+                          jobId={r.id}
+                          jobName={r.name}
+                          onDone={() => {
+                            void jobs.refetch();
+                            void artifacts.refetch();
+                          }}
+                        />
+                      )}
                       <Button
                         size="sm"
                         disabled={act.busy}
@@ -841,6 +875,7 @@ export default function RegulAItLlmPage() {
                       >
                         Cancel
                       </Button>
+                      </span>
                     ) : null,
                 },
               ]}

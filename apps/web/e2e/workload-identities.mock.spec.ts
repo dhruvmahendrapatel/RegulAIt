@@ -111,6 +111,7 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
     if (p === `/v1/servers/${SERVER.id}/tools`) return json(route, { tools: [{ serverId: SERVER.id, name: "read_record", kind: "read" }, { serverId: SERVER.id, name: "write_record", kind: "write" }] });
     if (p === "/v1/agents") return json(route, { agents: [AGENT] });
     if (p === "/v1/connectors") return json(route, { connectors: [] });
+    if (p === "/v1/identity/signing-keys") return json(route, { items: [] });
     if (p === "/v1/roles") return json(route, { roles: [ROLE] });
     if (p === "/v1/workload-identities" && method === "GET") {
       if (m.listFails) return json(route, { error: "internal", detail: "SYNTHETIC_UNTRUSTED_SERVER_DETAIL" }, 500);

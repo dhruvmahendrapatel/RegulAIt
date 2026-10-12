@@ -262,7 +262,7 @@ function parseAttestation(raw: unknown): ExecutorAttestation | null {
   return { profileDigest: a.profileDigest, fresh: true, isolationClass: a.class, expiresAt };
 }
 
-function parseExecutor(raw: unknown): Executor | null {
+export function parseExecutor(raw: unknown): Executor | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const e = raw as Record<string, unknown>;
   if (!str(e.executorId) || !str(e.name)) return null;
@@ -394,4 +394,102 @@ export function registerBody(d: RegisterDraft): { error: string } | { body: Regi
   if (classes.length === 0) return { error: "Choose at least one class the executor is expected to attest." };
   if (classes.some((c) => !allowed.includes(c))) return { error: `The ${d.backend} backend cannot attest every chosen class.` };
   return { body: { workloadIdentityId: d.workloadIdentityId, name: d.name, backend: d.backend, runtimeVersion: d.runtimeVersion, classesDeclared: classes } };
+}
+
+// ---------------------------------------------------------------------------
+// executor lifecycle (I3): detail, attestation history, and the admin acts
+// ---------------------------------------------------------------------------
+
+/** one row of `GET /v1/executors/:executorId/attestations` (newest first, at most 100) */
+export interface AttestationRecord {
+  id: string;
+  profileDigest: string;
+  isolationClass: string;
+  verdict: "pass" | "fail";
+  reportSha256: string;
+  observedAt: number;
+  expiresAt: number;
+}
+
+function parseAttestationRecord(raw: unknown): AttestationRecord | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const a = raw as Record<string, unknown>;
+  const observedAt = isoMs(a.observedAt);
+  const expiresAt = isoMs(a.expiresAt);
+  if (!str(a.id) || !str(a.profileDigest) || !str(a.class) || !str(a.reportSha256) || observedAt === null || expiresAt === null) return null;
+  if (a.verdict !== "pass" && a.verdict !== "fail") return null;
+  return { id: a.id, profileDigest: a.profileDigest, isolationClass: a.class, verdict: a.verdict, reportSha256: a.reportSha256, observedAt, expiresAt };
+}
+
+/** `{attestations: [...]}`; null when the envelope is malformed. An unreadable row is kept as unreadable, never dropped. */
+export function parseAttestationHistory(value: unknown): Array<AttestationRecord | { unreadable: true; index: number }> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "attestations")) return null;
+  const list = (value as { attestations: unknown }).attestations;
+  if (!Array.isArray(list)) return null;
+  return list.map((row, index) => parseAttestationRecord(row) ?? { unreadable: true as const, index });
+}
+
+/**
+ * A pass counts only for a class the executor's backend can attest, and only
+ * until it expires; the device clock may only take assurance away.
+ */
+export function attestationRecordText(r: AttestationRecord, backend: Backend, now: number): { label: string; tone: Tone } {
+  if (r.verdict === "fail") return { label: "Failed", tone: "danger" };
+  if (!BACKEND_CLASSES[backend].includes(r.isolationClass)) return { label: "Not evidence for this backend", tone: "neutral" };
+  return r.expiresAt > now ? { label: "Passed", tone: "ok" } : { label: "Passed, expired", tone: "neutral" };
+}
+
+export type ExecutorAct = "quarantine" | "reenable" | "revoke" | "declared_class";
+
+/**
+ * What an admin may do to this executor now, and why not otherwise. Mirrors
+ * the gateway's checks so a control is never offered that it would refuse;
+ * the gateway re-checks every one.
+ */
+export function executorActs(e: Pick<Executor, "status" | "backend">): Record<ExecutorAct, { ok: true } | { ok: false; reason: string }> {
+  const revoked = { ok: false as const, reason: "This executor is revoked. That is terminal: a new executor needs a new identity and key." };
+  return {
+    quarantine:
+      e.status === "active"
+        ? { ok: true }
+        : e.status === "quarantined"
+          ? { ok: false, reason: "Already quarantined: it places nothing until re-enabled." }
+          : revoked,
+    reenable:
+      e.status === "quarantined"
+        ? { ok: true }
+        : e.status === "active"
+          ? { ok: false, reason: "Only a quarantined executor can be re-enabled." }
+          : revoked,
+    revoke: e.status === "revoked" ? revoked : { ok: true },
+    declared_class:
+      e.backend !== "customer"
+        ? { ok: false, reason: "Only a customer plane maps its declared isolation to a class. Other backends prove their class by self-test." }
+        : e.status === "revoked"
+          ? revoked
+          : { ok: true },
+  };
+}
+
+/** `PUT /v1/executors/:executorId/declared-class`: a class, or null to unmap (the strict default) */
+export function declaredClassBody(value: string): { class: IsolationClass | null } | null {
+  if (value === "") return { class: null };
+  return isClass(value) ? { class: value } : null;
+}
+
+/** the executor routes' refusal codes, in words (pinned to isolation-routes.ts by the test) */
+export const EXECUTOR_REFUSALS: Readonly<Record<string, string>> = {
+  invalid_executor_id: "That executor id could not be read. Refresh the list.",
+  executor_not_found: "That executor no longer exists. Refresh the list.",
+  executor_revoked: "This executor is revoked. Nothing can change it now.",
+  executor_already_quarantined: "This executor is already quarantined. Refresh to see its current state.",
+  executor_not_quarantined: "This executor is not quarantined, so there is nothing to re-enable. Refresh to see its current state.",
+  executor_already_revoked: "This executor is already revoked.",
+  not_a_customer_plane: "Only a customer plane maps its declared isolation to a class.",
+};
+
+export function executorRefusal(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  const code = error.payload.error;
+  return typeof code === "string" && Object.hasOwn(EXECUTOR_REFUSALS, code) ? EXECUTOR_REFUSALS[code]! : null;
 }

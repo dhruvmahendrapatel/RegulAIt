@@ -13,14 +13,17 @@
  * takes name+url only), so it is shown rather than pretended to be editable.
  */
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { McpCoverage, StdioArguments } from "./Batch3Mcp";
 import { IntegrationOwnership } from "./IntegrationOwnership";
 import { ExecutionProfileSelector } from "./isolation/IsolationPanel";
+import { McpRegistriesPanel } from "./McpRegistriesPanel";
+import { McpAdmissionClearButton, McpVisibleToolsCard } from "./McpServerAdmission";
 import { api } from "../../../api/client";
 import type { McpServer, McpTool } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Select, Table, Tabs, tabIds } from "../../../ui/kit";
 import {
   RemoveButton,
   optionEls,
@@ -45,11 +48,17 @@ interface McpEntitlementRow {
   revoked?: boolean;
 }
 
-export default function McpServersPage() {
-  const servers = useServers();
-  const users = useUsers();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+/** ADR-0101: the federated registries live on their own tab of this page (ADR-0177 §3, no new navigation group) */
+const MCP_TABS = [
+  { id: "servers", label: "Servers" },
+  { id: "registries", label: "Federated registries" },
+];
+const MCP_TAB_PARAM = "tab";
 
+export default function McpServersPage() {
+  const [params, setParams] = useSearchParams();
+  const tab = params.get(MCP_TAB_PARAM) === "registries" ? "registries" : "servers";
+  const ids = tabIds("mcp", tab);
   return (
     <>
       <PageHeader
@@ -57,6 +66,33 @@ export default function McpServersPage() {
         sub="The servers the governed MCP proxy fronts, and their tool inventory."
         info={<p>Register the servers the governed MCP proxy fronts, build their tool inventory (with per-tool call pricing), and hand out tool-level allow-list grants — default-deny has nothing to govern until a server exists.</p>}
       />
+      <Tabs
+        tabs={MCP_TABS}
+        active={tab}
+        idPrefix="mcp"
+        onChange={(id) =>
+          setParams((prev) => {
+            const next = new URLSearchParams(prev);
+            if (id === "servers") next.delete(MCP_TAB_PARAM);
+            else next.set(MCP_TAB_PARAM, id);
+            return next;
+          })
+        }
+      />
+      <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab}>
+        {tab === "registries" ? <McpRegistriesPanel /> : <McpServersTab />}
+      </div>
+    </>
+  );
+}
+
+function McpServersTab() {
+  const servers = useServers();
+  const users = useUsers();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  return (
+    <>
       <div className={v.stack}>
         <Card title="Server registry">
           <RegisterServerForm />
@@ -65,7 +101,16 @@ export default function McpServersPage() {
               { key: "name", header: "Name", sort: (s) => s.name, render: (s) => s.name },
               { key: "url", header: "Endpoint / command", render: (s) => <span className={v.mono}>{s.transport === "stdio" ? s.stdio?.command ?? "Not reported" : s.url}</span> },
               { key: "transport", header: "Transport", render: (s) => s.transport ?? "Not reported" },
-              { key: "admission", header: "Admission", render: (s) => s.admissionState ?? "Not reported" },
+              {
+                key: "admission",
+                header: "Admission",
+                render: (s) => (
+                  <span className={v.row}>
+                    {s.admissionState ?? "Not reported"}
+                    {s.admissionState === "held" && <McpAdmissionClearButton server={s} />}
+                  </span>
+                ),
+              },
               { key: "digest", header: "Pinned command digest", render: (s) => s.stdioCommandDigest ? <span className={v.mono}>{s.stdioCommandDigest}</span> : "Not applicable" },
               { key: "owner", header: "Ownership", render: (s) => s.ownership ?? "Not reported" },
               {
@@ -120,6 +165,7 @@ export default function McpServersPage() {
         </Card>
 
         <McpEntitlementCard users={users} servers={servers.data?.servers ?? []} />
+        <McpVisibleToolsCard users={users} servers={servers.data?.servers ?? []} />
       </div>
     </>
   );
