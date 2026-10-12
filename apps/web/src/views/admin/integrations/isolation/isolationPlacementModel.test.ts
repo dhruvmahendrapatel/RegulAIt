@@ -15,6 +15,9 @@ import {
   REQUIRED_BY_TEXT,
   REFUSAL_TEXT,
   MISMATCH_TEXT,
+  newProfileBody,
+  profileNameOk,
+  versionBody,
 } from "./isolationModel";
 
 const at = "2026-10-12T10:00:00.000Z";
@@ -48,6 +51,19 @@ describe("execution profiles", () => {
     const list = parseProfiles({ profiles: [profile(), profile({ id: "r", name: "old", retiredAt: at }), { bad: true }] })!;
     expect(assignableProfiles(list).map((p) => p.name)).toEqual(["restricted"]);
     expect(profileText(parseProfileVersion(profile({ minClass: "hardened_container" }))!)).toBe("restricted v1 · L1 · Hardened container");
+  });
+});
+
+describe("a new profile", () => {
+  it("copies the base body, renamed at the chosen class; a name outside the pattern is refused before any request", () => {
+    expect(newProfileBody({ name: "restricted", minClass: "user_space_kernel", secrets: "none" }, "team-a", "microvm")).toEqual({ name: "team-a", minClass: "microvm", secrets: "none" });
+    expect(newProfileBody(null, "team-a", "microvm")).toBeNull();
+    expect(newProfileBody([], "team-a", "microvm")).toBeNull();
+    expect(versionBody({ versions: [{ id: "a", body: { x: 1 } }] }, "a")).toEqual({ x: 1 });
+    expect(versionBody({ versions: [{ id: "a", body: { x: 1 } }] }, "b")).toBeNull();
+    expect(versionBody({}, "a")).toBeNull();
+    for (const ok of ["ab", "team-new", "a1"]) expect(profileNameOk(ok)).toBe(true);
+    for (const bad of ["a", "Team", "1ab", "team_new", "a".repeat(64), ""]) expect(profileNameOk(bad)).toBe(false);
   });
 });
 

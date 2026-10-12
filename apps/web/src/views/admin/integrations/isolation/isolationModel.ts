@@ -447,6 +447,27 @@ export const assignableProfiles = (list: Array<ProfileVersion | { unreadable: tr
 
 export const profileText = (p: ProfileVersion) => `${p.name} v${p.version} · ${classText(p.minClass)}`;
 
+/** `^[a-z][a-z0-9-]{1,62}$` (EXECUTION_PROFILE_NAME_RE), checked by character (M-074) */
+export const profileNameOk = (s: string) =>
+  s.length >= 2 && s.length <= 63 && s[0]! >= "a" && s[0]! <= "z" && [...s].every((c) => (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-");
+
+/**
+ * A new profile starts from an existing version's body (`GET /v1/execution-profiles/:name`), renamed and with the
+ * chosen minimum class. Every other field is the base's: the gateway judges each field against `restricted`, and a
+ * looser one is a step-up and an audited relaxation. Null when the base body is not an object.
+ */
+export function newProfileBody(base: unknown, name: string, minClass: IsolationClass): Record<string, unknown> | null {
+  if (base === null || typeof base !== "object" || Array.isArray(base)) return null;
+  return { ...(base as Record<string, unknown>), name, minClass };
+}
+
+/** the body of one version from `GET /v1/execution-profiles/:name` (`{versions: [{id, body}]}`) */
+export function versionBody(value: unknown, id: string): unknown {
+  if (value === null || typeof value !== "object" || !Array.isArray((value as { versions?: unknown }).versions)) return null;
+  const v = ((value as { versions: unknown[] }).versions as Array<Record<string, unknown>>).find((x) => x && x.id === id);
+  return v?.body ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // profile assignment: `GET|PUT /v1/execution-profile-assignments/:kind/:id` (I2, built)
 // ---------------------------------------------------------------------------

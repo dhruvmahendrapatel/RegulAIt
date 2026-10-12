@@ -17,12 +17,17 @@ import { lazy, Suspense, useEffect, useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt } from "../../../../api/format";
-import { api as stepApi, withStepUp } from "../../../../stepup/stepUp";
+import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
 import { Badge, Button, Card, EmptyState, Field, Input, Modal, Select, Table } from "../../../../ui/kit";
 import { useAction } from "../../adminKit";
 import {
   assignableProfiles,
   availabilityOf,
+  CLASSES,
+  isClass,
+  newProfileBody,
+  profileNameOk,
+  versionBody,
   BACKEND_CLASSES,
   BACKENDS,
   classText,
@@ -89,16 +94,23 @@ function ReadFailure(props: { what: string; q: { isError: boolean; error: unknow
 type ProfileRow = ProfileVersion | Unreadable;
 
 function ProfilesCard() {
+  const [creating, setCreating] = useState(false);
   const q = useQuery({ queryKey: isolationKeys.profiles, retry: false, queryFn: () => api.get<unknown>("/v1/execution-profiles") });
   const rows = q.data === undefined ? null : parseProfiles(q.data);
   const failed = q.isError || (!q.isPending && rows === null);
+  const createReasonId = useId();
   return (
     <Card
       title="Execution profiles"
       actions={
-        <Button size="sm" variant="ghost" disabled={q.isFetching} onClick={() => void q.refetch()}>
-          Check again
-        </Button>
+        <>
+          <Button size="sm" variant="ghost" disabled={q.isFetching} onClick={() => void q.refetch()}>
+            Check again
+          </Button>
+          <Button size="sm" disabled={failed || q.isPending} aria-describedby={failed ? createReasonId : undefined} onClick={() => setCreating(true)}>
+            New profile
+          </Button>
+        </>
       }
     >
       <div className={v.stack}>
@@ -107,6 +119,12 @@ function ProfilesCard() {
           receives input. Each version is immutable; a change is a new version. A retired profile makes its calls unavailable; it never falls
           back to a weaker one.
         </p>
+        {failed && (
+          <p id={createReasonId} className={v.dim}>
+            Creating a profile is unavailable while the profile list cannot be read.
+          </p>
+        )}
+        {creating && rows && <NewProfileDialog profiles={assignableProfiles(rows)} onClose={() => setCreating(false)} />}
         {failed ? (
           <ReadFailure what="execution profiles" q={q} parsed={rows} />
         ) : (
@@ -146,6 +164,86 @@ function ProfilesCard() {
         )}
       </div>
     </Card>
+  );
+}
+
+/**
+ * `POST /v1/execution-profiles`: a new profile copied from a live version, renamed, at a chosen minimum class. A
+ * field looser than `restricted` (a lower class, or a looser base) is a relaxation: the gateway asks for the
+ * step-up and audits it. Its other controls are edited by API (a new version per change).
+ */
+function NewProfileDialog(props: { profiles: ProfileVersion[]; onClose: () => void }) {
+  const act = useAction();
+  const formId = useId();
+  const [baseId, setBaseId] = useState(props.profiles.find((p) => p.name === "restricted")?.id ?? props.profiles[0]?.id ?? "");
+  const [name, setName] = useState("");
+  const [minClass, setMinClass] = useState<string>("");
+  const [problem, setProblem] = useState<string | null>(null);
+  const base = props.profiles.find((p) => p.id === baseId) ?? null;
+  const submit = async () => {
+    if (!base) return setProblem("Choose a profile to start from.");
+    if (!profileNameOk(name)) return setProblem("Name: 2 to 63 characters, lower-case letters, digits and hyphens, starting with a letter.");
+    if (!isClass(minClass)) return setProblem("Choose the minimum isolation class.");
+    setProblem(null);
+    const ok = await act.run(async () => {
+      const detail = await api.get<unknown>(`/v1/execution-profiles/${encodeURIComponent(base.name)}`);
+      const body = newProfileBody(versionBody(detail, base.id), name, minClass);
+      if (!body) throw new Error("The base profile's body could not be read. Nothing was created.");
+      return withStepUp((h) => stepUpApi.post("/v1/execution-profiles", { body }, h));
+    }, `Execution profile ${name} created`);
+    if (ok) props.onClose();
+  };
+  return (
+    <Modal
+      open
+      title="New execution profile"
+      onClose={props.onClose}
+      actions={
+        <>
+          <Button onClick={props.onClose}>Cancel</Button>
+          <Button type="submit" form={formId} variant="primary" disabled={act.busy}>
+            Create
+          </Button>
+        </>
+      }
+    >
+      <form
+        id={formId}
+        className={v.stack}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <p className={v.dim}>
+          The new profile copies every control of the one it starts from. A lower class than the strict reference is an audited relaxation and
+          needs a step-up.
+        </p>
+        <Field label="Start from">
+          <Select value={baseId} onChange={(e) => setBaseId(e.target.value)}>
+            {props.profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {profileText(p)}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Profile name">
+          <Input value={name} maxLength={63} autoComplete="off" onChange={(e) => setName(e.target.value.trim())} />
+        </Field>
+        <Field label="Minimum isolation class">
+          <Select value={minClass} onChange={(e) => setMinClass(e.target.value)}>
+            <option value="">Choose a class</option>
+            {CLASSES.map((c) => (
+              <option key={c} value={c}>
+                {classText(c)}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {(problem ?? act.error) && <p role="alert">{problem ?? act.error}</p>}
+      </form>
+    </Modal>
   );
 }
 
@@ -520,7 +618,7 @@ export function ExecutionProfileSelector(props: { context: string; targetKind: A
   const changed = current !== null && value !== (current.assigned?.id ?? "");
   const save = async () => {
     const ok = await act.run(
-      () => withStepUp((h) => stepApi.put(`/v1/execution-profile-assignments/${props.targetKind}/${encodeURIComponent(props.targetId)}`, { profileId: value === "" ? null : value }, h)),
+      () => withStepUp((h) => stepUpApi.put(`/v1/execution-profile-assignments/${props.targetKind}/${encodeURIComponent(props.targetId)}`, { profileId: value === "" ? null : value }, h)),
       "Execution profile saved",
     );
     if (ok) {

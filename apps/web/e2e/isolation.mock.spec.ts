@@ -67,6 +67,8 @@ interface IsolationMock {
   /** I2: profile assignment by `kind/id`, and the PUT bodies received */
   assignments: Record<string, string | null>;
   assignWrites: Array<{ path: string; body: unknown }>;
+  profileCreates: unknown[];
+  builder?: Awaited<ReturnType<typeof installBuilderMock>>;
 }
 
 const AT = "2026-10-12T10:00:00.000Z";
@@ -81,14 +83,14 @@ const PROFILES = [
 const PLACEMENTS = {
   placements: [
     { id: "pl-1", workloadKind: "mcp_stdio", requiredClass: "microvm", requiredBy: "data_sensitivity", outcome: "refused", refusalCode: "class_below_required", appliedClass: null, executorName: null, profileName: "restricted", profileVersion: 1, createdAt: AT },
-    { id: "pl-2", workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", outcome: "placed", refusalCode: null, appliedClass: "user_space_kernel", executorName: "gvisor-fresh", profileName: "restricted", profileVersion: 1, createdAt: AT },
+    { id: "pl-2", workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", outcome: "placed", refusalCode: null, appliedClass: "user_space_kernel", executorName: "gvisor-a", profileName: "restricted", profileVersion: 1, createdAt: AT },
   ],
   refusalsWithoutPlacement: [{ auditId: "a-1", at: AT, code: "policy_unresolved", unresolvedFact: "sensitivity", workloadKind: "mcp_stdio" }],
   attestationStrength: "software_attested",
 };
 
 async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<IsolationMock> {
-  await installBuilderMock(page, { isAdmin: true });
+  const builder = await installBuilderMock(page, { isAdmin: true });
   await installEnginesMock(page);
   const now = Date.now();
   const m: IsolationMock = {
@@ -102,6 +104,8 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
     profilesStatus: 200,
     assignments: {},
     assignWrites: [],
+    profileCreates: [],
+    builder,
     ...init,
   };
   await page.route(/\/v1\/(org\/settings|executors|execution-profiles|execution-placements|execution-profile-assignments)(\/|\?|$)/, async (route) => {
@@ -126,6 +130,13 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
       if (m.executorsGate) await m.executorsGate;
       if (m.executorsStatus !== 200) return json(route, { error: "forbidden" }, m.executorsStatus);
       return json(route, m.executorsBody !== undefined ? m.executorsBody : { executors: executors(now) });
+    }
+    if (p === "/v1/execution-profiles" && req.method() === "POST") {
+      m.profileCreates.push(req.postDataJSON());
+      return json(route, { ...prof({ id: "p-new", name: "team-new", minClass: "microvm", shipped: false }) }, 201);
+    }
+    if (p === "/v1/execution-profiles/restricted") {
+      return json(route, { name: "restricted", versions: [{ ...PROFILES[0], body: { schema: "regulait.execution-profile.v1", name: "restricted", minClass: "user_space_kernel", secrets: "none" } }] });
     }
     if (p === "/v1/execution-profiles") {
       if (m.profilesStatus !== 200) return json(route, { error: "forbidden" }, m.profilesStatus);
@@ -180,7 +191,7 @@ test("Engines: profiles and placements are live, executors show the gateway's ve
   const placement = (text: string) => page.getByRole("row").filter({ hasText: text });
   await expect(placement("set by the project's data sensitivity").getByText("Refused", { exact: true })).toBeVisible();
   await expect(placement("set by the project's data sensitivity")).toContainText("class_below_required");
-  await expect(placement("on gvisor-fresh").getByText("Placed", { exact: true })).toBeVisible();
+  await expect(placement("on gvisor-a").getByText("Placed", { exact: true })).toBeVisible();
   await expect(page.getByText("Refused before any placement", { exact: true })).toBeVisible();
   await expect(page.getByText("· the fact sensitivity did not resolve")).toBeVisible();
   await expect(page.getByText(/answers 501/)).toHaveCount(0);
@@ -335,9 +346,8 @@ test("Engines: an unreadable placement list and a refused profile read are unava
 });
 
 test("builder and MCP: a stricter profile is assigned without step-up, a looser one is resent once with it; a remote server is external", async ({ page }) => {
-  const st = await installBuilderMock(page, { isAdmin: true });
   const m = await setup(page);
-  const agent = st.agents.find((a) => a.name === "Intake reviewer")!;
+  const agent = m.builder!.agents.find((a) => a.name === "Intake reviewer")!;
   await page.goto(`/ui/builder/agents/${agent.id}`);
   await expect(page.getByRole("heading", { level: 1, name: "Intake reviewer" })).toBeVisible();
   const configure = page.getByRole("button", { name: "Configure", exact: true });
@@ -405,4 +415,22 @@ test("Engines: registering an executor sends the strict body and grants no class
   expect(m.registered).toEqual([
     { workloadIdentityId: "11111111-1111-4111-8111-111111111111", name: "gvisor-b", backend: "gvisor", runtimeVersion: "release-20260901.0", classesDeclared: ["user_space_kernel"] },
   ]);
+});
+
+test("Engines: a new profile starts from a live version, renamed, at the chosen class; a stricter one needs no step-up", async ({ page }) => {
+  const m = await setup(page);
+  await openEngines(page);
+  await page.getByRole("button", { name: "New profile", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "New execution profile" });
+  // a retired version is never a starting point
+  await expect(dialog.getByLabel("Start from", { exact: true }).locator("option", { hasText: "team-old" })).toHaveCount(0);
+  await dialog.getByLabel("Profile name", { exact: true }).fill("Team-New");
+  await dialog.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Name: 2 to 63 characters");
+  await dialog.getByLabel("Profile name", { exact: true }).fill("team-new");
+  await dialog.getByLabel("Minimum isolation class", { exact: true }).selectOption("microvm");
+  await axe(page);
+  await dialog.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(m.profileCreates).toEqual([{ body: { schema: "regulait.execution-profile.v1", name: "team-new", minClass: "microvm", secrets: "none" } }]);
 });
