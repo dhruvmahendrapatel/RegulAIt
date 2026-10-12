@@ -1253,6 +1253,96 @@ independent security review:
    paths only, never the values). The proposals and picker-source reads are audited, because they expose user
    emails.
 
+## As built: slice S8 (2026-10-12)
+
+S8 builds decision 8's gateway-to-upstream hop. A server whose `identity_propagation` is `signed_assertion` gets a
+signed assertion on each call: who the call is for and who is acting. OWNER DECISION 6 keeps `none` as the default.
+S8 needs no migration, because the column and its CHECK exist since migration 0180 (S1). The format is documented in
+`docs/api/MCP_IDENTITY_ASSERTION.md`, and the code is in `apps/gateway/src/mcp-identity-assertion.ts` with constants
+in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle what decision 8 left open:
+
+1. **The claim set (data minimisation).** An assertion carries exactly `iss`, `aud`, `sub`, `iat`, `exp`, `jti`, and
+   `act` when an agent acts. Nothing else is sent.
+   - `sub` is the person, as the S3 pairwise subject (an HMAC of the audience and the user id, keyed from the data key).
+     It is stable for one server and cannot be linked across servers.
+   - `act` is rebuilt from the stored chain by `actClaimFromChain`, the same function the delegated tokens use. The
+     acting agent is outermost, and each link is the agent's SPIFFE ID.
+   - Never sent: the email, display name, user id, roles, project, grant id, environment, tool arguments, scope and
+     budget.
+
+   *Why:* OWNER DECISION 6 asks for "pairwise subjects and no email or name". An upstream needs to recognise a person
+   and an agent, not to know who they are. Agent SPIFFE IDs are not pairwise. Agents are not people, and decision 8
+   names the chain itself.
+2. **The format, from standards (ADR-0176).**
+   - It is an RFC 7519 JWT, signed with EdDSA by the issuer's current key. It verifies against the existing S3 JWKS
+     (`/.well-known/jwks.json`) with any JOSE library.
+   - It uses explicit typing (RFC 8725 §3.11): `typ` is `regulait-mcp-identity+jwt`. Our decision 13 verifier requires
+     `at+jwt` and exactly one `cnf`, so an assertion can never be used as a delegated access token, and a delegated
+     access token never passes for an assertion.
+   - `aud` is the server's canonical URI in the MCP authorization spec's sense: scheme, host, port and path, with no
+     query, fragment or credentials. A URL that carries a secret in its query never puts it in a token.
+   - The lifetime is a fixed 60 s, as decision 8 says. It is not a setting.
+   - The header is `RegulAIt-Identity-Assertion`, not `Authorization`. Under the MCP authorization spec,
+     `Authorization` carries the upstream's own access token.
+   - Considered and not used:
+     - RFC 7523 (an assertion presented to a token endpoint, not to a resource);
+     - Transaction Tokens (one trust domain only);
+     - the WIMSE `Workload-Identity-Token` header (an Internet-Draft; this ADR keeps WIMSE wire formats off until they
+       are RFCs).
+3. **Decision 5 and sender constraint.** The assertion carries no `cnf`. Decision 5's invariant is about access
+   tokens, which grant use of a RegulAIt resource and so must be bound to their holder. The assertion grants nothing
+   at RegulAIt (item 2). It is provenance that the gateway presents once, over the egress-guarded connection, to the
+   one audience it names. Replay is bounded by the 60 s lifetime and the per-request `jti`.
+4. **When it is sent.**
+   - One holder is created per governed call (`outboundIdentityFor`) and installed on that call's connection. It uses
+     the MCP SDK's fetch middleware hook (`createMiddleware`) over the egress-guarded fetch.
+   - The holder is armed only after the call is allowed, before the connect and before any approval is consumed. It is
+     armed for one JSON-RPC method: `tools/call`, or the method of a governed protocol call.
+   - Only a request message of that method carries an assertion, and every such request gets a new one with its own
+     `jti`.
+   - `initialize`, notifications, the event-stream GET, the session DELETE and the pre-decision manifest sync carry
+     nothing.
+   - A forged value in the header is removed.
+   - A request to any origin other than the one the assertion names is refused before it leaves.
+   - In-process chains (S4) and workload callers (S5, through the proxy route, which now receives the data key) send
+     their chain in `act`.
+5. **Fail closed, and audit every disclosure.**
+   - An opted-in server never receives a call without its assertion. If there is no issuer (`REGULAIT_PUBLIC_URL`), no
+     data key, no canonical audience, no active signing key, or the server is stdio, the call is refused before
+     anything is contacted. The refusal is a `mcp-identity-assertion-unavailable` decision deny with a `code`. That
+     makes `mcp-identity-assertion.ts` a B2 decision writer (ADR-0189), and it is now on the B2 list.
+   - Every assertion sent writes `mcp-identity-assertion-issued`. The row holds the `jti`, `kid`, audience, pairwise
+     `sub`, the method and the actor chain's identity ids. It never holds the token.
+6. **The setting is a relaxation (ADR-0180), following the #378 pattern.**
+   - `PATCH /v1/servers/:serverId` accepts `identityPropagation`.
+   - Turning it on needs a `settings_relax` step-up. The facts are `{op: "mcp_server_update", serverId, url, values:
+     {identityPropagation: "signed_assertion"}}`. The url is always bound, because it is where the identity will go.
+     If the same request also opens private ranges, both values go in one step-up.
+   - Every change is audited (`mcp-server-identity-propagation-changed`, with both values and the audience).
+   - **Consent does not follow the url.** A url move that does not name `identityPropagation` turns it off: the strict
+     value, audited with `resetByUrlMove`, and no step-up is needed. A url move that keeps it on is a relaxation bound
+     to the new url.
+   - The compare-and-set of that write now also compares `identity_propagation`.
+   - A stdio server is refused with `409 identity_propagation_unsupported`: it has no HTTP request to carry the
+     header. It may still be set to `none`.
+   - No route was added, so the route census is unchanged at 0 known UI gaps.
+7. **UI and documentation.**
+   - The MCP servers registry has an "Identity to upstream" column, saved through `withStepUp`.
+   - A selected server shows a card. The card has the format, the claims, the audience for that server and the
+     verification example.
+   - The example in the doc is run verbatim against a live JWKS in the route's format by
+     `mcp-identity-assertion.test.ts` (M-041). The screen's copy of the example is held byte-equal to the doc by
+     `mcpIdentityModel.test.ts`.
+
+Open after S8:
+
+- **Data-key rotation changes every `sub`** (S3 amendment 2). This now reaches third parties too: an upstream sees a
+  new subject for the same person after a rotation. The doc says so, and the data-key rotation runbook should too.
+- **Upstream replay sets across replicas** are the upstream's concern. The doc says to keep the `jti` set in shared
+  storage.
+- **No Playwright mock spec yet** for the new column. The model is unit-tested, and the step-up and audit paths are
+  covered by `zz-adr0188-s8-outbound-identity.test.ts`.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of
