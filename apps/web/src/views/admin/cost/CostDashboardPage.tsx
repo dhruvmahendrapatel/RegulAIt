@@ -27,6 +27,7 @@ import {
   userOpts,
 } from "../adminKit";
 import { EnergyEstimatePanel, EnergyFactorsCard } from "./EnergyEstimate";
+import { EditInitiativeButton } from "../editForms";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -633,6 +634,8 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
             header: "",
             align: "right",
             render: (i) => (
+              <div className={v.row} style={{ justifyContent: "flex-end" }}>
+              <EditInitiativeButton initiative={i} />
               <RemoveButton
                 what={i.name}
                 // An initiative with projects under it is a live rollup. Deleting
@@ -657,6 +660,7 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
                 // refetches elsewhere exist only where the rows are component
                 // state rather than react-query.
               />
+              </div>
             ),
           },
         ]}

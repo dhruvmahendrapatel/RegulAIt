@@ -45,6 +45,7 @@ import {
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
+import { EditScopeRuleButton } from "../editForms";
 
 const LADDER: Record<
   string,
@@ -415,9 +416,12 @@ function ScopeRulesCard() {
             header: "",
             align: "right",
             render: (r) => (
-              <Button size="sm" variant="ghost" onClick={() => setDeleteRule(r)}>
-                delete
-              </Button>
+              <div className={v.row} style={{ justifyContent: "flex-end" }}>
+                <EditScopeRuleButton rule={r} />
+                <Button size="sm" variant="ghost" onClick={() => setDeleteRule(r)}>
+                  delete
+                </Button>
+              </div>
             ),
           },
         ]}

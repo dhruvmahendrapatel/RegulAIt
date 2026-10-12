@@ -17,6 +17,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../ui/k
 import { RemoveButton } from "../admin/adminKit";
 import { api, withStepUp } from "../../stepup/stepUp";
 import v from "../views.module.css";
+import { RenamePasskeyButton } from "../admin/editForms";
 
 export interface OwnPasskey {
   id: string;
@@ -133,6 +134,8 @@ export default function PasskeysCard() {
               key: "actions",
               header: "",
               render: (p) => (
+                <div className={v.rowTight}>
+                <RenamePasskeyButton passkey={p} onSaved={refresh} />
                 <RemoveButton
                   label="Revoke"
                   what={`the passkey "${p.label}"`}
@@ -140,6 +143,7 @@ export default function PasskeysCard() {
                   onRemove={() => withStepUp((h) => api.del(`/v1/auth/passkeys/${p.id}`, undefined, h))}
                   onDone={refresh}
                 />
+                </div>
               ),
             },
           ]}

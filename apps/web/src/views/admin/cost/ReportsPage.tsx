@@ -22,7 +22,8 @@ import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
-import { QueryGate, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams } from "../adminKit";
+import { QueryGate, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams, useUsers, userOpts } from "../adminKit";
+import { EditReportScheduleButton } from "../editForms";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -88,6 +89,7 @@ export default function ReportsPage() {
   const teams = useTeams();
   const projects = useProjects();
 
+  const users = useUsers();
   const overview = useQuery({
     queryKey: ["admin", "reports-overview"],
     queryFn: () => api.get<Overview>("/v1/reports/overview"),
@@ -319,18 +321,21 @@ export default function ReportsPage() {
                       key: "act",
                       header: "",
                       render: (s) => (
-                        <Button
-                          size="sm"
-                          variant="danger"
-                          onClick={() =>
-                            void act.run(async () => {
-                              await api.del(`/v1/reports/schedules/${s.id}`);
-                              await overview.refetch();
-                            }, "Schedule deleted")
-                          }
-                        >
-                          Delete
-                        </Button>
+                        <div className={v.row}>
+                          <EditReportScheduleButton schedule={s} definitionName={s.definition} users={userOpts(users.data?.users).map((o) => ({ value: o.v, label: o.l }))} onSaved={() => void overview.refetch()} />
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            onClick={() =>
+                              void act.run(async () => {
+                                await api.del(`/v1/reports/schedules/${s.id}`);
+                                await overview.refetch();
+                              }, "Schedule deleted")
+                            }
+                          >
+                            Delete
+                          </Button>
+                        </div>
                       ),
                     },
                   ]}

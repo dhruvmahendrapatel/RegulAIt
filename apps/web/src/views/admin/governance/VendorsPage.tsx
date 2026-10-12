@@ -25,7 +25,8 @@ import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
-import { QueryGate, useAction } from "../adminKit";
+import { QueryGate, useAction, useCustomProviders } from "../adminKit";
+import { EditVendorButton, vendorEditBlocked } from "../editForms";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -95,6 +96,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 
 export default function VendorsPage() {
   const act = useAction();
+  const customProviders = useCustomProviders();
   const [searchParams] = useSearchParams();
 
   const list = useQuery({
@@ -250,6 +252,14 @@ export default function VendorsPage() {
                     </span>
                   </div>
                   <div className={v.faint}>{d.vendor.description}</div>
+                  <div className={v.row}>
+                    <EditVendorButton
+                      vendor={d.vendor}
+                      customProviders={(customProviders.data?.providers ?? []).map((p) => ({ value: p.id, label: p.name }))}
+                      onSaved={() => void detail.refetch()}
+                    />
+                    {vendorEditBlocked(d.vendor.status) ? <span className={v.faint}>{vendorEditBlocked(d.vendor.status)}</span> : null}
+                  </div>
                   {d.vendor.linkedAgentProviders.length > 0 && (
                     <div className={v.faint}>Linked providers: {d.vendor.linkedAgentProviders.join(", ")}</div>
                   )}
