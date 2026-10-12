@@ -1223,6 +1223,36 @@ and the audit cutover (19) are settled in this ADR before S1, so S1 freezes them
 | **S8 outbound MCP identity** | `identity_propagation` on upstream connects (signed assertion per call) | S5 | **Yes**, with S7 and S9 |
 | **S9 SPIFFE backend and docs** | Trust-bundle management, SVID client auth end to end, BYOC and air-gapped runbooks (each command executed, M-041) | S5 | **Yes**, with S7 and S8 |
 
+## As built: slice S6 (2026-10-12, PR #368)
+
+S6 makes the last seven identity routes real: create identity, revoke identity, list/bind/revoke credentials, grant
+proposals and picker sources. No route answers 501 any more, and the workload identities page is in the Identity &
+Access navigation group. These points settle details that the decisions above leave open, or refine them after the
+independent security review:
+
+1. **Who may set an identifier.** Only external kinds (`worker_runtime`, `pdp`) may set a custom SPIFFE ID, and
+   never under the reserved `/regulait/` path in our trust domain. An internal agent's identity is revoked for good:
+   under "one identity per subject", its subject never gets another one.
+2. **One key, one identity, ever.** A key is unique across JWK and certificate registrations. A certificate
+   credential stores the RFC 7638 thumbprint of its public key (`spki_thumbprint`, migration 0193), and a key
+   registered by either route is refused by the other.
+3. **Revoking a credential** revokes the tokens it authenticated or that are bound to its thumbprint. It also
+   revokes the grants it authenticated, whether as `auth_credential_id` or as `subject_credential_id`.
+   **Revoking an identity** also revokes every token bound to any of its credentials' thumbprints.
+4. **The revocation cascade can be incomplete.** Grants are revoked after the identity or credential transaction
+   commits. If that cascade fails, the response says `cascade: "incomplete"` and lists the grants not revoked, and a
+   `workload-identity-cascade-incomplete` row is audited. The backstop is the use-time refusal, because
+   `loadLiveChain` checks every ancestor's identity and credential state.
+5. **Observed use (refines owner decision 1).** Only `allow` decisions and `actor-allow-list` refusals count. A
+   Cedar forbid, a sponsor denial, a guardrail or an approval hold never becomes a proposal, so an agent that keeps
+   retrying a forbidden action cannot turn that into a grant. A proposal seen only as refusals is flagged
+   `refusalOnly`, is left out of the default `proposedSet`, and needs the admin to opt in per item. Proposals read
+   only audit decision rows (not `usage_events`) over 30 days on the database clock. The query uses two partial
+   indexes (migration 0193) and has a 5 s statement timeout, which answers `503 proposals_timeout`.
+6. **Audit.** Malformed requests on the write routes write a `workload-identity-request-invalid` deny row (issue
+   paths only, never the values). The proposals and picker-source reads are audited, because they expose user
+   emails.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of

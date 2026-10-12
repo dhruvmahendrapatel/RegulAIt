@@ -159,6 +159,11 @@ function uriSansOf(cert: Certificate): string[] {
   return names.names.filter((n) => n.type === 6).map((n) => String(n.value));
 }
 
+/** S6 (credential registration): a certificate's URI SANs, read with the same parser the validator uses; throws on bad DER */
+export function certificateUriSans(der: Uint8Array): string[] {
+  return uriSansOf(parsePkijs(der));
+}
+
 const sameCertificate = (a: Certificate, b: Certificate) => Buffer.from(a.tbsView).equals(Buffer.from(b.tbsView));
 
 /**

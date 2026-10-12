@@ -1,11 +1,11 @@
 /**
  * ADR-0188 S6 — the workload identities page against a mocked gateway (no
- * database). The page is a preview: routed, not in the navigation. These
- * check that it reads the live S4/S5 routes, that every write is confirmed and
- * resent once through the identity_manage step-up with the same body, that a
- * stale grant revision is refused rather than reported as saved, and that the
- * controls behind routes the gateway still answers 501 are disabled and
- * explained — and never send a request.
+ * database). The page is in the Identity & Access navigation. These check
+ * that it reads the live S4/S5/S6 routes, that every write is confirmed
+ * and resent once through the identity_manage step-up with the same body, that
+ * a stale grant revision is refused rather than reported as saved, that a
+ * private key is refused in the browser before anything is sent, and that no
+ * route the gateway answers 501 is ever called (S6 built the last of them).
  */
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
@@ -33,6 +33,33 @@ const GRANTS = {
   tools: [{ serverId: SERVER.id, toolName: "read_record" }], servers: [], agents: [], connectors: [], roleIds: [ROLE.id],
 };
 const RUN = U(30);
+const CREDENTIAL = {
+  id: U(60), identityId: IDENTITY.id, kind: "jwk", publicJwk: { kty: "OKP", crv: "Ed25519", x: "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo" },
+  jwkThumbprint: "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k", x5tS256: null, sanUri: null, subjectDn: null, spiffeId: null, selfSigned: false,
+  notBefore: new Date(Date.now() - 3_600_000).toISOString(), notAfter: LATER, revokedAt: null, createdAt: ISO,
+};
+const UNHELD_AGENT = U(13);
+const PROPOSALS = {
+  identityId: IDENTITY.id, windowDays: 30, since: ISO, revision: 4, unproposable: 1, truncated: false,
+  proposals: [
+    // allowed before, refused since: pre-selected
+    { grant: { kind: "agent", agentId: AGENT.id, allowedModes: ["execute"] }, observedCalls: 3, refusedCalls: 2, lastObservedAt: ISO, heldByStewards: true, refusalOnly: false },
+    // never ran: offered, but only by ticking it (security review Medium 3)
+    { grant: { kind: "agent", agentId: AGENT.id, allowedModes: ["review"] }, observedCalls: 2, refusedCalls: 2, lastObservedAt: ISO, heldByStewards: true, refusalOnly: true },
+    { grant: { kind: "agent", agentId: UNHELD_AGENT, allowedModes: ["execute"] }, observedCalls: 1, refusedCalls: 1, lastObservedAt: ISO, heldByStewards: false, refusalOnly: true },
+  ],
+  currentSet: { tools: [{ serverId: SERVER.id, toolName: "read_record" }], servers: [], connectors: [], roleIds: [ROLE.id], agents: [], revision: 4 },
+  proposedSet: {
+    tools: [{ serverId: SERVER.id, toolName: "read_record" }], servers: [], connectors: [], roleIds: [ROLE.id],
+    agents: [{ agentId: AGENT.id, allowedModes: ["execute"] }], revision: 4,
+  },
+};
+const PICKERS = {
+  sponsors: [{ id: STEWARD.id, label: STEWARD.displayName, email: STEWARD.email }, { id: CO_STEWARD.id, label: CO_STEWARD.displayName, email: CO_STEWARD.email }],
+  subjects: { agent: [{ id: U(14), label: "Unbound bot" }], builder_agent: [], engine_runner: [] },
+  environments: ["dev", "hosted"],
+  servers: [], agents: [], connectors: [], roles: [], workerIdentities: [], truncated: false,
+};
 const TREE = {
   items: [
     { id: U(41), rootGrantId: U(40), parentGrantId: U(40), path: [U(40)], depth: 1, sponsorUserId: STEWARD.id, actorIdentityId: U(21), runId: RUN, projectId: null,
@@ -103,6 +130,21 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
       m.grantsRevision += 1;
       return json(route, { ...body, identityId: IDENTITY.id, revision: m.grantsRevision });
     }
+    if (p === `/v1/workload-identities/${IDENTITY.id}/credentials` && method === "GET") return json(route, { items: [CREDENTIAL] });
+    if (p === `/v1/workload-identities/${IDENTITY.id}/credentials` && method === "POST") {
+      return json(route, { ...CREDENTIAL, id: U(61), publicJwk: (req.postDataJSON() as { publicJwk: object }).publicJwk }, 201);
+    }
+    if (p === `/v1/workload-identities/${IDENTITY.id}/credentials/${CREDENTIAL.id}` && method === "DELETE") {
+      return json(route, { credential: { ...CREDENTIAL, revokedAt: ISO }, tokensRevoked: 0, grantsRevoked: [] });
+    }
+    if (p === `/v1/workload-identities/${IDENTITY.id}/revoke` && method === "POST") {
+      return json(route, { identity: { ...IDENTITY, status: "revoked" }, credentialsRevoked: 1, tokensRevoked: 0, grantsRevoked: [] });
+    }
+    if (p === `/v1/workload-identities/${IDENTITY.id}/grant-proposals` && method === "GET") return json(route, PROPOSALS);
+    if (p === "/v1/identity/picker-sources" && method === "GET") return json(route, PICKERS);
+    if (p === "/v1/workload-identities" && method === "POST") {
+      return json(route, { ...IDENTITY, id: U(25), kind: "worker_runtime", agentId: null, ...(req.postDataJSON() as object) }, 201);
+    }
     // U3: the identity and delegation settings card on this page (strict defaults)
     if (p === "/v1/org/settings" && method === "GET") {
       return json(route, {
@@ -136,7 +178,7 @@ async function openIdentity(page: Page) {
   await expect(page.getByRole("heading", { name: IDENTITY.identifier })).toBeVisible();
 }
 
-test.describe("ADR-0188 S6: workload identities (preview)", () => {
+test.describe("ADR-0188 S6: workload identities", () => {
   test.beforeEach(() => {
     current = null;
   });
@@ -144,32 +186,27 @@ test.describe("ADR-0188 S6: workload identities (preview)", () => {
     expect(current?.unmatched ?? [], "every /v1 call this page makes is mocked deliberately").toEqual([]);
   });
 
-  test("lists identities from the live route, stays out of the navigation, and explains what is not built", async ({ page }) => {
+  test("lists identities from the live route, is in the Identity & Access navigation, and calls no stub", async ({ page }) => {
     const m = await mockApi(page);
     await page.goto("/ui/admin/workload-identities");
     await expect(page.getByRole("heading", { name: "Workload identities" })).toBeVisible();
     const row = page.getByRole("row", { name: new RegExp(IDENTITY.identifier) });
     await expect(row).toContainText("Avery Admin");
     await expect(row).toContainText("dev");
-    await expect(page.getByRole("note").filter({ hasText: "not in the navigation" })).toBeVisible();
-    await expect(page.locator('a[href*="workload-identities"]')).toHaveCount(0);
+    await expect(page.getByRole("note").filter({ hasText: "cannot be undone" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Workload identities" }).first()).toHaveAttribute("href", /\/admin\/workload-identities$/);
 
-    const add = page.getByRole("button", { name: "Add identity — unavailable" });
-    await expect(add).toHaveAttribute("aria-disabled", "true");
-    // aria-disabled, not disabled: still reachable from the keyboard, and refusing to act
-    await add.focus();
-    await page.keyboard.press("Enter");
-    await page.getByRole("button", { name: "What is the reason Add identity is unavailable?" }).click();
-    await expect(page.getByRole("note").filter({ hasText: "not built on this gateway yet" })).toBeVisible();
+    // S6 built the last stub: every control is live
+    expect(IDENTITY_ROUTES_NOT_BUILT).toEqual([]);
+    await expect(page.getByRole("button", { name: "Add identity" })).toBeEnabled();
 
     await page.getByRole("button", { name: `Manage ${IDENTITY.identifier}` }).click();
-    await expect(page.getByRole("button", { name: "Revoke identity — unavailable" })).toHaveAttribute("aria-disabled", "true");
-    await expect(page.getByRole("button", { name: "Add public credential — unavailable" })).toHaveAttribute("aria-disabled", "true");
+    await expect(page.getByRole("button", { name: "Revoke identity" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Add public credential" })).toBeEnabled();
     await expect(page.getByText("1 credential is active")).toBeVisible();
+    await expect(page.getByRole("row", { name: /kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k/ })).toContainText("live");
     const grants = page.getByRole("row", { name: /read_record/ });
     await expect(grants).toContainText("Records server");
-    await page.getByRole("button", { name: "Revoke identity — unavailable" }).focus();
-    await page.keyboard.press("Enter");
     expect(notBuiltCalls(m)).toEqual([]);
 
     await expectNoAxeViolations(page, "the page with an identity open");
@@ -283,5 +320,113 @@ test.describe("ADR-0188 S6: workload identities (preview)", () => {
     await su.expectResentOnce();
     expect(su.attempts[1]!.body).toEqual({});
     expect(notBuiltCalls(m)).toEqual([]);
+  });
+  test("creating an identity offers only the picker sources and is resent once through step-up", async ({ page }) => {
+    const m = await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "POST", path: "/v1/workload-identities", kind: "identity_manage" });
+    await page.goto("/ui/admin/workload-identities");
+    await page.getByRole("button", { name: "Add identity" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add workload identity" });
+    await expect(dialog.getByRole("button", { name: "Review identity" })).toBeEnabled();
+    await dialog.getByRole("button", { name: "Review identity" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("steward");
+    await dialog.getByLabel("Add a steward", { exact: true }).selectOption(STEWARD.id);
+    await dialog.getByRole("button", { name: "Add steward" }).click();
+    await dialog.getByLabel("Add an environment", { exact: true }).selectOption("dev");
+    await dialog.getByRole("button", { name: "Add environment" }).click();
+    await expectNoAxeViolations(page, "the open Add workload identity dialog");
+    await dialog.getByRole("button", { name: "Review identity" }).click();
+    await page.getByRole("dialog", { name: "Create workload identity?" }).getByRole("button", { name: "Create identity" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ kind: "worker_runtime", sponsorUserIds: [STEWARD.id], environments: ["dev"] });
+    await expect(page.getByText("Workload identity created.")).toBeVisible();
+    expect(m.calls.some((c) => c.path === "/v1/identity/picker-sources")).toBe(true);
+  });
+
+  test("a private key is refused in the browser; a public key is bound through step-up", async ({ page }) => {
+    const m = await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "POST", path: `/v1/workload-identities/${IDENTITY.id}/credentials`, kind: "identity_manage" });
+    await openIdentity(page);
+    await page.getByRole("button", { name: "Add public credential" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add public credential" });
+    const field = dialog.getByLabel("Public key (JSON Web Key)", { exact: true });
+    await field.fill(JSON.stringify({ ...CREDENTIAL.publicJwk, d: "SYNTHETIC_PRIVATE_MEMBER" }));
+    await dialog.getByRole("button", { name: "Review credential" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("private key");
+    expect(m.calls.filter((c) => c.method === "POST" && c.path.endsWith("/credentials"))).toHaveLength(0);
+    await field.fill(JSON.stringify({ ...CREDENTIAL.publicJwk, kid: "mine" }));
+    await dialog.getByRole("button", { name: "Review credential" }).click();
+    await page.getByRole("dialog", { name: "Add public credential?" }).getByRole("button", { name: "Add credential" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ kind: "jwk", publicJwk: CREDENTIAL.publicJwk });
+    await expect(page.getByText("Public credential added.")).toBeVisible();
+  });
+
+  test("revoking a credential is confirmed as permanent and stepped up", async ({ page }) => {
+    await mockApi(page);
+    const cred = await requireStepUpOn(page, { method: "DELETE", path: `/v1/workload-identities/${IDENTITY.id}/credentials/${CREDENTIAL.id}`, kind: "identity_manage" });
+    await openIdentity(page);
+    await page.getByRole("button", { name: /^Revoke Public key \(JWK\)/ }).click();
+    const c = page.getByRole("dialog", { name: "Revoke public credential?" });
+    await expect(c).toContainText("never revived");
+    await c.getByRole("button", { name: "Revoke credential" }).click();
+    await confirmStepUp(page);
+    await cred.expectResentOnce();
+    await expect(page.getByText("Credential revoked.")).toBeVisible();
+  });
+
+  test("revoking the identity is confirmed as permanent and stepped up", async ({ page }) => {
+    await mockApi(page);
+    const ident = await requireStepUpOn(page, { method: "POST", path: `/v1/workload-identities/${IDENTITY.id}/revoke`, kind: "identity_manage" });
+    await openIdentity(page);
+    await page.getByRole("button", { name: "Revoke identity" }).click();
+    const r = page.getByRole("dialog", { name: "Revoke identity permanently?" });
+    await expect(r).toContainText("can never be restored");
+    await r.getByRole("button", { name: "Revoke identity" }).click();
+    await confirmStepUp(page);
+    await ident.expectResentOnce();
+    expect(ident.attempts[1]!.body).toEqual({});
+    await expect(page.getByText("Identity revoked.")).toBeVisible();
+  });
+
+  test("proposals from observed use are read on request and accepted as the proposed set at its revision", async ({ page }) => {
+    const m = await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/workload-identities/${IDENTITY.id}/grants`, kind: "identity_manage" });
+    await openIdentity(page);
+    expect(m.calls.some((c) => c.path.endsWith("/grant-proposals"))).toBe(false);
+    await page.getByRole("button", { name: "Propose grants from observed use" }).click();
+    await expect(page.getByRole("row", { name: /no steward holds it/ })).toBeVisible();
+    await expect(page.getByText("1 observed call(s) cannot become an own grant", { exact: false })).toBeVisible();
+    await expectNoAxeViolations(page, "the loaded grant proposals");
+    await page.getByRole("button", { name: "Accept proposals" }).click();
+    await page.getByRole("dialog", { name: "Accept proposed grants?" }).getByRole("button", { name: "Accept proposals" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual(PROPOSALS.proposedSet);
+    await expect(page.getByText("Proposed grants accepted.")).toBeVisible();
+  });
+
+  test("a proposal that never ran is not pre-selected, and is added only when ticked", async ({ page }) => {
+    await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/workload-identities/${IDENTITY.id}/grants`, kind: "identity_manage" });
+    await openIdentity(page);
+    await page.getByRole("button", { name: "Propose grants from observed use" }).click();
+    const allowedBefore = page.getByRole("checkbox", { name: `Include Agent invocation; modes: execute on ${AGENT.name}` });
+    const neverRan = page.getByRole("checkbox", { name: `Include Agent invocation; modes: review on ${AGENT.name}` });
+    await expect(allowedBefore).toBeChecked();
+    await expect(neverRan).not.toBeChecked();
+    await expect(page.getByRole("row", { name: /modes: review/ })).toContainText("Never ran: every call was refused for lack of this grant.");
+    // the proposal no steward holds cannot be selected at all
+    await expect(page.getByRole("row", { name: /no steward holds it/ }).getByRole("checkbox")).toHaveCount(0);
+    await neverRan.check();
+    await page.getByRole("button", { name: "Accept proposals" }).click();
+    const confirm = page.getByRole("dialog", { name: "Accept proposed grants?" });
+    await expect(confirm).toContainText("never been allowed to use");
+    await confirm.getByRole("button", { name: "Accept proposals" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ ...PROPOSALS.currentSet, agents: [{ agentId: AGENT.id, allowedModes: ["execute", "review"] }] });
   });
 });
