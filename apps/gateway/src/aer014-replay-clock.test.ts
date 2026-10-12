@@ -17,6 +17,7 @@ import {
 import { buildApp } from "./app.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { replayCounterFor, runRuleSimulation } from "./policy-simulation.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 /**
  * AER-014 (ADR-0179 §1) — A REPLAYED RATE LIMIT COUNTS WHAT HAD HAPPENED BEFORE
@@ -65,7 +66,7 @@ const ids = { A: "", B: "", C: "" };
 const pruneMarkers: string[] = [];
 
 async function recordAllowedCall(when: Date): Promise<string> {
-  const [row] = await db
+  const [row] = await backdated(db)
     .insert(auditLog)
     .values({
       userId,

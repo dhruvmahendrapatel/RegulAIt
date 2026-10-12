@@ -15,6 +15,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { runRuleSimulation, tryAcquireSimulationSlot } from "./policy-simulation.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 /**
  * AER-016 (ADR-0179 §1) — A NON-ADMIN PREVIEW IS A BOUNDED RUN.
@@ -76,7 +77,7 @@ async function mkUser(tag: string): Promise<string> {
 
 async function recordCalls(userId: string, n: number, spacingMs: number): Promise<void> {
   const start = Date.now() - 6 * 60 * MIN;
-  await db.insert(auditLog).values(
+  await backdated(db).insert(auditLog).values(
     Array.from({ length: n }, (_, i) => ({
       userId,
       objectType: "mcp_tool" as const,

@@ -52,6 +52,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { computeCardStaleness } from "./mrm-autofill.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -104,7 +105,7 @@ async function redteamRun(agentId: string, libraryId: string, asr: number, start
 }
 
 const audit = (ruleId: string, at: Date, objectType: NonNullable<(typeof auditLog.$inferInsert)["objectType"]>, objectId: string, detail: unknown, userId = ids.admin) =>
-  db.insert(auditLog).values({
+  backdated(db).insert(auditLog).values({
     userId, at, effect: "allow", ruleId, ruleChain: [], reason: `sql2 fixture ${tag}`, objectType, objectId,
     detail: detail as Record<string, unknown>,
   });

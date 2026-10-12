@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { auditLog, createDb, runMigrations, sql, type Db } from "@regulait/db";
+import { auditLog, createDb, runMigrations, runWithCallerAuditAtForTest, sql, type Db } from "@regulait/db";
 import {
   AUDIT_GENESIS_CONTENT_HASH,
   AUDIT_GENESIS_PREV_HASH,
@@ -827,10 +827,29 @@ describe("M-075: audit_log.at is stamped on the database clock", () => {
     expect((await verify()).status).toBe("ok");
   });
 
-  it("keeps an `at` the caller names (the hash covers exactly that value)", async () => {
+  it("refuses an `at` the caller names: nothing is appended (a row cannot be backdated)", async () => {
+    const before = (await chainRows()).length;
+    await expect(db.insert(auditLog).values(auditRow({ reason: "backdated", at: new Date("2026-01-02T03:04:05.678Z") }))).rejects.toThrow(
+      "a caller may not name it",
+    );
+    expect((await chainRows()).length).toBe(before);
+    // only a test fixture may, inside the fixture path (the hash covers exactly the named value)
     const named = new Date("2026-01-02T03:04:05.678Z");
-    const [row] = await db.insert(auditLog).values(auditRow({ reason: "named at", at: named })).returning({ at: auditLog.at });
+    const [row] = await runWithCallerAuditAtForTest(() => db.insert(auditLog).values(auditRow({ reason: "fixture-dated", at: named })).returning({ at: auditLog.at }));
     expect(row!.at.toISOString()).toBe(named.toISOString());
+    expect((await verify()).status).toBe("ok");
+  });
+
+  it("never stamps a time earlier than the tip, even when the database clock is behind it (an NTP step-back)", async () => {
+    // a tip ahead of the database clock is what a step-back leaves behind; a fixture-dated row stands in for it
+    const ahead = new Date((await dbClock()).getTime() + 3_000);
+    const [tip] = await runWithCallerAuditAtForTest(() =>
+      db.insert(auditLog).values(auditRow({ ruleId: CLOCK_RULE, reason: "tip from before the step-back", at: ahead })).returning({ at: auditLog.at, seq: auditLog.seq }),
+    );
+    const [next] = await db.insert(auditLog).values(auditRow({ ruleId: CLOCK_RULE, reason: "after the step-back" })).returning({ at: auditLog.at, seq: auditLog.seq });
+    expect(Number(next!.seq)).toBe(Number(tip!.seq) + 1);
+    expect(next!.at.getTime()).toBe(ahead.getTime()); // held at the tip's time, not the (earlier) clock
+    expect((await dbClock()).getTime()).toBeLessThan(ahead.getTime());
     expect((await verify()).status).toBe("ok");
   });
 });

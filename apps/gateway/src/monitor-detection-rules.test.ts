@@ -8,12 +8,13 @@ import { buildApp } from "./app.js";
 import { detectionMonitorInput } from "./monitor-detection-rules.js";
 import { runGovernanceMonitor } from "./governance-monitor.js";
 import { dropScratchDatabase } from "./testing/scratch-db.js";
+import { backdated } from "./testing/backdated-audit.js";
 const base=process.env.DATABASE_URL,name=`regulait_x24_${process.pid}_${Date.now()}`;
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../../..");
 const now=new Date("2026-10-07T22:00:00Z"), at=(hours:number)=>new Date(now.getTime()+hours*3600000);
 let db:Db,control:Db,userId:string;
 async function entry(value:Partial<typeof auditLog.$inferInsert>={}){
- const [row]=await db.insert(auditLog).values({userId,at:at(-1),objectType:"mcp_tool",effect:"allow",ruleId:"fixture-decision",ruleChain:[],reason:"PRIVATE FIXTURE REASON",...value}).returning();return row!;
+ const [row]=await backdated(db).insert(auditLog).values({userId,at:at(-1),objectType:"mcp_tool",effect:"allow",ruleId:"fixture-decision",ruleChain:[],reason:"PRIVATE FIXTURE REASON",...value}).returning();return row!;
 }
 async function promptFixture(){
  const agentId=randomUUID();const [instance]=await db.insert(workflowInstances).values({templateIds:[],definition:{stages:[]},initiatorUserId:userId,change:{},state:{},status:"completed"}).returning();

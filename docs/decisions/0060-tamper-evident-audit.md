@@ -679,9 +679,18 @@ the column, so the chain stays verifiable.
 `clock_timestamp()` was chosen over `now()`. `now()` is the time the enclosing transaction started, so a
 transaction that waited on the chain lock, or did other work before its audit insert, would stamp a time
 earlier than rows already ahead of it in `seq`, and `at` would run backwards along the chain. Read after the
-lock, `at` never decreases along `seq` and records when the row's place in the chain was fixed. A caller
-that names its own `at` keeps it (the hash covers exactly that value).
+lock, `at` records when the row's place in the chain was fixed.
 
-The live rate-limit window (`governed-evaluate.ts`, which counts `allow` rows by `at`) moved to the
-database clock in the same change; a replay keeps its recorded instant. Tests: `audit-chain.test.ts`
+PR #377 review: the stamp is `greatest(clock_timestamp(), tip.at)` (the tip rounded up to the millisecond), so
+`at` never decreases along `seq`, even across an NTP step-back of the database host's clock: new rows are held
+at the tip's time until the clock catches up. A caller may **not** name `at` (secure by default: a row could
+otherwise be backdated into a window it never happened in); the writer refuses it and appends nothing. Test
+fixtures that need a dated row use `runWithCallerAuditAtForTest` (via the gateway's `testing/backdated-audit.ts`),
+which production code never calls and which refuses to run under `NODE_ENV=production`.
+
+The comparisons against `at` moved to the database clock in the same PR: the live rate-limit window
+(`governed-evaluate.ts`; a replay keeps its recorded instant), the receipt status's stalled check, the posture
+report's window, the condition-metric sweep and route and the deploy gate (whose instant feeds the metric
+windows), and the builder runtime's step lookup. Day-scale windows (org-settings retention, reporting periods)
+still take the process clock: a skew of seconds does not move them. Tests: `audit-chain.test.ts`
 ("M-075: audit_log.at is stamped on the database clock").

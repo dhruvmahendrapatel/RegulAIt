@@ -7,6 +7,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 import { relaxDataPostureForTest, setOrgSettingsForTest } from "./testing/strict-data-posture.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 /**
  * The most recent row by `at`.
@@ -283,7 +284,7 @@ describe("§8.4 audit-log retention pruning", () => {
   let markerId: string;
 
   beforeAll(async () => {
-    const ins = await db
+    const ins = await backdated(db)
       .insert(auditLog)
       .values(
         [0, 1, 2].map((i) => ({

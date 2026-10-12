@@ -25,6 +25,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { runCanaryObservationPrune } from "./config-versions.js";
+import { backdated } from "./testing/backdated-audit.js";
 
 /**
  * ADR-0073, batch B8b — THE COMPLIANCE-PROFILE SHADOW IS STORED HISTORY, AND
@@ -417,7 +418,7 @@ describe("B8b (3) — the preview surfaces the STORED divergence, admin-only", (
     });
     expect(s.statusCode, s.body).toBe(201);
     recordedServerId = s.json().id as string;
-    await db.insert(auditLog).values({
+    await backdated(db).insert(auditLog).values({
       userId: nonAdminId,
       objectType: "mcp_tool",
       objectId: recordedServerId,

@@ -20,6 +20,7 @@ import { USAGE_CSV_HEADER, usageEventsCsv } from "./projects.js";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { backdated } from "./testing/backdated-audit.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -111,7 +112,7 @@ afterAll(async () => {
 describe("ADR-0031: /v1/audit.csv streams in keyset batches", () => {
   it("costs strictly more round trips at batch size 2 than at one big batch, and returns the same rows", async () => {
     const base = Date.now();
-    await db.insert(auditLog).values(
+    await backdated(db).insert(auditLog).values(
       Array.from({ length: 9 }, (_, i) => auditRow(new Date(base - i * 1000))),
     );
 
@@ -139,7 +140,7 @@ describe("ADR-0031: /v1/audit.csv streams in keyset batches", () => {
   it("walks rows that share one microsecond-identical timestamp without loss or duplication", async () => {
     // the exact case a cursor built from a millisecond-truncated JS Date drops
     const at = new Date(Date.UTC(2026, 6, 15, 12, 0, 0));
-    await db.insert(auditLog).values(Array.from({ length: 5 }, () => auditRow(at)));
+    await backdated(db).insert(auditLog).values(Array.from({ length: 5 }, () => auditRow(at)));
 
     process.env.REGULAIT_CSV_BATCH_ROWS = "2";
     const res = await app.inject({
@@ -177,7 +178,7 @@ describe("ADR-0031: /v1/audit.csv streams in keyset batches", () => {
 
   it("applies a default date window, discloses it when it actually clips rows, and honours explicit bounds", async () => {
     const old = new Date(Date.now() - 200 * 86_400_000);
-    await db.insert(auditLog).values([auditRow(old)]);
+    await backdated(db).insert(auditLog).values([auditRow(old)]);
 
     const defaulted = await app.inject({
       method: "GET",
@@ -217,7 +218,7 @@ describe("ADR-0031: /v1/audit.csv streams in keyset batches", () => {
 
   it("neutralises a spreadsheet formula in any cell (CSV injection; ADR-0173 batch 2c fix round A)", async () => {
     const marker = randomUUID().slice(0, 8);
-    await db.insert(auditLog).values({
+    await backdated(db).insert(auditLog).values({
       ...auditRow(new Date()),
       toolName: `=HYPERLINK("http://x.invalid/${marker}")`,
       ruleId: `@csv-inject-${marker}`,
