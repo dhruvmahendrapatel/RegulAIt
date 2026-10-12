@@ -15,3 +15,10 @@
 /packages/shared/src/bom/release-ai-bom.ts        @dhruvmahendrapatel
 /packages/shared/src/bom/release-sbom-identity.ts @dhruvmahendrapatel
 /.github/workflows/release-ai-bom.yml             @dhruvmahendrapatel
+# PR #374 review: the UI census gates and their exception lists (MACHINE_ONLY,
+# SUPERSEDED, INDIRECT_UI_CALLS, KNOWN_UI_GAPS) live in these scripts, and the
+# list sizes are pinned in the census test; a new exception needs the owner.
+/scripts/preflight-ui-affordances.mjs             @dhruvmahendrapatel
+/scripts/preflight-ui-affordances.test.mjs        @dhruvmahendrapatel
+/scripts/preflight-ui-route-census.mjs            @dhruvmahendrapatel
+/scripts/preflight-ui-route-census.test.mjs       @dhruvmahendrapatel
