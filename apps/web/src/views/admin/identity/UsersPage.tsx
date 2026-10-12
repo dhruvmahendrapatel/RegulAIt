@@ -7,12 +7,14 @@
  * revocations) that beat every grant.
  */
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { RefusalGuidance } from "../../../api/refusals";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import UserPasskeysPanel from "./UserPasskeysPanel";
+import UserRoleProvenancePanel from "./UserRoleProvenancePanel";
+import { UsernameForm } from "../../account/UsernameForm";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import type {
   AdminUser,
@@ -325,6 +327,8 @@ function UserDetail(props: {
   const { user } = props;
   const lastAdmin = user.isAdmin && !user.disabledAt && props.activeAdmins <= 1;
   const [tab, setTab] = useState("lifecycle");
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["admin"] });
   return (
     <Card
       title={
@@ -338,6 +342,7 @@ function UserDetail(props: {
           { id: "lifecycle", label: "Lifecycle" },
           { id: "sessions", label: "Sessions" },
           { id: "passkeys", label: "Passkeys" },
+          { id: "roles", label: "Roles" },
           { id: "overrides", label: "Overrides" },
         ]}
         active={tab}
@@ -401,10 +406,21 @@ function UserDetail(props: {
               )}
             </div>
             <RenameForm user={user} />
+            {/* ADR-0030: an admin sets, changes or clears any user's username */}
+            <UsernameForm
+              key={`${user.id}:${user.username ?? ""}`}
+              testId="admin-username"
+              current={user.username ?? null}
+              save={async (username) => {
+                await api.put(`/v1/users/${encodeURIComponent(user.id)}/username`, { username });
+                await invalidate();
+              }}
+            />
           </div>
         )}
         {tab === "sessions" && <SessionsPanel userId={user.id} />}
         {tab === "passkeys" && <UserPasskeysPanel userId={user.id} userName={user.displayName || user.email} />}
+        {tab === "roles" && <UserRoleProvenancePanel userId={user.id} />}
         {tab === "overrides" && <OverridesPanel userId={user.id} />}
       </div>
     </Card>

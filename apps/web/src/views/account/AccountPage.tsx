@@ -17,6 +17,7 @@ import { Badge, Button, Card, EmptyState, Field, IdChip, Input, Table } from "..
 import { TotpQrCode } from "../../ui/TotpQrCode";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
+import { UsernameForm } from "./UsernameForm";
 import PasskeysCard from "./PasskeysCard";
 import { LiteracyDocumentList, useMyLiteracy } from "./AcknowledgeGate";
 import v from "../views.module.css";
@@ -80,6 +81,23 @@ export default function AccountPage() {
             </span>
             <span className={v.mono}>{auth?.via ?? "—"}</span>
           </div>
+          {/* ADR-0030: the person's own username — writable only while the org allows self-service */}
+          {auth?.user ? (
+            <UsernameForm
+              key={auth.user.username ?? ""}
+              testId="account-username"
+              current={auth.user.username ?? null}
+              lockedReason={
+                auth.usernameSelfService
+                  ? null
+                  : "Usernames are managed by an administrator in this organization. Ask an admin to set or change yours."
+              }
+              save={async (username) => {
+                await api.post("/auth/username", { username });
+                await refresh();
+              }}
+            />
+          ) : null}
         </Card>
 
         <div ref={pwRef}>
