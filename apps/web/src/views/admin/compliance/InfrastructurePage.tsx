@@ -26,6 +26,7 @@ import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { CertRotationsCard } from "./CertRotations";
 import { putOrgSettings } from "../../../stepup/stepUp";
+import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 
 const SEV_TONE: Record<string, Tone> = { critical: "danger", high: "danger", medium: "warn", low: "ok" };
 const STATUS_TONE: Record<string, Tone> = {
@@ -384,6 +385,9 @@ export default function InfrastructurePage() {
             empty={<EmptyState title="No CVE patches tracked" />}
           />
         </Card>
+
+        {/* O5 (migration 0045): scheduled backup verification, on by default (ADR-0181) */}
+        <OrgSettingsCard title="Backup verification" keys={["backupVerifyEnabled", "backupVerifyIntervalHours"]} testId="backup-verify-settings" />
 
         <Card title="Backups — run / restore ledger">
           <Table<InfraBackup>

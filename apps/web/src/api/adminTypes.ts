@@ -15,6 +15,8 @@ export interface AdminUser {
   totpEnabled: boolean;
   hasPassword: boolean;
   mustChangePassword: boolean;
+  /** ADR-0030: the second login identifier (null = email only); absent on an older gateway */
+  username?: string | null;
 }
 
 export interface ApiKey {

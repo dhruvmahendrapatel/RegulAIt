@@ -2406,6 +2406,22 @@ export const updateOrgSettingsSchema = z
      * never rewrites an approval that already exists — expiry is stamped at
      * queue time, exactly as ADR-0098 stamps a key's at issuance. */
     approvalTtlHours: z.number().int().min(1).max(8760).nullable().optional(),
+    /** ADR-0046 (migration 0058): the review-workbench bulk fences, writable
+     * here since the U3 settings batch. The hard cap on items per bulk
+     * approve/deny/reassign (strict 25; the DB CHECK holds 1–500), and whether
+     * bulk is refused on approvals attributed to a PII-blocking project
+     * (strict true). A larger cap, or the fence off, is a relaxation. */
+    approvalBulkMaxItems: z.number().int().min(1).max(500).optional(),
+    approvalBulkSensitiveBlocked: z.boolean().optional(),
+    /** ADR-0045 / ADR-0086: the model-risk dials beside `POST /v1/mrm/enforcement`
+     * (which keeps the master toggle). The warn window, in days before a
+     * sign-off lapses (0–3650, informational only: expiry is enforced on
+     * `validUntil` whatever this is); staleness-forces-recertification (strict
+     * true) and its drift threshold (strict 1, the DB CHECK holds 1–100000).
+     * Off, or a higher threshold, is a relaxation. */
+    mrmExpiryWarnDays: z.number().int().min(0).max(3650).optional(),
+    mrmStalenessRecertEnabled: z.boolean().optional(),
+    mrmStalenessRecertThreshold: z.number().int().min(1).max(100_000).optional(),
     /** ADR-0182 (ADR-0175 batch D4) — the accountability settings. Each one
      * defaults STRICT (migration 0162 wrote the strict value onto the existing
      * row); a write that relaxes one is audited like every other key here, as

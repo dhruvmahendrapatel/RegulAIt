@@ -385,8 +385,8 @@ export const BATCH4_SETTING_COPY: Readonly<Record<Batch4SettingKey, { label: str
   stepUpActions: {
     label: "Actions that need a step-up",
     strict:
-      "All six: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys " +
-      "and changing an owner.",
+      "All seven: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner and managing agent identities.",
     relaxed: "Each action removed from the list can be done with the session alone.",
   },
   toolApprovalSensitiveQuorum: {
@@ -505,7 +505,7 @@ export const batch4OrgSettingsFields = {
   stepUpMode: z.enum(STEP_UP_MODES).optional(),
   /** strict 120; longer, up to 900, relaxes it */
   stepUpMaxAgeSeconds: boundedInt(BATCH4_SETTING_LIMITS.stepUpMaxAgeSeconds).optional(),
-  /** strict: all six; removing one relaxes it */
+  /** strict: all seven; removing one relaxes it */
   stepUpActions: uniqueSubset(STEP_UP_ACTION_KINDS).optional(),
   /** strict 2; 1 relaxes it */
   toolApprovalSensitiveQuorum: boundedInt(BATCH4_SETTING_LIMITS.toolApprovalSensitiveQuorum).optional(),

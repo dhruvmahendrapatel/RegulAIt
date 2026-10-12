@@ -36,6 +36,7 @@ import {
 import { useToast } from "../../ui/toast";
 import v from "../views.module.css";
 import s from "./spend.module.css";
+import { MyConsolidatedSpendCard } from "./MyConsolidatedSpendCard";
 
 interface MyConnector {
   connectorId: string;
@@ -362,6 +363,9 @@ export default function SpendPage() {
                 }
               />
             </Card>
+
+            {/* ADR-0055 / ADR-0076: the self-scoped consolidated view (metered and imported, never summed) */}
+            {userId ? <MyConsolidatedSpendCard userId={userId} /> : null}
 
             <Card title="Recent invocations" flush>
               <Table<Row>

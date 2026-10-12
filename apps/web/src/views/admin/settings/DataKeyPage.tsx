@@ -35,6 +35,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "..
 import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import { ReencryptionStatusCard } from "./ReencryptionStatusCard";
 
 interface Attestation {
   id: string;
@@ -235,6 +236,8 @@ export default function DataKeyPage() {
             )}
           </Card>
         </QueryGate>
+        {/* ADR-0063: the re-encryption walk after a rotation (its own read, so a failure here hides nothing above) */}
+        <ReencryptionStatusCard />
       </div>
     </>
   );
