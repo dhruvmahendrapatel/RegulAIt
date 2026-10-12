@@ -69,9 +69,10 @@ async function mockApi(page: Page, routes: Array<[string, RegExp, Handler]>): Pr
 /**
  * Axe in light and dark on the MCP servers tab, excluding the server table's
  * Proxy id chips: a PRE-EXISTING target-size finding on that table (the
- * IdChip is 20px tall inside a clickable row), not part of this batch. The
- * Proxy id is the LAST column (10th since ADR-0188 S8 added "Identity to
- * upstream" before it); `:last-child` keeps the exclusion on it if columns move.
+ * IdChip is 20px tall inside a clickable row), not part of this batch (a logged
+ * follow-up). The exclusion names the chip itself (`data-id-chip`), not a column
+ * position: ADR-0188 S8 added a column before it and a positional selector
+ * silently moved onto another cell.
  */
 async function axeMcpServers(page: Page, label: string) {
   for (const theme of ["light", "dark"] as const) {
@@ -80,7 +81,7 @@ async function axeMcpServers(page: Page, label: string) {
     }, theme);
     const results = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-      .exclude('tr[aria-label^="Show tools on"] > td:last-child')
+      .exclude('tr[aria-label^="Show tools on"] [data-id-chip]')
       .analyze();
     expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`), `axe on "${label}" (${theme})`).toEqual([]);
   }
