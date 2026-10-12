@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { LLM_REFUSALS, parseCorpusRows, validateBody, validationVerdict, type ValidateResponse } from "./llmDatasetModel";
+import { GATEWAY_BODY_LIMIT_BYTES, LLM_REFUSALS, parseCorpusRows, rowsBodyProblem, validateBody, validationVerdict, type ValidateResponse } from "./llmDatasetModel";
 
 describe("adding rows", () => {
   it("parses JSON Lines into rowSchema rows, skipping blank lines", () => {
@@ -23,16 +23,26 @@ describe("adding rows", () => {
   });
 });
 
+describe("the request size", () => {
+  it("refuses, with the size, rows over the gateway's 1 MiB body limit instead of a bare 413", () => {
+    expect(rowsBodyProblem([{ input: "a", output: null }])).toBeNull();
+    const big = Array.from({ length: 30 }, () => ({ input: "x".repeat(40_000), output: null }));
+    expect(rowsBodyProblem(big)).toMatch(/over the gateway's 1\.00 MiB request limit/);
+    const gateway = readFileSync(new URL("../../../../../gateway/src/timeouts.ts", import.meta.url), "utf8");
+    expect(gateway).toContain(`bodyLimitBytes: ${GATEWAY_BODY_LIMIT_BYTES.toLocaleString("en-US").replace(/,/g, "_")},`);
+  });
+});
+
 describe("the dry-run validation", () => {
   it("sends only the typed dials, as numbers, and the price only when given", () => {
     expect(validateBody({ method: "text_classifier", backend: "local", dials: { epochs: "4", l2: "" }, price: "" }, ["epochs", "l2"])).toEqual({
       body: { method: "text_classifier", backend: "local", hyperparameters: { epochs: 4 } },
     });
-    expect(validateBody({ method: "lora_sft", backend: "openai", dials: {}, price: "2.5" }, [])).toEqual({
-      body: { method: "lora_sft", backend: "openai", hyperparameters: {}, pricePerMTokUsd: 2.5 },
+    expect(validateBody({ method: "lora_sft", backend: "remote-example", dials: {}, price: "2.5" }, [])).toEqual({
+      body: { method: "lora_sft", backend: "remote-example", hyperparameters: {}, pricePerMTokUsd: 2.5 },
     });
-    expect(validateBody({ method: "lora_sft", backend: "openai", dials: { epochs: "lots" }, price: "" }, ["epochs"])).toHaveProperty("error");
-    expect(validateBody({ method: "lora_sft", backend: "openai", dials: {}, price: "-1" }, [])).toHaveProperty("error");
+    expect(validateBody({ method: "lora_sft", backend: "remote-example", dials: { epochs: "lots" }, price: "" }, ["epochs"])).toHaveProperty("error");
+    expect(validateBody({ method: "lora_sft", backend: "remote-example", dials: {}, price: "-1" }, [])).toHaveProperty("error");
     expect(validateBody({ method: "", backend: "local", dials: {}, price: "" }, [])).toHaveProperty("error");
   });
 

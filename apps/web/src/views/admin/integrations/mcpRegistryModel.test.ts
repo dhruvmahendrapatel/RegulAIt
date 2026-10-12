@@ -1,15 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../../api/client";
-import { ADMISSION_CLEAR_REFUSALS, admissionClearRefusal } from "./McpServerAdmission";
+import { ADMISSION_CLEAR_REFUSALS, ADMISSION_REASON_MAX, admissionClearRefusal, admissionReasonProblem } from "./McpServerAdmission";
 import {
-  REGISTRY_REFUSAL_SENTENCES,
+  REFUSAL_SENTENCES,
   createRegistryBody,
   entryImportability,
   privateRangesOf,
   privateRangesWire,
   registryRefusalText,
   registryUrlProblem,
+  syncSucceeded,
   syncSummary,
   updateRegistryBody,
   type McpRegistry,
@@ -124,29 +125,45 @@ describe("reading results", () => {
     expect(syncSummary({ ...ok, outcome: "refused", reason: "air-gapped: federation is refused" })).toBe("air-gapped: federation is refused");
   });
 
-  it("explains every entry that cannot be imported", () => {
-    expect(entryImportability(entry())).toEqual({ importable: true });
+  it("blocks only what the gateway refuses for certain, and leaves recorded collisions to the gateway", () => {
+    expect(entryImportability(entry())).toEqual({ importable: true, warning: null });
     expect(entryImportability(entry({ serverId: registry.id }))).toMatchObject({ importable: false });
     expect(entryImportability(entry({ kind: "catalogue_only", remoteUrl: null, catalogueReason: "package_only" }))).toMatchObject({
       importable: false,
       reason: expect.stringContaining("package_only"),
     });
-    expect(entryImportability(entry({ conflictReason: "url_taken" }))).toMatchObject({ reason: expect.stringContaining("URL") });
-    expect(entryImportability(entry({ missingSince: "2026-10-12T00:00:00.000Z" }))).toMatchObject({ importable: false });
-    expect(entryImportability(entry({ upstreamStatus: "deleted" }))).toMatchObject({ importable: false });
+    // the gateway re-checks collisions live and does not refuse missing or deleted entries
+    expect(entryImportability(entry({ conflictReason: "url_taken" }))).toMatchObject({ importable: true, warning: expect.stringContaining("Sync now") });
+    expect(entryImportability(entry({ conflictReason: "name_taken" }))).toMatchObject({ importable: true, warning: expect.stringContaining("name") });
+    expect(entryImportability(entry({ missingSince: "2026-10-12T00:00:00.000Z" }))).toMatchObject({ importable: true, warning: expect.any(String) });
+    expect(entryImportability(entry({ upstreamStatus: "deleted" }))).toMatchObject({ importable: true, warning: expect.any(String) });
   });
 
-  it("reads a refusal as the page's sentence plus the gateway's detail", () => {
-    expect(registryRefusalText({ error: "egress_blocked", detail: "metadata address" })).toBe(`${REGISTRY_REFUSAL_SENTENCES.egress_blocked} metadata address`);
-    expect(registryRefusalText({ error: "something_else" })).toBeNull();
-    expect(registryRefusalText(null)).toBeNull();
+  it("reads a refusal in the words of the call that got it", () => {
+    expect(registryRefusalText({ error: "egress_blocked", detail: "metadata address" }, "registry")).toBe(`${REFUSAL_SENTENCES.registry.egress_blocked} metadata address`);
+    // a duplicate registry name (the global 23505 handler) is not an import collision
+    expect(registryRefusalText({ error: "conflict" }, "registry")).toMatch(/registry with this name already exists/);
+    expect(registryRefusalText({ error: "conflict", detail: "x" }, "import")).toMatch(/existing MCP server already has this entry/);
+    // import-only codes are not read on a registry call
+    for (const code of ["not_importable", "already_imported", "unknown_entry"]) expect(registryRefusalText({ error: code }, "registry")).toBeNull();
+    expect(registryRefusalText({ error: "something_else" }, "import")).toBeNull();
+    expect(registryRefusalText(null, "registry")).toBeNull();
+  });
+
+  it("only an ok sync is a success", () => {
+    expect(syncSucceeded({ outcome: "ok" })).toBe(true);
+    for (const outcome of ["refused", "failed", "skipped"] as const) expect(syncSucceeded({ outcome })).toBe(false);
   });
 });
 
 describe("pinned to the gateway source", () => {
-  it("every registry refusal code is one mcp-registry.ts sends", () => {
+  it("every registry refusal code is one the gateway sends", () => {
     const gateway = src("../../../../../gateway/src/mcp-registry.ts");
-    expect(Object.keys(REGISTRY_REFUSAL_SENTENCES).filter((code) => !gateway.includes(`"${code}"`))).toEqual([]);
+    const app = src("../../../../../gateway/src/app.ts");
+    expect(Object.keys(REFUSAL_SENTENCES.import).filter((code) => !gateway.includes(`"${code}"`))).toEqual([]);
+    expect(Object.keys(REFUSAL_SENTENCES.registry).filter((code) => code !== "conflict" && !gateway.includes(`"${code}"`))).toEqual([]);
+    // the registry `conflict` is the global unique-violation handler
+    expect(app).toContain('if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });');
   });
 
   it("every admission-clear refusal code is one mcp-admission.ts sends", () => {
@@ -154,5 +171,14 @@ describe("pinned to the gateway source", () => {
     expect(Object.keys(ADMISSION_CLEAR_REFUSALS).filter((code) => !gateway.includes(`error: "${code}"`))).toEqual([]);
     expect(admissionClearRefusal(new ApiError(409, { error: "reserved_tool_name" }))).toMatch(/rename/);
     expect(admissionClearRefusal(new ApiError(500, { error: "internal" }))).toBeNull();
+  });
+
+  it("the clear reason is bounded like clearMcpAdmissionSchema (1 to 2000 characters)", () => {
+    const shared = src("../../../../../../packages/shared/src/index.ts");
+    expect(shared).toContain(`.object({ reason: z.string().min(1).max(${ADMISSION_REASON_MAX}) })`);
+    expect(admissionReasonProblem("ok")).toBeNull();
+    expect(admissionReasonProblem("x".repeat(ADMISSION_REASON_MAX))).toBeNull();
+    expect(admissionReasonProblem("x".repeat(ADMISSION_REASON_MAX + 1))).toMatch(/at most 2000/);
+    expect(admissionReasonProblem("  ")).toMatch(/required/);
   });
 });

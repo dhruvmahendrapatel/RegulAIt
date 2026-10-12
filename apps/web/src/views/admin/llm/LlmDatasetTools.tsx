@@ -12,7 +12,7 @@ import { useId, useState } from "react";
 import { ApiError, api } from "../../../api/client";
 import { Badge, Button, Field, Input, Select, Textarea } from "../../../ui/kit";
 import { KV, OutcomePanel, optionEls, useAction, useApiAction } from "../adminKit";
-import { LLM_REFUSALS, parseCorpusRows, validateBody, validationVerdict, type ValidateResponse } from "./llmDatasetModel";
+import { LLM_REFUSALS, parseCorpusRows, rowsBodyProblem, validateBody, validationVerdict, type ValidateResponse } from "./llmDatasetModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -28,8 +28,8 @@ function FindingCounts(props: { findings: unknown }) {
   if (items.length === 0) return <span className={v.faint}>nothing fired</span>;
   return (
     <span>
-      {items.map((i) => (
-        <Badge key={i} tone="warn">
+      {items.map((i, n) => (
+        <Badge key={`${n}-${i}`} tone="warn">
           {i}
         </Badge>
       ))}
@@ -55,6 +55,8 @@ export function AddRowsForm(props: { datasetId: string; label: string; onDone: (
         e.preventDefault();
         const parsed = parseCorpusRows(text);
         if ("error" in parsed) return setProblem(parsed.error);
+        const tooLarge = rowsBodyProblem(parsed.rows);
+        if (tooLarge) return setProblem(tooLarge);
         setProblem(null);
         void act.run(() => api.post(`/v1/llm/datasets/${props.datasetId}/rows`, { rows: parsed.rows }), `${parsed.rows.length} row(s) added after the ingest scan`).then((out) => {
           if (out) {
@@ -110,9 +112,13 @@ export function ValidateDatasetForm(props: {
   dials: Record<string, Array<{ key: string; label: string; def: string }>>;
 }) {
   const act = useApiAction();
-  const [backend, setBackend] = useState(props.backends[0]?.kind ?? "local");
+  // the person's choices; the effective values are derived on every render, so a
+  // backend list that loads after mount (or changes) never leaves a stale choice
+  const [chosenBackend, setBackend] = useState("");
+  const [chosenMethod, setMethod] = useState("");
+  const backend = props.backends.some((b) => b.kind === chosenBackend) ? chosenBackend : (props.backends[0]?.kind ?? "local");
   const offered = props.backends.find((b) => b.kind === backend)?.methods ?? [...props.methods];
-  const [method, setMethod] = useState(offered[0] ?? "");
+  const method = offered.includes(chosenMethod) ? chosenMethod : (offered[0] ?? "");
   const [dials, setDials] = useState<Record<string, string>>({});
   const [price, setPrice] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
@@ -188,8 +194,8 @@ export function ValidateDatasetForm(props: {
             <>
               <div className={v.sectionTitle}>Why it would not train</div>
               <ul>
-                {verdict.problems.map((p) => (
-                  <li key={p}>{p}</li>
+                {verdict.problems.map((p, i) => (
+                  <li key={`p-${i}`}>{p}</li>
                 ))}
               </ul>
             </>
@@ -198,8 +204,8 @@ export function ValidateDatasetForm(props: {
             <>
               <div className={v.sectionTitle}>Warnings</div>
               <ul>
-                {result.validation.warnings.map((w) => (
-                  <li key={w}>{w}</li>
+                {result.validation.warnings.map((w, i) => (
+                  <li key={`w-${i}`}>{w}</li>
                 ))}
               </ul>
             </>

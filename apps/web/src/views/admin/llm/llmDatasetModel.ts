@@ -49,6 +49,17 @@ export function parseCorpusRows(text: string): { error: string } | { rows: Corpu
   return { rows };
 }
 
+/** the gateway's request body limit (Fastify `bodyLimit`, `TIMEOUT_DEFAULTS.bodyLimitBytes`) */
+export const GATEWAY_BODY_LIMIT_BYTES = 1_048_576;
+
+/** refuse here, with the size, a body the gateway would refuse with a bare 413 */
+export function rowsBodyProblem(rows: CorpusRowInput[]): string | null {
+  const bytes = new TextEncoder().encode(JSON.stringify({ rows })).length;
+  if (bytes <= GATEWAY_BODY_LIMIT_BYTES) return null;
+  const mib = (n: number) => (n / 1_048_576).toFixed(2);
+  return `These rows come to ${mib(bytes)} MiB, over the gateway's ${mib(GATEWAY_BODY_LIMIT_BYTES)} MiB request limit. Add them in smaller batches. Nothing was sent.`;
+}
+
 export interface ValidateDraft {
   method: string;
   backend: string;

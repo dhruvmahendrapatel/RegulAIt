@@ -99,10 +99,12 @@ const entry = (n: number, over: Json = {}) => ({
   serverId: null, importedAt: null, importedBy: null, conflictReason: null, conflictServerId: null, remoteUrlDrift: null, firstSeenAt: ISO, lastSeenAt: ISO, lastSyncedAt: ISO, missingSince: null, ...over,
 });
 
-function registryRoutes(state: { registries: Json[]; conflictOnImport?: boolean }): Array<[string, RegExp, Handler]> {
+function registryRoutes(state: { registries: Json[]; conflictOnImport?: boolean; refuseSync?: boolean }): Array<[string, RegExp, Handler]> {
   return [
     ["GET", /^\/v1\/mcp-registries$/, () => ({ body: { deployMode: "hosted", federationRefused: false, federationRefusedReason: null, maxPagesPerSync: 20, maxRegistriesPerSweep: 10, registries: state.registries } })],
     ["POST", /^\/v1\/mcp-registries$/, ({ body }) => {
+      // the unique name, refused by the gateway's global 23505 handler
+      if (state.registries.some((r) => r.name === body.name)) return { status: 409, body: { error: "conflict" } };
       const row = { ...REGISTRY, id: U(101), ...body };
       state.registries.push(row);
       return { status: 201, body: row };
@@ -113,10 +115,12 @@ function registryRoutes(state: { registries: Json[]; conflictOnImport?: boolean 
       return { body: r };
     }],
     ["POST", /^\/v1\/mcp-registries\/([^/]+)\/sync$/, () => ({
-      body: { registryId: REGISTRY.id, registryName: REGISTRY.name, outcome: "ok", reason: "pulled", pages: 1, truncated: false, entriesSeen: 3, created: 3, updated: 0, remote: 2, catalogueOnly: 1, malformed: 0, markedMissing: 0, driftDetected: 0, conflicts: 0, serversCreated: 0, grantsCreated: 0 },
+      body: state.refuseSync
+        ? { registryId: REGISTRY.id, registryName: REGISTRY.name, outcome: "refused", reason: "the egress guard refused the registry url", pages: 0, truncated: false, entriesSeen: 0, created: 0, updated: 0, remote: 0, catalogueOnly: 0, malformed: 0, markedMissing: 0, driftDetected: 0, conflicts: 0, serversCreated: 0, grantsCreated: 0 }
+        : { registryId: REGISTRY.id, registryName: REGISTRY.name, outcome: "ok", reason: "pulled", pages: 1, truncated: false, entriesSeen: 3, created: 3, updated: 0, remote: 2, catalogueOnly: 1, malformed: 0, markedMissing: 0, driftDetected: 0, conflicts: 0, serversCreated: 0, grantsCreated: 0 },
     })],
     ["GET", /^\/v1\/mcp-registries\/([^/]+)\/entries$/, () => ({
-      body: { registry: { id: REGISTRY.id, name: REGISTRY.name }, entries: [entry(1), entry(2, { kind: "catalogue_only", remoteUrl: null, remoteTransport: null, catalogueReason: "package_only" }), entry(3)] },
+      body: { registry: { id: REGISTRY.id, name: REGISTRY.name }, entries: [entry(1), entry(2, { kind: "catalogue_only", remoteUrl: null, remoteTransport: null, catalogueReason: "package_only" }), entry(3, { conflictReason: "name_taken", conflictServerId: U(9) })] },
     })],
     ["POST", /^\/v1\/mcp-registries\/entries\/([^/]+)\/import$/, ({ match }) =>
       state.conflictOnImport
@@ -171,11 +175,22 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expectAxeClean(page, "registry catalogue");
   });
 
-  test("an edit that enables the registry is confirmed in place; a colliding import is named", async ({ page }) => {
-    const state = { registries: [{ ...REGISTRY }], conflictOnImport: true };
+  test("a duplicate name and a refused sync are failures; an edit that enables is confirmed; a colliding import is named", async ({ page }) => {
+    const state = { registries: [{ ...REGISTRY }], conflictOnImport: true, refuseSync: true };
     const calls = await mockApi(page, registryRoutes(state));
     await page.goto("/ui/admin/mcp-servers?tab=registries");
-    await page.getByRole("button", { name: "Edit registry internal-mirror" }).click({ timeout: 30_000 });
+    const form = page.getByRole("form", { name: "Add a registry" });
+    await form.getByLabel("Registry name").fill("internal-mirror", { timeout: 30_000 });
+    await form.getByLabel("Registry base URL").fill("https://other.example.test");
+    await form.getByRole("button", { name: "Add registry" }).click();
+    await expect(form.getByRole("alert")).toHaveText("A registry with this name already exists. Choose another name.");
+
+    // a sync answers 200 for every outcome: a refused one is an error, never a success
+    await page.getByRole("button", { name: "Sync registry internal-mirror" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Sync of internal-mirror refused: the egress guard refused the registry url" }).first()).toBeVisible();
+    await expect(page.getByTestId("registry-sync-result")).toContainText("refused");
+
+    await page.getByRole("button", { name: "Edit registry internal-mirror" }).click();
     const dialog = page.getByRole("dialog", { name: "Edit registry internal-mirror" });
     await dialog.getByLabel("Scheduled pulls").selectOption("on");
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
@@ -186,6 +201,8 @@ test.describe("MCP servers — federated registries (ADR-0101)", () => {
     await expect.poll(() => sent(calls, "PATCH", `/v1/mcp-registries/${REGISTRY.id}`)).toEqual([{ enabled: true }]);
 
     await page.getByRole("button", { name: "Browse entries of internal-mirror" }).click();
+    // a collision recorded at the last sync is a warning; the gateway re-checks it live and decides
+    await expect(page.getByText(/At the last sync an existing MCP server had this name/)).toBeVisible();
     await page.getByRole("button", { name: "Import io.example/tool-3" }).click();
     await page.getByRole("dialog", { name: "Import io.example/tool-3?" }).getByRole("button", { name: "Import as an MCP server" }).click();
     await expect(page.getByRole("alert").filter({ hasText: "already has this entry's name or URL" })).toBeVisible();
@@ -244,7 +261,7 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
     await expect(page.getByRole("cell", { name: "search_docs" })).toBeVisible();
     await page.getByLabel("Server to preview").selectOption(HELD.id);
     await page.getByRole("button", { name: "Preview tools" }).click();
-    await expect(page.getByText("held by the admission scan, so its tools are hidden from everyone")).toBeVisible();
+    await expect(page.getByText("held by the admission scan. While admission is enforced its tools are hidden from everyone")).toBeVisible();
     await axeMcpServers(page, "tools/list preview");
   });
 });
@@ -416,7 +433,7 @@ test.describe("Red-teaming — recurring engine runs (ADR-0187)", () => {
 test.describe("regulAIt-LLM — add rows, validate, poll (ADR-0065)", () => {
   test("rows are checked by line, a blocked scan is named, validation and poll report back", async ({ page }) => {
     const DS = { id: U(800), name: "faq", version: 1, note: null, format: "prompt_completion", rowCount: 2, charCount: 40, checksum: "sha256:x", piiVerdict: "clean", piiMode: "block", scanFindings: { pii: [], guardrails: [] }, projectId: null, jobCount: 0, frozen: false, createdAt: ISO };
-    const JOB = { id: U(810), name: "faq-index", datasetId: DS.id, datasetName: "faq", datasetVersion: 1, backend: "openai", method: "lora_sft", baseModel: null, status: "running", progress: 0.4, error: null, estimatedCostUsd: 1, costUsd: null, projectId: null, approvalId: null, createdAt: ISO, durationMs: null };
+    const JOB = { id: U(810), name: "faq-index", datasetId: DS.id, datasetName: "faq", datasetVersion: 1, backend: "remote-example", method: "lora_sft", baseModel: null, status: "running", progress: 0.4, error: null, estimatedCostUsd: 1, costUsd: null, projectId: null, approvalId: null, createdAt: ISO, durationMs: null };
     let blockNext = true;
     const calls = await mockApi(page, [
       ["GET", /^\/v1\/llm\/backends$/, () => ({ body: { enabled: true, approvalThresholdUsd: 10, note: "", backends: [{ kind: "local", requiresCredential: false, inProcess: true, methods: ["retrieval_index", "text_classifier"], producesQueryableArtifact: true, supportsCancel: true, summary: "", limits: "IT DOES NOT FINE-TUNE A LANGUAGE MODEL", defaultBaseUrl: null, configured: true, configEnabled: true, hasCredential: false, baseUrl: null, lastTestError: null }] } })],
@@ -469,7 +486,7 @@ test.describe("regulAIt-LLM — add rows, validate, poll (ADR-0065)", () => {
 
 test.describe("Agents — expected served model (ADR-0175)", () => {
   test("setting it is confirmed as a relaxation; clearing sends null", async ({ page }) => {
-    const AGENT = { id: U(900), name: "azure-bot", provider: "openai", tier: 1, model: "prod-deployment", enabled: true, costPerMTokIn: null, costPerMTokOut: null, systemPrompt: null, expectedServedModel: null };
+    const AGENT = { id: U(900), name: "deployment-bot", provider: "mock", tier: 1, model: "prod-deployment", enabled: true, costPerMTokIn: null, costPerMTokOut: null, systemPrompt: null, expectedServedModel: null };
     const calls = await mockApi(page, [
       ["GET", /^\/v1\/agents$/, () => ({ body: { agents: [AGENT] } })],
       ["PUT", /^\/v1\/agents\/([^/]+)\/expected-served-model$/, ({ body }) => {
@@ -481,13 +498,13 @@ test.describe("Agents — expected served model (ADR-0175)", () => {
     const card = page.locator("section").filter({ has: page.getByText("Expected served model — drift baseline", { exact: true }) });
     await card.getByLabel("Agent", { exact: true }).selectOption(AGENT.id, { timeout: 30_000 });
     await expect(card).toContainText("the strict default");
-    await card.getByLabel("Expected served model (empty = the configured model)").fill("gpt-4o-2024-08-06");
+    await card.getByLabel("Expected served model (empty = the configured model)").fill("example-served-model-v1");
     await card.getByRole("button", { name: "Save expected model" }).click();
     const dialog = page.getByRole("dialog", { name: "Change what counts as served-model drift?" });
     await expect(dialog).toContainText("relaxes the strict default");
     await expectAxeClean(page, "expected served model confirmation");
     await dialog.getByRole("button", { name: "Set expected model" }).click();
-    await expect.poll(() => sent(calls, "PUT", `/v1/agents/${AGENT.id}/expected-served-model`)).toEqual([{ expectedServedModel: "gpt-4o-2024-08-06" }]);
+    await expect.poll(() => sent(calls, "PUT", `/v1/agents/${AGENT.id}/expected-served-model`)).toEqual([{ expectedServedModel: "example-served-model-v1" }]);
     await card.getByLabel("Expected served model (empty = the configured model)").fill("");
     await card.getByRole("button", { name: "Clear expected model" }).click();
     await expect.poll(() => sent(calls, "PUT", `/v1/agents/${AGENT.id}/expected-served-model`).length).toBe(2);

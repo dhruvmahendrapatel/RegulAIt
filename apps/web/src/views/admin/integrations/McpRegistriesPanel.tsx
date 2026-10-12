@@ -28,6 +28,7 @@ import {
   entryImportability,
   privateRangesOf,
   registryRefusalText,
+  syncSucceeded,
   syncSummary,
   updateRegistryBody,
   type CreateRegistryBody,
@@ -36,6 +37,7 @@ import {
   type McpRegistryEntry,
   type McpRegistryList,
   type PrivateRanges,
+  type RefusalScope,
   type RegistryDraft,
   type RegistryImportResult,
   type RegistrySyncResult,
@@ -49,11 +51,11 @@ export const mcpRegistryKeys = {
 };
 
 /** a registry refusal in the page's words (the gateway's detail kept), else the client's reading */
-async function registryCall<T>(fn: () => Promise<T>): Promise<T> {
+async function registryCall<T>(fn: () => Promise<T>, scope: RefusalScope = "registry"): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    const text = e instanceof ApiError ? registryRefusalText(e.payload) : null;
+    const text = e instanceof ApiError ? registryRefusalText(e.payload, scope) : null;
     throw text ? new Error(text) : e;
   }
 }
@@ -84,7 +86,9 @@ export function McpRegistriesPanel() {
       const out = await registryCall(() => api.post<RegistrySyncResult>(`/v1/mcp-registries/${r.id}/sync`));
       setLastSync(out);
       await list.refetch();
-      return out.outcome === "ok" ? `Synced ${r.name}: ${syncSummary(out)}` : `Sync of ${r.name} ${out.outcome}: ${out.reason}`;
+      // every outcome answers 200: anything but ok is reported as a failure, never a green toast
+      if (!syncSucceeded(out)) throw new Error(`Sync of ${r.name} ${out.outcome}: ${out.reason}`);
+      return `Synced ${r.name}: ${syncSummary(out)}`;
     }, undefined);
 
   return (
@@ -387,9 +391,7 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
             render: (e) => {
               const can = entryImportability(e);
               return can.importable ? (
-                <Button size="sm" disabled={act.busy} aria-label={`Import ${e.upstreamName}`} onClick={() => setImporting(e)}>
-                  Import
-                </Button>
+                <ImportAllowed entry={e} warning={can.warning} busy={act.busy} onImport={() => setImporting(e)} />
               ) : (
                 <ImportBlocked entry={e} reason={can.reason} />
               );
@@ -427,13 +429,30 @@ function RegistryEntriesCard(props: { registry: McpRegistry }) {
           setImporting(null);
           if (!e) return;
           void act.run(async () => {
-            const out = await registryCall(() => api.post<RegistryImportResult>(`/v1/mcp-registries/entries/${e.id}/import`));
+            const out = await registryCall(() => api.post<RegistryImportResult>(`/v1/mcp-registries/entries/${e.id}/import`), "import");
             setImported(out);
             await q.refetch();
           }, `Imported ${e.upstreamName}. Nobody can use it until granted.`);
         }}
       />
     </Card>
+  );
+}
+
+/** importable; a stale-catalogue warning is shown beside it, and the gateway decides at import */
+function ImportAllowed(props: { entry: McpRegistryEntry; warning: string | null; busy: boolean; onImport: () => void }) {
+  const id = useId();
+  return (
+    <span className={v.row}>
+      <Button size="sm" disabled={props.busy} aria-label={`Import ${props.entry.upstreamName}`} aria-describedby={props.warning ? id : undefined} onClick={props.onImport}>
+        Import
+      </Button>
+      {props.warning && (
+        <span id={id} className={v.faint}>
+          {props.warning}
+        </span>
+      )}
+    </span>
   );
 }
 

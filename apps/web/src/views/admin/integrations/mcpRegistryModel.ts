@@ -219,38 +219,62 @@ export function syncSummary(r: RegistrySyncResult): string {
   return `${parts.join(", ")}. No server and no grant was created.${tail}`;
 }
 
-/** can this entry be imported, and if not, why */
-export function entryImportability(e: McpRegistryEntry): { importable: true } | { importable: false; reason: string } {
+/**
+ * Can this entry be imported? Blocked only where the gateway's refusal is
+ * certain from the row itself (already imported, catalogue only). A recorded
+ * name/URL collision, a missing or a deleted upstream entry is shown as a
+ * warning: the gateway re-checks collisions live at import and decides.
+ */
+export function entryImportability(
+  e: McpRegistryEntry,
+): { importable: true; warning: string | null } | { importable: false; reason: string } {
   if (e.serverId) return { importable: false, reason: "Already imported as an MCP server." };
-  if (e.kind === "catalogue_only")
+  if (e.kind === "catalogue_only" || !e.remoteUrl)
     return { importable: false, reason: `Catalogue only: ${e.catalogueReason ?? "the registry lists no endpoint this gateway can reach"}. No URL is invented.` };
   if (e.conflictReason)
     return {
-      importable: false,
-      reason:
+      importable: true,
+      warning:
         e.conflictReason === "name_taken"
-          ? "An existing MCP server already has this name. Rename or remove it first."
-          : "An existing MCP server already uses this URL.",
+          ? "At the last sync an existing MCP server had this name. The gateway checks again at import; if that changed, Sync now first."
+          : "At the last sync an existing MCP server used this URL. The gateway checks again at import; if that changed, Sync now first.",
     };
-  if (e.missingSince) return { importable: false, reason: "The registry no longer lists this entry." };
-  if (e.upstreamStatus === "deleted") return { importable: false, reason: "The registry marks this entry deleted." };
-  return { importable: true };
+  if (e.missingSince) return { importable: true, warning: "The registry no longer lists this entry." };
+  if (e.upstreamStatus === "deleted") return { importable: true, warning: "The registry marks this entry deleted." };
+  return { importable: true, warning: null };
 }
 
-/** the refusal codes of the registry routes, in words (pinned to the gateway source by the test) */
-export const REGISTRY_REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
-  unknown_registry: "That registry no longer exists. Refresh the list.",
-  unknown_entry: "That catalogue entry no longer exists. Sync the registry again.",
-  not_importable: "This entry cannot be imported: the registry lists no endpoint this gateway can reach.",
-  already_imported: "This entry has already been imported as an MCP server.",
-  conflict: "An existing MCP server already has this entry's name or URL, so nothing was imported.",
-  egress_blocked: "The gateway's egress guard refused this URL. Nothing was saved or imported.",
+export type RefusalScope = "registry" | "import";
+
+/**
+ * The refusal codes, in words, per call (pinned to the gateway source by the
+ * test). `conflict` means different things: on a registry create or edit it is
+ * the unique-name constraint (the gateway's global 23505 handler); on an
+ * import it is a colliding MCP server.
+ */
+export const REFUSAL_SENTENCES: Readonly<Record<RefusalScope, Readonly<Record<string, string>>>> = {
+  registry: {
+    unknown_registry: "That registry no longer exists. Refresh the list.",
+    conflict: "A registry with this name already exists. Choose another name.",
+    egress_blocked: "The gateway's egress guard refused this URL. Nothing was saved.",
+  },
+  import: {
+    unknown_entry: "That catalogue entry no longer exists. Sync the registry again.",
+    not_importable: "This entry cannot be imported: the registry lists no endpoint this gateway can reach.",
+    already_imported: "This entry has already been imported as an MCP server.",
+    conflict: "An existing MCP server already has this entry's name or URL, so nothing was imported.",
+    egress_blocked: "The gateway's egress guard refused this URL. Nothing was imported.",
+  },
 };
 
-/** a refusal as a sentence plus the gateway's own detail, or null to use the client's reading */
-export function registryRefusalText(payload: { error?: unknown; detail?: unknown } | null | undefined): string | null {
+/** a refusal as the scope's sentence plus the gateway's own detail, or null to use the client's reading */
+export function registryRefusalText(payload: { error?: unknown; detail?: unknown } | null | undefined, scope: RefusalScope): string | null {
   const code = payload?.error;
-  if (typeof code !== "string" || !Object.hasOwn(REGISTRY_REFUSAL_SENTENCES, code)) return null;
+  const table = REFUSAL_SENTENCES[scope];
+  if (typeof code !== "string" || !Object.hasOwn(table, code)) return null;
   const detail = typeof payload?.detail === "string" && payload.detail.trim() ? ` ${payload.detail.trim()}` : "";
-  return `${REGISTRY_REFUSAL_SENTENCES[code]}${detail}`;
+  return `${table[code]}${detail}`;
 }
+
+/** a sync answers 200 for every outcome; only `ok` is a success */
+export const syncSucceeded = (r: Pick<RegistrySyncResult, "outcome">): boolean => r.outcome === "ok";

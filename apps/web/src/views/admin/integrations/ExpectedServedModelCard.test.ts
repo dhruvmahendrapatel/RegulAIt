@@ -4,7 +4,7 @@ import { EXPECTED_SERVED_MODEL_MAX, expectedServedModelBody } from "./ExpectedSe
 
 describe("expected served model", () => {
   it("sends a trimmed id, or null to clear back to the configured model", () => {
-    expect(expectedServedModelBody("  gpt-4o-2024-08-06 ")).toEqual({ body: { expectedServedModel: "gpt-4o-2024-08-06" } });
+    expect(expectedServedModelBody("  example-served-model-v1 ")).toEqual({ body: { expectedServedModel: "example-served-model-v1" } });
     expect(expectedServedModelBody("   ")).toEqual({ body: { expectedServedModel: null } });
     expect(expectedServedModelBody("x".repeat(EXPECTED_SERVED_MODEL_MAX + 1))).toHaveProperty("error");
   });

@@ -11,7 +11,7 @@
  *  - No route assigns a profile to an agent or an MCP server, so the selector
  *    is disabled and says why.
  */
-import { useEffect, useId, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt } from "../../../../api/format";
@@ -33,7 +33,8 @@ import {
   type Executor,
   type RegisterDraft,
 } from "./isolationModel";
-import { ExecutorDetail } from "./ExecutorDetail";
+// loaded on first Manage: the Engines page does not pay for the lifecycle surface until it is used
+const ExecutorDetail = lazy(() => import("./ExecutorDetail").then((m) => ({ default: m.ExecutorDetail })));
 import v from "../../../views.module.css";
 
 const isolationKeys = {
@@ -237,7 +238,11 @@ function ExecutorsCard() {
       </div>
       {registering && <RegisterExecutorDialog onClose={() => setRegistering(false)} />}
     </Card>
-    {managing && <ExecutorDetail key={managing} executorId={managing} onClose={() => setManaging(null)} />}
+    {managing && (
+      <Suspense fallback={<p role="status">Loading the executor…</p>}>
+        <ExecutorDetail key={managing} executorId={managing} onClose={() => setManaging(null)} />
+      </Suspense>
+    )}
     </>
   );
 }

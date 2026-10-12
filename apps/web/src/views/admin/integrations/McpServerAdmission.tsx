@@ -36,6 +36,14 @@ export function admissionClearRefusal(e: unknown): string | null {
   return typeof code === "string" && Object.hasOwn(ADMISSION_CLEAR_REFUSALS, code) ? ADMISSION_CLEAR_REFUSALS[code]! : null;
 }
 
+/** `clearMcpAdmissionSchema`: a reason of 1 to 2000 characters */
+export const ADMISSION_REASON_MAX = 2000;
+export function admissionReasonProblem(reason: string): string | null {
+  if (reason.trim().length === 0) return "A reason is required.";
+  if (reason.length > ADMISSION_REASON_MAX) return `The reason must be at most ${ADMISSION_REASON_MAX} characters (it has ${reason.length}). Nothing was sent.`;
+  return null;
+}
+
 export function McpAdmissionClearButton(props: { server: McpServer }) {
   const act = useAction();
   const [open, setOpen] = useState(false);
@@ -72,6 +80,11 @@ export function McpAdmissionClearButton(props: { server: McpServer }) {
         onCancel={() => setOpen(false)}
         onConfirm={(reason) => {
           setOpen(false);
+          const problem = admissionReasonProblem(reason);
+          if (problem) {
+            act.setError(problem);
+            return;
+          }
           void act.run(async () => {
             try {
               await withStepUp((h) => stepUpApi.post(`/v1/servers/${s.id}/admission/clear`, { reason }, h));
@@ -138,8 +151,8 @@ export function McpVisibleToolsCard(props: { users: ReturnType<typeof useUsers>;
               title="No tools visible"
               body={
                 server?.admissionState === "held"
-                  ? "This server is held by the admission scan, so its tools are hidden from everyone, whatever they are granted."
-                  : "Default-deny: this user holds no grant that reaches any tool on this server, so discovery shows nothing."
+                  ? "This server is held by the admission scan. While admission is enforced its tools are hidden from everyone, whatever they are granted; Admission review shows the mode."
+                  : "Either this user holds no grant that reaches a tool on this server (default-deny), or the server's tools are hidden from everyone because its release is still inside the release-age quarantine. Admission review shows which."
               }
             />
           }
