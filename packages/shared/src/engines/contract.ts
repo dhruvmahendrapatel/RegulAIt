@@ -20,6 +20,7 @@
  */
 import { z } from "zod";
 import { RED_TEAM_SEVERITIES } from "../redteam.js";
+import { compactJwsSchema, workloadPublicJwkSchema } from "../identity/contract.js";
 
 // ---------------------------------------------------------------------------
 // Vocabularies (each mirrors a CHECK in migration 0173)
@@ -107,8 +108,13 @@ export const BATCH5_NOT_BUILT = { error: "not_built" } as const;
 // Runner credentials and the route allow-list
 // ---------------------------------------------------------------------------
 
-/** the plaintext prefix of a runner token (only its sha256 is stored) */
-export const ENGINE_RUNNER_TOKEN_PREFIX = "rge_";
+/**
+ * ADR-0188 S7 (OWNER DECISION 8): the bearer runner token (`rge_`) is retired. A runner holds an
+ * Ed25519 PRIVATE KEY it generated itself, kept only on its own state volume (0600) in this
+ * encoding (`rgek_` + base64url of the PKCS#8 DER), never sent anywhere. Its public half is its
+ * workload identity's registered credential; it authenticates with `private_key_jwt` and DPoP.
+ */
+export const ENGINE_RUNNER_KEY_PREFIX = "rgek_";
 /** the plaintext prefix of a one-time enrolment token (only its sha256 is stored) */
 export const ENGINE_ENROLLMENT_TOKEN_PREFIX = "rgee_";
 
@@ -121,6 +127,8 @@ export const ENGINE_ENROLLMENT_TOKEN_PREFIX = "rgee_";
  */
 export const ENGINE_RUNNER_ROUTES = [
   "POST /v1/engine-runner/lease",
+  // ADR-0188 S7: a runner rotates its own key (decision 12: a new credential, the old one's window ends)
+  "POST /v1/engine-runner/credentials",
   // PR #205 review [53]: a runner refreshes its own self-test report (the lease refuses a stale one)
   "POST /v1/engine-runner/self-test",
   "POST /v1/engine-runner/runs/:runId/heartbeat",
@@ -335,15 +343,37 @@ export const engineRunnerRegisterSchema = z
     imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     engineVersion: z.string().min(1).max(64).regex(PRINTABLE),
     selfTest: runnerSelfTestSchema,
-    tokenHash: z.string().regex(SHA256_HEX),
     /**
-     * PR #205 review round 5 [67]: a runner re-enrolling because its build changed presents the
-     * runner token it held (proof of possession). On a successful registration the gateway revokes
-     * that runner, if it is a live runner of the same engine, in the same transaction (audited).
+     * ADR-0188 S7: the PUBLIC half of the key the runner generated (Ed25519 or P-256). It becomes the
+     * runner's workload identity's credential; one key authenticates one identity, ever.
      */
-    supersedes: z.string().startsWith(ENGINE_RUNNER_TOKEN_PREFIX).max(200).regex(/^[\x21-\x7e]+$/).optional(),
+    publicJwk: workloadPublicJwkSchema,
+    /**
+     * PR #205 review round 5 [67], S7: a runner re-enrolling because its build changed proves it held
+     * the previous registration with a compact JWS signed by its OLD key (`kid` = that key's RFC 7638
+     * thumbprint, `typ` `regulait-runner-supersede+jwt`, claim `jkt` = the NEW key's thumbprint). On a
+     * successful registration the gateway revokes that runner, if it is a live runner of the same
+     * engine, in the same transaction (audited).
+     */
+    supersedes: compactJwsSchema.optional(),
   })
   .strict();
+
+/** JOSE `typ` of a re-enrolling runner's proof that it held the registration it supersedes */
+export const RUNNER_SUPERSEDE_PROOF_TYP = "regulait-runner-supersede+jwt" as const;
+
+/**
+ * POST /v1/engine-runner/credentials (the runner's own self token) — ADR-0188 S7 key rotation.
+ * `proof` is a compact JWS signed by the NEW key (`typ` `regulait-key-rotation+jwt`, the new public
+ * key in its `jwk` header, `aud` = this route under the issuer, `iat` fresh): possession of the new
+ * key, so nobody can rotate a runner onto a key it does not hold.
+ */
+export const engineRunnerKeyRotationSchema = z.object({ publicJwk: workloadPublicJwkSchema, proof: compactJwsSchema }).strict();
+export const engineRunnerKeyRotationResponseSchema = z.object({
+  credentialId: z.string().min(1),
+  notAfter: z.string().min(1),
+  retiredCredentialId: z.string().min(1).nullable(),
+});
 
 /** POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] */
 export const engineRunnerSelfTestSchema = z.object({ selfTest: runnerSelfTestSchema }).strict();
