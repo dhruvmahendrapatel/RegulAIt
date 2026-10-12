@@ -1,10 +1,11 @@
 import { createHash, sign, type KeyObject } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, asc, auditLog, decisionCaptureStatus, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
+import { and, asc, auditLog, decisionCaptureStatus, decisionReceipts, desc, eq, gt, gte, inArray, isNotNull, isNull, loadAuditChainBoundary, lte, receiptSigningKeys, schedulerJobs, sql, type Db } from "@regulait/db";
 import { auditChainVersionAt, auditContentHashFor, auditRowHash, auditRowVersionProblem, isDecisionReceiptPayload, isDecisionReceiptPayloadV1, isReceiptBundle, RECEIPT_EMITTER_SUPPORTS_V2, RECEIPT_GENESIS_PREV, RECEIPT_OBJECT_TYPES, RECEIPT_PAYLOAD_VERSION, RECEIPT_PAYLOAD_VERSION_V2, receiptCanonicalBytes, receiptPayloadHash, receiptVersionForAuditSeq, type AnyDecisionReceiptPayload, type DecisionReceiptPayloadV2, verifyReceiptBundle, type DecisionReceiptPayload, type ReceiptPublicKey, type ReceiptSigningState, type SignedDecisionReceipt } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
-import { ReceiptKeyError, receiptPublicKeyFingerprint, receiptSigningKeyPosture, resolveReceiptSigningKey, type ReceiptKeySource } from "./receipt-signing-key.js";
+import { isReceiptKeyId, ReceiptKeyError, receiptPublicKeyFingerprint, receiptSigningKeyPosture, resolveReceiptSigningKey, type ReceiptKeySource } from "./receipt-signing-key.js";
+import { requireStepUp } from "./step-up.js";
 
 /** ADR-0186 R: one-writer, append-only receipts for chained governed decisions. */
 export const DECISION_RECEIPT_SIGN_JOB_NAME = "decision-receipt-sign-sweep";
@@ -25,6 +26,8 @@ function signingKey(): SigningKey | null {
 }
 
 export const RECEIPT_KEY_REGISTERED_RULE_ID = "receipt-signing-key-registered";
+export const RECEIPT_KEY_RETIRED_RULE_ID = "receipt-signing-key-retired";
+export const RECEIPT_KEY_RETIRE_REFUSED_RULE_ID = "receipt-signing-key-retire-refused";
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 /**
  * ADR-0189 R25 item 12: record a receipt signing key on its first use, and AUDIT it in the same
@@ -34,15 +37,24 @@ const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
  * finds the committed row, and writes nothing. A key that replaces a lost one has a new key id, so it is
  * registered (and audited) once of its own. The row carries the key id, the SPKI fingerprint and the
  * source, never key material. Returns true when this call registered the key.
+ *
+ * #353 follow-up: when another writer registered the key id first, the committed row is read back and
+ * this call throws `ReceiptKeyError` if it records a DIFFERENT public key (two replicas configured with
+ * one key id and different keys) or is retired, so nothing is signed under a key id whose recorded
+ * public key would not verify it.
  */
 export async function registerReceiptSigningKey(
-  tx: Pick<Db, "insert">,
+  tx: Pick<Db, "insert" | "select">,
   key: Pick<SigningKey, "keyId" | "jwk" | "source">,
   firstUsedAt: Date,
   via: "receipt-sweep" | "ai-bom-snapshot" | "decision-bom",
 ): Promise<boolean> {
   const inserted = await tx.insert(receiptSigningKeys).values({ keyId: key.keyId, publicJwk: key.jwk, firstUsedAt }).onConflictDoNothing().returning({ keyId: receiptSigningKeys.keyId });
-  if (inserted.length === 0) return false;
+  if (inserted.length === 0) {
+    const [recorded] = await tx.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, key.keyId));
+    if (!recorded || !samePublicKey(recorded.publicJwk, key.jwk) || recorded.retiredAt) throw new ReceiptKeyError();
+    return false;
+  }
   await tx.insert(auditLog).values({
     userId: SYSTEM_ACTOR, objectType: "decision_receipt", objectId: null, effect: "allow", ruleId: RECEIPT_KEY_REGISTERED_RULE_ID, ruleChain: [],
     reason: `Receipt signing key ${key.keyId} registered on first use (${key.source})`,
@@ -218,6 +230,70 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
     return { state, lastSweep:job?{at:job.lastFinishedAt?.toISOString()??null,outcome:job.lastOutcome}:null, lastSeq: last?.receiptSeq ?? 0, lagRows: counts[0]?.n ?? 0, signingKey: receiptSigningKeyPosture(process.env) };
   });
   app.get("/v1/receipts/keys", async () => ({ keys: await publicKeys(db) }));
+  /**
+   * #353 follow-up: RETIRE a receipt signing key. Admin-only (the default route class), `settings_relax`
+   * step-up, audited. Retiring sets `retired_at` (database clock) and nothing else: the public key stays
+   * recorded, so receipts it signed keep verifying (packages/shared/src/receipts/README.md), and no writer
+   * signs with it again (every signer refuses a retired key). One-way: there is no un-retire.
+   *
+   * Refused (409, audited) when the key is the one this gateway signs with now (`receipt_key_in_use`:
+   * configure the replacement and restart first), or when no other recorded key is active
+   * (`receipt_key_only_active`): retiring the last active key would leave nothing that signs. Decided under
+   * the receipt sign lock, so two retires (or a retire and a sweep) cannot cross.
+   */
+  app.post("/v1/receipts/keys/:keyId/retire", { bodyLimit: 1024 }, async (req, reply) => {
+    const { keyId } = req.params as { keyId?: unknown };
+    if (!isReceiptKeyId(keyId)) return reply.status(400).send({ error: "invalid_receipt_key_id" });
+    const [row] = await db.select().from(receiptSigningKeys).where(eq(receiptSigningKeys.keyId, keyId));
+    if (!row) return reply.status(404).send({ error: "receipt_key_unknown" });
+    if (row.retiredAt) return reply.status(409).send({ error: "receipt_key_already_retired", retiredAt: row.retiredAt.toISOString() });
+    const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "receipt_key_retire", keyId } });
+    if (!su.ok) return reply;
+    const actorUserId = req.authCtx.userId ?? SYSTEM_ACTOR;
+    // the key this gateway resolves now; an unusable configuration signs nothing, so it holds no key "in use"
+    let signingKeyId: string | null = null;
+    try { signingKeyId = signingKey()?.keyId ?? null; } catch (e) { if (!(e instanceof ReceiptKeyError)) throw e; }
+    type Refusal = { status: 404 | 409; error: string; detail: string; activeKeyIds: string[] };
+    const out = await db.transaction(async (tx): Promise<{ refused: Refusal } | { refused: null; retiredAt: Date; activeKeyIds: string[] }> => {
+      await tx.execute(sql`select pg_advisory_xact_lock(${RECEIPT_SIGN_LOCK_KEY})`);
+      const keys = await tx.select().from(receiptSigningKeys).orderBy(asc(receiptSigningKeys.createdAt)).for("update");
+      const target = keys.find((k) => k.keyId === keyId);
+      const others = keys.filter((k) => k.keyId !== keyId && !k.retiredAt).map((k) => k.keyId);
+      if (!target) return { refused: { status: 404, error: "receipt_key_unknown", detail: `no receipt signing key ${keyId} is recorded`, activeKeyIds: others } };
+      if (target.retiredAt) return { refused: { status: 409, error: "receipt_key_already_retired", detail: `receipt signing key ${keyId} is already retired`, activeKeyIds: others } };
+      if (signingKeyId === keyId) {
+        return { refused: { status: 409, error: "receipt_key_in_use", detail: `receipt signing key ${keyId} is the key this gateway signs with: configure its replacement and restart, then retire it; nothing was changed`, activeKeyIds: others } };
+      }
+      if (others.length === 0) {
+        return { refused: { status: 409, error: "receipt_key_only_active", detail: `receipt signing key ${keyId} is the only active key: a replacement must be recorded (it is, on its first signature) before it can be retired; nothing was changed`, activeKeyIds: others } };
+      }
+      const [moved] = await tx
+        .update(receiptSigningKeys)
+        .set({ retiredAt: sql`now()` })
+        .where(and(eq(receiptSigningKeys.keyId, keyId), isNull(receiptSigningKeys.retiredAt)))
+        .returning({ retiredAt: receiptSigningKeys.retiredAt });
+      const retiredAt = moved!.retiredAt!;
+      await tx.insert(auditLog).values({
+        userId: actorUserId, objectType: "decision_receipt", objectId: null, effect: "allow", ruleId: RECEIPT_KEY_RETIRED_RULE_ID, ruleChain: [],
+        reason: `Receipt signing key ${keyId} retired: no writer signs with it again; receipts it signed stay verifiable under its recorded public key`,
+        detail: { keyId, publicKeyFingerprint: receiptPublicKeyFingerprint(target.publicJwk), retiredAt: retiredAt.toISOString(), activeKeyIds: others, stepUp: su.method },
+      });
+      return { refused: null, retiredAt, activeKeyIds: others };
+    });
+    if (out.refused) {
+      const r = out.refused;
+      // the deciding transaction wrote nothing; the refusal's own row is written after it, on its own
+      if (r.status === 409 && r.error !== "receipt_key_already_retired") {
+        await db.insert(auditLog).values({
+          userId: actorUserId, objectType: "decision_receipt", objectId: null, effect: "deny", ruleId: RECEIPT_KEY_RETIRE_REFUSED_RULE_ID, ruleChain: [],
+          reason: `Retiring receipt signing key ${keyId} was refused (${r.error}); nothing was changed`,
+          detail: { keyId, code: r.error, activeKeyIds: r.activeKeyIds, stepUp: su.method },
+        });
+      }
+      return reply.status(r.status).send({ error: r.error, detail: r.detail });
+    }
+    return reply.status(200).send({ key: { keyId, retiredAt: out.retiredAt.toISOString() }, activeKeyIds: out.activeKeyIds, keys: await publicKeys(db) });
+  });
   app.get("/v1/receipts/export", async (req, reply) => {
     const q = req.query as Record<string, unknown>;
     const [last] = await db.select().from(decisionReceipts).orderBy(desc(decisionReceipts.receiptSeq)).limit(1);

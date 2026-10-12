@@ -503,7 +503,15 @@ async function prepareAiBomSnapshot(tx: Tx, input: TakeSnapshotInput): Promise<P
 
 /** FREEZE: the key row (first use), the snapshot and its renderings, and the audit row, in the caller's transaction */
 async function insertPreparedSnapshot(tx: Tx, p: PreparedSnapshot, input: TakeSnapshotInput): Promise<TakenSnapshot> {
-  if (!p.keyRecorded) await registerReceiptSigningKey(tx as unknown as Db, p.key, new Date(p.createdAt), "ai-bom-snapshot");
+  if (!p.keyRecorded) {
+    // #353 follow-up: a key id another writer registered meanwhile with a different public key (or retired) is a refusal
+    try {
+      await registerReceiptSigningKey(tx as unknown as Db, p.key, new Date(p.createdAt), "ai-bom-snapshot");
+    } catch (e) {
+      if (e instanceof ReceiptKeyError) throw new AiBomError(503, "receipt_signing_key_invalid", "The receipt signing key conflicts with its recorded public key.");
+      throw e;
+    }
+  }
   await tx.insert(aiBomSnapshots).values({
     id: p.id, subjectKind: input.subject.kind, subjectId: input.subject.id, version: p.version, serialNumber: p.build.body.serialNumber.slice("urn:uuid:".length), supersedesId: p.prevId,
     trigger: input.trigger, basis: { rows: p.build.basis.length, sha256: bomDigestOf(p.build.basis) }, body: p.build.bodyBytes, bodySha256: p.build.bodySha256,

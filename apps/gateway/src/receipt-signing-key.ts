@@ -42,6 +42,10 @@ export const INSTALL_SECRETS_DIR_ENV = "REGULAIT_INSTALL_SECRETS_DIR";
 export const INSTALL_RECEIPT_KEY_FILE = "receipt-signing-key.pem";
 const MAX_KEY_BYTES = 16384;
 const KEY_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+/** a receipt key id as `receipt_signing_keys.key_id` accepts it (one anchored character class: linear) */
+export function isReceiptKeyId(value: unknown): value is string {
+  return typeof value === "string" && KEY_ID_RE.test(value);
+}
 
 export type ReceiptKeySource = "operator_managed" | "install_generated";
 export type ReceiptKeyState = ReceiptKeySource | "missing" | "invalid";

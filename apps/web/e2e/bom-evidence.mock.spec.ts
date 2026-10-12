@@ -18,6 +18,7 @@
 import { createHash } from "node:crypto";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { confirmStepUp, requireStepUpOn } from "./step-up-harness";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -84,6 +85,9 @@ interface Scenario {
   decision: Array<{ status: number; body: Json }>;
   settings: Record<string, unknown>;
   receiptKey: Json;
+  /** GET /v1/receipts/keys; a retire sets `retiredAt` here, or answers `retireRefusal` (once) */
+  keys: Array<{ keyId: string; jwk: Json; firstUsedAt: string | null; retiredAt: string | null }>;
+  retireRefusal: { status: number; body: Json } | null;
   calls: Array<{ method: string; path: string; body: Json }>;
 }
 
@@ -103,6 +107,8 @@ async function mockApi(page: Page, over: Partial<Scenario> = {}): Promise<Scenar
       isolationFloorRegulated: "microvm", isolationFloorMcpStdio: "user_space_kernel", isolationFloorEngineWorker: "user_space_kernel", executorAttestationMaxAgeMinutes: 120,
     },
     receiptKey: { state: "missing", keyId: null, publicKeyFingerprint: null, publicKeys: "/v1/receipts/keys", note: "No receipt signing key, so sign-offs are refused (409 bom_signing_unavailable)." },
+    keys: [],
+    retireRefusal: null,
     calls: [],
     ...over,
   };
@@ -175,6 +181,19 @@ async function mockApi(page: Page, over: Partial<Scenario> = {}): Promise<Scenar
     }
     if (p === "/v1/audit/retention") return json(route, { retainedDays: 365, prunable: 0 });
     if (p === "/v1/receipts/status") return json(route, { state: "no_key", lastSeq: 0, lagRows: 0 });
+    if (p === "/v1/receipts/keys" && method === "GET") return json(route, { keys: st.keys });
+    const retiring = /^\/v1\/receipts\/keys\/([^/]+)\/retire$/.exec(p);
+    if (retiring && method === "POST") {
+      if (st.retireRefusal) {
+        const r = st.retireRefusal;
+        st.retireRefusal = null;
+        return json(route, r.body, r.status);
+      }
+      const key = st.keys.find((k) => k.keyId === decodeURIComponent(retiring[1]!));
+      if (!key) return json(route, { error: "receipt_key_unknown" }, 404);
+      key.retiredAt = T;
+      return json(route, { key: { keyId: key.keyId, retiredAt: T }, activeKeyIds: st.keys.filter((k) => !k.retiredAt).map((k) => k.keyId), keys: st.keys });
+    }
     if (p === "/v1/audit/anchors") return json(route, { anchors: [] });
     // ---- posture
     if (p === "/v1/org/posture") {
@@ -339,6 +358,49 @@ test.describe("ADR-0189 B6: BOM posture", () => {
     await expect(card.getByText("Decision BOM: not captured", { exact: true })).toBeVisible();
     await expect(card.getByTestId("bom-setting-decisionFactsCapture").getByText("relaxed (audited)")).toBeVisible();
     await expectAxeClean(page, "BOM posture");
+  });
+
+  test("#353 follow-up: a recorded receipt key is retired after a confirm and a step-up; the key in use and a refusal are said, not offered", async ({ page }) => {
+    const jwk = { kty: "OKP", crv: "Ed25519", x: "A".repeat(43) };
+    const st = await mockApi(page, {
+      receiptKey: { state: "operator_managed", keyId: "receipt-2026b", publicKeyFingerprint: `sha256:${"f".repeat(64)}`, publicKeys: "/v1/receipts/keys", note: "Managed by the operator." },
+      keys: [
+        { keyId: "receipt-2025", jwk, firstUsedAt: T, retiredAt: T },
+        { keyId: "receipt-2026", jwk, firstUsedAt: T, retiredAt: null },
+        { keyId: "receipt-2026b", jwk, firstUsedAt: T, retiredAt: null },
+      ],
+      // the first confirmed retire is refused by the gateway (another admin retired the replacement meanwhile)
+      retireRefusal: { status: 409, body: { error: "receipt_key_only_active", detail: "only active" } },
+    });
+    await page.goto("/ui/admin/enforcement-posture");
+    const table = page.getByTestId("receipt-keys");
+    // the key this gateway signs with is not offered, and says why; a retired key is listed for verification
+    await expect(table.getByRole("row").filter({ hasText: "receipt-2026b" })).toContainText("This gateway signs with this key");
+    await expect(table.getByRole("button", { name: "Retire receipt signing key receipt-2026b" })).toHaveCount(0);
+    await expect(table.getByRole("row").filter({ hasText: "receipt-2025" })).toContainText("retired");
+
+    // a refusal from the gateway is said in the page's words, and nothing reads as retired
+    await table.getByRole("button", { name: "Retire receipt signing key receipt-2026" }).click();
+    let dialog = page.getByRole("dialog", { name: "Retire receipt signing key receipt-2026?" });
+    await expect(dialog).toContainText("This cannot be undone");
+    await expectAxeClean(page, "retire receipt key confirmation");
+    await dialog.getByRole("button", { name: "Retire key" }).click();
+    await expect(table.getByRole("alert")).toHaveText("That is the only active key, so it was not retired. A replacement is recorded when it first signs.");
+
+    // retried: the gateway asks to confirm it's you, the same POST is resent once, and the key reads as retired
+    const su = await requireStepUpOn(page, { method: "POST", path: "/v1/receipts/keys/receipt-2026/retire", kind: "settings_relax", facts: () => ({ op: "receipt_key_retire", keyId: "receipt-2026" }) });
+    await table.getByRole("button", { name: "Retire receipt signing key receipt-2026" }).click();
+    dialog = page.getByRole("dialog", { name: "Retire receipt signing key receipt-2026?" });
+    await dialog.getByRole("button", { name: "Retire key" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    await expect(table.getByRole("row").filter({ has: page.getByText("receipt-2026", { exact: true }) })).toContainText("retired");
+    await expect(table.getByRole("button", { name: /^Retire receipt signing key/ })).toHaveCount(0);
+    expect(st.calls.filter((c) => c.method === "POST" && c.path.endsWith("/retire")).map((c) => c.path)).toEqual([
+      "/v1/receipts/keys/receipt-2026/retire",
+      "/v1/receipts/keys/receipt-2026/retire",
+    ]);
+    await expectAxeClean(page, "receipt keys after a retire");
   });
 
   // the BOM and isolation cards share one org-settings read (orgSettingsQuery); a save in one settles the shared
