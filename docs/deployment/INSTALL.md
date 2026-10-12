@@ -203,6 +203,8 @@ The installer converges. It never destroys.
 - All state lives in Docker named volumes (`regulait_pgdata`, `regulait_caddy_data`,
   `regulait_caddy_config`, `regulait_install_secrets`). The install directory holds configuration
   only.
+- An existing admin is never touched: the first-admin step is skipped, and a bootstrap token
+  that is still live is retired. A retired token stays retired (see "The first admin" below).
 - The install-generated receipt signing key is never regenerated or overwritten; an operator key
   passed with `--receipt-key-file` / `--receipt-key-id` is read back from `.env` like every other
   setting.
@@ -219,20 +221,87 @@ Reconfiguring is therefore just another run:
 
 The installer prints all of this; it is repeated here so it is findable later.
 
-### 1. Create the first admin, then close the bootstrap door
+### 1. The first admin (the installer asks for it)
 
-`REGULAIT_BOOTSTRAP_TOKEN` authenticates as an admin **with no user identity**
-(`apps/gateway/src/auth.ts`). It exists to create the first real admin and nothing else.
+Once the stack is up, the installer creates your first admin ([ADR-0194](../decisions/0194-installer-sets-first-admin.md)).
+Interactively it asks for:
+
+- a **username** (press Enter for `admin`);
+- an **email**;
+- a **password**, typed twice and not echoed. A mismatch asks again. The org password policy is
+  checked before anything is created (by default at least 12 characters and 3 of lowercase,
+  uppercase, digits and symbols); a password it refuses asks again.
+
+The password is yours, so it is not a one-time password. It is never written to `.env`, a compose
+file, a log, your shell history or the audit log. The installer hands it to the gateway container
+on a pipe (`docker compose exec -T gateway node apps/gateway/dist/first-admin.js`), never as a
+command argument. The account goes through the gateway's own validators, seat gate and audit rows
+(`first-admin-created`, `username-set`, `initial-password-set`), in one transaction.
+
+**Non-interactive installs** (`--yes`, CI, no terminal) put the password in a file instead:
+
+```sh
+# write it without echo and without it entering shell history (or have your secret tooling write it)
+( umask 077; IFS= read -rs -p 'First admin password: ' pw; printf '%s' "$pw" > /root/first-admin-password )
+REGULAIT_FIRST_ADMIN_PASSWORD_FILE=/root/first-admin-password \
+REGULAIT_FIRST_ADMIN_EMAIL=admin@your.org \
+REGULAIT_FIRST_ADMIN_USERNAME=admin \
+  ./scripts/install.sh --dir /opt/regulait --yes ...
+shred -u /root/first-admin-password
+```
+
+The file must be a regular file (not a symbolic link) owned by you or root, with mode `0600` or
+stricter, holding one line: no control characters except one trailing newline, and no UTF-8
+byte-order mark. Anything else is refused before anything renders, and checked again just before
+use. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
+three. Without the file, a non-interactive install skips the step and says so.
+
+**The bootstrap door closes itself.** `REGULAIT_BOOTSTRAP_TOKEN` authenticates as an admin **with
+no user identity** (`apps/gateway/src/auth.ts`). As soon as an admin exists, the installer retires
+it: the token is removed from `.env` (a `REGULAIT_BOOTSTRAP_RETIRED=1` line records that), it is
+pinned to the empty string in `compose.install.yml`, and the gateway is restarted. It is pinned
+rather than just deleted because `docker-compose.yml` would otherwise fall back to its published
+dev default, which the gateway refuses to boot with. Re-runs keep it retired, and a token merely
+exported in your shell is ignored. Only an explicit `--admin-token` on a run AFTER it was retired
+re-opens it, for a break-glass recovery; the next run without that flag retires it again. On a
+first install, `--admin-token` only chooses the token's value, and it is retired like any other
+once the first admin exists. If retiring fails because the gateway cannot be restarted, the
+installer stops and says so: the running gateway still accepts the old token until a re-run
+succeeds.
+
+With `--seed-demo`, the demo personas are created first, so the demo admin
+(`admin@regulait.local`) is the existing admin and you are not asked for one. The summary says how
+to replace it with your own account.
+
+**Re-running** on a deployment that already has an active admin skips the step, changes no
+account, and retires a token that is still live.
+
+**To turn the account off later**, use the existing controls (each is audited):
+
+- deactivate it (`POST /v1/users/:id/deactivate`) once another admin exists. The last active admin
+  cannot be deactivated;
+- or, once SSO is set up, make email sign-in `break_glass_only` or `sso_only` in Admin → SSO.
+
+#### Fallback: create the first admin by hand
+
+If the step was skipped or failed, the bootstrap token is still live and the summary prints it.
+Create the admin with it, issue a one-time password, then **re-run the installer**: it sees the
+admin and retires the token.
 
 ```sh
 curl -sS https://your-host/v1/users \
   -H "Authorization: Bearer $BOOTSTRAP_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","email":"admin@your.org","isAdmin":true}'
+  -d '{"email":"admin@your.org","displayName":"Admin","isAdmin":true}'
 
-sed -i '/^REGULAIT_BOOTSTRAP_TOKEN=/d' /opt/regulait/.env
-docker compose -p regulait up -d
+curl -sS -X POST https://your-host/v1/users/<id>/set-initial-password \
+  -H "Authorization: Bearer $BOOTSTRAP_TOKEN"
+
+./scripts/install.sh --dir /opt/regulait --yes   # retires the bootstrap token
 ```
+
+Do not just delete the token line from `.env` by hand: without the installer's override pin,
+compose substitutes the dev default and the gateway refuses to start.
 
 A fresh install starts strict (ADR-0181). The admin's first browser sign-in enrols a TOTP
 authenticator before anything else opens, because MFA is required for admins. Passwords need three
