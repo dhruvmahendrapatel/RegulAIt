@@ -4,6 +4,7 @@ import { api } from "../../../api/client";
 import { Button, Card, Field, Input } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
 import { UUID } from "./bomModel";
+import { DecisionReceiptsBrowser } from "./DecisionReceiptsBrowser";
 import v from "../../views.module.css";
 
 // ADR-0189 B6: a decision's Decision BOM, by its audit row id (not its receipt sequence)
@@ -66,6 +67,7 @@ export function DecisionReceiptsPanel() {
         <p>Last receipt sequence: {status.data!.lastSeq}. Decision rows awaiting signing: {status.data!.lagRows}.</p>
       </> : status.data ? <p>Receipt signing state is not reported by this gateway.</p> : null}
     </QueryGate>
+    <DecisionReceiptsBrowser />
     <DecisionBomOpener />
     <form className={v.stack} onSubmit={(event) => {
       event.preventDefault();

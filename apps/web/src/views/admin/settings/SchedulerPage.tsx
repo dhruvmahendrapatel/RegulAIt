@@ -25,6 +25,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { PageHeader } from "../../../shell/AppShell";
+import { BootSchedulerHealth } from "./BootSchedulerHealth";
 import { Badge, Button, Card, EmptyState, Table } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import { SchedulerJobHistory } from "./SchedulerJobHistory";
@@ -176,6 +177,8 @@ export default function SchedulerPage() {
             <div className={v.faint}>{s?.posture}</div>
             <div className={v.faint}>{s?.note}</div>
           </Card>
+
+          <BootSchedulerHealth />
 
           {jobs.length === 0 ? (
             <Card title="Jobs">

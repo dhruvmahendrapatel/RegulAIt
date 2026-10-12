@@ -19,7 +19,7 @@
  *    is rendered verbatim: an operator or cron drives runs, and a missed
  *    schedule is silent.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -28,6 +28,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { RefusalNotice } from "../../../ui/RefusalNotice";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import { EngineRunsPanel } from "./EngineRunsPanel";
+import { AttachRunEvidence, RedTeamFindingsCard, RedTeamSummaryCard, RunTrialsSection } from "./RedTeamPosture";
 import { QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -134,6 +135,12 @@ export default function RedTeamPage() {
 
   const [selectedLibrary, setSelectedLibrary] = useState<string>("");
   const [selectedRun, setSelectedRun] = useState<string>("");
+  const runDetailRef = useRef<HTMLDivElement>(null);
+  // a run opened from the posture or findings list: show its detail and take the reader there
+  const openRun = (id: string) => {
+    setSelectedRun(id);
+    requestAnimationFrame(() => runDetailRef.current?.scrollIntoView({ block: "start" }));
+  };
 
   const libDetail = useQuery({
     queryKey: ["admin", "redteam-library", selectedLibrary],
@@ -147,7 +154,7 @@ export default function RedTeamPage() {
     queryKey: ["admin", "redteam-run", selectedRun],
     enabled: Boolean(selectedRun),
     queryFn: () =>
-      api.get<{ run: RunRow; findings: FindingRow[]; baseline: RunRow | null }>(
+      api.get<{ run: RunRow; findings: FindingRow[]; baseline: RunRow | null; modelCardEvidence?: Array<{ id: string; cardId: string; label: string | null }> }>(
         `/v1/redteam/runs/${selectedRun}`,
       ),
   });
@@ -201,6 +208,9 @@ export default function RedTeamPage() {
               </>
             )}
           </Card>
+
+          {/* Batch U4: posture first, then the standing findings below the runs */}
+          <RedTeamSummaryCard onOpenRun={openRun} />
 
           <Card title="Attack classes, and what each one cannot tell you">
             <Table
@@ -487,6 +497,9 @@ export default function RedTeamPage() {
             )}
           </Card>
 
+          <RedTeamFindingsCard attackClasses={(classes.data?.attackClasses ?? []).map((c) => c.id)} onOpenRun={openRun} />
+
+          <div ref={runDetailRef} />
           {selectedRun && runDetail.data ? (
             <Card
               title="Run detail"
@@ -535,6 +548,15 @@ export default function RedTeamPage() {
                       render: (r) => <span className={v.faint}>{(r.outputSnippet ?? "").slice(0, 240)}</span>,
                     },
                   ]}
+                />
+              </div>
+              <div className={v.stack} style={{ marginTop: "var(--s3)" }}>
+                <RunTrialsSection key={selectedRun} runId={selectedRun} />
+                <AttachRunEvidence
+                  key={`ev-${selectedRun}`}
+                  runId={selectedRun}
+                  attached={runDetail.data.modelCardEvidence ?? []}
+                  onDone={() => void runDetail.refetch()}
                 />
               </div>
             </Card>

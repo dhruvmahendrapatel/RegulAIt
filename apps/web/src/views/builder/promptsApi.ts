@@ -208,6 +208,7 @@ export const pk = {
   prompts: ["prompts"] as const,
   prompt: (id: string) => ["prompts", id] as const,
   diff: (id: string, from: string, to: string) => ["prompts", id, "diff", from, to] as const,
+  commit: (id: string, hash: string) => ["prompts", id, "commit", hash] as const,
   datasets: ["playground", "datasets"] as const,
 };
 
@@ -220,6 +221,8 @@ export const promptsApi = {
     api.patch<PromptDetail>(`/v1/prompts/${id}`, body),
   archive: (id: string) => api.del<{ archived: true; id: string }>(`/v1/prompts/${id}`),
   commit: (id: string, body: CommitBody) => api.post<PromptCommit>(`/v1/prompts/${id}/commits`, body),
+  /** one commit by its full hash (a fresh read; `unknown_commit` when it is not in this prompt's history) */
+  commitAt: (id: string, hash: string) => api.get<PromptCommit>(`/v1/prompts/${id}/commits/${hash}`),
   diff: (id: string, from: string, to: string) =>
     api.get<PromptDiff>(`/v1/prompts/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`),
   moveTag: (id: string, tag: string, body: { commitHash: string; approverUserId?: string }) =>

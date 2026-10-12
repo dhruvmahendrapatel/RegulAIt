@@ -27,6 +27,7 @@
  *    to both, plus to an evaluation of it (ADR-0044).
  */
 import { useState } from "react";
+import { TrainingJobDetail } from "./TrainingJobDetail";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -257,6 +258,8 @@ export default function RegulAItLlmPage() {
 
   const [selectedDataset, setSelectedDataset] = useState("");
   const [selectedArtifact, setSelectedArtifact] = useState("");
+  // Batch U4: the training job opened for its full record (GET /v1/llm/jobs/:id)
+  const [openJob, setOpenJob] = useState<string | null>(null);
 
   const datasetDetail = useQuery({
     queryKey: ["admin", "llm-dataset", selectedDataset],
@@ -776,6 +779,7 @@ export default function RegulAItLlmPage() {
             </Card>
           )}
 
+          {openJob && <TrainingJobDetail key={openJob} jobId={openJob} onClose={() => setOpenJob(null)} />}
           {/* ---------------- jobs ---------------- */}
           <Card title="Training jobs">
             <Table
@@ -783,7 +787,18 @@ export default function RegulAItLlmPage() {
               rowKey={(r) => r.id}
               empty="No training jobs yet."
               columns={[
-                { key: "name", header: "Job", render: (r) => r.name },
+                {
+                  key: "name",
+                  header: "Job",
+                  render: (r) => (
+                    <span className={v.row}>
+                      {r.name}
+                      <Button size="sm" variant="ghost" aria-label={`Details of training job ${r.name}`} onClick={() => setOpenJob(r.id)}>
+                        Details
+                      </Button>
+                    </span>
+                  ),
+                },
                 {
                   key: "dataset",
                   header: "Trained on",

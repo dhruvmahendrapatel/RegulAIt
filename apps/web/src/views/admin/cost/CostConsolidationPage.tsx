@@ -61,6 +61,7 @@ import {
   userOpts,
   type RowRefusal,
 } from "../adminKit";
+import { CostImportDetail } from "./CostImportDetail";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -398,6 +399,8 @@ export default function CostConsolidationPage() {
   const [rosterFileError, setRosterFileError] = useState<string | null>(null);
 
   const [revoking, setRevoking] = useState<ImportBatch | null>(null);
+  // Batch U4: the batch opened from Import history (its lines, GET /v1/cost-imports/:importId)
+  const [openImport, setOpenImport] = useState<string | null>(null);
 
   const adapter = (adapters.data?.adapters ?? []).find((x) => x.id === adapterId) ?? null;
 
@@ -1401,12 +1404,18 @@ export default function CostConsolidationPage() {
                 {
                   key: "act",
                   header: "",
-                  render: (r) =>
-                    r.status === "applied" ? (
-                      <Button size="sm" variant="danger" onClick={() => setRevoking(r)}>
-                        Revoke
+                  render: (r) => (
+                    <div className={v.row}>
+                      <Button size="sm" aria-label={`Open the ${r.vendor} import from ${ago(r.createdAt)}`} onClick={() => setOpenImport(r.id)}>
+                        Open
                       </Button>
-                    ) : null,
+                      {r.status === "applied" ? (
+                        <Button size="sm" variant="danger" onClick={() => setRevoking(r)}>
+                          Revoke
+                        </Button>
+                      ) : null}
+                    </div>
+                  ),
                 },
               ]}
             />
@@ -1419,6 +1428,7 @@ export default function CostConsolidationPage() {
         </Card>
       </div>
 
+      {openImport && <CostImportDetail key={openImport} importId={openImport} onClose={() => setOpenImport(null)} />}
       <ReasonModal
         open={revoking !== null}
         title={revoking ? `Withdraw the lines from this ${revoking.vendor} import?` : ""}

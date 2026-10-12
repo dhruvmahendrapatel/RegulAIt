@@ -28,6 +28,7 @@ import {
 } from "../adminKit";
 import { EnergyEstimatePanel, EnergyFactorsCard } from "./EnergyEstimate";
 import { EditInitiativeButton } from "../editForms";
+import { InitiativeDetail } from "./InitiativeDetail";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -584,6 +585,8 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
   const act = useAction();
   const [name, setName] = useState("");
   const [costCenter, setCostCenter] = useState("");
+  // Batch U4: the initiative opened for its child projects and their spend
+  const [openId, setOpenId] = useState<string | null>(null);
   return (
     <Card title="Initiatives — cross-team rollup">
       <form
@@ -635,6 +638,9 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
             align: "right",
             render: (i) => (
               <div className={v.row} style={{ justifyContent: "flex-end" }}>
+              <Button size="sm" aria-label={`Open initiative ${i.name}`} onClick={() => setOpenId(i.id)}>
+                Open
+              </Button>
               <EditInitiativeButton initiative={i} />
               <RemoveButton
                 what={i.name}
@@ -674,6 +680,7 @@ function InitiativesCard(props: { initiatives: Initiative[]; loading: boolean })
         initiative-level budget or enforcement; each project keeps its own budget and governance. Group a
         project under one on the edit form above.
       </p>
+      {openId && <InitiativeDetail key={openId} initiativeId={openId} onClose={() => setOpenId(null)} />}
     </Card>
   );
 }

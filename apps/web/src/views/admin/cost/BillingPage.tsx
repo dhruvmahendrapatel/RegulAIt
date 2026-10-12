@@ -25,6 +25,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { KV, QueryGate, Stat, downloadCsv, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams } from "../adminKit";
 import { useToast } from "../../../ui/toast";
+import { BillingHistoryCard, RateCardDetail, StatementDetail } from "./BillingHistory";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -187,6 +188,9 @@ export default function BillingPage() {
   const [end, setEnd] = useState(nextMonthStart(now).slice(0, 10));
 
   const [cut, setCut] = useState<CutResult | null>(null);
+  // Batch U4: one rate card / statement opened from the tables below
+  const [openCard, setOpenCard] = useState<string | null>(null);
+  const [openStatement, setOpenStatement] = useState<string | null>(null);
   const [recon, setRecon] = useState<ReconcileResult | null>(null);
 
   const o = overview.data;
@@ -295,6 +299,16 @@ export default function BillingPage() {
                       render: (c) => <Badge tone={c.status === "active" ? "ok" : "neutral"}>{c.status}</Badge>,
                     },
                     { key: "at", header: "Created", render: (c) => ago(c.createdAt) },
+                    {
+                      key: "open",
+                      header: "",
+                      align: "right",
+                      render: (c) => (
+                        <Button size="sm" aria-label={`Open rate card ${c.name} v${c.version}`} onClick={() => setOpenCard(c.id)}>
+                          Open
+                        </Button>
+                      ),
+                    },
                   ]}
                 />
               )}
@@ -569,6 +583,9 @@ export default function BillingPage() {
                     header: "Export",
                     render: (s) => (
                       <div className={v.row}>
+                        <Button size="sm" aria-label={`Open statement v${s.version}`} onClick={() => setOpenStatement(s.id)}>
+                          Open
+                        </Button>
                         {(["csv", "json"] as const).map((format) => (
                           <Button
                             key={format}
@@ -616,8 +633,11 @@ export default function BillingPage() {
               )}
             </div>
           </Card>
+          <BillingHistoryCard />
         </QueryGate>
       </div>
+      {openCard && <RateCardDetail key={openCard} id={openCard} onClose={() => setOpenCard(null)} />}
+      {openStatement && <StatementDetail key={openStatement} id={openStatement} onClose={() => setOpenStatement(null)} />}
     </>
   );
 }

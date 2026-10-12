@@ -24,6 +24,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { QueryGate, optionEls, projectOpts, teamOpts, useAction, useProjects, useTeams, useUsers, userOpts } from "../adminKit";
 import { EditReportScheduleButton } from "../editForms";
+import { ReportDefinitionDetail, ReportRunDetail, ReportRunsCard } from "./ReportsHistory";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -104,6 +105,9 @@ export default function ReportsPage() {
   const [cadence, setCadence] = useState("monthly");
   const [scheduleFor, setScheduleFor] = useState("");
   const [result, setResult] = useState<GeneratedReport | null>(null);
+  // Batch U4: a definition or a run opened for its full record
+  const [openDefinition, setOpenDefinition] = useState<string | null>(null);
+  const [openRun, setOpenRun] = useState<string | null>(null);
 
   const defs = overview.data?.definitions ?? [];
 
@@ -213,6 +217,9 @@ export default function ReportsPage() {
                       header: "",
                       render: (d) => (
                         <div className={a.formRow}>
+                          <Button size="sm" aria-label={`Details of ${d.name}`} onClick={() => setOpenDefinition(d.id)}>
+                            Details
+                          </Button>
                           <Button
                             size="sm"
                             onClick={() =>
@@ -322,6 +329,11 @@ export default function ReportsPage() {
                       header: "",
                       render: (s) => (
                         <div className={v.row}>
+                          {s.lastRunId && (
+                            <Button size="sm" aria-label={`Open the last run of ${s.definition}`} onClick={() => setOpenRun(s.lastRunId)}>
+                              Last run
+                            </Button>
+                          )}
                           <EditReportScheduleButton schedule={s} definitionName={s.definition} users={userOpts(users.data?.users).map((o) => ({ value: o.v, label: o.l }))} usersLoading={users.isLoading} onSaved={() => void overview.refetch()} />
                           <Button
                             size="sm"
@@ -426,8 +438,13 @@ export default function ReportsPage() {
               </div>
             </Card>
           )}
+          <ReportRunsCard definitions={defs.map((d) => ({ id: d.id, name: d.name }))} onOpenRun={setOpenRun} />
         </QueryGate>
       </div>
+      {openDefinition && (
+        <ReportDefinitionDetail key={openDefinition} id={openDefinition} onClose={() => setOpenDefinition(null)} onOpenRun={(id) => { setOpenDefinition(null); setOpenRun(id); }} />
+      )}
+      {openRun && <ReportRunDetail key={openRun} id={openRun} onClose={() => setOpenRun(null)} />}
     </>
   );
 }

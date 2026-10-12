@@ -209,6 +209,13 @@ export async function installPromptsMock(page: Page, opts: PromptMockOptions = {
         pr.commits.unshift(c);
         return json(route, c, 201);
       }
+      // GET /v1/prompts/:id/commits/:hash — one commit (the route serializes no author name)
+      if (what === "commits" && method === "GET" && m[3]) {
+        const c = pr.commits.find((x: Json) => x.hash === m![3]);
+        if (!c) return json(route, { error: "unknown_commit" }, 404);
+        const { authorName: _omit, ...rest } = c as Json;
+        return json(route, rest);
+      }
       if (what === "diff" && method === "GET") {
         return json(route, {
           from: url.searchParams.get("from"),
