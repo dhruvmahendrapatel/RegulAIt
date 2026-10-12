@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import type { McpServer } from "../../../api/adminTypes";
-import { Badge, Button, Card, Select } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, Select } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import {
   ASSERTION_CLAIMS,
@@ -22,6 +22,7 @@ import {
   VERIFY_EXAMPLE,
   canonicalAudience,
   identityPropagationOf,
+  type IdentityPropagation,
 } from "./mcpIdentityModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -30,42 +31,67 @@ export function IdentityPropagationCell(props: { server: McpServer }) {
   const act = useAction();
   const stored = identityPropagationOf(props.server);
   const [value, setValue] = useState(stored);
+  const [confirming, setConfirming] = useState(false);
   if (props.server.transport === "stdio") return <>Not applicable</>;
+  const save = (next: IdentityPropagation) =>
+    void act.run(
+      () =>
+        // turning it on is a relaxation the gateway confirms with a step-up; turning it off asks nothing
+        withStepUp((h) => stepUpApi.patch(`/v1/servers/${props.server.id}`, { identityPropagation: next }, h)),
+      `Identity to upstream for ${props.server.name} saved`,
+    );
   return (
-    <form
-      className={v.row}
-      // the registry rows are clickable (they toggle the tools card); editing must not also toggle the row
-      onClick={(e) => e.stopPropagation()}
-      onSubmit={(e) => {
-        e.preventDefault();
-        void act.run(
-          () =>
-            // turning it on is a relaxation the gateway confirms with a step-up; turning it off asks nothing
-            withStepUp((h) => stepUpApi.patch(`/v1/servers/${props.server.id}`, { identityPropagation: value }, h)),
-          `Identity to upstream for ${props.server.name} saved`,
-        );
-      }}
-    >
-      <Select
-        value={value}
-        onChange={(e) => setValue(e.target.value === "signed_assertion" ? "signed_assertion" : "none")}
-        aria-label={`Identity sent to upstream ${props.server.name}`}
+    // the registry rows are clickable (they toggle the cards below); editing here, and the confirmation (rendered
+    // in place), must not also toggle the row
+    <span onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <form
+        className={v.row}
+        aria-label={`Identity to upstream for ${props.server.name}`}
+        onSubmit={(e) => {
+          e.preventDefault();
+          // sending identity to a third party is a relaxation: say so before the step-up is asked for
+          if (value === "signed_assertion") setConfirming(true);
+          else save(value);
+        }}
       >
-        {IDENTITY_PROPAGATION_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </Select>
-      <Button type="submit" size="sm" disabled={act.busy || value === stored}>
-        Save
-      </Button>
-      {act.error && (
-        <span className={v.errLine} role="alert">
-          {act.error}
-        </span>
-      )}
-    </form>
+        <Select
+          value={value}
+          onChange={(e) => setValue(e.target.value === "signed_assertion" ? "signed_assertion" : "none")}
+          aria-label={`Identity sent to upstream ${props.server.name}`}
+        >
+          {IDENTITY_PROPAGATION_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </Select>
+        <Button type="submit" size="sm" disabled={act.busy || value === stored}>
+          Save
+        </Button>
+        {act.error && (
+          <span className={v.errLine} role="alert">
+            {act.error}
+          </span>
+        )}
+      </form>
+      <ConfirmModal
+        open={confirming}
+        title={`Send caller identity to ${props.server.name}?`}
+        confirmLabel="Send a signed assertion"
+        body={
+          <p>
+            Every allowed call to {props.server.name} will carry a signed assertion of who it is for (a pairwise id, never an email or name) and
+            which agent is acting. This shares identity data with a third party, so it relaxes the strict default and asks you to confirm
+            it&apos;s you. The change is audited, and it turns off again if the server&apos;s URL changes.
+          </p>
+        }
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => {
+          setConfirming(false);
+          save("signed_assertion");
+        }}
+      />
+    </span>
   );
 }
 

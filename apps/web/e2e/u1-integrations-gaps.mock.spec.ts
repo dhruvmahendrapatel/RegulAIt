@@ -69,7 +69,9 @@ async function mockApi(page: Page, routes: Array<[string, RegExp, Handler]>): Pr
 /**
  * Axe in light and dark on the MCP servers tab, excluding the server table's
  * Proxy id chips: a PRE-EXISTING target-size finding on that table (the
- * IdChip is 20px tall inside a clickable row), not part of this batch.
+ * IdChip is 20px tall inside a clickable row), not part of this batch. The
+ * Proxy id is the LAST column (10th since ADR-0188 S8 added "Identity to
+ * upstream" before it); `:last-child` keeps the exclusion on it if columns move.
  */
 async function axeMcpServers(page: Page, label: string) {
   for (const theme of ["light", "dark"] as const) {
@@ -78,7 +80,7 @@ async function axeMcpServers(page: Page, label: string) {
     }, theme);
     const results = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-      .exclude('tr[aria-label^="Show tools on"] > td:nth-child(9)')
+      .exclude('tr[aria-label^="Show tools on"] > td:last-child')
       .analyze();
     expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`), `axe on "${label}" (${theme})`).toEqual([]);
   }
@@ -340,6 +342,108 @@ test.describe("MCP servers — admission clear and tools/list preview", () => {
     await page.getByRole("button", { name: "Preview tools" }).click();
     await expect(page.getByText("held by the admission scan. While admission is enforced its tools are hidden from everyone")).toBeVisible();
     await axeMcpServers(page, "tools/list preview");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0188 S8 identity to upstream (the per-server setting and its card)
+// ---------------------------------------------------------------------------
+
+test.describe("MCP servers — identity to upstream (ADR-0188 S8)", () => {
+  // the registry table's columns: ... 8 private ranges, 9 identity to upstream, 10 proxy id (0-based index 8)
+  const IDENTITY_CELL = 8;
+  const row = (page: Page, name: string) => page.getByRole("link", { name: `Show tools on ${name}`, exact: true });
+
+  test("turning it on is confirmed, then stepped up and resent once; turning it off asks nothing; the card shows the format", async ({ page }) => {
+    const SRV: Json = { ...CLEAN, id: U(410), name: "search", url: "https://search.example.test/mcp?key=s3cret", identityPropagation: "none" };
+    const calls = await mockApi(page, [
+      ["GET", /^\/v1\/servers$/, () => ({ body: { servers: [SRV] } })],
+      ["GET", /^\/v1\/servers\/([^/]+)\/tools$/, () => ({ body: { tools: [] } })],
+      ["PATCH", /^\/v1\/servers\/([^/]+)$/, ({ body }) => {
+        Object.assign(SRV, body);
+        return { body: SRV };
+      }],
+    ]);
+    const su = await requireStepUpOn(page, {
+      method: "PATCH",
+      path: `/v1/servers/${SRV.id}`,
+      kind: "settings_relax",
+      when: (b) => (b as Json).identityPropagation === "signed_assertion",
+      facts: () => ({ op: "mcp_server_update", serverId: SRV.id, url: SRV.url, values: { identityPropagation: "signed_assertion" } }),
+    });
+    await page.goto("/ui/admin/mcp-servers");
+    const setting = page.getByLabel("Identity sent to upstream search");
+    await expect(setting).toHaveValue("none", { timeout: 30_000 });
+    const form = page.getByRole("form", { name: "Identity to upstream for search" });
+    await expect(form.getByRole("button", { name: "Save" })).toBeDisabled();
+    await axeMcpServers(page, "mcp servers with the identity column");
+
+    // ON: a confirmation that says what is shared, then the step-up, then the request is resent once
+    await setting.selectOption("signed_assertion");
+    await form.getByRole("button", { name: "Save" }).click();
+    const confirm = page.getByRole("dialog", { name: "Send caller identity to search?" });
+    await expect(confirm).toContainText("pairwise id, never an email or name");
+    await axeMcpServers(page, "identity to upstream confirmation");
+    await confirm.getByRole("button", { name: "Send a signed assertion" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ identityPropagation: "signed_assertion" });
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${SRV.id}`)).toEqual([{ identityPropagation: "signed_assertion" }]);
+    // the form resets to the saved value before the next change
+    await expect(setting).toHaveValue("signed_assertion");
+    await expect(form.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    // the card: the audience without the query, the claims, and the verification example
+    await row(page, "search").locator("td").first().click();
+    const card = page.locator("section").filter({ has: page.getByText("Identity sent to this upstream", { exact: true }) });
+    await expect(card).toContainText("Signed assertion per call");
+    await expect(card).toContainText("https://search.example.test/mcp");
+    await expect(card).not.toContainText("s3cret");
+    const claims = card.getByRole("list", { name: "Claims in the assertion" });
+    for (const claim of ["iss", "aud", "sub", "act", "iat / exp", "jti"]) await expect(claims.getByText(claim, { exact: true })).toBeVisible();
+    await expect(claims).toContainText("never an email, name or user id");
+    await card.getByText("Verification example for the upstream operator (JavaScript, jose)").click();
+    const example = card.getByTestId("mcp-identity-verify-example");
+    await expect(example).toContainText('typ: "regulait-mcp-identity+jwt"');
+    await expect(example).toContainText("createRemoteJWKSet");
+    await axeMcpServers(page, "identity card with the example open");
+
+    // OFF: no confirmation and no step-up; sent once
+    await setting.selectOption("none");
+    await form.getByRole("button", { name: "Save" }).click();
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${SRV.id}`)).toEqual([{ identityPropagation: "signed_assertion" }, { identityPropagation: "none" }]);
+    await expect(page.getByRole("dialog", { name: "Send caller identity to search?" })).toHaveCount(0);
+    expect(su.attempts).toHaveLength(2);
+    expect(su.optionsCalls).toHaveLength(1);
+    await expect(setting).toHaveValue("none");
+    await expect(card).toContainText("Nothing sent (default)");
+  });
+
+  test("a stdio server shows not applicable; the gateway's stdio refusal is named in words", async ({ page }) => {
+    const STDIO: Json = { ...CLEAN, id: U(411), name: "local-files", url: "stdio:local-files", transport: "stdio", stdio: { command: "/usr/bin/mcp-files", args: [] }, identityPropagation: "none" };
+    // a row whose transport the list does not report (an older row shape): the gateway, which reads the row, refuses
+    const LEGACY: Json = { id: U(412), name: "legacy", url: "https://legacy.example.test/mcp", admissionState: "clean", pricePerCallUsd: null, identityPropagation: "none" };
+    const calls = await mockApi(page, [
+      ["GET", /^\/v1\/servers$/, () => ({ body: { servers: [STDIO, LEGACY] } })],
+      ["PATCH", /^\/v1\/servers\/([^/]+)$/, () => ({
+        status: 409,
+        body: { error: "identity_propagation_unsupported", detail: "this server is a stdio upstream: there is no HTTP request to carry an identity assertion. Nothing was saved." },
+      })],
+    ]);
+    await page.goto("/ui/admin/mcp-servers");
+    await expect(row(page, "local-files").locator("td").nth(IDENTITY_CELL)).toHaveText("Not applicable", { timeout: 30_000 });
+    await expect(page.getByLabel("Identity sent to upstream local-files")).toHaveCount(0);
+
+    const setting = page.getByLabel("Identity sent to upstream legacy");
+    await expect(setting).toHaveValue("none");
+    await setting.selectOption("signed_assertion");
+    const form = page.getByRole("form", { name: "Identity to upstream for legacy" });
+    await form.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("dialog", { name: "Send caller identity to legacy?" }).getByRole("button", { name: "Send a signed assertion" }).click();
+    await expect(form.getByRole("alert")).toContainText("cannot receive an identity assertion");
+    expect(sent(calls, "PATCH", `/v1/servers/${LEGACY.id}`)).toEqual([{ identityPropagation: "signed_assertion" }]);
+    await expect(row(page, "legacy").locator("td").nth(IDENTITY_CELL)).toContainText("cannot receive an identity assertion");
+    await axeMcpServers(page, "identity refusal");
   });
 });
 
