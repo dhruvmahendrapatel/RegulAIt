@@ -117,16 +117,19 @@ describe("ADR-0185 server bodies", () => {
     );
   });
 
-  it("a stdio upstream has a command and an argv list, and no url", () => {
-    const p = createServerSchema.parse({ name: "fs", transport: "stdio", stdio: { command: "/opt/mcp/bin/fs" } });
-    expect(p).toMatchObject({ transport: "stdio", stdio: { command: "/opt/mcp/bin/fs", args: [] } });
+  it("a stdio upstream has a closure image, a command inside it and an argv list, and no url (ADR-0190 I4)", () => {
+    const image = `sha256:${"a".repeat(64)}`;
+    const p = createServerSchema.parse({ name: "fs", transport: "stdio", stdio: { image, command: "/opt/mcp/bin/fs" } });
+    expect(p).toMatchObject({ transport: "stdio", stdio: { image, command: "/opt/mcp/bin/fs", args: [] } });
     expect(
-      createServerSchema.safeParse({ name: "fs", transport: "stdio", stdio: { command: "/opt/x", args: ["--root", "/srv"] } })
+      createServerSchema.safeParse({ name: "fs", transport: "stdio", stdio: { image, command: "/opt/x", args: ["--root", "/srv"] } })
         .success,
     ).toBe(true);
+    // no image, no stdio server: nothing runs from a host path any more
+    expect(createServerSchema.safeParse({ name: "fs", transport: "stdio", stdio: { command: "/opt/x" } }).success).toBe(false);
     // a shell line is not an argv list
     expect(
-      createServerSchema.safeParse({ name: "fs", transport: "stdio", stdio: { command: "/opt/x", args: "--root /srv" } })
+      createServerSchema.safeParse({ name: "fs", transport: "stdio", stdio: { image, command: "/opt/x", args: "--root /srv" } })
         .success,
     ).toBe(false);
     expect(
@@ -134,7 +137,7 @@ describe("ADR-0185 server bodies", () => {
         name: "fs",
         transport: "stdio",
         url: "https://x.example.com/",
-        stdio: { command: "/opt/x" },
+        stdio: { image, command: "/opt/x" },
       }).success,
     ).toBe(false);
     expect(createServerSchema.safeParse({ name: "fs", transport: "stdio" }).success).toBe(false);

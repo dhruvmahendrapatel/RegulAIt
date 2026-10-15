@@ -19,7 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_COMPLIANCE_PACKS, EVIDENCE_COLLECTORS, createCompliancePackSchema } from "./compliance-packs.js";
-import { ISACA_AI_AGENTS_PACK, ISACA_AI_AGENTS_SOURCE } from "./isaca-pack.js";
+import { ISACA_AI_AGENTS_PACK, ISACA_AI_AGENTS_PACK_V2, ISACA_AI_AGENTS_SOURCE } from "./isaca-pack.js";
 import { isNistAiRmfSubcategory } from "./nist-ai-rmf-subcategories.js";
 
 const pack = (framework: string, version: number) => {
@@ -49,9 +49,9 @@ describe("every pack version published before S5 is unchanged (content hash)", (
     expect(digest(pack(fw!, Number(v)))).toBe(hash);
   });
 
-  it("the new versions are exactly isaca-ai-agents@1, nist-ai-rmf@4 and eu-ai-act@3, and each parses", () => {
+  it("the new versions are exactly isaca-ai-agents@1, nist-ai-rmf@4 and eu-ai-act@3 (plus I4's isaca-ai-agents@2), and each parses", () => {
     const all = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`);
-    expect(all.filter((k) => !(k in PINNED)).sort()).toEqual(["eu-ai-act@3", "isaca-ai-agents@1", "nist-ai-rmf@4"]);
+    expect(all.filter((k) => !(k in PINNED)).sort()).toEqual(["eu-ai-act@3", "isaca-ai-agents@1", "isaca-ai-agents@2", "nist-ai-rmf@4"]);
     for (const k of ["eu-ai-act@3", "isaca-ai-agents@1", "nist-ai-rmf@4"]) {
       const [fw, v] = k.split("@");
       const res = createCompliancePackSchema.safeParse(pack(fw!, Number(v)));
@@ -215,5 +215,32 @@ describe("GUARD: every audit_decisions filter in the S5 pack versions names evid
         expect(new RegExp(`objectType: "${t}"`).test(source), `${c.controlRef}: no approval of type '${t}' is written`).toBe(true);
       }
     }
+  });
+});
+
+describe("isaca-ai-agents@2 (ADR-0190 I4): item 5 evidenced by sandbox placements", () => {
+  it("v1 is byte-for-byte unchanged (content hash taken before I4)", () => {
+    expect(digest(pack("isaca-ai-agents", 1))).toBe("da623121ae4c840c42ba86b02b0b206699ff41593d758925afa559d59e467935");
+  });
+
+  it("v2 changes item 5 only: partial, on the isolation_placements collector, no attestation", () => {
+    expect(pack("isaca-ai-agents", 2)).toBe(ISACA_AI_AGENTS_PACK_V2);
+    const v1 = new Map(ISACA_AI_AGENTS_PACK.controls.map((c) => [c.controlRef, c]));
+    const v2 = ISACA_AI_AGENTS_PACK_V2.controls;
+    expect(v2).toHaveLength(15);
+    for (const c of v2) {
+      if (c.controlRef.endsWith("item-05-sandbox-segmentation")) continue;
+      expect(c, c.controlRef).toEqual(v1.get(c.controlRef));
+    }
+    const item5 = v2.find((c) => c.controlRef.endsWith("item-05-sandbox-segmentation"))!;
+    expect(item5).toMatchObject({ coverage: "partial", collector: "isolation_placements", attestationRequired: false });
+    expect(EVIDENCE_COLLECTORS).toContain("isolation_placements");
+    // honest about what it does not cover
+    expect(item5.ownerNote).toMatch(/software-attested/);
+    expect(item5.ownerNote).toMatch(/Remote MCP servers/);
+    expect(v2.filter((c) => c.coverage === "unaddressed").map((c) => c.controlRef)).toEqual([ISACA_AI_AGENTS_PACK.controls[2]!.controlRef]);
+    expect(JSON.stringify(ISACA_AI_AGENTS_PACK_V2)).not.toMatch(/\bcompliant\b/i);
+    for (const c of v2) expect(`${c.title} ${c.description ?? ""}`, c.controlRef).not.toMatch(/["“”]/);
+    expect(createCompliancePackSchema.safeParse(ISACA_AI_AGENTS_PACK_V2).success).toBe(true);
   });
 });

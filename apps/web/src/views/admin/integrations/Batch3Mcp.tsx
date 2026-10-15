@@ -125,7 +125,7 @@ function CoverageSettings({ settings }: { settings: Record<string, unknown> }) {
     <fieldset disabled={busy || unavailable}><legend>Enabled upstream transports</legend>
       {MCP_UPSTREAM_TRANSPORTS.map((transport) => <label key={transport} className={v.row}><input type="checkbox" checked={transports.includes(transport)} onChange={(event) => setTransports(toggle(transports, transport, event.target.checked))} />{transport}</label>)}
     </fieldset>
-    <p>Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. Stdio also requires operator-configured executable directories, a pinned command digest and admission approval.</p>
+    <p>Only streamable HTTP is enabled by default. Enabling SSE or stdio is an audited relaxation. A stdio server never runs on the gateway: it runs from an image pinned by digest, inside a sandbox started by an executor that proves the required isolation, and it still needs admission approval.</p>
     <Button type="submit" disabled={busy || unavailable}>Save MCP coverage</Button>
     {act.error && <p role="alert">{act.error}</p>}
     {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
@@ -182,51 +182,51 @@ function StdioUpdate({ servers }: { servers: McpServer[] }) {
   const stdio = servers.filter((row) => row.transport === "stdio");
   if (!stdio.length) return null;
   return <Card title="Update a stdio command">
-    <p>A server's transport is fixed at registration. A command or argument change is audited, pins a new digest and resets admission to unscanned; scan and approve it again before use.</p>
+    <p>A server's transport is fixed at registration. A change of image, command or arguments is audited and resets admission to unscanned; scan and approve it again before use.</p>
     <Field label="Stdio server to update"><Select value={id} onChange={(event) => setId(event.target.value)}>{optionEls(serverOpts(stdio), "— select —")}</Select></Field>
     {server?.stdio && <StdioUpdateForm key={`${server.id}:${server.stdioCommandDigest}`} server={server} />}
   </Card>;
 }
-/** True when the form differs from the stored command or argv. */
-export function stdioSpecDirty(server: McpServer, command: string, args: string[]): boolean {
+/** True when the form differs from the stored image, command or argv (ADR-0190 I4: the image is the pinned digest). */
+export function stdioSpecDirty(server: McpServer, image: string, command: string, args: string[]): boolean {
   const stored = server.stdio;
-  return !stored || command !== stored.command || args.length !== stored.args.length || args.some((arg, index) => arg !== stored.args[index]);
+  return !stored || image !== (stored.image ?? server.stdioCommandDigest ?? "") || command !== stored.command || args.length !== stored.args.length || args.some((arg, index) => arg !== stored.args[index]);
 }
 /**
  * The sentence after a PATCH, from what the gateway RETURNED: an identical
- * command, argv and digest is a no-op there (no audit, admission kept), so it
- * must not be reported as "admission scan required". The same command can
- * still re-pin a new digest when the file on disk changed.
+ * image, command and argv is a no-op there (no audit, admission kept), so it
+ * must not be reported as "admission scan required".
  */
 export function stdioUpdateOutcome(before: McpServer, after: McpServer): string {
   const state = after.admissionState ?? "not reported";
-  const changed = after.stdioCommandDigest !== before.stdioCommandDigest || (after.stdio ? stdioSpecDirty(before, after.stdio.command, after.stdio.args) : false);
+  const changed = after.stdioCommandDigest !== before.stdioCommandDigest || (after.stdio ? stdioSpecDirty(before, after.stdio.image ?? after.stdioCommandDigest ?? "", after.stdio.command, after.stdio.args) : false);
   return changed
-    ? `Command updated; admission is now ${state}. A new digest was pinned: scan and approve it again before use.`
-    : `Nothing changed: the command, arguments and pinned digest are the same, so admission stays ${state}.`;
+    ? `Server updated; admission is now ${state}: scan and approve it again before use.`
+    : `Nothing changed: the image, command and arguments are the same, so admission stays ${state}.`;
 }
 function StdioUpdateForm({ server }: { server: McpServer }) {
-  const act = useAction(); const [command, setCommand] = useState(server.stdio!.command); const [args, setArgs] = useState(server.stdio!.args);
+  const act = useAction(); const [image, setImage] = useState(server.stdio!.image ?? server.stdioCommandDigest ?? ""); const [command, setCommand] = useState(server.stdio!.command); const [args, setArgs] = useState(server.stdio!.args);
   const flight = useSingleFlight();
   // after a save the form stays locked until the servers query has the server's command and digest
   const baseline = useSettleAfterWrite(adminKeys.servers);
-  const dirty = stdioSpecDirty(server, command, args);
+  const dirty = stdioSpecDirty(server, image, command, args);
   const busy = act.busy || flight.busy || baseline.stale;
   return <form className={v.stack} onSubmit={(event) => {
     event.preventDefault();
     if (baseline.stale || !flight.enter()) return;
     void (async () => {
       try {
-        if (await act.run(async () => stdioUpdateOutcome(server, await api.patch<McpServer>(`/v1/servers/${server.id}`, { stdio: { command, args } })))) await baseline.settle();
+        if (await act.run(async () => stdioUpdateOutcome(server, await api.patch<McpServer>(`/v1/servers/${server.id}`, { stdio: { image, command, args } })))) await baseline.settle();
       } finally {
         flight.leave();
       }
     })();
   }}>
-    <Field label="Updated executable path"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={busy} /></Field>
+    <Field label="Updated closure image digest"><Input required pattern="sha256:[0-9a-f]{64}" value={image} onChange={(event) => setImage(event.target.value)} disabled={busy} /></Field>
+    <Field label="Updated entry point in the image"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={busy} /></Field>
     <StdioArguments args={args} onChange={setArgs} disabled={busy} />
-    {!dirty && <p>The command and arguments match what is stored. Submitting re-checks the file's digest: admission resets only if the executable on disk has changed.</p>}
-    <Button type="submit" disabled={busy}>{dirty ? "Update command and reset admission" : "Re-check executable digest"}</Button>
+    {!dirty && <p>The image, entry point and arguments match what is stored. Submitting changes nothing.</p>}
+    <Button type="submit" disabled={busy || !dirty}>Update server and reset admission</Button>
     {act.error && <p role="alert">{act.error}</p>}
     {baseline.stale && <StaleAfterWrite onRetry={() => void baseline.settle()} />}
   </form>;

@@ -1,13 +1,13 @@
 /**
  * ADR-0185 G4 — THE UPSTREAM TRANSPORTS: Streamable HTTP, SSE and stdio.
  *
- * Every one is the official SDK transport (`@modelcontextprotocol/sdk` 1.32.0,
- * already locked — open source first, ADR-0176: no client of our own). This
- * module only decides HOW each is opened; WHETHER a connect may happen at all
- * (admission, the org's transport list, the egress guard, the stdio host rules
- * and the pinned digest) is decided before it, in `mcp-egress.ts`
- * (`checkUpstreamDestination`), and a refusal there means this file is never
- * reached — no socket, no process.
+ * HTTP and SSE are the official SDK transports (`@modelcontextprotocol/sdk`
+ * 1.32.0, already locked — open source first, ADR-0176: no client of our
+ * own). This module only decides HOW each is opened; WHETHER a connect may
+ * happen at all (admission, the org's transport list, the egress guard, the
+ * stdio closure rules and the isolation placement) is decided before it, in
+ * `mcp-egress.ts` (`checkUpstreamDestination`, `guardedMcpConnect`), and a
+ * refusal there means this file is never reached — no socket, no sandbox.
  *
  * ── SSE ─────────────────────────────────────────────────────────────────────
  * The SAME guarded, pinned fetch as Streamable HTTP for every request the
@@ -18,121 +18,40 @@
  * `endpoint` event naming another origin; the pin is the second line, so the
  * guarantee does not rest on one library check.
  *
- * ── stdio ───────────────────────────────────────────────────────────────────
- * A double opt-in. The HOST names the directories commands may live in
- * (`REGULAIT_MCP_STDIO_ALLOWED_DIRS`, path-list; unset = stdio is impossible),
- * and an admin enables `stdio` in `mcp_upstream_transports`. Then:
- *  - the command is an absolute path whose realpath lies inside an allowed
- *    directory (a symlink pointing out is refused), a regular file with an
- *    execute bit, neither world- nor group-writable, and no directory from
- *    its own up to the allowed directory is group- or world-writable
- *    (B3S-06: `group_writable`, `writable_parent`);
- *  - argv is a fixed `string[]` (≤ 64 × 4 KiB, no NUL) handed to the SDK's
- *    cross-spawn with `shell: false` — never a shell line, never interpolated;
- *  - the child's environment is ONLY the SDK's safe default
- *    (`getDefaultEnvironment()`: HOME, LOGNAME, PATH, SHELL, TERM, USER) —
- *    never `DATABASE_URL`, `REGULAIT_DATA_KEY` or any provider key;
- *  - cwd is the allowed directory holding the command; stderr is piped and
- *    drained (discarded), so a chatty child can neither block on a full pipe
- *    nor write into the gateway's own log;
- *  - one process per request, capped process-wide by
- *    `REGULAIT_MCP_STDIO_MAX_PROCS` (default 4), killed on close (the SDK's
- *    stdin-end → SIGTERM → SIGKILL ladder) and on a missed connect deadline;
- *  - the command's sha256 is pinned at registration; a different file at
- *    connect is refused (`mcp-stdio-digest-mismatch`).
- *
- * DISCLOSED RESIDUE: the file is hashed and then spawned by its realpath, so a
- * swap in the gap between the two is not caught by the digest (a host that can
- * write into an allowed directory between those two syscalls already controls
- * that directory). Only the ENTRY FILE is digest-pinned: an interpreter it
- * names (`#!`) and the modules that interpreter loads are not. argv is stored
- * in the audit log and shown to admins, so it must never carry a secret. The
- * child runs as the gateway's own OS user with no further isolation — process
- * isolation and credential binding are PF-06 (batch 6).
+ * ── stdio (ADR-0190 slice I4) ───────────────────────────────────────────────
+ * A stdio server NEVER runs on the gateway host: there is no process spawn
+ * anywhere in the gateway (OWNER DECISION 2, an invariant; built as for a
+ * first load, ADR-0180, with no fallback to the old in-process spawn). It runs
+ * in a sandbox an executor started from the server's CLOSURE IMAGE, pinned by
+ * its content digest at registration, under the execution profile decision 7
+ * requires (gVisor at L2 by default). The MCP bytes travel over the
+ * executor's own outbound channel (`executor-stdio.ts`), and the transport
+ * here is the SDK `Transport` over that session. Registration stores:
+ *  - `image`: the closure image's digest (`sha256:` + 64 hex);
+ *  - `command`: the absolute path of the server's entry point INSIDE the image;
+ *  - `args`: a fixed `string[]` (≤ 64 × 4 KiB, no NUL), never a shell line.
+ * This closes ADR-0185's three disclosed stdio residues: the hash-to-spawn
+ * TOCTOU (the runtime starts a digest, not a path), interpreter and module
+ * pinning (the closure image holds them), and credential binding (the sandbox
+ * holds no credential: profile `secrets: none`). argv is stored in the audit
+ * log and shown to admins, so it must never carry a secret.
  */
-import { createHash } from "node:crypto";
-import { constants as fsConstants, createReadStream } from "node:fs";
-import { access, realpath, stat } from "node:fs/promises";
-import path from "node:path";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import {
-  getDefaultEnvironment,
-  StdioClientTransport,
-  type StdioServerParameters,
-} from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { MCP_STDIO_LIMITS, type McpUpstreamTransport } from "@regulait/shared";
+import { isStdioClosureImage, MCP_STDIO_LIMITS, type McpUpstreamTransport } from "@regulait/shared";
+import { ExecutorStdioTransport, type StdioSession } from "./executor-stdio.js";
 
 // ---------------------------------------------------------------------------
-// The host policy (environment)
+// The stdio closure rules (registration, update and every connect)
 // ---------------------------------------------------------------------------
 
-export const STDIO_ALLOWED_DIRS_ENV = "REGULAIT_MCP_STDIO_ALLOWED_DIRS";
-export const STDIO_MAX_PROCS_ENV = "REGULAIT_MCP_STDIO_MAX_PROCS";
-export const STDIO_DEFAULT_MAX_PROCS = 4;
-/** an operator typo must not lift the cap into "unbounded" */
-const STDIO_MAX_PROCS_CEILING = 64;
-
-export interface StdioHostPolicy {
-  /** the realpaths of the allowed directories that exist; empty = stdio impossible */
-  allowedDirs: string[];
-  maxProcs: number;
-}
-
-/**
- * Read the host opt-in. Read on every decision (never cached), so an operator
- * who removes the variable and restarts — or a test that unsets it — gets the
- * strict answer at once. A relative entry, or one that does not resolve to a
- * directory, is ignored: it can never widen anything.
- */
-export async function loadStdioHostPolicy(env: NodeJS.ProcessEnv = process.env): Promise<StdioHostPolicy> {
-  const raw = env[STDIO_ALLOWED_DIRS_ENV] ?? "";
-  const allowedDirs: string[] = [];
-  for (const entry of raw.split(path.delimiter)) {
-    const dir = entry.trim();
-    if (!dir || !path.isAbsolute(dir) || dir.includes("\0")) continue;
-    try {
-      const real = await realpath(dir);
-      if ((await stat(real)).isDirectory() && !allowedDirs.includes(real)) allowedDirs.push(real);
-    } catch {
-      // a missing directory allows nothing
-    }
-  }
-  const n = Number.parseInt(env[STDIO_MAX_PROCS_ENV] ?? "", 10);
-  const maxProcs =
-    Number.isInteger(n) && n >= 1 ? Math.min(n, STDIO_MAX_PROCS_CEILING) : STDIO_DEFAULT_MAX_PROCS;
-  return { allowedDirs, maxProcs };
-}
-
-// ---------------------------------------------------------------------------
-// The command rules
-// ---------------------------------------------------------------------------
-
-export const STDIO_REFUSAL_CODES = [
-  "not_absolute",
-  "outside_allowed_dirs",
-  "not_executable",
-  "world_writable",
-  "group_writable",
-  "writable_parent",
-  "invalid_argv",
-] as const;
+export const STDIO_REFUSAL_CODES = ["not_absolute", "invalid_argv", "image_unpinned"] as const;
 export type StdioRefusalCode = (typeof STDIO_REFUSAL_CODES)[number];
 
-export type StdioCommandCheck =
-  | {
-      ok: true;
-      /** the verified realpath — what is hashed and what is spawned */
-      realCommand: string;
-      /** the allowed directory that contains it (the child's cwd) */
-      allowedDir: string;
-      /** sha256 hex of the file's bytes */
-      digest: string;
-    }
+export type StdioClosureCheck =
+  | { ok: true; image: string; command: string; args: string[] }
   | { ok: false; code: StdioRefusalCode; detail: string };
-
-const inside = (dir: string, p: string) => p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
 
 /** argv: a fixed string[] — ≤ 64 entries, each ≤ 4 KiB (UTF-8), no NUL */
 export function stdioArgvProblem(args: unknown): string | null {
@@ -148,138 +67,34 @@ export function stdioArgvProblem(args: unknown): string | null {
   return null;
 }
 
-/** sha256 of a file's bytes, streamed (a large binary is never held in memory) */
-export function sha256File(file: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const h = createHash("sha256");
-    createReadStream(file)
-      .on("error", reject)
-      .on("data", (c) => h.update(c))
-      .on("end", () => resolve(h.digest("hex")));
-  });
-}
-
 /**
- * The host rules for one command + argv, at registration, on update and at
- * EVERY connect (a write-time verdict is not a fact about the future: the file
- * can be replaced, chmod'ed or re-linked after it was registered).
+ * The rules for one stdio registration, checked at registration, on update
+ * and at EVERY connect (a stored row is re-checked, never trusted): the image
+ * is pinned by content digest, the entry point is an absolute path inside the
+ * image (no `.` or `..` segment), argv is bounded. Nothing on the gateway's
+ * filesystem is looked at: the command does not exist here, and never runs here.
  */
-export async function checkStdioCommand(
-  command: string,
-  args: unknown,
-  policy: StdioHostPolicy,
-): Promise<StdioCommandCheck> {
+export function checkStdioClosure(image: unknown, command: unknown, args: unknown): StdioClosureCheck {
+  if (!isStdioClosureImage(image)) {
+    return {
+      ok: false,
+      code: "image_unpinned",
+      detail: "a stdio server runs from a closure image pinned by its content digest (sha256: followed by 64 hex characters)",
+    };
+  }
   const argv = stdioArgvProblem(args);
   if (argv) return { ok: false, code: "invalid_argv", detail: argv };
   if (
     typeof command !== "string" ||
+    command.length < 2 ||
+    !command.startsWith("/") ||
     command.includes("\0") ||
     Buffer.byteLength(command, "utf8") > MCP_STDIO_LIMITS.maxCommandBytes ||
-    !path.isAbsolute(command)
+    command.split("/").some((seg, i) => i > 0 && (seg === "" || seg === "." || seg === ".."))
   ) {
-    return { ok: false, code: "not_absolute", detail: "the command must be an absolute path to a file" };
+    return { ok: false, code: "not_absolute", detail: "the command must be the absolute path of the server's entry point inside the image" };
   }
-  const outside = {
-    ok: false as const,
-    code: "outside_allowed_dirs" as const,
-    detail: `the command must resolve inside one of the host's allowed directories (${STDIO_ALLOWED_DIRS_ENV})`,
-  };
-  let real: string;
-  try {
-    real = await realpath(command);
-  } catch {
-    // nothing there: name WHICH rule the path breaks without probing further
-    const lexical = path.resolve(command);
-    return policy.allowedDirs.some((d) => inside(d, lexical))
-      ? { ok: false, code: "not_executable", detail: "no file exists at the command path" }
-      : outside;
-  }
-  // realpath, not the path as typed: a symlink inside an allowed directory
-  // that points out of it is an escape, and is refused here
-  const allowedDir = policy.allowedDirs.find((d) => inside(d, real));
-  if (!allowedDir) return outside;
-  const st = await stat(real);
-  if (!st.isFile()) return { ok: false, code: "not_executable", detail: "the command is not a regular file" };
-  if ((st.mode & 0o002) !== 0) {
-    return { ok: false, code: "world_writable", detail: "the command file is world-writable; anyone on the host could replace it" };
-  }
-  // B3S-06: a group member could rewrite the file as surely as anyone could
-  // a world-writable one
-  if ((st.mode & 0o020) !== 0) {
-    return { ok: false, code: "group_writable", detail: "the command file is group-writable; any member of its group could replace it" };
-  }
-  // B3S-06: nor may anyone but the owner be able to rename or replace it in
-  // place — every directory from the command's own up to the allowed
-  // directory must be writable by its owner only
-  for (let dir = path.dirname(real); ; dir = path.dirname(dir)) {
-    const ds = await stat(dir);
-    if ((ds.mode & 0o022) !== 0) {
-      return {
-        ok: false,
-        code: "writable_parent",
-        detail: `a directory holding the command (${dir}) is group- or world-writable; others could replace the command in it`,
-      };
-    }
-    if (dir === allowedDir || path.dirname(dir) === dir) break;
-  }
-  try {
-    await access(real, fsConstants.X_OK);
-  } catch {
-    return { ok: false, code: "not_executable", detail: "the command file is not executable by the gateway" };
-  }
-  return { ok: true, realCommand: real, allowedDir, digest: await sha256File(real) };
-}
-
-// ---------------------------------------------------------------------------
-// The process cap
-// ---------------------------------------------------------------------------
-
-let liveStdio = 0;
-
-/** how many stdio children are alive right now (a test reads it) */
-export function liveStdioProcesses(): number {
-  return liveStdio;
-}
-
-/** take one of `max` process slots; null when the host is at its cap */
-export function acquireStdioSlot(max: number): (() => void) | null {
-  if (liveStdio >= max) return null;
-  liveStdio += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    liveStdio -= 1;
-  };
-}
-
-/**
- * The SDK's stdio transport with the gateway's lifecycle around it: the slot
- * it holds is given back exactly once — when the gateway closes it, when the
- * child exits by itself, or when the spawn fails — and stderr is drained.
- */
-class GovernedStdioTransport extends StdioClientTransport {
-  constructor(params: StdioServerParameters, private readonly release: () => void) {
-    super(params);
-    // set BEFORE Protocol.connect, which chains a handler already present
-    this.onclose = () => this.release();
-    this.stderr?.on("data", () => {});
-  }
-  override async start(): Promise<void> {
-    try {
-      await super.start();
-    } catch (err) {
-      this.release();
-      throw err;
-    }
-  }
-  override async close(): Promise<void> {
-    try {
-      await super.close();
-    } finally {
-      this.release();
-    }
-  }
+  return { ok: true, image, command, args: [...(args as string[])] };
 }
 
 // ---------------------------------------------------------------------------
@@ -318,19 +133,21 @@ export function isSseCrossOriginRefusal(err: unknown): boolean {
   return typeof msg === "string" && msg.includes("Endpoint origin does not match connection origin");
 }
 
+
 // ---------------------------------------------------------------------------
 // openTransport
 // ---------------------------------------------------------------------------
 
-/** what `checkUpstreamDestination` decided may be opened */
+/** what `guardedMcpConnect` decided may be opened (stdio: a session already PLACED in a sandbox) */
 export type UpstreamLaunch =
   | { transport: "streamable_http" | "sse"; url: string; fetch: typeof fetch }
-  | { transport: "stdio"; realCommand: string; args: string[]; allowedDir: string; release: () => void };
+  | { transport: "stdio"; session: StdioSession };
 
 /**
  * Open the SDK transport for an ALREADY-ADJUDICATED destination. Nothing here
  * decides anything: it is reached only after `checkUpstreamDestination` allowed
- * the row (and, for stdio, after a process slot was taken).
+ * the row (and, for stdio, after an executor's sandbox was placed and its
+ * per-placement report accepted).
  */
 export function openTransport(launch: UpstreamLaunch, opts: { deadlineMs: number }): Transport {
   switch (launch.transport) {
@@ -348,18 +165,8 @@ export function openTransport(launch: UpstreamLaunch, opts: { deadlineMs: number
       return new SSEClientTransport(url, { fetch: originPinnedFetch(url.origin, launch.fetch) });
     }
     case "stdio":
-      return new GovernedStdioTransport(
-        {
-          command: launch.realCommand,
-          args: [...launch.args],
-          // the SDK merges this over getDefaultEnvironment(); passing exactly
-          // that default makes the child's environment explicit, not inherited
-          env: getDefaultEnvironment(),
-          cwd: launch.allowedDir,
-          stderr: "pipe",
-        },
-        launch.release,
-      );
+      // ADR-0190 I4: the MCP bytes go to the sandbox over the executor's channel; nothing is spawned here
+      return new ExecutorStdioTransport(launch.session);
   }
 }
 

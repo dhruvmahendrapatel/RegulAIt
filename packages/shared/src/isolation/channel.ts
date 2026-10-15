@@ -56,6 +56,9 @@ export const EXECUTOR_CHANNEL_ROUTES = [
   `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/decline`,
   `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/report`,
   `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/end`,
+  // I4: a placed stdio session's bytes (stdio.ts), on the same proof
+  `GET ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/stdio`,
+  `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/stdio`,
 ] as const;
 
 export const EXECUTOR_PROOF_HEADER = "executor-proof" as const;

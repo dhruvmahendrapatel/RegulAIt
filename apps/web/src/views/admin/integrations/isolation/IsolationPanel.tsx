@@ -377,6 +377,8 @@ type PlacementRow = Placement | Unreadable;
 function outcomeBadge(p: Placement) {
   if (p.outcome === "placed") return <Badge tone="ok">Placed</Badge>;
   if (p.outcome === "mismatch") return <Badge tone="danger">Mismatch</Badge>;
+  // I4: a governed stdio call chose an executor; the sandbox has not reported yet (or the call never connected)
+  if (p.outcome === "offered") return <Badge tone="neutral">Awaiting report</Badge>;
   return <Badge tone="warn">Refused</Badge>;
 }
 
@@ -424,6 +426,8 @@ function PlacementsCard() {
                       "Not reported"
                     ) : r.outcome === "placed" ? (
                       `${classText(r.appliedClass)} on ${r.executorName ?? "an executor"}`
+                    ) : r.outcome === "offered" ? (
+                      `Offered to ${r.executorName ?? "an executor"} at ${classText(r.appliedClass)}; nothing runs until its sandbox reports and the report is accepted`
                     ) : (
                       <span>
                         <code>{r.refusalCode}</code> <span className={v.faint}>{refusalText(r.refusalCode)}</span>

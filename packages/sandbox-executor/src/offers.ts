@@ -16,6 +16,7 @@ import type { ChannelCredential } from "./channel-credential.js";
 import { ExecutorClient, ExecutorHttpError } from "./client.js";
 import { buildReport } from "./report.js";
 import type { FreshAttestation } from "./self-test.js";
+import { pumpStdio } from "./stdio-pump.js";
 
 export interface OfferContext {
   backend: SandboxBackend;
@@ -34,6 +35,8 @@ export interface OfferContext {
   onSignal: (next: "quarantined" | "revoked" | "reannounce_required", why: string) => Promise<void>;
   now?: () => Date;
   log?: (m: string) => void;
+  /** I4: the stdio session window (seconds; default 25) */
+  stdioWindowSeconds?: number;
 }
 
 export type OfferOutcome =
@@ -125,7 +128,15 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       ctx.log?.(`offer ${offer.id}: placed but input withheld (${why}); sandbox killed`);
       return { kind: "unconfirmed", why };
     }
-    await handle.releaseInput();
+    if (offer.workloadKind === "mcp_stdio" && handle.stdio) {
+      // I4: the input is released by the stdio session, with the registered argv, once the gateway's `start` arrives.
+      // Every real backend gives an mcp_stdio sandbox its stdio (the runsc backend always does); only the I3 fake
+      // backend without a stdio responder has none, and is released as before.
+      const how = await pumpStdio({ client: ctx.client, offerId: offer.id, handle, ...(ctx.stdioWindowSeconds !== undefined ? { windowSeconds: ctx.stdioWindowSeconds } : {}), ...(ctx.log ? { log: ctx.log } : {}) });
+      ctx.log?.(`offer ${offer.id}: stdio session ended (${how})`);
+    } else {
+      await handle.releaseInput();
+    }
     const ended = await handle.ended;
     ctx.sandboxes.delete(offer.id);
     try {

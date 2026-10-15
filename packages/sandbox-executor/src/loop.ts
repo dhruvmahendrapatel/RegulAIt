@@ -82,6 +82,8 @@ export interface ExecutorLoopOptions {
   /** the self-test cadence (default 60 min; the gateway's freshness limit is 2 h at most) */
   selfTestIntervalMs?: number;
   capacity?: number;
+  /** I4: the stdio session window (seconds; default 25) */
+  stdioWindowSeconds?: number;
   /** first wait after a transient failure, doubling up to maxBackoffMs (defaults 2 s and 5 min) */
   backoffMs?: number;
   maxBackoffMs?: number;
@@ -163,6 +165,7 @@ export async function runExecutorLoop(opts: ExecutorLoopOptions): Promise<void> 
     attestations,
     sandboxes,
     ...(opts.capacity !== undefined ? { capacity: opts.capacity } : {}),
+    ...(opts.stdioWindowSeconds !== undefined ? { stdioWindowSeconds: opts.stdioWindowSeconds } : {}),
     quarantined: () => quarantine.active || current() !== "streaming",
     quarantineActive: () => quarantine.active || current() === "quarantined" || current() === "stopped",
     onSignal: async (next: "quarantined" | "revoked" | "reannounce_required", why: string) => go({ kind: "next", next }, why),

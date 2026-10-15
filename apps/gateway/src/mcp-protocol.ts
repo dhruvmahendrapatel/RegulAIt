@@ -567,7 +567,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
   let upstream: Client | null = null;
   try {
     try {
-      upstream = await connectUpstream(db, serverRow, { outboundIdentity });
+      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null } });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
         await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));

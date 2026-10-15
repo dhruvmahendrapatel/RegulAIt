@@ -135,8 +135,9 @@ export const BATCH3_SETTING_COPY: Readonly<Record<Batch3SettingKey, { label: str
     label: "MCP upstream transports",
     strict: "Streamable HTTP only, through the egress guard.",
     relaxed:
-      "SSE reaches servers over the older event-stream transport (same egress guard); stdio lets the gateway start " +
-      "a local command, and also needs the host to name the directories such commands may live in.",
+      "SSE reaches servers over the older event-stream transport (same egress guard); stdio runs a server from a " +
+      "digest-pinned image inside a sandbox started by an executor, never on the gateway host, and needs an executor " +
+      "that attests the required isolation class.",
   },
 };
 
@@ -197,12 +198,16 @@ export const batch3OrgSettingsFields = {
 // Request-body pieces
 // ---------------------------------------------------------------------------
 
-/** G4: a stdio upstream — an absolute command and a fixed argv, never a shell
- * line. Structural only: the route applies the host rules (absolute, inside
- * an allowed directory, not world-writable, argv bounds) and answers 400
- * `mcp_stdio_command_refused` with a `code`. */
+/** G4, moved by ADR-0190 I4: a stdio upstream runs in a sandbox from a CLOSURE
+ * IMAGE pinned by digest, never on the gateway host. `image` is the image's
+ * content digest (`sha256:` + 64 hex); `command` the absolute path of the
+ * server's entry point INSIDE that image; `args` a fixed argv, never a shell
+ * line. Structural only: the route applies the rules (an absolute path, argv
+ * bounds, a pinned digest) and answers 400 `mcp_stdio_command_refused` with a
+ * `code`. */
 export const mcpStdioSpecSchema = z
   .object({
+    image: z.string().min(1),
     command: z.string().min(1),
     args: z.array(z.string()).default([]),
   })

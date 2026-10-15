@@ -140,7 +140,11 @@ export const REQUIRED_CLASS_SOURCES = [
 ] as const;
 export type RequiredClassSource = (typeof REQUIRED_CLASS_SOURCES)[number];
 
-export const PLACEMENT_OUTCOMES = ["placed", "refused", "mismatch"] as const;
+/**
+ * `offered` (I4, migration 0198): a governed stdio call's decision-time row — an executor was chosen and offered the
+ * work; how it ended is the linked `execution_placement_reports` row.
+ */
+export const PLACEMENT_OUTCOMES = ["placed", "refused", "mismatch", "offered"] as const;
 export type PlacementOutcome = (typeof PLACEMENT_OUTCOMES)[number];
 
 /**

@@ -1,0 +1,30 @@
+# ADR-0190 slice I4 — AN EXAMPLE CLOSURE IMAGE for an npm-distributed stdio MCP server.
+#
+# The closure is the server, its interpreter and every module it loads, in one
+# image pinned by digest at registration (decision 4). This closes ADR-0185's
+# three stdio residues: the runtime starts a digest, not a path (no hash-to-spawn
+# gap); the interpreter and modules are in the image (pinned with it); and the
+# sandbox holds no credential (profile `secrets: none`).
+#
+# Copy this file next to the server's package.json and package-lock.json, then:
+#   docker build --build-arg REGULAIT_STDIO_BASE=regulait/stdio-base:local \
+#     -f Dockerfile.closure.example -t my-mcp-server:closure .
+#   docker image inspect --format '{{.Id}}' my-mcp-server:closure
+# Register the printed digest as the server's `image`, and the command and argv
+# named at the end of this file (absolute paths inside the image).
+# Air-gapped installs `docker save` the image into the bundle and `docker load` it
+# on the host; the executor runs it with `--pull never`.
+#
+# NOT EXECUTED in the session that wrote it (no Docker daemon there; M-041).
+ARG REGULAIT_STDIO_BASE=regulait/stdio-base:local
+
+FROM --platform=linux/amd64 node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS install
+WORKDIR /srv/mcp
+COPY package.json package-lock.json ./
+# no install scripts, production modules only, from the lockfile
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && rm -rf /root/.npm
+
+FROM ${REGULAIT_STDIO_BASE}
+COPY --from=install --chown=0:0 /srv/mcp /srv/mcp
+# what to register: `command` /usr/local/bin/node (the interpreter is in the image),
+# `args` ["/srv/mcp/node_modules/<package>/dist/index.js", …the server's own fixed arguments]

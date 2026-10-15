@@ -220,3 +220,50 @@ export const ISACA_AI_AGENTS_PACK: CreateCompliancePackInput = {
   cascadeTag: null,
   controls: ISACA_AI_AGENTS_CONTROLS,
 };
+
+/**
+ * ADR-0190 slice I4 — `isaca-ai-agents@2`. Version 1 is unchanged (a correction
+ * is a new version, never a rewrite). Item 5 (isolated execution, segmented
+ * network) moves from `unaddressed` to `partial`, evidenced by the
+ * `isolation_placements` collector: the placements an executor ran in a
+ * sandbox at L2 or above, after the gateway accepted the sandbox's own signed
+ * probe report. Partial on purpose: it covers only the workloads actually
+ * placed (stdio MCP servers today; remote MCP servers stay on someone else's
+ * host), the attestation is software-attested, and network segmentation of
+ * the deployment itself is still the deployment's.
+ */
+export const ISACA_AI_AGENTS_CONTROLS_V2: Control[] = ISACA_AI_AGENTS_CONTROLS.map((c) =>
+  c.controlRef === ref(5, "sandbox-segmentation")
+    ? evidenced(5, "sandbox-segmentation", {
+        title: "Run agent actions in an isolated environment on a segmented network",
+        description:
+          "Counts the workloads placed in a sandbox at L2 (user-space kernel) or L3 (microVM) in the period, each after " +
+          "the gateway accepted the sandbox's own probe report.",
+        coverage: "partial",
+        collector: "isolation_placements",
+        ownerNote:
+          "Covers the workloads regulAIt places (stdio MCP servers run in a gVisor sandbox started by an executor, never " +
+          "on the gateway host). Remote MCP servers run on their own hosts and are not counted. The probe reports are " +
+          "software-attested, not hardware-rooted. Network segmentation of the deployment itself is the deployment's. A " +
+          "period with no placement shows no evidence.",
+      })
+    : (JSON.parse(JSON.stringify(c)) as Control),
+);
+
+export const ISACA_AI_AGENTS_PACK_V2: CreateCompliancePackInput = {
+  ...ISACA_AI_AGENTS_PACK,
+  version: 2,
+  title: "ISACA — securing AI agents, Secure-by-Default checklist (control mapping), v2 evidences sandboxed execution",
+  description:
+    "One control per item of the 15-item Secure-by-Default checklist in ISACA's recommendations for securing AI agents " +
+    "(2026). Titles are regulAIt's paraphrases, not ISACA's text. v2 evidences item 5 by the sandbox placements an " +
+    "executor ran. Item 3 is not addressed by the platform and two more need the organisation's attestation; the rest " +
+    "count evidence from regulAIt's own ledgers.",
+  provenance: {
+    ...ISACA_AI_AGENTS_PACK.provenance,
+    note:
+      `${ISACA_AI_AGENTS_PACK.provenance.note} v2 (ADR-0190 I4): item 5 moves from unaddressed to partial, evidenced ` +
+      "by sandbox placements at L2 or above. Every other item is unchanged. v1 is unchanged.",
+  },
+  controls: ISACA_AI_AGENTS_CONTROLS_V2,
+};

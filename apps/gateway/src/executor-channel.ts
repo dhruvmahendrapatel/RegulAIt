@@ -27,7 +27,7 @@
  * governance alert are raised, and the executor is told `next: quarantined`
  * (it kills the sandbox: input was never released).
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { decodeProtectedHeader, flattenedVerify, importJWK, type JWK } from "jose";
 import { z } from "zod";
@@ -37,6 +37,7 @@ import {
   desc,
   eq,
   executionOffers,
+  executionPlacementReports,
   executionPlacements,
   executionProfiles,
   executorAttestations,
@@ -59,6 +60,7 @@ import {
   EXECUTOR_PROOF_ALGS,
   EXECUTOR_STREAM_WINDOW,
   executionProfileBodySchema,
+  canonicalJson,
   executorAnnounceSchema,
   executorDeclineSchema,
   executorEndSchema,
@@ -84,7 +86,8 @@ import {
 } from "@regulait/shared";
 import { completeExecutorRequest, NO_IDENTITY, sendExecutorRefusal, verifyExecutorProofHeader, type ExecutorAuth, type ExecutorProofHeaderResult } from "./executor-channel-auth.js";
 import { databaseNow } from "./delegation.js";
-import { attestationCounts, freshAttestation } from "./executor-attestation.js";
+import { attestationCounts, freshAttestation, type FreshAttestationRow } from "./executor-attestation.js";
+import { endStdioSession, registerExecutorStdioRoutes } from "./executor-stdio.js";
 import { loadOrgSettings } from "./org-settings.js";
 
 export interface ExecutorChannelOptions {
@@ -250,12 +253,27 @@ export interface PlacementAuditContext {
   detail?: Record<string, unknown>;
 }
 
+/**
+ * I4 (migration 0198): the decision-time placement row an offer belongs to, if
+ * a governed stdio decision made that offer (`outcome = 'offered'`). Its
+ * outcome is then a LINKED report row, never a second placement row: the
+ * decision-time row is the one the decision's facts name.
+ */
+async function linkedPlacementOf(db: Db, offerId: string): Promise<{ id: string } | null> {
+  const [row] = await db
+    .select({ id: executionPlacements.id })
+    .from(executionPlacements)
+    .where(and(eq(executionPlacements.offerId, offerId), eq(executionPlacements.outcome, "offered")));
+  return row ?? null;
+}
+
 async function refusedPlacement(
   db: Db,
-  o: Pick<ExecutionOfferRow, "id" | "workloadKind" | "requiredClass" | "requiredBy" | "profileDigest"> & { executorId: string | null },
+  o: Pick<ExecutionOfferRow, "id" | "workloadKind" | "requiredClass" | "requiredBy" | "profileDigest"> & { executorId: string | null; imageDigest?: string },
   code: ExecutionRefusalReason,
   context: PlacementAuditContext = {},
 ): Promise<string> {
+  const linked = await linkedPlacementOf(db, o.id);
   const auditId = await auditExecutor(db, {
     userId: context.userId ?? NO_IDENTITY,
     objectType: "execution_placement",
@@ -265,11 +283,23 @@ async function refusedPlacement(
     detail: { offerId: o.id, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, profileDigest: o.profileDigest, executorId: o.executorId, code, ...(context.detail ?? {}) },
     reason: `placement refused (${code}): no executor with a fresh attestation at ${o.requiredClass} took it (ADR-0190 decision 7; no fallback)`,
   });
+  if (linked) {
+    await db.insert(executionPlacementReports).values({ placementId: linked.id, offerId: o.id, auditId, outcome: "refused", refusalCode: code });
+    return linked.id;
+  }
+  const image = typeof o.imageDigest === "string" && /^sha256:[0-9a-f]{64}$/.test(o.imageDigest) ? o.imageDigest : null;
   const [row] = await db
     .insert(executionPlacements)
-    .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, outcome: "refused", refusalCode: code })
+    .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, outcome: "refused", refusalCode: code, imageDigest: image })
     .returning({ id: executionPlacements.id });
   return row!.id;
+}
+
+/** I4: the SHA-256 of the runtime flags an attestation's stored report observed (canonical JSON of the sorted list); null if none */
+export function runtimeFlagsDigest(report: Record<string, unknown>): string | null {
+  const flags = (report as { probes?: { runtime_config?: { observed?: { flags?: unknown } | null } } }).probes?.runtime_config?.observed?.flags;
+  if (!Array.isArray(flags) || !flags.every((f) => typeof f === "string")) return null;
+  return createHash("sha256").update(canonicalJson([...(flags as string[])].sort())).digest("hex");
 }
 
 /** an offer as the stream carries it */
@@ -314,11 +344,21 @@ export type OfferPlacementOutcome =
  * attestation meets the requirement, or refuse with the most specific reason
  * before any sandbox starts. Nothing here lowers the class.
  */
-export async function offerPlacement(db: Db, input: OfferPlacementInput): Promise<OfferPlacementOutcome> {
+/** what the broker's selection found, before anything is written */
+type Selection =
+  | { kind: "unresolved"; fact: string }
+  | { kind: "unknown_profile" }
+  | { kind: "refused"; code: ExecutionRefusalReason; input: OfferPlacementInput }
+  | { kind: "chosen"; executor: ExecutorRow; cls: AppliedIsolationKind; attestation: FreshAttestationRow; input: OfferPlacementInput };
+
+/**
+ * Decision 7's last step, read-only: an active executor whose fresh attestation meets the requirement (the
+ * profile's own floor raises it), or the most specific refusal. Shared by the I3 broker (`offerPlacement`) and the
+ * I4 governed stdio decision (`offerLinkedPlacement`), so both refuse and choose by the same rule.
+ */
+async function selectExecutor(db: Db, input: OfferPlacementInput): Promise<Selection> {
   // Amendment item 15 with OWNER DECISION B: a policy fact that is missing or outside its vocabulary refuses
-  // `policy_unresolved` before anything else is looked at, and before any executor is offered work. There is
-  // no placement row (the row's own columns would have to hold the unresolved fact); the audit row records it.
-  // Every fact the INSERTs below depend on is named here, so a malformed one is a refusal, never a CHECK error.
+  // `policy_unresolved` before anything else is looked at, and before any executor is offered work.
   const unresolved = unresolvedPlacementFact({
     workloadKind: input.workloadKind,
     requiredClass: input.requiredClass,
@@ -326,47 +366,14 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
     profileDigest: input.profileDigest,
     imageDigest: input.imageDigest,
   });
-  if (unresolved) {
-    await auditExecutor(db, {
-      userId: input.audit?.userId ?? NO_IDENTITY,
-      objectType: "execution_placement",
-      objectId: null,
-      ruleId: "execution-refused",
-      effect: "deny",
-      // only well-formed values are echoed: a malformed one is caller input of unbounded shape
-      detail: {
-        unresolvedFact: unresolved,
-        profileDigest: typeof input.profileDigest === "string" && /^[0-9a-f]{64}$/.test(input.profileDigest) ? input.profileDigest : null,
-        code: "policy_unresolved",
-        ...(input.audit?.detail ?? {}),
-      },
-      reason: `placement refused (policy_unresolved): the policy fact ${unresolved} did not resolve (ADR-0190 decision 7, amendment item 15; never defaulted)`,
-    });
-    return { kind: "refused", code: "policy_unresolved", placementId: null };
-  }
+  if (unresolved) return { kind: "unresolved", fact: unresolved };
   const now = await databaseNow(db);
-  const refuse = async (code: ExecutionRefusalReason): Promise<OfferPlacementOutcome> => ({
-    kind: "refused",
-    code,
-    placementId: await refusedPlacement(db, { id: randomUUID(), ...input, executorId: null }, code, input.audit),
-  });
   const profile = await profileByDigest(db, input.profileDigest);
-  if (!profile) {
-    await auditExecutor(db, {
-      userId: input.audit?.userId ?? NO_IDENTITY,
-      objectType: "execution_placement",
-      objectId: null,
-      ruleId: "execution-refused",
-      effect: "deny",
-      detail: { workloadKind: input.workloadKind, requiredClass: input.requiredClass, requiredBy: input.requiredBy, profileDigest: input.profileDigest, code: "profile_retired", ...(input.audit?.detail ?? {}) },
-      reason: "placement refused (profile_retired): no execution profile has that digest (ADR-0190 decision 7)",
-    });
-    return { kind: "refused", code: "profile_retired", placementId: null };
-  }
-  if (profile.retiredAt) return refuse("profile_retired");
+  if (!profile) return { kind: "unknown_profile" };
+  if (profile.retiredAt) return { kind: "refused", code: "profile_retired", input };
   // the profile's own floor is a policy fact too: one that does not resolve is never dropped from the MAX
   if (unresolvedPlacementFact({ workloadKind: input.workloadKind, requiredClass: input.requiredClass, requiredBy: input.requiredBy, profileMinClass: profile.minClass })) {
-    return refuse("policy_unresolved");
+    return { kind: "refused", code: "policy_unresolved", input };
   }
   if (isolationClassRank(profile.minClass) > isolationClassRank(input.requiredClass)) {
     // the profile's own floor is part of the requirement (decision 7 item 5)
@@ -375,11 +382,11 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
   const only = input.onlyExecutorIds;
   const rows = (await db.select().from(executors).where(inArray(executors.status, ["active", "quarantined"]))).filter((r) => !only || only.includes(r.id));
   const active = rows.filter((r) => r.status === "active");
-  if (active.length === 0) return refuse(rows.length > 0 ? "executor_quarantined" : "no_executor");
+  if (active.length === 0) return { kind: "refused", code: rows.length > 0 ? "executor_quarantined" : "no_executor", input };
 
   let sawAttestation = false;
   let sawFresh = false;
-  const candidates: Array<{ row: ExecutorRow; cls: AppliedIsolationKind; open: number }> = [];
+  const candidates: Array<{ row: ExecutorRow; fresh: FreshAttestationRow; open: number }> = [];
   for (const row of active) {
     const [any] = await db
       .select({ id: executorAttestations.id })
@@ -397,16 +404,20 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
       .select({ n: sql<number>`count(*)::int` })
       .from(executionOffers)
       .where(and(eq(executionOffers.executorId, row.id), inArray(executionOffers.status, ["offered", "accepted", "placed"])));
-    candidates.push({ row, cls: fresh.class, open: open?.n ?? 0 });
+    candidates.push({ row, fresh, open: open?.n ?? 0 });
   }
-  if (candidates.length === 0) return refuse(sawFresh ? "class_below_required" : sawAttestation ? "attestation_stale" : "no_executor");
+  if (candidates.length === 0) return { kind: "refused", code: sawFresh ? "class_below_required" : sawAttestation ? "attestation_stale" : "no_executor", input };
   candidates.sort((a, b) => a.open - b.open);
   const chosen = candidates[0]!;
+  return { kind: "chosen", executor: chosen.row, cls: chosen.fresh.class, attestation: chosen.fresh, input };
+}
+
+async function insertOffer(db: Db, executorId: string, input: OfferPlacementInput): Promise<string> {
   const ttl = Math.max(1, Math.min(600, input.ttlSeconds ?? EXECUTION_OFFER_TTL_SECONDS));
   const [offer] = await db
     .insert(executionOffers)
     .values({
-      executorId: chosen.row.id,
+      executorId,
       workloadKind: input.workloadKind,
       requiredClass: input.requiredClass,
       requiredBy: input.requiredBy,
@@ -416,7 +427,95 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
       expiresAt: sql`now() + make_interval(secs => ${ttl})`,
     })
     .returning({ id: executionOffers.id });
-  return { kind: "offered", offerId: offer!.id, executorId: chosen.row.id, attestedClass: chosen.cls };
+  return offer!.id;
+}
+
+export async function offerPlacement(db: Db, input: OfferPlacementInput): Promise<OfferPlacementOutcome> {
+  const sel = await selectExecutor(db, input);
+  if (sel.kind === "unresolved") {
+    // no placement row (the row's own columns would have to hold the unresolved fact); the audit row records it
+    await auditExecutor(db, {
+      userId: input.audit?.userId ?? NO_IDENTITY,
+      objectType: "execution_placement",
+      objectId: null,
+      ruleId: "execution-refused",
+      effect: "deny",
+      // only well-formed values are echoed: a malformed one is caller input of unbounded shape
+      detail: {
+        unresolvedFact: sel.fact,
+        profileDigest: typeof input.profileDigest === "string" && /^[0-9a-f]{64}$/.test(input.profileDigest) ? input.profileDigest : null,
+        code: "policy_unresolved",
+        ...(input.audit?.detail ?? {}),
+      },
+      reason: `placement refused (policy_unresolved): the policy fact ${sel.fact} did not resolve (ADR-0190 decision 7, amendment item 15; never defaulted)`,
+    });
+    return { kind: "refused", code: "policy_unresolved", placementId: null };
+  }
+  if (sel.kind === "unknown_profile") {
+    await auditExecutor(db, {
+      userId: input.audit?.userId ?? NO_IDENTITY,
+      objectType: "execution_placement",
+      objectId: null,
+      ruleId: "execution-refused",
+      effect: "deny",
+      detail: { workloadKind: input.workloadKind, requiredClass: input.requiredClass, requiredBy: input.requiredBy, profileDigest: input.profileDigest, code: "profile_retired", ...(input.audit?.detail ?? {}) },
+      reason: "placement refused (profile_retired): no execution profile has that digest (ADR-0190 decision 7)",
+    });
+    return { kind: "refused", code: "profile_retired", placementId: null };
+  }
+  if (sel.kind === "refused") {
+    return { kind: "refused", code: sel.code, placementId: await refusedPlacement(db, { id: randomUUID(), ...sel.input, executorId: null }, sel.code, input.audit) };
+  }
+  const offerId = await insertOffer(db, sel.executor.id, sel.input);
+  return { kind: "offered", offerId, executorId: sel.executor.id, attestedClass: sel.cls };
+}
+
+/**
+ * ADR-0190 I4 (with the I8 contract): decision 7 for a GOVERNED stdio call, inside the transaction that writes that
+ * decision's audit row and BEFORE it, so the decision's facts read the placement. The placement row is keyed to the
+ * decision's audit id (`auditId`, chosen by the caller) and is:
+ *  - `offered`: the chosen executor, the class its fresh attestation shows, that attestation (`attestationId`), the
+ *    image and the runtime flags hash; an offer is made to that executor in the same transaction. Its outcome is the
+ *    linked report row written when the executor reports (or the offer expires, is declined or withdrawn);
+ *  - `refused`: decision 7's fixed code (the decision itself becomes that refusal);
+ *  - none, for a policy fact that does not resolve (`policy_unresolved`: the row's columns would have to hold it).
+ * Nothing here audits: the decision row is the audit.
+ */
+export type LinkedPlacementOutcome =
+  | { kind: "offered"; placementId: string; offerId: string; executorId: string; attestedClass: AppliedIsolationKind }
+  | { kind: "refused"; code: ExecutionRefusalReason; placementId: string | null };
+
+export async function offerLinkedPlacement(tx: Db, auditId: string, input: OfferPlacementInput): Promise<LinkedPlacementOutcome> {
+  const sel = await selectExecutor(tx, input);
+  if (sel.kind === "unresolved") return { kind: "refused", code: "policy_unresolved", placementId: null };
+  if (sel.kind === "unknown_profile") return { kind: "refused", code: "profile_retired", placementId: null };
+  const base = {
+    auditId,
+    workloadKind: sel.input.workloadKind,
+    requiredClass: sel.input.requiredClass,
+    requiredBy: sel.input.requiredBy,
+    enforcement: ENFORCEMENT,
+    profileDigest: sel.input.profileDigest,
+    imageDigest: sel.input.imageDigest,
+  };
+  if (sel.kind === "refused") {
+    const [row] = await tx.insert(executionPlacements).values({ ...base, outcome: "refused", refusalCode: sel.code }).returning({ id: executionPlacements.id });
+    return { kind: "refused", code: sel.code, placementId: row!.id };
+  }
+  const offerId = await insertOffer(tx, sel.executor.id, sel.input);
+  const [row] = await tx
+    .insert(executionPlacements)
+    .values({
+      ...base,
+      outcome: "offered",
+      executorId: sel.executor.id,
+      appliedClass: sel.cls,
+      attestationId: sel.attestation.id,
+      runtimeFlagsSha256: runtimeFlagsDigest(sel.attestation.report),
+      offerId,
+    })
+    .returning({ id: executionPlacements.id });
+  return { kind: "offered", placementId: row!.id, offerId, executorId: sel.executor.id, attestedClass: sel.cls };
 }
 
 export type PlacementResult =
@@ -433,12 +532,15 @@ export async function awaitPlacement(db: Db, offerId: string, opts: { timeoutMs?
     if (!o) return { kind: "failed", status: "expired", code: "no_executor", placementId: null };
     if (o.status === "placed" || o.status === "ended") {
       const [p] = await db.select().from(executionPlacements).where(eq(executionPlacements.id, o.placementId!));
-      return { kind: "placed", placementId: o.placementId!, reportSha256: p!.reportSha256!, appliedClass: p!.appliedClass!, executorId: o.executorId };
+      // I4: a decision-time (`offered`) placement's outcome is its linked report row
+      const [r] = p?.outcome === "offered" ? await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, p.id)) : [];
+      return { kind: "placed", placementId: o.placementId!, reportSha256: (r?.reportSha256 ?? p!.reportSha256)!, appliedClass: (r?.appliedClass ?? p!.appliedClass)!, executorId: o.executorId };
     }
     if (o.status === "mismatch") return { kind: "failed", status: o.status, code: "execution_profile_mismatch", placementId: o.placementId };
     if (o.status === "declined" || o.status === "expired" || o.status === "withdrawn") {
       const [p] = o.placementId ? await db.select().from(executionPlacements).where(eq(executionPlacements.id, o.placementId)) : [];
-      return { kind: "failed", status: o.status, code: (p?.refusalCode as ExecutionRefusalReason | null) ?? "no_executor", placementId: o.placementId };
+      const [r] = p?.outcome === "offered" ? await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, p.id)) : [];
+      return { kind: "failed", status: o.status, code: ((r?.refusalCode ?? p?.refusalCode) as ExecutionRefusalReason | null) ?? "no_executor", placementId: o.placementId };
     }
     if (Date.now() >= deadline) return { kind: "failed", status: o.status, code: "no_executor", placementId: null };
     await new Promise((r) => setTimeout(r, poll));
@@ -868,10 +970,13 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
             detail: { ...detail, failures },
             reason: `the per-placement report disagrees with the placement (${failures.map((f) => `${f.probe}:${f.code}`).join(", ")}): refused before any input was delivered; the executor is quarantined (ADR-0190 decision 6)`,
           });
-          const [pl] = await tx
-            .insert(executionPlacements)
-            .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "mismatch", refusalCode: "execution_profile_mismatch" })
-            .returning({ id: executionPlacements.id });
+          const linked = await linkedPlacementOf(txDb, o.id);
+          const [pl] = linked
+            ? [linked, await tx.insert(executionPlacementReports).values({ placementId: linked.id, offerId: o.id, auditId, outcome: "mismatch", appliedClass: signed.report.class, reportSha256, refusalCode: "execution_profile_mismatch" })]
+            : await tx
+                .insert(executionPlacements)
+                .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "mismatch", refusalCode: "execution_profile_mismatch", imageDigest: o.imageDigest })
+                .returning({ id: executionPlacements.id });
           await tx.update(executionOffers).set({ status: "mismatch", reportedAt: sql`now()`, placementId: pl!.id }).where(eq(executionOffers.id, o.id));
           return { status: 409, code: "execution_profile_mismatch", failures, placementId: pl!.id } as const;
         }
@@ -883,10 +988,14 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
           detail,
           reason: `placed at ${signed.report.class} on executor ${ex.name} (required ${o.requiredClass} by ${o.requiredBy}); software-attested per-placement report ${reportSha256.slice(0, 12)} verified before input (ADR-0190 decision 6)`,
         });
-        const [pl] = await tx
-          .insert(executionPlacements)
-          .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "placed" })
-          .returning({ id: executionPlacements.id });
+        // I4: a governed stdio decision already wrote this placement's row (outcome `offered`): its report is linked
+        const linked = await linkedPlacementOf(txDb, o.id);
+        const [pl] = linked
+          ? [linked, await tx.insert(executionPlacementReports).values({ placementId: linked.id, offerId: o.id, auditId, outcome: "placed", appliedClass: signed.report.class, reportSha256 })]
+          : await tx
+              .insert(executionPlacements)
+              .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "placed", imageDigest: o.imageDigest })
+              .returning({ id: executionPlacements.id });
         await tx.update(executionOffers).set({ status: "placed", reportedAt: sql`now()`, placementId: pl!.id }).where(eq(executionOffers.id, o.id));
         return { status: 200, placementId: pl!.id, reportSha256 } as const;
       });
@@ -930,7 +1039,17 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         return true;
       });
       if (!ended) return refused(reply, 409, "offer_unavailable", row);
+      // I4: a stdio session this process holds ends with its sandbox
+      endStdioSession(p.data.offerId);
       return reply.status(204).send();
+    });
+
+    // ---- I4: the stdio session's bytes (same proof, same scope) ---------------
+    registerExecutorStdioRoutes(scope, db, {
+      authed: async (req, reply) => (await authed(req, reply, true))?.executor ?? null,
+      refused,
+      jsonOf,
+      keepaliveMs,
     });
   });
 }

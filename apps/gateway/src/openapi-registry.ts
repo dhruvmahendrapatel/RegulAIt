@@ -1064,6 +1064,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/executor-channel/offers/:offerId/decline": "internal",
   "POST /v1/executor-channel/offers/:offerId/report": "internal",
   "POST /v1/executor-channel/offers/:offerId/end": "internal",
+  // ADR-0190 I4: a placed stdio session's bytes
+  "GET /v1/executor-channel/offers/:offerId/stdio": "internal",
+  "POST /v1/executor-channel/offers/:offerId/stdio": "internal",
 };
 
 /**
@@ -2004,4 +2007,6 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/executor-channel/offers/:offerId/decline": "executor-channel",
   "POST /v1/executor-channel/offers/:offerId/report": "executor-channel",
   "POST /v1/executor-channel/offers/:offerId/end": "executor-channel",
+  "GET /v1/executor-channel/offers/:offerId/stdio": "executor-channel",
+  "POST /v1/executor-channel/offers/:offerId/stdio": "executor-channel",
 };

@@ -1902,7 +1902,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
    */
   const mcpServerView = (row: typeof mcpServers.$inferSelect) => ({
     ...row,
-    stdio: row.transport === "stdio" ? { command: row.stdioCommand, args: row.stdioArgs ?? [] } : null,
+    // ADR-0190 I4: `image` is the closure image's digest (stored in stdio_command_digest)
+    stdio: row.transport === "stdio" ? { image: row.stdioCommandDigest, command: row.stdioCommand, args: row.stdioArgs ?? [] } : null,
   });
 
   app.post("/v1/servers", async (req, reply) => {
@@ -1911,9 +1912,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const label = `MCP server '${parsed.name}'`;
     // ADR-0185 G4 — THE TRANSPORT RULES, before anything else is decided: the
     // org must have enabled the transport (422 mcp_transport_disabled); a
-    // stdio server also needs the host opt-in (422 mcp_stdio_unavailable)
-    // and a command that passes every host rule (400
-    // mcp_stdio_command_refused + code). Audited; nothing is saved.
+    // stdio server (ADR-0190 I4) needs a closure image pinned by digest (400
+    // mcp_stdio_image_unpinned) and an entry point and argv that pass the
+    // closure rules (400 mcp_stdio_command_refused + code). Audited; nothing
+    // is saved.
     const transportCheck = await checkMcpTransportWrite(db, {
       transport,
       stdio: parsed.transport === "stdio" ? parsed.stdio : undefined,
@@ -1942,8 +1944,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     let values: typeof mcpServers.$inferInsert;
     if (parsed.transport === "stdio") {
       // the row's url is the `stdio:<name>` sentinel (DB CHECK), which no
-      // fetch can reach; the command's sha256 is pinned here and checked at
-      // every connect (`mcp-stdio-digest-mismatch`)
+      // fetch can reach; the closure image's digest is pinned here and is the
+      // image every sandbox runs (ADR-0190 I4)
       const stdio = transportCheck.stdio!;
       values = {
         name: parsed.name,
@@ -2027,7 +2029,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           effect: "allow",
           ruleId: "mcp-stdio-server-registered",
           ruleChain: [],
-          reason: `${label} registered as a stdio upstream: ${created.stdioCommand} (sha256 ${created.stdioCommandDigest} pinned)`,
+          reason: `${label} registered as a stdio upstream: ${created.stdioCommand} in closure image ${created.stdioCommandDigest} (pinned; it runs only in a sandbox, ADR-0190 I4)`,
         });
       } else {
         await tx.insert(auditLog).values({
@@ -2313,7 +2315,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ruleId: "mcp-stdio-command-changed",
           ruleChain: [],
           reason:
-            `${label}: stdio command changed to ${row.stdioCommand} (sha256 ${row.stdioCommandDigest} pinned); ` +
+            `${label}: stdio command changed to ${row.stdioCommand} in closure image ${row.stdioCommandDigest} (pinned); ` +
             `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
         });
       }

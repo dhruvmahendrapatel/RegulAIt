@@ -14,6 +14,9 @@ export interface FreshAttestationRow {
   class: AppliedIsolationKind;
   expiresAt: Date;
   reportSha256: string;
+  /** I4: the attestation row itself (the broker stamps it on the placement), and its stored report */
+  id: string;
+  report: Record<string, unknown>;
 }
 
 /**
@@ -33,12 +36,12 @@ export function attestationCounts(executorId: string) {
 /** the executor's latest counting attestation for a profile, if it is a fresh `pass` on the database clock */
 export async function freshAttestation(db: Reader, executorId: string, profileDigest: string, now: Date): Promise<FreshAttestationRow | null> {
   const [row] = await db
-    .select({ class: executorAttestations.class, expiresAt: executorAttestations.expiresAt, verdict: executorAttestations.verdict, reportSha256: executorAttestations.reportSha256 })
+    .select({ id: executorAttestations.id, class: executorAttestations.class, expiresAt: executorAttestations.expiresAt, verdict: executorAttestations.verdict, reportSha256: executorAttestations.reportSha256, report: executorAttestations.report })
     .from(executorAttestations)
     .where(and(attestationCounts(executorId), eq(executorAttestations.profileDigest, profileDigest)))
     .orderBy(desc(executorAttestations.observedAt), desc(executorAttestations.createdAt))
     .limit(1);
   // the LATEST report decides: a fail after a pass withdraws the class until the next pass
   if (!row || row.verdict !== "pass" || row.expiresAt.getTime() <= now.getTime()) return null;
-  return { class: row.class, expiresAt: row.expiresAt, reportSha256: row.reportSha256 };
+  return { id: row.id, class: row.class, expiresAt: row.expiresAt, reportSha256: row.reportSha256, report: (row.report ?? {}) as Record<string, unknown> };
 }

@@ -127,6 +127,12 @@ describe("placements", () => {
     for (const bad of [null, {}, { placements: [] }, { placements: {}, refusalsWithoutPlacement: [] }]) expect(parsePlacements(bad)).toBeNull();
   });
 
+  it("I4: a governed stdio call's placement offered and awaiting its report reads as offered, with the class it was offered at", () => {
+    const out = parsePlacements({ placements: [{ ...placed, outcome: "offered" }, { ...placed, outcome: "offered", appliedClass: null }], refusalsWithoutPlacement: [] })!;
+    expect(out.placements[0]).toMatchObject({ outcome: "offered", appliedClass: "microvm" });
+    expect(out.placements[1]).toEqual({ unreadable: true, index: 1 });
+  });
+
   it("names every floor and every reason in words", () => {
     for (const source of ["workload_kind", "data_sensitivity", "compliance_tag", "autonomy_class", "configured_profile", "unknown_agent", "parent_grant"])
       expect(REQUIRED_BY_TEXT[source]).toBeTruthy();
