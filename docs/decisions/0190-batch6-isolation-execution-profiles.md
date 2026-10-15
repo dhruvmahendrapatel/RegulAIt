@@ -872,6 +872,22 @@ prove gVisor, and several evidence gaps. What changed:
   composite foreign key so a report's `offer_id` is its placement's. A process holds at most 256 live stdio sessions.
   A blank stdout line is skipped. The no-spawn guard flags any quoted `child_process` literal (dynamic `import()`,
   `require`).
+- **Recheck fixes (N1 to N5, 2026-10-15).**
+  - N1: compose mounts the gVisor directory read-only, not the `runsc` file (a single-file bind mount pins the
+    inode at container start, so an upgrade in place would leave the executor hashing the old binary). The hash
+    cache is keyed on device, inode, size, mtime and ctime, and a self-test always re-hashes.
+  - N2: the lost-session decision is in-process state. Each answer carries a fresh single-use nonce, which is
+    consumed and stripped from the error the first time it is classified, so no client sees a value it could replay.
+  - N3: an offered placement's report row is chosen deterministically: the `placed` row if any, else the refusal,
+    then the gateway's own ends, then time and id.
+  - N4: every sandbox's `docker run` blanks the Node variables that load code (`NODE_OPTIONS`, `NODE_PATH`,
+    `NODE_REPL_EXTERNAL_MODULE`, `NODE_COMPILE_CACHE`, the symlink switches, `NODE_ICU_DATA`). The per-placement
+    probe report remains evidence from inside an interpreter the IMAGE chose (an image can replace `node`); the class
+    itself is decided from outside. Bind-mounting a pinned Node for the init is a follow-up.
+  - N5: a digest that names no profile writes a `refused` (`profile_retired`) row keyed to the decision, keeping
+    its required class and floor with `profile_digest` NULL (the requirement CHECK allows exactly that).
+  - The compose default no longer names a real host; the executor exits at start when its gateway URL is not
+    reachable over TLS (see INSTALL.md).
 - **H1, with I8.** I8's execution facts gain an `offered` branch: at decision time the facts record the offered row
   (executor, attested class, the broker's stamped `attestation_id`, the offer, the closure image and the runtime
   flags hash, no report hash), and a `policy_unresolved` refusal may name no requirement. The Decision BOM read

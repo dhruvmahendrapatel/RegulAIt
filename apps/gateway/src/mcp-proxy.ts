@@ -73,6 +73,7 @@ import {
 } from "./mcp-egress.js";
 import { cancelUnattachedStdioSession, placeGovernedStdio, registerLinkedStdioSession, stdioPlacementContext, type GovernedStdioPlacement, type StdioSession } from "./executor-stdio.js";
 import { checkStdioClosure } from "./mcp-transports.js";
+import { isStdioSessionLostError } from "./stdio-session-loss.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { timeouts } from "./timeouts.js";
@@ -2502,6 +2503,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
           await finishTrace(db, toolTrace, "denied");
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
         }
+        // ADR-0190 I4 (recheck N2): a lost stdio session's error is recognised (and its in-process nonce stripped)
+        // before anything is answered, so a client never sees a value it could replay
+        isStdioSessionLostError(err);
         throw err;
       });
       await finishTrace(

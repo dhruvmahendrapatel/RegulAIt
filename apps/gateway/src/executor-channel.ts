@@ -33,6 +33,7 @@ import { decodeProtectedHeader, flattenedVerify, importJWK, type JWK } from "jos
 import { z } from "zod";
 import {
   and,
+  asc,
   auditLog,
   desc,
   eq,
@@ -480,7 +481,8 @@ export async function offerPlacement(db: Db, input: OfferPlacementInput): Promis
  *    image and the runtime flags hash; an offer is made to that executor in the same transaction. Its outcome is the
  *    linked report row written when the executor reports (or the offer expires, is declined or withdrawn);
  *  - `refused`: decision 7's fixed code (the decision itself becomes that refusal);
- *  - none, for a policy fact that does not resolve (`policy_unresolved`: the row's columns would have to hold it).
+ *    A `policy_unresolved` refusal has no requirement columns (review M2), and a digest that names no profile is
+ *    `profile_retired` with no profile digest (recheck N5): every refusal is a row keyed to the decision.
  * Nothing here audits: the decision row is the audit.
  */
 export type LinkedPlacementOutcome =
@@ -494,7 +496,16 @@ export async function offerLinkedPlacement(tx: Db, auditId: string, input: Offer
     const placementId = await refusedLinkedPlacement(tx, auditId, { workloadKind: input.workloadKind, imageDigest: input.imageDigest }, "policy_unresolved");
     return { kind: "refused", code: "policy_unresolved", placementId };
   }
-  if (sel.kind === "unknown_profile") return { kind: "refused", code: "profile_retired", placementId: null };
+  if (sel.kind === "unknown_profile") {
+    // recheck N5: still a row keyed to the decision; the digest names no profile, so it is not stored (its FK)
+    const placementId = await refusedLinkedPlacement(
+      tx,
+      auditId,
+      { workloadKind: input.workloadKind, imageDigest: input.imageDigest, requiredClass: input.requiredClass, requiredBy: input.requiredBy },
+      "profile_retired",
+    );
+    return { kind: "refused", code: "profile_retired", placementId };
+  }
   const base = {
     auditId,
     workloadKind: sel.input.workloadKind,
@@ -638,6 +649,29 @@ export type PlacementResult =
   | { kind: "failed"; status: ExecutionOfferRow["status"]; code: ExecutionRefusalReason | "execution_profile_mismatch" | "placement_timeout"; placementId: string | null };
 
 /** wait for an offer to be placed (the report accepted) or to fail; expiries are applied while waiting */
+/** I4 (recheck N3): the order the linked report rows of one placement are read in: what ran first, then refusals, then the gateway's own ends */
+const REPORT_RANK: Record<string, number> = { placed: 0, mismatch: 1, refused: 2, cancelled: 3, session_lost: 4 };
+type LinkedReport = Pick<typeof executionPlacementReports.$inferSelect, "id" | "outcome" | "appliedClass" | "reportSha256" | "refusalCode" | "endCode" | "createdAt">;
+/**
+ * I4 (recheck N3): THE report row of an offered placement, chosen deterministically: the `placed` row if one exists
+ * (a later `cancelled` or `session_lost` row never hides that the call ran), otherwise the end rows in rank order,
+ * then by time and id.
+ */
+export function pickLinkedReport<R extends LinkedReport>(rows: readonly R[]): R | null {
+  const sorted = [...rows].sort(
+    (a, b) => (REPORT_RANK[a.outcome] ?? 9) - (REPORT_RANK[b.outcome] ?? 9) || a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  return sorted[0] ?? null;
+}
+async function linkedReportOf(db: Db, placementId: string): Promise<LinkedReport | null> {
+  const rows = await db
+    .select({ id: executionPlacementReports.id, outcome: executionPlacementReports.outcome, appliedClass: executionPlacementReports.appliedClass, reportSha256: executionPlacementReports.reportSha256, refusalCode: executionPlacementReports.refusalCode, endCode: executionPlacementReports.endCode, createdAt: executionPlacementReports.createdAt })
+    .from(executionPlacementReports)
+    .where(eq(executionPlacementReports.placementId, placementId))
+    .orderBy(asc(executionPlacementReports.createdAt), asc(executionPlacementReports.id));
+  return pickLinkedReport(rows);
+}
+
 export async function awaitPlacement(db: Db, offerId: string, opts: { timeoutMs?: number; pollMs?: number } = {}): Promise<PlacementResult> {
   const deadline = Date.now() + (opts.timeoutMs ?? (EXECUTION_OFFER_TTL_SECONDS + EXECUTION_OFFER_REPORT_TTL_SECONDS) * 1000);
   const poll = opts.pollMs ?? 250;
@@ -647,15 +681,20 @@ export async function awaitPlacement(db: Db, offerId: string, opts: { timeoutMs?
     if (!o) return { kind: "failed", status: "expired", code: "no_executor", placementId: null };
     if (o.status === "placed" || o.status === "ended") {
       const [p] = await db.select().from(executionPlacements).where(eq(executionPlacements.id, o.placementId!));
-      // I4: a decision-time (`offered`) placement's outcome is its linked report row
-      const [r] = p?.outcome === "offered" ? await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, p.id)) : [];
-      return { kind: "placed", placementId: o.placementId!, reportSha256: (r?.reportSha256 ?? p!.reportSha256)!, appliedClass: (r?.appliedClass ?? p!.appliedClass)!, executorId: o.executorId };
+      // I4: a decision-time (`offered`) placement's outcome is its linked `placed` report row (recheck N3)
+      if (p?.outcome === "offered") {
+        const r = await linkedReportOf(db, p.id);
+        if (r?.outcome !== "placed" || !r.reportSha256 || !r.appliedClass) return { kind: "failed", status: o.status, code: "no_executor", placementId: o.placementId };
+        return { kind: "placed", placementId: o.placementId!, reportSha256: r.reportSha256, appliedClass: r.appliedClass, executorId: o.executorId };
+      }
+      return { kind: "placed", placementId: o.placementId!, reportSha256: p!.reportSha256!, appliedClass: p!.appliedClass!, executorId: o.executorId };
     }
     if (o.status === "mismatch") return { kind: "failed", status: o.status, code: "execution_profile_mismatch", placementId: o.placementId };
     if (o.status === "declined" || o.status === "expired" || o.status === "withdrawn") {
       const [p] = o.placementId ? await db.select().from(executionPlacements).where(eq(executionPlacements.id, o.placementId)) : [];
-      const [r] = p?.outcome === "offered" ? await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, p.id)) : [];
-      return { kind: "failed", status: o.status, code: ((r?.refusalCode ?? p?.refusalCode) as ExecutionRefusalReason | null) ?? "no_executor", placementId: o.placementId };
+      const r = p?.outcome === "offered" ? await linkedReportOf(db, p.id) : null;
+      const code = r?.endCode === "placement_timeout" ? "placement_timeout" : ((r?.refusalCode ?? p?.refusalCode) as ExecutionRefusalReason | null) ?? "no_executor";
+      return { kind: "failed", status: o.status, code, placementId: o.placementId };
     }
     if (Date.now() >= deadline) return { kind: "failed", status: o.status, code: "placement_timeout", placementId: o.placementId };
     await new Promise((r) => setTimeout(r, poll));

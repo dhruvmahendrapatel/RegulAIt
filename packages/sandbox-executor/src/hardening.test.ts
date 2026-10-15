@@ -21,6 +21,7 @@ import {
   type ExecutorHttp,
 } from "./client.js";
 import { FakeSandboxBackend } from "./fake-backend.js";
+import { probeGatewayReachable } from "./client.js";
 import { generateExecutorKey } from "./keys.js";
 import { handleOffer, type OfferContext } from "./offers.js";
 
@@ -214,5 +215,23 @@ describe("input is released only on release: true with next: ok and no quarantin
     expect(r.outcome).toMatchObject({ kind: "placed" });
     expect(r.sandbox).toMatchObject({ released: true });
     expect(r.ends).toEqual(["completed"]);
+  });
+});
+
+describe("ADR-0190 I4 recheck: an unreachable gateway stops the executor at start, with the reason", () => {
+  it("a TLS failure or no route is reported (main exits 2 on it); any HTTP answer is reachable", async () => {
+    const tlsFailure = Object.assign(new TypeError("fetch failed"), { cause: { code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" } });
+    const seen: string[] = [];
+    const failing = async (url: string) => {
+      seen.push(url);
+      throw tlsFailure;
+    };
+    expect(await probeGatewayReachable("https://gateway.example.test/base", failing)).toBe(
+      "the gateway at https://gateway.example.test is not reachable over https from this executor (UNABLE_TO_VERIFY_LEAF_SIGNATURE)",
+    );
+    expect(seen).toEqual(["https://gateway.example.test/health"]);
+    expect(await probeGatewayReachable("https://gateway.example.test", async () => ({ status: 503 }))).toBeNull();
+    const noRoute = Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } });
+    expect(await probeGatewayReachable("https://set-regulait-executor-gateway-url.invalid", async () => Promise.reject(noRoute))).toMatch(/not reachable over https .*ENOTFOUND/);
   });
 });

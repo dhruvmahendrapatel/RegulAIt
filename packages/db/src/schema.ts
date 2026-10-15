@@ -13433,7 +13433,7 @@ export const executionPlacements = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     auditId: uuid("audit_id").notNull(),
     workloadKind: text("workload_kind", { enum: ISOLABLE_WORKLOAD_KINDS }).notNull(),
-    /** I4 (migration 0198): NULL only on a `refused` row whose code is `policy_unresolved` (requirement check) */
+    /** I4 (migration 0198): NULL only on a `refused` row whose code is `policy_unresolved` (requirement check; the profile digest also on a `profile_retired` refusal for a digest that names no profile) */
     requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }),
     requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }),
     enforcement: text("enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull(),
@@ -13458,7 +13458,7 @@ export const executionPlacements = pgTable(
     unique("execution_placements_id_offer_uq").on(t.id, t.offerId),
     check(
       "execution_placements_requirement_check",
-      sql`(${t.requiredClass} IS NOT NULL AND ${t.requiredBy} IS NOT NULL AND ${t.profileDigest} IS NOT NULL) OR (${t.outcome} = 'refused' AND ${t.refusalCode} = 'policy_unresolved')`,
+      sql`(${t.requiredClass} IS NOT NULL AND ${t.requiredBy} IS NOT NULL AND ${t.profileDigest} IS NOT NULL) OR (${t.outcome} = 'refused' AND ${t.refusalCode} = 'policy_unresolved') OR (${t.outcome} = 'refused' AND ${t.refusalCode} = 'profile_retired' AND ${t.requiredClass} IS NOT NULL AND ${t.requiredBy} IS NOT NULL)`,
     ),
     check("execution_placements_image_digest_check", sql`${t.imageDigest} IS NULL OR ${t.imageDigest} ~ '^sha256:[0-9a-f]{64}$'`),
     check("execution_placements_runtime_flags_sha256_check", sql`${t.runtimeFlagsSha256} IS NULL OR ${t.runtimeFlagsSha256} ~ '^[0-9a-f]{64}$'`),

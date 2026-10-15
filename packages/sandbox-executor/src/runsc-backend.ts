@@ -101,7 +101,8 @@ export interface RunscBackendOptions {
   initDir: string;
   initVolume: string;
   /**
-   * Review H2: the runsc binary as this executor can read it (the host's gVisor directory, mounted read-only), and
+   * Review H2: the runsc binary as this executor can read it (the host's gVisor DIRECTORY, mounted read-only, so a
+   * replaced binary is seen: a single-file bind mount would pin the old inode, recheck N1), and
    * the path the DAEMON names for it. The daemon's path must be `runscHostPath`, and the binary's sha512 a pinned
    * release (`RUNSC_RELEASES`).
    */
@@ -166,6 +167,12 @@ export interface DockerRunInput {
   /** the Docker volume holding the executor's pinned init (mounted read-only) */
   initVolume: string;
 }
+
+/**
+ * Recheck N4: Node environment variables that make the interpreter load code or change module resolution before the
+ * init's first line, blanked on every sandbox's `docker run` (an image may set them in its `ENV`).
+ */
+export const STDIO_SANDBOX_BLANKED_ENV = ["NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "NODE_COMPILE_CACHE", "NODE_PRESERVE_SYMLINKS", "NODE_PRESERVE_SYMLINKS_MAIN", "NODE_ICU_DATA"] as const;
 
 /** the profile features the Docker backend cannot honour in I4: refused before any sandbox */
 export function unsupportedProfileFeature(profile: ExecutionProfileBody): string | null {
@@ -235,6 +242,9 @@ export function dockerRunArgs(input: DockerRunInput): string[] {
     // review H2: the init is the executor's, read-only, and it is the entry point (the image cannot replace it)
     "--mount",
     `type=volume,src=${input.initVolume},dst=${STDIO_SANDBOX_INIT_DIR},readonly`,
+    // recheck N4: the image's own environment may not make Node load code before the init (or the workload) runs.
+    // These are the only `--env` flags: each BLANKS a variable the image may set, never passes a value in.
+    ...STDIO_SANDBOX_BLANKED_ENV.flatMap((name) => ["--env", `${name}=`]),
     "--entrypoint",
     STDIO_SANDBOX_NODE,
     input.image,
@@ -479,8 +489,11 @@ export class RunscDockerBackend implements SandboxBackend {
   private readonly dockerBin: string;
   private readonly socket: string;
 
-  /** the runsc binary's identity when it was last verified (size and mtime); re-hashed when either changes */
-  private verifiedBinary: { size: number; mtimeMs: number } | null = null;
+  /**
+   * the runsc binary's identity when it was last verified (device, inode, size, mtime, ctime); re-hashed when any of
+   * them changes (recheck N1: a replace-by-rename is a new inode, an in-place write moves size, mtime or ctime)
+   */
+  private verifiedBinary: string | null = null;
 
   constructor(private readonly opts: RunscBackendOptions) {
     if (!isStdioClosureImage(opts.canaryImage)) throw new RunscBackendError("the canary image must be a content digest (sha256:<64 hex>)");
@@ -519,7 +532,7 @@ export class RunscDockerBackend implements SandboxBackend {
     }
   }
 
-  /** the runsc binary the daemon names is the pinned release (re-hashed whenever its size or mtime changes) */
+  /** the runsc binary the daemon names is the pinned release (re-hashed whenever its file identity changes) */
   private async binaryVerified(daemonPath: string | null, force: boolean): Promise<boolean> {
     if (daemonPath !== this.opts.runscHostPath) return false;
     let st;
@@ -528,13 +541,14 @@ export class RunscDockerBackend implements SandboxBackend {
     } catch {
       return false;
     }
-    if (!force && this.verifiedBinary && this.verifiedBinary.size === st.size && this.verifiedBinary.mtimeMs === st.mtimeMs) return true;
+    const identity = `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+    if (!force && this.verifiedBinary === identity) return true;
     const sum = await (this.opts.sha512File ?? sha512FileHex)(this.opts.runscBinary);
     if (sum !== RUNSC_RELEASES[this.opts.runtimeVersion]) {
       this.verifiedBinary = null;
       return false;
     }
-    this.verifiedBinary = { size: st.size, mtimeMs: st.mtimeMs };
+    this.verifiedBinary = identity;
     return true;
   }
 
@@ -572,7 +586,7 @@ export class RunscDockerBackend implements SandboxBackend {
       const unsupported = unsupportedProfileFeature(profile);
       if (unsupported) throw new RunscBackendError(`the profile asks for ${unsupported}, which the runsc backend does not provide in this release; nothing was started`);
     }
-    // a self-test re-hashes the runtime binary; a placement re-hashes it when its size or mtime changed
+    // a self-test re-hashes the runtime binary; a placement re-hashes it whenever its file identity changed
     const rt = await this.preflight(kind === "canary");
     const name = `regulait-sbx-${randomUUID()}`;
     const args = dockerRunArgs({ name, runtimeName: this.opts.runtimeName, image, profile, canary: kind === "canary", seccompDir: this.opts.seccompDir ?? null, initVolume: this.opts.initVolume });

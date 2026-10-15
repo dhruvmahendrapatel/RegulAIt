@@ -871,16 +871,19 @@ services:
       # review H2: the executor-controlled sandbox init. The executor copies its hash-pinned init here; every
       # sandbox mounts this same named volume READ-ONLY as its entry point.
       - sandbox-init:/regulait-init
-      # review H2: the host's runsc binary, READ-ONLY, so the executor can hash it against the pinned gVisor release
-      - ${REGULAIT_RUNSC_HOST_PATH:-/usr/local/lib/gvisor/runsc}:/host-gvisor/runsc:ro
+      # review H2 / recheck N1: the host's gVisor DIRECTORY, READ-ONLY, so the executor hashes the runsc binary the
+      # daemon runs against the pinned release. A directory, never the file: a single-file bind mount pins the inode
+      # at container start, so an upgrade in place would leave the executor hashing the old binary.
+      - ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}:/host-gvisor:ro
     environment:
-      # review M4: https by default (the TLS profile's public name). Plain http only through the explicit
-      # development override compose.isolation-insecure-dev.yml, which logs a warning at start.
-      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://${REGULAIT_TLS_HOST:-3-229-246-126.sslip.io}}
+      # review M4: https only. There is no working default: set REGULAIT_EXECUTOR_GATEWAY_URL to an https address of
+      # the gateway reachable from the `engines` network. The placeholder (.invalid never resolves) makes the executor
+      # exit at start with that instruction. Plain http only through compose.isolation-insecure-dev.yml (warned).
+      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://set-regulait-executor-gateway-url.invalid}
       REGULAIT_EXECUTOR_INIT_VOLUME: regulait-sandbox-init
       REGULAIT_EXECUTOR_INIT_DIR: /regulait-init
       REGULAIT_EXECUTOR_RUNSC_BINARY: /host-gvisor/runsc
-      REGULAIT_EXECUTOR_RUNSC_HOST_PATH: ${REGULAIT_RUNSC_HOST_PATH:-/usr/local/lib/gvisor/runsc}
+      REGULAIT_EXECUTOR_RUNSC_HOST_PATH: ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}/runsc
       REGULAIT_PUBLIC_URL: ${REGULAIT_PUBLIC_URL:-}
       REGULAIT_EXECUTOR_IDENTIFIER: ${REGULAIT_EXECUTOR_IDENTIFIER:-}
       REGULAIT_EXECUTOR_KEY_FILE: /state/executor-key.json

@@ -13,7 +13,7 @@
 import { fileURLToPath } from "node:url";
 import { loadOrCreateExecutorKey } from "./keys.js";
 import { ProofChannelCredential } from "./channel-credential.js";
-import { checkGatewayUrl, ExecutorClient, ExecutorConfigError } from "./client.js";
+import { checkGatewayUrl, ExecutorClient, ExecutorConfigError, probeGatewayReachable } from "./client.js";
 import { ExecutorFatalError, runExecutorLoop } from "./loop.js";
 import type { SandboxBackend } from "./backend.js";
 import { RunscBackendError, RunscDockerBackend } from "./runsc-backend.js";
@@ -71,6 +71,13 @@ export async function main(): Promise<void> {
       process.exit(2);
     }
     throw e;
+  }
+  // recheck: an https gateway this executor cannot reach (no route from its network, no TLS front, a certificate it
+  // does not trust) stops it at start with the reason, instead of a silent retry loop (exit 2; compose restarts it)
+  const unreachable = await probeGatewayReachable(gatewayUrl);
+  if (unreachable) {
+    console.error(`REGULAIT_GATEWAY_URL: ${unreachable}. Set REGULAIT_EXECUTOR_GATEWAY_URL to an https address of the gateway this executor's network can reach (docs/deployment/INSTALL.md).`);
+    process.exit(2);
   }
   const factory = Object.hasOwn(BACKENDS, backendName) ? BACKENDS[backendName] : undefined;
   if (!factory) {

@@ -24,7 +24,7 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -45,6 +45,7 @@ import {
   probesFrom,
   readLines,
   RunscBackendError,
+  STDIO_SANDBOX_BLANKED_ENV,
   RunscDockerBackend,
   runtimeFromInfo,
   unsupportedProfileFeature,
@@ -81,9 +82,13 @@ describe("the sandbox as docker run arguments (restricted profile)", () => {
     expect(valueAfter(args, "--entrypoint")).toBe("/usr/local/bin/node");
     expect(valueAfter(args, "--mount")).toBe("type=volume,src=regulait-init,dst=/.regulait-init,readonly");
     expect(args.slice(-2)).toEqual([IMAGE, "/.regulait-init/sandbox-init.mjs"]);
-    // nothing of the workload's: no command, no env, no mounts of a host path
+    // nothing of the workload's: no command, no env value, no mounts of a host path. The only --env flags BLANK the
+    // Node variables that load code (recheck N4): an image's ENV cannot make the interpreter run anything first.
     expect(args).not.toContain("-e");
-    expect(args).not.toContain("--env");
+    const envs = valuesAfter(args, "--env");
+    expect(envs).toEqual(STDIO_SANDBOX_BLANKED_ENV.map((n) => `${n}=`));
+    expect(envs).toEqual(expect.arrayContaining(["NODE_OPTIONS=", "NODE_PATH="]));
+    expect(args.indexOf("--env")).toBeLessThan(args.indexOf("--entrypoint"));
     expect(args).not.toContain("-v");
     expect(args).not.toContain("--volume");
     expect(args).not.toContain("--privileged");
@@ -300,6 +305,41 @@ describe("review H2: the init and the runtime binary are pinned, checked from ou
     await expect(new RunscDockerBackend(hostOptions({ runscBinary: "/nonexistent/runsc" })).preflight()).rejects.toThrow(/sha512 is not the pinned one/);
     const ok = await new RunscDockerBackend(hostOptions()).preflight();
     expect(ok).toEqual({ path: RUNSC_HOST, args: runscFlags(restricted), verified: true });
+  });
+
+  it("recheck N1: a runsc binary replaced IN PLACE after it was verified refuses the next placement (rename-over and overwrite)", async () => {
+    for (const how of ["rename-over", "overwrite"] as const) {
+      const dir = mkdtempSync(path.join(tmpdir(), "regulait-runsc-"));
+      const binary = path.join(dir, "runsc");
+      writeFileSync(binary, "stand-in");
+      const stamp = new Date("2026-10-01T00:00:00Z");
+      utimesSync(binary, stamp, stamp);
+      let hashed = 0;
+      // the seam hashes the REAL file: the stand-in bytes are "the pinned release", anything else is not
+      const sha512File = async (f: string) => {
+        hashed += 1;
+        return readFileSync(f, "utf8") === "stand-in" ? PINNED : createHash("sha512").update(readFileSync(f)).digest("hex");
+      };
+      const calls: string[][] = [];
+      const b = new RunscDockerBackend(hostOptions({ runscBinary: binary, sha512File, spawnDocker: hostInit(calls) }));
+      await b.preflight();
+      // NEGATIVE CONTROL: an unchanged file is not re-hashed for a placement (the cache is keyed on its identity)
+      await b.preflight();
+      expect(hashed).toBe(1);
+      // the upgrade in place: same size, same mtime, so only the inode (rename-over) or the ctime (overwrite) moves
+      if (how === "rename-over") {
+        const next = path.join(dir, "runsc.new");
+        writeFileSync(next, "tampered");
+        utimesSync(next, stamp, stamp);
+        renameSync(next, binary);
+      } else {
+        await new Promise((r) => setTimeout(r, 20));
+        writeFileSync(binary, "tampered");
+        utimesSync(binary, stamp, stamp);
+      }
+      await expect(b.start(offer, restricted, "user_space_kernel"), how).rejects.toThrow(/sha512 is not the pinned one/);
+      expect(calls, `${how}: no docker run`).toEqual([]);
+    }
   });
 
   it("a tampered init (the shipped file or the copy in the volume) is refused or replaced before any sandbox", async () => {

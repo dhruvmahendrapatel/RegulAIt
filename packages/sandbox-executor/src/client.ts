@@ -61,6 +61,27 @@ export function checkGatewayUrl(gatewayUrl: string, allowInsecureHttp = false): 
   throw new ExecutorConfigError(`the gateway URL must be https: (got ${u.protocol}//${u.host}); plain http is allowed only for a loopback host or with REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP=1 in development`);
 }
 
+/**
+ * ADR-0190 I4 (recheck): at start, the gateway URL must answer over its own scheme (for https: the TLS handshake
+ * and an HTTP answer of any status from `/health`). Null when it does; otherwise the reason, which `main` prints
+ * before it exits (it never retries an unreachable or non-TLS gateway forever in silence).
+ */
+export async function probeGatewayReachable(
+  gatewayUrl: string,
+  fetchImpl: (url: string, init: { method: string; signal: AbortSignal; redirect: "manual" }) => Promise<{ status: number }> = fetch,
+  timeoutMs = 10_000,
+): Promise<string | null> {
+  const url = new URL("/health", gatewayUrl).toString();
+  try {
+    await fetchImpl(url, { method: "GET", signal: AbortSignal.timeout(timeoutMs), redirect: "manual" });
+    return null;
+  } catch (e) {
+    const cause = (e as { cause?: { code?: unknown; message?: unknown } }).cause;
+    const detail = typeof cause?.code === "string" ? cause.code : typeof cause?.message === "string" ? cause.message : (e as Error).message;
+    return `the gateway at ${new URL(gatewayUrl).origin} is not reachable over ${new URL(gatewayUrl).protocol.replace(":", "")} from this executor (${detail})`;
+  }
+}
+
 export type ExecutorRoute = "announce" | "self-test" | "stream" | "accept" | "decline" | "report" | "end" | "stdio";
 
 /** the HTTP seam: `fetch`-shaped, with a body that may stream (the stream route) or be whole text */

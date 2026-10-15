@@ -11,7 +11,8 @@
 --      - `refused`: decision 7's refusal, with its fixed code; the decision itself is the refusal. A policy fact
 --        that did not resolve (`policy_unresolved`) is recorded too: for that code ONLY, the requirement columns
 --        (`required_class`, `required_by`, `profile_digest`) may be NULL, because they are exactly what did not
---        resolve (CHECK `execution_placements_requirement_check`).
+--        resolve (CHECK `execution_placements_requirement_check`). A `profile_retired` refusal for a digest that names
+--        no profile at all keeps its required class and floor, with `profile_digest` NULL (the profile does not exist).
 --    The executor's later report never rewrites that row (the table stays append-only): it is a LINKED row in
 --    `execution_placement_reports` (step 2).
 --
@@ -56,6 +57,7 @@ ALTER TABLE "execution_placements" DROP CONSTRAINT IF EXISTS "execution_placemen
 ALTER TABLE "execution_placements" ADD CONSTRAINT "execution_placements_requirement_check" CHECK (
   ("required_class" IS NOT NULL AND "required_by" IS NOT NULL AND "profile_digest" IS NOT NULL)
   OR ("outcome" = 'refused' AND "refusal_code" = 'policy_unresolved')
+  OR ("outcome" = 'refused' AND "refusal_code" = 'profile_retired' AND "required_class" IS NOT NULL AND "required_by" IS NOT NULL)
 );
 --> statement-breakpoint
 ALTER TABLE "execution_placements" DROP CONSTRAINT IF EXISTS "execution_placements_image_digest_check";

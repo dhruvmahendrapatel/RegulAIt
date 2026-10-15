@@ -543,8 +543,10 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
    ```
 
    The executor checks this before it announces anything, from OUTSIDE any sandbox: the daemon must name the
-   `runsc` runtime at exactly `REGULAIT_RUNSC_HOST_PATH` (default `/usr/local/lib/gvisor/runsc`), and that binary,
-   which compose mounts read-only into the executor, must hash (sha512) to the pinned `release-20261005.0` binary.
+   `runsc` runtime at exactly `$REGULAIT_GVISOR_HOST_DIR/runsc` (default `/usr/local/lib/gvisor/runsc`), and that
+   binary must hash (sha512) to the pinned `release-20261005.0` binary. Compose mounts the gVisor DIRECTORY read-only
+   into the executor (never the file alone, which would pin the old inode across an upgrade), and the executor
+   re-hashes the binary at every self-test and whenever its device, inode, size or times change.
    Anything else stops it at start (exit 2). Each sandbox's own runtime is then read with `docker inspect`; a
    sandbox under any other runtime, or under a binary that is not the pinned release, is reported as `runc` and the
    gateway refuses it. Every self-test and every sandbox reports the runtime's arguments, and the gateway fails a
@@ -562,11 +564,12 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
    them on the Docker host (`docker load` in an air-gapped install).
 5. **Start the executor**: register a `worker_runtime` workload identity for it, set `REGULAIT_EXECUTOR_IDENTIFIER`,
    set `REGULAIT_DOCKER_GID` to the group that owns the host's `/var/run/docker.sock`, and run
-   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only
-   (`REGULAIT_EXECUTOR_GATEWAY_URL`; the default names the TLS profile's public host). The executor sits on the
-   internal-only `engines` network, which has no route to the public address, so in the stock stack you must set
-   `REGULAIT_EXECUTOR_GATEWAY_URL` to an https address of the gateway that the `engines` network can reach (a TLS
-   front on that network); until you do, the executor fails closed at start and nothing is placed. Plain http is for
+   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only,
+   at `REGULAIT_EXECUTOR_GATEWAY_URL`, which has no working default (the placeholder ends in `.invalid`). The executor
+   sits on the internal-only `engines` network, which has no route to the public address, so set it to an https
+   address of the gateway that the `engines` network can reach (a TLS front on that network). At start the executor
+   checks that address over TLS; if it cannot reach it, it exits (code 2) with the reason and this instruction, and
+   compose restarts it, so nothing is placed until the address works. Plain http is for
    a development box only, through the explicit override `docker compose -f docker-compose.yml -f
    compose.isolation-insecure-dev.yml --profile isolation up`, and the executor logs a warning when it runs that way.
    On its first start it prints its public key: register

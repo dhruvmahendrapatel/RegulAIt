@@ -116,6 +116,8 @@ describe("ADR-0190 I8: the execution facts contract", () => {
     // ADR-0190 I4: offered (no report yet), and a policy_unresolved refusal with no requirement
     expect(decisionExecutionFactsSchema.safeParse(OFFERED).success).toBe(true);
     expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "policy_unresolved", requiredClass: null, requiredBy: null, profile: null }).success).toBe(true);
+    // recheck N5: a digest that names no profile is profile_retired with no profile, its requirement kept
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "profile_retired", profile: null }).success).toBe(true);
   });
   it("ADR-0190 I4: an offered placement has an executor, its attested class and its offer, and no report; only it names an offer", () => {
     const bad: Array<[string, unknown]> = [
@@ -124,6 +126,7 @@ describe("ADR-0190 I8: the execution facts contract", () => {
       ["offered without its executor", { ...OFFERED, executor: null }],
       ["offered with a refusal code", { ...OFFERED, refusalCode: "no_executor" }],
       ["a placed row naming an offer", { ...PLACED, offerId: U(906) }],
+      ["a no_executor refusal without its profile", { ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "no_executor", profile: null }],
       ["a refusal other than policy_unresolved without its requirement", { ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "no_executor", requiredClass: null }],
     ];
     for (const [what, value] of bad) expect(decisionExecutionFactsSchema.safeParse(value).success, what).toBe(false);

@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import { stdioFrameMacValid, stdioMacKey } from "@regulait/shared";
 import { ExecutorStdioTransport, StdioSession, stdioSecretFor } from "./executor-stdio.js";
 import { isStdioSessionLostError } from "./stdio-session-loss.js";
+import { pickLinkedReport } from "./executor-channel.js";
 import { classifyUpstreamError } from "./upstream-retry.js";
 
 const WORKLOAD = { command: "/srv/mcp/server.js", args: ["--root", "/work"] };
@@ -69,8 +70,22 @@ describe("review M3: a lost stdio session fails the call at once, as the gateway
     const err = await pending;
     stop();
     expect(Date.now() - t0, "it fails fast, not at the 30 s deadline").toBeLessThan(5_000);
+    const issuedNonce = ((err as McpError).data as { regulaitStdioSessionLost?: string } | undefined)?.regulaitStdioSessionLost;
+    expect(issuedNonce).toMatch(/^[0-9a-f]{32}$/);
     expect(isStdioSessionLostError(err)).toBe(true);
     expect(classifyUpstreamError(err)).toEqual({ retryable: false, why: "our_own_refusal" });
+    // recheck N2: recognition strips the in-process nonce, so no client is ever answered with it
+    expect((err as McpError).data).toBeUndefined();
+
+    // ...and a server that answers with that REAL value (as a client that once saw it could make it) is still the
+    // server's own failure, charged to its breaker: the nonce was single-use and is gone
+    const replay = newSession();
+    const c2 = await connected(replay, (m) => ({ jsonrpc: "2.0", id: m.id, error: { code: ErrorCode.InternalError, message: "replayed", data: { regulaitStdioSessionLost: issuedNonce } } }));
+    const replayed = await c2.client.callTool({ name: "x", arguments: {} }).then(() => null, (e: unknown) => e);
+    c2.stop();
+    expect(replayed).toBeInstanceOf(McpError);
+    expect(isStdioSessionLostError(replayed)).toBe(false);
+    expect(classifyUpstreamError(replayed).why).not.toBe("our_own_refusal");
   });
 
   it("negative control: a server's own error answer, even one dressed as ours, is the server's failure", async () => {
@@ -148,5 +163,26 @@ describe("review M4: the window's lines are MACed under the session key", () => 
     // bound to the offer: the same line under another session's key and offer id does not verify
     const other = randomUUID();
     expect(stdioFrameMacValid(stdioMacKey(stdioSecretFor(other), other), other, start)).toBe(false);
+  });
+});
+
+describe("recheck N3: the linked report of an offered placement is chosen deterministically", () => {
+  const at = (s: number) => new Date(Date.UTC(2026, 9, 15, 12, 0, s));
+  const row = (id: string, outcome: string, s: number) => ({ id, outcome, createdAt: at(s), appliedClass: outcome === "placed" ? "microvm" : null, reportSha256: outcome === "placed" ? "b".repeat(64) : null, refusalCode: null, endCode: outcome === "cancelled" ? "later_gate" : null }) as never;
+  it("a placed row wins over a cancelled or session_lost row, in either read order", () => {
+    const placed = row("00000000-0000-4000-8000-000000000002", "placed", 5);
+    const cancelled = row("00000000-0000-4000-8000-000000000001", "cancelled", 1);
+    const lost = row("00000000-0000-4000-8000-000000000003", "session_lost", 9);
+    expect(pickLinkedReport([cancelled, placed, lost])).toBe(placed);
+    expect(pickLinkedReport([lost, cancelled, placed])).toBe(placed);
+  });
+  it("with no placed row: a refusal before the gateway's own ends; then time, then id", () => {
+    const refused = row("00000000-0000-4000-8000-000000000009", "refused", 7);
+    const cancelled = row("00000000-0000-4000-8000-000000000001", "cancelled", 1);
+    expect(pickLinkedReport([cancelled, refused])).toBe(refused);
+    const a = row("00000000-0000-4000-8000-00000000000a", "cancelled", 3);
+    const b = row("00000000-0000-4000-8000-00000000000b", "cancelled", 3);
+    expect(pickLinkedReport([b, a])).toBe(a);
+    expect(pickLinkedReport([])).toBeNull();
   });
 });

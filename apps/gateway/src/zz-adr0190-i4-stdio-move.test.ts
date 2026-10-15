@@ -53,7 +53,7 @@ import {
   setStdioPlacementAffinityForTest,
   stdioPlacementContext,
 } from "./executor-stdio.js";
-import { recordSessionLost } from "./executor-channel.js";
+import { offerLinkedPlacement, recordSessionLost } from "./executor-channel.js";
 import { decisionPlacementReports } from "./bom-routes.js";
 import { decisionFactsSchema, decisionPlacementReportSchema } from "@regulait/shared";
 import { deploymentEnvironment } from "./oauth/common.js";
@@ -423,6 +423,19 @@ describe("review M2: an unresolved policy fact is still a placement row keyed to
       db.execute(sql`insert into execution_placements (audit_id, workload_kind, enforcement, outcome, refusal_code) values (${randomUUID()}, 'mcp_stdio', 'enforce', 'refused', 'no_executor')`),
     );
     expect(String((other as { cause?: { message?: string }; message?: string })?.cause?.message ?? (other as Error)?.message)).toMatch(/execution_placements_requirement_check/);
+  });
+});
+
+describe("recheck N5: a digest that names no profile is a refused row keyed to the decision", () => {
+  it("profile_retired, its requirement kept, no profile digest (the profile does not exist)", async () => {
+    const auditId = randomUUID();
+    const out = await db.transaction(async (tx) =>
+      offerLinkedPlacement(tx as unknown as Db, auditId, { workloadKind: "mcp_stdio", requiredClass: "microvm", requiredBy: "workload_kind", profileDigest: "e".repeat(64), imageDigest: IMAGE }),
+    );
+    expect(out).toMatchObject({ kind: "refused", code: "profile_retired" });
+    expect((out as { placementId: string | null }).placementId).not.toBeNull();
+    const p = await placementOfDecision(auditId);
+    expect(p).toMatchObject({ id: (out as { placementId: string }).placementId, outcome: "refused", refusalCode: "profile_retired", requiredClass: "microvm", requiredBy: "workload_kind", profileDigest: null, executorId: null, imageDigest: IMAGE });
   });
 });
 

@@ -682,7 +682,9 @@ export const decisionExecutionFactsSchema = z
     // I4 review M2: an unresolved policy fact is exactly a requirement that did not resolve
     const unresolved = e.placement === "refused" && e.refusalCode === "policy_unresolved";
     if (e.placementId === null) issue("a placement names its row");
-    if (!unresolved && (e.requiredClass === null || e.requiredBy === null || e.profile === null)) issue("a placement names its required class, the floor that set it and its profile");
+    // recheck N5: a digest that names no profile is `profile_retired` with no profile (it does not exist)
+    const noProfile = e.placement === "refused" && e.refusalCode === "profile_retired";
+    if (!unresolved && (e.requiredClass === null || e.requiredBy === null || (e.profile === null && !noProfile))) issue("a placement names its required class, the floor that set it and its profile");
     if (e.appliedClass === "in_gateway" || e.appliedClass === "external") issue("an executor placement applies an isolation class");
     if (e.placement !== "offered" && e.offerId != null) issue("only an offered placement names its offer");
     if (e.placement === "refused") {

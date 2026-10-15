@@ -490,7 +490,9 @@ export function readExecution(value: unknown): ExecutionView | null {
   const local = e.placement === "in_gateway" || e.placement === "external";
   // ADR-0190 I4 review M2: an unresolved policy fact names no requirement and no profile (nothing resolved)
   const unresolved = e.placement === "refused" && e.refusalCode === "policy_unresolved";
-  if (local ? e.appliedClass !== e.placement || profile !== null || executor !== null || attestation !== null : !unresolved && (profile === null || e.requiredClass === null)) return bad();
+  // recheck N5: a `profile_retired` refusal for a digest that names no profile records no profile
+  const noProfile = e.placement === "refused" && e.refusalCode === "profile_retired";
+  if (local ? e.appliedClass !== e.placement || profile !== null || executor !== null || attestation !== null : !unresolved && ((profile === null && !noProfile) || e.requiredClass === null)) return bad();
   // ADR-0190 I4: only an offered placement names its offer, and it has no report yet
   if ((e.placement === "offered") !== (offerId !== null) || (e.placement === "offered" && (executor === null || attestation === null || attestation.placementReportSha256 !== null))) return bad();
   return {
