@@ -10,6 +10,7 @@
  *  - a session the gateway refuses (or that never starts) kills the sandbox
  *    with its input never released.
  */
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { executionProfileDigest, SHIPPED_EXECUTION_PROFILES, stdioFrameMac, stdioMacKey, type ExecutionOffer, type ExecutorStdioMessage, type ExecutorStdioPost, type StdioWorkload } from "@regulait/shared";
 import { ExecutorHttpError, type ExecutorClient } from "./client.js";
@@ -110,11 +111,13 @@ describe("the executor's stdio session", () => {
   });
 
   describe("review M4: an injected line is refused", () => {
+    // another session's offer id, made at run time (no id-shaped literal next to a key)
+    const OTHER_OFFER = randomUUID();
     const OTHER = stdioMacKey(Buffer.alloc(32, 9).toString("base64url"), offer.id);
     const cases: Array<[string, ExecutorStdioMessage[]]> = [
       ["injected argv (a start MACed with another key)", [start({ command: "/bin/sh", args: ["-c", "id"] }, OTHER)]],
       ["argv altered after MACing", [{ ...(start() as Extract<ExecutorStdioMessage, { type: "start" }>), workload: { command: "/bin/sh", args: [] } }]],
-      ["a start replayed from another session", [start(WORKLOAD, stdioMacKey(SECRET, "7b0c1a3e-6a1e-4a4b-9a2c-0f4e5d6c7b8a"), "7b0c1a3e-6a1e-4a4b-9a2c-0f4e5d6c7b8a")]],
+      ["a start replayed from another session", [start(WORKLOAD, stdioMacKey(SECRET, OTHER_OFFER), OTHER_OFFER)]],
     ];
     it.each(cases)("%s: never released, killed", async (_n, window) => {
       const backend = new FakeSandboxBackend({ stdioServer: () => [] });
