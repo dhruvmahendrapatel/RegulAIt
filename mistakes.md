@@ -1569,3 +1569,21 @@ turn the grep into a check that CI runs. A file that creates shared state is pro
 fresh database (`vitest.run-last.config.ts`, `REGULAIT_VITEST_LAST=<file>`) and checking the table afterwards, not
 by a green run in whatever order vitest chose.
 
+### M-079 (2026-10-12) - REPEAT of M-047: I pushed a one-line test fix after running only vitest, and the build failed
+
+On PR #379 (ADR-0188 S8) I pushed a one-line fix to a test after running only that package's vitest. vitest strips
+types and never checks them. The CI build ran `tsc` and failed with TS2532 ("Object is possibly 'undefined'", from
+`noUncheckedIndexedAccess`). M-047 already says that a green vitest run proves nothing about whether a test file
+builds. That rule failed here because "a one-line fix" felt too small to need a build.
+
+Rule: run `pnpm -r build` (which runs `tsc`) before every push, whatever the size of the edit and whether it touches
+code or only a test. A push with no green build after the last edit is not a push to make.
+
+### M-080 (2026-10-12) - CI job logs can't be read with `gh api`; use the GitHub MCP `get_job_logs` tool
+
+Recorded alongside M-079. Reading a failed CI job's log, such as the #379 build, is the first step of diagnosing it.
+The Actions job-logs endpoint answers with a redirect to the log file, and `gh api` in the build environment does not
+follow that redirect, so no log comes back. The GitHub MCP `get_job_logs` tool fetches the log itself. No earlier
+entry covers this.
+
+Rule: read a CI job's log with the GitHub MCP `get_job_logs` tool. Don't retry `gh api` against the logs endpoint.
