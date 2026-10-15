@@ -58,9 +58,10 @@ export function isStdioClosureImage(v: unknown): v is string {
  *
  * Recheck N4: the per-placement probe report is therefore evidence gathered INSIDE AN IMAGE-CHOSEN INTERPRETER. The
  * executor blanks the Node variables that load code (`NODE_OPTIONS`, `NODE_PATH` and the like) on every sandbox, but
- * an image that replaces the `node` binary itself can still shape what the probes print. That can only make a
- * sandbox look WORSE or equally good inside a runtime the executor already verified from outside; it can never make
- * runc pass as gVisor. Bind-mounting a pinned Node for the init is a follow-up.
+ * an image that replaces the `node` binary itself controls the interpreter, so it can FORGE the probe report (make
+ * the inside view look better or worse than it is). The class is decided from outside the sandbox (this container's
+ * runtime and the runtime binary's pinned hash), so a forged report can never make runc pass as gVisor.
+ * Bind-mounting a pinned Node for the init is a follow-up.
  */
 export const STDIO_SANDBOX_INIT_DIR = "/.regulait-init" as const;
 export const STDIO_SANDBOX_INIT_PATH = "/.regulait-init/sandbox-init.mjs" as const;

@@ -74,6 +74,7 @@ import {
 import { cancelUnattachedStdioSession, placeGovernedStdio, registerLinkedStdioSession, stdioPlacementContext, type GovernedStdioPlacement, type StdioSession } from "./executor-stdio.js";
 import { checkStdioClosure } from "./mcp-transports.js";
 import { isStdioSessionLostError } from "./stdio-session-loss.js";
+import { PROJECT_HEADER } from "./project-header.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { timeouts } from "./timeouts.js";
@@ -154,7 +155,8 @@ export /** ADR-0124 — a rule id may be a row id or a symbolic name; only the f
  * belongs in a uuid column. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const PROJECT_HEADER = "x-regulait-project-id";
+// the attribution header lives in a leaf module (an import cycle through compat-core would otherwise read it early)
+export { PROJECT_HEADER };
 const proxyHeaders = z.object({
   [PROJECT_HEADER]: z.string().uuid().optional(),
 });
