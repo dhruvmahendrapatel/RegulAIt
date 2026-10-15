@@ -356,12 +356,15 @@ describe("the handshake with the real sandbox init (run on this host in place of
     expect(h.imageDigest).toBe(IMAGE);
     const probes = await h.probe(requiredReportProbes(restricted, "gvisor", "user_space_kernel"));
     // the host is not a sandbox: what it observed is reported as is, and the gateway's evaluator refuses it. (The
-    // runtime itself is decided from outside — this test's Docker seam claims runsc — so it is the inside probes,
-    // the uid, the capabilities, the seccomp filter and the rest, that fail here.)
+    // runtime itself is decided from outside — this test's Docker seam claims runsc — so it is the inside probes
+    // that fail here.)
     const report = buildReport({ kind: "placement", identifier: ID, backend: b.describe(), profileDigest: offer.profileDigest, cls: "user_space_kernel", probes, offerId: offer.id, imageDigest: h.imageDigest });
     const v = evaluateExecutorReport(report, { profile: restricted, profileDigest: offer.profileDigest, backend: "gvisor", classesDeclared: ["user_space_kernel"], requiredClass: "user_space_kernel" });
     expect(v.verdict).toBe("fail");
-    expect(v.failures.map((f) => f.code)).toEqual(expect.arrayContaining(["uid_mismatch", "capabilities_present", "seccomp_not_filtering"]));
+    // which inside probes fail depends on the host (a CI runner has no effective capabilities, for one); a host process
+    // is never the profile's uid 10001, so that one holds on any host, and the report is refused whatever else fails
+    expect(v.failures.length).toBeGreaterThan(0);
+    expect(v.failures.map((f) => f.code)).toContain("uid_mismatch");
     // the stdio protocol itself: release with argv, then a line through /bin/cat and back
     await expect(h.stdio!.write("early")).rejects.toThrow(/before release/);
     await h.releaseInput({ command: "/bin/cat", args: [] });
