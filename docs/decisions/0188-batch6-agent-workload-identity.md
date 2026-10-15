@@ -1360,11 +1360,8 @@ in `packages/shared/src/identity/mcp-identity-assertion.ts`. These points settle
    default (ADR-0180). The audit row keeps the internal identity ids beside the pairwise ids, so an operator can map
    one back.
 
-   *Not built yet:* the review also asked for a separate, opt-in per-server relaxation, "disclose agent workload IDs"
-   (a `settings_relax` step-up bound to `{op: "mcp_server_update", serverId, url, values}`, audited, reset by a url
-   move, in the compare-and-set, with a UI confirmation). It needs a new `mcp_servers` column (there is no JSON
-   settings column, and `identity_propagation`'s CHECK allows two values). It waits for a migration number to be
-   coordinated with S7: the next migration after S7's 0195 (0196). Until then the only behaviour is the strict one.
+   *Built in the S8 follow-up (2026-10-15, migration 0196):* the review also asked for a separate, opt-in per-server
+   relaxation, "disclose agent workload IDs". See "As built: S8 follow-up" below. Pairwise agent ids stay the default.
 2. **The format, from standards (ADR-0176).**
    - It is an RFC 7519 JWT, signed with EdDSA by the issuer's current key. It verifies against the existing S3 JWKS
      (`/.well-known/jwks.json`) with any JOSE library.
@@ -1449,7 +1446,57 @@ Open after S8:
   new subject for the same person after a rotation. The doc says so, and the data-key rotation runbook should too.
 - **Upstream replay sets across replicas** are the upstream's concern. The doc says to keep the `jti` set in shared
   storage.
-- **The "disclose agent workload IDs" relaxation** (item 1) waits for a coordinated migration number.
+- ~~**The "disclose agent workload IDs" relaxation** (item 1) waits for a coordinated migration number.~~ Built in
+  the S8 follow-up below (migration 0196).
+
+### As built: S8 follow-up, "disclose agent workload IDs" (2026-10-15, migration 0196)
+
+S8 item 1 kept agents pairwise and left this relaxation for a later migration number. It is now built.
+
+1. **The setting.** `mcp_servers.disclose_agent_workload_ids` is a boolean, default false (the strict value). The CHECK
+   `mcp_servers_disclose_agent_ids_check` is `NOT disclose_agent_workload_ids OR identity_propagation =
+   'signed_assertion'`: the IDs ride only inside an assertion, so the database refuses the pair otherwise. The
+   migration is hand-written and re-runnable; every existing row gets false, with no grandfathering (ADR-0180).
+2. **What changes on the wire.** Only `act.sub` (and each nested `act.sub`): each agent is named by its workload
+   identity's `identifier` exactly as stored (its SPIFFE ID, default or admin-typed) instead of `pairwiseActor`. `sub`
+   stays pairwise, and nothing else is added. The setting is read from the server row when the holder is created for
+   the call (`outboundIdentityFor`), and only an exact `true` discloses.
+3. **Audit of every disclosure.** Each `mcp-identity-assertion-issued` row now holds `agentIdsDisclosed` (true when an
+   agent was named by its workload ID) and `actorIdForm` (`pairwise` or `workload_id`), beside the existing
+   `actorChain` and `act`.
+4. **The PATCH rules** (`agentIdDisclosureUpdate`, in `packages/shared/src/identity/mcp-identity-assertion.ts`), on
+   `PATCH /v1/servers/:serverId` `{ discloseAgentWorkloadIds }`, following the S8 `identity_propagation` pattern:
+   - Turning it on is a relaxation: a `settings_relax` step-up with facts `{op: "mcp_server_update", serverId, url,
+     values: {discloseAgentWorkloadIds: true}}`, the url always bound. If the same request also turns on the assertion
+     or opens private ranges, all the values go in ONE step-up.
+   - The grant is looked at (not spent) before anything is written, and spent after the compare-and-set inside the
+     write's transaction, as before. The compare-and-set now also compares `disclose_agent_workload_ids`.
+   - Every change is audited (`mcp-server-agent-id-disclosure-changed`, with both values, the url and the audience);
+     turning it on as a relaxation with its step-up. The audit rows of this route (private ranges, identity
+     propagation, this disclosure and a stdio command change) are now written inside the write's transaction, so an
+     audit row that cannot be written rolls the change back (#381 review); before, they were written after the commit.
+   - Asking for it while the server's next `identity_propagation` is not `signed_assertion` is refused
+     `409 agent_id_disclosure_needs_assertion` with a refusal sentence, before any step-up; nothing is saved. A stdio
+     server is refused `409 identity_propagation_unsupported`, as for the assertion itself.
+   - **Consent does not follow the url.** A url move that does not name it turns it off (audited, `resetByUrlMove`, no
+     step-up); keeping it on across a url move is a relaxation bound to the new url. Propagation turning off turns it
+     off too (audited, `resetByPropagationOff`).
+   - Turning it off needs no step-up.
+5. **UI.** The identity card of a server that is sent an assertion has an "Agent ids sent" control
+   (`data-agent-id-disclosure`). Choosing workload IDs is confirmed first: the IDs are global, upstreams can correlate
+   the same agent across servers, and an identifier an admin typed is sent exactly as typed; then the step-up. Going
+   back to pairwise saves directly. A server not sent an assertion is not offered the choice. The format doc, the
+   card's claim text and the verification example's comment say both forms; the doc and the screen's example stay
+   byte-equal (`mcpIdentityModel.test.ts`).
+6. **Tests.** Unit (`mcp-identity-assertion.test.ts`, `mcpIdentityModel.test.ts`); database
+   (`zz-adr0188-s8-outbound-identity.test.ts`: off gives pairwise ids, on gives SPIFFE IDs, the step-up is required and
+   combined, a url move and propagation turning off reset it, refused while propagation is off, the CHECK, a concurrent
+   change to the column alone refused `409 changed_concurrently`, and a refused audit insert rolling the change back);
+   mock e2e (`u1-integrations-gaps.mock.spec.ts`, stable `data-` hooks; its axe helper now also runs `heading-order`). No route was added: the census stays at 0 known UI
+   gaps.
+
+Open after the follow-up: the AI BOM's MCP server records (`apps/gateway/src/ai-bom.ts`) carry `identityPropagation`
+but not this setting; adding it is left to the ADR-0189 owner, whose files a parallel slice is changing.
 
 ## Test strategy
 

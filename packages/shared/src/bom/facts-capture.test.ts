@@ -58,7 +58,7 @@ describe("buildDecisionFacts", () => {
   it("a v1 decision: target and digest from the row, no actors (pre_identity), no policy, outcome from the effect", () => {
     const f = buildDecisionFacts(row(), reads());
     expect(f).toMatchObject({
-      v: "regulait.decision-facts.v1", auditId: U(100), auditSeq: 42, actors: null, policy: null, model: null, rows: [],
+      v: "regulait.decision-facts.v2", auditId: U(100), auditSeq: 42, actors: null, policy: null, model: null, rows: [], execution: null,
       action: { argumentsDigest: D, contextDigest: null, target: { kind: "mcp_tool", serverId: SERVER, toolName: "search", toolNameHash: null, connectorId: null, agentId: null }, inputs: null, dataSensitivity: null, complianceTags: [] },
       outcome: { effect: "allow", refusalCode: null, upstreamStatusClass: null },
     });

@@ -48,6 +48,9 @@ import {
   engineRuns,
   engines,
   eq,
+  executionProfiles,
+  executorAttestations,
+  executors,
   evalCases,
   evalRuns,
   identityConnectorGrants,
@@ -99,6 +102,7 @@ import { AI_BOM_SNAPSHOTS_RELEASED } from "@regulait/shared";
 import { loadReceiptSigningKey, ReceiptKeyError, registerReceiptSigningKey, sameReceiptPublicKey } from "./decision-receipts.js";
 import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
+import { freshAttestation } from "./executor-attestation.js";
 
 /**
  * R2/R17: RELEASED. A code constant, never a setting, defined ONCE in
@@ -215,7 +219,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
 
   // ---- workload identities, observed use
   const identities = agentIds.length || builderIds.length
-    ? await tx.select({ id: workloadIdentities.id, agentId: workloadIdentities.agentId, builderAgentId: workloadIdentities.builderAgentId, identifier: workloadIdentities.identifier }).from(workloadIdentities)
+    ? await tx.select({ id: workloadIdentities.id, agentId: workloadIdentities.agentId, builderAgentId: workloadIdentities.builderAgentId, identifier: workloadIdentities.identifier, executionProfileId: workloadIdentities.executionProfileId }).from(workloadIdentities)
         .where(sql`${workloadIdentities.agentId} = any(${`{${agentIds.join(",")}}`}::uuid[]) or ${workloadIdentities.builderAgentId} = any(${`{${builderIds.join(",")}}`}::uuid[])`)
     : [];
   const observed = agentIds.length
@@ -333,7 +337,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   const liveTools = new Set(grantedTools.map((t) => t.id));
   const keptGrants = grants.filter((g) => g.targetKind !== "mcp_tool" || liveTools.has(g.targetId));
   const serverIds = install ? null : uniq([...grantedTools.map((t) => t.serverId), ...keptGrants.filter((g) => g.targetKind === "mcp_server").map((g) => g.targetId)]);
-  const serverCols = { id: mcpServers.id, name: mcpServers.name, transport: mcpServers.transport, url: mcpServers.url, releaseDigest: mcpServers.releaseDigest, admissionState: mcpServers.admissionState, admissionManifestDigest: mcpServers.admissionManifestDigest, identityPropagation: mcpServers.identityPropagation, ownerUserId: mcpServers.ownerUserId };
+  const serverCols = { id: mcpServers.id, name: mcpServers.name, transport: mcpServers.transport, url: mcpServers.url, releaseDigest: mcpServers.releaseDigest, admissionState: mcpServers.admissionState, admissionManifestDigest: mcpServers.admissionManifestDigest, identityPropagation: mcpServers.identityPropagation, discloseAgentWorkloadIds: mcpServers.discloseAgentWorkloadIds, ownerUserId: mcpServers.ownerUserId, executionProfileId: mcpServers.executionProfileId };
   const serverRows = serverIds === null ? capped(await tx.select(serverCols).from(mcpServers).limit(CAP + 1), "mcp_servers") : serverIds.length ? await tx.select(serverCols).from(mcpServers).where(inArray(mcpServers.id, serverIds)) : [];
   const serverGranted = new Set(keptGrants.filter((g) => g.targetKind === "mcp_server").map((g) => g.targetId));
   const toolRows = install
@@ -367,6 +371,15 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   const nameOf = (id: string | null) => (id ? names.get(id) ?? null : null);
   const identityOf = (k: "agentId" | "builderAgentId", id: string) => identities.find((i) => i[k] === id)?.identifier ?? null;
 
+  // ---- ADR-0190 I8 (decision 9): execution profiles, their assignments and the executors that attest them
+  const execution = await loadExecutionRecords(tx, {
+    install,
+    assignments: [
+      ...identities.filter((i) => i.executionProfileId && (i.agentId || i.builderAgentId)).map((i) => ({ targetKind: i.agentId ? "agent" : "builder_agent", targetId: (i.agentId ?? i.builderAgentId)!, profileId: i.executionProfileId! })),
+      ...serverRows.filter((s) => s.executionProfileId).map((s) => ({ targetKind: "mcp_server", targetId: s.id, profileId: s.executionProfileId! })),
+    ],
+  });
+
   // ---- B9 (R51): the current supplier-declared SPDX properties of the loaded cards and dataset versions,
   // read in this same snapshot, so the signed body and the SPDX rendering agree with what was declared
   const spdxFields = [
@@ -398,7 +411,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
     engines: engineRows,
     promptTags: promptRows.filter((p) => agentIds.includes(p.agentId)),
     configVersions: cvRows.map(({ body, ...v }) => ({ ...v, bodyDigest: bomDigestOf(body) })),
-    mcpServers: serverRows.map((s) => ({ ...s, ownerDisplayName: nameOf(s.ownerUserId) })),
+    mcpServers: serverRows.map(({ executionProfileId: _p, ...s }) => ({ ...s, ownerDisplayName: nameOf(s.ownerUserId) })),
     mcpTools: toolRows,
     connectors: connRows.map((c) => ({ ...c, ownerDisplayName: nameOf(c.ownerUserId) })),
     grants: finalGrants,
@@ -406,8 +419,62 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
     builderSkills: skillRows,
     memoryStores,
     spdxFields,
+    ...execution,
   } as AiBomRecordSet;
 }
+
+/**
+ * ADR-0190 decision 9 / slice I8: the execution part of an AI BOM, read in the snapshot's own REPEATABLE READ
+ * capture (`now()` is the capture's database clock, M-075).
+ *  - Profiles: every profile for the install subject; otherwise the profiles assigned to the loaded agents, builder
+ *    agents and stdio servers. Never a profile body: the digest stands for it.
+ *  - Assignments: the agent and builder agent identities' and the servers' `execution_profile_id` (granted edges).
+ *  - Executors: every executor for the install; otherwise those with any attestation row for an in-scope profile.
+ *  - Each executor's attestations: for every (executor, profile) pair, the BROKER'S OWN predicate decides
+ *    (`freshAttestation`: the LATEST counting row, amendment 3, observed after the last re-enable, amendment T,
+ *    then a `pass` unexpired at capture). A fail after a pass, or a pass voided by a quarantine, lists nothing, so
+ *    the AI BOM never shows a class the broker would refuse to place on.
+ */
+async function loadExecutionRecords(
+  tx: Tx,
+  input: { install: boolean; assignments: Array<{ targetKind: string; targetId: string; profileId: string }> },
+): Promise<Pick<AiBomRecordSet, "executionProfiles" | "executors" | "executionAssignments">> {
+  const profileCols = { id: executionProfiles.id, name: executionProfiles.name, version: executionProfiles.version, digest: executionProfiles.digest, minClass: executionProfiles.minClass, shipped: executionProfiles.shipped, retired: sql<boolean>`${executionProfiles.retiredAt} is not null` };
+  const assignedIds = uniq(input.assignments.map((a) => a.profileId));
+  const profileRows = input.install
+    ? capped(await tx.select(profileCols).from(executionProfiles).limit(CAP + 1), "execution_profiles")
+    : assignedIds.length
+      ? await tx.select(profileCols).from(executionProfiles).where(inArray(executionProfiles.id, assignedIds))
+      : [];
+  const digests = profileRows.map((p) => p.digest);
+  // the (executor, profile) pairs that have any attestation row; freshness is decided per pair below
+  const pairCols = { executorId: executorAttestations.executorId, profileDigest: executorAttestations.profileDigest };
+  const pairs = input.install
+    ? capped(await tx.selectDistinct(pairCols).from(executorAttestations).limit(CAP + 1), "executor_attestations")
+    : digests.length
+      ? await tx.selectDistinct(pairCols).from(executorAttestations).where(inArray(executorAttestations.profileDigest, digests))
+      : [];
+  const executorCols = { id: executors.id, name: executors.name, backend: executors.backend, runtimeVersion: executors.runtimeVersion, classesDeclared: executors.classesDeclared, declaredClass: executors.declaredClass, status: executors.status, workloadIdentity: workloadIdentities.identifier };
+  const executorIds = uniq(pairs.map((a) => a.executorId));
+  const executorRows = input.install
+    ? capped(await tx.select(executorCols).from(executors).innerJoin(workloadIdentities, eq(workloadIdentities.id, executors.workloadIdentityId)).limit(CAP + 1), "executors")
+    : executorIds.length
+      ? await tx.select(executorCols).from(executors).innerJoin(workloadIdentities, eq(workloadIdentities.id, executors.workloadIdentityId)).where(inArray(executors.id, executorIds))
+      : [];
+  const now = new Date(rowsOfNow(await tx.execute(sql`select now() as "now"`)));
+  const fresh = new Map<string, Array<{ profileDigest: string; class: string; reportSha256: string; observedAt: string }>>();
+  for (const p of pairs) {
+    const a = await freshAttestation(tx, p.executorId, p.profileDigest, now);
+    if (!a) continue;
+    fresh.set(p.executorId, [...(fresh.get(p.executorId) ?? []), { profileDigest: p.profileDigest, class: a.class, reportSha256: a.reportSha256, observedAt: iso(a.observedAt)! }]);
+  }
+  return {
+    executionProfiles: profileRows.map((p) => ({ ...p, retired: Boolean(p.retired) })),
+    executionAssignments: input.assignments,
+    executors: executorRows.map((e) => ({ ...e, classesDeclared: [...e.classesDeclared], attestations: fresh.get(e.id) ?? [] })),
+  };
+}
+const rowsOfNow = (r: unknown): Date | string => ((r as { rows: Array<{ now: Date | string }> }).rows[0]!.now);
 
 // ---------------------------------------------------------------------------
 // settings

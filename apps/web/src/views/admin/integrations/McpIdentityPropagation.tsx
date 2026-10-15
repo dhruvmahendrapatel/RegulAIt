@@ -6,7 +6,8 @@
  *    `settings_relax` step-up (ADR-0180, ADR-0186 A); turning it off asks nothing. A stdio server has no HTTP
  *    request to carry the header, so the cell says so instead of offering it.
  *  - `McpIdentityAssertionCard`: for the selected server, what is sent and how the upstream verifies it, with the
- *    example from docs/api/MCP_IDENTITY_ASSERTION.md.
+ *    example from docs/api/MCP_IDENTITY_ASSERTION.md, and (the S8 follow-up) `AgentIdDisclosureControl`: whether
+ *    agents are named by pairwise ids (the default) or by their workload IDs.
  */
 import { useState } from "react";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
@@ -14,14 +15,17 @@ import type { McpServer } from "../../../api/adminTypes";
 import { Badge, Button, Card, ConfirmModal, Select } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import {
+  AGENT_ID_FORM_OPTIONS,
   ASSERTION_CLAIMS,
   IDENTITY_ASSERTION_HEADER,
   IDENTITY_ASSERTION_TYP,
   IDENTITY_PROPAGATION_OPTIONS,
   JWKS_PATH,
   VERIFY_EXAMPLE,
+  agentIdFormOf,
   canonicalAudience,
   identityPropagationOf,
+  type AgentIdForm,
   type IdentityPropagation,
 } from "./mcpIdentityModel";
 import a from "../admin.module.css";
@@ -96,6 +100,87 @@ export function IdentityPropagationCell(props: { server: McpServer }) {
   );
 }
 
+/**
+ * The S8 follow-up, on the identity card of a server that is sent an assertion: how the agents in `act` are named
+ * (`PATCH /v1/servers/:id` `{ discloseAgentWorkloadIds }`). Disclosing workload IDs is a relaxation the gateway
+ * confirms with a `settings_relax` step-up, so it is confirmed here first; going back to pairwise ids saves directly.
+ */
+export function AgentIdDisclosureControl(props: { server: McpServer }) {
+  const act = useAction();
+  const stored = agentIdFormOf(props.server);
+  const [value, setValue] = useState(stored);
+  const [confirming, setConfirming] = useState(false);
+  const save = (next: AgentIdForm) =>
+    void act.run(
+      () =>
+        withStepUp((h) =>
+          stepUpApi.patch(`/v1/servers/${props.server.id}`, { discloseAgentWorkloadIds: next === "workload_id" }, h),
+        ),
+      `Agent ids sent to ${props.server.name} saved`,
+    );
+  return (
+    // `data-agent-id-disclosure`: a stable hook for the screen tests (never a position)
+    <div data-agent-id-disclosure="">
+      <form
+        className={v.row}
+        aria-label={`Agent ids for ${props.server.name}`}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value === "workload_id") setConfirming(true);
+          else save(value);
+        }}
+      >
+        <Select
+          value={value}
+          onChange={(e) => setValue(e.target.value === "workload_id" ? "workload_id" : "pairwise")}
+          aria-label={`Agent ids sent to upstream ${props.server.name}`}
+        >
+          {AGENT_ID_FORM_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </Select>
+        <Button type="submit" size="sm" disabled={act.busy || value === stored}>
+          Save
+        </Button>
+        {act.error && (
+          <span className={v.errLine} role="alert">
+            {act.error}
+          </span>
+        )}
+      </form>
+      <ConfirmModal
+        open={confirming}
+        title={`Disclose agent workload IDs to ${props.server.name}?`}
+        confirmLabel="Disclose workload IDs"
+        body={
+          <>
+            <p>
+              Each assertion sent to {props.server.name} will name every acting agent by its workload ID (its SPIFFE ID) instead of a
+              pairwise id for this server. The person the call is for stays pairwise.
+            </p>
+            <ul>
+              <li>Workload IDs are global: every server that receives them sees the same value for the same agent.</li>
+              <li>So upstreams can correlate the same agent across servers, and the calls it makes for a person.</li>
+              <li>An identifier an admin typed in for an agent is sent exactly as it was typed, including anything written in it.</li>
+            </ul>
+            <p>
+              This relaxes the strict default, so you will be asked to confirm it&apos;s you. The change is audited, and it turns off again if
+              the server&apos;s URL changes or the signed assertion is turned off.
+            </p>
+          </>
+        }
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => {
+          setConfirming(false);
+          save("workload_id");
+        }}
+      />
+    </div>
+  );
+}
+
 export function McpIdentityAssertionCard(props: { server: McpServer | undefined }) {
   const { server } = props;
   if (!server) return null;
@@ -128,7 +213,26 @@ export function McpIdentityAssertionCard(props: { server: McpServer | undefined 
               </li>
             ))}
           </ul>
-          <p>Never sent: the person&apos;s email, name or user id, an agent&apos;s global workload id, roles, project, grant, tool arguments, scope or budget.</p>
+          <p>
+            Never sent: the person&apos;s email, name or user id, roles, project, grant, tool arguments, scope or budget. An agent&apos;s global
+            workload id is sent only if you choose to disclose it below.
+          </p>
+          {/* a label, not a heading: the card's title is the section heading, and a sub-heading here skipped a level */}
+          <p className={v.dim}>
+            <strong>Agent ids sent</strong>
+          </p>
+          {on ? (
+            <>
+              <p>
+                {agentIdFormOf(server) === "workload_id"
+                  ? "Agents are named by their workload IDs (SPIFFE IDs). These are global, so upstreams can correlate the same agent across servers."
+                  : "Agents are named by a pairwise id for this server: stable here, unlinkable across servers. Disclosing their workload IDs instead is a relaxation that needs a step-up."}
+              </p>
+              <AgentIdDisclosureControl key={`${server.id}:${agentIdFormOf(server)}`} server={server} />
+            </>
+          ) : (
+            <p>Agent ids are sent only inside a signed assertion. Turn the assertion on first to choose how agents are named.</p>
+          )}
           <details>
             <summary>Verification example for the upstream operator (JavaScript, jose)</summary>
             <pre className={a.snippet} data-testid="mcp-identity-verify-example">

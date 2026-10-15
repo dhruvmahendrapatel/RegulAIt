@@ -923,8 +923,8 @@ addNegative("N-B07", { spec: [SPEC.s6, SPEC.findOffline], title: "a rogue key si
 addNegative("N-B08", { spec: [SPEC.owner2, SPEC.signedBytes], title: "domain separation: the signature file carries the receipt's signature",
   build: { hooks: { sigFile: (s, bytes) => canon({ ...s, signature: JSON.parse(bytes).receipt.signature }) } },
   expect: { checks: { body_signature: I("signature_mismatch") } }, authentic: { manifest: true, body: false, receipt: true } });
-addNegative("N-B09", { spec: [SPEC.owner2, "§5 every verifier rejects an unknown v"], title: "body v is regulait.decision-bom.v2, correctly signed",
-  build: { hooks: { body: (b) => ({ ...b, v: "regulait.decision-bom.v2" }) } }, expect: { checks: { body_version: I("unknown_body_version") } } });
+addNegative("N-B09", { spec: [SPEC.owner2, "§5 every verifier rejects an unknown v"], title: "body v is regulait.decision-bom.v3 (unknown; v2 is ADR-0190 I8's), correctly signed",
+  build: { hooks: { body: (b) => ({ ...b, v: "regulait.decision-bom.v3" }) } }, expect: { checks: { body_version: I("unknown_body_version") } } });
 addNegative("N-B10", { spec: [SPEC.files, SPEC.signedBytes], title: "body not canonical (pretty-printed) but signed over those bytes",
   build: { hooks: { bodyBytes: (b) => JSON.stringify(b, null, 1) } }, expect: { checks: { body_schema: I("schema_violation") } } });
 addNegative("N-B11", { spec: [SPEC.unknownKey], title: "the receipt trust root holds R1's id twice with different keys",

@@ -968,3 +968,147 @@ and a 2-hour attestation age as listed. Slice I0 may start now; I1 onward follow
 - Secondary (search results only, marked where used): NVD and SUSE entries for CVE-2026-41326, a vendor's
   confidential-containers release notes, the Arch Linux package pages for Firecracker and nsjail, a gVisor-users
   mailing-list post.
+
+## As built: slice I8 evidence (2026-10-15)
+
+I8 puts decision 9 into the evidence: decision facts, the Decision BOM and the AI BOM. Migration 0197 only widens
+two CHECKs (owner ruling: 0196 belongs to ADR-0188 S8, and 0197 sorts after it). This section covers I8 alone. I4
+records its own changes separately.
+
+1. **Format versions.**
+   - **Decision facts → `regulait.decision-facts.v2`.** v2 is v1 plus an `execution` key. The capture writes v2.
+   - **Decision BOM → `regulait.decision-bom.v2`.** v2 is v1 plus the `execution` section and its completeness
+     entry. Every Decision BOM assembled from I8 on is v2, whatever version its facts are.
+   - **What migration 0197 changes.** It widens `decision_facts_version_check` and `decision_boms_body_check` to
+     admit v1 and v2, and refuses anything else. `decision_facts.facts_version` now defaults to v2.
+     - **How (review L2).** Each widened CHECK is added `NOT VALID`, then validated by `VALIDATE CONSTRAINT`.
+     - **What that buys.** `VALIDATE CONSTRAINT` scans under SHARE UPDATE EXCLUSIVE, not under the ACCESS
+       EXCLUSIVE lock the DROP/ADD takes. That shorter lock applies only when the statements run on their own.
+       drizzle's migrator applies all pending migrations in one transaction (checked in drizzle-orm 0.45.3), so
+       there the ACCESS EXCLUSIVE lock is held until commit.
+   - **Old rows.** Stored v1 rows are valid as recorded. Nothing is rewritten or back-filled (ADR-0180).
+   - **Verifiers.** The online verifier and `scripts/verify-bom.mjs` both accept the two Decision BOM versions,
+     for stored BOMs and bundles alike. Each version is checked against its own section list: twelve sections for
+     v1, thirteen for v2. An unknown `v` is still refused (OWNER DECISION 2).
+   - **Vector N-B09** used `decision-bom.v2` as its "unknown version". It now uses `v3`. This is a reviewed
+     correction under ADR-0191: the case it tests is unchanged.
+2. **The AI BOM stays `regulait.ai-bom.v1`** (owner ruling, 2026-10-15). Its `records` map is open-keyed, and its
+   verifier checks only `v`, the signature and the rendering hashes. A v1 verifier therefore still verifies a body
+   that carries the new lists.
+   - **New lists.** `executionProfiles`, `executors` and `executionAssignments`. They are optional on input and
+     always present (possibly empty) in the body, as B9's `spdxFields` is.
+   - **Worked example.** The B4.9 example blocks remain byte-identical apart from those empty lists. The test that
+     pins this now says so.
+3. **What `execution` records** (`decisionExecutionFactsSchema`). Fields:
+   - workload kind, placement, placement id;
+   - required class and the floor that set it (`requiredBy`);
+   - applied class and refusal code;
+   - the profile: id, name, version, digest;
+   - the executor: id, backend, runtime version, ADR-0188 identity id and SPIFFE URI;
+   - the attestation references: the per-placement report SHA-256, and the executor self-test the placement relied
+     on. That self-test is chosen by the broker's own predicate as of the placement (review H1):
+     - the LATEST counting self-test for that executor and profile decides (amendment 3), counting only those
+       observed after the executor's last re-enable (amendment T);
+     - it is named only if it is a `pass`, unexpired at the placement, for the class the placement applied;
+     - so a fail after a pass, or a pass from before a quarantine and re-enable, names none.
+
+     The query is defined once, in `packages/db/src/executor-attestation.ts` (`attestationCounts`,
+     `latestCountingAttestation`). The gateway's `freshAttestation`, which the broker, the live delegation chain and
+     the AI BOM loader use, is built on it. If I4 stamps the broker's own attestation reference on the placement row,
+     the capture will prefer that reference.
+   - **What `appliedClass` means.** For `placed`, it is the class the call ran under. For `mismatch`, it is the class
+     the per-placement report claimed. The gateway refused that claim, so the call never ran under it (review L1). The
+     UI labels it "Reported class (disputed)" and shows no "software-attested" note.
+
+   Decision 9 also names the image digest and the runtime flags. `execution_placements` has no column for either,
+   so the facts do not repeat them. The per-placement report, which is bound by its hash, carries both (I4).
+4. **Where the facts come from: the I4/I8 contract (coordinator ruling).**
+   - **With a placement row.** The `execution_placements` row is written in the decision's own transaction, before
+     the audit row. The shared audit writer's capture (`packages/db/src/decision-facts.ts`) reads it in that same
+     transaction. When the row exists, it is the authority.
+   - **Obligation on I4 (review M2).** I4 must key each placement row to the governed decision's own audit id
+     (`execution_placements.audit_id` = the decision row's `id`), and write it in that decision's transaction.
+     Today's broker (`executor-channel.ts`) writes its own `execution-placed` audit row, keys the placement to that
+     row, and records the report in a later transaction. I8's capture therefore cannot match a governed call to its
+     placement until I4 changes this: such calls read `not_recorded, no_placement`, which is true and never a
+     guess. The same obligation went to the I4 builder.
+   - **With no placement row:**
+     - an `agent` decision is a model call, recorded `in_gateway`;
+     - a `connector` decision is a connector call, recorded `in_gateway`;
+     - an `mcp_tool` decision on a `streamable_http` or `sse` server is recorded `external`.
+   - **Recorded as null (NOT RECORDED).** A stdio call with no placement, an MCP decision whose server cannot be
+     resolved, and an approval decision.
+   - **What the Decision BOM says when execution is null:**
+     - `not_applicable` for an approval (nothing executes);
+     - `not_recorded, no_placement` for every other v2 decision;
+     - `not_recorded, pre_isolation` for v1 facts.
+   - **A malformed placement fails the capture.** A placement row the contract cannot represent fails the capture,
+     and the decision with it (fail closed, as B2 does for a broken actor chain).
+   - **Engine runs (review M1).** An engine run's entitlement decision (`agent`, `detail.phase` =
+     `engine-run-entitlement`) governs an engine worker, which an executor places from I5 on. It is not a model call
+     in the gateway. Until I5 writes its placement row it is null, so the BOM reads `not_recorded, no_placement`.
+     Signed evidence never states a location known to be false. The phase is one shared constant
+     (`ENGINE_RUN_ENTITLEMENT_PHASE`), used by both `engine-runs.ts` and the capture.
+5. **A format change is not a new fact.** A decision frozen as v1 keeps its v1 BOM. A v2 assembly of it is the
+   same version (`decisionBomSameContent`) when two conditions both hold:
+   - it adds nothing but `v` and an execution section that records nothing (`pre_isolation`, `pre_facts` or
+     `capture_off`);
+   - everything else is identical.
+
+   A recorded execution, or any other difference, freezes version n+1 as before.
+6. **AI BOM content (decision 9).**
+   - **Profiles.** Each profile is a CycloneDX `data` (`configuration`) component: hashed by its digest, versioned
+     by its profile version, never its body.
+   - **Executors.** Each executor is a `service`. Its trust zone is `regulait-execution-plane`, or
+     `customer-execution-plane` for a customer plane. Its properties are:
+     - backend, runtime version and status;
+     - declared classes, and the class a customer plane is mapped to;
+     - its workload identity;
+     - each fresh passing self-test (`class:profileDigest` and the report SHA-256).
+   - **Self-test freshness (review H1).** For each (executor, profile), the loader applies the broker's
+     `freshAttestation`:
+     - the latest counting row decides (amendments 3 and T);
+     - it must be a `pass` unexpired at the capture's database clock (M-075).
+
+     A fail after a pass therefore lists no attestation, and a stdio server whose only executors are in that state
+     is an isolation gap. The AI BOM never shows as attested a server the broker would refuse to place.
+   - **Assignments.** Each assignment is a granted edge from an agent, builder agent or stdio server to its
+     profile.
+   - **Placement property.** MCP servers carry `regulait:execution:placement`: `executor` for stdio, `external`
+     for remote.
+   - **Disclosure property.** MCP servers also carry `regulait:identity:discloseAgentWorkloadIds`, next to
+     `regulait:identity:propagation`. It is ADR-0188 S8's `mcp_servers.disclose_agent_workload_ids` (migration
+     0196), a required record field: a record without it is refused.
+   - **SPDX.** Profiles map to SPDX `software_File` (configuration). Executors are services, so they appear in
+     CycloneDX only, as MCP servers and connectors already do. The SPDX document comment is unchanged, so the
+     B4.9 worked example stays byte-identical.
+7. **Isolation evidence makes a composition incomplete.** This rule is not relaxable. A stdio MCP server is a gap,
+   and so sits in an `incomplete` composition, never `complete`, unless all of these hold:
+   - its assigned profile is current;
+   - the profile is at L2 or above;
+   - an active executor holds a fresh passing self-test for that profile at that class or stricter.
+
+   The gap reasons are `execution_profile_not_assigned`, `execution_profile_retired`,
+   `isolation_hardened_container`, `isolation_customer_declared` and `isolation_not_attested`. A
+   customer-declared plane is never verified evidence.
+8. **UI.**
+   - **Decision BOM panel.** It shows a v2 BOM's execution facts from the signed body only: where the call ran, the
+     required class and the floor that set it, the applied class, the profile, the executor and the attestation
+     references.
+   - **Wording.** The panel says "software-attested". L0 and L1 are never called a sandbox (decision 11).
+   - **Reading the section.** The browser reader refuses an execution section it cannot read in full.
+   - **Drift view.** It names executors and execution profiles.
+   - **Routes.** No route was added, so the UI census is unchanged.
+9. **Tests.**
+   - **Shared:** `i8-execution.test.ts` covers the contract, capture, both Decision BOM versions verified as
+     stored BOMs and as bundles, and the AI BOM.
+   - **Gateway:** `zz-adr0190-i8-evidence.test.ts`, on a scratch database, covers:
+     - migration 0197;
+     - a placement written in the decision's transaction being captured;
+     - the negative control, a placement written after the decision's transaction, not being captured;
+     - the AI BOM loader.
+   - **Web:** `bomExecution.test.tsx`.
+   - **Existing suites.** The B2 suite's invariant now checks that every capture is v2 with the right `execution`.
+
+**Open for the owner or a later slice.** Should the facts also record the image digest and the runtime flags
+directly, rather than through the report hash? Doing so needs new `execution_placements` columns, which I4 owns.

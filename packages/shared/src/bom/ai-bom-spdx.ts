@@ -326,6 +326,8 @@ export function renderAiBomSpdx(n: AiBomRecordSet, meta: AiBomSnapshotMeta, cdx:
       case "prompt":
       case "config":
       case "skill":
+      // ADR-0190 I8: an execution profile is configuration, verified by its digest
+      case "execution-profile":
         el({ type: "software_File", spdxId, name, software_primaryPurpose: "configuration", ...verified(c) });
         break;
       case "engine": {

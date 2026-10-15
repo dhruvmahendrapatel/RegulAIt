@@ -127,6 +127,17 @@ describe("the mirrored vocabularies match @regulait/shared", () => {
     expect(m.BOM_CANNOT_PROVE).toEqual(s.BOM_CANNOT_PROVE);
     expect(m.BOM_CANNOT_PROVE_COPY).toEqual(s.BOM_CANNOT_PROVE_COPY);
     expect(m.BOM_BODY_VERSIONS).toEqual(s.BOM_BODY_VERSIONS);
+    // ADR-0190 I8: v2 sections and versions, and the execution facts vocabularies
+    expect(m.DECISION_BOM_SECTIONS_V2).toEqual(s.DECISION_BOM_SECTIONS_V2);
+    expect(m.DECISION_BOM_VERSIONS).toEqual(s.DECISION_BOM_VERSIONS);
+    expect(m.DECISION_EXECUTION_PLACEMENTS).toEqual(s.DECISION_EXECUTION_PLACEMENTS);
+    expect(m.DECISION_EXECUTION_APPLIED).toEqual(s.DECISION_EXECUTION_APPLIED);
+    expect(m.DECISION_EXECUTION_REFUSAL_CODES).toEqual(s.DECISION_EXECUTION_REFUSAL_CODES);
+    const iso = await sharedFile("isolation/contract.ts");
+    expect(m.WORKLOAD_KINDS).toEqual(iso.WORKLOAD_KINDS);
+    expect(m.REQUIRABLE_ISOLATION_CLASSES).toEqual(iso.REQUIRABLE_ISOLATION_CLASSES);
+    expect(m.REQUIRED_CLASS_SOURCES).toEqual(iso.REQUIRED_CLASS_SOURCES);
+    expect(m.EXECUTOR_BACKENDS).toEqual(iso.EXECUTOR_BACKENDS);
   });
   it("every refusal code a BOM route can answer has its own sentence (none falls through to the generic text)", async () => {
     const s = await sharedBom();
@@ -146,7 +157,15 @@ describe("the mirrored vocabularies match @regulait/shared", () => {
   });
   it("every check, section, finality, trigger and limit has a label", () => {
     for (const c of m.BOM_VERIFY_CHECKS) expect(m.checkLabel(c)).not.toBe(c);
-    for (const s of m.DECISION_BOM_SECTIONS) expect(m.sectionLabel(s)).not.toBe(s);
+    for (const s of m.DECISION_BOM_SECTIONS_V2) expect(m.sectionLabel(s)).not.toBe(s);
+    for (const p of m.DECISION_EXECUTION_PLACEMENTS) expect(m.executionPlacementLabel(p)).not.toBe(p);
+    for (const c of m.DECISION_EXECUTION_APPLIED) expect(m.isolationClassLabel(c)).not.toBe(c);
+    for (const r of m.REQUIRED_CLASS_SOURCES) expect(m.requiredByLabel(r)).not.toBe(r);
+    // decision 11: L0 and L1 are never called a sandbox
+    for (const c of ["in_gateway", "hardened_container"]) expect(m.isolationClassLabel(c).toLowerCase()).not.toContain("sandbox");
+    for (const p of m.DECISION_EXECUTION_PLACEMENTS) expect(m.executionPlacementLabel(p).toLowerCase()).not.toContain("sandbox");
+    expect(m.driftRefKind("service:executor:x")).toBe("Executor");
+    expect(m.driftRefKind("execution-profile:x")).toBe("Execution profile");
     for (const f of m.BOM_REPORTED_FINALITY_STATES) expect(m.finalityLabel(f)).not.toBe(f);
     for (const t of m.AI_BOM_SNAPSHOT_TRIGGERS) expect(m.triggerLabel(t)).not.toBe(t);
     for (const r of m.BOM_NOT_RECORDED_REASONS) expect(m.notRecordedLabel(r)).not.toBe(r);

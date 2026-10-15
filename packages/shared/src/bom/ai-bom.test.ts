@@ -83,7 +83,7 @@ function fixture(over: Partial<AiBomRecordSet> = {}): AiBomRecordSet {
       { id: CV1, artifactType: "agent_system_prompt", artifactId: AG, version: 4, status: "active", canaryPct: null, bodyDigest: H("2") },
       { id: CV2, artifactType: "agent_system_prompt", artifactId: AG, version: 5, status: "canary", canaryPct: 10, bodyDigest: H("3") },
     ],
-    mcpServers: [{ id: MCP, name: "files", transport: "streamable_http", url: "https://mcp.example/bot123456:ABCDEFsecretpath/api?key=CANARY_MCP", releaseDigest: H("4"), admissionState: "clean", admissionManifestDigest: null, identityPropagation: "none", ownerUserId: null, ownerDisplayName: null }],
+    mcpServers: [{ id: MCP, name: "files", transport: "streamable_http", url: "https://mcp.example/bot123456:ABCDEFsecretpath/api?key=CANARY_MCP", releaseDigest: H("4"), admissionState: "clean", admissionManifestDigest: null, identityPropagation: "none", discloseAgentWorkloadIds: false, ownerUserId: null, ownerDisplayName: null }],
     mcpTools: [{ id: TOOL, serverId: MCP, name: "read_file", kind: "read" }],
     connectors: [{ id: CONN, name: "crm", kind: "salesforce", url: null, ownerUserId: OWNER, ownerDisplayName: null, credentialSet: true }],
     grants: [
@@ -614,6 +614,10 @@ describe("X41: no string field carries a credential or a URL path/query into any
         { subjectKind: "eval_dataset", subjectId: EDS, releaseTime: "2026-05-20T00:00:00Z", downloadLocation: "https://evals.supplier.example", packageVersion: null, builtTime: "2026-05-19T23:59:59Z", originatedBy: "Eval Lab", datasetType: ["text", "image"] },
         { subjectKind: "model_card", subjectId: CARD2, releaseTime: "2026-05-01T00:00:00Z", downloadLocation: "https://models.provider-a.example", packageVersion: "2026-05-01", builtTime: null, originatedBy: null, datasetType: [] },
       ],
+      // ADR-0190 I8: a profile, an executor with a fresh passing self-test, and an assignment (every string field seeded)
+      executionProfiles: [{ id: u(42), name: "restricted", version: 1, digest: H("6"), minClass: "user_space_kernel", shipped: true, retired: false }],
+      executors: [{ id: u(43), name: "executor-one", backend: "gvisor", runtimeVersion: "test-only-1.0", classesDeclared: ["hardened_container", "user_space_kernel"], declaredClass: null, status: "active", workloadIdentity: "spiffe://test-only.example/regulait/worker_runtime/executor-one", attestations: [{ profileDigest: H("6"), class: "user_space_kernel", reportSha256: H("7"), observedAt: "2026-10-10T10:00:00.000Z" }] }],
+      executionAssignments: [{ targetKind: "agent", targetId: AG, profileId: u(42) }],
     });
   /** every path to a string (or string-array element) in the first record of each list */
   const stringPaths = (v: unknown, at: Array<string | number>): Array<Array<string | number>> => {

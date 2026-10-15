@@ -17,7 +17,7 @@ import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { bomCanonicalBytes, bomSha256, findEmailShapes } from "./contract.js";
 import { readBomArchive, writeBomTar } from "./bom-archive.js";
-import { assembleDecisionBom, bomDecimalSum, DecisionBomAssemblyError, isBomCostString, projectDecisionBom, type DecisionBomAssemblyInput } from "./decision-bom-assembly.js";
+import { assembleDecisionBom, bomDecimalSum, DecisionBomAssemblyError, decisionBomSameContent, isBomCostString, projectDecisionBom, type DecisionBomAssemblyInput } from "./decision-bom-assembly.js";
 import { verifyBomBundle, verifyStoredDecisionBom, type BomVerifyReport, type BomVerifyTrust } from "./verify.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -159,7 +159,7 @@ describe("review item 2: crafted input never throws", () => {
     const body = JSON.parse(entriesOf("P07").find((e) => e.name.endsWith("/content/decision-bom.json"))!.text);
     const facts = JSON.parse(body.facts.payload);
     facts.rows.find((r: { table: string }) => r.table === "usage_events").projection.costUsd = "1e9999999";
-    const p = projectDecisionBom({ receipt: JSON.parse(body.receipt.payload), receiptSeq: 1, facts, addenda: [], noFactsReason: "pre_facts", ruleChain: [], chain: body.proof.chain, anchor: null });
+    const p = projectDecisionBom({ bodyVersion: body.v, receipt: JSON.parse(body.receipt.payload), receiptSeq: 1, facts, addenda: [], noFactsReason: "pre_facts", ruleChain: [], chain: body.proof.chain, anchor: null });
     expect(p.problems.map((x) => x.section)).toContain("cost");
     expect(p.cost?.costUsd).toBeNull();
   });
@@ -188,7 +188,10 @@ describe("review item 4: the B4.3 v2 actor binding is load-bearing", () => {
   });
   it("P25 now carries a lower-case SPIFFE trust domain and verifies valid (positive control)", async () => {
     expect(JSON.parse(p25.facts.payload).actors.actorChain[0]).toMatch(/^spiffe:\/\/test-only\.example\/TEST-ONLY-CANARY\//);
-    expect(assembleDecisionBom(input()).bodyBytes).toBe(entriesOf("P25").find((e) => e.name.endsWith("/content/decision-bom.json"))!.text);
+    // ADR-0190 I8: the assembler now writes v2; the frozen v1 vector is the same version (format change, no new fact)
+    const assembled = assembleDecisionBom(input());
+    expect(assembled.body.v).toBe("regulait.decision-bom.v2");
+    expect(decisionBomSameContent(p25, assembled.body)).toBe(true);
     const r = await verifyBomBundle(gzipSync(writeBomTar(filesOf(entriesOf("P25")))), trustOf("P25"));
     expect(r.outcome).toBe("valid");
   });

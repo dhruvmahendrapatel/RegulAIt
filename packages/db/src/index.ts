@@ -29,6 +29,8 @@ export {
 
 // ADR-0189 B2 — the shared decision fact writer (called by the audit chain writer)
 export { captureDecisionFacts, loadDecisionCaptureStatus } from "./decision-facts.js";
+// ADR-0190 decision 6 / amendments T and 3 — the one attestation-freshness query (the broker, the facts, the AI BOM)
+export { attestationCounts, latestCountingAttestation, type LatestCountingAttestation } from "./executor-attestation.js";
 // ADR-0189 — the per-decision and per-subject lock targets of the BOM writers
 export { BOM_DECISION_LOCK_NAMESPACE, BOM_SUBJECT_LOCK_NAMESPACE, lockAiBomSubject, lockDecisionForBom } from "./bom-locks.js";
 // ADR-0189 B3 — the session-level per-subject lock taken before a REPEATABLE READ capture

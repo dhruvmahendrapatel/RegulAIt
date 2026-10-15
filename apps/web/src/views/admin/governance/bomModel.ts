@@ -39,8 +39,19 @@ export const BOM_RENDERING_FORMATS = ["cyclonedx-1.7", "cyclonedx-1.6", "spdx-3.
 export const AI_BOM_DRIFT_CHANGES = ["added", "removed", "changed_hash", "changed_version"] as const;
 
 export const DECISION_BOM_SECTIONS = ["decision", "receipt", "principal", "actors", "action", "policy", "model", "approval", "outcome", "cost", "trace", "proof"] as const;
+/** ADR-0190 I8: a v2 body adds `execution` after the v1 sections */
+export const DECISION_BOM_SECTIONS_V2 = [...DECISION_BOM_SECTIONS, "execution"] as const;
 export const BOM_SECTION_STATUSES = ["recorded", "not_applicable", "not_recorded"] as const;
-export const BOM_NOT_RECORDED_REASONS = ["pre_identity", "pre_facts", "capture_off", "no_bound_row", "unsigned_addendum", "not_captured_by_path", "anchor_absent"] as const;
+export const BOM_NOT_RECORDED_REASONS = ["pre_identity", "pre_facts", "capture_off", "no_bound_row", "unsigned_addendum", "not_captured_by_path", "anchor_absent", "pre_isolation", "no_placement"] as const;
+
+// ADR-0190 decision 9 / I8: the execution facts vocabularies (`packages/shared/src/isolation/contract.ts`, mirrored)
+export const WORKLOAD_KINDS = ["model_call", "connector_call", "remote_mcp", "mcp_stdio", "code_exec", "engine_worker", "byoc_worker"] as const;
+export const DECISION_EXECUTION_PLACEMENTS = ["in_gateway", "external", "placed", "refused", "mismatch"] as const;
+export const REQUIRABLE_ISOLATION_CLASSES = ["hardened_container", "user_space_kernel", "microvm"] as const;
+export const DECISION_EXECUTION_APPLIED = ["in_gateway", "external", ...REQUIRABLE_ISOLATION_CLASSES, "customer_declared"] as const;
+export const REQUIRED_CLASS_SOURCES = ["workload_kind", "data_sensitivity", "compliance_tag", "autonomy_class", "configured_profile", "unknown_agent", "parent_grant"] as const;
+export const DECISION_EXECUTION_REFUSAL_CODES = ["no_executor", "attestation_stale", "class_below_required", "executor_quarantined", "profile_retired", "policy_unresolved", "execution_profile_mismatch"] as const;
+export const EXECUTOR_BACKENDS = ["runc", "gvisor", "kata", "openshell", "customer"] as const;
 export const DECISION_BOM_FINALITY_STATES = ["anchored", "anchored_finite_lock", "anchored_unverified_destination", "chain_signed"] as const;
 export const BOM_REPORTED_FINALITY_STATES = [...DECISION_BOM_FINALITY_STATES, "anchored_lapsed"] as const;
 export const BOM_ANCHOR_PENDING_REASONS = [
@@ -77,8 +88,13 @@ export type BomVerifyOutcome = (typeof BOM_VERIFY_OUTCOMES)[number];
 export const BOM_VERIFY_SOURCES = ["bundle", "decision_bom", "ai_bom_snapshot"] as const;
 /** contract.ts `BOM_BODY_VERSIONS`: the signed body each subject carries */
 export const DECISION_BOM_VERSION = "regulait.decision-bom.v1";
+/** ADR-0190 I8: every Decision BOM frozen from I8 on; v1 bodies stay readable */
+export const DECISION_BOM_VERSION_V2 = "regulait.decision-bom.v2";
+export const DECISION_BOM_VERSIONS = [DECISION_BOM_VERSION, DECISION_BOM_VERSION_V2] as const;
 export const AI_BOM_VERSION = "regulait.ai-bom.v1";
-export const BOM_BODY_VERSIONS = [DECISION_BOM_VERSION, AI_BOM_VERSION] as const;
+export const BOM_BODY_VERSIONS = [DECISION_BOM_VERSION, DECISION_BOM_VERSION_V2, AI_BOM_VERSION] as const;
+/** the sections a Decision BOM body of version `v` carries */
+export const decisionBomSectionsFor = (v: string): readonly string[] => (v === DECISION_BOM_VERSION ? DECISION_BOM_SECTIONS : DECISION_BOM_SECTIONS_V2);
 export type BomVerifySource = (typeof BOM_VERIFY_SOURCES)[number];
 export const BOM_BUNDLE_REQUIRED_CHECKS = ["bundle_manifest_signature", "bundle_manifest_files", "bundle_subject", "bundle_email_scan"] as const;
 export const BOM_ANCHOR_CHECKS = ["anchor_record", "anchor_imprint", "tsa_token"] as const;
@@ -309,6 +325,9 @@ export function readDrift(value: unknown, subject: BomSubject): BomDrift {
 /** what a drift `ref` (a CycloneDX bom-ref, `aiBomRef` in the shared builder) names, in words */
 const REF_KINDS: Array<[string, string]> = [
   ["service:mcp:", "MCP server or tool"],
+  // ADR-0190 I8
+  ["service:executor:", "Executor"],
+  ["execution-profile:", "Execution profile"],
   ["service:connector:", "Connector"],
   ["service:provider:", "Model provider endpoint"],
   ["subject:", "This subject"],
@@ -393,8 +412,68 @@ export interface DecisionBomVersion {
   keyId: string;
   createdAt: string;
 }
+/**
+ * ADR-0190 I8: the execution facts of a v2 Decision BOM, read from the signed body only (never from another
+ * request). Null when the body is v1 or records no execution (the completeness row says why).
+ */
+export interface ExecutionView {
+  workloadKind: string;
+  placement: string;
+  placementId: string | null;
+  requiredClass: string | null;
+  requiredBy: string | null;
+  appliedClass: string | null;
+  refusalCode: string | null;
+  profile: { id: string; name: string; version: number; digest: string } | null;
+  executor: { id: string; backend: string; runtimeVersion: string; identityId: string; identity: string | null } | null;
+  attestation: { placementReportSha256: string | null; executorAttestationId: string | null; executorReportSha256: string | null } | null;
+}
+const ID_TEXT = /^[A-Za-z0-9._:/@+#=-]{1,256}$/;
+const nullOr = <T>(v: unknown, ok: (x: unknown) => x is T): v is T | null => v === null || ok(v);
+const isSha = (x: unknown): x is string => typeof x === "string" && SHA256_HEX.test(x);
+const isUuid = (x: unknown): x is string => typeof x === "string" && UUID.test(x);
+const isIdText = (x: unknown): x is string => typeof x === "string" && ID_TEXT.test(x);
+const isSpiffe = (x: unknown): x is string => typeof x === "string" && x.length <= 2048 && /^spiffe:\/\/[a-z0-9._-]+\/[A-Za-z0-9._/-]+$/.test(x);
+const exactKeys = (o: Obj, keys: readonly string[]) => Object.keys(o).sort().join() === [...keys].sort().join();
+/** the `execution` section of a v2 body: exactly the contract's fields and vocabularies, or the whole BOM is unreadable */
+export function readExecution(value: unknown): ExecutionView | null {
+  if (value === null) return null;
+  const e = obj(value);
+  const bad = (): never => unreadable("The Decision BOM");
+  if (!e || !exactKeys(e, ["workloadKind", "placement", "placementId", "requiredClass", "requiredBy", "appliedClass", "refusalCode", "profile", "executor", "attestation"])) return bad();
+  if (!oneOf(WORKLOAD_KINDS, e.workloadKind) || !oneOf(DECISION_EXECUTION_PLACEMENTS, e.placement) || !nullOr(e.placementId, isUuid)) return bad();
+  if (!(e.requiredClass === null || oneOf(REQUIRABLE_ISOLATION_CLASSES, e.requiredClass)) || !(e.requiredBy === null || oneOf(REQUIRED_CLASS_SOURCES, e.requiredBy))) return bad();
+  if (!(e.appliedClass === null || oneOf(DECISION_EXECUTION_APPLIED, e.appliedClass)) || !(e.refusalCode === null || oneOf(DECISION_EXECUTION_REFUSAL_CODES, e.refusalCode))) return bad();
+  let profile: ExecutionView["profile"] = null;
+  if (e.profile !== null) {
+    const p = obj(e.profile);
+    if (!p || !exactKeys(p, ["id", "name", "version", "digest"]) || !isUuid(p.id) || !isIdText(p.name) || !posInt(p.version) || !isSha(p.digest)) return bad();
+    profile = { id: p.id, name: p.name, version: p.version, digest: p.digest };
+  }
+  let executor: ExecutionView["executor"] = null;
+  if (e.executor !== null) {
+    const x = obj(e.executor);
+    if (!x || !exactKeys(x, ["id", "backend", "runtimeVersion", "identityId", "identity"]) || !isUuid(x.id) || !oneOf(EXECUTOR_BACKENDS, x.backend) || !isIdText(x.runtimeVersion) || !isUuid(x.identityId) || !nullOr(x.identity, isSpiffe)) return bad();
+    executor = { id: x.id, backend: x.backend, runtimeVersion: x.runtimeVersion, identityId: x.identityId, identity: x.identity };
+  }
+  let attestation: ExecutionView["attestation"] = null;
+  if (e.attestation !== null) {
+    const a = obj(e.attestation);
+    if (!a || !exactKeys(a, ["placementReportSha256", "executorAttestationId", "executorReportSha256"]) || !nullOr(a.placementReportSha256, isSha) || !nullOr(a.executorAttestationId, isUuid) || !nullOr(a.executorReportSha256, isSha)) return bad();
+    attestation = { placementReportSha256: a.placementReportSha256, executorAttestationId: a.executorAttestationId, executorReportSha256: a.executorReportSha256 };
+  }
+  // what ran where: a call no executor places has no placement facts; a placement names its profile (decision 9)
+  const local = e.placement === "in_gateway" || e.placement === "external";
+  if (local ? e.appliedClass !== e.placement || profile !== null || executor !== null || attestation !== null : profile === null || e.requiredClass === null) return bad();
+  return { workloadKind: e.workloadKind, placement: e.placement, placementId: e.placementId, requiredClass: e.requiredClass, requiredBy: e.requiredBy, appliedClass: e.appliedClass, refusalCode: e.refusalCode, profile, executor, attestation };
+}
+
 export interface DecisionBomView {
   auditId: string;
+  /** the signed body's own version (v1 bodies frozen before ADR-0190 I8 have no execution section) */
+  bodyVersion: string;
+  /** ADR-0190 I8: the execution facts, from the signed body (null for v1, or when none were recorded) */
+  execution: ExecutionView | null;
   bom: DecisionBomVersion & { reportedFinality: string; aiBomSnapshotId: string | null };
   versions: DecisionBomVersion[];
   renderings: string[];
@@ -463,14 +542,22 @@ export function readDecisionBom(value: unknown, auditId: string): DecisionBomVie
   if (bundle.subject !== "decision-bom" || bundle.href !== `/v1/decisions/${auditId}/bom/bundle?version=${bom.version}`) return unreadable("The Decision BOM");
   if (!v.renderings.every((f) => oneOf(BOM_RENDERING_FORMATS, f))) return unreadable("The Decision BOM");
   const c = obj(d.completeness);
-  if (!c) return unreadable("The Decision BOM");
-  const completeness = DECISION_BOM_SECTIONS.map((section): SectionCompleteness => {
+  if (!c || !oneOf(DECISION_BOM_VERSIONS, d.v)) return unreadable("The Decision BOM");
+  const sections = decisionBomSectionsFor(d.v);
+  if (Object.keys(c).length !== sections.length) return unreadable("The Decision BOM");
+  // a v1 body has no execution key at all; a v2 body always has one, recorded exactly when present
+  if ((d.v === DECISION_BOM_VERSION) === ("execution" in d)) return unreadable("The Decision BOM");
+  const execution = d.v === DECISION_BOM_VERSION ? null : readExecution(d.execution);
+  const completeness = sections.map((section): SectionCompleteness => {
     const e = obj(c[section]);
     if (!e || !oneOf(BOM_SECTION_STATUSES, e.status) || (e.status === "not_recorded") !== oneOf(BOM_NOT_RECORDED_REASONS, e.reason)) return unreadable("The Decision BOM");
     return { section, status: e.status, reason: (e.reason as string | undefined) ?? null };
   });
+  if (d.v !== DECISION_BOM_VERSION && (completeness.find((x) => x.section === "execution")!.status === "recorded") !== (execution !== null)) return unreadable("The Decision BOM");
   return {
     auditId,
+    bodyVersion: d.v,
+    execution,
     body: b.body,
     bom: { ...bom, reportedFinality: b.reportedFinality, aiBomSnapshotId: b.aiBomSnapshotId as string | null },
     versions,
@@ -573,11 +660,11 @@ function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], 
   const of = (check: string) => checks.filter((c) => c.check === check);
   const all = (check: string, status: string, reason: string) => of(check).every((c) => c.status === status && c.reason === reason);
   const decision = id.subject === "decision-bom";
-  if (env.bodyVersion !== (decision ? DECISION_BOM_VERSION : AI_BOM_VERSION)) return "its body version is not the one for this kind of BOM";
+  if (decision ? !oneOf(DECISION_BOM_VERSIONS, env.bodyVersion) : env.bodyVersion !== AI_BOM_VERSION) return "its body version is not the one for this kind of BOM";
   if ((source === "decision_bom" && !decision) || (source === "ai_bom_snapshot" && decision)) return "it verified a different kind of BOM than the stored one asked for";
   const foreign: readonly string[] = decision ? AI_BOM_ONLY_CHECKS : DECISION_BOM_ONLY_CHECKS;
   if (checks.some((c) => foreign.includes(c.check))) return "it reports checks that belong to the other kind of BOM";
-  if (decision ? sections.map((s) => s.section).join() !== DECISION_BOM_SECTIONS.join() : sections.length !== 0) return "its sections are not this BOM's sections";
+  if (decision ? sections.map((s) => s.section).join() !== decisionBomSectionsFor(env.bodyVersion).join() : sections.length !== 0) return "its sections are not this BOM's sections";
   const missing = requiredChecksFor(id, source).filter((c) => of(c).length === 0);
   if (missing.length && outcome !== "invalid") return `it leaves out required checks (${missing.join(", ")})`;
   for (const c of BOM_BUNDLE_REQUIRED_CHECKS) {
@@ -660,7 +747,7 @@ export function readVerifyReport(value: unknown, expected: VerifyExpectation): V
   });
   const sections = v.sections.map((raw) => {
     const s = obj(raw);
-    if (!s || !oneOf(DECISION_BOM_SECTIONS, s.section) || !oneOf(["valid", "invalid"] as const, s.status) || !oneOf(BOM_SECTION_STATUSES, s.completeness) || !(s.notRecordedReason === null || oneOf(BOM_NOT_RECORDED_REASONS, s.notRecordedReason)) || (s.completeness === "not_recorded") !== (s.notRecordedReason !== null)) {
+    if (!s || !oneOf(DECISION_BOM_SECTIONS_V2, s.section) || !oneOf(["valid", "invalid"] as const, s.status) || !oneOf(BOM_SECTION_STATUSES, s.completeness) || !(s.notRecordedReason === null || oneOf(BOM_NOT_RECORDED_REASONS, s.notRecordedReason)) || (s.completeness === "not_recorded") !== (s.notRecordedReason !== null)) {
       return unreadable("The verification result");
     }
     return { section: s.section, status: s.status, completeness: s.completeness, notRecordedReason: s.notRecordedReason as string | null };
@@ -827,6 +914,7 @@ export const SECTION_LABELS: Readonly<Record<string, string>> = {
   cost: "Cost",
   trace: "Trace",
   proof: "Proof",
+  execution: "Execution",
 };
 export const sectionLabel = (s: string) => own(SECTION_LABELS, s, s);
 
@@ -838,7 +926,38 @@ export const NOT_RECORDED_LABELS: Readonly<Record<string, string>> = {
   unsigned_addendum: "Unsigned addendum",
   not_captured_by_path: "Not captured on this path",
   anchor_absent: "No anchor recorded",
+  pre_isolation: "Predates execution facts",
+  no_placement: "No placement recorded",
 };
+
+// ADR-0190 I8: execution facts in words. L0 and L1 are never called a sandbox (decision 11).
+export const EXECUTION_PLACEMENT_LABELS: Readonly<Record<string, string>> = {
+  in_gateway: "Ran in the gateway (L0, not isolated)",
+  external: "Ran on the upstream's own host (external)",
+  placed: "Placed on an executor",
+  refused: "Refused before it ran",
+  mismatch: "Refused: the placement report did not match the profile",
+};
+export const ISOLATION_CLASS_LABELS: Readonly<Record<string, string>> = {
+  in_gateway: "L0 in gateway",
+  external: "External (the upstream's host)",
+  hardened_container: "L1 hardened container",
+  user_space_kernel: "L2 user-space kernel",
+  microvm: "L3 microVM",
+  customer_declared: "customer declared (not verified)",
+};
+export const REQUIRED_BY_LABELS: Readonly<Record<string, string>> = {
+  workload_kind: "the workload kind",
+  data_sensitivity: "the data sensitivity",
+  compliance_tag: "a compliance tag",
+  autonomy_class: "the agent's autonomy class",
+  configured_profile: "the configured profile",
+  unknown_agent: "an unknown agent",
+  parent_grant: "the parent grant",
+};
+export const executionPlacementLabel = (p: string) => own(EXECUTION_PLACEMENT_LABELS, p, p);
+export const isolationClassLabel = (c: string | null) => (c === null ? "none" : own(ISOLATION_CLASS_LABELS, c, c));
+export const requiredByLabel = (r: string | null) => (r === null ? "" : own(REQUIRED_BY_LABELS, r, r));
 export const notRecordedLabel = (r: string | null) => (r === null ? "" : own(NOT_RECORDED_LABELS, r, r));
 
 export const CHECK_LABELS: Readonly<Record<string, string>> = {

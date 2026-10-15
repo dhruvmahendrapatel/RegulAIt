@@ -407,6 +407,8 @@ export interface McpServer {
   admissionState?: string;
   /** ADR-0188 S8: does each call send this upstream a signed assertion of who it is for? Default `none`. */
   identityPropagation?: "none" | "signed_assertion";
+  /** ADR-0188 S8 follow-up: name agents in the assertion by their workload IDs instead of pairwise ids? Default false. */
+  discloseAgentWorkloadIds?: boolean;
   ownerUserId?: string | null;
   ownership?: "owned" | "unowned" | "orphaned";
   createdAt?: string;

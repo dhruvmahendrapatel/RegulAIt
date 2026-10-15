@@ -175,6 +175,9 @@ const CODE_SENTENCES: Record<string, string> = {
   // ADR-0188 S8: a stdio MCP server has no HTTP request to carry an identity assertion
   identity_audience_shared: "Another MCP server already receives identity assertions for this same address, so an assertion for one would be accepted by the other. Nothing was saved",
   identity_propagation_unsupported: "This server runs as a local (stdio) process, so it cannot receive an identity assertion. Nothing was saved",
+  // ADR-0188 S8 follow-up: agent workload IDs ride only inside a signed assertion
+  agent_id_disclosure_needs_assertion:
+    "Agent workload IDs are sent only inside a signed identity assertion, and this server is not set to receive one. Turn on the signed assertion first. Nothing was saved",
   unavailable: "This record isn't available — it may not exist, or it may belong to someone else",
   not_found: "No such record",
   unknown_project: "No project with this ID exists",

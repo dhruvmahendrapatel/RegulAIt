@@ -33,6 +33,7 @@ import { AI_BOM_SPDX_SUBJECT_KINDS, AI_BOM_SPDX_SUBJECT_PROPERTIES, AiBomSpdxFie
 import { aiDevStackToolSchema, bomSafeIssue, type AiDevStackTool } from "./ai-dev-stack.js";
 import { RELEASE_SBOM_IDENTITY_BASES, RELEASE_SBOM_KINDS, releaseCommitSchema, releaseImageDigestSchema, releaseSbomSerialSchema, type ReleaseSbomRecord } from "./release-sbom-identity.js";
 import { AI_BOM_SUBJECT_KINDS, bomCanonicalBytes, bomIdentifierSchema, isBomExportEndpoint, isBomSpiffeId, parseTrainingDatasetChecksum, type AiBomSubjectKind } from "./contract.js";
+import { APPLIED_ISOLATION_KINDS, EXECUTOR_BACKENDS, EXECUTOR_STATUSES, REQUIRABLE_ISOLATION_CLASSES } from "../isolation/contract.js";
 
 // ---------------------------------------------------------------------------
 // persisted vocabularies (each mirrors a `packages/db` enum; any other value is refused)
@@ -55,6 +56,8 @@ export const AI_BOM_BIAS_STATUSES = ["not_assessed", "in_progress", "assessed", 
 /** the config artifact types whose active and canary versions are agent components (round 8, 4237322637) */
 export const AI_BOM_AGENT_CONFIG_TYPES = ["agent_system_prompt", "agent_config"] as const;
 export const AI_BOM_CONFIG_STATUSES = ["active", "canary"] as const;
+/** ADR-0190 I8: what an execution profile is assigned to (`workload_identities.execution_profile_id` of an agent or builder agent, `mcp_servers.execution_profile_id`) */
+export const AI_BOM_EXECUTION_TARGET_KINDS = ["agent", "builder_agent", "mcp_server"] as const;
 /** the memory stores of the ADR-0082 inventory (`memoryStoreInventory`) */
 export const AI_BOM_MEMORY_STORE_KINDS = ["semantic_cache", "conversations", "builder_agent_memory", "project_context"] as const;
 
@@ -259,6 +262,8 @@ export interface McpServerRecord {
   admissionState: string;
   admissionManifestDigest: Nullable<string>;
   identityPropagation: string;
+  /** ADR-0188 S8 (migration 0196): whether the signed assertion also discloses agent workload ids to this upstream */
+  discloseAgentWorkloadIds: boolean;
   ownerUserId: Nullable<string>;
   ownerDisplayName: Nullable<string>;
 }
@@ -309,6 +314,46 @@ export interface BuilderSkillRecord {
 export interface MemoryStoreRecord {
   kind: string;
   builderAgentId: Nullable<string>;
+}
+/**
+ * ADR-0190 decision 9 / I8: an execution profile (`execution_profiles`), a `data` (`configuration`) component
+ * hashed by its digest. Never its body: the digest is the SHA-256 of the canonical body the database checks.
+ */
+export interface ExecutionProfileRecord {
+  id: string;
+  name: string;
+  version: number;
+  digest: string;
+  minClass: string;
+  shipped: boolean;
+  retired: boolean;
+}
+/** one passing executor self-test that was fresh when the snapshot was captured (decision 6) */
+export interface ExecutorAttestationRecord {
+  profileDigest: string;
+  class: string;
+  reportSha256: string;
+  observedAt: string;
+}
+/** ADR-0190 decision 9 / I8: an executor (`executors`), a CycloneDX `service` with its trust zone and runtime */
+export interface ExecutorRecord {
+  id: string;
+  name: string;
+  backend: string;
+  runtimeVersion: string;
+  classesDeclared: string[];
+  /** OWNER DECISION 6: the class an admin mapped a customer plane to (null = none) */
+  declaredClass: Nullable<string>;
+  status: string;
+  /** its ADR-0188 `worker_runtime` identity URI */
+  workloadIdentity: Nullable<string>;
+  attestations: ExecutorAttestationRecord[];
+}
+/** ADR-0190 I8: the profile an agent, builder agent or stdio MCP server is assigned (a granted edge, not observed use) */
+export interface ExecutionAssignmentRecord {
+  targetKind: string;
+  targetId: string;
+  profileId: string;
 }
 export interface InstallRecord {
   /** ADR-0116: the operator-set install id, or null (said so, never generated) */
@@ -371,6 +416,10 @@ export interface AiBomRecordSet {
   releaseSboms?: ReleaseSbomRecord[];
   /** B7: the reviewed inventory of AI tools in our development stack (`security/ai-dev-stack.json`); install subject only */
   devStackTools?: AiDevStackTool[];
+  /** ADR-0190 I8; optional on input (absent = none), always present after `normaliseAiBomRecords` */
+  executionProfiles?: ExecutionProfileRecord[];
+  executors?: ExecutorRecord[];
+  executionAssignments?: ExecutionAssignmentRecord[];
 }
 /** the record lists only an install snapshot may carry (B7) */
 export const AI_BOM_INSTALL_ONLY_LISTS = ["releaseSboms", "devStackTools"] as const;
@@ -382,7 +431,10 @@ export const AI_BOM_RECORD_LISTS = [
   "evalDatasets", "trainingDatasets", "trainingJobs", "trainingArtifacts", "modelArtifacts", "artifactScans",
   "engineRuns", "engines", "promptTags", "configVersions", "mcpServers", "mcpTools", "connectors", "grants",
   "builderAgents", "builderSkills", "memoryStores", "releaseSboms", "devStackTools", "spdxFields",
+  "executionProfiles", "executors", "executionAssignments",
 ] as const satisfies ReadonlyArray<keyof AiBomRecordSet>;
+/** the lists that are optional on input (absent = none): B7's, B9's and ADR-0190 I8's */
+const OPTIONAL_LISTS: readonly string[] = ["releaseSboms", "devStackTools", "spdxFields", "executionProfiles", "executors", "executionAssignments"];
 export type AiBomRecordList = (typeof AI_BOM_RECORD_LISTS)[number];
 
 /** the source table of each record list (R22's basis names the table) */
@@ -397,6 +449,7 @@ export const AI_BOM_RECORD_TABLES: Readonly<Record<AiBomRecordList, string>> = {
   // B7: not tables; the signed release identity file and the checked-in inventory
   releaseSboms: "release:sbom_identity", devStackTools: "release:ai_dev_stack",
   spdxFields: "ai_bom_spdx_declarations",
+  executionProfiles: "execution_profiles", executors: "executors", executionAssignments: "execution_profile_assignments",
 };
 
 /** THE ALLOWLISTS: exactly the fields each record may carry */
@@ -418,7 +471,7 @@ const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof RecordOf<K>> } = {
   engines: ["id", "version", "imageDigest", "licence"],
   promptTags: ["promptId", "promptName", "tag", "commitId", "hash", "agentId"],
   configVersions: ["id", "artifactType", "artifactId", "version", "status", "canaryPct", "bodyDigest"],
-  mcpServers: ["id", "name", "transport", "url", "releaseDigest", "admissionState", "admissionManifestDigest", "identityPropagation", "ownerUserId", "ownerDisplayName"],
+  mcpServers: ["id", "name", "transport", "url", "releaseDigest", "admissionState", "admissionManifestDigest", "identityPropagation", "discloseAgentWorkloadIds", "ownerUserId", "ownerDisplayName"],
   mcpTools: ["id", "serverId", "name", "kind"],
   connectors: ["id", "name", "kind", "url", "ownerUserId", "ownerDisplayName", "credentialSet"],
   grants: ["holderKind", "holderId", "targetKind", "targetId", "source"],
@@ -428,6 +481,9 @@ const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof RecordOf<K>> } = {
   releaseSboms: ["kind", "serialNumber", "version", "sha256", "imageDigest", "releaseCommit", "identityBasis"],
   devStackTools: ["id", "category", "description", "deployment", "networkEgress", "repositoryAccess", "dataShared", "outputControl", "governedBy", "introducedOn"],
   spdxFields: ["subjectKind", "subjectId", "releaseTime", "downloadLocation", "packageVersion", "builtTime", "originatedBy", "datasetType"],
+  executionProfiles: ["id", "name", "version", "digest", "minClass", "shipped", "retired"],
+  executors: ["id", "name", "backend", "runtimeVersion", "classesDeclared", "declaredClass", "status", "workloadIdentity", "attestations"],
+  executionAssignments: ["targetKind", "targetId", "profileId"],
 };
 const BIAS_FIELDS = ["dimension", "method", "status", "resultRef", "assessedAt"] as const;
 
@@ -444,6 +500,8 @@ export function aiBomRecordKey(list: AiBomRecordList, r: Record<string, unknown>
       return `${r.kind}:${r.builderAgentId ?? "org"}`;
     case "spdxFields":
       return `${r.subjectKind}:${r.subjectId}`;
+    case "executionAssignments":
+      return `${r.targetKind}:${r.targetId}`;
     case "releaseSboms":
       return String(r.kind);
     case "evalDatasets":
@@ -729,8 +787,8 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
 
   const each = <K extends AiBomRecordList>(list: K, map: (r: Record<string, unknown>, at: string) => RecordOf<K>): RecordOf<K>[] => {
     let raw = (input as unknown as Record<string, unknown>)[list];
-    // B7's install-only lists and B9's `spdxFields` are optional on input; every other list is required
-    if (raw === undefined && ((AI_BOM_INSTALL_ONLY_LISTS as readonly string[]).includes(list) || list === "spdxFields")) raw = [];
+    // B7's install-only lists, B9's `spdxFields` and ADR-0190 I8's execution lists are optional on input; every other list is required
+    if (raw === undefined && OPTIONAL_LISTS.includes(list)) raw = [];
     if (!Array.isArray(raw)) return fail(`${list}: expected a list`);
     if (raw.length > AI_BOM_MAX_RECORDS_PER_LIST) fail(`${list}: more than the cap of ${AI_BOM_MAX_RECORDS_PER_LIST} records (refused)`);
     const out = raw.map((r, i) => map(onlyFields(list, r, `${list}[${i}]`), `${list}[${i}]`));
@@ -955,6 +1013,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         admissionState: ident(`${at}.admissionState`, r.admissionState),
         admissionManifestDigest: r.admissionManifestDigest === null ? null : digest(`${at}.admissionManifestDigest`, String(r.admissionManifestDigest).replace(/^sha256:/, "")),
         identityPropagation: ident(`${at}.identityPropagation`, r.identityPropagation),
+        discloseAgentWorkloadIds: bool(`${at}.discloseAgentWorkloadIds`, r.discloseAgentWorkloadIds),
         ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
         ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       };
@@ -1030,6 +1089,51 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
       if (!t.success) return fail(`${at}: ${t.error.issues.map(bomSafeIssue).join("; ")}`);
       return { ...t.data, dataShared: sortedStrings(t.data.dataShared) as AiDevStackTool["dataShared"], governedBy: sortedStrings(t.data.governedBy) };
     }),
+    // ADR-0190 I8: profiles, executors (with their fresh passing self-tests) and assignments; ids, digests, enums only
+    executionProfiles: each("executionProfiles", (r, at) => {
+      const version = int(`${at}.version`, r.version) as number;
+      if (version < 1) fail(`${at}.version: not positive`);
+      return {
+        id: uuid(`${at}.id`, r.id) as string,
+        name: ident(`${at}.name`, r.name),
+        version,
+        digest: digest(`${at}.digest`, r.digest) as string,
+        minClass: oneOf(`${at}.minClass`, r.minClass, REQUIRABLE_ISOLATION_CLASSES),
+        shipped: bool(`${at}.shipped`, r.shipped),
+        retired: bool(`${at}.retired`, r.retired),
+      };
+    }),
+    executors: each("executors", (r, at) => {
+      const backend = oneOf(`${at}.backend`, r.backend, EXECUTOR_BACKENDS);
+      if (!Array.isArray(r.attestations)) fail(`${at}.attestations: expected a list`);
+      const attestations = (r.attestations as unknown[]).map((x, i) => {
+        const a = x !== null && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>) : fail(`${at}.attestations[${i}]: expected an object`);
+        const keys = Object.keys(a).sort(cmpCodeUnits).join();
+        if (keys !== "class,observedAt,profileDigest,reportSha256") fail(`${at}.attestations[${i}]: only class, observedAt, profileDigest and reportSha256`);
+        return {
+          profileDigest: digest(`${at}.attestations[${i}].profileDigest`, a.profileDigest) as string,
+          class: oneOf(`${at}.attestations[${i}].class`, a.class, APPLIED_ISOLATION_KINDS),
+          reportSha256: digest(`${at}.attestations[${i}].reportSha256`, a.reportSha256) as string,
+          observedAt: time(`${at}.attestations[${i}].observedAt`, a.observedAt) as string,
+        };
+      });
+      return {
+        id: uuid(`${at}.id`, r.id) as string,
+        name: ident(`${at}.name`, r.name),
+        backend,
+        runtimeVersion: ident(`${at}.runtimeVersion`, r.runtimeVersion),
+        classesDeclared: sortedStrings(strings(`${at}.classesDeclared`, r.classesDeclared, 64).map((c, i) => oneOf(`${at}.classesDeclared[${i}]`, c, APPLIED_ISOLATION_KINDS))),
+        declaredClass: r.declaredClass === null ? null : oneOf(`${at}.declaredClass`, r.declaredClass, REQUIRABLE_ISOLATION_CLASSES),
+        status: oneOf(`${at}.status`, r.status, EXECUTOR_STATUSES),
+        workloadIdentity: spiffeOrNull(`${at}.workloadIdentity`, r.workloadIdentity),
+        attestations: sortedBy(attestations, (a) => `${a.profileDigest}\u0000${a.class}\u0000${a.observedAt}\u0000${a.reportSha256}`),
+      };
+    }),
+    executionAssignments: each("executionAssignments", (r, at) => ({
+      targetKind: oneOf(`${at}.targetKind`, r.targetKind, AI_BOM_EXECUTION_TARGET_KINDS),
+      targetId: uuid(`${at}.targetId`, r.targetId) as string,
+      profileId: uuid(`${at}.profileId`, r.profileId) as string,
+    })),
     // B9 (R51): every loaded value is re-checked by the write route's own rules (defence in depth)
     spdxFields: each("spdxFields", (r, at) => {
       const kind = oneOf(`${at}.subjectKind`, r.subjectKind, AI_BOM_SPDX_SUBJECT_KINDS);
@@ -1060,6 +1164,17 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
   };
   for (const list of AI_BOM_INSTALL_ONLY_LISTS) {
     if (subjectKind !== "install" && (n[list]?.length ?? 0) > 0) fail(`${list}: only an install snapshot carries release records (B7)`);
+  }
+  // ADR-0190 I8: an assignment names a loaded profile and a loaded target; a dangling edge is refused, never dropped
+  const profileIds = new Set((n.executionProfiles ?? []).map((p) => p.id));
+  const targets: Record<string, Set<string>> = {
+    agent: new Set(n.agents.map((a) => a.id)),
+    builder_agent: new Set(n.builderAgents.map((b) => b.id)),
+    mcp_server: new Set(n.mcpServers.map((m) => m.id)),
+  };
+  for (const a of n.executionAssignments ?? []) {
+    if (!profileIds.has(a.profileId)) fail(`executionAssignments: ${a.targetKind} ${a.targetId} names a profile that is not loaded`);
+    if (!targets[a.targetKind]!.has(a.targetId)) fail(`executionAssignments: ${a.targetKind} ${a.targetId} is not in the record set`);
   }
   const commits = new Set((n.releaseSboms ?? []).map((r) => r.releaseCommit));
   if (commits.size > 1) fail("releaseSboms: every SBOM identity must name the same release commit");

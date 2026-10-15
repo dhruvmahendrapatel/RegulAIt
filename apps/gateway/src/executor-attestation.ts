@@ -5,17 +5,18 @@
  * (`delegation.ts`, decision 8 third bullet, slice I2) applies the very same
  * predicate the broker does, without an import cycle.
  */
-import { and, desc, eq, executorAttestations, executors, sql, type Db } from "@regulait/db";
+import { attestationCounts, eq, executorAttestations, latestCountingAttestation, type Db } from "@regulait/db";
 import type { AppliedIsolationKind } from "@regulait/shared";
 
 type Reader = Pick<Db, "select">;
 
 export interface FreshAttestationRow {
+  id: string;
+  observedAt: Date;
   class: AppliedIsolationKind;
   expiresAt: Date;
   reportSha256: string;
-  /** I4: the attestation row itself (the broker stamps it on the placement), and its stored report */
-  id: string;
+  /** I4: the stored report of this attestation row (the broker hashes its runtime flags onto the placement) */
   report: Record<string, unknown>;
 }
 
@@ -26,22 +27,15 @@ export interface FreshAttestationRow {
  * whose `expires_at` has not passed, so a re-enabled executor takes no work
  * before a new `pass`. Every reader of attestations for placement uses this.
  */
-export function attestationCounts(executorId: string) {
-  return and(
-    eq(executorAttestations.executorId, executorId),
-    sql`${executorAttestations.observedAt} > coalesce((SELECT ${executors.reenabledAt} FROM ${executors} WHERE ${executors.id} = ${executorId}), '-infinity'::timestamptz)`,
-  );
-}
+// ADR-0190 I8: defined once in `packages/db` (`executor-attestation.ts`), so the decision fact capture applies it too
+export { attestationCounts };
 
 /** the executor's latest counting attestation for a profile, if it is a fresh `pass` on the database clock */
 export async function freshAttestation(db: Reader, executorId: string, profileDigest: string, now: Date): Promise<FreshAttestationRow | null> {
-  const [row] = await db
-    .select({ id: executorAttestations.id, class: executorAttestations.class, expiresAt: executorAttestations.expiresAt, verdict: executorAttestations.verdict, reportSha256: executorAttestations.reportSha256, report: executorAttestations.report })
-    .from(executorAttestations)
-    .where(and(attestationCounts(executorId), eq(executorAttestations.profileDigest, profileDigest)))
-    .orderBy(desc(executorAttestations.observedAt), desc(executorAttestations.createdAt))
-    .limit(1);
+  const row = await latestCountingAttestation(db, executorId, profileDigest);
   // the LATEST report decides: a fail after a pass withdraws the class until the next pass
   if (!row || row.verdict !== "pass" || row.expiresAt.getTime() <= now.getTime()) return null;
-  return { id: row.id, class: row.class, expiresAt: row.expiresAt, reportSha256: row.reportSha256, report: (row.report ?? {}) as Record<string, unknown> };
+  // I4: the stored report of that same row (the broker hashes its runtime flags onto the placement)
+  const [stored] = await db.select({ report: executorAttestations.report }).from(executorAttestations).where(eq(executorAttestations.id, row.id));
+  return { id: row.id, class: row.class, observedAt: row.observedAt, expiresAt: row.expiresAt, reportSha256: row.reportSha256, report: (stored?.report ?? {}) as Record<string, unknown> };
 }

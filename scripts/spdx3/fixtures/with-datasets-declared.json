@@ -239,6 +239,7 @@
     "admissionState": "clean",
     "admissionManifestDigest": null,
     "identityPropagation": "none",
+    "discloseAgentWorkloadIds": false,
     "ownerUserId": null,
     "ownerDisplayName": null
    }

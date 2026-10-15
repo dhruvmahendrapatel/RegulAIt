@@ -24,7 +24,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { createDb, runMigrations, sql, type Db } from "@regulait/db";
-import { AI_BOM_VERSION, aiBomSerialNumber, bomCanonicalBytes, bomDigestOf, DECISION_FACTS_VERSION } from "@regulait/shared";
+import { AI_BOM_VERSION, aiBomSerialNumber, bomCanonicalBytes, bomDigestOf, DECISION_FACTS_VERSION_V2 } from "@regulait/shared";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -175,7 +175,7 @@ describe("F5: facts and addenda hold only shapes both canonicalisers agree on", 
     it(`SQL refuses ${label}`, async () => {
       await rolledBack(async (tx) => {
         const auditId = randomUUID();
-        const body = `{"v":"${DECISION_FACTS_VERSION}","auditId":"${auditId}","auditSeq":1,"model":null,"x":${raw}}`;
+        const body = `{"v":"${DECISION_FACTS_VERSION_V2}","auditId":"${auditId}","auditSeq":1,"model":null,"x":${raw}}`;
         const hash = sql`encode(sha256(convert_to(regulait_canonical_json(${body}::jsonb), 'UTF8')), 'hex')`;
         // the marker carries the SQL hash, so the only thing left to refuse the facts is the shape check
         await tx.execute(sql`insert into decision_capture_status (audit_id, audit_seq, audit_at, status, facts_hash) values (${auditId}, 1, now(), 'captured', ${hash})`);

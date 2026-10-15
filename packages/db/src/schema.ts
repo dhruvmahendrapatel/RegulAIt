@@ -742,6 +742,11 @@ export const mcpServers = pgTable("mcp_servers", {
    * nothing; `signed_assertion` sends a 60 s gateway-signed JWT with a pairwise
    * subject and the actor chain (slice S8). Turning it on is audited. */
   identityPropagation: text("identity_propagation", { enum: IDENTITY_PROPAGATION_MODES }).notNull().default("none"),
+  /** ADR-0188 S8 follow-up (migration 0196): name each agent in the assertion's `act` chain by its real workload
+   * identifier (its SPIFFE ID) instead of a pairwise id for this server. Off by default (pairwise, unlinkable across
+   * servers); turning it on is a stepped-up, audited relaxation, reset by a url move. Only while
+   * `identityPropagation` is `signed_assertion` (CHECK `mcp_servers_disclose_agent_ids_check`). */
+  discloseAgentWorkloadIds: boolean("disclose_agent_workload_ids").notNull().default(false),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
    * default (org_settings.mcpPrivateRangesDefault, false by default since
@@ -867,6 +872,7 @@ export const mcpServers = pgTable("mcp_servers", {
 }, (t) => [
   check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
   check("mcp_servers_execution_profile_check", sql`${t.executionProfileId} IS NULL OR ${t.transport} = 'stdio'`),
+  check("mcp_servers_disclose_agent_ids_check", sql`NOT ${t.discloseAgentWorkloadIds} OR ${t.identityPropagation} = 'signed_assertion'`),
   check(
     "mcp_servers_transport_shape",
     sql`(${t.transport} = 'stdio' AND ${t.url} = 'stdio:' || ${t.name} AND ${t.stdioCommand} IS NOT NULL AND ${t.stdioArgs} IS NOT NULL AND jsonb_typeof(${t.stdioArgs}) = 'array' AND ${t.stdioCommandDigest} IS NOT NULL) OR (${t.transport} <> 'stdio' AND ${t.url} NOT LIKE 'stdio:%' AND ${t.stdioCommand} IS NULL AND ${t.stdioArgs} IS NULL AND ${t.stdioCommandDigest} IS NULL)`,
@@ -12124,7 +12130,7 @@ export const decisionFacts = pgTable(
       .primaryKey()
       .references(() => decisionCaptureStatus.auditId),
     auditSeq: bigint("audit_seq", { mode: "number" }).notNull(),
-    factsVersion: text("facts_version").notNull().default("regulait.decision-facts.v1"),
+    factsVersion: text("facts_version").notNull().default("regulait.decision-facts.v2"),
     facts: jsonb("facts").notNull(),
     /** SHA-256 of `regulait_canonical_json(facts)`, checked in the database */
     factsHash: text("facts_hash").notNull(),
@@ -12135,7 +12141,8 @@ export const decisionFacts = pgTable(
   },
   (t) => [
     index("decision_facts_snapshot_idx").on(t.aiBomSnapshotId).where(sql`${t.aiBomSnapshotId} IS NOT NULL`),
-    check("decision_facts_version_check", sql`${t.factsVersion} = 'regulait.decision-facts.v1'`),
+    // migration 0197 (ADR-0190 I8): v2 adds execution facts; stored v1 rows stay valid
+    check("decision_facts_version_check", sql`${t.factsVersion} IN ('regulait.decision-facts.v1', 'regulait.decision-facts.v2')`),
     check(
       "decision_facts_payload_check",
       sql`COALESCE(jsonb_typeof(${t.facts}) = 'object' AND ${t.facts} ->> 'v' = ${t.factsVersion} AND ${t.facts} ->> 'auditId' = ${t.auditId}::text AND ${t.facts} -> 'auditSeq' = to_jsonb(${t.auditSeq}) AND (${t.facts} #>> '{model,aiBomSnapshotId}') IS NOT DISTINCT FROM ${t.aiBomSnapshotId}::text, false)`,
@@ -12240,7 +12247,7 @@ export const decisionBoms = pgTable(
     check("decision_boms_body_sha256_check", sql`${t.bodySha256} = encode(sha256(convert_to(${t.body}, 'UTF8')), 'hex')`),
     check(
       "decision_boms_body_check",
-      sql`COALESCE((${t.body}::jsonb ->> 'v') = 'regulait.decision-bom.v1' AND (${t.body}::jsonb ->> 'id') = ${t.id}::text AND (${t.body}::jsonb ->> 'auditId') = ${t.auditId}::text AND (${t.body}::jsonb -> 'version') = to_jsonb(${t.version}) AND (${t.body}::jsonb ->> 'finality') = ${t.finality}, false)`,
+      sql`COALESCE((${t.body}::jsonb ->> 'v') IN ('regulait.decision-bom.v1', 'regulait.decision-bom.v2') AND (${t.body}::jsonb ->> 'id') = ${t.id}::text AND (${t.body}::jsonb ->> 'auditId') = ${t.auditId}::text AND (${t.body}::jsonb -> 'version') = to_jsonb(${t.version}) AND (${t.body}::jsonb ->> 'finality') = ${t.finality}, false)`,
     ),
     check("decision_boms_signature_check", sql`${t.signature} ~ '^[A-Za-z0-9_-]{86}$'`),
     check("decision_boms_basis_check", sql`jsonb_typeof(${t.basis}) = 'object'`),

@@ -30,15 +30,16 @@ import {
   aiBomSerialNumber,
   bomCanonicalBytes,
   bomSha256,
-  DECISION_BOM_SECTIONS,
-  DECISION_BOM_VERSION,
+  DECISION_BOM_VERSIONS,
   decisionBomBodySchema,
+  decisionBomSectionsFor,
   decisionFactsAddendumSchema,
   decisionFactsSchema,
   findEmailShapes,
   hasEmailShape,
   type DecisionBomFinalityState,
   type DecisionBomSection,
+  type DecisionBomVersion,
   type DecisionFacts,
   type DecisionFactsAddendum,
 } from "./contract.js";
@@ -113,7 +114,8 @@ export interface BomVerifyTrust {
 
 /** the verifier's result: `bomVerifyResponseSchema` without the route's own fields (trust, source, time, capabilities) */
 export interface BomVerifyReport {
-  bodyVersion: typeof DECISION_BOM_VERSION | typeof AI_BOM_VERSION | null;
+  /** the `v` of the verified body: either Decision BOM version (ADR-0190 I8), or the AI BOM's */
+  bodyVersion: DecisionBomVersion | typeof AI_BOM_VERSION | null;
   identity: ReturnType<typeof bomVerifyIdentitySchema.parse> | null;
   outcome: BomVerifyOutcome;
   checks: BomVerifyCheckResult[];
@@ -322,7 +324,7 @@ function finish(
   checks: CheckList,
   ctx: { source: BomVerifySource; manifest: ExportBundleV3Manifest | null },
   subject:
-    | { kind: "decision-bom"; identity: unknown; sections: BomVerifyReport["sections"]; receiptPayloadVersion: "v1" | "v2" | null; recordedFinality: DecisionBomFinalityState | null; reportedFinality: BomReportedFinality | null; version: number }
+    | { kind: "decision-bom"; identity: unknown; bodyVersion: DecisionBomVersion; sections: BomVerifyReport["sections"]; receiptPayloadVersion: "v1" | "v2" | null; recordedFinality: DecisionBomFinalityState | null; reportedFinality: BomReportedFinality | null; version: number }
     | { kind: "ai-bom"; identity: unknown; version: number }
     | null,
 ): BomVerifyReport {
@@ -344,7 +346,7 @@ function finish(
       ? []
       : bomCannotProveFor({ ...design, reportedFinality: subject?.kind === "decision-bom" ? subject.reportedFinality : null });
   return {
-    bodyVersion: identity === null ? null : identity.subject === "decision-bom" ? DECISION_BOM_VERSION : AI_BOM_VERSION,
+    bodyVersion: identity === null || subject === null ? null : subject.kind === "decision-bom" ? subject.bodyVersion : AI_BOM_VERSION,
     identity,
     outcome,
     checks: list,
@@ -379,6 +381,8 @@ interface DecisionInputs {
 interface DecisionOutcome {
   body: Record<string, unknown> | null;
   identity: unknown;
+  /** the body's own `v` when it is a known Decision BOM version (ADR-0190 I8); otherwise v2, whose sections are reported */
+  bodyVersion: DecisionBomVersion;
   sections: BomVerifyReport["sections"];
   receiptPayloadVersion: "v1" | "v2" | null;
   recordedFinality: DecisionBomFinalityState | null;
@@ -390,15 +394,18 @@ async function verifyDecisionBody(checks: CheckList, trust: BomVerifyTrust, inp:
   const parsedJson = tryJson(inp.bodyText);
   const raw = parsedJson.ok && isObject(parsedJson.value) ? parsedJson.value : null;
 
-  // body_version: the domain is the `v` inside the signed bytes (OWNER DECISION 2)
-  checks.put("body_version", raw?.v === DECISION_BOM_VERSION ? null : bad("unknown_body_version"));
+  // body_version: the domain is the `v` inside the signed bytes (OWNER DECISION 2); v1 and v2 both verify (I8)
+  const knownVersion = (DECISION_BOM_VERSIONS as readonly unknown[]).includes(raw?.v);
+  checks.put("body_version", knownVersion ? null : bad("unknown_body_version"));
+  const bodyVersion = (knownVersion ? raw!.v : DECISION_BOM_VERSIONS[DECISION_BOM_VERSIONS.length - 1]) as DecisionBomVersion;
+  const sectionList = decisionBomSectionsFor(bodyVersion);
   // body_schema: canonical and `decisionBomBodySchema`
   const schemaOk = raw !== null && canonicalOf(raw) === inp.bodyText && decisionBomBodySchema.safeParse(raw).success;
   checks.put("body_schema", schemaOk ? null : bad("schema_violation"));
   // body_signature
   checks.put("body_signature", bodySignatureResult(inp.sig, inp.bodyText, inp.envelopeBodySha, trust.receipt, inp.bundledReceiptKeys));
 
-  const empty: DecisionOutcome = { body: raw, identity: null, sections: [], receiptPayloadVersion: null, recordedFinality: null, reportedFinality: null, version: 1 };
+  const empty: DecisionOutcome = { body: raw, identity: null, bodyVersion, sections: [], receiptPayloadVersion: null, recordedFinality: null, reportedFinality: null, version: 1 };
   if (raw === null) {
     for (const c of ["receipt_signature", "receipt_payload_hash", "receipt_facts_binding", "sections_projection", "chain_links"] as const) checks.invalid(c, c === "receipt_facts_binding" ? "facts_hash_mismatch" : c === "chain_links" ? "chain_break" : c === "sections_projection" ? "section_mismatch" : "schema_violation");
     return empty;
@@ -504,6 +511,7 @@ async function verifyDecisionBody(checks: CheckList, trust: BomVerifyTrust, inp:
         ? payload.factsStatus === "capture_off" ? "capture_off" : "pre_facts"
         : bodyReason === "capture_off" ? "capture_off" : "pre_facts";
     const proj = projectDecisionBom({
+      bodyVersion,
       receipt: payload,
       receiptSeq: Number(receipt.receiptSeq),
       facts,
@@ -516,13 +524,22 @@ async function verifyDecisionBody(checks: CheckList, trust: BomVerifyTrust, inp:
     for (const p of proj.problems) failed.add(p.section);
     const simple = ["decision", "principal", "actors", "action", "policy", "model", "approval", "outcome", "cost", "trace"] as const;
     for (const s of simple) if (!sameJson(b[s], proj[s])) failed.add(s);
-    for (const s of DECISION_BOM_SECTIONS) if (!sameJson(completeness[s], proj.completeness[s])) failed.add(s);
+    // ADR-0190 I8: v2's execution section is recomputed from the facts like every other section
+    if (sectionList.includes("execution") && !sameJson(b.execution, proj.execution)) failed.add("execution");
+    for (const s of sectionList) if (!sameJson(completeness[s], proj.completeness[s])) failed.add(s);
     const basis = isObject(b.basis) ? b.basis : {};
     if (basis.auditSeq !== proj.basis.auditSeq || basis.anchorId !== proj.basis.anchorId) failed.add("proof");
     if (basis.receiptSeq !== proj.basis.receiptSeq) failed.add("receipt");
     if (basis.aiBomSnapshotId !== proj.basis.aiBomSnapshotId) failed.add("model");
   }
-  if (factsBroken) for (const s of ["actors", "action", "policy", "model", "outcome", "approval", "cost", "trace"] as const) failed.add(s);
+  if (factsBroken) for (const s of ["actors", "action", "policy", "model", "outcome", "approval", "cost", "trace", "execution"] as const) failed.add(s);
+  // a section the body's version does not have is reported on `decision` (a v1 body has no `execution`)
+  for (const s of [...failed]) {
+    if (!sectionList.includes(s)) {
+      failed.delete(s);
+      failed.add("decision");
+    }
+  }
   if (addendaBroken) for (const s of ["approval", "cost", "trace"] as const) failed.add(s);
   // G15: a row bound twice across the facts and the addenda has no valid projection, whatever the body says
   {
@@ -631,7 +648,7 @@ async function verifyDecisionBody(checks: CheckList, trust: BomVerifyTrust, inp:
   }
 
   // --- sections and identity ---------------------------------------------------
-  const sections = DECISION_BOM_SECTIONS.map((s) => {
+  const sections = sectionList.map((s) => {
     const e = completeness[s];
     const status: "recorded" | "not_applicable" | "not_recorded" = e?.status === "recorded" || e?.status === "not_applicable" ? e.status : "not_recorded";
     return {
@@ -652,6 +669,7 @@ async function verifyDecisionBody(checks: CheckList, trust: BomVerifyTrust, inp:
   };
   return {
     body: raw,
+    bodyVersion,
     identity,
     sections,
     receiptPayloadVersion,
