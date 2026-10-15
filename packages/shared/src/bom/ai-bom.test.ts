@@ -83,7 +83,7 @@ function fixture(over: Partial<AiBomRecordSet> = {}): AiBomRecordSet {
       { id: CV1, artifactType: "agent_system_prompt", artifactId: AG, version: 4, status: "active", canaryPct: null, bodyDigest: H("2") },
       { id: CV2, artifactType: "agent_system_prompt", artifactId: AG, version: 5, status: "canary", canaryPct: 10, bodyDigest: H("3") },
     ],
-    mcpServers: [{ id: MCP, name: "files", transport: "streamable_http", url: "https://mcp.example/bot123456:ABCDEFsecretpath/api?key=CANARY_MCP", releaseDigest: H("4"), admissionState: "clean", admissionManifestDigest: null, identityPropagation: "none", ownerUserId: null, ownerDisplayName: null }],
+    mcpServers: [{ id: MCP, name: "files", transport: "streamable_http", url: "https://mcp.example/bot123456:ABCDEFsecretpath/api?key=CANARY_MCP", releaseDigest: H("4"), admissionState: "clean", admissionManifestDigest: null, identityPropagation: "none", discloseAgentWorkloadIds: false, ownerUserId: null, ownerDisplayName: null }],
     mcpTools: [{ id: TOOL, serverId: MCP, name: "read_file", kind: "read" }],
     connectors: [{ id: CONN, name: "crm", kind: "salesforce", url: null, ownerUserId: OWNER, ownerDisplayName: null, credentialSet: true }],
     grants: [

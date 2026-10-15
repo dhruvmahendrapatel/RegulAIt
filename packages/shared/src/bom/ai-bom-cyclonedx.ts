@@ -587,6 +587,8 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
         prop("regulait:mcp:transport", m.transport), prop("regulait:mcp:releaseDigest", m.releaseDigest ?? "not_recorded"),
         prop("regulait:mcp:admissionManifestDigest", m.admissionManifestDigest ?? "not_recorded"),
         prop("regulait:admission:state", m.admissionState), prop("regulait:identity:propagation", m.identityPropagation),
+        // ADR-0188 S8: whether agent workload ids are disclosed to this upstream in the signed assertion
+        prop("regulait:identity:discloseAgentWorkloadIds", m.discloseAgentWorkloadIds),
         ...ownerProps(m.ownerUserId, m.ownerDisplayName),
       ]),
     });

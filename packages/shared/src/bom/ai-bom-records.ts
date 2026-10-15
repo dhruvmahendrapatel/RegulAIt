@@ -262,6 +262,8 @@ export interface McpServerRecord {
   admissionState: string;
   admissionManifestDigest: Nullable<string>;
   identityPropagation: string;
+  /** ADR-0188 S8 (migration 0196): whether the signed assertion also discloses agent workload ids to this upstream */
+  discloseAgentWorkloadIds: boolean;
   ownerUserId: Nullable<string>;
   ownerDisplayName: Nullable<string>;
 }
@@ -469,7 +471,7 @@ const FIELDS: { [K in AiBomRecordList]: ReadonlyArray<keyof RecordOf<K>> } = {
   engines: ["id", "version", "imageDigest", "licence"],
   promptTags: ["promptId", "promptName", "tag", "commitId", "hash", "agentId"],
   configVersions: ["id", "artifactType", "artifactId", "version", "status", "canaryPct", "bodyDigest"],
-  mcpServers: ["id", "name", "transport", "url", "releaseDigest", "admissionState", "admissionManifestDigest", "identityPropagation", "ownerUserId", "ownerDisplayName"],
+  mcpServers: ["id", "name", "transport", "url", "releaseDigest", "admissionState", "admissionManifestDigest", "identityPropagation", "discloseAgentWorkloadIds", "ownerUserId", "ownerDisplayName"],
   mcpTools: ["id", "serverId", "name", "kind"],
   connectors: ["id", "name", "kind", "url", "ownerUserId", "ownerDisplayName", "credentialSet"],
   grants: ["holderKind", "holderId", "targetKind", "targetId", "source"],
@@ -1011,6 +1013,7 @@ export function normaliseAiBomRecords(input: AiBomRecordSet): AiBomRecordSet {
         admissionState: ident(`${at}.admissionState`, r.admissionState),
         admissionManifestDigest: r.admissionManifestDigest === null ? null : digest(`${at}.admissionManifestDigest`, String(r.admissionManifestDigest).replace(/^sha256:/, "")),
         identityPropagation: ident(`${at}.identityPropagation`, r.identityPropagation),
+        discloseAgentWorkloadIds: bool(`${at}.discloseAgentWorkloadIds`, r.discloseAgentWorkloadIds),
         ownerUserId: uuid(`${at}.ownerUserId`, r.ownerUserId, true),
         ownerDisplayName: nameOpt(`${at}.ownerDisplayName`, r.ownerDisplayName, AI_BOM_NAME_MAX_CHARS),
       };

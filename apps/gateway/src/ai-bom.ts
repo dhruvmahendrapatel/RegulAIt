@@ -337,7 +337,7 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
   const liveTools = new Set(grantedTools.map((t) => t.id));
   const keptGrants = grants.filter((g) => g.targetKind !== "mcp_tool" || liveTools.has(g.targetId));
   const serverIds = install ? null : uniq([...grantedTools.map((t) => t.serverId), ...keptGrants.filter((g) => g.targetKind === "mcp_server").map((g) => g.targetId)]);
-  const serverCols = { id: mcpServers.id, name: mcpServers.name, transport: mcpServers.transport, url: mcpServers.url, releaseDigest: mcpServers.releaseDigest, admissionState: mcpServers.admissionState, admissionManifestDigest: mcpServers.admissionManifestDigest, identityPropagation: mcpServers.identityPropagation, ownerUserId: mcpServers.ownerUserId, executionProfileId: mcpServers.executionProfileId };
+  const serverCols = { id: mcpServers.id, name: mcpServers.name, transport: mcpServers.transport, url: mcpServers.url, releaseDigest: mcpServers.releaseDigest, admissionState: mcpServers.admissionState, admissionManifestDigest: mcpServers.admissionManifestDigest, identityPropagation: mcpServers.identityPropagation, discloseAgentWorkloadIds: mcpServers.discloseAgentWorkloadIds, ownerUserId: mcpServers.ownerUserId, executionProfileId: mcpServers.executionProfileId };
   const serverRows = serverIds === null ? capped(await tx.select(serverCols).from(mcpServers).limit(CAP + 1), "mcp_servers") : serverIds.length ? await tx.select(serverCols).from(mcpServers).where(inArray(mcpServers.id, serverIds)) : [];
   const serverGranted = new Set(keptGrants.filter((g) => g.targetKind === "mcp_server").map((g) => g.targetId));
   const toolRows = install

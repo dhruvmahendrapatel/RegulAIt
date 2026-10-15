@@ -976,6 +976,9 @@ records its own changes separately.
      profile.
    - **Placement property.** MCP servers carry `regulait:execution:placement`: `executor` for stdio, `external`
      for remote.
+   - **Disclosure property.** MCP servers also carry `regulait:identity:discloseAgentWorkloadIds`, next to
+     `regulait:identity:propagation`. It is ADR-0188 S8's `mcp_servers.disclose_agent_workload_ids` (migration
+     0196), a required record field: a record without it is refused.
    - **SPDX.** Profiles map to SPDX `software_File` (configuration). Executors are services, so they appear in
      CycloneDX only, as MCP servers and connectors already do. The SPDX document comment is unchanged, so the
      B4.9 worked example stays byte-identical.

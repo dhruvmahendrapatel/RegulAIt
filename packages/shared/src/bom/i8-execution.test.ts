@@ -336,7 +336,7 @@ describe("ADR-0190 I8: executors and profiles in the AI BOM", () => {
     ...o,
   });
   const customer = (attestations: Att[]) => executor({ id: CUSTOMER, backend: "customer", classesDeclared: ["customer_declared"], attestations });
-  const stdioServer = { id: STDIO, name: "stdio-files", transport: "stdio", url: "stdio:stdio-files", releaseDigest: null, admissionState: "clean", admissionManifestDigest: null, identityPropagation: "none", ownerUserId: null, ownerDisplayName: null };
+  const stdioServer = { id: STDIO, name: "stdio-files", transport: "stdio", url: "stdio:stdio-files", releaseDigest: null, admissionState: "clean", admissionManifestDigest: null, identityPropagation: "none", discloseAgentWorkloadIds: false, ownerUserId: null, ownerDisplayName: null };
   const records = (o: Partial<AiBomRecordSet> = {}): AiBomRecordSet => ({
     subject: install, install: { installId: null }, useCases: [], agents: [], customProviders: [], modelCards: [], modelCardApprovals: [], modelCardEvidence: [],
     evalRuns: [], evalDatasets: [], trainingDatasets: [], trainingJobs: [], trainingArtifacts: [], modelArtifacts: [], artifactScans: [], engineRuns: [], engines: [],
@@ -408,6 +408,20 @@ describe("ADR-0190 I8: executors and profiles in the AI BOM", () => {
     const doc = cdx(b);
     expect(doc.services.find((x) => x["bom-ref"] === `service:executor:${CUSTOMER}`)).toMatchObject({ trustZone: "customer-execution-plane" });
     expect(doc.services.find((x) => x["bom-ref"] === `service:mcp:${U(955)}`)!.properties).toContainEqual({ name: "regulait:execution:placement", value: "external" });
+  });
+  it("ADR-0188 S8: an MCP server records whether it discloses agent workload ids, next to its identity propagation", () => {
+    const remote = { ...stdioServer, id: U(956), name: "remote-disclosing", transport: "streamable_http", url: "https://mcp.example/y", identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true };
+    const doc = cdx(build(records({ mcpServers: [stdioServer, remote] })));
+    const props = (ref: string) => doc.services.find((x) => x["bom-ref"] === ref)!.properties!;
+    expect(props(`service:mcp:${U(956)}`)).toEqual(expect.arrayContaining([
+      { name: "regulait:identity:propagation", value: "signed_assertion" },
+      { name: "regulait:identity:discloseAgentWorkloadIds", value: "true" },
+    ]));
+    expect(props(mcpRef)).toContainEqual({ name: "regulait:identity:discloseAgentWorkloadIds", value: "false" });
+    // strict, no grandfathering: a record without the field, or with a non-boolean, is refused
+    const { discloseAgentWorkloadIds: _d, ...without } = stdioServer;
+    expect(() => build(records({ mcpServers: [without as typeof stdioServer] }))).toThrow(/discloseAgentWorkloadIds/);
+    expect(() => build(records({ mcpServers: [{ ...stdioServer, discloseAgentWorkloadIds: "yes" as never }] }))).toThrow(/discloseAgentWorkloadIds/);
   });
   it("refuses a dangling assignment, an unknown attestation field and an unknown class (never dropped, never copied)", () => {
     expect(() => build(records({ executionAssignments: [{ targetKind: "mcp_server", targetId: STDIO, profileId: U(999) }] }))).toThrow(/not loaded/);

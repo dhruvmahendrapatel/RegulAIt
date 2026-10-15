@@ -313,6 +313,8 @@ describe("ADR-0190 I8: the AI BOM loader reads profiles, assignments and executo
     const r = await loadAiBomRecords(db, { kind: "install", id: AI_BOM_INSTALL_SUBJECT_ID }, { personIdentifiers: "id_only", installId: null });
     expect(r.executionProfiles).toContainEqual({ id: profile.id, name: profile.name, version: profile.version, digest: RESTRICTED_DIGEST, minClass: "user_space_kernel", shipped: true, retired: false });
     expect(r.executionAssignments).toContainEqual({ targetKind: "mcp_server", targetId: stdioId, profileId: profile.id });
+    // ADR-0188 S8 (migration 0196): the loader reads the disclosure setting next to identity propagation (default off)
+    expect(r.mcpServers.find((s) => s.id === stdioId)).toMatchObject({ identityPropagation: "none", discloseAgentWorkloadIds: false });
     const ours = r.executors!.find((e) => e.id === executorId)!;
     expect(ours).toMatchObject({ backend: "gvisor", status: "active", workloadIdentity: EXECUTOR_URI });
     // the latest counting self-test decides: the fresh pass, never the older expired one
