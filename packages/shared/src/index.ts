@@ -807,6 +807,8 @@ export const updateServerSchema = z
     ownerUserId: serverOwnerField,
     // ADR-0188 S8: send the caller's identity to this upstream (a relaxation: settings_relax step-up)
     identityPropagation: z.enum(IDENTITY_PROPAGATION_MODES).optional(),
+    // ADR-0188 S8 follow-up: name agents by their workload IDs, not pairwise ids (a relaxation: settings_relax step-up)
+    discloseAgentWorkloadIds: z.boolean().optional(),
   })
   .strict();
 

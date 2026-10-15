@@ -29,6 +29,7 @@ import { jwksDocument } from "./identity-signing-keys.js";
 import { pairwiseSubject } from "./delegated-token.js";
 import { classifyUpstreamError } from "./upstream-retry.js";
 import {
+  agentIdDisclosureUpdate,
   IdentityAssertionRefusedError,
   identityAssertionMiddleware,
   identityPropagationUpdate,
@@ -36,6 +37,7 @@ import {
   OutboundIdentity,
   outboundIdentityFor,
   pairwiseActor,
+  refuseAgentIdDisclosureWithoutAssertion,
   refuseIdentityPropagationOnStdio,
   signIdentityAssertion,
 } from "./mcp-identity-assertion.js";
@@ -325,5 +327,78 @@ describe("S8 — the PATCH rules", () => {
     expect(refuseIdentityPropagationOnStdio(true, "signed_assertion")).toMatchObject({ status: 409, body: { error: "identity_propagation_unsupported" } });
     expect(refuseIdentityPropagationOnStdio(true, "none")).toBeNull();
     expect(refuseIdentityPropagationOnStdio(false, "signed_assertion")).toBeNull();
+    // the agent IDs ride only inside an assertion, so a stdio server cannot disclose them either; off is always fine
+    expect(refuseIdentityPropagationOnStdio(true, undefined, true)).toMatchObject({ status: 409, body: { error: "identity_propagation_unsupported" } });
+    expect(refuseIdentityPropagationOnStdio(true, undefined, false)).toBeNull();
+  });
+});
+
+describe("S8 follow-up — the disclose-agent-workload-IDs PATCH rules", () => {
+  const AUD2 = "https://new.example.com/mcp";
+  const state = (identityPropagation: "none" | "signed_assertion", discloseAgentWorkloadIds: boolean) => ({ identityPropagation, discloseAgentWorkloadIds, url: AUD });
+  const update = (before: ReturnType<typeof state>, body: { identityPropagation?: "none" | "signed_assertion"; discloseAgentWorkloadIds?: boolean; url?: string }) =>
+    agentIdDisclosureUpdate(before, body, identityPropagationUpdate(before, body));
+
+  it("turning it on is a relaxation; off, unchanged and absent are not", () => {
+    expect(update(state("signed_assertion", false), { discloseAgentWorkloadIds: true })).toEqual({
+      write: true,
+      relaxed: { discloseAgentWorkloadIds: true },
+      reset: null,
+      refused: false,
+    });
+    expect(update(state("signed_assertion", true), { discloseAgentWorkloadIds: false })).toEqual({ write: false, relaxed: null, reset: null, refused: false });
+    expect(update(state("signed_assertion", true), { discloseAgentWorkloadIds: true })).toEqual({ write: null, relaxed: null, reset: null, refused: false });
+    expect(update(state("signed_assertion", false), { discloseAgentWorkloadIds: false })).toEqual({ write: null, relaxed: null, reset: null, refused: false });
+    expect(update(state("signed_assertion", true), {})).toEqual({ write: null, relaxed: null, reset: null, refused: false });
+  });
+
+  it("only while an assertion is sent: refused when propagation is (or becomes) none; allowed when it is turned on in the same request", () => {
+    expect(update(state("none", false), { discloseAgentWorkloadIds: true }).refused).toBe(true);
+    expect(update(state("signed_assertion", false), { identityPropagation: "none", discloseAgentWorkloadIds: true }).refused).toBe(true);
+    // a url move without restating propagation turns it off, so the IDs cannot ride either
+    expect(update(state("signed_assertion", false), { url: AUD2, discloseAgentWorkloadIds: true }).refused).toBe(true);
+    expect(update(state("none", false), { identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true })).toEqual({
+      write: true,
+      relaxed: { discloseAgentWorkloadIds: true },
+      reset: null,
+      refused: false,
+    });
+    // turning it OFF is never refused, whatever the propagation
+    expect(update(state("none", false), { discloseAgentWorkloadIds: false }).refused).toBe(false);
+    expect(refuseAgentIdDisclosureWithoutAssertion({ refused: true })).toMatchObject({
+      status: 409,
+      body: { error: "agent_id_disclosure_needs_assertion", detail: expect.stringContaining("Nothing was saved") },
+    });
+    expect(refuseAgentIdDisclosureWithoutAssertion({ refused: false })).toBeNull();
+  });
+
+  it("propagation turning off, or a url move that does not name it, resets it (the strict value, no relaxation)", () => {
+    expect(update(state("signed_assertion", true), { identityPropagation: "none" })).toEqual({ write: false, relaxed: null, reset: "propagation_off", refused: false });
+    expect(update(state("signed_assertion", true), { url: AUD2 })).toEqual({ write: false, relaxed: null, reset: "url_move", refused: false });
+    expect(update(state("signed_assertion", true), { url: AUD2, identityPropagation: "signed_assertion" })).toEqual({
+      write: false,
+      relaxed: null,
+      reset: "url_move",
+      refused: false,
+    });
+    // a "move" to the same url is no move
+    expect(update(state("signed_assertion", true), { url: AUD })).toEqual({ write: null, relaxed: null, reset: null, refused: false });
+  });
+
+  it("kept on across a url move is a relaxation bound to the new url (nothing to write)", () => {
+    expect(update(state("signed_assertion", true), { url: AUD2, identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true })).toEqual({
+      write: null,
+      relaxed: { discloseAgentWorkloadIds: true },
+      reset: null,
+      refused: false,
+    });
+  });
+
+  it("the holder takes the server's opt-in, strictly: only an exact true discloses", () => {
+    expect(outboundIdentityFor({ url: AUD, identityPropagation: "signed_assertion" })!.discloseAgentIds).toBe(false);
+    expect(outboundIdentityFor({ url: AUD, identityPropagation: "signed_assertion", discloseAgentWorkloadIds: null })!.discloseAgentIds).toBe(false);
+    expect(outboundIdentityFor({ url: AUD, identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true })!.discloseAgentIds).toBe(true);
+    // never without an assertion
+    expect(outboundIdentityFor({ url: AUD, identityPropagation: "none", discloseAgentWorkloadIds: true })).toBeNull();
   });
 });

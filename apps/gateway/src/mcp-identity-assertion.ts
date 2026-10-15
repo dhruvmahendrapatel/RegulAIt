@@ -39,6 +39,13 @@
  * (`createMiddleware`); `act` is shaped by S3's `actClaimFromChain`; the
  * pairwise ids use S3's pairwise key. What is ours is the decision of when an
  * identity may leave and what it may say.
+ *
+ * DISCLOSING AGENT WORKLOAD IDS (the S8 follow-up, migration 0196). By
+ * default each agent in `act` is a pairwise id for the audience. A server
+ * with `disclose_agent_workload_ids` names them by their workload identifiers
+ * (SPIFFE IDs) instead, exactly as stored. That is a per-server relaxation
+ * (stepped up, audited, reset by a url move), read from the server row at
+ * the call, and every "issued" row says which form was sent.
  */
 import { createHmac, randomBytes, type KeyObject } from "node:crypto";
 import { SignJWT, type JWTPayload } from "jose";
@@ -46,6 +53,8 @@ import { createMiddleware, type Middleware } from "@modelcontextprotocol/sdk/cli
 import { and, auditLog, eq, mcpServers, ne, sql, type Db } from "@regulait/db";
 import {
   actClaimFromChain,
+  AGENT_ID_DISCLOSURE_CHANGED_RULE_ID,
+  AGENT_ID_DISCLOSURE_NEEDS_ASSERTION,
   canonicalMcpAudience,
   IDENTITY_ASSERTION_HEADER,
   IDENTITY_ASSERTION_ISSUED_RULE_ID,
@@ -176,8 +185,14 @@ export class OutboundIdentity {
   /** how many assertions this call has sent (each with its own `jti`) */
   sent = 0;
 
-  /** `audience` is null when the server's URL has no canonical form: such a holder is never armed */
-  constructor(readonly audience: string | null) {}
+  /**
+   * `audience` is null when the server's URL has no canonical form: such a holder is never armed.
+   * `discloseAgentIds`: name agents by their workload identifiers instead of pairwise ids (the server's opt-in).
+   */
+  constructor(
+    readonly audience: string | null,
+    readonly discloseAgentIds = false,
+  ) {}
 
   get origin(): string {
     return this.audience === null ? "invalid" : originOf(this.audience);
@@ -257,9 +272,14 @@ export class OutboundIdentity {
  * (then nothing is ever attached). Created before the call's first connect,
  * unarmed.
  */
-export function outboundIdentityFor(server: { url: string; identityPropagation?: string | null }): OutboundIdentity | null {
+export function outboundIdentityFor(server: {
+  url: string;
+  identityPropagation?: string | null;
+  discloseAgentWorkloadIds?: boolean | null;
+}): OutboundIdentity | null {
   if (server.identityPropagation !== "signed_assertion") return null;
-  return new OutboundIdentity(canonicalMcpAudience(server.url));
+  // strict unless the row says exactly true (a missing or null value is the pairwise default)
+  return new OutboundIdentity(canonicalMcpAudience(server.url), server.discloseAgentWorkloadIds === true);
 }
 
 /**
@@ -351,9 +371,17 @@ export async function armOutboundIdentity(
     throw err;
   }
   const subject = pairwiseSubject(secrets.pairwiseKey, audience, ctx.sponsorUserId);
-  // ADR-0180: agents are named by PAIRWISE ids too. Global SPIFFE IDs would let two upstreams join on `act.sub`
-  // (and through it on the person), and an external identifier is admin-typed text that can carry a name.
-  const actors = ctx.actors ? ctx.actors.map((a) => ({ identityId: a.identityId, identifier: pairwiseActor(secrets.pairwiseKey, audience, a.identityId) })) : null;
+  // ADR-0180: agents are named by PAIRWISE ids by default. Global SPIFFE IDs would let two upstreams join on `act.sub`
+  // (and through it on the person), and an external identifier is admin-typed text that can carry a name. Only a
+  // server whose admin turned on "disclose agent workload IDs" (a stepped-up relaxation) gets them, as stored.
+  const disclosed = identity.discloseAgentIds;
+  const actors = ctx.actors
+    ? ctx.actors.map((a) => ({
+        identityId: a.identityId,
+        identifier: disclosed ? a.identifier : pairwiseActor(secrets.pairwiseKey, audience, a.identityId),
+      }))
+    : null;
+  const agentIdsDisclosed = disclosed && actors !== null && actors.length > 0;
   identity.arm(method, {
     refuse: async (armedMethod, code, why) => {
       await writeUnavailable(ctx, armedMethod, code, why);
@@ -380,6 +408,9 @@ export async function armOutboundIdentity(
             sub: subject,
             actorChain: actors ? actors.map((a) => a.identityId) : null,
             act: actors ? actors.map((a) => a.identifier) : null,
+            // were the agents named by their workload IDs (the server's opt-in) rather than pairwise ids?
+            agentIdsDisclosed,
+            actorIdForm: disclosed ? "workload_id" : "pairwise",
             expiresAt: new Date(signed.exp * 1000).toISOString(),
             projectId: ctx.projectId ?? null,
           },
@@ -399,19 +430,42 @@ export async function armOutboundIdentity(
 // The per-server setting (PATCH /v1/servers/:serverId)
 // ---------------------------------------------------------------------------
 
-export { identityPropagationUpdate, type IdentityPropagationUpdate } from "@regulait/shared";
+export {
+  agentIdDisclosureUpdate,
+  identityPropagationUpdate,
+  type AgentIdDisclosureUpdate,
+  type IdentityPropagationUpdate,
+} from "@regulait/shared";
 
 /** a stdio server has no HTTP request to carry the header: turning it on is refused, nothing is saved */
 export function refuseIdentityPropagationOnStdio(
   isStdio: boolean,
   requested: string | undefined,
+  discloseAgentIds?: boolean,
 ): { status: 409; body: { error: typeof IDENTITY_PROPAGATION_UNSUPPORTED; detail: string } } | null {
-  if (!isStdio || requested !== "signed_assertion") return null;
+  if (!isStdio || (requested !== "signed_assertion" && discloseAgentIds !== true)) return null;
   return {
     status: 409,
     body: {
       error: IDENTITY_PROPAGATION_UNSUPPORTED,
       detail: "this server is a stdio upstream: there is no HTTP request to carry an identity assertion. Nothing was saved.",
+    },
+  };
+}
+
+/** agent workload IDs ride only in an assertion: asking for them on a server that is not sent one is refused (409) */
+export function refuseAgentIdDisclosureWithoutAssertion(update: { refused: boolean }): {
+  status: 409;
+  body: { error: typeof AGENT_ID_DISCLOSURE_NEEDS_ASSERTION; detail: string };
+} | null {
+  if (!update.refused) return null;
+  return {
+    status: 409,
+    body: {
+      error: AGENT_ID_DISCLOSURE_NEEDS_ASSERTION,
+      detail:
+        "agent workload IDs are sent only inside a signed identity assertion, and this server is not set to receive one " +
+        "(identity propagation must be signed_assertion, already or in this request). Nothing was saved.",
     },
   };
 }
@@ -492,5 +546,51 @@ export async function auditIdentityPropagationChange(
         : args.update.resetByUrlMove
           ? " — the url moved, and the opt-in does not follow it to a new destination"
           : ""),
+  });
+}
+
+/** every change of a server's "disclose agent workload IDs" opt-in is on the trail with both values; on as a relaxation */
+export async function auditAgentIdDisclosureChange(
+  db: Db,
+  args: {
+    userId: string;
+    serverId: string;
+    label: string;
+    from: boolean;
+    to: boolean;
+    url: string;
+    update: { relaxed: { discloseAgentWorkloadIds: true } | null; reset: "url_move" | "propagation_off" | null };
+    stepUp: string | null;
+  },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: args.userId,
+    serverId: args.serverId,
+    objectType: "mcp_server",
+    objectId: args.serverId,
+    detail: {
+      phase: "update",
+      from: { discloseAgentWorkloadIds: args.from },
+      to: { discloseAgentWorkloadIds: args.to },
+      url: args.url,
+      audience: canonicalMcpAudience(args.url),
+      relaxation: args.update.relaxed !== null,
+      ...(args.update.relaxed ? { relaxed: args.update.relaxed, stepUp: args.stepUp } : {}),
+      ...(args.update.reset === "url_move" ? { resetByUrlMove: true } : {}),
+      ...(args.update.reset === "propagation_off" ? { resetByPropagationOff: true } : {}),
+    },
+    effect: "allow",
+    ruleId: AGENT_ID_DISCLOSURE_CHANGED_RULE_ID,
+    ruleChain: [],
+    reason:
+      `${args.label}: disclose agent workload IDs ${String(args.from)} → ${String(args.to)}` +
+      (args.update.relaxed
+        ? " — a relaxation of the strict default: agents in each assertion are named by their global workload IDs, " +
+          "which upstreams can correlate across servers"
+        : args.update.reset === "url_move"
+          ? " — the url moved, and the opt-in does not follow it to a new destination"
+          : args.update.reset === "propagation_off"
+            ? " — identity propagation was turned off, and the IDs ride only in an assertion"
+            : ""),
   });
 }

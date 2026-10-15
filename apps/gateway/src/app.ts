@@ -139,9 +139,12 @@ import {
 import { governedEvaluate } from "./governed-evaluate.js";
 import { checkMcpTransportWrite, refuseMcpServerWrite } from "./mcp-egress.js";
 import {
+  agentIdDisclosureUpdate,
+  auditAgentIdDisclosureChange,
   auditIdentityPropagationChange,
   identityPropagationUpdate,
   lockIdentityAudiences,
+  refuseAgentIdDisclosureWithoutAssertion,
   refuseIdentityPropagationOnStdio,
   refuseSharedIdentityAudience,
 } from "./mcp-identity-assertion.js";
@@ -2085,8 +2088,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           : `this server's transport is '${before.transport}'; register a new server to use another. Nothing was saved.`,
       });
     }
-    // ADR-0188 S8: a stdio server cannot carry an identity assertion (409, nothing saved)
-    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation);
+    // ADR-0188 S8: a stdio server cannot carry an identity assertion, nor the agent IDs inside one (409, nothing saved)
+    const identityRefusal = refuseIdentityPropagationOnStdio(isStdio, body.identityPropagation, body.discloseAgentWorkloadIds);
     if (identityRefusal) return reply.status(identityRefusal.status).send(identityRefusal.body);
     const label = `MCP server '${before.name}'`;
     const nextUrl = body.url ?? before.url;
@@ -2158,14 +2161,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0188 S8: sending the caller's identity to this upstream is a relaxation too, bound to the url it goes to;
     // a url move without it turns the opt-in off (it never follows the url to a new destination)
     const identity = identityPropagationUpdate(before, body);
-    const relaxedValues = rangesRelaxed || identity.relaxed ? { ...rangesRelaxed, ...identity.relaxed } : null;
+    // ADR-0188 S8 follow-up: naming agents by their global workload IDs (not pairwise ids) is a further relaxation,
+    // only while an assertion is sent (else 409, before any step-up); a url move or propagation turning off resets it
+    const disclosure = agentIdDisclosureUpdate(before, body, identity);
+    const disclosureRefusal = refuseAgentIdDisclosureWithoutAssertion(disclosure);
+    if (disclosureRefusal) return reply.status(disclosureRefusal.status).send(disclosureRefusal.body);
+    const relaxedValues =
+      rangesRelaxed || identity.relaxed || disclosure.relaxed ? { ...rangesRelaxed, ...identity.relaxed, ...disclosure.relaxed } : null;
     const rangesStepUpArgs = relaxedValues
       ? {
           kind: "settings_relax" as const,
           facts: {
             op: "mcp_server_update",
             serverId,
-            ...(body.url !== undefined || identity.relaxed ? { url: nextUrl } : {}),
+            ...(body.url !== undefined || identity.relaxed || disclosure.relaxed ? { url: nextUrl } : {}),
             values: relaxedValues,
           },
         }
@@ -2212,6 +2221,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ? { allowPrivateRanges: body.allowPrivateRanges }
         : {}),
       ...(identity.write !== null ? { identityPropagation: identity.write } : {}),
+      ...(disclosure.write !== null ? { discloseAgentWorkloadIds: disclosure.write } : {}),
       ...stdioPatch,
     };
     let row: typeof mcpServers.$inferSelect = before;
@@ -2223,7 +2233,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // ranges AND the url it was decided on are unchanged, so a concurrent change (another admin closing the ranges,
       // or moving the url) is never overwritten by a write decided against the old values. The ranges grant is
       // spent inside the same transaction AFTER that compare-and-set, so a 409 never burns it.
-      const touchesPosture = body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null;
+      const touchesPosture =
+        body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null || disclosure.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
       const out = await db.transaction(async (tx): Promise<Patched> => {
         if (identity.relaxed) {
@@ -2243,6 +2254,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
                     : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
                   eq(mcpServers.url, before.url),
                   eq(mcpServers.identityPropagation, before.identityPropagation),
+                  eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
                 )
               : eq(mcpServers.id, serverId),
           )
@@ -2300,6 +2312,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           url: row.url,
           update: identity,
           stepUp: identity.relaxed ? rangesStepUp : null,
+        });
+      }
+      // ADR-0188 S8 follow-up: every change of the agent-ID disclosure, and a url move that keeps it on, on the trail
+      if (disclosure.write !== null || disclosure.relaxed) {
+        await auditAgentIdDisclosureChange(db, {
+          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+          serverId,
+          label,
+          from: before.discloseAgentWorkloadIds,
+          to: row.discloseAgentWorkloadIds,
+          url: row.url,
+          update: disclosure,
+          stepUp: disclosure.relaxed ? rangesStepUp : null,
         });
       }
       if (stdioChange) {

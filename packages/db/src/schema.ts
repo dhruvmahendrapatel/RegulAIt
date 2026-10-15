@@ -742,6 +742,11 @@ export const mcpServers = pgTable("mcp_servers", {
    * nothing; `signed_assertion` sends a 60 s gateway-signed JWT with a pairwise
    * subject and the actor chain (slice S8). Turning it on is audited. */
   identityPropagation: text("identity_propagation", { enum: IDENTITY_PROPAGATION_MODES }).notNull().default("none"),
+  /** ADR-0188 S8 follow-up (migration 0196): name each agent in the assertion's `act` chain by its real workload
+   * identifier (its SPIFFE ID) instead of a pairwise id for this server. Off by default (pairwise, unlinkable across
+   * servers); turning it on is a stepped-up, audited relaxation, reset by a url move. Only while
+   * `identityPropagation` is `signed_assertion` (CHECK `mcp_servers_disclose_agent_ids_check`). */
+  discloseAgentWorkloadIds: boolean("disclose_agent_workload_ids").notNull().default(false),
   /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
    * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
    * default (org_settings.mcpPrivateRangesDefault, false by default since
@@ -867,6 +872,7 @@ export const mcpServers = pgTable("mcp_servers", {
 }, (t) => [
   check("mcp_servers_transport_check", sql`${t.transport} IN ('streamable_http', 'sse', 'stdio')`),
   check("mcp_servers_execution_profile_check", sql`${t.executionProfileId} IS NULL OR ${t.transport} = 'stdio'`),
+  check("mcp_servers_disclose_agent_ids_check", sql`NOT ${t.discloseAgentWorkloadIds} OR ${t.identityPropagation} = 'signed_assertion'`),
   check(
     "mcp_servers_transport_shape",
     sql`(${t.transport} = 'stdio' AND ${t.url} = 'stdio:' || ${t.name} AND ${t.stdioCommand} IS NOT NULL AND ${t.stdioArgs} IS NOT NULL AND jsonb_typeof(${t.stdioArgs}) = 'array' AND ${t.stdioCommandDigest} IS NOT NULL) OR (${t.transport} <> 'stdio' AND ${t.url} NOT LIKE 'stdio:%' AND ${t.stdioCommand} IS NULL AND ${t.stdioArgs} IS NULL AND ${t.stdioCommandDigest} IS NULL)`,

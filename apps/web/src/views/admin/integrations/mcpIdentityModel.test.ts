@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_ID_FORM_OPTIONS,
   IDENTITY_ASSERTION_HEADER,
   IDENTITY_ASSERTION_TYP,
   IDENTITY_PROPAGATION_OPTIONS,
   VERIFY_EXAMPLE,
+  agentIdFormOf,
   canonicalAudience,
   identityPropagationOf,
 } from "./mcpIdentityModel";
@@ -34,5 +36,22 @@ describe("ADR-0188 S8 — the outbound identity screen model", () => {
     expect(identityPropagationOf({ identityPropagation: null })).toBe("none");
     expect(identityPropagationOf({ identityPropagation: "signed_assertion" })).toBe("signed_assertion");
     expect(IDENTITY_PROPAGATION_OPTIONS[0]!.value).toBe("none");
+  });
+
+  it("S8 follow-up: agents are pairwise unless the server discloses workload IDs, and only while an assertion is sent", () => {
+    expect(agentIdFormOf({})).toBe("pairwise");
+    expect(agentIdFormOf({ identityPropagation: "signed_assertion" })).toBe("pairwise");
+    expect(agentIdFormOf({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: null })).toBe("pairwise");
+    expect(agentIdFormOf({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true })).toBe("workload_id");
+    // a row that says disclose without an assertion (the database refuses it) still reads as the strict value
+    expect(agentIdFormOf({ identityPropagation: "none", discloseAgentWorkloadIds: true })).toBe("pairwise");
+    expect(AGENT_ID_FORM_OPTIONS[0]!.value).toBe("pairwise");
+  });
+
+  it("S8 follow-up: the 409 the gateway sends when agent IDs are asked for without an assertion is the shared code", () => {
+    const shared = repo("packages/shared/src/identity/mcp-identity-assertion.ts");
+    const client = repo("apps/web/src/api/client.ts");
+    const code = /AGENT_ID_DISCLOSURE_NEEDS_ASSERTION = "([a-z_]+)"/.exec(shared)![1]!;
+    expect(client).toContain(`${code}:`);
   });
 });

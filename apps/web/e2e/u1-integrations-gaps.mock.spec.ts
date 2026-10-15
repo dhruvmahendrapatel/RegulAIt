@@ -446,6 +446,94 @@ test.describe("MCP servers — identity to upstream (ADR-0188 S8)", () => {
     await expect(identityCell(page, "legacy")).toContainText("cannot receive an identity assertion");
     await axeMcpServers(page, "identity refusal");
   });
+
+  test("S8 follow-up: disclosing agent workload IDs is confirmed in plain words, stepped up and resent once; pairwise saves directly", async ({ page }) => {
+    const SRV: Json = { ...CLEAN, id: U(413), name: "search", identityPropagation: "signed_assertion", discloseAgentWorkloadIds: false };
+    // sent an assertion in the list, but turned off by someone else since: the gateway refuses with its sentence
+    const STALE: Json = { ...CLEAN, id: U(414), name: "stale", url: "https://stale.example.test/mcp", identityPropagation: "signed_assertion", discloseAgentWorkloadIds: false };
+    const PLAIN: Json = { ...CLEAN, id: U(415), name: "plain", url: "https://plain.example.test/mcp", identityPropagation: "none", discloseAgentWorkloadIds: false };
+    const calls = await mockApi(page, [
+      ["GET", /^\/v1\/servers$/, () => ({ body: { servers: [SRV, STALE, PLAIN] } })],
+      ["GET", /^\/v1\/servers\/([^/]+)\/tools$/, () => ({ body: { tools: [] } })],
+      ["PATCH", /^\/v1\/servers\/([^/]+)$/, ({ body, match }) => {
+        if (match[1] === STALE.id) {
+          return {
+            status: 409,
+            body: {
+              error: "agent_id_disclosure_needs_assertion",
+              detail: "agent workload IDs are sent only inside a signed identity assertion, and this server is not set to receive one. Nothing was saved.",
+            },
+          };
+        }
+        Object.assign(SRV, body);
+        return { body: SRV };
+      }],
+    ]);
+    const su = await requireStepUpOn(page, {
+      method: "PATCH",
+      path: `/v1/servers/${SRV.id}`,
+      kind: "settings_relax",
+      when: (b) => (b as Json).discloseAgentWorkloadIds === true,
+      facts: () => ({ op: "mcp_server_update", serverId: SRV.id, url: SRV.url, values: { discloseAgentWorkloadIds: true } }),
+    });
+    await page.goto("/ui/admin/mcp-servers");
+    await row(page, "search").locator("td").first().click({ timeout: 30_000 });
+    const card = page.locator("section").filter({ has: page.getByText("Identity sent to this upstream", { exact: true }) });
+    /** the control, by its stable hook (never a position) */
+    const control = card.locator("[data-agent-id-disclosure]");
+    const setting = control.getByLabel("Agent ids sent to upstream search");
+    const save = control.getByRole("form", { name: "Agent ids for search" }).getByRole("button", { name: "Save" });
+    await expect(setting).toHaveValue("pairwise");
+    await expect(save).toBeDisabled();
+    await expect(card).toContainText("pairwise id for this server");
+    await axeMcpServers(page, "identity card with the agent id control");
+
+    // ON: the confirmation says the IDs are global, correlate the agent across servers, and are sent as typed
+    await setting.selectOption("workload_id");
+    await save.click();
+    const confirm = page.getByRole("dialog", { name: "Disclose agent workload IDs to search?" });
+    await expect(confirm).toContainText("Workload IDs are global");
+    await expect(confirm).toContainText("upstreams can correlate the same agent across servers");
+    await expect(confirm).toContainText("sent exactly as it was typed");
+    await axeMcpServers(page, "agent id disclosure confirmation");
+    await confirm.getByRole("button", { name: "Disclose workload IDs" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ discloseAgentWorkloadIds: true });
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${SRV.id}`)).toEqual([{ discloseAgentWorkloadIds: true }]);
+    // the form resets to the saved value before the next change
+    await expect(card).toContainText("Agents are named by their workload IDs");
+    await expect(setting).toHaveValue("workload_id");
+    await expect(save).toBeDisabled();
+
+    // OFF: back to pairwise saves directly: no confirmation, no step-up
+    await setting.selectOption("pairwise");
+    await save.click();
+    await expect.poll(() => sent(calls, "PATCH", `/v1/servers/${SRV.id}`)).toEqual([{ discloseAgentWorkloadIds: true }, { discloseAgentWorkloadIds: false }]);
+    await expect(page.getByRole("dialog", { name: "Disclose agent workload IDs to search?" })).toHaveCount(0);
+    expect(su.attempts).toHaveLength(2);
+    expect(su.optionsCalls).toHaveLength(1);
+    await expect(card).toContainText("pairwise id for this server");
+    await expect(setting).toHaveValue("pairwise");
+    await expect(save).toBeDisabled();
+
+    // the gateway's refusal when the server is no longer sent an assertion is named in words
+    await row(page, "stale").locator("td").first().click();
+    const staleSetting = control.getByLabel("Agent ids sent to upstream stale");
+    await expect(staleSetting).toHaveValue("pairwise");
+    await staleSetting.selectOption("workload_id");
+    const staleForm = control.getByRole("form", { name: "Agent ids for stale" });
+    await staleForm.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("dialog", { name: "Disclose agent workload IDs to stale?" }).getByRole("button", { name: "Disclose workload IDs" }).click();
+    await expect(staleForm.getByRole("alert")).toContainText("Turn on the signed assertion first");
+    expect(sent(calls, "PATCH", `/v1/servers/${STALE.id}`)).toEqual([{ discloseAgentWorkloadIds: true }]);
+    await axeMcpServers(page, "agent id disclosure refusal");
+
+    // a server not sent an assertion is not offered the choice
+    await row(page, "plain").locator("td").first().click();
+    await expect(card).toContainText("Turn the assertion on first");
+    await expect(card.locator("[data-agent-id-disclosure]")).toHaveCount(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
