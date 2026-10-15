@@ -219,6 +219,14 @@ export default function EnginesPage() {
       />
       <div className={v.stack}>
         <QueryGate loading={engines.isLoading} error={engines.error} onRetry={() => void engines.refetch()}>
+          {engines.data?.runnerIssuer && !engines.data.runnerIssuer.configured && (
+            // ADR-0188 S7: without the issuer no runner can authenticate; say why rather than show runners offline
+            <Card title="Issuer not configured">
+              <p>
+                <Badge tone="danger">Runners cannot authenticate</Badge> {engines.data.runnerIssuer.note}
+              </p>
+            </Card>
+          )}
           {list.length === 0 ? (
             <Card>
               <EmptyState title="No engines are registered" body="The gateway reported no engine rows. Engines arrive with the gateway's migrations; nothing can run until they exist." />
@@ -702,7 +710,7 @@ function RevokeRunnerModal(props: { runner: EngineRunner; busy: boolean; onCance
     >
       <div className={v.stack}>
         <p>
-          Its runner token authenticates nothing from now on. Runs it holds end as cancelled and their run-scoped keys are
+          Its runner key authenticates nothing from now on, and its live tokens are revoked. Runs it holds end as cancelled and their run-scoped keys are
           revoked at once. To serve this engine again, enrol a runner with a new enrolment token.
         </p>
         <p className={v.faint}>
@@ -752,7 +760,7 @@ function EnableBody(props: { engine: Engine }) {
       )}
       <p>
         The gateway refuses unless a self-test of this build passed in the last 24 hours. You will be asked to confirm
-        it&apos;s you. If this build cannot keep the runner token away from the engine process, the gateway says so and you
+        it&apos;s you. If this build cannot keep the runner's key away from the engine process, the gateway says so and you
         decide separately whether to accept that risk.
       </p>
       <p className={v.faint}>
@@ -808,7 +816,7 @@ function AcceptRiskModal(props: {
           <div style={{ display: "flex", gap: "var(--s2)", alignItems: "flex-start" }}>
             <input id={id} type="checkbox" checked={ack} onChange={(ev) => setAck(ev.target.checked)} />
             <label htmlFor={id}>
-              I accept that a compromised {e.displayName} engine could read its runner token for build {build.version} (
+              I accept that a compromised {e.displayName} engine could read its runner key for build {build.version} (
               {shortDigest(build.imageDigest)}), lease this engine&apos;s runs and post their results.
             </label>
           </div>

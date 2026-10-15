@@ -8,7 +8,7 @@
  *            bytes (magic numbers, the zip directory, a verified safetensors header), never the file
  *            name, which is kept for display only. The bytes go to the content-addressed store once
  *            (`sha256/<hex>`); the row and its audit commit together.
- *   stream   GET /v1/engine-runner/artifacts/:artifactId (runner token) streams the artifact only to
+ *   stream   GET /v1/engine-runner/artifacts/:artifactId (runner self token) streams the artifact only to
  *            the runner holding a LIVE lease on a run that targets it (audited either way); the
  *            runner checks the sha256 and length against its lease.
  *   record   every terminal write of an artifact run (result, cancel, timeout, not-run) writes one
@@ -956,7 +956,7 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
     });
   });
 
-  // ---- GET /v1/engine-runner/artifacts/:artifactId (runner token; the scope hook enforces it) ----
+  // ---- GET /v1/engine-runner/artifacts/:artifactId (runner self token; the scope hook enforces it) ----
   app.get("/v1/engine-runner/artifacts/:artifactId", async (req, reply) => {
     const { artifactId } = artifactParam.parse(req.params);
     const runnerId = req.authCtx.engineRunnerId!;

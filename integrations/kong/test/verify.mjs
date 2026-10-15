@@ -43,7 +43,7 @@
  * by DIGEST (AER-034) and logs the digests the job ran against.
  */
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign as cryptoSign } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -60,7 +60,10 @@ const PROTOCOL_HEADERS = [
   "x-regulait-subject", "x-regulait-server-id", "x-regulait-tool",
   "x-regulait-decision", "x-regulait-reason",
 ];
-const DATA_KEY = "a".repeat(64);
+// A data key generated for THIS run. The gateway refuses to boot a deployed mode
+// (REGULAIT_DEPLOY_MODE=hosted, which the PDP client's environment needs) on the
+// published dev-default key, and it is right to: a fixed key is not a secret.
+const DATA_KEY = randomBytes(32).toString("hex");
 const PG = process.env.E2E_PG ?? "postgres://regulait:regulait@localhost:5432";
 
 /**
@@ -102,6 +105,13 @@ const BOOT = `kong-e2e-${randomBytes(16).toString("hex")}`;
 let GATEWAY_PORT = 0;
 let UPSTREAM_PORT = 0;
 let KONG_PROXY_PORT = 0;
+// ADR-0188 S7: the gateway's issuer (REGULAIT_PUBLIC_URL), which the plugin's
+// self token and DPoP proofs name. Kong reaches the gateway at
+// host.docker.internal, so this is deliberately NOT the address the plugin
+// dials (`pdp_url`): it is the name the gateway knows itself by.
+let ISSUER = "";
+// the environment the PDP client's identity is allowed in (the gateway's deploy mode)
+const DEPLOY_MODE = "hosted";
 const PORT_BAND_LOW = 20000;
 const PORT_BAND_SIZE = 12000; // 20000-31999
 const derivedPort = (salt) =>
@@ -128,7 +138,8 @@ const freePort = async (preferred, taken) => {
 const created = {
   db: false,
   container: null, // the container ID the daemon returned, not the name
-  keyId: null,
+  // ADR-0188 S7: the PDP client is a workload identity, revoked at teardown
+  pdpIdentityId: null,
   base: null,
   boot: null,
   scratchDir: null,
@@ -159,6 +170,95 @@ const check = (name, ok, detail = "") => {
 
 const sh = (cmd, args, opts = {}) =>
   execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe", ...opts });
+
+// ---- ADR-0188 S7: identity_manage setup calls, step-up off for exactly those calls ----
+//
+// Creating, binding and revoking the PDP client's identity is an `identity_manage` action, which needs a
+// step-up. The bootstrap credential passes one only until a real admin with a step-up method exists, and the
+// demo seed makes one, so these calls would be refused 403 `step_up_required`. The harness owns this scratch
+// database: it turns step-up OFF around exactly these calls, through its own psql connection, and puts the
+// previous value back in a finally. Nothing else the harness does runs relaxed.
+const psqlScalar = (sql) =>
+  execFileSync("psql", [`${PG}/${DB}`, "-v", "ON_ERROR_STOP=1", "-tAc", sql], { encoding: "utf8", stdio: "pipe" }).trim();
+async function withStepUpOff(call) {
+  const prior = psqlScalar("SELECT step_up_mode FROM org_settings WHERE id = 'singleton'");
+  if (!/^[a-z_]+$/.test(prior)) throw new Error(`unexpected step_up_mode '${prior.slice(0, 40)}'`);
+  psqlScalar("UPDATE org_settings SET step_up_mode = 'off' WHERE id = 'singleton'");
+  try {
+    return await call();
+  } finally {
+    psqlScalar(`UPDATE org_settings SET step_up_mode = '${prior}' WHERE id = 'singleton'`);
+  }
+}
+
+// ---- ADR-0188 S7: the PDP client's credential, exercised from OUTSIDE Kong ----
+//
+// The plugin asks with its own key's DPoP-bound self token. When the Kong run
+// fails, "Kong could not authenticate" has two very different causes: the
+// gateway refusing a correct client, or the plugin building a wrong one. This
+// control takes the SAME key through the SAME protocol from Node (nothing but
+// node:crypto), step by step, and names the step that failed. It prints status
+// codes and the gateway's error codes only: never a key, a token or a proof.
+const b64u = (v) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
+const jws = (privateKey, header, payload) => {
+  const input = `${b64u(header)}.${b64u(payload)}`;
+  return `${input}.${cryptoSign(null, Buffer.from(input), privateKey).toString("base64url")}`;
+};
+async function pdpClientControl(base, issuer, privateKey, jwk) {
+  const jkt = createHash("sha256").update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x })).digest("base64url");
+  const clientId = `urn:ietf:params:oauth:jwk-thumbprint:sha-256:${jkt}`;
+  const now = () => Math.floor(Date.now() / 1000);
+  const proof = (htm, htu, extra = {}) =>
+    jws(privateKey, { alg: "EdDSA", typ: "dpop+jwt", jwk }, { htm, htu, iat: now(), jti: randomUUID(), ...extra });
+  const tokenRequest = (nonce) => {
+    const iat = now();
+    const assertion = jws(privateKey, { alg: "EdDSA", kid: jkt }, {
+      iss: clientId, sub: clientId, aud: `${issuer}/oauth/token`, jti: randomUUID(), iat, exp: iat + 60,
+    });
+    return fetch(`${base}/oauth/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        dpop: proof("POST", `${issuer}/oauth/token`, nonce ? { nonce } : {}),
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        resource: `${issuer}/v1/authz/check`,
+        client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        client_assertion: assertion,
+      }).toString(),
+    });
+  };
+  const errOf = async (res) => {
+    const j = await res.json().catch(() => ({}));
+    // the provider's error_description names the failure class; it never carries key material
+    return `${res.status} ${j.error ?? ""}${j.error_code ? `/${j.error_code}` : ""}${j.code ? `/${j.code}` : ""}${j.error_description ? ` (${String(j.error_description).slice(0, 120)})` : ""}`;
+  };
+  const steps = [];
+  let res = await tokenRequest(null);
+  let nonce = res.headers.get("dpop-nonce");
+  steps.push(`token without nonce: ${res.status === 200 ? "200" : await errOf(res.clone())}${nonce ? " (nonce offered)" : ""}`);
+  if (res.status !== 200) {
+    res = await tokenRequest(nonce);
+    steps.push(`token with nonce: ${res.status === 200 ? "200" : await errOf(res.clone())}`);
+  }
+  if (res.status !== 200) return { ok: false, steps };
+  const token = (await res.json()).access_token;
+  const ath = createHash("sha256").update(token).digest("base64url");
+  const ask = await fetch(`${base}/v1/authz/check`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `DPoP ${token}`,
+      dpop: proof("POST", `${issuer}/v1/authz/check`, { ath, ...(nonce ? { nonce } : {}) }),
+    },
+    body: JSON.stringify({ userId: randomUUID(), serverId: randomUUID(), toolName: "kong-e2e-control" }),
+  });
+  // any answer the PDP decided (200, or a 4xx about the QUESTION) shows the credential was accepted;
+  // a 401 is the credential refused
+  steps.push(`check: ${ask.status === 200 ? "200" : await errOf(ask)}`);
+  return { ok: ask.status !== 401 && ask.status !== 403 && ask.status < 500, steps };
+}
 
 /**
  * BOTH STREAMS, COMBINED. `execFileSync` with `stdio: "pipe"` returns stdout
@@ -333,6 +433,7 @@ async function main() {
     return port;
   };
   GATEWAY_PORT = await pick("GATEWAY_PORT", "gateway");
+  ISSUER = `http://127.0.0.1:${GATEWAY_PORT}`;
   UPSTREAM_PORT = await pick("UPSTREAM_PORT", "upstream");
   KONG_PROXY_PORT = await pick("KONG_PROXY_PORT", "kong");
   console.log(
@@ -383,9 +484,27 @@ async function main() {
     receiptKey.REGULAIT_RECEIPT_SIGNING_KEY = file;
     receiptKey.REGULAIT_RECEIPT_SIGNING_KEY_ID = `kong-e2e-receipt-${RUN_ID}`;
   }
+  // ADR-0188 S7: the PDP client takes a self token, which the gateway's ISSUER
+  // signs and names. A deployment holds an issuer key (REGULAIT_IDENTITY_SIGNING_KEY,
+  // the receipt-key pattern) and a public URL; this run's gateway does too: an
+  // ephemeral, TEST-ONLY Ed25519 key beside the receipt key, and the loopback
+  // address the harness reaches it at. The first signature records the single
+  // configured key as the active one (a first load).
+  const identityKey = {};
+  if (!process.env.REGULAIT_IDENTITY_SIGNING_KEY) {
+    beforeCreating("the identity signing key");
+    const keyDir = created.receiptKeyDir ?? mkdtempSync(path.join(tmpdir(), `kong-e2e-receipt-${RUN_ID}-`));
+    created.receiptKeyDir = keyDir;
+    const file = path.join(keyDir, "identity.pem");
+    writeFileSync(file, generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+    identityKey.REGULAIT_IDENTITY_SIGNING_KEY = file;
+  }
   const env = {
     ...process.env,
     ...receiptKey,
+    ...identityKey,
+    REGULAIT_PUBLIC_URL: ISSUER,
+    REGULAIT_DEPLOY_MODE: DEPLOY_MODE,
     DATABASE_URL: `${PG}/${DB}`,
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
     REGULAIT_DATA_KEY: DATA_KEY,
@@ -428,22 +547,50 @@ async function main() {
   // This used to mint an admin API key, because `/v1/authz/check` was
   // admin-gated and nothing else could reach it — so the harness modelled, and
   // the docs recommended, putting a control-plane administrator token inside a
-  // data-plane proxy. A 'pdp' virtual key reaches that one route and nothing
-  // else: it cannot dispatch, cannot read a ledger and cannot mint another key.
+  // data-plane proxy. AER-027 narrowed that to a 'pdp' virtual key, and
+  // ADR-0188 S7 retired THAT bearer value: the PDP client is now a `pdp`
+  // WORKLOAD IDENTITY holding its own Ed25519 key. It takes a DPoP-bound self
+  // token whose audience is the check route, so it cannot dispatch, cannot read
+  // a ledger and cannot mint anything, and a copied token is useless without
+  // the key.
   //
   // The harness uses it because a verification that exercises a MORE privileged
   // credential than the product recommends is verifying the wrong deployment.
   const admin = users.find((u) => u.email === "admin@regulait.local");
-  beforeCreating("the PDP key");
-  const key = (
-    await api("POST", `${base}/v1/virtual-keys`, { name: "kong-e2e-pdp", userId: admin.id, purpose: "pdp" }, boot)
-  ).json;
-  const pdpKey = key.token ?? key.key;
-  if (!pdpKey) throw new Error(`could not mint a PDP key: ${JSON.stringify(key).slice(0, 200)}`);
-  // remembered so teardown can revoke it even when an assertion below throws
-  created.keyId = key.id ?? null;
   created.base = base;
   created.boot = boot;
+  beforeCreating("the PDP client identity");
+  const ident = await withStepUpOff(() => api("POST", `${base}/v1/workload-identities`,
+    { kind: "pdp", sponsorUserIds: [admin.id], environments: [DEPLOY_MODE] }, boot));
+  if (ident.status !== 201) throw new Error(`could not create the PDP client identity: ${ident.status} ${JSON.stringify(ident.json).slice(0, 200)}`);
+  // remembered so teardown can revoke it even when an assertion below throws
+  created.pdpIdentityId = ident.json.id;
+  // the key is made HERE and only its public half is sent: the gateway never holds the private key
+  const pdpPrivate = generateKeyPairSync("ed25519").privateKey;
+  const { kty, crv, x } = pdpPrivate.export({ format: "jwk" });
+  const bound = await withStepUpOff(() => api("POST", `${base}/v1/workload-identities/${created.pdpIdentityId}/credentials`,
+    { kind: "jwk", publicJwk: { kty, crv, x } }, boot));
+  if (bound.status !== 201) throw new Error(`could not bind the PDP client key: ${bound.status} ${JSON.stringify(bound.json).slice(0, 200)}`);
+  // one line (an env-file holds one): base64url of the PKCS#8 DER, which the plugin also accepts as PEM
+  const pdpKey = pdpPrivate.export({ type: "pkcs8", format: "der" }).toString("base64url");
+  {
+    const control = await pdpClientControl(base, ISSUER, pdpPrivate, { kty, crv, x });
+    check("control: the PDP client's key takes a self token and asks, from outside Kong (ADR-0188 S7)",
+      control.ok, control.steps.join("; "));
+    if (!control.ok) {
+      console.error(`  PDP client control steps: ${control.steps.join("; ")}`);
+      // the gateway's own audited reason codes for the refusals (codes only: never a key, token or proof)
+      try {
+        const codes = psqlScalar(
+          "SELECT coalesce(string_agg(code, ', '), '(none)') FROM (SELECT coalesce(detail->>'code', '?') AS code FROM audit_log " +
+            "WHERE rule_id IN ('workload-token-refused', 'workload-token-issued') ORDER BY at DESC LIMIT 6) r",
+        );
+        console.error(`  audited token outcomes (newest first): ${codes}`);
+      } catch (e) {
+        console.error(`  could not read the audited token outcomes: ${e instanceof Error ? e.message.split("\n")[0] : e}`);
+      }
+    }
+  }
 
   // AER-034 — a THIRD subject, entitled to the tool AND caught by an approval
   // rule, so the `approval_required` branch can be asserted end to end. It needs
@@ -691,7 +838,8 @@ plugins:
       # to use (\`referenceable = true\` on the field is what permits it), so the
       # harness exercises the recommended secret handling instead of a shortcut
       # no customer should copy.
-      pdp_key: "{vault://env/regulait-pdp-key}"
+      pdp_client_key: "{vault://env/regulait-pdp-client-key}"
+      issuer: "${ISSUER}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
       # AER-028's context, on the route that fronts the tool. Sent so assertion
@@ -718,7 +866,8 @@ plugins:
       # the plugin appends /v1/authz/check, so this resolves to the upstream's
       # non-counting stub path that answers 500
       pdp_url: "http://host.docker.internal:${UPSTREAM_PORT}/__pdp500"
-      pdp_key: "{vault://env/regulait-pdp-key}"
+      pdp_client_key: "{vault://env/regulait-pdp-client-key}"
+      issuer: "${ISSUER}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
       timeout_ms: 2000
@@ -732,7 +881,8 @@ plugins:
       # 200 with a body cjson cannot decode — an unreadable answer must refuse,
       # never be treated as an allow
       pdp_url: "http://host.docker.internal:${UPSTREAM_PORT}/__pdpjunk"
-      pdp_key: "{vault://env/regulait-pdp-key}"
+      pdp_client_key: "{vault://env/regulait-pdp-client-key}"
+      issuer: "${ISSUER}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
       timeout_ms: 2000
@@ -747,7 +897,8 @@ plugins:
       # and not from a broken decision point, so this points at the real gateway
       # exactly as the governed route does.
       pdp_url: "http://host.docker.internal:${GATEWAY_PORT}"
-      pdp_key: "{vault://env/regulait-pdp-key}"
+      pdp_client_key: "{vault://env/regulait-pdp-client-key}"
+      issuer: "${ISSUER}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
       # key-auth is on this route, so the credential says 'api_key'. Declaring
@@ -766,7 +917,8 @@ plugins:
     config:
       # A WORKING PDP, so the refusal under test can only be the plugin's own.
       pdp_url: "http://host.docker.internal:${GATEWAY_PORT}"
-      pdp_key: "{vault://env/regulait-pdp-key}"
+      pdp_client_key: "{vault://env/regulait-pdp-client-key}"
+      issuer: "${ISSUER}"
       server_id: "${server.id}"
       tool_name: "${tool.name}"
       timeout_ms: 2000
@@ -778,7 +930,8 @@ plugins:
     route: second-route
     config:
       pdp_url: "http://host.docker.internal:${GATEWAY_PORT}"
-      pdp_key: "{vault://env/regulait-pdp-key}"
+      pdp_client_key: "{vault://env/regulait-pdp-client-key}"
+      issuer: "${ISSUER}"
       # THE DISTINCT BINDING (AER-030)
       server_id: "${serverB.id}"
       tool_name: "${toolB.name}"
@@ -799,7 +952,7 @@ plugins:
   const secretDir = mkdtempSync(path.join(tmpdir(), `kong-e2e-secret-${RUN_ID}-`));
   created.secretDir = secretDir;
   const keyFile = path.join(secretDir, "pdp.env");
-  writeFileSync(keyFile, `REGULAIT_PDP_KEY=${pdpKey}\n`, { mode: 0o600 });
+  writeFileSync(keyFile, `REGULAIT_PDP_CLIENT_KEY=${pdpKey}\n`, { mode: 0o600 });
 
   // THE IMAGE, AS THE DAEMON HOLDS IT (AER-034). The job pins Kong by digest;
   // this prints, in the harness's own output, the digest the container was
@@ -893,7 +1046,7 @@ plugins:
     // The file no longer contains the secret (it holds a vault reference), but
     // the redaction stays: a dump that depends on the file never regaining one
     // is a dump that leaks the day it does.
-    console.error(shBoth(`cat ${path.join(dir, "kong.yml")}`).replace(/pdp_key: "[^"]*"/, 'pdp_key: "<redacted>"'));
+    console.error(shBoth(`cat ${path.join(dir, "kong.yml")}`).replace(/pdp_client_key: "[^"]*"/, 'pdp_client_key: "<redacted>"'));
   };
 
   // Its own loop rather than waitFor(): waitFor swallows exceptions and retries,
@@ -942,7 +1095,16 @@ plugins:
       readFileSync(keyFile, "utf8").includes(pdpKey));
     const onDisk = readFileSync(path.join(dir, "kong.yml"), "utf8");
     check("the world-readable declarative config holds the vault reference and never the key",
-      !onDisk.includes(pdpKey) && onDisk.includes("{vault://env/regulait-pdp-key}"));
+      !onDisk.includes(pdpKey) && onDisk.includes("{vault://env/regulait-pdp-client-key}"));
+  }
+
+  // (y) ADR-0188 S7 — THE BEARER PDP KEY IS GONE. The plugin asked every case
+  //     below with its own key's DPoP-bound self token; the credential it
+  //     replaced is issued to no one, an administrator included.
+  {
+    const retired = await api("POST", `${base}/v1/virtual-keys`, { name: "kong-e2e-retired-pdp", userId: admin.id, purpose: "pdp" }, boot);
+    check("ADR-0188 S7: a pdp bearer key is issued to no one (410 pdp_key_retired)",
+      retired.status === 410 && retired.json.error === "pdp_key_retired", `status ${retired.status}`);
   }
 
   // (a) NO CREDENTIAL -> key-auth refuses, and nothing is proxied.
@@ -1398,13 +1560,16 @@ async function teardown(why) {
   // 1. REVOKE the scratch credential while the gateway can still do it, so a
   //    failure in any step after this leaves no live key behind. Bounded: a
   //    hung gateway must not hold the rest of the teardown hostage.
-  if (created.keyId && created.base && created.boot) {
+  if (created.pdpIdentityId && created.base && created.boot) {
     try {
-      await fetch(`${created.base}/v1/virtual-keys/${created.keyId}`, {
-        method: "DELETE",
-        headers: created.boot,
-        signal: AbortSignal.timeout(5_000),
-      });
+      await withStepUpOff(() =>
+        fetch(`${created.base}/v1/workload-identities/${created.pdpIdentityId}/revoke`, {
+          method: "POST",
+          headers: { ...created.boot, "content-type": "application/json" },
+          body: "{}",
+          signal: AbortSignal.timeout(5_000),
+        }),
+      );
     } catch {
       /* best effort — the gateway may already be dead from assertion (j) */
     }

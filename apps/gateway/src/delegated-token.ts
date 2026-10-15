@@ -64,7 +64,12 @@ import { loadOrgSettings } from "./org-settings.js";
 /** the JOSE `typ` of a delegated access token (RFC 9068) */
 export const ACCESS_TOKEN_TYP = "at+jwt" as const;
 /** the algorithms a DPoP proof or a delegation authorization may use (decision 13) */
-export const WORKLOAD_PROOF_ALGS = ["EdDSA", "ES256"] as const;
+/**
+ * The JWS algorithms a workload's assertions and proofs may use. ADR-0188 S7 (review of #380): `Ed25519` is the
+ * RFC 9864 fully-specified name of the same Ed25519 signature `EdDSA` (RFC 8037) names, and current client
+ * libraries (oauth4webapi 3.x) emit it, so both labels are accepted. Either way the key must be an Ed25519 key.
+ */
+export const WORKLOAD_PROOF_ALGS = ["EdDSA", "Ed25519", "ES256"] as const;
 /** a DPoP nonce is an HMAC over a 5-minute slot (decision 20) */
 export const DPOP_NONCE_SLOT_SECONDS = 300;
 /** a placeholder jwks_uri handed to oauth4webapi; `customFetch` answers it locally and nothing else */
@@ -328,6 +333,9 @@ export async function storedAndLive(
   if (
     !row ||
     row.revokedAt !== null ||
+    // ADR-0188 S7: a workload SELF token (no grant) is never a delegated token, whatever it claims
+    row.grantId === null ||
+    row.subjectIdentityId !== null ||
     row.grantId !== claims.grant_id ||
     row.bindingKind !== binding.kind ||
     row.bindingThumbprint !== binding.thumbprint ||
@@ -362,6 +370,65 @@ export async function storedAndLive(
 }
 
 /**
+ * Decision 13 step 2, the DPoP branch, shared by the delegated-token verifier
+ * and the S7 workload self-token verifier (`oauth/workload-self.ts`):
+ * `oauth4webapi.validateJwtAccessToken` with `requireDPoP`, a fixed algorithm
+ * list and ONLY our local issuer key; then OUR checks: the proof's `iat`
+ * within 60 s (at most 5 s ahead), the gateway nonce, and an atomic `rs_dpop`
+ * claim of the proof `jti`. The caller has already checked the scheme and that
+ * `cnf` is exactly one `jkt` (`thumbprint`).
+ */
+export async function verifyDpopBranch(
+  db: Db,
+  input: Pick<VerifyDelegatedTokenInput, "request" | "audience" | "issuer" | "secrets">,
+  key: IdentitySigningKeyRow,
+  thumbprint: string,
+  now: Date,
+): Promise<{ ok: true; claims: JWTPayload } | VerifyFailure> {
+  const proofJwt = input.request.headers.get("dpop");
+  if (!proofJwt) return fail("dpop_proof_missing", "invalid_dpop_proof");
+  let claims: JWTPayload;
+  try {
+    claims = await oauth.validateJwtAccessToken({ issuer: input.issuer, jwks_uri: LOCAL_JWKS_URI }, input.request, input.audience, {
+      requireDPoP: true,
+      signingAlgorithms: [...WORKLOAD_PROOF_ALGS],
+      // the library reads the process clock; shift it to ours (the database's) so its exp/iat checks agree
+      [oauth.clockSkew]: Math.round((now.getTime() - Date.now()) / 1000),
+      // local keys only: the placeholder URI is answered here and no request ever leaves the process
+      [oauth.customFetch]: async (url: string) => {
+        if (url !== LOCAL_JWKS_URI) throw new Error("no remote key fetch");
+        return new Response(JSON.stringify({ keys: [jwkOf(key)] }), { headers: { "content-type": "application/json" } });
+      },
+    });
+  } catch {
+    return fail("token_or_proof_invalid");
+  }
+  let proof: JWTPayload;
+  try {
+    proof = decodeJwt(proofJwt);
+  } catch {
+    return fail("dpop_proof_malformed", "invalid_dpop_proof");
+  }
+  const nowS = Math.floor(now.getTime() / 1000);
+  if (typeof proof.iat !== "number" || proof.iat < nowS - DPOP_PROOF_MAX_AGE_SECONDS || proof.iat > nowS + DPOP_PROOF_MAX_FUTURE_SECONDS) {
+    return fail("dpop_proof_stale", "invalid_dpop_proof");
+  }
+  const org = await loadOrgSettings(db);
+  if (org.dpopNonceRequired && !dpopNonceValid(proof.nonce, input.secrets.nonceKey, now)) {
+    return fail("dpop_nonce_required", "use_dpop_nonce", { dpopNonce: issueDpopNonce(input.secrets.nonceKey, now) });
+  }
+  if (typeof proof.jti !== "string" || proof.jti.length === 0 || proof.jti.length > 256) return fail("dpop_proof_jti", "invalid_dpop_proof");
+  const claimed = await claimReplay(
+    db,
+    "rs_dpop",
+    `${thumbprint}:${proof.jti}`,
+    new Date((proof.iat + DPOP_PROOF_MAX_AGE_SECONDS + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000),
+  );
+  if (!claimed) return fail("dpop_proof_replayed", "invalid_dpop_proof");
+  return { ok: true, claims };
+}
+
+/**
  * THE RESOURCE-SIDE VERIFIER (decision 13). 401 on any failure, with a short
  * code; `use_dpop_nonce` carries a fresh nonce to retry with.
  */
@@ -389,45 +456,9 @@ export async function verifyDelegatedToken(db: Db, input: VerifyDelegatedTokenIn
   if (binding.kind === "dpop") {
     // 2. DPoP branch
     if (scheme !== "DPoP") return fail("dpop_scheme_required");
-    const proofJwt = input.request.headers.get("dpop");
-    if (!proofJwt) return fail("dpop_proof_missing", "invalid_dpop_proof");
-    try {
-      claims = await oauth.validateJwtAccessToken({ issuer: input.issuer, jwks_uri: LOCAL_JWKS_URI }, input.request, input.audience, {
-        requireDPoP: true,
-        signingAlgorithms: [...WORKLOAD_PROOF_ALGS],
-        // the library reads the process clock; shift it to ours (the database's) so its exp/iat checks agree
-        [oauth.clockSkew]: Math.round((now.getTime() - Date.now()) / 1000),
-        // local keys only: the placeholder URI is answered here and no request ever leaves the process
-        [oauth.customFetch]: async (url: string) => {
-          if (url !== LOCAL_JWKS_URI) throw new Error("no remote key fetch");
-          return new Response(JSON.stringify({ keys: [jwkOf(key.row)] }), { headers: { "content-type": "application/json" } });
-        },
-      });
-    } catch {
-      return fail("token_or_proof_invalid");
-    }
-    let proof: JWTPayload;
-    try {
-      proof = decodeJwt(proofJwt);
-    } catch {
-      return fail("dpop_proof_malformed", "invalid_dpop_proof");
-    }
-    const nowS = Math.floor(now.getTime() / 1000);
-    if (typeof proof.iat !== "number" || proof.iat < nowS - DPOP_PROOF_MAX_AGE_SECONDS || proof.iat > nowS + DPOP_PROOF_MAX_FUTURE_SECONDS) {
-      return fail("dpop_proof_stale", "invalid_dpop_proof");
-    }
-    const org = await loadOrgSettings(db);
-    if (org.dpopNonceRequired && !dpopNonceValid(proof.nonce, input.secrets.nonceKey, now)) {
-      return fail("dpop_nonce_required", "use_dpop_nonce", { dpopNonce: issueDpopNonce(input.secrets.nonceKey, now) });
-    }
-    if (typeof proof.jti !== "string" || proof.jti.length === 0 || proof.jti.length > 256) return fail("dpop_proof_jti", "invalid_dpop_proof");
-    const claimed = await claimReplay(
-      db,
-      "rs_dpop",
-      `${binding.thumbprint}:${proof.jti}`,
-      new Date((proof.iat + DPOP_PROOF_MAX_AGE_SECONDS + DPOP_PROOF_MAX_FUTURE_SECONDS) * 1000),
-    );
-    if (!claimed) return fail("dpop_proof_replayed", "invalid_dpop_proof");
+    const dpop = await verifyDpopBranch(db, input, key.row, binding.thumbprint, now);
+    if (!dpop.ok) return dpop;
+    claims = dpop.claims;
   } else {
     // 3. mTLS branch: the signature alone through jose, then the certificate; no DPoP fallback
     if (scheme !== "Bearer" || input.request.headers.has("dpop")) return fail("mtls_scheme_required");

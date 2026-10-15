@@ -1296,6 +1296,13 @@
       "when": 1785129000000,
       "tag": "0194_isolation_placement_decision",
       "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1785130000000,
+      "tag": "0195_identity_s7_retire_bearer",
+      "breakpoints": true
     }
   ]
 }

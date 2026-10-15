@@ -8398,7 +8398,10 @@ export const virtualKeys = pgTable(
      * NOTHING ELSE: the credential a data-plane proxy holds to ask
      * authorization questions, which before this could only be an admin API
      * key — making proxy compromise equivalent to control-plane admin. The
-     * separation runs BOTH ways: a pdp key cannot dispatch either. */
+     * separation ran BOTH ways: a pdp key could not dispatch either.
+     * ADR-0188 S7 (migration 0195): 'pdp' keys are retired; the CHECK admits
+     * 'pdp' only on a REVOKED row (history), and a PDP client is a workload
+     * identity of kind 'pdp' with a registered key. */
     purpose: text("purpose").notNull().default("dispatch").$type<"dispatch" | "pdp" | "engine">(),
     /** ADR-0187 (migration 0173) — an `engine` key is PINNED to one project: a
      * call whose x-regulait-project-id names another is refused, and an
@@ -12441,7 +12444,7 @@ export const engineEnrollmentTokens = pgTable(
   (t) => [check("engine_enrollment_tokens_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '60 minutes'`)],
 );
 
-/** A registered runner. Its `rge_` token reaches only the runner route allow-list. */
+/** A registered runner. Its credential is its workload identity's key (ADR-0188 S7); its self token reaches only the runner route allow-list. */
 export const engineRunners = pgTable(
   "engine_runners",
   {
@@ -12450,7 +12453,7 @@ export const engineRunners = pgTable(
       .notNull()
       .references(() => engines.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
-    tokenHash: text("token_hash").notNull().unique(),
+    // ADR-0188 S7 (migration 0195): the `rge_` token hash is gone; the runner's credential is its workload identity's key
     enrollmentTokenId: uuid("enrollment_token_id").references(() => engineEnrollmentTokens.id, { onDelete: "set null" }),
     reportedDigest: text("reported_digest").notNull(),
     reportedVersion: text("reported_version").notNull(),
@@ -13172,9 +13175,10 @@ export const issuedTokens = pgTable(
   "issued_tokens",
   {
     jti: text("jti").primaryKey(),
-    grantId: uuid("grant_id")
-      .notNull()
-      .references(() => delegationGrants.id, { onDelete: "restrict" }),
+    /** the delegation grant (a delegated token); null for a workload SELF token (S7, migration 0195) */
+    grantId: uuid("grant_id").references(() => delegationGrants.id, { onDelete: "restrict" }),
+    /** ADR-0188 S7: the identity a `client_credentials` self token was issued to (exactly one of this and grant_id) */
+    subjectIdentityId: uuid("subject_identity_id").references(() => workloadIdentities.id, { onDelete: "restrict" }),
     authCredentialId: uuid("auth_credential_id")
       .notNull()
       .references(() => workloadCredentials.id, { onDelete: "restrict" }),
@@ -13203,7 +13207,12 @@ export const issuedTokens = pgTable(
       sql`${t.expiresAt} > ${t.issuedAt} AND ${t.expiresAt} <= ${t.issuedAt} + interval '3600 seconds'`,
     ),
     check("issued_tokens_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.issuedAt}`),
+    check(
+      "issued_tokens_subject_check",
+      sql`(${t.grantId} IS NOT NULL AND ${t.subjectIdentityId} IS NULL) OR (${t.grantId} IS NULL AND ${t.subjectIdentityId} IS NOT NULL AND ${t.bindingKind} = 'dpop')`,
+    ),
     index("issued_tokens_grant_idx").on(t.grantId),
+    index("issued_tokens_subject_identity_idx").on(t.subjectIdentityId).where(sql`${t.subjectIdentityId} IS NOT NULL`),
     index("issued_tokens_binding_idx").on(t.bindingThumbprint),
     index("issued_tokens_credential_idx").on(t.authCredentialId),
     index("issued_tokens_expires_idx").on(t.expiresAt),

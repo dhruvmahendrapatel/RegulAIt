@@ -2,7 +2,7 @@
  * ADR-0187 B5-P — the promptfoo RUNNER's entrypoint inside its image (`node dist/main.js`).
  *
  * Everything about the runner's life comes from the shared core (`runRunnerLoop`, decisions 48 and
- * 49): the runner token is kept on the runner's own volume (REGULAIT_RUNNER_STATE_DIR, default
+ * 49): the runner key is kept on the runner's own volume (REGULAIT_RUNNER_STATE_DIR, default
  * /state) so a restart does not need a new enrolment token; a lease refused because the engine is
  * still off waits with a capped backoff; only a refused credential with no enrolment token to
  * replace it stops the process (after a pause, so a restart policy cannot hammer the gateway).
@@ -13,7 +13,7 @@
  * worker's own report (worker-selftest.ts) as the manifest's `REGULAIT_PROMPTFOO_WORKER_ISOLATED`.
  */
 import path from "node:path";
-import { buildSelfTest, FileRunnerTokenStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError } from "@regulait/engine-runner";
+import { buildSelfTest, FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST, type RunnerSelfTest } from "@regulait/shared";
 import { promptfooAdapter } from "./adapter.js";
 import { ExchangePromptfooExecutor } from "./exchange.js";
@@ -38,7 +38,10 @@ async function main(): Promise<void> {
   // with the digest reported (a consistency check; the signature check at deploy time is the proof)
   const imageDigest = pinnedImageDigest(process.env.REGULAIT_ENGINE_IMAGE_REF, process.env.REGULAIT_ENGINE_IMAGE_DIGEST);
   const engineVersion = installedPromptfooVersion();
-  const client = new RunnerClient({ gatewayUrl });
+  // ADR-0188 S7: the runner authenticates with its own key (private_key_jwt + DPoP); each proof names the request
+  // under the gateway's issuer (REGULAIT_PUBLIC_URL), the same value the gateway is configured with
+  // (it refuses to start without one: never a guess from the address it dials)
+  const client = new RunnerClient({ gatewayUrl, issuer: runnerIssuerFromEnv(process.env) });
   const stateDir = process.env.REGULAIT_RUNNER_STATE_DIR ?? "/state";
   const jobsRoot = process.env.REGULAIT_PROMPTFOO_JOBS_DIR ?? "/jobs";
   const resultsRoot = process.env.REGULAIT_PROMPTFOO_RESULTS_DIR ?? "/results";
@@ -54,7 +57,7 @@ async function main(): Promise<void> {
     // PR #205 review round 11 [90]: undelivered results survive a restart on the state volume (0700,
     // the runner's own), apart from the engine's work dirs on the tmpfs
     retainRoot: path.join(stateDir, "undelivered"),
-    store: new FileRunnerTokenStore(path.join(stateDir, "runner-token")),
+    store: new FileRunnerKeyStore(path.join(stateDir, "runner-key")),
     enrollmentToken: process.env.REGULAIT_ENGINE_ENROLLMENT_TOKEN || null,
     registration: async () => ({
       name: `promptfoo-${process.env.HOSTNAME ?? "runner"}`,

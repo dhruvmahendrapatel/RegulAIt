@@ -204,7 +204,7 @@ describe("decision 204: the adapter and the worker", () => {
     const work = path.join(root, "work");
     await Promise.all([mkdir(jobsRoot), mkdir(results), mkdir(work)]);
     // a runner credential planted where a careless worker would pick it up: its own environment
-    const planted = { REGULAIT_ENGINE_ENROLLMENT_TOKEN: "rgee_synthetic_planted", REGULAIT_RUNNER_TOKEN: "rge_synthetic_planted" };
+    const planted = { REGULAIT_ENGINE_ENROLLMENT_TOKEN: "rgee_synthetic_planted", REGULAIT_RUNNER_KEY: "rgek_synthetic_planted" };
     const prior = Object.fromEntries(Object.keys(planted).map((k) => [k, process.env[k]]));
     Object.assign(process.env, planted);
     const seen: Array<{ env: Record<string, string>; config: Record<string, unknown> }> = [];

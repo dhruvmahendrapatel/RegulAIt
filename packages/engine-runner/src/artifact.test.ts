@@ -21,16 +21,16 @@ describe("downloadArtifact", () => {
     const aborted = new AbortController();
     aborted.abort();
     const err = await downloadArtifact({
-      gatewayUrl: "http://g",
-      token: "rge_x",
+      source: {
+        artifact: async () => {
+          fetched += 1;
+          return new Response(new Uint8Array(bytes), { status: 200 });
+        },
+      },
       artifact,
       destPath: dest,
       deadlineAt: deadlineAt(),
       signal: aborted.signal,
-      fetch: async () => {
-        fetched += 1;
-        return new Response(new Uint8Array(bytes), { status: 200 });
-      },
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ArtifactFetchError);
     expect((err as ArtifactFetchError).code).toBe("artifact_aborted");
@@ -40,14 +40,21 @@ describe("downloadArtifact", () => {
 
   it("writes exactly the named bytes; a tampered or longer body is refused and removed", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "art-"));
-    const ok = await downloadArtifact({ gatewayUrl: "http://g", token: "rge_x", artifact, destPath: path.join(dir, "ok"), deadlineAt: deadlineAt(), fetch: async () => new Response(new Uint8Array(bytes)) });
+    const ok = await downloadArtifact({ source: { artifact: async () => new Response(new Uint8Array(bytes)) }, artifact, destPath: path.join(dir, "ok"), deadlineAt: deadlineAt() });
     expect(ok).toEqual({ bytes: bytes.length, sha256: artifact.sha256 });
     const tampered = Buffer.from(bytes);
     tampered[0] = tampered[0]! ^ 1;
     for (const [name, body] of [["tampered", tampered], ["longer", Buffer.concat([bytes, Buffer.from("x")])]] as const) {
-      const e = await downloadArtifact({ gatewayUrl: "http://g", token: "rge_x", artifact, destPath: path.join(dir, name), deadlineAt: deadlineAt(), fetch: async () => new Response(new Uint8Array(body)) }).catch((x: unknown) => x);
+      const e = await downloadArtifact({ source: { artifact: async () => new Response(new Uint8Array(body)) }, artifact, destPath: path.join(dir, name), deadlineAt: deadlineAt() }).catch((x: unknown) => x);
       expect(e).toBeInstanceOf(ArtifactFetchError);
       expect(existsSync(path.join(dir, name))).toBe(false);
     }
+  });
+
+  it("ADR-0188 S7: a runner that holds no key fetches nothing", async () => {
+    const dest = path.join(await mkdtemp(path.join(tmpdir(), "art-")), "a.bin");
+    const err = await downloadArtifact({ source: null, artifact, destPath: dest, deadlineAt: deadlineAt() }).catch((e: unknown) => e);
+    expect((err as ArtifactFetchError).code).toBe("artifact_no_credential");
+    expect(existsSync(dest)).toBe(false);
   });
 });

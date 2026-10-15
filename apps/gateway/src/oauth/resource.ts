@@ -35,13 +35,15 @@
  */
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { decodeJwt, decodeProtectedHeader } from "jose";
-import { auditLog, type Db } from "@regulait/db";
+import { auditLog, engineRunners, eq, sql, type Db } from "@regulait/db";
 import { verifyDelegatedToken, ACCESS_TOKEN_TYP } from "../delegated-token.js";
 import { databaseNow } from "../delegation.js";
 import { findWorkloadClient, matchCertificateCredential } from "./clients.js";
 import { deploymentEnvironment, gatewayResource, identityIssuer, identitySecretsFor } from "./common.js";
 import { presentedClientCertificate } from "./x509.js";
 import { DELEGATED_ROUTES_WIRED } from "./wiring.js";
+import { selfKindForResource, verifyWorkloadSelfToken } from "./workload-self.js";
+import type { WorkloadSelfKind } from "@regulait/shared";
 import type { AuthContext } from "../auth.js";
 
 /** the routes a delegated token may reach (an allow-list: a new route is unreachable until named here) */
@@ -103,7 +105,12 @@ export async function authenticateWorkloadRequest(db: Db, req: FastifyRequest, o
   const header = req.headers.authorization;
   if (!isDelegatedTokenHeader(header)) return { kind: "none" };
   const route = `${req.method} ${req.routeOptions.url ?? ""}`;
-  const challenge = (error: string) => ({ "www-authenticate": `DPoP error="${error}", algs="EdDSA ES256"` });
+  const challenge = (error: string) => ({ "www-authenticate": `DPoP error="${error}", algs="EdDSA Ed25519 ES256"` });
+  // ADR-0188 S7: an engine runner's or a PDP client's SELF token is recognised by the one control-plane audience
+  // it names, on whatever route it is presented. It is verified as such (never as a delegated token), and the
+  // route allow-lists then confine it exactly as they confined the bearer value it replaced (403 elsewhere).
+  const selfKind = selfKindOfToken(header!);
+  if (selfKind) return authenticateSelfRequest(db, req, route, selfKind, opts, challenge);
   if (!WORKLOAD_ROUTES.has(route)) {
     await auditRefusal(db, "workload_route_not_allowed", route, null);
     return { kind: "refused", status: 403, body: { error: "workload_scope", detail: "a delegated token reaches only the MCP proxy and the compat model routes" } };
@@ -179,6 +186,85 @@ export async function authenticateWorkloadRequest(db: Db, req: FastifyRequest, o
       actorChain: v.live.links.map((l) => l.identity.id),
     },
   };
+}
+
+/** the self-token kind an Authorization header's token names by its (not yet verified) audience, or null */
+function selfKindOfToken(header: string): WorkloadSelfKind | null {
+  const issuer = identityIssuer();
+  const st = schemeAndToken(header);
+  // a self token presented as `Bearer` is still judged as one (and refused: it exists only DPoP-bound)
+  if (!issuer || !st || (st.scheme !== "dpop" && st.scheme !== "bearer")) return null;
+  let aud: unknown;
+  try {
+    aud = decodeJwt(st.token).aud;
+  } catch {
+    return null;
+  }
+  return typeof aud === "string" ? selfKindForResource(issuer, aud) : null;
+}
+
+/**
+ * ADR-0188 S7 — a self token at a control-plane route: verified by
+ * `verifyWorkloadSelfToken`; the context is the runner (its engine and row) or
+ * the PDP client, never a person and never an admin. A delegated token is not
+ * accepted here, and a self token is accepted nowhere else.
+ */
+async function authenticateSelfRequest(
+  db: Db,
+  req: FastifyRequest,
+  route: string,
+  kind: WorkloadSelfKind,
+  opts: { dataKey?: string | undefined },
+  challenge: (error: string) => Record<string, string>,
+): Promise<WorkloadAuthOutcome> {
+  const issuer = identityIssuer();
+  const secrets = identitySecretsFor(opts.dataKey);
+  if (!issuer || !secrets) return { kind: "refused", status: 503, body: { error: "issuer_not_configured" } };
+  const path = new URL(req.url, "http://local").pathname;
+  const search = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+  const request = new Request(`${issuer}${path}${search}`, {
+    method: req.method,
+    headers: {
+      authorization: req.headers.authorization!,
+      ...(typeof req.headers.dpop === "string" ? { dpop: req.headers.dpop } : {}),
+    },
+  });
+  const v = await verifyWorkloadSelfToken(db, { request, kind, env: deploymentEnvironment(), issuer, secrets });
+  if (!v.ok) {
+    await auditSelfRefusal(db, v.code, route);
+    // ADR-0187: the runner's loop reads a revoked runner as `revoked` (it re-enrols or stops and says so)
+    const runnerRevoked = v.code === "engine_runner_revoked";
+    return {
+      kind: "refused",
+      status: 401,
+      body: runnerRevoked ? { error: "engine_runner_revoked", code: v.code, next: "revoked" } : { error: v.error, code: v.code },
+      headers: { ...challenge(v.error), ...(v.dpopNonce ? { "dpop-nonce": v.dpopNonce } : {}) },
+    };
+  }
+  const { identity, authCredentialId, runner } = v.subject;
+  if (kind === "engine_runner") {
+    // the ADR-0187 last-seen stamp the runner's bearer path kept
+    // M-075: the database clock, as every other stamp on this row
+    await db.update(engineRunners).set({ lastSeenAt: sql`now()` }).where(eq(engineRunners.id, runner!.id));
+    return {
+      kind: "ok",
+      ctx: { userId: null, isAdmin: false, via: "engine-runner", engineRunnerId: runner!.id, engineId: runner!.engineId, workloadIdentityId: identity.id, workloadCredentialId: authCredentialId },
+    };
+  }
+  return { kind: "ok", ctx: { userId: null, isAdmin: false, via: "pdp", workloadIdentityId: identity.id, workloadCredentialId: authCredentialId } };
+}
+
+async function auditSelfRefusal(db: Db, code: string, route: string) {
+  await db.insert(auditLog).values({
+    userId: "00000000-0000-0000-0000-000000000000",
+    objectType: "workload_identity",
+    objectId: null,
+    detail: { phase: "workload-token-refused", code, route },
+    effect: "deny",
+    ruleId: "workload-token-refused",
+    ruleChain: [],
+    reason: "a workload self token was refused at a control-plane route (ADR-0188 S7)",
+  });
 }
 
 /** send a refusal produced above */

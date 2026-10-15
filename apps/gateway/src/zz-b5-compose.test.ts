@@ -57,9 +57,11 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(t).toMatch(/\n {4}- \/work:size=/);
     // no Docker socket anywhere in the stack
     expect(compose).not.toMatch(/docker\.sock/);
-    // the runner holds no secret but its enrolment token
+    // the runner holds no secret but its enrolment token (ADR-0188 S7: plus the gateway's issuer, a public URL
+    // its self-token requests name; its key it generates itself, on its own volume)
     const env = t.slice(t.indexOf("  environment:"), t.indexOf("  restart:"));
-    expect(env.match(/\n {4}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual(["REGULAIT_GATEWAY_URL:", "REGULAIT_ENGINE_ENROLLMENT_TOKEN:"]);
+    expect(env.match(/\n {4}[A-Z_]+:/g)?.map((s) => s.trim())).toEqual(["REGULAIT_GATEWAY_URL:", "REGULAIT_ENGINE_ENROLLMENT_TOKEN:", "REGULAIT_PUBLIC_URL:"]);
+    expect(env).toMatch(/\n {4}REGULAIT_PUBLIC_URL: \$\{REGULAIT_PUBLIC_URL:-\}\n/);
   });
 
   it("B5-P2: the promptfoo worker runs promptfoo with no runner credential in reach: no state volume, no enrolment token, its own namespaces, the job volume read-only", () => {
@@ -221,7 +223,7 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(worker).toMatch(/\n {4}user: "10001:10001"\n/);
     expect(worker).toMatch(/\n {4}pull_policy: \$\{REGULAIT_ENGINE_PULL_POLICY:-never\}\n/);
     expect(worker).toMatch(/\n {4}profiles: \["engines"\]\n/);
-    // credential isolation (decision 140): no runner token, no enrolment token, no state volume
+    // credential isolation (decision 140): no runner key, no enrolment token, no state volume
     const wvols = worker.slice(worker.indexOf("    volumes:\n") + 13, worker.indexOf("    environment:"));
     expect(wvols.trim().split("\n").map((l) => l.trim())).toEqual(["- engine-garak-jobs:/jobs:ro", "- engine-garak-results:/out"]);
     expect(worker).not.toMatch(/ENROLLMENT_TOKEN|\/state|engine-garak-state|IMAGE_DIGEST/);

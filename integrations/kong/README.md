@@ -97,16 +97,50 @@ export KONG_PLUGINS=bundled,regulait-authz
 export KONG_LUA_PACKAGE_PATH=/path/to/integrations/kong/?.lua\;\;
 ```
 
+### The plugin's own credential (ADR-0188 S7, plugin 0.5.0)
+
+The plugin no longer holds a bearer `pdp_key`: the gateway revoked every `pdp`
+virtual key on upgrade (migration 0195) and issues none (`410 pdp_key_retired`).
+The plugin is a **`pdp` workload identity** holding its own Ed25519 key:
+
+1. Generate the key **on the Kong host** (it never leaves it):
+   `openssl genpkey -algorithm ed25519 -out pdp-client.pem && chmod 600 pdp-client.pem`.
+2. An admin creates the identity in the console (**Admin → Workload
+   identities → New**, kind `pdp`, a steward, this deployment's environment) and
+   binds the key's **public** half to it (`openssl pkey -in pdp-client.pem -pubout`
+   converted to a JWK, or the console's credential form). Rotation is binding
+   the next key, switching the plugin to it, then revoking the old credential;
+   on compromise, revoking the credential or the identity also revokes its live
+   tokens.
+3. Hand the key to Kong as a vault reference. The value may be the PEM or, for
+   an env-file or env vault that holds one line, the base64url of the same
+   PKCS#8 DER.
+
+Each callout takes a self token from the gateway's `/oauth/token`
+(`client_credentials`, `private_key_jwt` signed by the key, `resource` = the
+check route, a DPoP proof) and asks `/v1/authz/check` with `Authorization: DPoP`
+and a proof bound to that token. The token is audience-scoped to the check
+route and useless without the key. `issuer` must be the gateway's
+`REGULAIT_PUBLIC_URL` exactly — not the internal address in `pdp_url`. A
+credential failure is a fail-closed `503` naming it (`pdp_token_refused`,
+`pdp_client_key_invalid`, `pdp_token_unparseable`, `pdp_unreachable`).
+
 Then, per governed route — the per-route part is the point:
 
 ```sh
 curl -X POST http://localhost:8001/routes/<route>/plugins \
   --data name=regulait-authz \
   --data config.pdp_url=http://regulait-gateway:3000 \
-  --data config.pdp_key='{vault://env/regulait-pdp-key}' \
+  --data config.issuer=https://regulait.example.com \
+  --data config.pdp_client_key='{vault://env/regulait-pdp-client-key}' \
   --data config.server_id=<mcp server uuid> \
   --data config.tool_name=<tool name>
 ```
+
+**Status of 0.5.0:** the client is pinned by `test/workload_spec.lua` (busted on
+LuaJIT with the real `lua-resty-openssl`, including RFC 8037's published
+thumbprint vector); the live path through Kong is **pending its first CI run**
+of `verify.mjs`.
 
 The route also needs an authentication plugin, and each Kong consumer needs its
 `custom_id` set to the matching **RegulAIt user UUID**. An unmapped consumer is
@@ -219,8 +253,8 @@ gateway's bootstrap token. **Nothing is dropped or removed at start**: a
 database or container that already carries the name belongs to another run
 and the harness stops rather than destroying it. Teardown — from the normal
 exit, from a failure, and from `SIGINT`/`SIGTERM`, one shared teardown however
-many of those fire — first revokes the scratch PDP key while the gateway can
-still do it, then removes the container **by id and only if it carries this
+many of those fire — first revokes the scratch PDP client identity (and so its
+key and live tokens) while the gateway can still do it, then removes the container **by id and only if it carries this
 run's label** (plus any container carrying that label whose id was never
 recorded because `docker run` was interrupted),
 and drops the database **only if it still carries this run's comment**;
@@ -230,7 +264,8 @@ database after teardown has gone past it. Before Kong starts, the generated
 declarative config is checked for the values Kong requires to be unique
 (consumer `username`/`id`/`custom_id`, key-auth `key`, route names, one plugin
 instance per route), so a config Kong would refuse is named rather than
-surfacing as a container that never came up. The PDP key lives in a `0600` file in a
+surfacing as a container that never came up. The PDP client's private key (made by the
+harness; only its public half is sent to the gateway) lives in a `0600` file in a
 `0700` directory handed to the container through `--env-file`, and the run
 proves it: a read as a non-runner user (`nobody`) must fail while the runner's
 own read succeeds, and the world-readable declarative config is checked to

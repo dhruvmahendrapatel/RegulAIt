@@ -27,7 +27,7 @@ type Json = any;
 const json = (route: Route, status: number, body: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
 const ISOLATION_DETAIL =
-  "engine promptfoo's build runs the engine process as the runner's own user, so a compromised engine could read the runner token " +
+  "engine promptfoo's build runs the engine process as the runner's own user, so a compromised engine could read the runner key " +
   "(it can lease this engine's runs and post their results; it cannot reach any other route). " +
   "To enable it anyway, send acceptCredentialIsolationRisk: true with a step-up; the isolating build is ADR-0187 slice B5-P2.";
 

@@ -376,6 +376,69 @@ export const DELEGATION_ERROR_CODES = [
   "delegation_isolation",
 ] as const;
 
+// ---------------------------------------------------------------------------
+// ADR-0188 S7 — the workload SELF token (engine runners and PDP clients)
+// ---------------------------------------------------------------------------
+
+/**
+ * OWNER DECISION 8 (slice S7): an engine runner and a PDP client no longer hold
+ * a bearer secret. Each is a workload identity with a registered key; it gets a
+ * short-lived, DPoP-bound token from `POST /oauth/token` with the RFC 6749
+ * `client_credentials` grant and `private_key_jwt` (RFC 7523). The token is the
+ * workload acting AS ITSELF on its own control-plane route: no sponsor, no
+ * delegation grant, so it never reaches a governed route.
+ */
+export const CLIENT_CREDENTIALS_GRANT_TYPE = "client_credentials" as const;
+/**
+ * RFC 9278: a self-token client may name itself by its key's JWK thumbprint
+ * URI instead of its identity's identifier, so a runner or a proxy needs to
+ * hold nothing but its key. One key authenticates one identity, ever (S6).
+ */
+export const JWK_THUMBPRINT_URI_PREFIX = "urn:ietf:params:oauth:jwk-thumbprint:sha-256:" as const;
+/**
+ * The identity kinds that may hold a self token, and the ONE control-plane
+ * resource (RFC 8707, a path under the issuer) each may name. A runner's token
+ * reaches the runner routes; a PDP client's reaches `POST /v1/authz/check`.
+ */
+export const WORKLOAD_SELF_RESOURCE_PATHS = { engine_runner: "/v1/engine-runner", pdp: "/v1/authz/check" } as const;
+export type WorkloadSelfKind = keyof typeof WORKLOAD_SELF_RESOURCE_PATHS;
+export const WORKLOAD_SELF_KINDS = Object.keys(WORKLOAD_SELF_RESOURCE_PATHS) as WorkloadSelfKind[];
+/**
+ * A non-standard member of the self-token response (RFC 6749 §5.1 allows
+ * them): when the key that authenticated this request stops being accepted, in
+ * epoch seconds. The client rotates its key before then (decision 12).
+ */
+export const CREDENTIAL_NOT_AFTER_RESPONSE_MEMBER = "regulait_credential_not_after" as const;
+/**
+ * The companion member: from when the client should rotate that key (epoch
+ * seconds), two thirds into its window. An engine runner rotates itself then
+ * (`POST /v1/engine-runner/credentials`); a PDP client's operator rotates it.
+ */
+export const CREDENTIAL_ROTATE_AFTER_RESPONSE_MEMBER = "regulait_credential_rotate_after" as const;
+/** the share of a key's window after which its holder should rotate it */
+export const CREDENTIAL_ROTATE_AT_FRACTION = 2 / 3;
+/** JOSE `typ` of the proof a workload signs with a NEW key it is rotating to */
+export const KEY_ROTATION_PROOF_TYP = "regulait-key-rotation+jwt" as const;
+
+/** the form fields of a self-token request (`private_key_jwt` only: S7 retires every bearer secret) */
+export const clientCredentialsRequestSchema = z
+  .object({
+    grant_type: z.literal(CLIENT_CREDENTIALS_GRANT_TYPE),
+    resource: z.string().url().max(2048),
+    client_assertion_type: z.literal(CLIENT_ASSERTION_TYPE_JWT_BEARER),
+    client_assertion: z.string().min(1).max(16_384),
+    client_id: z.string().min(1).max(2048).optional(),
+  })
+  .strict();
+
+/** a compact JWS (three base64url segments), checked without a regular expression over the whole string */
+export function isCompactJws(v: unknown, maxLength = 16_384): v is string {
+  if (typeof v !== "string" || v.length === 0 || v.length > maxLength) return false;
+  const parts = v.split(".");
+  return parts.length === 3 && parts.every((p) => p.length > 0 && [...p].every((c) => (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-" || c === "_"));
+}
+export const compactJwsSchema = z.string().refine((v) => isCompactJws(v), { message: "a compact JWS" });
+
 /** the form fields of `POST /oauth/token` (decisions 15 and 23); S5 validates the semantics */
 export const tokenExchangeRequestSchema = z
   .object({
@@ -918,8 +981,24 @@ export interface IdentitySigningKeyView {
 }
 
 /** `GET /v1/identity/signing-keys` (S3): every issuer key ever recorded, newest first; public halves only */
+/**
+ * ADR-0188 S7: where the issuer's private keys come from. `install_generated` is the
+ * `identity-signing-key.pem` the installer or first boot creates in the install secrets
+ * directory (the receipt-key pattern); `operator_managed` is REGULAIT_IDENTITY_SIGNING_KEY;
+ * `missing` means no token can be issued (every workload self token and delegated token is refused).
+ */
+export const IDENTITY_SIGNING_KEY_SOURCES = ["operator_managed", "install_generated", "missing", "invalid"] as const;
+export type IdentitySigningKeySource = (typeof IDENTITY_SIGNING_KEY_SOURCES)[number];
+export interface IdentitySigningKeyConfigurationView {
+  source: IdentitySigningKeySource;
+  /** the kids (RFC 7638 thumbprints) of the configured private keys; never key material */
+  configuredKids: string[];
+  note: string;
+}
 export interface IdentitySigningKeyListView {
   items: IdentitySigningKeyView[];
+  /** ADR-0188 S7: where the private halves come from (absent from a gateway before S7) */
+  configuration?: IdentitySigningKeyConfigurationView;
 }
 
 /** an issuer key id: the RFC 7638 thumbprint of its public JWK (migration 0180 CHECK allows this alphabet) */

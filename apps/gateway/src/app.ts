@@ -1229,7 +1229,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0188 S5: a gateway-issued delegated token (DPoP, or certificate-bound) is judged by its own path
     const workload = await workloadPreHandler(db, req, reply, { dataKey: opts.dataKey });
     if (workload === "refused") return reply;
-    if (workload === "authenticated") return;
+    if (workload === "authenticated") {
+      // ADR-0167 credential tier for a runner's or a PDP client's self token (ADR-0188 S7): its identity names the bucket
+      const workloadKey = rateLimitCredentialKey(req.authCtx);
+      if (workloadKey && app.rateLimitCredential && (await app.rateLimitCredential(req, reply, workloadKey))) return reply;
+      return;
+    }
     const ctx = await authenticate(db, opts.bootstrapToken, authorization);
     // ADR-0022: a valid key whose user is DEACTIVATED gets its own reason —
     // the holder should learn "your account is disabled", not "bad token".
@@ -1341,7 +1346,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     // AER-027: the allow-list is chosen by the key's PURPOSE, and the
     // separation runs both ways — a dispatch key cannot ask an authorization
-    // question about another person, and a pdp key cannot spend anybody's
+    // question about another person, and a PDP client cannot spend anybody's
     // budget. An unrecognised purpose resolves to the empty set rather than a
     // default, so a credential this build does not understand reaches nothing.
     const allowed = routesForPurpose(req.authCtx.virtualKeyPurpose);
@@ -1367,7 +1372,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // it is the same one decision read once more.
     //
     // This changes exactly ONE route's behaviour: `POST /v1/authz/check` with a
-    // 'pdp' key. Every dispatch route a virtual key can reach is already in
+    // PDP client's self token (ADR-0188 S7 retired the 'pdp' key that did this). Every dispatch route a virtual key can reach is already in
     // NON_ADMIN_ROUTES, so a dispatch key gains nothing here. Making the
     // endpoint plainly non-admin instead would have let ANY authenticated user
     // ask authorization questions about anyone, which is worse than the problem.
@@ -3091,6 +3096,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // and the ledger should not blur them.
       credential: req.authCtx.via,
       ...(req.authCtx.virtualKeyId ? { virtualKeyId: req.authCtx.virtualKeyId } : {}),
+      // ADR-0188 S7: a PDP client is a workload identity (the pdp virtual key is retired)
+      ...(req.authCtx.workloadIdentityId ? { workloadIdentityId: req.authCtx.workloadIdentityId } : {}),
       ...(body.proxyConsumer
         ? { proxyConsumer: { id: body.proxyConsumer.id, username: body.proxyConsumer.username ?? null } }
         : {}),
@@ -5526,11 +5533,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerExecutorChannelRoutes(app, db, opts.executorChannel ?? {});
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
-  // (runner token only: registerEngineRunnerScopeHook).
+  // (the runner's self token only: registerEngineRunnerScopeHook).
   registerEngineRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
   registerEngineRunRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
   // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
-  // runner's artifact stream (runner token, live lease only)
+  // runner's artifact stream (the runner's self token, live lease only)
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows

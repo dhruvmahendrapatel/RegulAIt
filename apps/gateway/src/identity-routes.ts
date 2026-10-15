@@ -48,6 +48,7 @@ import { requireStepUp } from "./step-up.js";
 import { registerOAuthRoutes } from "./oauth/index.js";
 import {
   IdentitySigningKeyError,
+  identitySigningKeyConfiguration,
   jwksDocument,
   listIdentitySigningKeys,
   publishedSigningKeys,
@@ -101,7 +102,8 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   // admin: the issuer's signing keys (public halves only; every write needs an
   // `identity_manage` step-up and is audited inside identity-signing-keys.ts)
   app.get("/v1/identity/signing-keys", async (_req, reply) => {
-    const view: IdentitySigningKeyListView = { items: await listIdentitySigningKeys(db) };
+    // ADR-0188 S7: and where the private halves come from (install-generated, operator-managed, missing)
+    const view: IdentitySigningKeyListView = { items: await listIdentitySigningKeys(db), configuration: await identitySigningKeyConfiguration() };
     return reply.send(view);
   });
   app.post("/v1/identity/signing-keys/rotate", async (req, reply) => {

@@ -19,8 +19,22 @@ export interface IdentitySigningKeyView {
   retiredAt: string | null;
   revokedAt: string | null;
 }
+/** ADR-0188 S7: where the private halves come from (`IdentitySigningKeyConfigurationView`) */
+export type IdentitySigningKeySource = "operator_managed" | "install_generated" | "missing" | "invalid";
+export interface IdentitySigningKeyConfigurationView {
+  source: IdentitySigningKeySource;
+  configuredKids: string[];
+  note: string;
+}
+export const SIGNING_KEY_SOURCE_TEXT: Record<IdentitySigningKeySource, string> = {
+  install_generated: "Install-generated",
+  operator_managed: "Operator-managed",
+  missing: "Missing",
+  invalid: "Unusable",
+};
 export interface IdentitySigningKeyListView {
   items: IdentitySigningKeyView[];
+  configuration?: IdentitySigningKeyConfigurationView;
 }
 export interface DelegationGrantDetailView extends DelegationGrantView {
   allocation: DelegationAllocationView | null;

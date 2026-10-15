@@ -92,32 +92,40 @@ The callout names the user it is asking about:
 ```
 
 **The subject comes from the request body, and RegulAIt believes it.** The caller authenticates with
-an admin API key and asserts who it is asking about — there is no check that the key "belongs to"
+its own PDP client credential and asserts who it is asking about — there is no check that the key "belongs to"
 the subject. That is what makes the callout usable by a proxy at all, and it means:
 
-> **The PDP key is a subject-impersonation credential — but it is no longer an administrator.**
+> **The PDP client's key is a subject-impersonation credential — but it is no longer an administrator.**
 > Anything holding it can ask a question about any user, which is inherent: the subject comes from
 > the request body and is believed, and that is what makes the callout usable by a proxy at all.
 > What it can no longer do is anything else.
 
-**Mint it as a `pdp` virtual key, never as an admin API key** (AER-027, migration 0117):
+**Make it a `pdp` workload identity holding its own key, never an admin API key** (AER-027;
+ADR-0188 S7, migration 0195). The `pdp` virtual key that AER-027 introduced was a bearer value
+anyone who copied it could replay; S7 revoked every one on upgrade and issues none
+(`410 pdp_key_retired`). Instead:
 
-```sh
-curl -X POST https://<gateway>/v1/virtual-keys \
-  -H "authorization: Bearer <an admin key>" \
-  -d '{"name":"kong-pdp","userId":"<owner uuid>","purpose":"pdp","expiresAt":"2027-01-01T00:00:00Z"}'
-```
+1. Generate an Ed25519 key **on the proxy host**; it never leaves it.
+2. An admin creates a `pdp` workload identity (console **Admin → Workload identities**, or
+   `POST /v1/workload-identities` with `{"kind":"pdp","sponsorUserIds":[...],"environments":[...]}`)
+   and binds the key's **public** JWK to it (`POST /v1/workload-identities/<id>/credentials`).
+3. The proxy takes a self token from `/oauth/token` (`client_credentials`, `private_key_jwt` signed
+   by its key, `resource` = `<REGULAIT_PUBLIC_URL>/v1/authz/check`, a DPoP proof) and calls
+   `/v1/authz/check` with `Authorization: DPoP <token>` and a proof bound to the token. Its client
+   id is the key's RFC 9278 thumbprint URI, so the key and the issuer are the whole configuration.
 
-That credential reaches `POST /v1/authz/check` and **nothing else**: it cannot dispatch a model,
-read a ledger, or mint another key, and it is never an administrator whatever its owner is. Until
-this existed the only credential that could reach an admin-gated `/v1/authz/check` was an admin API
-key — so putting a PDP in your data plane meant putting a control-plane administrator there, which
-is the wrong blast radius for a component whose whole job is one question.
+That credential reaches `POST /v1/authz/check` and **nothing else** (`403 workload_scope`): it
+cannot dispatch a model, read a ledger, or mint anything, and it is never an administrator. A copied
+token is useless without the key, and it lives minutes. Until AER-027 the only credential that could
+reach an admin-gated `/v1/authz/check` was an admin API key — so putting a PDP in your data plane
+meant putting a control-plane administrator there, which is the wrong blast radius for a component
+whose whole job is one question.
 
-Issuing one is itself an admin act, because a pdp key can ask about **anyone**. It carries the
-expiry and revocation every virtual key has; rotate it by minting the replacement and revoking the
-old one. Still: its own credential, minimum blast radius, never in a config file in git — the Kong
-plugin reads it through a vault reference for exactly that reason.
+Creating one is itself an admin act (with step-up), because a PDP client can ask about **anyone**.
+Rotate by binding the next key, switching the proxy to it, then revoking the old credential; on
+compromise revoke the credential or the identity at once, which also revokes its live tokens. Still: its own
+credential, minimum blast radius, never in a config file in git — the Kong plugin reads its key
+through a vault reference for exactly that reason.
 
 Your gateway must map **its** authenticated identity (a JWT `sub`, a Kong consumer, an mTLS CN) to a
 RegulAIt user UUID before it calls. Nothing here does that mapping for you, and a wrong mapping is

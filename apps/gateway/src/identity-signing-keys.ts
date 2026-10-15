@@ -27,6 +27,14 @@
  *    at once, every unexpired token it signed is revoked in `issued_tokens`,
  *    and the verifier refuses its `kid` from then on. Never undone (trigger).
  *
+ * INSTALL-GENERATED (ADR-0188 S7, the receipt-key pattern of ADR-0189 R25 item 12): with
+ * REGULAIT_IDENTITY_SIGNING_KEY unset and REGULAIT_INSTALL_SECRETS_DIR set, the installer or the first
+ * boot creates `<dir>/identity-signing-key.pem` (Ed25519, mode 0600, create-exclusive, never
+ * overwritten) with the same generator and the same strict reader as the receipt key. Without an issuer
+ * key no workload can take a self token, so an engine runner or a PDP client on a fresh install could
+ * never authenticate. The variable always wins: setting it is how an operator takes the key over (and
+ * rotates: list the next key beside the current one, then rotate here).
+ *
  * Open source first (ADR-0176): the key parsing is Node's own `crypto`
  * (`createPrivateKey`/`createPublicKey`), the thumbprint and every JWS are
  * `jose` 6.2.12 (already exact-pinned). No cryptography is written here.
@@ -40,8 +48,17 @@ import {
   IDENTITY_SETTING_LIMITS,
   IDENTITY_SIGNING_KEY_ENV,
   IDENTITY_SIGNING_KID_PATTERN,
+  type IdentitySigningKeyConfigurationView,
   type IdentitySigningKeyView,
 } from "@regulait/shared";
+import path from "node:path";
+import {
+  ensureInstallKeyFile,
+  INSTALL_SECRETS_DIR_ENV,
+  loadInstallKeyFile,
+  type EnsureInstallKeyFileOutcome,
+  type EnsureInstallReceiptKeyDeps,
+} from "./receipt-signing-key.js";
 
 /** a retired key verifies for this long after retirement: the longest a delegated token may live */
 export const SIGNING_KEY_OVERLAP_SECONDS = IDENTITY_SETTING_LIMITS.delegatedTokenTtlSeconds.max;
@@ -89,6 +106,94 @@ const pkcs8BlockPattern = () => new RegExp(`-----BEGIN ${PEM_LABEL}-----[\\s\\S]
 
 let memo: { file: string; mtimeMs: number; size: number; keys: ConfiguredSigningKey[] } | null = null;
 
+/** ADR-0188 S7: the install-generated issuer key's file name in the install secrets directory */
+export const INSTALL_IDENTITY_KEY_FILE = "identity-signing-key.pem";
+/** `.identity-signing-key.pem.<pid>.<12 hex>.tmp` — a literal, like the receipt key's (CodeQL js/incomplete-sanitization) */
+const IDENTITY_TMP_RE = /^\.identity-signing-key\.pem\.\d+\.[0-9a-f]{12}\.tmp$/;
+
+/** `<dir>/identity-signing-key.pem`, or null when no install secrets directory is configured */
+export function installIdentityKeyPath(env: NodeJS.ProcessEnv = process.env): string | null {
+  const dir = env[INSTALL_SECRETS_DIR_ENV]?.trim();
+  return dir ? path.join(path.resolve(dir), INSTALL_IDENTITY_KEY_FILE) : null;
+}
+
+/** does the operator variable claim the issuer keys? Then nothing install-generated is read or written. */
+export function operatorIdentityKeyConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env[IDENTITY_SIGNING_KEY_ENV]?.trim());
+}
+
+async function asConfigured(privateKey: KeyObject, x: string): Promise<ConfiguredSigningKey> {
+  const publicJwk: IssuerPublicJwk = { kty: "OKP", crv: "Ed25519", x };
+  return { kid: await calculateJwkThumbprint(publicJwk, "sha256"), privateKey, publicJwk };
+}
+
+/** the install-generated issuer key, read as strictly as the receipt key (or [] when there is none) */
+async function installGeneratedIdentityKeys(env: NodeJS.ProcessEnv): Promise<ConfiguredSigningKey[]> {
+  const file = installIdentityKeyPath(env);
+  if (!file) return [];
+  let parsed;
+  try {
+    parsed = loadInstallKeyFile(file);
+  } catch {
+    throw new IdentitySigningKeyError(
+      "signing_key_config_invalid",
+      `the install-generated issuer key (${INSTALL_IDENTITY_KEY_FILE}) is not a 0600 PKCS#8 Ed25519 key owned by the gateway's user; it is never overwritten`,
+    );
+  }
+  return parsed ? [await asConfigured(parsed.privateKey, parsed.jwk.x)] : [];
+}
+
+export type EnsureInstallIdentityKeyOutcome =
+  | { outcome: "operator_managed" }
+  | { outcome: "not_configured" }
+  | (EnsureInstallKeyFileOutcome & { kid?: string });
+
+/**
+ * First boot and the installer (`identity-key-init.js`): create the install-generated issuer key when
+ * none is configured. Idempotent, create-exclusive, never overwrites, never throws (a failure is an
+ * outcome, and the token endpoint stays refused: where a deployment with no key already is).
+ */
+export async function ensureInstallIdentityKey(
+  env: NodeJS.ProcessEnv = process.env,
+  deps: EnsureInstallReceiptKeyDeps = {},
+): Promise<EnsureInstallIdentityKeyOutcome> {
+  if (operatorIdentityKeyConfigured(env)) return { outcome: "operator_managed" };
+  const file = installIdentityKeyPath(env);
+  if (!file) return { outcome: "not_configured" };
+  const r = ensureInstallKeyFile(file, IDENTITY_TMP_RE, deps);
+  if (r.outcome === "failed") return r;
+  return { ...r, kid: await calculateJwkThumbprint(r.jwk, "sha256") };
+}
+
+/** where the issuer's private keys come from: the posture read and the signing-keys view say it */
+export async function identitySigningKeyConfiguration(env: NodeJS.ProcessEnv = process.env): Promise<IdentitySigningKeyConfigurationView> {
+  const operator = operatorIdentityKeyConfigured(env);
+  try {
+    const keys = await configuredIdentitySigningKeys(env);
+    const configuredKids = keys.map((k) => k.kid);
+    if (keys.length === 0) {
+      return {
+        source: "missing",
+        configuredKids,
+        note:
+          "No issuer signing key, so no token can be issued: engine runners and PDP clients cannot authenticate. Set " +
+          `${INSTALL_SECRETS_DIR_ENV} for an install-generated key, or ${IDENTITY_SIGNING_KEY_ENV} for keys you manage.`,
+      };
+    }
+    return operator
+      ? { source: "operator_managed", configuredKids, note: `Managed by the operator (${IDENTITY_SIGNING_KEY_ENV}). To rotate, list the next key in that file beside the current one and rotate here.` }
+      : {
+          source: "install_generated",
+          configuredKids,
+          note:
+            `Generated by the installer or first boot and kept with the install secrets (${INSTALL_IDENTITY_KEY_FILE}, mode 0600). ` +
+            `To rotate, set ${IDENTITY_SIGNING_KEY_ENV} to a file holding this key and the next one, restart, and rotate here.`,
+        };
+  } catch (e) {
+    return { source: "invalid", configuredKids: [], note: e instanceof IdentitySigningKeyError ? e.message : "the issuer key configuration is unusable" };
+  }
+}
+
 /**
  * The private keys this deployment holds, parsed from the file named by
  * `REGULAIT_IDENTITY_SIGNING_KEY`. Empty when the variable is unset (then
@@ -97,7 +202,8 @@ let memo: { file: string; mtimeMs: number; size: number; keys: ConfiguredSigning
  */
 export async function configuredIdentitySigningKeys(env: NodeJS.ProcessEnv = process.env): Promise<ConfiguredSigningKey[]> {
   const file = env[IDENTITY_SIGNING_KEY_ENV]?.trim();
-  if (!file) return [];
+  // ADR-0188 S7: unset → the install-generated key, when the install secrets directory holds one
+  if (!file) return installGeneratedIdentityKeys(env);
   const bad = () => new IdentitySigningKeyError("signing_key_config_invalid", `${IDENTITY_SIGNING_KEY_ENV} does not name a readable file of PKCS#8 Ed25519 private keys`);
   let st;
   try {

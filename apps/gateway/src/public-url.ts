@@ -21,63 +21,10 @@
  * trailing slash; any other path character set is refused.
  */
 
-export const PUBLIC_URL_ENV = "REGULAIT_PUBLIC_URL";
-
-export class PublicUrlBootError extends Error {
-  constructor(detail: string) {
-    super(
-      `${PUBLIC_URL_ENV} is set but not usable: ${detail}. Set it to the absolute https origin this deployment is ` +
-        `reached at (optionally with a base path, e.g. https://regulait.acme.example), or unset it. It is the only ` +
-        `origin links in outbound mail may use (ADR-0121 amendment).`,
-    );
-    this.name = "PublicUrlBootError";
-  }
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127(\.\d{1,3}){3}$/.test(h);
-}
-
-/**
- * The normalized public URL (origin plus optional base path, no trailing
- * slash), or null when unset or blank.
- *
- * @throws {PublicUrlBootError} when set to something that is not a valid public URL
- */
-export function parsePublicUrl(raw: string | undefined): string | null {
-  if (raw === undefined || raw.trim() === "") return null;
-  const value = raw.trim();
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new PublicUrlBootError(`${JSON.stringify(value)} is not an absolute URL`);
-  }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
-    throw new PublicUrlBootError(`the scheme must be https (http only for localhost or loopback), got ${url.protocol.replace(/:$/, "")}`);
-  }
-  // the AUTHORITY as written: `https://:@host` parses to empty credentials the
-  // URL parser silently drops, so the raw text is checked, not the parse
-  const rawAfterScheme = value.replace(/^[A-Za-z][A-Za-z0-9+.-]*:[/\\]*/, "");
-  const rawAuthority = rawAfterScheme.split(/[/\\?#]/, 1)[0] ?? "";
-  const rawPath = rawAfterScheme.slice(rawAuthority.length).split(/[?#]/, 1)[0] ?? "";
-  if (url.username || url.password || rawAuthority.includes("@")) throw new PublicUrlBootError("it must not carry credentials");
-  // a trailing-dot FQDN names the same host under a different origin string
-  // (certificates, cookies and allow-lists compare the dotless form): refused
-  if (url.hostname.endsWith(".")) throw new PublicUrlBootError("the host must not end with a dot");
-  // dot segments are refused as written, never normalised away
-  if (/(^|[/\\])(\.|%2e){1,2}([/\\]|$)/i.test(rawPath)) {
-    throw new PublicUrlBootError(`the base path ${JSON.stringify(rawPath)} must not contain '.' or '..' segments`);
-  }
-  if (url.search || value.includes("?")) throw new PublicUrlBootError("it must not carry a query");
-  if (url.hash || value.includes("#")) throw new PublicUrlBootError("it must not carry a fragment");
-  const basePath = url.pathname.replace(/\/+$/, "");
-  if (basePath !== "" && (!/^(\/[A-Za-z0-9._~-]+)+$/.test(basePath) || /\/\.{1,2}(\/|$)/.test(basePath))) {
-    throw new PublicUrlBootError(`the base path ${JSON.stringify(url.pathname)} must be plain path segments`);
-  }
-  return `${url.origin}${basePath}`;
-}
+// ADR-0188 S7 (review of #380): the parser lives in @regulait/shared, so an engine runner normalises the issuer
+// exactly as the gateway does (a self token is refused unless both produce the same string).
+import { isLoopbackHost, parsePublicUrl, PUBLIC_URL_ENV, PublicUrlBootError } from "@regulait/shared";
+export { isLoopbackHost, parsePublicUrl, PUBLIC_URL_ENV, PublicUrlBootError };
 
 /** the deployment's public URL right now (see the header), or null */
 export function resolvePublicUrl(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -109,7 +56,10 @@ export function publicUrlPosture(env: NodeJS.ProcessEnv = process.env): { set: b
  * `https://h/ui` + `/ui/admin` → `https://h/ui/admin`.
  */
 export function joinPublicUrl(base: string, path: string): string {
-  const b = base.replace(/\/+$/, "");
+  // trailing slashes off with a bounded loop (never a repeating regex: CodeQL js/polynomial-redos)
+  let end = base.length;
+  while (end > 0 && base.charCodeAt(end - 1) === 47) end--;
+  const b = base.slice(0, end);
   const p = path.startsWith("/") ? path : `/${path}`;
   if (/\/ui$/.test(b) && (p === "/ui" || p.startsWith("/ui/") || p.startsWith("/ui?"))) return `${b}${p.slice(3)}`;
   return `${b}${p}`;

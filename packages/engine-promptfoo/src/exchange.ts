@@ -3,13 +3,13 @@
  * tmpfs-backed volumes (the modelscan pattern, ADR-0187 decision 104, adapted to an engine that
  * makes model calls).
  *
- *   runner (engines network; holds the runner token)            jobs: read-write   results: read-only
- *   worker (engines network; NO runner token, NO state volume)  jobs: read-only    results: read-write (/out)
+ *   runner (engines network; holds the runner key)            jobs: read-write   results: read-only
+ *   worker (engines network; NO runner key, NO state volume)  jobs: read-only    results: read-write (/out)
  *
  * The worker runs promptfoo. It reaches the gateway (promptfoo's model calls go to the compat
  * routes) on the RUN key the job carries, which is the narrowest credential promptfoo can work with:
  * the gateway accepts it only on the compat model routes, for the run's project, within the run's
- * budget, until the run's deadline, and revokes it when the run ends. The runner token (which leases
+ * budget, until the run's deadline, and revokes it when the run ends. The runner key (which leases
  * runs, mints their keys through the lease and posts their results) never leaves the runner
  * container: it is on the runner's state volume, which the worker does not mount, in a process the
  * worker cannot see (its own PID namespace), and it is not an input of the adapter that writes jobs.

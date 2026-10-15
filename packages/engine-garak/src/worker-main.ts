@@ -1,7 +1,7 @@
 /**
  * ADR-0187 B5-G — the garak WORKER's entrypoint (`node dist/worker-main.js`), in the worker container:
  * on the internal `engines` network (garak must reach the gateway's model routes), read-only root, no
- * capabilities, non-root, NO runner token and no state volume. It reads jobs from the read-only jobs
+ * capabilities, non-root, NO runner key and no state volume. It reads jobs from the read-only jobs
  * volume, runs one garak process per probe on its own tmpfs (/work), and writes each probe's report to
  * the results volume. It also writes its own self-test there every hour (selftest.ts), which the runner
  * reports to the gateway.

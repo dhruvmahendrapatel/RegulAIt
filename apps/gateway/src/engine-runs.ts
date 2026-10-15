@@ -1360,7 +1360,7 @@ function leaseHardGate(
     return {
       next: "reenrol_required",
       error: "engine_runner_reenrol_required",
-      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+      detail: "this runner key was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
     };
   }
   if (!engine || !engine.enabled) {
@@ -1395,7 +1395,7 @@ function leaseAdmission(
     return {
       next: "reenrol_required",
       error: "engine_runner_reenrol_required",
-      detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+      detail: "this runner key was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
     };
   }
   // PR #205 review round 10 [85]: a runner whose registered build is not the CURRENT manifest build
@@ -1585,7 +1585,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
   // POST /v1/model-artifacts and the runner's GET /v1/engine-runner/artifacts/:artifactId are B5-M's
   // (model-artifacts.ts)
 
-  // ===== runner routes (runner token only; the scope hook enforces it) ==========
+  // ===== runner routes (runner key only; the scope hook enforces it) ==========
 
   app.post("/v1/engine-runner/lease", async (req, reply) => {
     const runnerId = req.authCtx.engineRunnerId!;

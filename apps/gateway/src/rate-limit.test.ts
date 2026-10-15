@@ -180,6 +180,11 @@ describe("ADR-0031: rate-limit configuration", () => {
       `cred:vkey:${keyId}`,
     );
     expect(rateLimitCredentialKey({ userId: null, isAdmin: true, via: "bootstrap" })).toBe("cred:bootstrap");
+    // ADR-0188 S7: a runner's and a PDP client's self token count against their workload identity's bucket
+    const wid = randomUUID();
+    expect(rateLimitCredentialKey({ userId: null, isAdmin: false, via: "engine-runner", engineRunnerId: keyId, workloadIdentityId: wid })).toBe(`cred:wid:${wid}`);
+    expect(rateLimitCredentialKey({ userId: null, isAdmin: false, via: "pdp", workloadIdentityId: wid })).toBe(`cred:wid:${wid}`);
+    expect(rateLimitMax(RATE_LIMIT_DEFAULTS, `cred:wid:${wid}`)).toBe(RATE_LIMIT_DEFAULTS.apiKeyMax);
     expect(rateLimitCredentialKey({ userId: "u", isAdmin: false, via: "session" })).toBeNull();
   });
 });

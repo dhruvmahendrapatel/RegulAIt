@@ -38,6 +38,7 @@ import { buildSelfTest, generateRunnerSecret, runOnce, RunnerClient, type Runner
 import { modelscanAdapter, type ScanExecutor, type ScanOutcome, type ScanJob } from "@regulait/engine-modelscan";
 import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, safetensorsFile, truncatedMaliciousPickle } from "@regulait/engine-modelscan/fixtures";
 import { buildApp } from "./app.js";
+import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
 import { FileArtifactStore } from "./model-artifacts.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -68,6 +69,11 @@ let alice: { id: string; key: { authorization: string } };
 let bob: { id: string; key: { authorization: string } };
 let client: RunnerClient;
 let runnerSecret: string;
+// ADR-0188 S7: the runner's own key signs its self tokens' proofs; the issuer signs the tokens
+let restoreIssuerKey: (() => Promise<void>) | undefined;
+const DATA_KEY = "f".repeat(64);
+/** the runner holding `runnerSecret`, as a request credential (its self token and a fresh DPoP proof per request) */
+let runnerKey: TestWorkloadClient;
 
 type Method = "GET" | "PUT" | "POST" | "PATCH" | "DELETE";
 const inject = (method: Method, url: string, headers: Record<string, string>, payload?: unknown) =>
@@ -75,15 +81,16 @@ const inject = (method: Method, url: string, headers: Record<string, string>, pa
 const asAdmin = (method: Method, url: string, payload?: unknown, headers: Record<string, string> = {}) =>
   app.inject({ method, url, headers: { ...CSRF, ...headers }, cookies: { regulait_session: admin.session.token }, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
+/**
+ * The runner's HTTP, through the app, as a fetch Response (the runner core's own client code is what runs; S7: the
+ * artifact stream rides the same client, so the bytes are passed as they are, and the headers carry DPoP-Nonce)
+ */
 const runnerHttp: RunnerHttp = async (url, init) => {
   const u = new URL(url);
   const r = await app.inject({ method: init.method as Method, url: u.pathname, headers: init.headers, ...(init.body !== undefined ? { payload: init.body } : {}) });
-  return { status: r.statusCode, json: async () => (r.body ? JSON.parse(r.body) : null) };
-};
-/** the adapter's artifact fetch, through the app */
-const viaApp = async (url: string, init: { headers: Record<string, string> }) => {
-  const r = await app.inject({ method: "GET", url: new URL(url).pathname, headers: init.headers });
-  return new Response(r.statusCode === 200 ? new Uint8Array(r.rawPayload) : r.body, { status: r.statusCode });
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(r.headers)) if (v !== undefined) headers.set(k, Array.isArray(v) ? v.join(", ") : String(v));
+  return new Response(r.statusCode === 204 ? null : new Uint8Array(r.rawPayload), { status: r.statusCode, headers });
 };
 
 async function makeUser(email: string, isAdmin = false) {
@@ -149,7 +156,7 @@ function report(p: { scanned?: string[]; issues?: Array<{ module: string; operat
 const osSystem = report({ scanned: ["artifact.pkl"], issues: [{ module: "os", operator: "system", source: "artifact.pkl" }] });
 
 async function once(executor: ScanExecutor) {
-  const adapter = modelscanAdapter({ gatewayUrl: "http://gateway.test", token: async () => runnerSecret, executor, fetch: viaApp });
+  const adapter = modelscanAdapter({ artifacts: client, executor });
   return runOnce(client, adapter, { ...MS_BUILD, engineId: "modelscan", workRoot: await mkdtemp(path.join(tmpdir(), "b5m-w-")), heartbeatMs: 25, retryBaseMs: 10 });
 }
 async function scanOf(runId: string) {
@@ -170,13 +177,14 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
+  restoreIssuerKey = await useTestIssuerKey(db);
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, useCaseGateMode: "off" });
   // this suite uploads more artifacts as one person than the strict per-uploader quota (20, ADR-0187
   // decision 127) allows; the quotas themselves are proven in zz-b5-modelscan-storage.test.ts.
   // afterAll restores every batch-5 setting to its strict default.
   await db.update(orgSettings).set({ modelArtifactUploaderQuotaCount: 1000 }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   storeDir = await mkdtemp(path.join(tmpdir(), "b5m-store-"));
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64), engines: { manifest: MANIFEST }, artifactStore: new FileArtifactStore(storeDir) });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, engines: { manifest: MANIFEST }, artifactStore: new FileArtifactStore(storeDir) });
   await app.ready();
   await db.execute(sql`UPDATE engine_runs SET status = 'cancelled', finished_at = now(), error_code = 'test_cleanup' WHERE engine_id = 'modelscan' AND status IN ('queued', 'awaiting_approval')`);
 
@@ -200,7 +208,7 @@ beforeAll(async () => {
   // the runner registers with its self-test: the scanner's isolation switch judged true
   const t = await inject("POST", "/v1/engines/modelscan/enrollment-tokens", admin.key, { label: "b5m" });
   expect(t.statusCode, t.body).toBe(201);
-  client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: runnerHttp });
+  client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: ORIGIN, http: runnerHttp });
   const selfTest = await buildSelfTest({
     ...MS_BUILD,
     requiredEnv: MANIFEST.modelscan.usageDataEnv,
@@ -209,6 +217,7 @@ beforeAll(async () => {
   });
   runnerSecret = generateRunnerSecret();
   const reg = await client.register(t.json().token, runnerSecret, { name: `modelscan-${RUN}`, ...MS_BUILD, selfTest });
+  runnerKey = new TestWorkloadClient(app, { issuer: ORIGIN, dataKey: DATA_KEY, kind: "engine_runner", runnerSecret });
   expect(reg.selfTest).toEqual({ passed: true, failures: [] });
   expect((await inject("POST", "/v1/engines/modelscan/self-test", admin.key)).json().passed).toBe(true);
   const refused = await asAdmin("PATCH", "/v1/engines/modelscan", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.modelscan.version, expectedDigest: MS_DIGEST });
@@ -223,6 +232,7 @@ afterAll(async () => {
   await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test suite finished' WHERE revoked_at IS NULL`);
   await db.update(orgSettings).set({ ...BATCH5_STRICT_DEFAULTS }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   await restoreGates?.();
+  await restoreIssuerKey?.();
   await restoreIdentity?.();
   if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
   else process.env.REGULAIT_PUBLIC_URL = prevPublicUrl;
@@ -318,7 +328,7 @@ describe("B5-M through the real gateway: the lease, the stream, the scan record"
     const streamed = await db.select().from(auditLog).where(eq(auditLog.objectId, run.id));
     expect(streamed.map((x) => x.ruleId)).toContain("engine-run-artifact-streamed");
     // after the run ended, the runner cannot fetch it again
-    const again = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: { authorization: `Bearer ${runnerSecret}` } });
+    const again = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: await runnerKey.headers("GET", `/v1/engine-runner/artifacts/${artifact.id}`) });
     expect(again.statusCode).toBe(409);
     expect(again.json().error).toBe("engine_artifact_not_leased");
     // a human credential cannot reach the runner route at all
@@ -411,7 +421,7 @@ describe("B5-M through the real gateway: the lease, the stream, the scan record"
     const exec = answering({ exitCode: 0, report: report({ scanned: ["artifact.pkl"] }) }, async () => {
       const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, { reason: "stop" });
       expect(c.statusCode, c.body).toBe(200);
-      const s = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${a.id}`, headers: { authorization: `Bearer ${runnerSecret}` } });
+      const s = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${a.id}`, headers: await runnerKey.headers("GET", `/v1/engine-runner/artifacts/${a.id}`) });
       afterCancel = { stream: s.statusCode, status: 0 };
       // the scanner keeps going until the runner's heartbeat delivers the cancel
       await new Promise((r) => setTimeout(r, 120));

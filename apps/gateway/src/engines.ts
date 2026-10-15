@@ -55,7 +55,22 @@ import { z } from "zod";
 import { CHANGED_CONCURRENTLY, requireRelaxStepUp } from "./step-up.js";
 import { settingTransitions } from "./setting-transitions.js";
 import { generateEnrollmentToken } from "./engine-runner-auth.js";
-import { hashToken } from "./token-hash.js";
+import {
+  keyRegistered,
+  prepareRunnerKey,
+  registerRunnerKeyRotationRoute,
+  RUNNER_ACTOR_ID,
+  runnerHoldsKey,
+  runnerKeyThumbprint,
+  verifySupersedeProof,
+} from "./engine-runner-keys.js";
+
+/** ADR-0188 S7: thrown inside the registration transaction when its key is already registered (rolls it back) */
+class RunnerKeyTaken extends Error {}
+import { bindPreparedCredentialTx, IdentityAdminError } from "./oauth/identity-admin.js";
+import { ensureIdentityFor } from "./in-process-delegation.js";
+import { databaseNow } from "./delegation.js";
+import { workloadIssuerPosture } from "./oauth/common.js";
 import { endActiveRunsOfEngineTx, endRunsHeldByRevokedRunnersTx, engineRunTestHooks, notifyWorkflowsOfEndedRuns } from "./engine-runs.js";
 
 export const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -340,7 +355,9 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       const v = await view(id);
       if (v) out.push(v);
     }
-    return { engines: out, taxonomyVersion: taxonomyOf(opts).version };
+    // ADR-0188 S7: runners authenticate with tokens the issuer (REGULAIT_PUBLIC_URL) signs and names; without it
+    // no runner can authenticate, and the page says so rather than leaving runners "offline" unexplained
+    return { engines: out, taxonomyVersion: taxonomyOf(opts).version, runnerIssuer: workloadIssuerPosture() };
   });
 
   app.get("/v1/engines/:engineId", async (req, reply) => {
@@ -387,7 +404,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           version: current.version,
           imageDigest: current.imageDigest,
           detail:
-            `engine ${engineId}'s build runs the engine process as the runner's own user, so a compromised engine could read the runner token ` +
+            `engine ${engineId}'s build runs the engine process as the runner's own user, so a compromised engine could read the runner key ` +
             "(it can lease this engine's runs and post their results; it cannot reach any other route). " +
             `To enable it anyway, send acceptCredentialIsolationRisk: true naming this build (expectedVersion ${current.version}, expectedDigest ${current.imageDigest ?? "none"}) with a step-up; an isolating build (ADR-0187 slice B5-P2) needs no acceptance.`,
         });
@@ -429,7 +446,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           effect: "allow",
           ruleId: "engine-credential-isolation-risk-accepted",
           ruleChain: [],
-          reason: `engine ${engineId} enabled although its engine process can read the runner token: the admin accepted that risk with a step-up (ADR-0187 decision 79)`,
+          reason: `engine ${engineId} enabled although its engine process can read the runner key: the admin accepted that risk with a step-up (ADR-0187 decision 79)`,
         });
       }
       if (Object.keys(transitions).length > 0) {
@@ -606,15 +623,21 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
   });
 
   // ---- POST /v1/engine-runner/register (one-time enrolment token) ------------
-  // PR #205 review [54]: the runner brings its own runner token and sends only its sha256, which
-  // is stored as the credential. Nothing secret is returned, so a lost response loses nothing: a
-  // retry with the same (now spent, unexpired) enrolment token and the SAME hash is answered with
-  // the same runner; any other hash is refused. A spent token never mints a second runner.
+  // PR #205 review [54], ADR-0188 S7: the runner brings its own KEY and sends only the public half, which
+  // becomes its workload identity's credential (the `rge_` bearer token is retired). Nothing secret is
+  // returned, so a lost response loses nothing: a retry with the same (now spent, unexpired) enrolment
+  // token and the SAME key is answered with the same runner; any other key is refused. A spent token
+  // never mints a second runner.
   app.post("/v1/engine-runner/register", async (req, reply) => {
     const body = engineRunnerRegisterSchema.parse(req.body);
     const tokenId = req.authCtx.engineEnrollmentTokenId;
     const engineId = req.authCtx.engineId as EngineId | undefined;
     if (!tokenId || !engineId) return reply.status(401).send({ error: "engine_enrollment_invalid" });
+    // ADR-0188 S7: the runner's public key, validated and reduced exactly as S6 binds a JWK (a bad point is refused)
+    const now = await databaseNow(db);
+    const prepared = await prepareRunnerKey(body.publicJwk, now);
+    if (prepared instanceof IdentityAdminError) return reply.status(422).send({ error: "engine_runner_key_invalid", detail: prepared.message });
+    const jkt = await runnerKeyThumbprint(prepared);
     if (body.selfTest.imageDigest !== body.imageDigest || body.selfTest.engineVersion !== body.engineVersion) {
       return reply.status(422).send({ error: "engine_self_test_inconsistent", detail: "the self-test must describe the image being registered" });
     }
@@ -647,7 +670,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     const verdict = evaluateRunnerSelfTest(manifest[engineId], body.selfTest, new Date());
     const replay = async () => {
       const [existing] = await db.select().from(engineRunners).where(eq(engineRunners.enrollmentTokenId, tokenId));
-      if (!existing || existing.tokenHash !== body.tokenHash || existing.revokedAt !== null) {
+      if (!existing || existing.revokedAt !== null || !(await runnerHoldsKey(db, existing.id, jkt))) {
         return reply.status(401).send({ error: "engine_enrollment_invalid", detail: "this enrolment token was already used" });
       }
       // PR #205 review round 7 [76]: a replay reconciles, idempotently — any run still leased by a
@@ -681,17 +704,18 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         .send({ runnerId: existing.id, engineId, selfTest: { passed: existing.selfTestPassed, failures: existing.selfTestFailures }, replayed: true });
     };
     if (req.authCtx.engineEnrollmentSpent) return replay();
-    // PR #205 review round 8 [77]: a fresh enrolment token with a hash that is ALREADY a runner's
-    // credential (a registration whose response was lost, retried after its token expired) is a clear
-    // 409, decided before the token is spent — the runner then tries its secret as the credential.
-    // Nothing is relaxed: the existing registration is not re-bound to this token.
+    // PR #205 review round 8 [77]: a fresh enrolment token with a KEY that is ALREADY registered (a
+    // registration whose response was lost, retried after its token expired) is a clear 409, decided
+    // before the token is spent — the runner then tries its key as the credential. Nothing is relaxed:
+    // the existing registration is not re-bound to this token, and one key authenticates one identity, ever.
     const alreadyRegistered = () =>
       reply.status(409).send({
         error: "engine_runner_already_registered",
-        detail: "that runner token is already registered: use it as this runner's credential (an earlier registration's response was lost), or generate a new one",
+        detail: "that key is already registered: use it as this runner's credential (an earlier registration's response was lost), or generate a new one",
       });
-    const [already] = await db.select({ id: engineRunners.id }).from(engineRunners).where(eq(engineRunners.tokenHash, body.tokenHash));
-    if (already) return alreadyRegistered();
+    if (await keyRegistered(db, jkt)) return alreadyRegistered();
+    // round 5 [67], S7: a re-enrolment after a build change proves, with its OLD key, which registration it replaces
+    const supersededRunnerId = body.supersedes ? await verifySupersedeProof(db, body.supersedes, engineId, jkt, now) : null;
     let out: (typeof engineRunners.$inferSelect & { superseded: { id: string; name: string } | null; ended: Awaited<ReturnType<typeof endRunsHeldByRevokedRunnersTx>> }) | null;
     try {
       out = await db.transaction(async (tx) => {
@@ -707,7 +731,6 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           .values({
             engineId,
             name: body.name,
-            tokenHash: body.tokenHash,
             enrollmentTokenId: tokenId,
             reportedDigest: body.imageDigest,
             reportedVersion: body.engineVersion,
@@ -717,16 +740,22 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
           })
           .returning();
         await tx.update(engineEnrollmentTokens).set({ runnerId: runner!.id }).where(eq(engineEnrollmentTokens.id, tokenId));
-        // PR #205 review round 5 [67]: a re-enrolment after a build change presents the runner token
-        // it held; that registration (a live runner of THIS engine) is revoked in the same transaction,
-        // so an upgraded runner never leaves a live credential behind. Anything else is ignored.
+        // ADR-0188 S7: the runner's identity (S4's one per subject) and its key, bound in THIS transaction: a runner
+        // is never registered without its credential, and a key already registered rolls the whole registration back
+        const ident = await ensureIdentityFor(tx as unknown as Db, { kind: "engine_runner", id: runner!.id });
+        const bound = await bindPreparedCredentialTx(tx as unknown as Db, ident.id, prepared, RUNNER_ACTOR_ID, now);
+        if (bound instanceof IdentityAdminError) throw new RunnerKeyTaken();
+        // PR #205 review round 5 [67]: a re-enrolment after a build change proves it held the previous
+        // registration (S7: a JWS by its OLD key); that registration (a live runner of THIS engine) is revoked
+        // in the same transaction, so an upgraded runner never leaves a live credential behind. Anything
+        // else is ignored.
         let superseded: { id: string; name: string } | null = null;
         let ended: Awaited<ReturnType<typeof endRunsHeldByRevokedRunnersTx>> = [];
-        if (body.supersedes) {
+        if (supersededRunnerId) {
           const [old] = await tx
             .update(engineRunners)
             .set({ revokedAt: new Date(), revokeReason: `superseded: re-enrolled as runner ${runner!.id} after a build change` })
-            .where(and(eq(engineRunners.tokenHash, hashToken(body.supersedes)), eq(engineRunners.engineId, engineId), isNull(engineRunners.revokedAt)))
+            .where(and(eq(engineRunners.id, supersededRunnerId), eq(engineRunners.engineId, engineId), isNull(engineRunners.revokedAt)))
             .returning({ id: engineRunners.id, name: engineRunners.name });
           superseded = old ?? null;
           if (old) {
@@ -758,8 +787,9 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
         return { ...runner!, superseded, ended };
       });
     } catch (e) {
-      // the hash is already some runner's credential (token_hash is unique): a credential is never shared
-      // (a concurrent registration of the same hash, past the check above)
+      // the key is already some identity's credential: a credential is never shared (a concurrent
+      // registration of the same key, past the check above; the binding's lock and unique index decide it)
+      if (e instanceof RunnerKeyTaken) return alreadyRegistered();
       const pg = (e as { code?: string; cause?: { code?: string } }) ?? {};
       if (pg.code === "23505" || pg.cause?.code === "23505") return alreadyRegistered();
       throw e;
@@ -771,7 +801,10 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
     return reply.status(201).send({ runnerId: out.id, engineId, selfTest: verdict, supersededRunnerId: out.superseded?.id ?? null });
   });
 
-  // ---- POST /v1/engine-runner/self-test (runner token) — PR #205 review [53] --
+  // ADR-0188 S7: the runner rotates its own key (decision 12)
+  registerRunnerKeyRotationRoute(app, db);
+
+  // ---- POST /v1/engine-runner/self-test (runner self token) — PR #205 review [53]
   // A runner refreshes its own report: the lease refuses a report older than 24 hours, and before
   // this route only registration (a new enrolment token) accepted one. Evaluated exactly like
   // registration's report (manifest, digest, version, switches, egress, freshness) and audited.
@@ -798,7 +831,7 @@ export function registerEngineRoutes(app: FastifyInstance, db: Db, opts: EngineO
       return reply.status(409).send({
         error: "engine_runner_reenrol_required",
         next: "reenrol_required" satisfies EngineRunnerNext,
-        detail: "this runner token was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
+        detail: "this runner key was registered for another build: re-enrol this runner with a new enrolment token (the old registration is revoked when it does)",
       });
     }
     // PR #205 review round 10 [85]: a report of a build that is not the CURRENT manifest build (an

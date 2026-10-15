@@ -6,7 +6,7 @@
  * B5-P2 (ADR-0187 decisions 170 on): the adapter runs in the RUNNER container and never runs
  * promptfoo there. It hands a job (job.ts: the config, the gateway URL, the run key, the deadline)
  * to an executor; in the image that is the exchange to the worker container (exchange.ts), which
- * holds no runner credential. The runner token is not an input of this adapter at all.
+ * holds no runner credential. The runner key is not an input of this adapter at all.
  *
  * Fail closed:
  *   - nothing runnable (every requested set is cloud-only, excluded, not pre-seeded or unknown)
@@ -63,7 +63,7 @@ export interface PromptfooAdapterOptions {
   maxResultsBytes?: number;
   /**
    * B5-P2: where promptfoo runs. The image's runner passes the exchange to the worker container
-   * (exchange.ts), so promptfoo never runs where the runner token is. Default: this process's
+   * (exchange.ts), so promptfoo never runs where the runner key is. Default: this process's
    * container (`LocalPromptfooExecutor`, from `entrypoint`, `nodeBin`, `run` and `path`), for tests
    * and the opt-in real-engine test only.
    */

@@ -431,6 +431,7 @@ export async function revokeWorkloadIdentity(db: Db, identityId: string, actorUs
       update issued_tokens set revoked_at = GREATEST(now(), issued_at)
       where revoked_at is null and expires_at > now()
         and (grant_id in (select id from delegation_grants where actor_identity_id = ${identityId})
+             or subject_identity_id = ${identityId}
              or auth_credential_id in (select id from workload_credentials where identity_id = ${identityId})
              or binding_thumbprint in (
                select t from workload_credentials c, unnest(array[c.jwk_thumbprint, c.x5t_s256, c.spki_thumbprint]) as t
@@ -587,6 +588,114 @@ export async function prepareCredential(body: AddWorkloadCredential, now: Date, 
 }
 
 /**
+ * The core of binding a PREPARED public credential, inside the caller's
+ * transaction (the caller has locked the identity and checked it is active):
+ * the window (now to at most `workload_key_max_age_days`, strict 90, never
+ * past a certificate's own expiry), "one key, one identity, ever" under an
+ * advisory lock on the key's thumbprint, the insert and its
+ * `workload-credential-added` audit row. Shared by the admin route and, in
+ * ADR-0188 S7, by an engine runner's registration and key rotation.
+ */
+export async function bindPreparedCredentialTx(
+  t: Db,
+  identityId: string,
+  prepared: PreparedCredential,
+  actorUserId: string,
+  now: Date,
+  requestedNotAfter?: string,
+): Promise<WorkloadCredentialView | IdentityAdminError> {
+  const org = await loadOrgSettings(t);
+  const maxDays = Math.min(org.workloadKeyMaxAgeDays, WORKLOAD_CREDENTIAL_MAX_DAYS);
+  const ceiling = new Date(Math.min(now.getTime() + maxDays * DAY_MS, prepared.certificateNotAfter?.getTime() ?? Number.POSITIVE_INFINITY));
+  let notAfter = ceiling;
+  if (requestedNotAfter !== undefined) {
+    notAfter = new Date(requestedNotAfter);
+    if (!(notAfter.getTime() > now.getTime()) || notAfter.getTime() > ceiling.getTime()) {
+      return new IdentityAdminError(
+        "credential_not_after",
+        422,
+        `notAfter must be after now and no later than ${ceiling.toISOString()} (${maxDays} days${prepared.certificateNotAfter ? ", and the certificate's own expiry" : ""})`,
+      );
+    }
+  }
+  // one key or certificate authenticates one identity, ever (a revoked one is not re-registered). A KEY is the
+  // same whether registered as a JWK or inside a certificate (review Low 5): its thumbprint is checked against
+  // both columns, under a lock on that thumbprint so two concurrent registrations of one key serialise
+  const keyThumb = prepared.jwkThumbprint ?? prepared.spkiThumbprint;
+  if (keyThumb) await t.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`workload-key:${keyThumb}`}, 0))`);
+  const clash = keyThumb
+    ? or(
+        eq(workloadCredentials.jwkThumbprint, keyThumb),
+        eq(workloadCredentials.spkiThumbprint, keyThumb),
+        ...(prepared.x5tS256 ? [eq(workloadCredentials.x5tS256, prepared.x5tS256)] : []),
+      )!
+    : prepared.x5tS256
+      ? eq(workloadCredentials.x5tS256, prepared.x5tS256)
+      : and(eq(workloadCredentials.spiffeId, prepared.spiffeId!), isNull(workloadCredentials.revokedAt))!;
+  const [dup] = await t.select({ id: workloadCredentials.id }).from(workloadCredentials).where(clash);
+  if (dup) return new IdentityAdminError("credential_already_registered", 409, "that key, certificate or SPIFFE ID is already registered; register a new key instead");
+  const [row] = await t
+    .insert(workloadCredentials)
+    .values({
+      identityId,
+      kind: prepared.kind,
+      publicJwk: prepared.publicJwk as WorkloadPublicJwk | null,
+      jwkThumbprint: prepared.jwkThumbprint,
+      x5tS256: prepared.x5tS256,
+      spkiThumbprint: prepared.spkiThumbprint,
+      sanUri: prepared.sanUri,
+      subjectDn: prepared.subjectDn,
+      spiffeId: prepared.spiffeId,
+      selfSigned: prepared.selfSigned,
+      notBefore: now,
+      notAfter,
+      createdBy: actorUserId === SYSTEM_USER_ID ? null : actorUserId,
+    })
+    .returning();
+  await t.insert(auditLog).values({
+    userId: actorUserId,
+    objectType: "workload_identity",
+    objectId: identityId,
+    detail: {
+      phase: "credential_add",
+      credentialId: row!.id,
+      kind: prepared.kind,
+      // public facts only: a thumbprint or SPIFFE ID, never key material
+      thumbprint: prepared.jwkThumbprint ?? prepared.x5tS256,
+      spiffeId: prepared.spiffeId,
+      selfSigned: prepared.selfSigned,
+      notAfter: notAfter.toISOString(),
+    },
+    effect: "allow",
+    ruleId: "workload-credential-added",
+    ruleChain: [],
+    reason: `a public ${prepared.kind} credential was bound to workload identity ${identityId} until ${notAfter.toISOString()} (ADR-0188 S6)`,
+  });
+  return credentialView(row!);
+}
+
+/** live keys an engine runner's identity may hold at once: its current key and, during a rotation, the next one */
+export const RUNNER_MAX_LIVE_KEYS = 2;
+
+/**
+ * ADR-0188 S7 (review of #380): the two-live-key cap of an engine runner's identity, on the database clock.
+ * Applied by BOTH binding paths (the runner's own rotation and the admin bind route), so no path leaves a runner
+ * with more live keys. A second key an admin binds therefore takes the slot a rotation needs: the runner's next
+ * rotation is refused `409 runner_key_limit` until that key is revoked (or expires). That is accepted: an admin
+ * who binds a runner key owns it, and the runner's current key keeps working until its window ends. The caller
+ * holds the identity row FOR UPDATE, so two binds cannot both pass the count.
+ */
+export async function runnerKeyLimitRefusal(t: Db, identityId: string): Promise<IdentityAdminError | null> {
+  const rows = (await t.execute(
+    sql`SELECT count(*)::int AS live FROM workload_credentials WHERE identity_id = ${identityId} AND revoked_at IS NULL AND not_after > clock_timestamp()`,
+  )) as unknown as { rows: Array<{ live: number }> };
+  const live = rows.rows[0]?.live ?? 0;
+  return live >= RUNNER_MAX_LIVE_KEYS
+    ? new IdentityAdminError("runner_key_limit", 409, `an engine runner holds at most ${RUNNER_MAX_LIVE_KEYS} live keys (its current key and, during a rotation, the next)`)
+    : null;
+}
+
+/**
  * Bind a PUBLIC credential to an ACTIVE identity. Its window starts now
  * (database clock) and ends at `notAfter`, default and maximum
  * `workload_key_max_age_days` (strict 90), never past a certificate's own
@@ -606,80 +715,20 @@ export async function addWorkloadCredential(
   try {
     out = await db.transaction(async (tx): Promise<WorkloadCredentialView | IdentityAdminError> => {
       const t = tx as unknown as Db;
-      const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for("share");
+      // an engine runner's identity is locked FOR UPDATE: its two-live-key cap is counted under the lock
+      const [kindRow] = await t.select({ kind: workloadIdentities.kind }).from(workloadIdentities).where(eq(workloadIdentities.id, identityId));
+      const runnerIdentity = kindRow?.kind === "engine_runner";
+      const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for(runnerIdentity ? "update" : "share");
       if (!ident) return new IdentityAdminError("identity_not_found", 404, `no workload identity ${identityId}`);
       if (ident.status !== "active") return new IdentityAdminError("identity_not_active", 409, `identity ${identityId} is ${ident.status}; a credential is bound only to an active identity`);
+      if (ident.kind === "engine_runner") {
+        const limit = await runnerKeyLimitRefusal(t, identityId);
+        if (limit) return limit;
+      }
       const now = await databaseNow(t);
       const prepared = await prepareCredential(input, now, env);
       if (prepared instanceof IdentityAdminError) return prepared;
-      const org = await loadOrgSettings(t);
-      const maxDays = Math.min(org.workloadKeyMaxAgeDays, WORKLOAD_CREDENTIAL_MAX_DAYS);
-      const ceiling = new Date(Math.min(now.getTime() + maxDays * DAY_MS, prepared.certificateNotAfter?.getTime() ?? Number.POSITIVE_INFINITY));
-      let notAfter = ceiling;
-      if (input.notAfter !== undefined) {
-        notAfter = new Date(input.notAfter);
-        if (!(notAfter.getTime() > now.getTime()) || notAfter.getTime() > ceiling.getTime()) {
-          return new IdentityAdminError(
-            "credential_not_after",
-            422,
-            `notAfter must be after now and no later than ${ceiling.toISOString()} (${maxDays} days${prepared.certificateNotAfter ? ", and the certificate's own expiry" : ""})`,
-          );
-        }
-      }
-      // one key or certificate authenticates one identity, ever (a revoked one is not re-registered). A KEY is the
-      // same whether registered as a JWK or inside a certificate (review Low 5): its thumbprint is checked against
-      // both columns, under a lock on that thumbprint so two concurrent registrations of one key serialise
-      const keyThumb = prepared.jwkThumbprint ?? prepared.spkiThumbprint;
-      if (keyThumb) await t.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`workload-key:${keyThumb}`}, 0))`);
-      const clash = keyThumb
-        ? or(
-            eq(workloadCredentials.jwkThumbprint, keyThumb),
-            eq(workloadCredentials.spkiThumbprint, keyThumb),
-            ...(prepared.x5tS256 ? [eq(workloadCredentials.x5tS256, prepared.x5tS256)] : []),
-          )!
-        : prepared.x5tS256
-          ? eq(workloadCredentials.x5tS256, prepared.x5tS256)
-          : and(eq(workloadCredentials.spiffeId, prepared.spiffeId!), isNull(workloadCredentials.revokedAt))!;
-      const [dup] = await t.select({ id: workloadCredentials.id }).from(workloadCredentials).where(clash);
-      if (dup) return new IdentityAdminError("credential_already_registered", 409, "that key, certificate or SPIFFE ID is already registered; register a new key instead");
-      const [row] = await t
-        .insert(workloadCredentials)
-        .values({
-          identityId,
-          kind: prepared.kind,
-          publicJwk: prepared.publicJwk as WorkloadPublicJwk | null,
-          jwkThumbprint: prepared.jwkThumbprint,
-          x5tS256: prepared.x5tS256,
-          spkiThumbprint: prepared.spkiThumbprint,
-          sanUri: prepared.sanUri,
-          subjectDn: prepared.subjectDn,
-          spiffeId: prepared.spiffeId,
-          selfSigned: prepared.selfSigned,
-          notBefore: now,
-          notAfter,
-          createdBy: actorUserId === SYSTEM_USER_ID ? null : actorUserId,
-        })
-        .returning();
-      await t.insert(auditLog).values({
-        userId: actorUserId,
-        objectType: "workload_identity",
-        objectId: identityId,
-        detail: {
-          phase: "credential_add",
-          credentialId: row!.id,
-          kind: prepared.kind,
-          // public facts only: a thumbprint or SPIFFE ID, never key material
-          thumbprint: prepared.jwkThumbprint ?? prepared.x5tS256,
-          spiffeId: prepared.spiffeId,
-          selfSigned: prepared.selfSigned,
-          notAfter: notAfter.toISOString(),
-        },
-        effect: "allow",
-        ruleId: "workload-credential-added",
-        ruleChain: [],
-        reason: `a public ${prepared.kind} credential was bound to workload identity ${identityId} until ${notAfter.toISOString()} (ADR-0188 S6)`,
-      });
-      return credentialView(row!);
+      return bindPreparedCredentialTx(t, identityId, prepared, actorUserId, now, input.notAfter);
     });
   } catch (e) {
     if (!isUniqueViolation(e)) throw e;

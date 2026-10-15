@@ -561,10 +561,13 @@ export function buildOpenApiDocument(
           ? {
               engineRunnerToken: {
                 type: "http",
-                scheme: "bearer",
+                scheme: "DPoP",
                 description:
-                  "An ADR-0187 engine runner token (`rge_...`), or on the register route a one-time enrolment token " +
-                  "(`rgee_...`). A separate trust path: it reaches only the runner routes, and they refuse every other credential.",
+                  "An engine runner's self token (ADR-0188 S7): a DPoP-bound access token (RFC 9449) the runner takes " +
+                  "from `/oauth/token` with the client_credentials grant and private_key_jwt, signed by its own key, " +
+                  "presented with a fresh DPoP proof. On the register route only, a one-time enrolment token " +
+                  "(`rgee_...`) as a Bearer value instead. A separate trust path: it reaches only the runner routes, " +
+                  "and they refuse every other credential.",
               },
             }
           : {}),

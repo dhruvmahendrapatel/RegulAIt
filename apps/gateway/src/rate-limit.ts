@@ -251,8 +251,13 @@ export function rateLimitCredentialKey(ctx: AuthContext): string | null {
       return ctx.apiKeyId ? `cred:key:${ctx.apiKeyId}` : null;
     case "virtual-key":
       return ctx.virtualKeyId ? `cred:vkey:${ctx.virtualKeyId}` : null;
+    // ADR-0188 S7: a runner and a PDP client authenticate with their own key's self token; the bucket is named
+    // by their workload identity's row id (one bucket however many keys and tokens they hold over time)
     case "engine-runner":
+      if (ctx.workloadIdentityId) return `cred:wid:${ctx.workloadIdentityId}`;
       return ctx.engineRunnerId ? `cred:runner:${ctx.engineRunnerId}` : null;
+    case "pdp":
+      return ctx.workloadIdentityId ? `cred:wid:${ctx.workloadIdentityId}` : null;
     default:
       return null;
   }

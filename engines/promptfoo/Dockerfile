@@ -14,7 +14,7 @@
 # self-test and the engine cannot be enabled.
 #
 # ONE image, TWO containers (ADR-0187 B5-P2, decisions 170 on; docker-compose.yml): the RUNNER
-# (`node /app/dist/main.js`, the default CMD) holds the runner token and talks to the gateway, and
+# (`node /app/dist/main.js`, the default CMD) holds the runner key and talks to the gateway, and
 # never runs promptfoo; the WORKER (`node /app/dist/worker-main.js`) runs promptfoo with only each
 # run's virtual key, no state volume and no runner or enrolment token. They exchange jobs and results
 # through two tmpfs-backed volumes.
@@ -74,7 +74,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=promptfoo /opt/promptfoo /opt/promptfoo
 COPY --from=shim /out /app
-# the runner's own state volume (PR #205 review [49]): the runner token survives a restart. Owned by
+# the runner's own state volume (PR #205 review [49]): the runner key survives a restart. Owned by
 # the runner uid and 0700 here, so a fresh named volume mounted on it inherits both. B5-P2: the
 # exchange mount points (/jobs, /results in the runner; /jobs, /out in the worker) exist for the
 # volumes compose mounts on them. In the WORKER container /state stays this empty image directory

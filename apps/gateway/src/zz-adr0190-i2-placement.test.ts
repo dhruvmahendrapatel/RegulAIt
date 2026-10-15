@@ -171,13 +171,16 @@ afterAll(async () => {
 
 // ---------------------------------------------------------------------------
 describe("ADR-0190 I2 migration 0194", () => {
-  it("the journal places 0194 last with a strictly later `when` (never drizzle-kit generate)", () => {
+  it("the journal places 0194 after every earlier migration with a strictly later `when` (never drizzle-kit generate)", () => {
     const journal = JSON.parse(readFileSync(path.join(migrationsFolder, "meta/_journal.json"), "utf8")) as { entries: Array<{ idx: number; when: number; tag: string }> };
     const mine = journal.entries.find((e) => e.tag === MIGRATION)!;
     expect(mine).toBeDefined();
     const byIdx = [...journal.entries].sort((a, b) => a.idx - b.idx);
     for (let i = 1; i < byIdx.length; i++) expect(byIdx[i]!.when, byIdx[i]!.tag).toBeGreaterThan(byIdx[i - 1]!.when);
-    expect(Math.max(...journal.entries.map((e) => e.when))).toBe(mine.when);
+    // 0194 is found by its TAG: later than everything before it and earlier than everything after it, so a later
+    // migration (0195 on) never breaks this check, as "0194 is the newest" did
+    for (const e of journal.entries.filter((x) => x.idx < mine.idx)) expect(mine.when, e.tag).toBeGreaterThan(e.when);
+    for (const e of journal.entries.filter((x) => x.idx > mine.idx)) expect(e.when, e.tag).toBeGreaterThan(mine.when);
   });
 
   it("adds the decision 14 columns I1 deferred", async () => {

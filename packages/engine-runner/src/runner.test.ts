@@ -18,9 +18,25 @@ import path from "node:path";
 import { ENGINE_RESULT_VERSION, type EngineLease, type EngineResultEnvelope } from "@regulait/shared";
 import { probeEgress, tcpConnect } from "./egress.js";
 import { runProcessGroup } from "./process.js";
+import { generateRunnerSecret, runnerIssuerFromEnv } from "./key.js";
 import { buildSelfTest, postResultWithRetry, RETAINED_RESULT_FILE, runOnce, RunnerClient, RunnerHttpError, RunnerMalformedResponseError, RunnerTimeoutError, type RunnerHttp } from "./runner.js";
 
 const refuse = (code: string) => () => Promise.reject(Object.assign(new Error(code), { code }));
+
+/** ADR-0188 S7: a synthetic runner key (the `rge_` bearer token is retired) */
+const TEST_KEY = generateRunnerSecret();
+
+/**
+ * ADR-0188 S7: the gateway's token endpoint, faked for these protocol tests — every key gets a DPoP token
+ * (the real `client_credentials` grant and its refusals are pinned by the gateway suites). Not recorded.
+ */
+function withTokenEndpoint(inner: RunnerHttp): RunnerHttp {
+  return async (url, init) =>
+    new URL(url).pathname === "/oauth/token"
+      ? { status: 200, headers: { "content-type": "application/json" }, json: async () => ({ access_token: "s7-test-token", token_type: "DPoP", expires_in: 300 }) }
+      : inner(url, init);
+}
+
 
 describe("the egress probe", () => {
   it("a name that resolves is reached; ENOTFOUND is denied; an unexplained error is not denied", async () => {
@@ -124,8 +140,8 @@ describe("runOnce", () => {
       }
       return { status: 200, json: async () => ({}) };
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http) });
+    client.useKey(TEST_KEY);
     return { client, calls };
   }
 
@@ -215,8 +231,8 @@ describe("PR #203 review round 2", () => {
       if (r === "throw") throw new Error("ECONNRESET");
       return { status: r, json: async () => ({}) };
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http) });
+    client.useKey(TEST_KEY);
     return { client, calls, setDir: (d: string) => (dir = d), seen: () => workDirSeenDuringRetry };
   }
   const adapter = (g: { setDir: (d: string) => void }) => async (_l: EngineLease, ctx: { workDir: string }) => {
@@ -260,8 +276,8 @@ describe("PR #203 review round 2", () => {
       }
       return { status: 200, json: async () => ({}) };
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http) });
+    client.useKey(TEST_KEY);
     const adapter = async () => {
       adapterRan = true;
       return { status: "completed" as const, items: [], notRun: [], rawReport: null };
@@ -304,8 +320,8 @@ describe("PR #203 review round 2", () => {
       signal = init.signal;
       return new Promise(() => {}); // never settles, never honours the signal
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: hang, requestTimeoutMs: 20 });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(hang), requestTimeoutMs: 20 });
+    client.useKey(TEST_KEY);
     const t0 = Date.now();
     await expect(client.lease({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1" })).rejects.toBeInstanceOf(RunnerTimeoutError);
     expect(Date.now() - t0).toBeLessThan(2000);
@@ -313,8 +329,8 @@ describe("PR #203 review round 2", () => {
   });
 
   it("PR #205 round 11 [89]: the bound is the run's deadline when that is sooner", async () => {
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: () => new Promise(() => {}), requestTimeoutMs: 60_000 });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(() => new Promise(() => {})), requestTimeoutMs: 60_000 });
+    client.useKey(TEST_KEY);
     const t0 = Date.now();
     await expect(client.heartbeat("r", "running", 0, new Date(Date.now() + 30).toISOString())).rejects.toBeInstanceOf(RunnerTimeoutError);
     expect(Date.now() - t0).toBeLessThan(2000);
@@ -327,8 +343,8 @@ describe("PR #203 review round 2", () => {
       if (calls === 1) return new Promise(() => {});
       return { status: 200, json: async () => ({}) };
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http, requestTimeoutMs: 20 });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(http), requestTimeoutMs: 20 });
+    client.useKey(TEST_KEY);
     const env: EngineResultEnvelope = { version: ENGINE_RESULT_VERSION, runId: lease2.runId, engineId: "promptfoo" as const, engineVersion: "0.123.1", status: "completed" as const, errorCode: null, items: [], notRun: [], rawReport: null };
     expect(await postResultWithRetry(client, lease2.runId, env, { deadlineAt: new Date(Date.now() + 60_000).toISOString(), retryBaseMs: 1 })).toBe(200);
     expect(calls).toBe(2);
@@ -378,8 +394,8 @@ describe("PR #203 review round 2", () => {
 describe("PR #205 follow-up [101]: the sweep of every runner route for a swallowed parse error", () => {
   const truncated = async () => JSON.parse('{"cancel":fa');
   const clientAnswering = (status: number, json: () => Promise<unknown>) => {
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: async () => ({ status, json }) });
-    client.useToken("rge_test");
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(async () => ({ status, json })) });
+    client.useKey(TEST_KEY);
     return client;
   };
   const build = { imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1" };
@@ -434,12 +450,54 @@ describe("PR #205 follow-up [101]: the sweep of every runner route for a swallow
   });
 
   it("register: a truncated 201 is transient (the loop confirms the secret), and sets no token", async () => {
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: async () => ({ status: 201, json: truncated }) });
-    await expect(client.register("rgee_x", "rge_secret", { name: "r", imageDigest: build.imageDigest, engineVersion: "1", selfTest: st })).rejects.toBeInstanceOf(RunnerMalformedResponseError);
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(async () => ({ status: 201, json: truncated })) });
+    await expect(client.register("rgee_x", TEST_KEY, { name: "r", imageDigest: build.imageDigest, engineVersion: "1", selfTest: st })).rejects.toBeInstanceOf(RunnerMalformedResponseError);
     await expect(client.heartbeat("r", "running", 0)).rejects.toThrow(/not registered/);
   });
 
   it("result: the status is the whole answer; a 2xx with a truncated body is still definitive (a retry would get 409 engine_run_finished)", async () => {
     expect(await clientAnswering(200, truncated).result("r", {} as EngineResultEnvelope)).toBe(200);
+  });
+});
+
+describe("ADR-0188 S7: the runner's own credential, as the gateway's workload profile reads it", () => {
+  const b64json = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as Record<string, unknown>;
+
+  it("every JWS the runner sends is an Ed25519 signature labelled as oauth4webapi writes it (RFC 9864 `Ed25519`, accepted by the gateway)", async () => {
+    const seen: Array<{ path: string; headers: Record<string, string>; body?: string }> = [];
+    const http: RunnerHttp = async (url, init) => {
+      const p = new URL(url).pathname;
+      seen.push({ path: p, headers: init.headers, ...(typeof init.body === "string" ? { body: init.body } : {}) });
+      if (p === "/oauth/token") return { status: 200, headers: { "content-type": "application/json" }, json: async () => ({ access_token: "s7-test-token", token_type: "DPoP", expires_in: 300 }) };
+      return { status: 204, json: async () => null };
+    };
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: "https://regulait.example", http });
+    client.useKey(TEST_KEY);
+    expect(await client.lease({ imageDigest: `sha256:${"1".repeat(64)}`, engineVersion: "1.0.0" })).toBeNull();
+    const token = seen.find((c) => c.path === "/oauth/token")!;
+    const form = new URLSearchParams(token.body ?? "");
+    const assertion = form.get("client_assertion")!.split(".");
+    expect(b64json(assertion[0]!).alg).toBe("Ed25519");
+    expect(b64json(assertion[1]!).aud).toBe("https://regulait.example/oauth/token");
+    const proofHeader = (h: Record<string, string>) => b64json((h.dpop ?? h.DPoP)!.split(".")[0]!);
+    expect(proofHeader(token.headers).alg).toBe("Ed25519");
+    const lease = seen.find((c) => c.path === "/v1/engine-runner/lease")!;
+    expect(proofHeader(lease.headers).alg).toBe("Ed25519");
+  });
+
+  it("a runner refuses to start without the issuer, and never guesses one", () => {
+    expect(() => runnerIssuerFromEnv({})).toThrow(/REGULAIT_PUBLIC_URL is empty/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "  " })).toThrow(/REGULAIT_PUBLIC_URL is empty/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "not a url" })).toThrow(/not an absolute URL/);
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://regulait.example/" })).toBe("https://regulait.example");
+    // the SAME normalisation as the gateway (parsePublicUrl, @regulait/shared): lowercased host, no default port
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://Host.Example:443" })).toBe("https://host.example");
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://Host.Example:443/base//" })).toBe("https://host.example/base");
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "http://localhost:3000" })).toBe("http://localhost:3000");
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "http://gateway:3000" })).toThrow(/scheme must be https/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://host.example./" })).toThrow(/must not end with a dot/);
+    expect(() => runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: "https://host.example/a/../b" })).toThrow(/segments/);
+    // a long run of slashes is trimmed in linear time (no repeating regex)
+    expect(runnerIssuerFromEnv({ REGULAIT_PUBLIC_URL: `https://host.example/base${"/".repeat(50_000)}` })).toBe("https://host.example/base");
   });
 });
