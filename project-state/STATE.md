@@ -1,10 +1,10 @@
 ---
-phase: batch-6-hardening-before-s7-and-i4
-last_updated: 2026-10-12
+phase: batch-6-s7-s8-i4-i8-merged-s9-b8-next
+last_updated: 2026-10-15
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-12-session-01.md
+last_session: sessions/2026-10-15-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,51 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-15 - bearer workload secrets retired, outbound MCP identity live, stdio servers moved off the gateway onto
+gVisor sandboxes, and execution facts in the evidence.** Full record:
+[sessions/2026-10-15-session-01.md](sessions/2026-10-15-session-01.md). This paragraph supersedes the 2026-10-12
+queue below.
+- **Merged (UTC 2026-10-12 to 2026-10-15)**, after #373-#375 (recorded in the 2026-10-12 paragraph):
+  - #376 docs(state) for 2026-10-12;
+  - #377 evidence and clock: DB-clock audit timestamps, the receipt-key retire action, #353/#339 Lows (10-12 queue
+    item 1);
+  - #378 secure-by-default server gaps: step-ups for three relaxations, the scrub-marker refusal, the shadow-AI plan
+    body, re-sync step-up codes (10-12 queue items 2 and 3);
+  - #379 ADR-0188 S8 outbound MCP identity assertion per call (no migration; pairwise `sub` and pairwise agent ids);
+  - #380 ADR-0188 S7 retire bearer workload secrets (runner and PDP self tokens), **migration 0195**. Engine runners
+    and PDP clients use `private_key_jwt` and DPoP-bound self tokens. Every live runner is revoked and must re-enrol
+    once;
+  - #381 ADR-0188 S8 follow-up: the per-server `disclose_agent_workload_ids` opt-in, **migration 0196** (default off;
+    turning it on is a `settings_relax` step-up, audited, reset by a URL move);
+  - #382 ADR-0190 I8 execution facts in the Decision BOM and AI BOM, **migration 0197**. Decision facts and the
+    Decision BOM move to v2 (`regulait.decision-facts.v2`, `regulait.decision-bom.v2`; stored v1 rows stay valid and
+    nothing is back-filled). The AI BOM stays `regulait.ai-bom.v1` and must stay verifiable;
+  - #383 ADR-0190 I4 gVisor (`runsc`) backend, **migration 0198**. stdio MCP servers no longer spawn in the gateway:
+    they run in sandboxes on the executor channel. A governed stdio call's placement row is written in its
+    decision's transaction and keyed to that decision.
+- **I4 caveats:**
+  - **L2 (gVisor) is UNVERIFIED** until it has run on a real gVisor host. No session that built or fixed I4 had a
+    Docker daemon, and there is no gVisor CI job yet.
+  - The stock compose executor needs `REGULAIT_EXECUTOR_GATEWAY_URL` set to a TLS front it can reach on the
+    `engines` network. Without one it exits with code 2 at start (fails closed), and nothing is placed.
+  - `REGULAIT_RUNSC_HOST_PATH` was renamed to `REGULAIT_GVISOR_HOST_DIR` (release-notes item).
+- **CI:** the mocked UI suite runs in 5 shards (was 3), recorded on 2026-10-12.
+- **Last migration:** 0198.
+- **Open owner questions:**
+  1. Should a person's own authenticated stdio call (no agent) count as a known subject at L2, rather than as the
+     unknown agent at L3? Today a gVisor-only host always refuses it (ADR-0190 I4 open question 1).
+  2. The source of project sensitivity for I2 (today the strictest use case, failing closed with none).
+  3. The EU AI Act Art. 50 legal review.
+  4. The I7 OpenShell go/no-go.
+  5. 5 Dependabot alerts on main. They can't be read from the build environment (the alerts API answers 403), so
+     the owner has to check them.
+  6. Should plain egress allow entries need a step-up? Today they are audited with no step-up. Only the
+     private-range and plaintext-http opt-ins take `settings_relax`.
+  7. The demo-prep warn line the owner has not yet shared.
+- **Still queued from 2026-10-12:** ADR-0188 S9 (SPIFFE backend and runbooks) and ADR-0189 B8 runbooks. New from I4:
+  a TLS front for the executor, a gVisor CI job, and I5 (engines under profiles). Condensed open items are under "Batch 6 follow-ups (2026-10-15)" in Known
+  follow-ups.
 
 **2026-10-12 - every built API route has UI or a stated reason; the installer sets the first admin.** Full record:
 [sessions/2026-10-12-session-01.md](sessions/2026-10-12-session-01.md).
@@ -4902,6 +4947,11 @@ Batch 6 status (2026-10-12): ADR-0188 (agent and workload identity) is built thr
 (isolation and execution profiles) is built through I2, with I4 next and the I2 sensitivity source open for the owner;
 ADR-0194 (the installer sets the first admin, no default password) is accepted and built (#366).
 
+Batch 6 status (2026-10-15): ADR-0188 is built through S8, with S7 (#380, 0195), S8 (#379) and the S8 disclose
+opt-in (#381, 0196) merged. S9 is next. ADR-0190 has I2, I8 (#382, 0197) and I4 (#383, 0198) built, and each has an
+as-built section in the ADR. L2 (gVisor) stays unverified until it has run on a real host. No new ADR was written in
+this window: the ADR index still ends at 0194, with 189 files and 189 rows.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
@@ -4916,6 +4966,49 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Batch 6 follow-ups (2026-10-15)**, from the #377-#383 builder reports and reviews. Unless a line says it was
+  checked on main, these are taken from those reports and were not re-verified one by one.
+  - **I4 (ADR-0190, #383):**
+    - The executor needs an internal TLS front on `engines` that does not trust proxy addresses. Today it fails
+      closed without one.
+    - The `runsc` pin does not cover the release's `gvisor-bin/` sidecars.
+    - Multi-replica stdio needs sticky routing or a frames table.
+    - Add a gVisor CI job. None exists, checked on main.
+    - I5 needs the input-volume and task-secret channels.
+    - Bind-mount a pinned Node for the sandbox init.
+    - MAC the close, keepalive and bye lines.
+    - Lows: `awaitPlacement` maps a later-gate-withdrawn offer to `no_executor`; a null profile is allowed on any
+      `profile_retired` refusal; the release notes must name the `REGULAIT_GVISOR_HOST_DIR` rename.
+  - **I8 / I4 (#382):**
+    - Write a full frozen-BOM-through-route test across both slices. It needs B4 receipt and anchor setup in an
+      isolated DB test file.
+    - `attestationCounts` reads the current `reenabled_at` rather than the one in force at the time. Add a doc
+      comment; this is harmless while facts are captured in-transaction.
+    - The I8 question of recording the image digest and runtime flags directly was answered by I4 review H1: offered
+      placements record both in the facts.
+  - **S7 (ADR-0188, #380):**
+    - Should dispatch and engine virtual keys become DPoP-bound too? (owner decision 8 follow-up)
+    - PDP keys are rotated by an admin. Consider self-rotation like the runners.
+    - If the installer ever provisions the PDP identity, which steward does it name?
+    - The release notes must say that S7 revokes every runner, and each must re-enrol once. INSTALL.md already
+      says so, checked on main.
+  - **S8 (#379):** the data-key rotation runbook must say that rotating the data key changes every pairwise `sub`,
+    including those sent upstream in identity assertions.
+  - **#377 / #378:**
+    - Finish the M-075 sweep of the remaining process-clock comparisons with `audit_log.at`.
+    - A `connector_policy_changed` refusal at execution or release writes a trace span but no deny audit row.
+    - Retiring the in-use receipt key is refused. This is accepted as the stricter posture.
+    - Give key management its own step-up kind (needs a migration).
+    - The shadow-AI plan could take an optional `?environment=`.
+    - Narrow race: a concurrent change between the check and the owner write on `PATCH /v1/servers/:id`.
+  - **Repo hygiene:**
+    - The compose Caddy `REGULAIT_TLS_HOST` default still names the owner's dev host. Replace it with a neutral
+      placeholder (checked on main).
+    - An import cycle from `mcp-proxy` to `compat-core` remains (#383 moved only the constant). Consider a cycle
+      check in CI.
+    - Flaky candidate: the `zz-b4c-review-fixes.test.ts` TOTP-activate test got a 401 once on #381.
+    - Sweep the mocked e2e specs for forms filled right after a POST that don't wait for the post-success reset
+      (seen on #377).
 - **ADR-0182 follow-ups (2026-10-06):**
   - A STIX 2.1 incident export (PF-14); an xAPI completion import for training documents.
   - Incident clocks for further regimes, once verified from primary text.
