@@ -280,7 +280,7 @@ export async function freezeDecisionBom(db: Db, auditId: string, actorUserId: st
     // 6. the email scan (R10), the frozen schema, then the signature (no key, no new BOM)
     const emails = findEmailShapes(assembled.body);
     if (emails.length) throw new BomRouteError(422, { error: "bom_export_refused", reason: "email_shape", file: "body", path: emails[0]!.slice(0, 1024) });
-    if (!decisionBomBodySchema.safeParse(assembled.body).success) throw new BomRouteError(500, { error: "bom_integrity_failure", detail: "The assembled body does not meet regulait.decision-bom.v1." });
+    if (!decisionBomBodySchema.safeParse(assembled.body).success) throw new BomRouteError(500, { error: "bom_integrity_failure", detail: "The assembled body does not meet regulait.decision-bom.v2." });
     const key = receiptKeyOrNull();
     if (!key) throw noReceiptKey();
     // PR #377 review: FOR SHARE, so a concurrent retire either committed first (seen here: refused) or waits for this

@@ -44,7 +44,9 @@ import {
   bomTimeSchema,
   bomUuidSchema,
   DECISION_BOM_FINALITY_STATES,
-  DECISION_BOM_SECTIONS,
+  DECISION_BOM_SECTIONS_V2,
+  DECISION_BOM_VERSIONS,
+  decisionBomSectionsFor,
   decisionBomBodySchema,
   findEmailShapes,
   hasEmailShape,
@@ -667,7 +669,7 @@ export function bomCannotProveFor(ctx: BomByDesignContext & { reportedFinality: 
 /** a Decision BOM section as verified: the recomputed result and the recorded completeness (a gap is a limit, not a failure) */
 export const bomVerifySectionSchema = z
   .object({
-    section: z.enum(DECISION_BOM_SECTIONS),
+    section: z.enum(DECISION_BOM_SECTIONS_V2),
     status: z.enum(BOM_VERIFY_STATUSES),
     completeness: z.enum(BOM_SECTION_STATUSES),
     notRecordedReason: z.enum(BOM_NOT_RECORDED_REASONS).nullable(),
@@ -711,8 +713,8 @@ export const bomVerifyResponseSchema = z
     identity: bomVerifyIdentitySchema.nullable(),
     outcome: z.enum(BOM_VERIFY_OUTCOMES),
     checks: z.array(bomVerifyCheckResultSchema).min(1).max(4096),
-    /** Decision BOMs: one entry per section, in DECISION_BOM_SECTIONS order; empty for an AI BOM */
-    sections: z.array(bomVerifySectionSchema).max(DECISION_BOM_SECTIONS.length),
+    /** Decision BOMs: one entry per section of the body's version, in `decisionBomSectionsFor` order (v2 adds `execution`, ADR-0190 I8); empty for an AI BOM */
+    sections: z.array(bomVerifySectionSchema).max(DECISION_BOM_SECTIONS_V2.length),
     cannotProve: z.array(z.enum(BOM_CANNOT_PROVE)).max(BOM_CANNOT_PROVE.length),
     /** the bundle's manifest (bundle source only) */
     manifest: exportBundleV3ManifestSchema.nullable(),
@@ -752,12 +754,12 @@ export const bomVerifyResponseSchema = z
       if (r.outcome !== "invalid" || !r.checks.some((c) => c.status === "invalid")) issue("an unreadable bundle is invalid, with the failing check");
     } else {
       const decision = r.identity.subject === "decision-bom";
-      if (r.bodyVersion !== (decision ? "regulait.decision-bom.v1" : "regulait.ai-bom.v1")) issue("bodyVersion matches the subject");
+      if (decision ? !(DECISION_BOM_VERSIONS as readonly string[]).includes(r.bodyVersion) : r.bodyVersion !== "regulait.ai-bom.v1") issue("bodyVersion matches the subject");
       // B4C-03: a stored source names its own subject; a bundle may hold either
       if ((r.source === "decision_bom" && !decision) || (r.source === "ai_bom_snapshot" && decision)) issue("the stored source matches the verified subject");
       const foreign = decision ? AI_BOM_ONLY_CHECKS : DECISION_BOM_ONLY_CHECKS;
       if (r.checks.some((c) => (foreign as readonly string[]).includes(c.check))) issue("checks belong to the subject (R19)");
-      if (decision && r.sections.map((s) => s.section).join() !== DECISION_BOM_SECTIONS.join()) issue("every Decision BOM section, in order");
+      if (decision && r.sections.map((s) => s.section).join() !== decisionBomSectionsFor(r.bodyVersion).join()) issue("every Decision BOM section of its version, in order");
       if (!decision && r.sections.length) issue("an AI BOM has no Decision BOM sections");
 
       // B4C-01: the minimum check set for this source and subject; an inapplicable conditional check is left out (B4.4)

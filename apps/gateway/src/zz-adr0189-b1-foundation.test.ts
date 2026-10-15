@@ -89,7 +89,7 @@ import {
   bomRowDigest,
   DECISION_BOM_VERSION,
   DECISION_FACTS_ADDENDUM_VERSION,
-  DECISION_FACTS_VERSION,
+  DECISION_FACTS_VERSION_V2,
   decisionFactsSchema,
   projectBomRow,
   RECEIPT_PAYLOAD_VERSION,
@@ -187,11 +187,12 @@ async function inRolledBackTx(body: (tx: Tx) => Promise<void>, on: Db = db): Pro
 const inSavepoint = (tx: Tx, stmt: ReturnType<typeof sql>) => tx.transaction((sp) => sp.execute(stmt));
 const one = async <T>(tx: Tx | Db, stmt: ReturnType<typeof sql>) => rows<T>(await tx.execute(stmt))[0]!;
 
-/** a valid `regulait.decision-facts.v1` payload for an audit id */
+/** a valid `regulait.decision-facts.v2` payload for an audit id (the column default since migration 0197, ADR-0190 I8) */
 function factsFor(auditId: string, auditSeq: number, aiBomSnapshotId: string | null = null) {
   const projection = projectBomRow("approvals", { id: randomUUID(), status: "approved", quorum: 1, argumentsDigest: H("a"), requestedAt: new Date("2026-10-10T00:00:00.000Z") });
   return decisionFactsSchema.parse({
-    v: DECISION_FACTS_VERSION,
+    v: DECISION_FACTS_VERSION_V2,
+    execution: null,
     auditId,
     auditSeq,
     action: null,

@@ -21,9 +21,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { bomCanonicalBytes, bomRowDigest, bomSha256, decisionFactsSchema } from "./contract.js";
+import { bomCanonicalBytes, bomRowDigest, bomSha256, decisionBomBodyV2Schema, decisionFactsSchema } from "./contract.js";
 import { bomVerifyResponseSchema, type BomVerifyCheck } from "./contract-b4.js";
-import { assembleDecisionBom, bomDecimalSum, DecisionBomAssemblyError, type DecisionBomAssemblyInput } from "./decision-bom-assembly.js";
+import { assembleDecisionBom, bomDecimalSum, DecisionBomAssemblyError, decisionBomSameContent, type DecisionBomAssemblyInput } from "./decision-bom-assembly.js";
 import { decisionBomFinalityDetail } from "./finality.js";
 import { BomExportKeyringError, bomOnlineExportTrust, verifyBomBundle, type BomVerifyReport, type BomVerifyTrust } from "./verify.js";
 import { BomExportRefusal, buildAiBomBundle, buildDecisionBomBundle, type BomBundleEnvelope, type BuiltBomBundle } from "./bom-bundle.js";
@@ -251,12 +251,17 @@ describe("ADR-0189 B4.4: assembly refusals (the database-free assembly vectors)"
     return null;
   };
 
-  it("the assembler rebuilds every positive Decision BOM body byte for byte (the same mapping as the verifier)", () => {
+  it("the assembler rebuilds every positive Decision BOM body as the same version (ADR-0190 I8: v1 vectors, v2 assembly, no new fact)", () => {
     for (const v of (corpus.positives as Vector[]).filter((x) => x.subject === "decision-bom")) {
       const text = entriesOf(v).find((e) => e.name.endsWith("/content/decision-bom.json"))!.text;
       const body = JSON.parse(text);
       const reason = body.completeness.action?.reason === "capture_off" ? "capture_off" : "pre_facts";
-      expect(assembleDecisionBom({ ...base(body), noFactsReason: reason }).bodyBytes, v.id).toBe(text);
+      const assembled = assembleDecisionBom({ ...base(body), noFactsReason: reason });
+      expect(assembled.body.v, v.id).toBe("regulait.decision-bom.v2");
+      expect(decisionBomBodyV2Schema.safeParse(assembled.body).success, v.id).toBe(true);
+      // the v1 vector's facts predate execution facts: v2 says so, and records nothing else new
+      expect((assembled.body.completeness as Record<string, unknown>).execution, v.id).toEqual(body.facts.payload === null ? { status: "not_recorded", reason } : { status: "not_recorded", reason: "pre_isolation" });
+      expect(decisionBomSameContent(body, assembled.body), v.id).toBe(true);
     }
   });
   it("X04 a usage event bound in facts.rows and again in addendum 1: 500 bom_integrity_failure", () => {
@@ -362,10 +367,13 @@ describe("ADR-0189 B4.9 G12: the AI BOM worked example is what buildAiBom writes
    * plus `"spdxFields":[]` in `records`; the renderings are byte-identical. The vectors A01 to A03 are self-consistent
    * signed bundles and verify either way. This pins that the ONLY difference is that one key.
    */
+  // B9's spdxFields and ADR-0190 I8's execution lists postdate the worked example; empty, they are its only difference
   const withoutSpdxFields = (bytes: string) => {
     const body = JSON.parse(bytes) as { records: Record<string, unknown> };
-    expect(body.records.spdxFields).toEqual([]);
-    delete body.records.spdxFields;
+    for (const list of ["spdxFields", "executionProfiles", "executors", "executionAssignments"]) {
+      expect(body.records[list], list).toEqual([]);
+      delete body.records[list];
+    }
     return bomCanonicalBytes(body);
   };
   it("rebuilds A01's body and CycloneDX 1.7 rendering, and A03's body, byte for byte (apart from B9's spdxFields)", () => {

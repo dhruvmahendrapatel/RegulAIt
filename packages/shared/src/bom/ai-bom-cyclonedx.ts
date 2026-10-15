@@ -35,9 +35,17 @@
  *    components with id, version and content digest only.
  *  - #280 (4237488600): training artifacts are components; an inline one is
  *    hashed over its payload's canonical bytes, a remote one is incomplete.
+ *  - ADR-0190 decision 9 / I8: each executor is a `service` with its trust zone
+ *    and runtime as properties; each execution profile a `data`
+ *    (`configuration`) component hashed by its digest; an assignment is a
+ *    granted edge to its profile. A stdio MCP server whose isolation evidence
+ *    is not an attested L2 or L3 (no profile, an L1 profile, a retired one, only
+ *    a customer-declared plane, or no fresh attestation) is a gap, so its
+ *    composition is `incomplete`, never `complete`.
  */
 import { aiBomSerialNumber, parseTrainingDatasetChecksum, type AiBomSnapshotTrigger, type AiBomSubjectKind } from "./contract.js";
 import { cmpCodeUnits, sortedBy, type AgentRecord, type AiBomRecordSet, type ModelCardRecord } from "./ai-bom-records.js";
+import { isolationClassSatisfies, type IsolationClass } from "../isolation/contract.js";
 import { cycloneDxBomLink, RELEASE_SBOM_KINDS } from "./release-sbom-identity.js";
 import canonicalize from "canonicalize";
 
@@ -93,6 +101,9 @@ export const aiBomRef = {
   skill: (agentId: string, skillId: string) => `skill:${agentId}:${skillId}`,
   memory: (kind: string, builderAgentId: string | null) => `memory:${kind}:${builderAgentId ?? "org"}`,
   devTool: (id: string) => `dev-tool:${id}`,
+  /** ADR-0190 I8 */
+  executionProfile: (id: string) => `execution-profile:${id}`,
+  executor: (id: string) => `service:executor:${id}`,
 };
 
 const userRef = (id: string | null) => (id === null ? "not_recorded" : `user:${id}`);
@@ -571,6 +582,8 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
       ...(m.url ? { endpoints: [m.url] } : {}),
       ...(tools.length ? { services: tools.map((t) => ({ "bom-ref": aiBomRef.tool(m.id, t.id), name: t.name, ...withProps([prop("regulait:tool:kind", t.kind)]) })) } : {}),
       ...withProps([
+        // ADR-0190 decision 3/9: a remote server runs on the upstream's host (`external`); a stdio one only on an executor
+        prop("regulait:execution:placement", m.transport === "stdio" ? "executor" : "external"),
         prop("regulait:mcp:transport", m.transport), prop("regulait:mcp:releaseDigest", m.releaseDigest ?? "not_recorded"),
         prop("regulait:mcp:admissionManifestDigest", m.admissionManifestDigest ?? "not_recorded"),
         prop("regulait:admission:state", m.admissionState), prop("regulait:identity:propagation", m.identityPropagation),
@@ -588,6 +601,9 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
     });
     dep(ref);
   }
+  // ------------------------------------------------------------- ADR-0190 I8: execution profiles, executors, assignments
+  renderExecution(n, { components, services, dep, gap });
+
   // GRANTED edges only (ADR-0082)
   const toolsById = new Map(n.mcpTools.map((t) => [t.id, t]));
   for (const g of n.grants) {
@@ -652,6 +668,91 @@ export function renderAiBomCycloneDx(n: AiBomRecordSet, meta: AiBomSnapshotMeta,
 }
 
 const serviceRefs = (s: Obj): string[] => [s["bom-ref"] as string, ...((s.services as Obj[] | undefined) ?? []).flatMap(serviceRefs)];
+
+/**
+ * ADR-0190 decision 9 / slice I8: the execution part of an AI BOM.
+ *  - Each profile: a `data` component (`configuration`), hashed by its digest (the SHA-256 of its canonical body),
+ *    versioned by its profile version; its floor, shipped and retired state as properties.
+ *  - Each executor: a `service` whose trust zone says whose plane it is, with its backend, runtime version, status,
+ *    declared classes, the class a customer plane is mapped to, its workload identity, and each fresh passing
+ *    self-test (class, profile digest, report SHA-256) as properties; it depends on the profiles it attests.
+ *  - Each assignment: a granted edge from the agent, builder agent or stdio server to its profile.
+ *  - The isolation evidence rule (decision 9, never relaxed): a stdio MCP server is a gap unless its assigned
+ *    profile is current, at L2 or above, and an active executor holds a fresh passing self-test for that profile
+ *    at that class or stricter. A customer-declared plane is never verified evidence.
+ */
+function renderExecution(
+  n: AiBomRecordSet,
+  out: { components: Obj[]; services: Obj[]; dep: (from: string, to?: string) => void; gap: (ref: string, field: string, reason: string) => void },
+): void {
+  const profiles = n.executionProfiles ?? [];
+  const executors = n.executors ?? [];
+  const assignments = n.executionAssignments ?? [];
+  const profileById = new Map(profiles.map((p) => [p.id, p]));
+  for (const p of profiles) {
+    const ref = aiBomRef.executionProfile(p.id);
+    out.components.push({
+      type: "data", "bom-ref": ref, name: p.name, version: String(p.version),
+      hashes: [{ alg: "SHA-256", content: p.digest }],
+      data: [{ type: "configuration", name: `execution-profile-${p.name}` }],
+      ...withProps([
+        prop("regulait:execution:profile:digestOf", "execution_profiles.body"), prop("regulait:execution:profile:minClass", p.minClass),
+        prop("regulait:execution:profile:shipped", p.shipped), prop("regulait:execution:profile:retired", p.retired),
+      ]),
+    });
+    out.dep(ref);
+  }
+  const digests = new Map(profiles.map((p) => [p.digest, p]));
+  for (const e of executors) {
+    const ref = aiBomRef.executor(e.id);
+    out.services.push({
+      "bom-ref": ref, name: e.name, version: e.runtimeVersion,
+      trustZone: e.backend === "customer" ? "customer-execution-plane" : "regulait-execution-plane",
+      ...withProps([
+        prop("regulait:executor:backend", e.backend), prop("regulait:executor:runtimeVersion", e.runtimeVersion), prop("regulait:executor:status", e.status),
+        ...e.classesDeclared.map((c) => prop("regulait:executor:classDeclared", c)), prop("regulait:executor:declaredClass", e.declaredClass),
+        prop("regulait:identity:workload", e.workloadIdentity ?? "not_recorded"),
+        ...e.attestations.map((a) => prop("regulait:executor:attested", `${a.class}:${a.profileDigest}`)),
+        ...e.attestations.map((a) => prop("regulait:executor:attestationReport", `${a.class}:${a.profileDigest}:sha256:${a.reportSha256}`)),
+      ]),
+    });
+    out.dep(ref);
+    for (const d of new Set(e.attestations.map((a) => a.profileDigest))) {
+      const p = digests.get(d);
+      if (p) out.dep(ref, aiBomRef.executionProfile(p.id));
+    }
+    if (!e.workloadIdentity) out.gap(ref, "workloadIdentity", "not_recorded");
+  }
+  const targetRef = (kind: string, id: string) => (kind === "agent" ? aiBomRef.agent(id) : kind === "builder_agent" ? aiBomRef.builderAgent(id) : aiBomRef.mcp(id));
+  for (const a of assignments) out.dep(targetRef(a.targetKind, a.targetId), aiBomRef.executionProfile(a.profileId));
+
+  // the isolation evidence of each stdio MCP server (decision 9)
+  const assigned = new Map(assignments.filter((a) => a.targetKind === "mcp_server").map((a) => [a.targetId, a.profileId]));
+  for (const m of n.mcpServers.filter((s) => s.transport === "stdio")) {
+    const ref = aiBomRef.mcp(m.id);
+    const profileId = assigned.get(m.id);
+    const p = profileId ? profileById.get(profileId) : undefined;
+    if (!p) {
+      out.gap(ref, "isolation", "execution_profile_not_assigned");
+      continue;
+    }
+    if (p.retired) {
+      out.gap(ref, "isolation", "execution_profile_retired");
+      continue;
+    }
+    if (p.minClass === "hardened_container") {
+      out.gap(ref, "isolation", "isolation_hardened_container");
+      continue;
+    }
+    const active = executors.filter((e) => e.status === "active");
+    const attested = active.some((e) =>
+      e.attestations.some((a) => a.profileDigest === p.digest && a.class !== "customer_declared" && isolationClassSatisfies(a.class as IsolationClass, p.minClass as IsolationClass)),
+    );
+    if (attested) continue;
+    const declared = active.some((e) => e.attestations.some((a) => a.profileDigest === p.digest && a.class === "customer_declared"));
+    out.gap(ref, "isolation", declared ? "isolation_customer_declared" : "isolation_not_attested");
+  }
+}
 
 /**
  * THE COMPOSITION RULE (not relaxable): the subject's own assembly is always

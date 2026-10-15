@@ -1,7 +1,7 @@
 /**
  * ADR-0189 slice B4 — the Decision BOM projection and assembly (pure).
  *
- * B4.4: every section of `regulait.decision-bom.v1` is a pure function of the
+ * B4.4: every section of `regulait.decision-bom.v1` and `.v2` (ADR-0190 I8) is a pure function of the
  * receipt payload, the decision's facts payload and its signed addenda (in `n`
  * order), the decision row's `rule_chain`, the chain rows and the anchor row
  * (R37). This file holds that mapping ONCE: the gateway's assembler builds the
@@ -24,14 +24,20 @@ import {
   bomRowDigest,
   bomSha256,
   bomUuidSchema,
-  DECISION_BOM_SECTIONS,
+  DECISION_BOM_CURRENT_VERSION,
   DECISION_BOM_VERSION,
+  DECISION_BOM_VERSION_V2,
+  DECISION_FACTS_VERSION_V2,
   decisionBomAnchorSchema,
+  decisionBomSectionsFor,
   decisionFactsAddendumSchema,
   decisionFactsSchema,
+  executionFactsOf,
   type BoundRow,
   type DecisionBomFinalityState,
   type DecisionBomSection,
+  type DecisionBomVersion,
+  type DecisionExecutionFacts,
   type DecisionFacts,
   type DecisionFactsAddendum,
 } from "./contract.js";
@@ -44,7 +50,7 @@ export interface DecisionBomChainRow {
   prevHash: string;
   rowHash: string;
 }
-export type BomCompletenessEntry = { status: "recorded" } | { status: "not_recorded"; reason: string };
+export type BomCompletenessEntry = { status: "recorded" } | { status: "not_applicable" } | { status: "not_recorded"; reason: string };
 /** the "no facts" reason (B4.4 decided here): `capture_off` when the marker says so, `pre_facts` with no marker */
 export type DecisionBomNoFactsReason = "pre_facts" | "capture_off";
 
@@ -60,7 +66,9 @@ export interface DecisionBomProjection {
   outcome: DecisionFacts["outcome"] | null;
   cost: { usageEventIds: string[]; inputTokens: number; outputTokens: number; costUsd: string | null; costSource: "usage_events.cost_usd" } | null;
   trace: { traceIds: string[]; spanIds: string[] } | null;
-  completeness: Record<DecisionBomSection, BomCompletenessEntry>;
+  /** ADR-0190 I8: v2 only (a v1 projection has no execution section, and `completeness` no `execution` key) */
+  execution: DecisionExecutionFacts | null;
+  completeness: Partial<Record<DecisionBomSection, BomCompletenessEntry>>;
   basis: { auditSeq: number; anchorId: string | null; receiptSeq: number; aiBomSnapshotId: string | null };
   /**
    * What makes the inputs unprojectable (B4.4 'decided here', B4.3 v2 bullet, G15). The assembler refuses each as
@@ -70,6 +78,8 @@ export interface DecisionBomProjection {
 }
 
 export interface DecisionBomProjectionInput {
+  /** the body version being projected: v1 (a frozen pre-I8 body, verified) or v2 (every new body) */
+  bodyVersion: DecisionBomVersion;
   receipt: AnyDecisionReceiptPayload;
   receiptSeq: number;
   facts: DecisionFacts | null;
@@ -137,6 +147,10 @@ export function projectDecisionBom(input: DecisionBomProjectionInput): DecisionB
     }
   }
 
+  // ADR-0190 I8: a v1 body never carries v2 facts (it would drop their execution section unseen)
+  const v2 = input.bodyVersion === DECISION_BOM_VERSION_V2;
+  if (!v2 && facts?.v === DECISION_FACTS_VERSION_V2) problems.push({ section: "decision", why: "a v1 Decision BOM carries v2 facts" });
+
   const pick = (tables: readonly string[]) => bound.filter((r) => tables.includes(r.table));
   // stable sort by table then id: every binding is kept
   const approvals = pick(["approvals", "approval_decisions"])
@@ -175,6 +189,34 @@ export function projectDecisionBom(input: DecisionBomProjectionInput): DecisionB
   const fact = (v: unknown, reason: string) => (facts === null ? gap : v === null || v === undefined ? nr(reason) : rec);
   const rows = (list: readonly unknown[]) => (facts === null ? gap : list.length ? rec : nr("no_bound_row"));
   const last = input.chain[input.chain.length - 1];
+  // ADR-0190 I8: the execution section. Approvals execute nothing (`not_applicable`); v1 facts predate execution
+  // facts (`pre_isolation`); a v2 null is a call with no placement row in its transaction (`no_placement`)
+  const execution = executionFactsOf(facts);
+  const executionCompleteness: BomCompletenessEntry =
+    facts === null
+      ? gap
+      : execution !== null
+        ? rec
+        : facts.v !== DECISION_FACTS_VERSION_V2
+          ? nr("pre_isolation")
+          : d.objectType === "approval"
+            ? { status: "not_applicable" }
+            : nr("no_placement");
+  const completeness: DecisionBomProjection["completeness"] = {
+    decision: rec,
+    receipt: rec,
+    principal: rec,
+    actors: fact(facts?.actors, "pre_identity"),
+    action: fact(facts?.action, "not_captured_by_path"),
+    policy: fact(facts?.policy, "not_captured_by_path"),
+    model: fact(facts?.model, "not_captured_by_path"),
+    approval: rows(approvals),
+    outcome: fact(facts?.outcome, "not_captured_by_path"),
+    cost: rows(usage),
+    trace: rows(spans),
+    proof: input.anchor === null ? nr("anchor_absent") : rec,
+    ...(v2 ? { execution: executionCompleteness } : {}),
+  };
 
   return {
     decision: {
@@ -197,20 +239,8 @@ export function projectDecisionBom(input: DecisionBomProjectionInput): DecisionB
     outcome: facts?.outcome ?? null,
     cost,
     trace,
-    completeness: {
-      decision: rec,
-      receipt: rec,
-      principal: rec,
-      actors: fact(facts?.actors, "pre_identity"),
-      action: fact(facts?.action, "not_captured_by_path"),
-      policy: fact(facts?.policy, "not_captured_by_path"),
-      model: fact(facts?.model, "not_captured_by_path"),
-      approval: rows(approvals),
-      outcome: fact(facts?.outcome, "not_captured_by_path"),
-      cost: rows(usage),
-      trace: rows(spans),
-      proof: input.anchor === null ? nr("anchor_absent") : rec,
-    },
+    execution: v2 ? execution : null,
+    completeness,
     basis: {
       auditSeq: last ? last.seq : receipt.audit.seq,
       anchorId: input.anchor ? input.anchor.id : null,
@@ -278,7 +308,7 @@ export interface AssembledDecisionBom {
 const integrity = (why: string) => new DecisionBomAssemblyError(500, "bom_integrity_failure", why);
 
 /**
- * B4.4: build the `regulait.decision-bom.v1` body from stored rows. Re-checks every bound row's digest and the
+ * B4.4: build the `regulait.decision-bom.v2` body (ADR-0190 I8) from stored rows. Re-checks every bound row's digest and the
  * addendum chain from `facts_hash` (R35); any mismatch is a 500 `bom_integrity_failure` and nothing is frozen (R5).
  * The caller email-scans and signs the result.
  */
@@ -329,6 +359,7 @@ export function assembleDecisionBom(input: DecisionBomAssemblyInput): AssembledD
   }
 
   const projection = projectDecisionBom({
+    bodyVersion: DECISION_BOM_CURRENT_VERSION,
     receipt: receipt.payload,
     receiptSeq: receipt.receiptSeq,
     facts,
@@ -342,7 +373,7 @@ export function assembleDecisionBom(input: DecisionBomAssemblyInput): AssembledD
   if (first) throw integrity(first.why);
 
   const body: Record<string, unknown> = {
-    v: DECISION_BOM_VERSION,
+    v: DECISION_BOM_CURRENT_VERSION,
     id: input.id,
     auditId: input.auditId,
     version: input.version,
@@ -359,9 +390,10 @@ export function assembleDecisionBom(input: DecisionBomAssemblyInput): AssembledD
     outcome: projection.outcome,
     cost: projection.cost,
     trace: projection.trace,
+    execution: projection.execution,
     proof: { chain: input.chain, anchor: input.anchor },
     facts: { payload: factsBytes, addenda: addendaOut },
-    completeness: Object.fromEntries(DECISION_BOM_SECTIONS.map((s) => [s, projection.completeness[s]])),
+    completeness: Object.fromEntries(decisionBomSectionsFor(DECISION_BOM_CURRENT_VERSION).map((s) => [s, projection.completeness[s]])),
     basis: projection.basis,
   };
   const bodyBytes = bomCanonicalBytes(body);
@@ -371,13 +403,29 @@ export function assembleDecisionBom(input: DecisionBomAssemblyInput): AssembledD
 /** the canonical receipt payload bytes (ADR-0060 `canonicalJson`, byte-identical to RFC 8785 for these shapes) */
 export const bomReceiptBytes = (payload: AnyDecisionReceiptPayload): string => receiptCanonicalBytes(payload);
 
-/** B4.4 Freezing item 5: two bodies are the same version when they differ in nothing but `id`, `version` and `supersedes` */
+/**
+ * B4.4 Freezing item 5: two bodies are the same version when they differ in nothing but `id`, `version` and
+ * `supersedes`. ADR-0190 I8: a format change is not a new fact. A frozen v1 body and a v2 assembly of the same
+ * decision are the same version when the v2 body adds nothing but `v` and an execution section that records
+ * nothing (`not_recorded`: `pre_isolation`, `pre_facts` or `capture_off`). So a decision frozen before I8 keeps
+ * its v1 BOM; it gains a v2 version only when a recorded fact really differs.
+ */
 export function decisionBomSameContent(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
-  const strip = (x: Record<string, unknown>) => {
-    const { id: _id, version: _version, supersedes: _supersedes, ...rest } = x;
-    return bomCanonicalBytes(rest);
+  const strip = (x: Record<string, unknown>, dropExecution: boolean) => {
+    const { id: _id, version: _version, supersedes: _supersedes, v: _v, ...rest } = x;
+    if (!dropExecution) return bomCanonicalBytes({ v: x.v, ...rest });
+    const { execution: _execution, completeness, ...kept } = rest as Record<string, unknown> & { completeness?: Record<string, unknown> };
+    const { execution: _entry, ...others } = completeness ?? {};
+    return bomCanonicalBytes({ ...kept, completeness: others });
   };
-  return strip(a) === strip(b);
+  const formatOnly = (v1: Record<string, unknown>, v2: Record<string, unknown>) => {
+    const entry = (v2.completeness as Record<string, { status?: string; reason?: string }> | undefined)?.execution;
+    const nothing = v2.execution === null && entry?.status === "not_recorded" && ["pre_isolation", "pre_facts", "capture_off"].includes(entry.reason ?? "");
+    return nothing && strip(v1, true) === strip(v2, true);
+  };
+  if (a.v === DECISION_BOM_VERSION && b.v === DECISION_BOM_VERSION_V2) return formatOnly(a, b);
+  if (b.v === DECISION_BOM_VERSION && a.v === DECISION_BOM_VERSION_V2) return formatOnly(b, a);
+  return strip(a, false) === strip(b, false);
 }
 
 /** the SHA-256 hex of bytes (Buffer or text) */
