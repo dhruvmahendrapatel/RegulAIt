@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -67,8 +68,14 @@ import {
   checkUpstreamDestination,
   guardedMcpConnect,
   McpEgressBlockedError,
+  McpUpstreamRefusedError,
   type McpUpstreamRow,
 } from "./mcp-egress.js";
+import { cancelUnattachedStdioSession, placeGovernedStdio, registerLinkedStdioSession, stdioPlacementContext, type GovernedStdioPlacement, type StdioSession } from "./executor-stdio.js";
+import { checkStdioClosure } from "./mcp-transports.js";
+import { isStdioSessionLostError } from "./stdio-session-loss.js";
+import { PROJECT_HEADER } from "./project-header.js";
+import { stdioRefusalSentence } from "./mcp-egress.js";
 import { armOutboundIdentity, IdentityAssertionRefusedError, outboundIdentityFor, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { timeouts } from "./timeouts.js";
 import {
@@ -148,7 +155,8 @@ export /** ADR-0124 — a rule id may be a row id or a symbolic name; only the f
  * belongs in a uuid column. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const PROJECT_HEADER = "x-regulait-project-id";
+// the attribution header lives in a leaf module (an import cycle through compat-core would otherwise read it early)
+export { PROJECT_HEADER };
 const proxyHeaders = z.object({
   [PROJECT_HEADER]: z.string().uuid().optional(),
 });
@@ -257,7 +265,16 @@ export async function refuseStdioWithoutEntitlement(
 export async function connectUpstream(
   db: Db,
   serverRow: McpUpstreamRow,
-  opts: { retry?: RetryReport; retryAttempts?: number; outboundIdentity?: OutboundIdentity | null } = {},
+  opts: {
+    retry?: RetryReport;
+    retryAttempts?: number;
+    outboundIdentity?: OutboundIdentity | null;
+    /**
+     * ADR-0190 I4: the call a stdio connect serves (person, project, delegation grant), the inputs of the
+     * isolation placement. Absent = no project: a stdio connect is refused `policy_unresolved` (fail closed).
+     */
+    placement?: { userId: string; projectId: string | null; delegationGrantId?: string | null; linkedOfferId?: string | null } | null;
+  } = {},
 ): Promise<Client> {
   // ADR-0128 — THE RETRY SEQUENCE WRAPS BOTH GATES, and that is the point of
   // putting it here rather than inside `guardedMcpConnect`. A handshake is
@@ -281,6 +298,10 @@ export async function connectUpstream(
       await assertAdmitted(db, serverRow.id);
       return guardedMcpConnect(db, serverRow, {
         connectDeadlineMs: deadlineMs,
+        // ADR-0190 I4: only a stdio row is placed; the context is read fresh per attempt
+        ...(serverRow.transport === "stdio" && opts.placement
+          ? { placement: { ...(await stdioPlacementContext(db, opts.placement)), linkedOfferId: opts.placement.linkedOfferId ?? null } }
+          : {}),
         // ADR-0188 S8: an opted-in server's identity holder (unarmed until the call is allowed)
         ...(opts.outboundIdentity ? { outboundIdentity: opts.outboundIdentity } : {}),
       });
@@ -617,7 +638,16 @@ export async function executeGovernedToolCall(
   // approval) is a `denied` span carrying its reason, not an absent one.
   const traceStartedAt = new Date();
   const traceInput: { value?: Record<string, unknown> } = {};
-  const outcome = await executeGovernedToolCallInner(db, _dataKey, args, traceInput);
+  // ADR-0190 I4 (review low): the offer a governed stdio decision made. If the call returns (or throws) without its
+  // connect having taken the session, a LATER gate stopped it: the offer is withdrawn and its evidence says
+  // `cancelled` (later_gate), never `placed`; a sandbox that already started gets no workload.
+  const stdioHold: { session: StdioSession | null } = { session: null };
+  let outcome: GovernedToolCallOutcome;
+  try {
+    outcome = await executeGovernedToolCallInner(db, _dataKey, args, traceInput, stdioHold);
+  } finally {
+    if (stdioHold.session) await cancelUnattachedStdioSession(db, stdioHold.session, args.userId).catch(() => undefined);
+  }
   if (args.trace) {
     const denied =
       outcome.kind === "denied" ||
@@ -697,6 +727,7 @@ async function executeGovernedToolCallInner(
   dataKey: string | undefined,
   args: Parameters<typeof executeGovernedToolCall>[2],
   traceInput: { value?: Record<string, unknown> },
+  stdioHold: { session: StdioSession | null },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
   // ADR-0185 G3: `mcp:` names are protocol grants, never tools — a tool so
@@ -839,7 +870,9 @@ async function executeGovernedToolCallInner(
       if (refused) return refused;
       let upstreamTools;
       try {
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity });
+        // ADR-0190 I4 (review M1): for stdio this is an UNLINKED placement (`placeStdioSession`): there is no tool
+        // decision yet, so its placement row is keyed to its own audit row and is outside the I4/I8 decision contract
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null } });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
@@ -971,9 +1004,34 @@ async function executeGovernedToolCallInner(
     // scrubbed on the queue row instead.
     // ADR-0189 B2: written only if the epoch and the kill-switch state it was decided under still hold, read in
     // this transaction (`decisionPolicyStillCurrent`); otherwise refused, nothing written, nothing run
+    //
+    // ADR-0190 I4 (with the I8 contract): an ALLOWED call on a stdio server decides its isolation placement in this
+    // same transaction, BEFORE the decision row, keyed to that row's id, so the decision's facts name the placement.
+    // A placement refused here (no executor at the required class, and every other decision 7 reason) makes the
+    // decision itself the refusal, under rule id `execution-profile`. A row whose closure image is not pinned is
+    // left to the connect, which refuses it (`mcp_stdio_image_unpinned`).
+    const decisionAuditId = randomUUID();
+    let stdioPlacement: GovernedStdioPlacement | null = null;
+    const stdioClosure = serverRow.transport === "stdio" ? checkStdioClosure(serverRow.stdioCommandDigest, serverRow.stdioCommand, serverRow.stdioArgs) : null;
     const recorded = await db.transaction(async (tx) => {
       if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName }))) return false;
+      if (decision.effect === "allow" && stdioClosure?.ok) {
+        stdioPlacement = await placeGovernedStdio(tx as unknown as Db, decisionAuditId, {
+          ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null })),
+          mcpServerId: serverId,
+          imageDigest: stdioClosure.image,
+        });
+        if (stdioPlacement.kind === "refused") {
+          decision = {
+            effect: "deny",
+            ruleId: "execution-profile",
+            ruleChain: decision.ruleChain,
+            reason: `stdio MCP server '${serverRow.name}' refused (execution_profile_unavailable: ${stdioPlacement.code}): ${stdioRefusalSentence(stdioPlacement.code)}`,
+          };
+        }
+      }
       await tx.insert(auditLog).values({
+      id: decisionAuditId,
       userId,
       serverId,
       toolName,
@@ -1004,6 +1062,14 @@ async function executeGovernedToolCallInner(
         policyEpoch,
         killSwitch,
         receiptClass: "decision",
+        // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
+        ...(stdioPlacement
+          ? {
+              execution: (stdioPlacement as GovernedStdioPlacement).kind === "offered"
+                ? { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).placementId, offerId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).offerId }
+                : { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).placementId, refusal: "execution_profile_unavailable", reason: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).code },
+            }
+          : {}),
       },
       effect: decision.effect,
       ruleId: decision.ruleId,
@@ -1022,6 +1088,13 @@ async function executeGovernedToolCallInner(
         detail: { ...(args.detail ?? {}), projectId, target: auditTarget(serverRow) },
       });
       return { kind: "denied", decision: refusal };
+    }
+
+    // ADR-0190 I4: the executor's stdio window must find the session as soon as its report is accepted
+    const linked = stdioPlacement as GovernedStdioPlacement | null;
+    const linkedOfferId = linked?.kind === "offered" && stdioClosure?.ok ? linked.offerId : null;
+    if (linked?.kind === "offered" && stdioClosure?.ok) {
+      stdioHold.session = registerLinkedStdioSession(db, { offerId: linked.offerId, executorId: linked.executorId }, { command: stdioClosure.command, args: stdioClosure.args }, userId);
     }
 
     if (decision.effect === "deny") return { kind: "denied", decision };
@@ -1248,7 +1321,7 @@ async function executeGovernedToolCallInner(
       const refused = await breakerRefusesUpstream();
       if (refused) return refused;
       try {
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId } });
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
@@ -1910,7 +1983,9 @@ export async function resolveNodeToolContext(
       if (await breakerAdmits(db, serverRow)) continue;
       let upstreamTools;
       try {
-        upstream = await connectUpstream(db, serverRow);
+        // ADR-0190 I4 (review M1): for stdio, an UNLINKED manifest placement for the initiating user (no decision
+        // exists yet; outside the I4/I8 decision contract, `placeStdioSession`)
+        upstream = await connectUpstream(db, serverRow, { placement: { userId, projectId: null } });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         if (classifyUpstreamError(err).why !== "our_own_refusal") {
@@ -2122,10 +2197,20 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
     }
     /** The two refusals that are OURS, as the route's plain pre-hijack 403. */
     const ownRefusal = (err: unknown) => {
+      // ADR-0190 decision 7 (I4): a stdio server no executor can run at its required class answers the isolation
+      // envelope, 409 `execution_profile_unavailable` with rule id `execution-profile` and the fixed reason
+      if (err instanceof McpUpstreamRefusedError && err.error === "execution_profile_unavailable" && err.executionRefusal) {
+        return reply.status(409).send({
+          error: "execution_profile_unavailable",
+          ruleId: "execution-profile",
+          reason: err.executionRefusal,
+          detail: err.decision.reason,
+        });
+      }
       if (err instanceof McpEgressBlockedError) {
         // ADR-0185 G4: `egress_blocked` for a destination refusal, the
         // transport refusal's own contract code otherwise (e.g.
-        // `mcp_stdio_digest_mismatch`, `mcp_transport_disabled`)
+        // `mcp_stdio_image_unpinned`, `mcp_transport_disabled`)
         return reply.status(403).send({
           error: err.error,
           code: err.decision.code,
@@ -2172,7 +2257,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       // Tool calls own admission in the shared primitive. Protocol setup is
       // local; only a manifest request needs a connection at this boundary.
       if (needsManifest && !storedManifest) {
-        upstream = await connectUpstream(db, serverRow, { retry: connectRetry });
+        // ADR-0190 I4 (review M1): for stdio, an UNLINKED placement for the manifest (no decision exists yet): its
+        // own audit row, outside the I4/I8 decision contract (`placeStdioSession`)
+        upstream = await connectUpstream(db, serverRow, { retry: connectRetry, placement: { userId, projectId } });
       }
       // B3S-02: the client left while we were connecting — close it now
       if (clientGone || reply.raw.destroyed || req.raw.socket?.destroyed) {
@@ -2418,6 +2505,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
           await finishTrace(db, toolTrace, "denied");
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.message}`);
         }
+        // ADR-0190 I4 (recheck N2): a lost stdio session's error is recognised (and its in-process nonce stripped)
+        // before anything is answered, so a client never sees a value it could replay
+        isStdioSessionLostError(err);
         throw err;
       });
       await finishTrace(

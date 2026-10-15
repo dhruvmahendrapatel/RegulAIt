@@ -56,6 +56,9 @@ export const EXECUTOR_CHANNEL_ROUTES = [
   `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/decline`,
   `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/report`,
   `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/end`,
+  // I4: a placed stdio session's bytes (stdio.ts), on the same proof
+  `GET ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/stdio`,
+  `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/stdio`,
 ] as const;
 
 export const EXECUTOR_PROOF_HEADER = "executor-proof" as const;
@@ -202,6 +205,12 @@ export const executorReportResponseSchema = z
     placementId: z.string().uuid(),
     reportSha256: z.string().regex(/^[0-9a-f]{64}$/),
     next: z.enum(EXECUTOR_NEXT),
+    /**
+     * I4 (review M4): for an mcp_stdio placement, the session's 32-byte MAC secret (base64url). The gateway derives
+     * it from its deploy-time data key and the offer id (every replica derives the same one); the executor verifies
+     * every `start` and `stdin` line with it. Sent only in this answer, over the executor's TLS channel.
+     */
+    stdioSecret: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
   })
   .strict();
 export type ExecutorReportResponse = z.infer<typeof executorReportResponseSchema>;

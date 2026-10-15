@@ -401,7 +401,8 @@ export interface McpServer {
    * is never opened by this flag. */
   allowPrivateRanges?: boolean | null;
   transport?: "streamable_http" | "sse" | "stdio";
-  stdio?: { command: string; args: string[] } | null;
+  /** ADR-0190 I4: `image` is the closure image digest the sandbox runs (also `stdioCommandDigest`) */
+  stdio?: { image?: string | null; command: string; args: string[] } | null;
   stdioCommandDigest?: string | null;
   admissionState?: string;
   /** ADR-0188 S8: does each call send this upstream a signed assertion of who it is for? Default `none`. */

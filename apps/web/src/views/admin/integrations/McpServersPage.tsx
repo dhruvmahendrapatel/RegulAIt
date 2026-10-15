@@ -113,7 +113,7 @@ function McpServersTab() {
                   </span>
                 ),
               },
-              { key: "digest", header: "Pinned command digest", render: (s) => s.stdioCommandDigest ? <span className={v.mono}>{s.stdioCommandDigest}</span> : "Not applicable" },
+              { key: "digest", header: "Pinned closure image", render: (s) => s.stdioCommandDigest ? <span className={v.mono}>{s.stdioCommandDigest}</span> : "Not applicable" },
               { key: "owner", header: "Ownership", render: (s) => s.ownership ?? "Not reported" },
               {
                 key: "flat",
@@ -331,6 +331,7 @@ function RegisterServerForm() {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [transport, setTransport] = useState("streamable_http");
+  const [image, setImage] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState<string[]>([]);
   const [privateRanges, setPrivateRanges] = useState("inherit");
@@ -351,7 +352,7 @@ function RegisterServerForm() {
                   {
                     name,
                     transport,
-                    ...(transport === "stdio" ? { stdio: { command, args } } : { url, allowPrivateRanges: privateRangeValue(privateRanges) }),
+                    ...(transport === "stdio" ? { stdio: { image, command, args } } : { url, allowPrivateRanges: privateRangeValue(privateRanges) }),
                   },
                   h,
                 ),
@@ -362,6 +363,7 @@ function RegisterServerForm() {
             if (ok) {
               setName("");
               setUrl("");
+              setImage("");
               setCommand("");
               setArgs([]);
               setPrivateRanges("inherit");
@@ -376,9 +378,10 @@ function RegisterServerForm() {
         <option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">Stdio</option>
       </Select></Field>
       {transport === "stdio" ? <>
-        <Field label="Executable path"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={act.busy} placeholder="/opt/mcp/bin/server" /></Field>
+        <Field label="Closure image digest"><Input required pattern="sha256:[0-9a-f]{64}" value={image} onChange={(event) => setImage(event.target.value)} disabled={act.busy} placeholder="sha256:…" /></Field>
+        <Field label="Entry point in the image"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={act.busy} placeholder="/srv/mcp/server.js" /></Field>
         <StdioArguments args={args} onChange={setArgs} disabled={act.busy} />
-        <p>Stdio must be enabled above and allowed by the deployment operator. The command must be an absolute executable path in an allowed directory, with secure file and parent permissions. Registration pins its digest and requires admission approval.</p>
+        <p>Stdio must be enabled above. The server never runs on the gateway: it runs from the closure image (built from the RegulAIt stdio base, pinned by its digest) inside a sandbox an executor starts, only after the executor proves the isolation the call requires. Without such an executor every call is refused. Registration requires admission approval.</p>
       </> : <Field label="URL" grow>
         <Input required value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://mcp.internal/repo" />
       </Field>

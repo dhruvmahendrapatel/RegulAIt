@@ -52,7 +52,7 @@
 import { z } from "zod";
 // ADR-0182 S5 — the ISACA AI agents pack is authored data in its own file
 // (type-only imports back into this one, so there is no runtime cycle)
-import { ISACA_AI_AGENTS_PACK } from "./isaca-pack.js";
+import { ISACA_AI_AGENTS_PACK, ISACA_AI_AGENTS_PACK_V2 } from "./isaca-pack.js";
 // batch B1 — a pack's cascade PRESET is validated with the SAME check every
 // compliance-profile version body passes: only enforcing profile columns,
 // correctly typed, selection (`tag`) refused. One validator, not two.
@@ -155,6 +155,13 @@ export const EVIDENCE_COLLECTORS = [
    * (`decision_regression_runs.created_at`). Org-wide configuration testing
    * with no project: counted under an org-scoped report only. */
   "decision_regression_runs",
+  /** ADR-0190 I4: `execution_placements` PLACED in the period at L2
+   * (`user_space_kernel`) or L3 (`microvm`): a workload an executor ran in a
+   * sandbox after the gateway accepted that sandbox's own signed probe
+   * report. A refused, mismatched or `customer_declared` placement is never
+   * counted. Org-wide (a placement row carries no project): counted under an
+   * org-scoped report only. Software-attested evidence (ADR-0190 decision 6). */
+  "isolation_placements",
   /** NOT AUTO-EVIDENCED. Pairs with attestationRequired. */
   "none",
 ] as const;
@@ -1784,4 +1791,6 @@ DEFAULT_COMPLIANCE_PACKS.push(
     controls: euV3Controls,
   }),
   ISACA_AI_AGENTS_PACK,
+  // ADR-0190 I4: item 5 evidenced by sandbox placements
+  ISACA_AI_AGENTS_PACK_V2,
 );

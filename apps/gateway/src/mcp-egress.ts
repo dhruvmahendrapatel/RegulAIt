@@ -42,7 +42,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { auditLog, eq, mcpServers, type Db } from "@regulait/db";
-import type { McpUpstreamTransport } from "@regulait/shared";
+import type { ExecutionRefusalReason, McpUpstreamTransport } from "@regulait/shared";
 import {
   checkEgress,
   createGuardedFetch,
@@ -53,17 +53,14 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import {
-  acquireStdioSlot,
-  checkStdioCommand,
+  checkStdioClosure,
   isSseCrossOriginRefusal,
-  loadStdioHostPolicy,
   openTransport,
   rowTransport,
-  STDIO_ALLOWED_DIRS_ENV,
-  STDIO_MAX_PROCS_ENV,
   type StdioRefusalCode,
   type UpstreamLaunch,
 } from "./mcp-transports.js";
+import { attachLinkedStdioSession, placeStdioSession, type StdioPlacementInput, type StdioSessionFailure } from "./executor-stdio.js";
 import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
 import { identityAssertionMiddleware, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { loadEgressAllowList } from "./custom-providers.js";
@@ -89,6 +86,20 @@ export interface McpEgressDeps {
    * the egress guard already allowed; absent = byte-identical to before.
    */
   outboundIdentity?: OutboundIdentity | null;
+  /**
+   * ADR-0190 I4: who a stdio connect runs for — the person, the project the
+   * call is attributed to, the agent and the delegation grant — the inputs of
+   * decision 7's required class. Absent (a sweep, a probe, a connect with no
+   * call behind it) = no project, which never resolves: the placement is
+   * refused `policy_unresolved` and nothing starts (fail closed, never
+   * defaulted).
+   */
+  placement?: (Pick<StdioPlacementInput, "userId" | "projectId" | "agent" | "parentGrantId"> & {
+    /** the offer the governed decision already made (its placement row is keyed to that decision, I4/I8) */
+    linkedOfferId?: string | null;
+  }) | null;
+  /** tests: how long to wait for the executor's per-placement report (default the offer TTLs) */
+  placementTimeoutMs?: number;
 }
 
 /** Everything one decision needs: the allow-list snapshot and the EFFECTIVE
@@ -302,10 +313,11 @@ export interface McpUpstreamRow {
  * name (`err.error`). */
 export const MCP_UPSTREAM_REFUSALS = {
   mcp_transport_disabled: "mcp-transport-disabled",
-  mcp_stdio_unavailable: "mcp-stdio-unavailable",
   mcp_stdio_command_refused: "mcp-stdio-command-refused",
-  mcp_stdio_digest_mismatch: "mcp-stdio-digest-mismatch",
-  mcp_stdio_busy: "mcp-stdio-busy",
+  /** ADR-0190 I4: a stdio row whose image is not pinned by digest (e.g. an older host-path registration) */
+  mcp_stdio_image_unpinned: "mcp-stdio-image-unpinned",
+  /** ADR-0190 decision 7: no executor can run this stdio server at its required isolation class */
+  execution_profile_unavailable: "execution-profile",
   mcp_sse_endpoint_refused: "mcp-sse-endpoint-refused",
 } as const;
 export type McpUpstreamRefusal = keyof typeof MCP_UPSTREAM_REFUSALS;
@@ -325,6 +337,8 @@ export class McpUpstreamRefusedError extends McpEgressBlockedError {
     error: McpUpstreamRefusal,
     reason: string,
     readonly refusalCode?: StdioRefusalCode,
+    /** ADR-0190 decision 7: the fixed reason of an `execution_profile_unavailable` refusal */
+    readonly executionRefusal?: ExecutionRefusalReason | "execution_profile_mismatch" | StdioSessionFailure,
   ) {
     super({ ok: false, code: (refusalCode ?? error) as unknown as EgressDenyCode, reason });
     this.error = error;
@@ -342,9 +356,11 @@ async function refuseUpstream(
   reason: string,
   detail: Record<string, unknown> = {},
   refusalCode?: StdioRefusalCode,
+  executionRefusal?: ExecutionRefusalReason | "execution_profile_mismatch" | StdioSessionFailure,
+  userId?: string | null,
 ): Promise<never> {
   await db.insert(auditLog).values({
-    userId: NIL_USER,
+    userId: userId ?? NIL_USER,
     serverId: row.id,
     objectType: "mcp_server",
     objectId: row.id,
@@ -354,7 +370,7 @@ async function refuseUpstream(
     ruleChain: [],
     reason,
   });
-  throw new McpUpstreamRefusedError(error, reason, refusalCode);
+  throw new McpUpstreamRefusedError(error, reason, refusalCode, executionRefusal);
 }
 
 type FullUpstreamRow = McpUpstreamRow & { transport: McpUpstreamTransport };
@@ -384,10 +400,10 @@ export type UpstreamDestination =
   | {
       transport: "stdio";
       row: FullUpstreamRow;
-      realCommand: string;
+      /** the closure image (content digest), its entry point and argv — re-checked from the stored row */
+      image: string;
+      command: string;
       args: string[];
-      allowedDir: string;
-      maxProcs: number;
     };
 
 /**
@@ -398,10 +414,12 @@ export type UpstreamDestination =
  *     an admin who takes SSE or stdio away stops existing servers at once;
  *  2. Streamable HTTP and SSE: the URL egress decision, exactly as before
  *     (audited `mcp-server-egress-blocked`, `McpEgressBlockedError`);
- *  3. stdio: the host opt-in, then the command rules on the file as it is
- *     NOW, then the pinned digest. The row's `stdio:<name>` URL is never
- *     handed to a fetch on this branch (and it fails the egress check on any
- *     path that forgets to branch, so such a path fails closed).
+ *  3. stdio (ADR-0190 I4): the closure rules on the stored row — the image
+ *     pinned by content digest, the entry point an absolute path inside it,
+ *     argv bounded. Nothing on this host is looked at or started: the
+ *     placement in a sandbox is `guardedMcpConnect`'s. The row's `stdio:<name>`
+ *     URL is never handed to a fetch on this branch (and it fails the egress
+ *     check on any path that forgets to branch, so such a path fails closed).
  */
 export async function checkUpstreamDestination(
   db: Db,
@@ -423,49 +441,23 @@ export async function checkUpstreamDestination(
     );
   }
   if (row.transport === "stdio") {
-    const policy = await loadStdioHostPolicy();
-    if (policy.allowedDirs.length === 0) {
-      await refuseUpstream(
-        db,
-        row,
-        "mcp_stdio_unavailable",
-        `${label} refused: this host has not enabled stdio upstreams (${STDIO_ALLOWED_DIRS_ENV} names no ` +
-          `existing directory). Nothing was started.`,
-      );
-    }
-    if (!row.stdioCommand || !row.stdioCommandDigest || !Array.isArray(row.stdioArgs)) {
-      await refuseUpstream(db, row, "mcp_stdio_command_refused", `${label} refused: the stored stdio command is incomplete. Nothing was started.`, {}, "not_absolute");
-    }
-    const check = await checkStdioCommand(row.stdioCommand!, row.stdioArgs, policy);
+    const check = checkStdioClosure(row.stdioCommandDigest, row.stdioCommand, row.stdioArgs);
     if (!check.ok) {
       await refuseUpstream(
         db,
         row,
-        "mcp_stdio_command_refused",
-        `${label} refused (${check.code}): ${check.detail}. Nothing was started.`,
-        { command: row.stdioCommand },
+        check.code === "image_unpinned" ? "mcp_stdio_image_unpinned" : "mcp_stdio_command_refused",
+        `${label} refused (${check.code}): ${check.detail}. ` +
+          (check.code === "image_unpinned"
+            ? "A stdio server registered before isolation ran from a path on the gateway host; it must be re-registered " +
+              "with a closure image. Nothing was started."
+            : "Nothing was started."),
+        { command: typeof row.stdioCommand === "string" ? row.stdioCommand.slice(0, 512) : null },
         check.code,
       );
       throw new Error("unreachable");
     }
-    if (check.digest !== row.stdioCommandDigest) {
-      await refuseUpstream(
-        db,
-        row,
-        "mcp_stdio_digest_mismatch",
-        `${label} refused: the command file changed since it was registered (sha256 ${check.digest} ≠ pinned ` +
-          `${row.stdioCommandDigest}). An admin must review the new binary and re-pin it. Nothing was started.`,
-        { command: row.stdioCommand, pinnedDigest: row.stdioCommandDigest, observedDigest: check.digest },
-      );
-    }
-    return {
-      transport: "stdio",
-      row,
-      realCommand: check.realCommand,
-      args: [...(row.stdioArgs as string[])],
-      allowedDir: check.allowedDir,
-      maxProcs: policy.maxProcs,
-    };
+    return { transport: "stdio", row, image: check.image, command: check.command, args: check.args };
   }
   const { decision, posture } = await checkMcpServerUrl(db, row.url, row.allowPrivateRanges, deps);
   if (!decision.ok) {
@@ -538,27 +530,39 @@ export async function guardedMcpConnect(
 
   let launch: UpstreamLaunch;
   if (dest.transport === "stdio") {
-    // ONE PROCESS PER REQUEST, capped process-wide. A full host is our own
-    // refusal (audited, never charged to the upstream's breaker).
-    const release = acquireStdioSlot(dest.maxProcs);
-    if (!release) {
+    // ADR-0190 I4: decision 7 for this connect, then a sandbox whose per-placement report the gateway accepted.
+    // There is NO in-process fallback: no executor at the required class is a refusal (audited, 409 envelope).
+    const ctx = deps.placement ?? null;
+    // a governed tools/call decided its placement in its own decision transaction: attach to that offer's session.
+    // Every other connect (a manifest sync, a protocol method) is placed here, with its own audited decision 7.
+    const placed = ctx?.linkedOfferId
+      ? await attachLinkedStdioSession(db, ctx.linkedOfferId, deps.placementTimeoutMs ?? deadlineMs, ctx.userId ?? null)
+      : await placeStdioSession(db, {
+      userId: ctx?.userId ?? null,
+      projectId: ctx?.projectId ?? null,
+      agent: ctx?.agent ?? null,
+      parentGrantId: ctx?.parentGrantId ?? null,
+      mcpServerId: dest.row.id,
+      imageDigest: dest.image,
+      workload: { command: dest.command, args: dest.args },
+      // the placement (offer, sandbox start, accepted report) is part of the connect, inside its deadline
+      timeoutMs: deps.placementTimeoutMs ?? deadlineMs,
+    });
+    if (placed.kind === "refused") {
       observe("refused");
       await refuseUpstream(
         db,
         dest.row,
-        "mcp_stdio_busy",
-        `${label} refused: this host already runs its maximum of ${dest.maxProcs} stdio upstream process(es) ` +
-          `(${STDIO_MAX_PROCS_ENV}). Retry when one finishes; nothing was started.`,
-        { maxProcs: dest.maxProcs },
+        "execution_profile_unavailable",
+        `${label} refused (${placed.reason}): ${stdioRefusalSentence(placed.reason)} Nothing was started on the gateway host, ` +
+          `and nothing reached the server.`,
+        { reason: placed.reason, placementId: placed.placementId, refusalRuleId: "execution-profile" },
+        undefined,
+        placed.reason,
+        ctx?.userId ?? null,
       );
     }
-    launch = {
-      transport: "stdio",
-      realCommand: dest.realCommand,
-      args: dest.args,
-      allowedDir: dest.allowedDir,
-      release: release!,
-    };
+    launch = { transport: "stdio", session: (placed as Extract<typeof placed, { kind: "placed" }>).session };
   } else {
     const guarded = createGuardedFetch({
       allowList: dest.posture.allowList,
@@ -618,6 +622,31 @@ export async function guardedMcpConnect(
   return client;
 }
 
+/** the plain-language sentence for each isolation refusal of a stdio connect (decision 7's fixed reasons) */
+export function stdioRefusalSentence(reason: ExecutionRefusalReason | "execution_profile_mismatch" | StdioSessionFailure): string {
+  switch (reason) {
+    case "no_executor":
+      return "No sandbox executor is available to run this stdio server. An administrator must register an executor that attests the required isolation.";
+    case "attestation_stale":
+      return "The sandbox executors have not proved their isolation recently enough. The executor's next self-test restores it.";
+    case "class_below_required":
+      return "The available sandbox isolation is weaker than this call requires, and a call is never run below its required isolation.";
+    case "executor_quarantined":
+      return "Every executor that could run this server is quarantined after a failed check. An administrator must review and re-enable one.";
+    case "profile_retired":
+      return "The execution profile assigned to this server has been retired. An administrator must assign a current profile.";
+    case "policy_unresolved":
+      return "The isolation this call needs could not be worked out: the call must name a project whose AI use cases give it a data sensitivity.";
+    case "execution_profile_mismatch":
+      return "The sandbox did not match its execution profile, so it was stopped before receiving any input and its executor was quarantined.";
+    // ADR-0190 I4 (review lows): not decision 7 refusals, each labelled as what it is
+    case "placement_timeout":
+      return "The sandbox executor did not confirm the sandbox before the call's deadline, so the placement was withdrawn and the sandbox, if one started, got no input.";
+    case "session_lost":
+      return "The gateway no longer holds this call's sandbox session (it was abandoned or its executor side was lost); this is the gateway's own refusal, not the server's failure.";
+  }
+}
+
 // ===========================================================================
 // ADR-0185 G4 — WRITE TIME: the transport rules at registration and update
 // ===========================================================================
@@ -629,20 +658,22 @@ export type McpTransportWriteResult =
       status: 400 | 422;
       body: { error: McpUpstreamRefusal; detail: string; code?: StdioRefusalCode };
     };
+/* ADR-0190 I4: `stdio.digest` is the closure image's content digest (stored in `stdio_command_digest`). */
 
 /**
  * The transport half of `POST`/`PATCH /v1/servers`, in one call (the
  * `refuseMcpServerWrite` shape): the org's transport list first (422
- * `mcp_transport_disabled`), then for stdio the host opt-in (422
- * `mcp_stdio_unavailable`) and the command rules (400
- * `mcp_stdio_command_refused` with `code`). On allow, a stdio server's pinned
- * digest is returned. Every refusal is audited; nothing is saved.
+ * `mcp_transport_disabled`), then for stdio the closure rules (400
+ * `mcp_stdio_image_unpinned` for an image not pinned by digest, 400
+ * `mcp_stdio_command_refused` with `code` for the entry point or argv). On
+ * allow, a stdio server's pinned image digest is returned. Nothing on the
+ * gateway host is looked at (ADR-0190 I4). Every refusal is audited; nothing is saved.
  */
 export async function checkMcpTransportWrite(
   db: Db,
   args: {
     transport: McpUpstreamTransport;
-    stdio?: { command: string; args: unknown } | undefined;
+    stdio?: { image?: unknown; command: string; args: unknown } | undefined;
     userId?: string | null;
     serverId?: string | null;
     phase: "registration" | "update";
@@ -681,29 +712,18 @@ export async function checkMcpTransportWrite(
     );
   }
   if (args.transport !== "stdio") return { ok: true, stdio: null };
-  const policy = await loadStdioHostPolicy();
-  if (policy.allowedDirs.length === 0) {
-    return refuse(
-      422,
-      "mcp_stdio_unavailable",
-      `this host has not enabled stdio upstreams: ${STDIO_ALLOWED_DIRS_ENV} names no existing directory.`,
-    );
-  }
   if (!args.stdio) {
-    return refuse(400, "mcp_stdio_command_refused", "a stdio server needs a command.", {}, "not_absolute");
+    return refuse(400, "mcp_stdio_command_refused", "a stdio server needs a closure image and a command.", {}, "not_absolute");
   }
-  const check = await checkStdioCommand(args.stdio.command, args.stdio.args, policy);
+  const check = checkStdioClosure(args.stdio.image, args.stdio.command, args.stdio.args);
   if (!check.ok) {
     return refuse(
       400,
-      "mcp_stdio_command_refused",
+      check.code === "image_unpinned" ? "mcp_stdio_image_unpinned" : "mcp_stdio_command_refused",
       `${check.detail} (${check.code}).`,
       { command: typeof args.stdio.command === "string" ? args.stdio.command.slice(0, 512) : null },
       check.code,
     );
   }
-  return {
-    ok: true,
-    stdio: { command: args.stdio.command, args: [...(args.stdio.args as string[])], digest: check.digest },
-  };
+  return { ok: true, stdio: { command: check.command, args: check.args, digest: check.image } };
 }

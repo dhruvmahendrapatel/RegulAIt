@@ -821,6 +821,79 @@ services:
     networks: [regulait]
 
   # --- TLS terminator (profile: tls) -----------------------------------------
+  # --- sandbox executor (profile: isolation) — ADR-0190 slice I4 ---------------
+  #
+  # Stdio MCP servers never run on the gateway host (OWNER DECISION 2). They run
+  # in a gVisor sandbox (`runsc`, isolation class L2) that THIS service starts on
+  # the host's Docker daemon, from the server's closure image pinned by digest,
+  # after proving the sandbox from inside it. OFF unless the `isolation` profile
+  # is up; without it every stdio call is refused 409
+  # `execution_profile_unavailable` (no fallback: ADR-0180).
+  #
+  # Needs, on the host (INSTALL.md "Sandboxed stdio MCP servers"):
+  #   - gVisor installed from its pinned release tarball and registered with the
+  #     daemon as the runtime `runsc`, with runtimeArgs exactly the profile's
+  #     runsc flags (--oci-seccomp, --network=none, the sidecar policies,
+  #     --platform=systrap, --directfs=false);
+  #   - the RegulAIt stdio base image built and its digest in
+  #     REGULAIT_STDIO_BASE_IMAGE (the self-test's canary);
+  #   - the executor registered on the Engines page (POST /v1/executors) with the
+  #     public key it prints on first start, and REGULAIT_EXECUTOR_IDENTIFIER set.
+  #
+  # The executor holds the host's Docker socket: it is as privileged as the
+  # daemon, which is why the GATEWAY never gets that socket (ADR-0187 decision 1)
+  # and the executor holds nothing else (no secret: its key is a file it
+  # generates on its own volume). Its only network is the internal `engines`
+  # network, which reaches the gateway and nothing off the host. The sandboxes it
+  # starts have no network at all (`--network none`): the MCP bytes travel over
+  # the executor's channel. Plain http to the gateway on that internal network is
+  # the development flag (amendment V); a deployment uses https.
+  sandbox-executor:
+    profiles: ["isolation"]
+    build:
+      context: .
+      dockerfile: packages/sandbox-executor/Dockerfile
+    image: regulait/sandbox-executor:local
+    depends_on:
+      gateway:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    # the docker group of the HOST (owner of /var/run/docker.sock); set REGULAIT_DOCKER_GID to it
+    group_add: ["${REGULAIT_DOCKER_GID:-999}"]
+    mem_limit: 512m
+    pids_limit: 256
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandbox-executor-state:/state
+      # review H2: the executor-controlled sandbox init. The executor copies its hash-pinned init here; every
+      # sandbox mounts this same named volume READ-ONLY as its entry point.
+      - sandbox-init:/regulait-init
+      # review H2 / recheck N1: the host's gVisor DIRECTORY, READ-ONLY, so the executor hashes the runsc binary the
+      # daemon runs against the pinned release. A directory, never the file: a single-file bind mount pins the inode
+      # at container start, so an upgrade in place would leave the executor hashing the old binary.
+      - ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}:/host-gvisor:ro
+    environment:
+      # review M4: https only. There is no working default: set REGULAIT_EXECUTOR_GATEWAY_URL to an https address of
+      # the gateway reachable from the `engines` network. The placeholder (.invalid never resolves) makes the executor
+      # exit at start with that instruction. Plain http only through compose.isolation-insecure-dev.yml (warned).
+      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://set-regulait-executor-gateway-url.invalid}
+      REGULAIT_EXECUTOR_INIT_VOLUME: regulait-sandbox-init
+      REGULAIT_EXECUTOR_INIT_DIR: /regulait-init
+      REGULAIT_EXECUTOR_RUNSC_BINARY: /host-gvisor/runsc
+      REGULAIT_EXECUTOR_RUNSC_HOST_PATH: ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}/runsc
+      REGULAIT_PUBLIC_URL: ${REGULAIT_PUBLIC_URL:-}
+      REGULAIT_EXECUTOR_IDENTIFIER: ${REGULAIT_EXECUTOR_IDENTIFIER:-}
+      REGULAIT_EXECUTOR_KEY_FILE: /state/executor-key.json
+      REGULAIT_EXECUTOR_BACKEND: gvisor
+      REGULAIT_EXECUTOR_RUNSC_RUNTIME: runsc
+      REGULAIT_EXECUTOR_RUNSC_VERSION: release-20261005.0
+      REGULAIT_EXECUTOR_CANARY_IMAGE: ${REGULAIT_STDIO_BASE_IMAGE:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    restart: unless-stopped
+    networks: [engines]
+
   caddy:
     image: caddy:2-alpine
     profiles: ["tls"]
@@ -954,5 +1027,10 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=256m,uid=10001,gid=10001,mode=0750"
+  # ADR-0190 I4: the sandbox executor's own state (its key only)
+  sandbox-executor-state:
+  # review H2: a FIXED name, because the executor names it on each `docker run --mount` against the host daemon
+  sandbox-init:
+    name: regulait-sandbox-init
   caddy_data:
   caddy_config:

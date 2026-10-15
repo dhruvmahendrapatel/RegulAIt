@@ -5,19 +5,45 @@
  * first start, and runs the loop against the backend named by
  * `REGULAIT_EXECUTOR_BACKEND`.
  *
- * I3 ships NO backend: `gvisor` arrives with slice I4, `kata` with I6,
- * `openshell` with I7. Until then this process refuses to start (exit 2)
+ * Backends: `gvisor` (slice I4, `runsc` under Docker); `kata` arrives with
+ * I6 and `openshell` with I7. Any other name refuses to start (exit 2)
  * rather than run anything that is not a real OS boundary — and the fake
  * backend is deliberately not reachable from here.
  */
+import { fileURLToPath } from "node:url";
 import { loadOrCreateExecutorKey } from "./keys.js";
 import { ProofChannelCredential } from "./channel-credential.js";
-import { checkGatewayUrl, ExecutorClient, ExecutorConfigError } from "./client.js";
+import { checkGatewayUrl, ExecutorClient, ExecutorConfigError, probeGatewayReachable } from "./client.js";
 import { ExecutorFatalError, runExecutorLoop } from "./loop.js";
 import type { SandboxBackend } from "./backend.js";
+import { RunscBackendError, RunscDockerBackend } from "./runsc-backend.js";
 
-/** the backends a deployment may name (filled by I4/I6/I7) */
-const BACKENDS: Readonly<Record<string, (() => Promise<SandboxBackend>) | undefined>> = {};
+/**
+ * The backends a deployment may name (I6 adds kata, I7 openshell). `gvisor`
+ * (I4) is the runsc backend on a Docker host: it checks, before the executor
+ * announces anything, that the daemon has the named runtime and that it is
+ * runsc, and refuses to start otherwise.
+ */
+const BACKENDS: Readonly<Record<string, (() => Promise<SandboxBackend>) | undefined>> = {
+  gvisor: async () => {
+    const backend = new RunscDockerBackend({
+      runtimeName: process.env.REGULAIT_EXECUTOR_RUNSC_RUNTIME || "runsc",
+      canaryImage: required("REGULAIT_EXECUTOR_CANARY_IMAGE"),
+      runtimeVersion: required("REGULAIT_EXECUTOR_RUNSC_VERSION"),
+      ...(process.env.REGULAIT_EXECUTOR_DOCKER_SOCKET ? { dockerSocket: process.env.REGULAIT_EXECUTOR_DOCKER_SOCKET } : {}),
+      seccompDir: process.env.REGULAIT_EXECUTOR_SECCOMP_DIR || null,
+      // review H2: the init this build ships (next to dist/), copied into the init volume this executor owns
+      initSource: fileURLToPath(new URL("../sandbox-init/sandbox-init.mjs", import.meta.url)),
+      initDir: process.env.REGULAIT_EXECUTOR_INIT_DIR || "/regulait-init",
+      initVolume: required("REGULAIT_EXECUTOR_INIT_VOLUME"),
+      // review H2: the host's runsc, mounted read-only into this container, and the path the daemon names for it
+      runscBinary: process.env.REGULAIT_EXECUTOR_RUNSC_BINARY || "/host-gvisor/runsc",
+      runscHostPath: required("REGULAIT_EXECUTOR_RUNSC_HOST_PATH"),
+    });
+    await backend.preflight();
+    return backend;
+  },
+};
 
 function required(name: string): string {
   const v = process.env[name];
@@ -46,9 +72,16 @@ export async function main(): Promise<void> {
     }
     throw e;
   }
-  const factory = BACKENDS[backendName];
+  // recheck: an https gateway this executor cannot reach (no route from its network, no TLS front, a certificate it
+  // does not trust) stops it at start with the reason, instead of a silent retry loop (exit 2; compose restarts it)
+  const unreachable = await probeGatewayReachable(gatewayUrl);
+  if (unreachable) {
+    console.error(`REGULAIT_GATEWAY_URL: ${unreachable}. Set REGULAIT_EXECUTOR_GATEWAY_URL to an https address of the gateway this executor's network can reach (docs/deployment/INSTALL.md).`);
+    process.exit(2);
+  }
+  const factory = Object.hasOwn(BACKENDS, backendName) ? BACKENDS[backendName] : undefined;
   if (!factory) {
-    console.error(`REGULAIT_EXECUTOR_BACKEND=${backendName}: no such backend in this build (ADR-0190 I3 ships none; I4 adds gvisor)`);
+    console.error(`REGULAIT_EXECUTOR_BACKEND=${backendName}: no such backend in this build (available: ${Object.keys(BACKENDS).join(", ")})`);
     process.exit(2);
   }
   const { key, created } = await loadOrCreateExecutorKey(keyFile);
@@ -58,7 +91,14 @@ export async function main(): Promise<void> {
   }
   const credential = new ProofChannelCredential({ identifier, key, issuer });
   const client = new ExecutorClient({ gatewayUrl, credential, allowInsecureHttp });
-  const backend = await factory();
+  let backend: SandboxBackend;
+  try {
+    backend = await factory();
+  } catch (e) {
+    // a missing runtime, a runtime that is not runsc, an unreachable Docker socket: nothing starts (exit 2)
+    console.error(`REGULAIT_EXECUTOR_BACKEND=${backendName}: ${e instanceof RunscBackendError ? e.message : `the backend is not usable: ${(e as Error).message}`}`);
+    process.exit(2);
+  }
   try {
     await runExecutorLoop({ client, backend, credential, log: (m) => console.log(m) });
   } catch (e) {

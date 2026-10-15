@@ -119,10 +119,12 @@
  *    purpose" is never confused with "it never ran".
  */
 import {
+  and,
   asc,
   auditLog,
   inArray,
   mcpServers,
+  ne,
   sql,
   type Db,
 } from "@regulait/db";
@@ -192,8 +194,10 @@ interface EligibleRow {
   url: string;
   allowPrivateRanges: boolean | null;
   admissionState: McpAdmissionState;
-  /** ADR-0185 G4: the connect opens the row's own transport (a stdio server is
-   * re-scanned by starting its pinned command, through every stdio rule) */
+  /** ADR-0185 G4: the connect opens the row's own transport. ADR-0190 I4 (review low): a stdio server is NOT in
+   * the sweep: its manifest can only be read inside an executor sandbox placed for a governed caller, and a timed
+   * pass with nobody behind it has no caller to place for (it would only write a `policy_unresolved` refusal per
+   * row). Its manifest is scanned when a governed call syncs it. */
   transport: McpUpstreamTransport;
   stdioCommand: string | null;
   stdioArgs: string[] | null;
@@ -268,7 +272,8 @@ export async function runMcpAdmissionRescan(
       stdioCommandDigest: mcpServers.stdioCommandDigest,
     })
     .from(mcpServers)
-    .where(inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]))
+    // ADR-0190 I4: stdio servers are skipped here, before any connect (no placement, no refusal row): see EligibleRow
+    .where(and(inArray(mcpServers.admissionState, [...MCP_RESCAN_ELIGIBLE_STATES]), ne(mcpServers.transport, "stdio")))
     .orderBy(priority, sql`${mcpServers.admissionScannedAt} asc nulls first`, asc(mcpServers.id))) as EligibleRow[];
 
   const eligible = candidates.length;

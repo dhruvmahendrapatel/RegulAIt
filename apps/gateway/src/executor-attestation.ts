@@ -5,7 +5,7 @@
  * (`delegation.ts`, decision 8 third bullet, slice I2) applies the very same
  * predicate the broker does, without an import cycle.
  */
-import { attestationCounts, latestCountingAttestation, type Db } from "@regulait/db";
+import { attestationCounts, eq, executorAttestations, latestCountingAttestation, type Db } from "@regulait/db";
 import type { AppliedIsolationKind } from "@regulait/shared";
 
 type Reader = Pick<Db, "select">;
@@ -16,6 +16,8 @@ export interface FreshAttestationRow {
   class: AppliedIsolationKind;
   expiresAt: Date;
   reportSha256: string;
+  /** I4: the stored report of this attestation row (the broker hashes its runtime flags onto the placement) */
+  report: Record<string, unknown>;
 }
 
 /**
@@ -33,5 +35,7 @@ export async function freshAttestation(db: Reader, executorId: string, profileDi
   const row = await latestCountingAttestation(db, executorId, profileDigest);
   // the LATEST report decides: a fail after a pass withdraws the class until the next pass
   if (!row || row.verdict !== "pass" || row.expiresAt.getTime() <= now.getTime()) return null;
-  return { id: row.id, class: row.class, observedAt: row.observedAt, expiresAt: row.expiresAt, reportSha256: row.reportSha256 };
+  // I4: the stored report of that same row (the broker hashes its runtime flags onto the placement)
+  const [stored] = await db.select({ report: executorAttestations.report }).from(executorAttestations).where(eq(executorAttestations.id, row.id));
+  return { id: row.id, class: row.class, observedAt: row.observedAt, expiresAt: row.expiresAt, reportSha256: row.reportSha256, report: (stored?.report ?? {}) as Record<string, unknown> };
 }

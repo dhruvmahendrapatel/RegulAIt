@@ -435,7 +435,7 @@ describe("ADR-0185 seams keep today's behaviour", () => {
     expect(legacy.json()).toMatchObject({ transport: "streamable_http", stdioCommand: null, admissionState: "unscanned" });
     for (const body of [
       { name: `a185-sse-${RUN}`, url: "http://127.0.0.1:9/sse", transport: "sse", allowPrivateRanges: true },
-      { name: `a185-std-${RUN}`, transport: "stdio", stdio: { command: "/opt/mcp/bin/fs", args: ["--root", "/srv"] } },
+      { name: `a185-std-${RUN}`, transport: "stdio", stdio: { image: `sha256:${"1".repeat(64)}`, command: "/opt/mcp/bin/fs", args: ["--root", "/srv"] } },
     ]) {
       const r = await inject("POST", "/v1/servers", users.admin.auth, body);
       expect(r.statusCode, r.body).toBe(422);
@@ -457,7 +457,7 @@ describe("ADR-0185 seams keep today's behaviour", () => {
     const change = await inject("PATCH", `/v1/servers/${id}`, users.admin.auth, { transport: "sse" });
     expect(change.statusCode, change.body).toBe(409);
     expect(change.json().error).toBe("mcp_transport_immutable");
-    const stdio = await inject("PATCH", `/v1/servers/${id}`, users.admin.auth, { stdio: { command: "/opt/x" } });
+    const stdio = await inject("PATCH", `/v1/servers/${id}`, users.admin.auth, { stdio: { image: `sha256:${"1".repeat(64)}`, command: "/opt/x" } });
     expect(stdio.statusCode, stdio.body).toBe(409);
     const same = await inject("PATCH", `/v1/servers/${id}`, users.admin.auth, { transport: "streamable_http" });
     expect(same.statusCode, same.body).toBe(200);

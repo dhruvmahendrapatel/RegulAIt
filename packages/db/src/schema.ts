@@ -3908,7 +3908,7 @@ export const orgSettings = pgTable(
      * Strict 30 (owner decision); longer, up to 2555, is an audited relaxation. */
     conversationRetentionDays: integer("conversation_retention_days").notNull().default(30),
     /** ADR-0185 G4 (migration 0169): the upstream transports an admin allows;
-     * strict ["streamable_http"]. stdio also needs REGULAIT_MCP_STDIO_ALLOWED_DIRS. */
+     * strict ["streamable_http"]. A stdio server runs only in an executor's sandbox (ADR-0190 I4). */
     mcpUpstreamTransports: jsonb("mcp_upstream_transports")
       .$type<McpUpstreamTransport[]>()
       .notNull()
@@ -13433,21 +13433,35 @@ export const executionPlacements = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     auditId: uuid("audit_id").notNull(),
     workloadKind: text("workload_kind", { enum: ISOLABLE_WORKLOAD_KINDS }).notNull(),
-    requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull(),
-    requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }).notNull(),
+    /** I4 (migration 0198): NULL only on a `refused` row whose code is `policy_unresolved` (requirement check; the profile digest also on a `profile_retired` refusal for a digest that names no profile) */
+    requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }),
+    requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }),
     enforcement: text("enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull(),
-    profileDigest: text("profile_digest")
-      .notNull()
-      .references(() => executionProfiles.digest, { onDelete: "restrict" }),
+    profileDigest: text("profile_digest").references(() => executionProfiles.digest, { onDelete: "restrict" }),
     executorId: uuid("executor_id").references(() => executors.id, { onDelete: "restrict" }),
     appliedClass: text("applied_class", { enum: APPLIED_ISOLATION_KINDS }),
     reportSha256: text("report_sha256"),
     outcome: text("outcome", { enum: PLACEMENT_OUTCOMES }).notNull(),
     refusalCode: text("refusal_code", { enum: [...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"] }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** ADR-0190 I4 (migration 0198): the closure / workload image the placement is for */
+    imageDigest: text("image_digest"),
+    /** I4: SHA-256 of the runtime flags the relied-on attestation reported (canonical JSON of the sorted list) */
+    runtimeFlagsSha256: text("runtime_flags_sha256"),
+    /** I4: the executor self-test the broker relied on */
+    attestationId: uuid("attestation_id").references(() => executorAttestations.id, { onDelete: "restrict" }),
+    /** I4: the offer an `offered` placement made; its outcome is the linked `execution_placement_reports` row */
+    offerId: uuid("offer_id").references((): AnyPgColumn => executionOffers.id, { onDelete: "restrict" }),
   },
   (t) => [
     unique("execution_placements_audit_id_uq").on(t.auditId),
+    unique("execution_placements_id_offer_uq").on(t.id, t.offerId),
+    check(
+      "execution_placements_requirement_check",
+      sql`(${t.requiredClass} IS NOT NULL AND ${t.requiredBy} IS NOT NULL AND ${t.profileDigest} IS NOT NULL) OR (${t.outcome} = 'refused' AND ${t.refusalCode} = 'policy_unresolved') OR (${t.outcome} = 'refused' AND ${t.refusalCode} = 'profile_retired' AND ${t.requiredClass} IS NOT NULL AND ${t.requiredBy} IS NOT NULL)`,
+    ),
+    check("execution_placements_image_digest_check", sql`${t.imageDigest} IS NULL OR ${t.imageDigest} ~ '^sha256:[0-9a-f]{64}$'`),
+    check("execution_placements_runtime_flags_sha256_check", sql`${t.runtimeFlagsSha256} IS NULL OR ${t.runtimeFlagsSha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "execution_placements_workload_kind_check",
       sql`${t.workloadKind} IN ('mcp_stdio', 'code_exec', 'engine_worker', 'byoc_worker')`,
@@ -13467,24 +13481,70 @@ export const executionPlacements = pgTable(
       sql`${t.appliedClass} IS NULL OR ${t.appliedClass} IN ('hardened_container', 'user_space_kernel', 'microvm', 'customer_declared')`,
     ),
     check("execution_placements_report_sha256_check", sql`${t.reportSha256} IS NULL OR ${t.reportSha256} ~ '^[0-9a-f]{64}$'`),
-    check("execution_placements_outcome_check", sql`${t.outcome} IN ('placed', 'refused', 'mismatch')`),
+    check("execution_placements_outcome_check", sql`${t.outcome} IN ('placed', 'refused', 'mismatch', 'offered')`),
     check(
       "execution_placements_refusal_code_check",
       sql`${t.refusalCode} IS NULL OR ${t.refusalCode} IN ('no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired', 'policy_unresolved', 'execution_profile_mismatch')`,
     ),
     check(
       "execution_placements_shape_check",
-      sql`(${t.outcome} = 'refused' AND ${t.executorId} IS NULL AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NOT NULL AND ${t.refusalCode} <> 'execution_profile_mismatch') OR (${t.outcome} = 'placed' AND ${t.executorId} IS NOT NULL AND ${t.appliedClass} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} IS NULL) OR (${t.outcome} = 'mismatch' AND ${t.executorId} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} = 'execution_profile_mismatch')`,
+      sql`(${t.outcome} = 'refused' AND ${t.executorId} IS NULL AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NOT NULL AND ${t.refusalCode} <> 'execution_profile_mismatch') OR (${t.outcome} = 'placed' AND ${t.executorId} IS NOT NULL AND ${t.appliedClass} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} IS NULL) OR (${t.outcome} = 'mismatch' AND ${t.executorId} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} = 'execution_profile_mismatch') OR (${t.outcome} = 'offered' AND ${t.executorId} IS NOT NULL AND ${t.appliedClass} IS NOT NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NULL AND ${t.imageDigest} IS NOT NULL AND ${t.attestationId} IS NOT NULL AND ${t.offerId} IS NOT NULL)`,
     ),
     check(
       "execution_placements_no_fallback_check",
-      sql`${t.outcome} <> 'placed' OR ${t.appliedClass} = 'customer_declared' OR array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.appliedClass}) >= array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.requiredClass})`,
+      sql`${t.outcome} NOT IN ('placed', 'offered') OR ${t.appliedClass} = 'customer_declared' OR array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.appliedClass}) >= array_position(ARRAY['hardened_container', 'user_space_kernel', 'microvm'], ${t.requiredClass})`,
     ),
     index("execution_placements_executor_idx").on(t.executorId, t.createdAt),
     index("execution_placements_created_idx").on(t.createdAt),
+    uniqueIndex("execution_placements_offer_uq").on(t.offerId).where(sql`${t.offerId} IS NOT NULL`),
   ],
 );
 export type ExecutionPlacementRow = typeof executionPlacements.$inferSelect;
+
+/**
+ * ADR-0190 I4 (migration 0198): how an `offered` placement ended — the
+ * executor's accepted report (`placed`), a report that disagreed
+ * (`mismatch`), or an offer that expired, was declined or withdrawn
+ * (`refused`, decision 7's code). Append-only, at most one per placement: the
+ * decision-time placement row is never rewritten.
+ */
+export const executionPlacementReports = pgTable(
+  "execution_placement_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    placementId: uuid("placement_id").notNull(),
+    offerId: uuid("offer_id")
+      .notNull()
+      .references(() => executionOffers.id, { onDelete: "restrict" }),
+    auditId: uuid("audit_id").notNull(),
+    outcome: text("outcome", { enum: ["placed", "mismatch", "refused", "cancelled", "session_lost"] }).notNull(),
+    appliedClass: text("applied_class", { enum: APPLIED_ISOLATION_KINDS }),
+    reportSha256: text("report_sha256"),
+    refusalCode: text("refusal_code", { enum: [...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"] }),
+    /** why the gateway ended it (`cancelled`, `session_lost`): a fixed vocabulary */
+    endCode: text("end_code", { enum: ["later_gate", "placement_timeout", "session_abandoned", "session_unknown"] }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: "execution_placement_reports_parent_fk", columns: [t.placementId, t.offerId], foreignColumns: [executionPlacements.id, executionPlacements.offerId] }).onDelete("restrict"),
+    unique("execution_placement_reports_audit_id_uq").on(t.auditId),
+    uniqueIndex("execution_placement_reports_end_uq").on(t.placementId).where(sql`${t.outcome} IN ('placed', 'mismatch', 'refused')`),
+    uniqueIndex("execution_placement_reports_cancel_uq").on(t.placementId).where(sql`${t.outcome} = 'cancelled'`),
+    uniqueIndex("execution_placement_reports_session_uq").on(t.placementId).where(sql`${t.outcome} = 'session_lost'`),
+    check("execution_placement_reports_outcome_check", sql`${t.outcome} IN ('placed', 'mismatch', 'refused', 'cancelled', 'session_lost')`),
+    check(
+      "execution_placement_reports_applied_class_check",
+      sql`${t.appliedClass} IS NULL OR ${t.appliedClass} IN ('hardened_container', 'user_space_kernel', 'microvm', 'customer_declared')`,
+    ),
+    check("execution_placement_reports_report_sha256_check", sql`${t.reportSha256} IS NULL OR ${t.reportSha256} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "execution_placement_reports_shape_check",
+      sql`(${t.outcome} = 'placed' AND ${t.appliedClass} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} IS NULL AND ${t.endCode} IS NULL) OR (${t.outcome} = 'mismatch' AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} = 'execution_profile_mismatch' AND ${t.endCode} IS NULL) OR (${t.outcome} = 'refused' AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.endCode} IS NULL AND ${t.refusalCode} IN ('no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired', 'policy_unresolved')) OR (${t.outcome} = 'cancelled' AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NULL AND ${t.endCode} IN ('later_gate', 'placement_timeout', 'session_abandoned')) OR (${t.outcome} = 'session_lost' AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NULL AND ${t.endCode} = 'session_unknown')`,
+    ),
+    index("execution_placement_reports_offer_idx").on(t.offerId),
+  ],
+);
+export type ExecutionPlacementReportRow = typeof executionPlacementReports.$inferSelect;
 
 /**
  * ADR-0190 I3 (migration 0187): a placement OFFERED to one executor over its

@@ -187,11 +187,12 @@ export const HEALTH_PROBE_CLAIM_LOCK_KEY = 6_000_000_037;
 export function healthProbeEligibility(): SQL {
   const cooldown = sql`make_interval(secs => ${breakerConfig().cooldownMs / 1000})`;
   // ADR-0185 G4 — A STDIO UPSTREAM IS NEVER PROBED. A probe of one is not a
-  // look at a remote server's health: it STARTS a local process, on a timer,
-  // with nobody having asked for it, and takes one of the host's few stdio
-  // process slots from a real request. Its breaker still learns passively
-  // from real traffic, which is the enforcement anyway (this sweep only
-  // changes when the breaker learns).
+  // look at a remote server's health: it would START a sandbox (ADR-0190 I4:
+  // an executor placement), on a timer, with nobody having asked for it and no
+  // governed caller to place it for, so it is excluded here, before any
+  // connect, with no refusal row. Its breaker still learns passively from real
+  // traffic, which is the enforcement anyway (this sweep only changes when the
+  // breaker learns).
   return sql`(${mcpServers.transport} <> 'stdio' and (${mcpServers.breakerOpenedAt} is null or now() - ${mcpServers.breakerOpenedAt} >= ${cooldown}))`;
 }
 

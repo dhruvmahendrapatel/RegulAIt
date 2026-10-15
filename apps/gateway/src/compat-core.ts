@@ -89,7 +89,7 @@ import { loadVersions } from "./config-versions.js";
 /** ADR-0173 §3 — the OpenAI/Anthropic-compatible shims (and `/v1/models`) are the "compat" feature */
 export const COMPAT_FEATURE: ModelPolicyGate = { feature: "compat" };
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
-import { PROJECT_HEADER } from "./mcp-proxy.js";
+import { PROJECT_HEADER } from "./project-header.js";
 // ADR-0070 — the compat surfaces' entitlement refusal gets a `policy` deny span
 // too: an SDK pointed at this gateway has no RegulAIt UI to look in.
 import { beginTrace, finishTrace, recordSpan } from "./tracing.js";

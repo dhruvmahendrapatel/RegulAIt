@@ -35,7 +35,7 @@
  * (`scripts/preflight-ui-affordances.mjs`) sees every route.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { aiBomSnapshots, and, auditLog, bomRenderings, eq, sql, type Db } from "@regulait/db";
+import { aiBomSnapshots, and, asc, auditLog, bomRenderings, eq, executionPlacementReports, executionPlacements, sql, type Db } from "@regulait/db";
 import {
   AI_BOM_DOWNLOAD_FORMATS,
   AI_BOM_INSTALL_SUBJECT_ID,
@@ -62,6 +62,7 @@ import {
   type AiBomDownloadFormat,
   type AiBomSubjectKind,
   type BomVerifyReport,
+  type DecisionPlacementReport,
 } from "@regulait/shared";
 import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomDrift, aiBomInstallId, listAiBomSnapshots, loadAiBomSettings, takeAiBomSnapshot, type AiBomSubject } from "./ai-bom.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
@@ -87,6 +88,37 @@ function subjectOf(req: FastifyRequest): AiBomSubject | null {
 }
 
 const installId = aiBomInstallId;
+
+/**
+ * ADR-0190 I4 (with the I8 contract): the linked reports of a decision's OFFERED placement, oldest first. Live and
+ * unsigned (the body's facts were frozen at the decision, before anything ran); empty when the decision placed
+ * nothing, or its placement was not offered. The Decision BOM read returns them beside the signed body.
+ */
+export async function decisionPlacementReports(db: Db, auditId: string): Promise<DecisionPlacementReport[]> {
+  const [pl] = await db
+    .select({ id: executionPlacements.id, outcome: executionPlacements.outcome })
+    .from(executionPlacements)
+    .where(eq(executionPlacements.auditId, auditId));
+  if (!pl || pl.outcome !== "offered") return [];
+  const reports = await db
+    .select()
+    .from(executionPlacementReports)
+    .where(eq(executionPlacementReports.placementId, pl.id))
+    .orderBy(asc(executionPlacementReports.createdAt), asc(executionPlacementReports.id))
+    .limit(8);
+  return reports.map((r) => ({
+    id: r.id,
+    placementId: r.placementId,
+    offerId: r.offerId,
+    auditId: r.auditId,
+    outcome: r.outcome,
+    appliedClass: r.appliedClass,
+    reportSha256: r.reportSha256,
+    refusalCode: r.refusalCode,
+    endCode: r.endCode,
+    createdAt: r.createdAt.toISOString(),
+  }));
+}
 
 export function registerBomRoutes(app: FastifyInstance, db: Db): void {
   const limiter = new SharedRateLimitStore(db);
@@ -224,6 +256,7 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
         renderings: renderings.map((r) => r.format),
         bundle: { schema: EXPORT_BUNDLE_V3_SCHEMA, subject: "decision-bom", href: decisionBomBundleHref(params.auditId, row.version) },
         capabilities: bomCapabilitiesOf(access),
+        placementReports: await decisionPlacementReports(db, params.auditId),
       };
     } catch (e) {
       return b4Refuse(reply, e);

@@ -140,8 +140,22 @@ export const REQUIRED_CLASS_SOURCES = [
 ] as const;
 export type RequiredClassSource = (typeof REQUIRED_CLASS_SOURCES)[number];
 
-export const PLACEMENT_OUTCOMES = ["placed", "refused", "mismatch"] as const;
+/**
+ * `offered` (I4, migration 0198): a governed stdio call's decision-time row — an executor was chosen and offered the
+ * work; how it ended is the linked `execution_placement_reports` row.
+ */
+export const PLACEMENT_OUTCOMES = ["placed", "refused", "mismatch", "offered"] as const;
 export type PlacementOutcome = (typeof PLACEMENT_OUTCOMES)[number];
+
+/**
+ * I4 (review lows, migration 0198): the EFFECTIVE outcome a placement view shows — the row's own, or its linked
+ * report's. A report adds `cancelled`: the gateway withdrew an offered placement (a later gate refused the call, the
+ * executor did not confirm the sandbox in time, or nothing connected to the session). Its `endCode` says which.
+ */
+export const PLACEMENT_EFFECTIVE_OUTCOMES = [...PLACEMENT_OUTCOMES, "cancelled"] as const;
+export type PlacementEffectiveOutcome = (typeof PLACEMENT_EFFECTIVE_OUTCOMES)[number];
+export const PLACEMENT_END_CODES = ["later_gate", "placement_timeout", "session_abandoned", "session_unknown"] as const;
+export type PlacementEndCode = (typeof PLACEMENT_END_CODES)[number];
 
 /**
  * the kernel rule ids decision 7 and 8 add. `delegation-isolation` is also in `DELEGATION_RULE_IDS`
@@ -223,6 +237,10 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-ended",
   // I2: an execution profile assigned to (or unassigned from) an agent, builder agent or stdio MCP server
   "execution-profile-assigned",
+  // I4: an offered stdio placement the gateway stopped (a later gate, a timeout, an abandoned session)
+  "execution-cancelled",
+  // I4 (review M3): a stdio window reached a gateway process that does not hold the session (our own refusal)
+  "execution-session-lost",
 ] as const;
 
 // ---------------------------------------------------------------------------

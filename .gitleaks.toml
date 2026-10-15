@@ -247,3 +247,11 @@ condition = "AND"
 paths = ['''^packages/shared/test-vectors/decision-bom/''']
 regexTarget = "match"
 regexes = ['''CANARY''']
+
+[[allowlists]]
+description = "ADR-0190 I4 review round (PR #383): a synthetic offer UUID (a second session's id in a MAC-replay test, not a key) that the generic rule read because it followed a key argument. Allowed only in the commit that introduced it; the next commit replaced it with a run-time randomUUID()."
+condition = "AND"
+paths = ['''^packages/sandbox-executor/src/stdio-pump\.test\.ts$''']
+commits = ["b2124861838dcf4b0e2140702ae3a37d86f496a2"]
+regexTarget = "secret"
+regexes = ['''^7b0c1a3e-6a1e-4a4b-9a2c-0f4e5d6c7b8a$''']

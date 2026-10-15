@@ -19,7 +19,8 @@
  *     `model_card_approvals`, `eval_runs`, `guardrail_configs`,
  *     `abac_policies`, `lineage_edges`, `usage_events`, `compliance_profiles`,
  *     and (ADR-0182 S5) `ai_incidents`, `use_case_feedback`,
- *     `ai_policy_acknowledgements`, `decision_regression_runs`.
+ *     `ai_policy_acknowledgements`, `decision_regression_runs`, and (ADR-0190 I4)
+ *     `execution_placements`.
  *     There is no column anywhere in migration 0073 that an admin could set to
  *     make a control green. Seed the evidence and the control goes green;
  *     delete it and the control goes red again, in the same period, with no
@@ -70,6 +71,7 @@ import {
   energyFactors,
   eq,
   evalRuns,
+  executionPlacements,
   guardrailConfigs,
   gte,
   inArray,
@@ -435,6 +437,26 @@ export async function runCollector(
         .select({ n: count() })
         .from(decisionRegressionRuns)
         .where(and(gte(decisionRegressionRuns.createdAt, periodStart), lt(decisionRegressionRuns.createdAt, periodEnd)));
+      return row?.n ?? 0;
+    }
+
+    case "isolation_placements": {
+      // ADR-0190 I4: workloads PLACED in a sandbox at L2 or L3 in the period (the gateway accepted that sandbox's
+      // own signed probe report). A placement row carries no project, so only an org-scoped report counts it
+      // (fail closed, as `decision_regression_runs`). Refused, mismatched and customer-declared rows never count.
+      if (projectIds !== null) return 0;
+      const [row] = await db
+        .select({ n: count() })
+        .from(executionPlacements)
+        .where(
+          and(
+            eq(executionPlacements.outcome, "placed"),
+            inArray(executionPlacements.appliedClass, ["user_space_kernel", "microvm"]),
+            isNotNull(executionPlacements.reportSha256),
+            gte(executionPlacements.createdAt, periodStart),
+            lt(executionPlacements.createdAt, periodEnd),
+          ),
+        );
       return row?.n ?? 0;
     }
 

@@ -46,6 +46,7 @@ import {
   delegationGrants,
   executionPlacements,
   executionProfiles,
+  executorAttestations,
   executors,
   mcpServers,
   projects,
@@ -118,12 +119,22 @@ async function loadPlacements(tx: Tx, auditIds: string[]): Promise<Map<string, D
   if (!auditIds.length) return out;
   const placementRows = await tx.select().from(executionPlacements).where(inArray(executionPlacements.auditId, auditIds));
   if (!placementRows.length) return out;
-  const digests = [...new Set(placementRows.map((p) => p.profileDigest))];
+  // a `policy_unresolved` refusal (ADR-0190 I4 review M2) names no profile
+  const digests = [...new Set(placementRows.map((p) => p.profileDigest).filter((d): d is string => d !== null))];
   const executorIds = [...new Set(placementRows.map((p) => p.executorId).filter((x): x is string => x !== null))];
-  const profileRows = await tx
-    .select({ id: executionProfiles.id, name: executionProfiles.name, version: executionProfiles.version, digest: executionProfiles.digest })
-    .from(executionProfiles)
-    .where(inArray(executionProfiles.digest, digests));
+  const profileRows = digests.length
+    ? await tx
+        .select({ id: executionProfiles.id, name: executionProfiles.name, version: executionProfiles.version, digest: executionProfiles.digest })
+        .from(executionProfiles)
+        .where(inArray(executionProfiles.digest, digests))
+    : [];
+  // ADR-0190 I4: the attestation the broker STAMPED on a placement (`attestation_id`) is the authority; it is read,
+  // never re-derived. Only a row without one (an I3 unlinked placement) falls back to the as-of derivation below.
+  const stampedIds = [...new Set(placementRows.map((p) => p.attestationId).filter((x): x is string => x !== null))];
+  const stampedRows = stampedIds.length
+    ? await tx.select({ id: executorAttestations.id, reportSha256: executorAttestations.reportSha256 }).from(executorAttestations).where(inArray(executorAttestations.id, stampedIds))
+    : [];
+  const stampedOf = new Map(stampedRows.map((a) => [a.id, a]));
   const executorRows = executorIds.length
     ? await tx
         .select({ id: executors.id, backend: executors.backend, runtimeVersion: executors.runtimeVersion, workloadIdentityId: executors.workloadIdentityId })
@@ -143,14 +154,17 @@ async function loadPlacements(tx: Tx, auditIds: string[]): Promise<Map<string, D
     // executor and profile decides; it is named only if it is a pass, unexpired at the placement, for the class the
     // placement applied. A later fail, a void pass from before a quarantine, or another class names nothing.
     let attestation: Record<string, unknown> | null = null;
-    if (executor) {
+    const stamped = p.attestationId ? stampedOf.get(p.attestationId) : undefined;
+    if (stamped) {
+      attestation = { id: stamped.id, reportSha256: stamped.reportSha256 };
+    } else if (executor && p.profileDigest) {
       const a = await latestCountingAttestation(tx, executor.id, p.profileDigest, p.createdAt);
       const counts = a !== null && a.verdict === "pass" && a.expiresAt.getTime() > p.createdAt.getTime() && a.class === p.appliedClass;
       attestation = counts ? { id: a.id, reportSha256: a.reportSha256 } : null;
     }
     out.set(p.auditId, {
       placement: p as unknown as Record<string, unknown>,
-      profile: profileOf.get(p.profileDigest) ?? null,
+      profile: p.profileDigest ? profileOf.get(p.profileDigest) ?? null : null,
       executor,
       executorIdentity: executor ? identityOf.get(executor.workloadIdentityId) ?? null : null,
       executorAttestation: attestation,

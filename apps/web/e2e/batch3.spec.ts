@@ -1,7 +1,9 @@
 /** X18: built SPA through the real gateway and an owned fixture. No route mocks.
- * Standard playwright.config.ts prepares a fresh database. Stdio success is
- * exercised when E2E_MCP_STDIO_COMMAND names an operator-allowed executable;
- * without host opt-in the same UI must explain mcp_stdio_unavailable.
+ * Standard playwright.config.ts prepares a fresh database. ADR-0190 I4: a stdio
+ * server is registered as a closure image digest, an entry point inside it and
+ * an argv; there is no host opt-in (it never runs on the gateway host), so the
+ * registration succeeds once the org enables stdio. Running it needs an
+ * executor, which this journey does not start.
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -20,7 +22,7 @@ const EMAIL = `batch3-${RUN}@example.test`;
 const FIXTURE_PASSWORD = disposablePassword("E2E_BATCH3_PASSWORD");
 const SERVER = `batch3-stdio-${RUN}`;
 const CONNECTOR = `batch3-connector-${RUN}`;
-const EXECUTABLE = process.env.E2E_MCP_STDIO_COMMAND;
+const IMAGE = `sha256:${"e".repeat(64)}`;
 const request = async (path: string, method = "GET", body?: unknown) => {
   const response = await fetch(`${state.baseUrl}${path}`, { method, headers: BOOT, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const json = await response.json();
@@ -142,7 +144,8 @@ test("stdio registration refuses a disabled transport and preserves separate arg
   const form = page.getByRole("button", { name: "Register", exact: true }).locator("..");
   await form.getByLabel("Name", { exact: true }).fill(SERVER);
   await page.getByLabel("Upstream transport").selectOption("stdio");
-  await page.getByLabel("Executable path", { exact: true }).fill(EXECUTABLE ?? "/opt/mcp/not-enabled");
+  await page.getByLabel("Closure image digest", { exact: true }).fill(IMAGE);
+  await page.getByLabel("Entry point in the image", { exact: true }).fill("/srv/mcp/server.js");
   await page.getByRole("button", { name: "Add argument", exact: true }).click();
   await page.getByLabel("Argument 1", { exact: true }).fill("--root");
   await page.getByRole("button", { name: "Add argument", exact: true }).click();
@@ -162,26 +165,20 @@ test("stdio registration refuses a disabled transport and preserves separate arg
   response = page.waitForResponse((r) => r.url().endsWith("/v1/servers") && r.request().method() === "POST");
   await page.getByRole("button", { name: "Register", exact: true }).click();
   const registered = await response;
-  if (!EXECUTABLE) {
-    expect(registered.status()).toBe(422);
-    expect((await registered.json()).error).toBe("mcp_stdio_unavailable");
-    await expect(page.getByRole("alert").filter({ hasText: "deployment has not enabled local MCP executables" })).toBeVisible();
-  } else {
-    expect(registered.ok()).toBe(true);
-    const row = await registered.json(); serverId = row.id;
-    expect(row.stdio.args).toEqual(["--root", "/srv/data with spaces"]);
-    expect(row.stdioCommandDigest).toMatch(/^[a-f0-9]{64}$/);
-    await expect(page.getByRole("link", { name: `Show tools on ${SERVER}`, exact: true })).toContainText(row.stdioCommandDigest);
-    await page.getByLabel("Server to assign").selectOption(serverId!);
-    await page.getByLabel(`Owner for ${SERVER}`).selectOption(ownerId);
-    await page.getByRole("button", { name: "Save owner", exact: true }).click();
-    await expect.poll(async () => (await request("/v1/servers")).servers.find((item: { id: string }) => item.id === serverId)?.ownerUserId).toBe(ownerId);
-    await page.getByLabel("Stdio server to update").selectOption(serverId!);
-    await page.getByLabel("Argument 2", { exact: true }).last().fill("/srv/new root");
-    await page.getByRole("button", { name: "Update command and reset admission" }).click();
-    await expect.poll(async () => (await request("/v1/servers")).servers.find((item: { id: string }) => item.id === serverId)?.stdio.args).toEqual(["--root", "/srv/new root"]);
-    expect((await request("/v1/servers")).servers.find((item: { id: string }) => item.id === serverId).admissionState).toBe("unscanned");
-  }
+  expect(registered.ok()).toBe(true);
+  const row = await registered.json(); serverId = row.id;
+  expect(row.stdio).toEqual({ image: IMAGE, command: "/srv/mcp/server.js", args: ["--root", "/srv/data with spaces"] });
+  expect(row.stdioCommandDigest).toBe(IMAGE);
+  await expect(page.getByRole("link", { name: `Show tools on ${SERVER}`, exact: true })).toContainText(IMAGE);
+  await page.getByLabel("Server to assign").selectOption(serverId!);
+  await page.getByLabel(`Owner for ${SERVER}`).selectOption(ownerId);
+  await page.getByRole("button", { name: "Save owner", exact: true }).click();
+  await expect.poll(async () => (await request("/v1/servers")).servers.find((item: { id: string }) => item.id === serverId)?.ownerUserId).toBe(ownerId);
+  await page.getByLabel("Stdio server to update").selectOption(serverId!);
+  await page.getByLabel("Argument 2", { exact: true }).last().fill("/srv/new root");
+  await page.getByRole("button", { name: "Update server and reset admission" }).click();
+  await expect.poll(async () => (await request("/v1/servers")).servers.find((item: { id: string }) => item.id === serverId)?.stdio.args).toEqual(["--root", "/srv/new root"]);
+  expect((await request("/v1/servers")).servers.find((item: { id: string }) => item.id === serverId).admissionState).toBe("unscanned");
 });
 
 test("Outlook recipient changes are audited, confirmed, persisted and explained on refusal", async () => {

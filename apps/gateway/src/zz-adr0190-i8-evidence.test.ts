@@ -252,6 +252,10 @@ describe("ADR-0190 I8: the placement row of the decision's transaction is captur
       refusalCode: null,
       profile: { id: profile.id, name: profile.name, version: profile.version, digest: RESTRICTED_DIGEST },
       executor: { id: executorId, backend: "gvisor", runtimeVersion: "fake-0.0.0", identityId: executorIdentityId, identity: EXECUTOR_URI },
+      // ADR-0190 I4: the row's own stamps (an I3-style placed row has no offer, image or runtime flags hash)
+      offerId: null,
+      imageDigest: null,
+      runtimeFlagsSha256: null,
       // the LATEST counting self-test, a pass fresh at the placement; the older expired pass is never named
       attestation: { placementReportSha256: H("b"), executorAttestationId: passingAttestation.id, executorReportSha256: H("c") },
     });

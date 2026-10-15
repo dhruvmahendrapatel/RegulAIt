@@ -766,8 +766,9 @@ const serverOwnerField = z.string().uuid().nullable().optional();
  * POST /v1/servers. Two shapes (ADR-0185 G4):
  *  - a URL upstream (today's body, unchanged): `transport` absent =
  *    `streamable_http`, or `sse`; never a `stdio` block;
- *  - a stdio upstream: `transport: "stdio"` with `stdio: {command, args}` and
- *    no `url` (the row stores the `stdio:<name>` sentinel).
+ *  - a stdio upstream: `transport: "stdio"` with `stdio: {image, command, args}`
+ *    (a digest-pinned closure image run in a sandbox, ADR-0190 I4) and no
+ *    `url` (the row stores the `stdio:<name>` sentinel).
  */
 export const createServerSchema = z.union([
   z.object({

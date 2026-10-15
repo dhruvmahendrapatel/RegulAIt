@@ -46,7 +46,10 @@ export const BOM_NOT_RECORDED_REASONS = ["pre_identity", "pre_facts", "capture_o
 
 // ADR-0190 decision 9 / I8: the execution facts vocabularies (`packages/shared/src/isolation/contract.ts`, mirrored)
 export const WORKLOAD_KINDS = ["model_call", "connector_call", "remote_mcp", "mcp_stdio", "code_exec", "engine_worker", "byoc_worker"] as const;
-export const DECISION_EXECUTION_PLACEMENTS = ["in_gateway", "external", "placed", "refused", "mismatch"] as const;
+export const DECISION_EXECUTION_PLACEMENTS = ["in_gateway", "external", "placed", "refused", "mismatch", "offered"] as const;
+/** ADR-0190 I4: the linked report rows of an offered placement (`execution_placement_reports`), mirrored */
+export const PLACEMENT_REPORT_OUTCOMES = ["placed", "mismatch", "refused", "cancelled", "session_lost"] as const;
+export const PLACEMENT_END_CODES = ["later_gate", "placement_timeout", "session_abandoned", "session_unknown"] as const;
 export const REQUIRABLE_ISOLATION_CLASSES = ["hardened_container", "user_space_kernel", "microvm"] as const;
 export const DECISION_EXECUTION_APPLIED = ["in_gateway", "external", ...REQUIRABLE_ISOLATION_CLASSES, "customer_declared"] as const;
 export const REQUIRED_CLASS_SOURCES = ["workload_kind", "data_sensitivity", "compliance_tag", "autonomy_class", "configured_profile", "unknown_agent", "parent_grant"] as const;
@@ -427,6 +430,20 @@ export interface ExecutionView {
   profile: { id: string; name: string; version: number; digest: string } | null;
   executor: { id: string; backend: string; runtimeVersion: string; identityId: string; identity: string | null } | null;
   attestation: { placementReportSha256: string | null; executorAttestationId: string | null; executorReportSha256: string | null } | null;
+  /** ADR-0190 I4: the offer of an `offered` placement, the closure image and the runtime flags hash (null when absent) */
+  offerId: string | null;
+  imageDigest: string | null;
+  runtimeFlagsSha256: string | null;
+}
+/** ADR-0190 I4: one linked report of an offered placement (live, unsigned: shown beside the signed body) */
+export interface PlacementReportView {
+  id: string;
+  outcome: string;
+  appliedClass: string | null;
+  reportSha256: string | null;
+  refusalCode: string | null;
+  endCode: string | null;
+  createdAt: string;
 }
 const ID_TEXT = /^[A-Za-z0-9._:/@+#=-]{1,256}$/;
 const nullOr = <T>(v: unknown, ok: (x: unknown) => x is T): v is T | null => v === null || ok(v);
@@ -440,7 +457,14 @@ export function readExecution(value: unknown): ExecutionView | null {
   if (value === null) return null;
   const e = obj(value);
   const bad = (): never => unreadable("The Decision BOM");
-  if (!e || !exactKeys(e, ["workloadKind", "placement", "placementId", "requiredClass", "requiredBy", "appliedClass", "refusalCode", "profile", "executor", "attestation"])) return bad();
+  const base = ["workloadKind", "placement", "placementId", "requiredClass", "requiredBy", "appliedClass", "refusalCode", "profile", "executor", "attestation"];
+  // ADR-0190 I4: three keys a capture from I4 on writes (absent from earlier v2 facts): never any other key
+  const i4 = ["offerId", "imageDigest", "runtimeFlagsSha256"];
+  if (!e || !base.every((k) => k in e) || !Object.keys(e).every((k) => base.includes(k) || i4.includes(k))) return bad();
+  const offerId = e.offerId ?? null;
+  const imageDigest = e.imageDigest ?? null;
+  const runtimeFlagsSha256 = e.runtimeFlagsSha256 ?? null;
+  if (!nullOr(offerId, isUuid) || !(imageDigest === null || (typeof imageDigest === "string" && /^sha256:[0-9a-f]{64}$/.test(imageDigest))) || !nullOr(runtimeFlagsSha256, isSha)) return bad();
   if (!oneOf(WORKLOAD_KINDS, e.workloadKind) || !oneOf(DECISION_EXECUTION_PLACEMENTS, e.placement) || !nullOr(e.placementId, isUuid)) return bad();
   if (!(e.requiredClass === null || oneOf(REQUIRABLE_ISOLATION_CLASSES, e.requiredClass)) || !(e.requiredBy === null || oneOf(REQUIRED_CLASS_SOURCES, e.requiredBy))) return bad();
   if (!(e.appliedClass === null || oneOf(DECISION_EXECUTION_APPLIED, e.appliedClass)) || !(e.refusalCode === null || oneOf(DECISION_EXECUTION_REFUSAL_CODES, e.refusalCode))) return bad();
@@ -464,8 +488,45 @@ export function readExecution(value: unknown): ExecutionView | null {
   }
   // what ran where: a call no executor places has no placement facts; a placement names its profile (decision 9)
   const local = e.placement === "in_gateway" || e.placement === "external";
-  if (local ? e.appliedClass !== e.placement || profile !== null || executor !== null || attestation !== null : profile === null || e.requiredClass === null) return bad();
-  return { workloadKind: e.workloadKind, placement: e.placement, placementId: e.placementId, requiredClass: e.requiredClass, requiredBy: e.requiredBy, appliedClass: e.appliedClass, refusalCode: e.refusalCode, profile, executor, attestation };
+  // ADR-0190 I4 review M2: an unresolved policy fact names no requirement and no profile (nothing resolved)
+  const unresolved = e.placement === "refused" && e.refusalCode === "policy_unresolved";
+  // recheck N5: a `profile_retired` refusal for a digest that names no profile records no profile
+  const noProfile = e.placement === "refused" && e.refusalCode === "profile_retired";
+  if (local ? e.appliedClass !== e.placement || profile !== null || executor !== null || attestation !== null : !unresolved && ((profile === null && !noProfile) || e.requiredClass === null)) return bad();
+  // ADR-0190 I4: only an offered placement names its offer, and it has no report yet
+  if ((e.placement === "offered") !== (offerId !== null) || (e.placement === "offered" && (executor === null || attestation === null || attestation.placementReportSha256 !== null))) return bad();
+  return {
+    workloadKind: e.workloadKind,
+    placement: e.placement,
+    placementId: e.placementId,
+    requiredClass: e.requiredClass,
+    requiredBy: e.requiredBy,
+    appliedClass: e.appliedClass,
+    refusalCode: e.refusalCode,
+    profile,
+    executor,
+    attestation,
+    offerId,
+    imageDigest: imageDigest as string | null,
+    runtimeFlagsSha256,
+  };
+}
+
+/** ADR-0190 I4: the read response's linked reports of an offered placement (absent before I4 = none) */
+export function readPlacementReports(value: unknown): PlacementReportView[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 8) return unreadable("The Decision BOM");
+  return value.map((item): PlacementReportView => {
+    const r = obj(item);
+    if (
+      !r || !isUuid(r.id) || !oneOf(PLACEMENT_REPORT_OUTCOMES, r.outcome) || !(r.appliedClass === null || oneOf(DECISION_EXECUTION_APPLIED, r.appliedClass)) ||
+      !nullOr(r.reportSha256, isSha) || !(r.refusalCode === null || oneOf(DECISION_EXECUTION_REFUSAL_CODES, r.refusalCode)) ||
+      !(r.endCode === null || oneOf(PLACEMENT_END_CODES, r.endCode)) || typeof r.createdAt !== "string"
+    ) {
+      return unreadable("The Decision BOM");
+    }
+    return { id: r.id, outcome: r.outcome, appliedClass: r.appliedClass, reportSha256: r.reportSha256, refusalCode: r.refusalCode, endCode: r.endCode, createdAt: r.createdAt };
+  });
 }
 
 export interface DecisionBomView {
@@ -474,6 +535,8 @@ export interface DecisionBomView {
   bodyVersion: string;
   /** ADR-0190 I8: the execution facts, from the signed body (null for v1, or when none were recorded) */
   execution: ExecutionView | null;
+  /** ADR-0190 I4: what happened to an offered placement afterwards (live, unsigned, from the read response) */
+  placementReports: PlacementReportView[];
   bom: DecisionBomVersion & { reportedFinality: string; aiBomSnapshotId: string | null };
   versions: DecisionBomVersion[];
   renderings: string[];
@@ -558,6 +621,7 @@ export function readDecisionBom(value: unknown, auditId: string): DecisionBomVie
     auditId,
     bodyVersion: d.v,
     execution,
+    placementReports: readPlacementReports(v.placementReports),
     body: b.body,
     bom: { ...bom, reportedFinality: b.reportedFinality, aiBomSnapshotId: b.aiBomSnapshotId as string | null },
     versions,
@@ -937,7 +1001,24 @@ export const EXECUTION_PLACEMENT_LABELS: Readonly<Record<string, string>> = {
   placed: "Placed on an executor",
   refused: "Refused before it ran",
   mismatch: "Refused: the placement report did not match the profile",
+  offered: "Offered to an executor (nothing had run when this was decided)",
 };
+// ADR-0190 I4: the linked reports of an offered placement, in words
+export const PLACEMENT_REPORT_LABELS: Readonly<Record<string, string>> = {
+  placed: "Ran: the sandbox's report was accepted",
+  mismatch: "Refused: the sandbox's report did not match the profile",
+  refused: "Never ran: the offer expired, was declined or withdrawn",
+  cancelled: "Cancelled by the gateway before the call used it",
+  session_lost: "The gateway lost the session (its own refusal)",
+};
+export const PLACEMENT_END_LABELS: Readonly<Record<string, string>> = {
+  later_gate: "a later check refused the call",
+  placement_timeout: "the executor did not confirm the sandbox in time",
+  session_abandoned: "nothing connected to the session",
+  session_unknown: "the session reached a gateway that did not hold it",
+};
+export const placementReportLabel = (o: string) => own(PLACEMENT_REPORT_LABELS, o, o);
+export const placementEndLabel = (c: string | null) => (c === null ? "" : own(PLACEMENT_END_LABELS, c, c));
 export const ISOLATION_CLASS_LABELS: Readonly<Record<string, string>> = {
   in_gateway: "L0 in gateway",
   external: "External (the upstream's host)",

@@ -9,6 +9,8 @@ engines/modelscan/*.toml text eol=lf
 engines/garak/*.py text eol=lf
 engines/garak/requirements*.txt text eol=lf
 engines/garak/excluded-data.txt text eol=lf
+# ADR-0190 I4 (M-069): the sandbox init is executed inside every stdio sandbox (its shebang line must stay LF)
+packages/sandbox-executor/sandbox-init/*.mjs text eol=lf
 # ADR-0187 decision 186: vendored dataset bytes are pinned by sha256; no end-of-line conversion on any checkout
 packages/shared/src/eval-datasets/vendor/** -text
 # ADR-0189 B5: vendored SPDX 3.0.1 specification files are pinned by sha256 (no end-of-line conversion);

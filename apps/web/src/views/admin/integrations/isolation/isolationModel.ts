@@ -523,7 +523,8 @@ export const REQUIRED_BY_TEXT: Readonly<Record<string, string>> = {
   parent_grant: "the parent delegation",
 };
 
-const OUTCOMES = ["placed", "refused", "mismatch"] as const;
+/** `offered` (I4): a governed stdio call's placement chose an executor and is awaiting the sandbox's report */
+const OUTCOMES = ["placed", "refused", "mismatch", "offered"] as const;
 export interface Placement {
   id: string;
   workloadKind: string;
@@ -552,8 +553,8 @@ function parsePlacement(raw: unknown): Placement | null {
   if (typeof p.outcome !== "string" || !(OUTCOMES as readonly string[]).includes(p.outcome)) return null;
   const opt = (v: unknown) => (typeof v === "string" && v.length > 0 && v.length <= 512 ? v : null);
   // a refusal or a mismatch names its code; a placement names the class it ran under
-  if (p.outcome !== "placed" && !opt(p.refusalCode)) return null;
-  if (p.outcome === "placed" && !opt(p.appliedClass)) return null;
+  if ((p.outcome === "refused" || p.outcome === "mismatch") && !opt(p.refusalCode)) return null;
+  if ((p.outcome === "placed" || p.outcome === "offered") && !opt(p.appliedClass)) return null;
   return {
     id: p.id,
     workloadKind: p.workloadKind,

@@ -281,7 +281,8 @@ async function placementFailuresOf(db: DbOrTx, grants: readonly DelegationGrantR
     const ex = r?.executor ?? null;
     let fresh = false;
     let satisfies = false;
-    if (r && ex && ex.status === "active") {
+    // a placement with no requirement (a policy_unresolved refusal, migration 0198) has no executor: never live
+    if (r && ex && ex.status === "active" && r.placement.profileDigest) {
       const a = await freshAttestation(db as Db, ex.id, r.placement.profileDigest, now);
       fresh = a !== null;
       const effective = a ? (a.class === "customer_declared" ? ex.declaredClass : a.class) : null;

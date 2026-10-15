@@ -204,9 +204,10 @@ describe("the launch packs are honest data", () => {
     const frameworks = [...new Set(DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework))].sort();
     // ADR-0182 S5: the ISACA AI agents checklist joins the launch set
     expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "isaca-ai-agents", "iso-27001", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
-    // ADR-0150: exactly two frameworks ship a second version (bias/safety controls)
+    // ADR-0150: two frameworks ship a second version (bias/safety controls); ADR-0190 I4: the ISACA pack a
+    // second (item 5 evidenced by sandbox placements)
     const versions = DEFAULT_COMPLIANCE_PACKS.map((p) => `${p.framework}@${p.version}`).sort();
-    expect(versions.filter((v) => v.endsWith("@2"))).toEqual(["eu-ai-act@2", "nist-ai-rmf@2"]);
+    expect(versions.filter((v) => v.endsWith("@2"))).toEqual(["eu-ai-act@2", "isaca-ai-agents@2", "nist-ai-rmf@2"]);
     // ADR-0175: the NIST AI RMF pack ships a third version (ID correction);
     // ADR-0182 S5: the EU AI Act a third (Art. 4 as amended, Art. 73) and NIST
     // a fourth (the accountability records as evidence)

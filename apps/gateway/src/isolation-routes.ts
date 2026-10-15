@@ -52,6 +52,7 @@ import {
   desc,
   eq,
   executionOffers,
+  executionPlacementReports,
   executionPlacements,
   executionProfiles,
   executorAttestations,
@@ -586,7 +587,16 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
   });
 
   // ---- placements (I2) ---------------------------------------------------------
-  const placementView = (r: { placement: typeof executionPlacements.$inferSelect; profileName: string | null; profileVersion: number | null; executorName: string | null }) => ({
+  // I4 (migration 0198): a governed stdio decision's row is `offered`; how it ended is its linked report row. The
+  // view shows the EFFECTIVE outcome (the report's, else `offered`: still awaiting the sandbox's report), and names
+  // the decision-time evidence (image, runtime flags hash, attestation) beside it.
+  const placementView = (r: {
+    placement: typeof executionPlacements.$inferSelect;
+    report: typeof executionPlacementReports.$inferSelect | null;
+    profileName: string | null;
+    profileVersion: number | null;
+    executorName: string | null;
+  }) => ({
     id: r.placement.id,
     auditId: r.placement.auditId,
     workloadKind: r.placement.workloadKind,
@@ -598,16 +608,21 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     profileVersion: r.profileVersion,
     executorId: r.placement.executorId,
     executorName: r.executorName,
-    appliedClass: r.placement.appliedClass,
-    reportSha256: r.placement.reportSha256,
-    outcome: r.placement.outcome,
-    refusalCode: r.placement.refusalCode,
+    appliedClass: r.report?.appliedClass ?? r.placement.appliedClass,
+    reportSha256: r.report?.reportSha256 ?? r.placement.reportSha256,
+    outcome: r.report?.outcome ?? r.placement.outcome,
+    refusalCode: r.report?.refusalCode ?? r.placement.refusalCode,
+    imageDigest: r.placement.imageDigest,
+    runtimeFlagsSha256: r.placement.runtimeFlagsSha256,
+    attestationId: r.placement.attestationId,
+    decidedAs: r.placement.outcome,
     createdAt: r.placement.createdAt.toISOString(),
   });
   const placementSelect = () =>
     db
-      .select({ placement: executionPlacements, profileName: executionProfiles.name, profileVersion: executionProfiles.version, executorName: executors.name })
+      .select({ placement: executionPlacements, report: executionPlacementReports, profileName: executionProfiles.name, profileVersion: executionProfiles.version, executorName: executors.name })
       .from(executionPlacements)
+      .leftJoin(executionPlacementReports, eq(executionPlacementReports.placementId, executionPlacements.id))
       .leftJoin(executionProfiles, eq(executionProfiles.digest, executionPlacements.profileDigest))
       .leftJoin(executors, eq(executors.id, executionPlacements.executorId));
 
@@ -616,9 +631,10 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     if (!q.success) return reply.status(400).send({ error: "invalid_query", issues: q.error.issues });
     const { limit, outcome, workloadKind, reason, before } = q.data;
     const conds = [
-      outcome ? eq(executionPlacements.outcome, outcome) : undefined,
+      // the effective outcome: a linked report's, else the row's own
+      outcome ? sql`coalesce(${executionPlacementReports.outcome}, ${executionPlacements.outcome}) = ${outcome}` : undefined,
       workloadKind ? eq(executionPlacements.workloadKind, workloadKind) : undefined,
-      reason ? eq(executionPlacements.refusalCode, reason) : undefined,
+      reason ? sql`coalesce(${executionPlacementReports.refusalCode}, ${executionPlacements.refusalCode}) = ${reason}` : undefined,
       before ? lt(executionPlacements.createdAt, new Date(before)) : undefined,
     ].filter((c) => c !== undefined);
     const rows = await placementSelect()

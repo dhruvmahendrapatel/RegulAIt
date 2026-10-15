@@ -25,7 +25,7 @@ import {
   type ProbeObserved,
   type RequirableIsolationClass,
 } from "@regulait/shared";
-import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle } from "./backend.js";
+import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle, SandboxStdio } from "./backend.js";
 
 export interface FakeBackendOptions {
   backend?: ExecutorBackend;
@@ -34,6 +34,14 @@ export interface FakeBackendOptions {
   classes?: readonly AppliedIsolationKind[];
   /** the "public literal address" the egress probe reports it tried */
   probeAddress?: string;
+  /**
+   * I4: an in-process stand-in for a stdio MCP server. When set, every
+   * placement sandbox has stdio: each line written to it (after release) is
+   * answered with the lines this returns, and the sandbox ends `completed`
+   * when its input is ended. Unset = the I3 behaviour (no stdio; the
+   * workload completes as soon as its input is released).
+   */
+  stdioServer?: (line: string, workload: { command: string; args: string[] }) => string[];
 }
 
 type Lie<P extends AttestationProbe> = (observed: ProbeObserved<P>) => ProbeObserved<P>;
@@ -46,6 +54,10 @@ export interface FakeSandboxRecord {
   probed: boolean;
   released: boolean;
   killed: boolean;
+  /** I4: the workload the stdio session released (null before release, or without stdio) */
+  workload: { command: string; args: string[] } | null;
+  /** I4: every line the sandbox received on stdin, in order */
+  stdin: string[];
 }
 
 /** the runtime each backend's sandbox observes from inside, at a class */
@@ -65,7 +77,7 @@ export class FakeSandboxBackend implements SandboxBackend {
   /** the image every placement sandbox reports (a test may set it per offer by reading the offer) */
   imageDigestOverride: string | null = null;
 
-  constructor(opts: FakeBackendOptions = {}) {
+  constructor(private readonly opts: FakeBackendOptions = {}) {
     const backend = opts.backend ?? "gvisor";
     this.description = { backend, runtimeVersion: opts.runtimeVersion ?? "fake-0.0.0", classes: opts.classes ?? BACKEND_ATTESTABLE_CLASSES[backend] };
     this.probeAddress = opts.probeAddress ?? "203.0.113.9";
@@ -131,11 +143,52 @@ export class FakeSandboxBackend implements SandboxBackend {
   }
 
   private handle(kind: "canary" | "placement", offer: ExecutionOffer | null, profile: ExecutionProfileBody, cls: AppliedIsolationKind): SandboxHandle {
-    const rec: FakeSandboxRecord = { id: randomUUID(), kind, offerId: offer?.id ?? null, cls, probed: false, released: false, killed: false };
+    const rec: FakeSandboxRecord = { id: randomUUID(), kind, offerId: offer?.id ?? null, cls, probed: false, released: false, killed: false, workload: null, stdin: [] };
     this.sandboxes.push(rec);
     let endedResolve!: (o: "completed" | "failed" | "killed" | "limit_exceeded") => void;
+    let settled = false;
     const ended = new Promise<"completed" | "failed" | "killed" | "limit_exceeded">((r) => (endedResolve = r));
     const self = this;
+    const server = kind === "placement" ? this.opts.stdioServer : undefined;
+    // the stdout queue of a fake stdio server, and its waiting reader
+    const out: string[] = [];
+    let outEnded = false;
+    let wake: (() => void) | null = null;
+    const endOut = () => {
+      outEnded = true;
+      wake?.();
+    };
+    const finish = (how: "completed" | "killed") => {
+      if (settled) return;
+      settled = true;
+      endOut();
+      endedResolve(how);
+    };
+    const stdio: SandboxStdio | undefined = server
+      ? {
+          async write(line) {
+            if (!rec.released || rec.killed) throw new Error("fake backend: stdin before release or after kill");
+            rec.stdin.push(line);
+            for (const reply of server(line, rec.workload!)) out.push(reply);
+            wake?.();
+          },
+          async endInput() {
+            finish("completed");
+          },
+          lines: () =>
+            (async function* () {
+              for (;;) {
+                if (out.length > 0) {
+                  yield out.shift()!;
+                  continue;
+                }
+                if (outEnded) return;
+                await new Promise<void>((r) => (wake = r));
+                wake = null;
+              }
+            })(),
+        }
+      : undefined;
     return {
       id: rec.id,
       imageDigest: this.imageDigestOverride ?? offer?.imageDigest ?? `sha256:${"f".repeat(64)}`,
@@ -143,16 +196,22 @@ export class FakeSandboxBackend implements SandboxBackend {
         rec.probed = true;
         return self.probeSet(kind, profile, cls, probes);
       },
-      async releaseInput() {
+      async releaseInput(workload) {
         if (rec.killed) throw new Error("fake backend: input released to a killed sandbox");
         rec.released = true;
-        // a fake workload completes as soon as it has its input
-        endedResolve("completed");
+        if (server) {
+          if (!workload) throw new Error("fake backend: a stdio sandbox is released with its workload");
+          rec.workload = { command: workload.command, args: [...workload.args] };
+          return;
+        }
+        // a fake workload with no stdio completes as soon as it has its input
+        finish("completed");
       },
       async kill() {
         rec.killed = true;
-        endedResolve("killed");
+        finish("killed");
       },
+      ...(stdio ? { stdio } : {}),
       ended,
     };
   }

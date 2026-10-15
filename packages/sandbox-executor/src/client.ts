@@ -1,6 +1,6 @@
 /**
- * ADR-0190 I3 — THE CHANNEL CLIENT: the executor's seven routes and nothing
- * else (`EXECUTOR_CHANNEL_ROUTES`). Every request is authorised by the
+ * ADR-0190 I3 — THE CHANNEL CLIENT: the executor's seven routes, plus I4's
+ * two stdio session routes (`EXECUTOR_STDIO_ROUTES`), and nothing else. Every request is authorised by the
  * `ChannelCredential`; every answer is parsed with the shared schema before
  * it is believed. As ADR-0187's runner client: a request is bounded in time;
  * a timeout, a 5xx, a 408, a 429 or a success whose body is not a valid
@@ -15,8 +15,12 @@ import {
   executorAnnounceResponseSchema,
   executorReportResponseSchema,
   executorSelfTestResponseSchema,
+  executorStdioMessageSchema,
+  executorStdioPostResponseSchema,
   executorStreamMessageSchema,
   type ExecutorAnnounce,
+  type ExecutorStdioMessage,
+  type ExecutorStdioPost,
   type ExecutorNext,
   type ExecutorStreamMessage,
   type SignedExecutorReport,
@@ -57,7 +61,28 @@ export function checkGatewayUrl(gatewayUrl: string, allowInsecureHttp = false): 
   throw new ExecutorConfigError(`the gateway URL must be https: (got ${u.protocol}//${u.host}); plain http is allowed only for a loopback host or with REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP=1 in development`);
 }
 
-export type ExecutorRoute = "announce" | "self-test" | "stream" | "accept" | "decline" | "report" | "end";
+/**
+ * ADR-0190 I4 (recheck): at start, the gateway URL must answer over its own scheme (for https: the TLS handshake
+ * and an HTTP answer of any status from `/health`). Null when it does; otherwise the reason, which `main` prints
+ * before it exits (it never retries an unreachable or non-TLS gateway forever in silence).
+ */
+export async function probeGatewayReachable(
+  gatewayUrl: string,
+  fetchImpl: (url: string, init: { method: string; signal: AbortSignal; redirect: "manual" }) => Promise<{ status: number }> = fetch,
+  timeoutMs = 10_000,
+): Promise<string | null> {
+  const url = new URL("/health", gatewayUrl).toString();
+  try {
+    await fetchImpl(url, { method: "GET", signal: AbortSignal.timeout(timeoutMs), redirect: "manual" });
+    return null;
+  } catch (e) {
+    const cause = (e as { cause?: { code?: unknown; message?: unknown } }).cause;
+    const detail = typeof cause?.code === "string" ? cause.code : typeof cause?.message === "string" ? cause.message : (e as Error).message;
+    return `the gateway at ${new URL(gatewayUrl).origin} is not reachable over ${new URL(gatewayUrl).protocol.replace(":", "")} from this executor (${detail})`;
+  }
+}
+
+export type ExecutorRoute = "announce" | "self-test" | "stream" | "accept" | "decline" | "report" | "end" | "stdio";
 
 /** the HTTP seam: `fetch`-shaped, with a body that may stream (the stream route) or be whole text */
 export interface ExecutorHttp {
@@ -269,7 +294,43 @@ export class ExecutorClient {
     }
   }
 
-  private async readStream(url: string, auth: Record<string, string>, abort: AbortController, idleMs: number, onMessage: (m: ExecutorStreamMessage) => Promise<void> | void): Promise<void> {
+  /**
+   * ADR-0190 I4: hold one window of a placed stdio session (gateway → sandbox):
+   * `start`, `stdin` frames, `close`, keepalives, `bye`. Every line is parsed
+   * with the shared schema; anything else is dropped, never acted on. Review M6: `from` is the next stdin sequence
+   * number this executor expects; the gateway keeps every frame until it is acknowledged that way and re-sends from it.
+   */
+  async stdioStream(offerId: string, windowSeconds: number, from: number, onMessage: (m: ExecutorStdioMessage) => Promise<void> | void, signal?: AbortSignal): Promise<void> {
+    const w = Math.min(EXECUTOR_STREAM_WINDOW.max, Math.max(EXECUTOR_STREAM_WINDOW.min, Math.floor(windowSeconds)));
+    const url = this.url(`/offers/${encodeURIComponent(offerId)}/stdio?window=${w}&from=${Math.max(0, Math.floor(from))}`);
+    const auth = await this.opts.credential.authorizeRequest("GET", url, undefined);
+    const abort = new AbortController();
+    const onCallerAbort = () => abort.abort();
+    signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const idleMs = w * 1000 + Math.max(0, this.opts.streamIdleSlackMs ?? EXECUTOR_STREAM_IDLE_SLACK_MS);
+    try {
+      await this.readStream(url, auth, abort, idleMs, onMessage, executorStdioMessageSchema, "stdio", (m) => m.type === "bye");
+    } finally {
+      signal?.removeEventListener("abort", onCallerAbort);
+      abort.abort();
+    }
+  }
+
+  /** ADR-0190 I4: sandbox → gateway, a batch of stdout frames and/or eof */
+  async stdioPost(offerId: string, body: ExecutorStdioPost) {
+    return this.answer("stdio", await this.call("stdio", "POST", `/offers/${encodeURIComponent(offerId)}/stdio`, body), 200, executorStdioPostResponseSchema);
+  }
+
+  private async readStream<M>(
+    url: string,
+    auth: Record<string, string>,
+    abort: AbortController,
+    idleMs: number,
+    onMessage: (m: M) => Promise<void> | void,
+    schema: { safeParse(v: unknown): { success: true; data: M } | { success: false } } = executorStreamMessageSchema as never,
+    route: ExecutorRoute = "stream",
+    isBye: (m: M) => boolean = (m) => (m as { type?: string }).type === "bye",
+  ): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const idle = <T>(p: Promise<T>): Promise<T> =>
       Promise.race([
@@ -289,7 +350,7 @@ export class ExecutorClient {
       } catch {
         // a refusal with no JSON body still refuses
       }
-      throw new ExecutorHttpError("stream", res.status, typeof j.error === "string" ? j.error : null, nextOf(j.next));
+      throw new ExecutorHttpError(route, res.status, typeof j.error === "string" ? j.error : null, nextOf(j.next));
     }
     const lines = res.lines
       ? res.lines()
@@ -309,10 +370,10 @@ export class ExecutorClient {
         } catch {
           continue;
         }
-        const m = executorStreamMessageSchema.safeParse(parsed);
+        const m = schema.safeParse(parsed);
         if (!m.success) continue;
         await onMessage(m.data);
-        if (m.data.type === "bye") return;
+        if (isBye(m.data)) return;
       }
     } finally {
       void Promise.resolve(it.return?.()).catch(() => undefined);

@@ -13,3 +13,5 @@ export * from "./self-test.js";
 export * from "./offers.js";
 export * from "./quarantine.js";
 export * from "./loop.js";
+export * from "./runsc-backend.js";
+export * from "./stdio-pump.js";

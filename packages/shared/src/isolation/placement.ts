@@ -26,7 +26,7 @@ import {
   EXECUTION_REFUSAL_REASONS,
   isolationClassRank,
   ISOLABLE_WORKLOAD_KINDS,
-  PLACEMENT_OUTCOMES,
+  PLACEMENT_EFFECTIVE_OUTCOMES,
   REQUIRABLE_ISOLATION_CLASSES,
   REQUIRED_CLASS_SOURCES,
   type ExecutorStatus,
@@ -275,7 +275,7 @@ export const retireExecutionProfileSchema = z.object({}).strict();
 export const executionPlacementsQuerySchema = z
   .object({
     limit: z.coerce.number().int().min(1).max(200).default(50),
-    outcome: z.enum(PLACEMENT_OUTCOMES).optional(),
+    outcome: z.enum(PLACEMENT_EFFECTIVE_OUTCOMES).optional(),
     workloadKind: z.enum(ISOLABLE_WORKLOAD_KINDS).optional(),
     reason: z.enum([...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"]).optional(),
     before: z.string().datetime({ offset: true }).optional(),

@@ -22,12 +22,14 @@ describe("Batch 3 browser contract", () => {
     expect(held.message).toContain("cannot be deleted while the hold applies");
     expect(held.payload.error).toBe("incident_evidence_hold");
   });
-  it("explains stdio permission refusals and inactive owners", () => {
-    for (const code of ["group_writable", "writable_parent"]) {
+  it("explains stdio refusals (ADR-0190 I4) and inactive owners", () => {
+    for (const code of ["not_absolute", "invalid_argv"]) {
       const error = new ApiError(400, { error: "mcp_stdio_command_refused", code });
-      expect(error.message).toContain("file and parent-directory write permissions");
+      expect(error.message).toContain("absolute path inside the image");
       expect(error.payload.code).toBe(code);
     }
+    expect(new ApiError(400, { error: "mcp_stdio_image_unpinned", code: "image_unpinned" }).message).toContain("by digest");
+    expect(new ApiError(409, { error: "execution_profile_unavailable", ruleId: "execution-profile", reason: "no_executor" }).message).toContain("No sandbox executor can run this");
     expect(errMessage(422, { error: "owner_inactive" })).toContain("Choose an active person");
   });
   it("sends only the MCP coverage list that was changed (PUT /v1/org/settings is partial)", () => {
@@ -41,15 +43,17 @@ describe("Batch 3 browser contract", () => {
       .toEqual({ kind: "unchanged" });
   });
   it("a stdio update that changed nothing is not reported as an admission reset (PR #181 review)", () => {
-    const before = { id: "s", name: "s", url: "stdio:s", transport: "stdio", stdio: { command: "/opt/mcp/a", args: ["--x"] }, stdioCommandDigest: "d1", admissionState: "admitted" } as McpServer;
-    expect(stdioSpecDirty(before, "/opt/mcp/a", ["--x"])).toBe(false);
-    expect(stdioSpecDirty(before, "/opt/mcp/a", ["--x", "--y"])).toBe(true);
-    expect(stdioSpecDirty(before, "/opt/mcp/b", ["--x"])).toBe(true);
+    const d1 = `sha256:${"1".repeat(64)}`;
+    const before = { id: "s", name: "s", url: "stdio:s", transport: "stdio", stdio: { image: d1, command: "/opt/mcp/a", args: ["--x"] }, stdioCommandDigest: d1, admissionState: "admitted" } as McpServer;
+    expect(stdioSpecDirty(before, d1, "/opt/mcp/a", ["--x"])).toBe(false);
+    expect(stdioSpecDirty(before, d1, "/opt/mcp/a", ["--x", "--y"])).toBe(true);
+    expect(stdioSpecDirty(before, d1, "/opt/mcp/b", ["--x"])).toBe(true);
+    expect(stdioSpecDirty(before, `sha256:${"2".repeat(64)}`, "/opt/mcp/a", ["--x"])).toBe(true);
     const same = stdioUpdateOutcome(before, { ...before });
     expect(same).not.toContain("scan required");
     expect(same).toContain("Nothing changed");
     expect(same).toContain("admitted");
-    const repinned = stdioUpdateOutcome(before, { ...before, stdioCommandDigest: "d2", admissionState: "unscanned" });
+    const repinned = stdioUpdateOutcome(before, { ...before, stdio: { ...before.stdio!, image: `sha256:${"2".repeat(64)}` }, stdioCommandDigest: `sha256:${"2".repeat(64)}`, admissionState: "unscanned" });
     expect(repinned).toContain("unscanned");
     expect(repinned).toContain("scan and approve");
   });

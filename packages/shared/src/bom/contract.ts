@@ -609,6 +609,16 @@ export const decisionOutcomeFactsSchema = z
  *    the executor (id, backend, runtime version, its ADR-0188 workload identity) and the attestation references:
  *    the per-placement report SHA-256 (decision 6) and the executor self-test the placement relied on (the newest
  *    passing one for that executor and profile, observed at or before the placement and not expired at it).
+ *  - `offered` (ADR-0190 I4): a governed stdio decision chose an executor and offered it the work IN the decision's
+ *    transaction, so at decision time nothing has run: the row names the executor, the class its fresh attestation
+ *    shows, the broker's attestation (`executorAttestationId`, the one the broker stamped, never re-derived), the
+ *    offer (`offerId`), the closure image and the runtime flags hash, and NO report hash (`placementReportSha256`
+ *    null). What happened next (placed, mismatch, refused, cancelled, session lost) is the linked
+ *    `execution_placement_reports` row, which the Decision BOM read shows beside the signed body.
+ *  - `refused` with `policy_unresolved` (I4 review M2): the requirement did not resolve, so the required class, the
+ *    floor that set it and the profile are null; every other refusal names them.
+ * `offerId`, `imageDigest` and `runtimeFlagsSha256` are optional so v2 facts captured before I4 still parse; from I4
+ * on every placement-backed capture writes them (null where the row has none).
  */
 export const DECISION_EXECUTION_PLACEMENTS = ["in_gateway", "external", ...PLACEMENT_OUTCOMES] as const;
 export type DecisionExecutionPlacement = (typeof DECISION_EXECUTION_PLACEMENTS)[number];
@@ -637,6 +647,12 @@ export const decisionExecutionFactsSchema = z
       })
       .strict()
       .nullable(),
+    /** ADR-0190 I4: the offer an `offered` placement made (null on other placements) */
+    offerId: nullableUuid.optional(),
+    /** ADR-0190 I4: the closure image the placement named (`sha256:<64 hex>`), as stamped on the row */
+    imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).nullable().optional(),
+    /** ADR-0190 I4: the SHA-256 of the runtime flags the broker's attestation reported, as stamped on the row */
+    runtimeFlagsSha256: bomDigestSchema.nullable().optional(),
     attestation: z
       .object({
         /** decision 6: the SHA-256 of the per-placement report the gateway compared before delivering the call */
@@ -663,10 +679,21 @@ export const decisionExecutionFactsSchema = z
       return;
     }
     if (!isolable) issue(`${e.workloadKind} is never placed by an executor (decision 3)`);
-    if (e.placementId === null || e.requiredClass === null || e.requiredBy === null || e.profile === null) issue("a placement names its row, required class, the floor that set it and its profile");
+    // I4 review M2: an unresolved policy fact is exactly a requirement that did not resolve
+    const unresolved = e.placement === "refused" && e.refusalCode === "policy_unresolved";
+    if (e.placementId === null) issue("a placement names its row");
+    // recheck N5: a digest that names no profile is `profile_retired` with no profile (it does not exist)
+    const noProfile = e.placement === "refused" && e.refusalCode === "profile_retired";
+    if (!unresolved && (e.requiredClass === null || e.requiredBy === null || (e.profile === null && !noProfile))) issue("a placement names its required class, the floor that set it and its profile");
     if (e.appliedClass === "in_gateway" || e.appliedClass === "external") issue("an executor placement applies an isolation class");
+    if (e.placement !== "offered" && e.offerId != null) issue("only an offered placement names its offer");
     if (e.placement === "refused") {
       if (e.executor !== null || e.appliedClass !== null || e.attestation !== null || e.refusalCode === null || e.refusalCode === "execution_profile_mismatch") issue("a refusal starts nothing and names its reason");
+    } else if (e.placement === "offered") {
+      // I4: chosen and offered at decision time; nothing ran yet, so there is no per-placement report
+      if (e.executor === null || e.appliedClass === null || e.refusalCode !== null || !e.offerId || e.attestation === null || e.attestation.placementReportSha256 !== null) {
+        issue("an offered placement names its executor, the attested class and its offer, and has no report yet");
+      }
     } else if (e.placement === "placed") {
       if (e.executor === null || e.appliedClass === null || !e.attestation?.placementReportSha256 || e.refusalCode !== null) issue("a placement names its executor, applied class and report");
     } else if (e.executor === null || !e.attestation?.placementReportSha256 || e.refusalCode !== "execution_profile_mismatch") {

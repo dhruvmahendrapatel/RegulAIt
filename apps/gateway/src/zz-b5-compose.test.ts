@@ -55,8 +55,14 @@ describe("ADR-0187: the engines network and the runner template", () => {
     expect(t).toMatch(/\n {2}pids_limit: \d+\n/);
     expect(t).toMatch(/\n {2}pull_policy: \$\{REGULAIT_ENGINE_PULL_POLICY:-never\}\n/);
     expect(t).toMatch(/\n {4}- \/work:size=/);
-    // no Docker socket anywhere in the stack
-    expect(compose).not.toMatch(/docker\.sock/);
+    // no Docker socket anywhere in the stack, except the ADR-0190 sandbox executor's (decision 4: the executor, never
+    // the gateway or a runner, starts sandboxes; it holds the socket and nothing else)
+    const executor = block("sandbox-executor");
+    expect(executor).toMatch(/\n {6}- \/var\/run\/docker\.sock:\/var\/run\/docker\.sock\n/);
+    expect(compose.replace(executor, "")).not.toMatch(/docker\.sock/);
+    expect(block("gateway")).not.toMatch(/docker\.sock/);
+    expect(executor).toMatch(/\n {4}profiles: \["isolation"\]\n/);
+    expect(executor).toMatch(/\n {4}networks: \[engines\]\n/);
     // the runner holds no secret but its enrolment token (ADR-0188 S7: plus the gateway's issuer, a public URL
     // its self-token requests name; its key it generates itself, on its own volume)
     const env = t.slice(t.indexOf("  environment:"), t.indexOf("  restart:"));

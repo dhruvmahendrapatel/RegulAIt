@@ -488,30 +488,103 @@ admission `enforce`, a 7-day release-age cooldown, private MCP ranges closed, co
 endpoints adjudicated against the egress allow-list, and backup verification, spend monitoring and
 stale-credential alerts on. Each is relaxable by an admin, and every change is audited old → new.
 
-**Metrics and stdio MCP upstreams (ADR-0185).** Both are off unless you set them:
+**Metrics (ADR-0185).** Off unless you set them:
 
 | Variable | Default | Effect |
 |---|---|---|
 | `REGULAIT_METRICS_LISTEN` | unset (no `/metrics` anywhere) | `host:port` or a port (e.g. `127.0.0.1:9464`): a **separate** listener that serves only `GET /metrics` (Prometheus text). Keep it on a private network. |
 | `REGULAIT_METRICS_TOKEN` | unset | Required (at least 32 characters, no whitespace) whenever either metrics variable is on, or the gateway **refuses to start**. Scrapers send it as `Authorization: Bearer <token>`; a wrong or missing token is a 401 `metrics_unauthorized`, counted rather than audited. |
 | `REGULAIT_METRICS_ON_MAIN_LISTENER` | off | `1`/`true`/`on` also mounts `GET /metrics` on the public listener, with the same token check. Any other value than on/off refuses boot. |
-| `REGULAIT_MCP_STDIO_ALLOWED_DIRS` | unset (stdio upstreams impossible) | Absolute directories, separated by `:`, that a stdio MCP server's command must resolve inside. An admin must also enable `stdio` in the org's MCP upstream transports; both are needed. Relative or missing entries allow nothing. |
-| `REGULAIT_MCP_STDIO_MAX_PROCS` | `4` | Most stdio upstream processes this host runs at once (one per request); capped at 64; a request past the cap is refused (`mcp_stdio_busy`), nothing started. |
 
-Metric labels carry no user, project, email, tool name, URL or URI. A stdio child gets only a minimal safe
-environment (never `DATABASE_URL` or `REGULAIT_DATA_KEY`), and its command's sha256 is pinned at registration.
+Metric labels carry no user, project, email, tool name, URL or URI.
 
-Before you register a stdio server:
+**Sandboxed stdio MCP servers (ADR-0190 slice I4).** A stdio MCP server **never runs on the gateway host**. It runs
+in a gVisor sandbox (`runsc`, isolation class L2) that a separate **sandbox executor** starts on a Docker host, from
+the server's *closure image* (the server, its interpreter and every module, pinned by digest at registration). The
+gateway has no Docker socket and starts no process. The ADR-0185 host variables `REGULAIT_MCP_STDIO_ALLOWED_DIRS` and
+`REGULAIT_MCP_STDIO_MAX_PROCS` no longer exist, and a stdio server registered before this release (a host path) is
+refused until it is registered again with an image (`mcp_stdio_image_unpinned`).
 
-- **Put no secret in its arguments.** The argument list is stored in the audit log and shown to admins on the
-  server's page. Give the program its credentials some other way, such as a file only the gateway's user can read.
-- **Only the command file itself is pinned.** If it is a script, the interpreter it names on its `#!` line and
-  any modules that interpreter loads are not checked. Keep those where only an administrator can write them.
-  Pinning them, and running the child in isolation, is planned (PF-06).
-- **Keep the command and its directories writable by their owner only.** The gateway refuses a command file that
-  is world- or group-writable (`world_writable`, `group_writable`). It also refuses one in a directory that is
-  group- or world-writable, checking every directory from the file's up to the allowed directory
-  (`writable_parent`).
+Without an executor that proves the class a call requires, every stdio call is refused with `409
+execution_profile_unavailable` and its reason (`no_executor`, `attestation_stale`, `class_below_required`,
+`executor_quarantined`, `profile_retired`, `policy_unresolved`), audited, with nothing started. There is no fallback
+to anything less isolated. A call must name a project whose AI use cases give it a data sensitivity (the
+`x-regulait-project-id` header); an unattributed call refuses `policy_unresolved`. A call made without an agent is
+placed as decision 7's unknown agent, under the most restrictive profile (L3); on a host with only gVisor (L2) it
+refuses until an admin relaxes that requirement or an L3 executor exists (see the ADR's open questions).
+
+> **Not yet executed end to end (M-041).** The steps below were written in a session with no Docker daemon. The
+> executor's code, the sandbox init and the gateway's side are tested (the init runs in the executor's test suite;
+> the gateway suite drives the executor channel with a fake backend), and the gVisor tarball and its sha512 are the
+> ones the I0 spike verified and ran (`spikes/isolation-i0`). The Docker steps themselves (`daemon.json`, the image
+> builds, the compose profile) have **not** been run yet. Run them on a test host before relying on them, and record
+> what you find against ADR-0190 "As built: slice I4". **Until then the L2 (gVisor) class is unverified**: the
+> executor's proof that a sandbox ran under gVisor (below) has only been exercised against test doubles.
+
+1. **Install gVisor on the Docker host, as one unit** (amendment E). The release tarball holds `runsc`, its shim and
+   the `gvisor-bin/` sidecars; a bare `runsc` copy no longer runs. Fetch and verify it with the I0 script, which pins
+   the sha512 of `release-20261005.0` and re-checks the published one:
+   `spikes/isolation-i0/fetch-gvisor.sh /tmp/gvisor`. Then copy the extracted tree to a directory every user can
+   traverse (amendment E: a `0700` parent breaks `--directfs=false`), for example `/usr/local/lib/gvisor` (`0755`).
+   Air-gapped: bring the tarball in the bundle and run the same verification offline.
+2. **Register it with the Docker daemon** as the runtime `runsc`, with exactly the shipped profiles' runsc flags
+   (amendments A and B), in `/etc/docker/daemon.json`, then restart the daemon:
+
+   ```json
+   {
+     "runtimes": {
+       "runsc": {
+         "path": "/usr/local/lib/gvisor/runsc",
+         "runtimeArgs": ["--oci-seccomp", "--network=none", "--sidecar-usage-policy=STRICT",
+                         "--sidecar-release-enforcement-policy=ALWAYS", "--platform=systrap", "--directfs=false"]
+       }
+     }
+   }
+   ```
+
+   The executor checks this before it announces anything, from OUTSIDE any sandbox: the daemon must name the
+   `runsc` runtime at exactly `$REGULAIT_GVISOR_HOST_DIR/runsc` (default `/usr/local/lib/gvisor/runsc`), and that
+   binary must hash (sha512) to the pinned `release-20261005.0` binary. Compose mounts the gVisor DIRECTORY read-only
+   into the executor (never the file alone, which would pin the old inode across an upgrade), and the executor
+   re-hashes the binary at every self-test and whenever its device, inode, size or times change.
+   Anything else stops it at start (exit 2). Each sandbox's own runtime is then read with `docker inspect`; a
+   sandbox under any other runtime, or under a binary that is not the pinned release, is reported as `runc` and the
+   gateway refuses it. Every self-test and every sandbox reports the runtime's arguments, and the gateway fails a
+   report that lacks any of the profile's flags (`runtime_flags_missing`). A new gVisor release is accepted only
+   after its verified sha512 is added to `packages/sandbox-executor/src/init-pin.ts` in a reviewed change.
+3. **Build the stdio base image** and note its digest (the executor's self-test canary). It provides the Node
+   interpreter only: the sandbox init is the executor's own, hash-pinned file, mounted read-only into every sandbox
+   from the `regulait-sandbox-init` volume and run as its entry point, so no image can replace it:
+   `docker build -f packages/sandbox-executor/stdio-base/Dockerfile -t regulait/stdio-base:local packages/sandbox-executor`
+   then `docker image inspect --format '{{.Id}}' regulait/stdio-base:local`. Put it in `REGULAIT_STDIO_BASE_IMAGE`.
+4. **Build each stdio server's closure image FROM that base**
+   (`packages/sandbox-executor/stdio-base/Dockerfile.closure.example`), note its digest the same way, and register the
+   server with `transport: "stdio"` and `stdio: { image: "<digest>", command: "<absolute path inside the image>",
+   args: [...] }` (MCP servers page, "Register an MCP server"). The executor runs images with `--pull never`: load
+   them on the Docker host (`docker load` in an air-gapped install).
+5. **Start the executor**: register a `worker_runtime` workload identity for it, set `REGULAIT_EXECUTOR_IDENTIFIER`,
+   set `REGULAIT_DOCKER_GID` to the group that owns the host's `/var/run/docker.sock`, and run
+   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only,
+   at `REGULAIT_EXECUTOR_GATEWAY_URL`, which has no working default (the placeholder ends in `.invalid`). The executor
+   sits on the internal-only `engines` network, which has no route to the public address, so set it to an https
+   address of the gateway that the `engines` network can reach (a TLS front on that network). At start the executor
+   checks that address over TLS; if it cannot reach it, it exits (code 2) with the reason and this instruction, and
+   compose restarts it, so nothing is placed until the address works. Plain http is for
+   a development box only, through the explicit override `docker compose -f docker-compose.yml -f
+   compose.isolation-insecure-dev.yml --profile isolation up`, and the executor logs a warning when it runs that way.
+   On its first start it prints its public key: register
+   the executor with that key on the Engines page (`POST /v1/executors`, backend `gvisor`, class
+   `user_space_kernel`). It then announces itself, self-tests every profile it can serve, and takes placements.
+
+The executor holds the Docker socket, so it is as privileged as the Docker daemon; it holds nothing else (its key is a
+file it generates on its own volume). Its sandboxes get no network at all; the MCP bytes travel over the executor's
+own authenticated channel to the gateway. Before you register a stdio server:
+
+- **Put no secret in its arguments or its image.** The argument list is stored in the audit log and shown to admins
+  on the server's page, and a sandbox holds no credential (profile `secrets: none`). A server that needs a user's
+  upstream credential is not supported yet (ADR-0190 decision 5).
+- **Pin the image, not a tag.** A tag is refused at registration (`mcp_stdio_image_unpinned`). Changing the image,
+  the entry point or the arguments resets the server's admission to `unscanned`.
 
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always
