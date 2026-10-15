@@ -881,6 +881,11 @@ records its own changes separately.
      entry. Every Decision BOM assembled from I8 on is v2, whatever version its facts are.
    - **What migration 0197 changes.** It widens `decision_facts_version_check` and `decision_boms_body_check` to
      admit v1 and v2, and refuses anything else. `decision_facts.facts_version` now defaults to v2.
+     - **How (review L2).** Each widened CHECK is added `NOT VALID`, then validated by `VALIDATE CONSTRAINT`.
+     - **What that buys.** `VALIDATE CONSTRAINT` scans under SHARE UPDATE EXCLUSIVE, not under the ACCESS
+       EXCLUSIVE lock the DROP/ADD takes. That shorter lock applies only when the statements run on their own.
+       drizzle's migrator applies all pending migrations in one transaction (checked in drizzle-orm 0.45.3), so
+       there the ACCESS EXCLUSIVE lock is held until commit.
    - **Old rows.** Stored v1 rows are valid as recorded. Nothing is rewritten or back-filled (ADR-0180).
    - **Verifiers.** The online verifier and `scripts/verify-bom.mjs` both accept the two Decision BOM versions,
      for stored BOMs and bundles alike. Each version is checked against its own section list: twelve sections for
@@ -901,8 +906,19 @@ records its own changes separately.
    - the profile: id, name, version, digest;
    - the executor: id, backend, runtime version, ADR-0188 identity id and SPIFFE URI;
    - the attestation references: the per-placement report SHA-256, and the executor self-test the placement relied
-     on (the newest passing one for that executor and profile, observed at or before the placement and not
-     expired at it).
+     on. That self-test is chosen by the broker's own predicate as of the placement (review H1):
+     - the LATEST counting self-test for that executor and profile decides (amendment 3), counting only those
+       observed after the executor's last re-enable (amendment T);
+     - it is named only if it is a `pass`, unexpired at the placement, for the class the placement applied;
+     - so a fail after a pass, or a pass from before a quarantine and re-enable, names none.
+
+     The query is defined once, in `packages/db/src/executor-attestation.ts` (`attestationCounts`,
+     `latestCountingAttestation`). The gateway's `freshAttestation`, which the broker, the live delegation chain and
+     the AI BOM loader use, is built on it. If I4 stamps the broker's own attestation reference on the placement row,
+     the capture will prefer that reference.
+   - **What `appliedClass` means.** For `placed`, it is the class the call ran under. For `mismatch`, it is the class
+     the per-placement report claimed. The gateway refused that claim, so the call never ran under it (review L1). The
+     UI labels it "Reported class (disputed)" and shows no "software-attested" note.
 
    Decision 9 also names the image digest and the runtime flags. `execution_placements` has no column for either,
    so the facts do not repeat them. The per-placement report, which is bound by its hash, carries both (I4).
@@ -910,6 +926,12 @@ records its own changes separately.
    - **With a placement row.** The `execution_placements` row is written in the decision's own transaction, before
      the audit row. The shared audit writer's capture (`packages/db/src/decision-facts.ts`) reads it in that same
      transaction. When the row exists, it is the authority.
+   - **Obligation on I4 (review M2).** I4 must key each placement row to the governed decision's own audit id
+     (`execution_placements.audit_id` = the decision row's `id`), and write it in that decision's transaction.
+     Today's broker (`executor-channel.ts`) writes its own `execution-placed` audit row, keys the placement to that
+     row, and records the report in a later transaction. I8's capture therefore cannot match a governed call to its
+     placement until I4 changes this: such calls read `not_recorded, no_placement`, which is true and never a
+     guess. The same obligation went to the I4 builder.
    - **With no placement row:**
      - an `agent` decision is a model call, recorded `in_gateway`;
      - a `connector` decision is a connector call, recorded `in_gateway`;
@@ -922,8 +944,11 @@ records its own changes separately.
      - `not_recorded, pre_isolation` for v1 facts.
    - **A malformed placement fails the capture.** A placement row the contract cannot represent fails the capture,
      and the decision with it (fail closed, as B2 does for a broken actor chain).
-   - **Engine runs.** I5 will write placement rows for engine runs. Until then, an engine run's entitlement
-     decision (`agent`) records the model call it governs as `in_gateway`.
+   - **Engine runs (review M1).** An engine run's entitlement decision (`agent`, `detail.phase` =
+     `engine-run-entitlement`) governs an engine worker, which an executor places from I5 on. It is not a model call
+     in the gateway. Until I5 writes its placement row it is null, so the BOM reads `not_recorded, no_placement`.
+     Signed evidence never states a location known to be false. The phase is one shared constant
+     (`ENGINE_RUN_ENTITLEMENT_PHASE`), used by both `engine-runs.ts` and the capture.
 5. **A format change is not a new fact.** A decision frozen as v1 keeps its v1 BOM. A v2 assembly of it is the
    same version (`decisionBomSameContent`) when two conditions both hold:
    - it adds nothing but `v` and an execution section that records nothing (`pre_isolation`, `pre_facts` or
@@ -940,8 +965,13 @@ records its own changes separately.
      - declared classes, and the class a customer plane is mapped to;
      - its workload identity;
      - each fresh passing self-test (`class:profileDigest` and the report SHA-256).
-   - **Self-test freshness.** A self-test counts when it passed, is not expired at capture, and was observed after
-     the executor's last re-enable (amendment T). The capture's database clock is used (M-075).
+   - **Self-test freshness (review H1).** For each (executor, profile), the loader applies the broker's
+     `freshAttestation`:
+     - the latest counting row decides (amendments 3 and T);
+     - it must be a `pass` unexpired at the capture's database clock (M-075).
+
+     A fail after a pass therefore lists no attestation, and a stdio server whose only executors are in that state
+     is an isolation gap. The AI BOM never shows as attested a server the broker would refuse to place.
    - **Assignments.** Each assignment is a granted edge from an agent, builder agent or stdio server to its
      profile.
    - **Placement property.** MCP servers carry `regulait:execution:placement`: `executor` for stdio, `external`

@@ -9,6 +9,12 @@
 -- never rewritten, and nothing is back-filled: a decision captured before I8 reads `execution: not_recorded,
 -- pre_isolation`). Any other version is still refused. The facts column defaults to v2, the version the capture
 -- writes. `regulait.ai-bom.v1` is unchanged (its records map is open-keyed; owner ruling, 2026-10-15).
+--
+-- Each widened CHECK is added NOT VALID and then validated in its own statement: ADD ... NOT VALID does no scan,
+-- and VALIDATE CONSTRAINT scans under SHARE UPDATE EXCLUSIVE. Every existing row is v1, which the widened CHECK
+-- admits, so the validation passes and the constraint ends fully validated. Caveat: drizzle's migrator applies all
+-- pending migrations in ONE transaction, so there the ACCESS EXCLUSIVE lock taken by DROP/ADD is held until commit
+-- and the scan still runs under it; the shorter lock applies when an operator runs these statements on their own.
 
 -- ===== decision_facts ==========================================================
 ALTER TABLE "decision_facts" ALTER COLUMN "facts_version" SET DEFAULT 'regulait.decision-facts.v2';
@@ -16,7 +22,9 @@ ALTER TABLE "decision_facts" ALTER COLUMN "facts_version" SET DEFAULT 'regulait.
 ALTER TABLE "decision_facts" DROP CONSTRAINT IF EXISTS "decision_facts_version_check";
 --> statement-breakpoint
 ALTER TABLE "decision_facts" ADD CONSTRAINT "decision_facts_version_check"
-  CHECK ("facts_version" IN ('regulait.decision-facts.v1', 'regulait.decision-facts.v2'));
+  CHECK ("facts_version" IN ('regulait.decision-facts.v1', 'regulait.decision-facts.v2')) NOT VALID;
+--> statement-breakpoint
+ALTER TABLE "decision_facts" VALIDATE CONSTRAINT "decision_facts_version_check";
 --> statement-breakpoint
 
 -- ===== decision_boms ===========================================================
@@ -31,4 +39,6 @@ ALTER TABLE "decision_boms" ADD CONSTRAINT "decision_boms_body_check" CHECK (
     AND ("body"::jsonb ->> 'finality') = "finality",
     false
   )
-);
+) NOT VALID;
+--> statement-breakpoint
+ALTER TABLE "decision_boms" VALIDATE CONSTRAINT "decision_boms_body_check";

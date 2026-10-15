@@ -225,7 +225,9 @@ async function assertCaptured(seq: number): Promise<Array<{ row: AuditRow; facts
     // (or an MCP decision that names no server) records no execution
     expect(facts.v).toBe(DECISION_FACTS_VERSION_V2);
     const execution = executionFactsOf(facts);
-    const ran = row.objectType === "agent" || row.objectType === "connector" ? "in_gateway" : row.objectType === "mcp_tool" && row.serverId ? "external" : null;
+    // (an engine run's entitlement decision governs an engine worker, placed from I5: no location until then, M1)
+    const engineRun = row.objectType === "agent" && detail.phase === "engine-run-entitlement";
+    const ran = engineRun ? null : row.objectType === "agent" || row.objectType === "connector" ? "in_gateway" : row.objectType === "mcp_tool" && row.serverId ? "external" : null;
     if (ran === null) expect(execution, `${row.ruleId} (${row.objectType}) records no execution`).toBeNull();
     else expect(execution, `${row.ruleId} (${row.objectType}) ran ${ran}`).toMatchObject({ placement: ran, appliedClass: ran, placementId: null, profile: null, executor: null });
     out.push({ row, facts });

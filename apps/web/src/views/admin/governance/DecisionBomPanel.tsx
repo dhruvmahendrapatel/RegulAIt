@@ -44,7 +44,8 @@ export function ExecutionFacts({ execution: e }: { execution: ExecutionView }) {
     { key: "kind", label: "Workload kind", value: <code className={v.mono}>{e.workloadKind}</code> },
   ];
   if (e.requiredClass) rows.push({ key: "required", label: "Required isolation", value: `${isolationClassLabel(e.requiredClass)}${e.requiredBy ? `, set by ${requiredByLabel(e.requiredBy)}` : ""}` });
-  if (e.placement !== "refused") rows.push({ key: "applied", label: "Applied isolation", value: isolationClassLabel(e.appliedClass) });
+  // a mismatch's class is what the placement report claimed, which the gateway refused: the call never ran under it (decision 6)
+  if (e.placement !== "refused") rows.push({ key: "applied", label: e.placement === "mismatch" ? "Reported class (disputed)" : "Applied isolation", value: isolationClassLabel(e.appliedClass) });
   if (e.refusalCode) rows.push({ key: "refusal", label: "Refusal", value: <code className={v.mono}>{e.refusalCode}</code> });
   if (e.profile) rows.push({ key: "profile", label: "Execution profile", value: <>{e.profile.name} version {e.profile.version} · <Digest value={e.profile.digest} /></> });
   if (e.executor) {
@@ -75,7 +76,7 @@ export function ExecutionFacts({ execution: e }: { execution: ExecutionView }) {
     <div className={v.stack} data-testid="decision-bom-execution">
       <div className={v.sectionTitle}>Execution</div>
       <Table rows={rows} rowKey={(r) => r.key} columns={[{ key: "label", header: "Fact", render: (r) => r.label }, { key: "value", header: "Recorded", render: (r) => r.value }]} />
-      {e.attestation && <p className={v.faint}>Software-attested: the reports come from software on the same host, not from hardware-rooted attestation.</p>}
+      {e.placement === "placed" && e.attestation && <p className={v.faint}>Software-attested: the reports come from software on the same host, not from hardware-rooted attestation.</p>}
     </div>
   );
 }

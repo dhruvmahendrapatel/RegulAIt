@@ -25,7 +25,7 @@
  * approvals and their decisions, grant, identities) only when a row names one,
  * and two inserts per decision. `zz-adr0189-b2-facts.test.ts` measures it.
  */
-import { and, desc, eq, gt, inArray, lte, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   bomExpiresAt,
@@ -46,13 +46,13 @@ import {
   delegationGrants,
   executionPlacements,
   executionProfiles,
-  executorAttestations,
   executors,
   mcpServers,
   projects,
   workloadIdentities,
   ORG_SETTINGS_ID,
 } from "./schema.js";
+import { latestCountingAttestation } from "./executor-attestation.js";
 
 type Tx = Pick<NodePgDatabase<Record<string, never>>, "select" | "insert" | "execute">;
 
@@ -107,9 +107,11 @@ async function loadReads(tx: Tx, rows: DecisionAuditRow[]): Promise<DecisionFact
 /**
  * ADR-0190 I8: the placement rows of these decisions, read in the decision's transaction (the I4/I8 contract: the
  * row is written in that transaction before the facts). With each: its profile (by digest), its executor and the
- * executor's identity URI, and the executor self-test the placement relied on: the newest PASSING attestation for
- * that executor and profile digest, observed at or before the placement and not expired at it (decision 6). Times
- * compared are both database-clock stamps (M-075).
+ * executor's identity URI, and the executor self-test the placement relied on, by the broker's own predicate
+ * (`latestCountingAttestation`, amendments T and 3) as of the placement: the LATEST counting row for that executor
+ * and profile decides, and it is named only if it is a pass, unexpired at the placement, for the applied class. A
+ * fail after a pass, or a pass voided by a later re-enable, names none (decision 6). Times compared are both
+ * database-clock stamps (M-075).
  */
 async function loadPlacements(tx: Tx, auditIds: string[]): Promise<Map<string, DecisionPlacementRead>> {
   const out = new Map<string, DecisionPlacementRead>();
@@ -137,23 +139,14 @@ async function loadPlacements(tx: Tx, auditIds: string[]): Promise<Map<string, D
   const identityOf = new Map(identityRows.map((i) => [i.id, i.identifier]));
   for (const p of placementRows) {
     const executor = p.executorId ? executorOf.get(p.executorId) ?? null : null;
+    // the broker's own predicate, as of the placement (amendments T and 3): the LATEST counting self-test for this
+    // executor and profile decides; it is named only if it is a pass, unexpired at the placement, for the class the
+    // placement applied. A later fail, a void pass from before a quarantine, or another class names nothing.
     let attestation: Record<string, unknown> | null = null;
     if (executor) {
-      const [a] = await tx
-        .select({ id: executorAttestations.id, reportSha256: executorAttestations.reportSha256 })
-        .from(executorAttestations)
-        .where(
-          and(
-            eq(executorAttestations.executorId, executor.id),
-            eq(executorAttestations.profileDigest, p.profileDigest),
-            eq(executorAttestations.verdict, "pass"),
-            lte(executorAttestations.observedAt, p.createdAt),
-            gt(executorAttestations.expiresAt, p.createdAt),
-          ),
-        )
-        .orderBy(desc(executorAttestations.observedAt), desc(executorAttestations.id))
-        .limit(1);
-      attestation = a ?? null;
+      const a = await latestCountingAttestation(tx, executor.id, p.profileDigest, p.createdAt);
+      const counts = a !== null && a.verdict === "pass" && a.expiresAt.getTime() > p.createdAt.getTime() && a.class === p.appliedClass;
+      attestation = counts ? { id: a.id, reportSha256: a.reportSha256 } : null;
     }
     out.set(p.auditId, {
       placement: p as unknown as Record<string, unknown>,

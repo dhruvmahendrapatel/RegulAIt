@@ -32,7 +32,7 @@ import {
 } from "./contract.js";
 import { bomVerifyResponseSchema } from "./contract-b4.js";
 import { assembleDecisionBom, decisionBomSameContent, projectDecisionBom, type DecisionBomAssemblyInput } from "./decision-bom-assembly.js";
-import { buildDecisionFacts, buildExecutionFacts, DecisionFactsCaptureError, type DecisionAuditRow, type DecisionFactReads, type DecisionPlacementRead } from "./facts-capture.js";
+import { buildDecisionFacts, buildExecutionFacts, DecisionFactsCaptureError, ENGINE_RUN_ENTITLEMENT_PHASE, type DecisionAuditRow, type DecisionFactReads, type DecisionPlacementRead } from "./facts-capture.js";
 import { verifyBomBundle, verifyStoredDecisionBom, type BomVerifyReport, type BomVerifyTrust } from "./verify.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -158,6 +158,16 @@ describe("ADR-0190 I8: capture (buildExecutionFacts)", () => {
     for (const transport of ["streamable_http", "sse"]) {
       expect(buildExecutionFacts(row(), reads({ mcpServerTransports: new Map([[U(2), transport]]) }))).toEqual(EXTERNAL);
     }
+  });
+  it("review M1: an engine run's entitlement decision records no location (an engine worker, placed from I5), never in_gateway", () => {
+    const entitlement = row({ objectType: "agent", objectId: U(7), serverId: null, detail: { receiptClass: "decision", phase: ENGINE_RUN_ENTITLEMENT_PHASE, role: "target" } });
+    expect(buildExecutionFacts(entitlement, reads())).toBeNull();
+    expect(ENGINE_RUN_ENTITLEMENT_PHASE).toBe("engine-run-entitlement");
+    // its Decision BOM says not_recorded, no_placement (a v2 null that is not an approval)
+    const f = buildDecisionFacts(entitlement, reads());
+    expect(f.v === "regulait.decision-facts.v2" && f.execution).toBeNull();
+    // NEGATIVE CONTROL: any other agent decision is a model call in the gateway
+    expect(buildExecutionFacts(row({ objectType: "agent", objectId: U(7), serverId: null, detail: { receiptClass: "decision", phase: "dispatch" } }), reads())).toMatchObject({ placement: "in_gateway" });
   });
   it("no placement row and nothing to record: a stdio call, an unknown server, an approval are NOT RECORDED (null)", () => {
     expect(buildExecutionFacts(row(), reads({ mcpServerTransports: new Map([[U(2), "stdio"]]) }))).toBeNull();

@@ -181,6 +181,8 @@ export interface DecisionFactReads {
 }
 
 const REMOTE_MCP_TRANSPORTS: ReadonlySet<string> = new Set(["streamable_http", "sse"]);
+/** `engine-runs.ts`'s `detail.phase` on an engine run's entitlement decision (ADR-0190 I8 review M1) */
+export const ENGINE_RUN_ENTITLEMENT_PHASE = "engine-run-entitlement";
 const asText = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
 /**
@@ -226,6 +228,9 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
     } as DecisionExecutionFacts;
   }
   const none = { placementId: null, requiredClass: null, requiredBy: null, refusalCode: null, profile: null, executor: null, attestation: null };
+  // an engine run's entitlement decision governs an engine worker (placed by an executor from slice I5), not a
+  // model call in the gateway: until I5 writes its placement row, its location is NOT RECORDED, never a guess
+  if (row.objectType === "agent" && asRecord(row.detail)?.phase === ENGINE_RUN_ENTITLEMENT_PHASE) return null;
   if (row.objectType === "agent") return { workloadKind: "model_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
   if (row.objectType === "connector") return { workloadKind: "connector_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
   if (row.objectType === "mcp_tool") {

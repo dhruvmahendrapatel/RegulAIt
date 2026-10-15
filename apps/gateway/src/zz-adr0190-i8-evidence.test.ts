@@ -7,9 +7,12 @@
  *    v1 or v2 body and refuses any other; the facts column defaults to v2.
  *  - THE I4/I8 CONTRACT: an `execution_placements` row written in the decision's own transaction, before the
  *    audit row, is captured in that decision's `regulait.decision-facts.v2` (class, the floor that set it, profile
- *    id/name/version/digest, executor and its workload identity, the per-placement report and the passing
- *    executor self-test it relied on). A placement written in another transaction is not (nothing is inferred),
- *    and a failing or later self-test is never the one named.
+ *    id/name/version/digest, executor and its workload identity, the per-placement report and the executor
+ *    self-test it relied on, by the broker's own predicate: the LATEST counting self-test decides, so a fail after
+ *    a pass, or a pass from before a re-enable, names none). A placement written in another transaction is not
+ *    captured (nothing is inferred).
+ *  - THE AI BOM LOADER applies the same predicate: such an executor lists no attestation, and a stdio server whose
+ *    only executors are in that state is an isolation gap.
  *  - With no placement row: a remote MCP call records `external`, a model call `in_gateway`, a stdio call and an
  *    approval record nothing (null).
  *
@@ -46,6 +49,7 @@ const PREVIOUS = "0196_";
 const RUN = Math.random().toString(36).slice(2, 8);
 const SCRATCH = `a190_i8_${process.pid}_${RUN}`;
 const RESTRICTED_DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES.restricted);
+const MICROVM_DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES["restricted-microvm"]);
 const H = (c: string) => c.repeat(64);
 const SIG = "A".repeat(86);
 const EXECUTOR_URI = `spiffe://i8.example.org/regulait/worker_runtime/executor-${RUN}`;
@@ -87,6 +91,11 @@ let userId: string;
 let stdioId: string;
 let remoteId: string;
 let executorId: string;
+/** a kata executor whose latest self-test is a FAIL after a pass; one whose pass predates its re-enable */
+let failedExecutorId: string;
+let voidedExecutorId: string;
+let stdioL3Id: string;
+let microvmProfileId: string;
 let executorIdentityId: string;
 let profile: { id: string; name: string; version: number; digest: string };
 let passingAttestation: { id: string; reportSha256: string };
@@ -104,12 +113,28 @@ async function factsOf(auditId: string) {
   expect(row!.facts_hash).toBe(bomDigestOf(facts));
   return facts;
 }
-const placementSql = (auditId: string, o: { outcome?: "placed" | "refused" } = {}) =>
-  o.outcome === "refused"
+/** a placement on `executor` (default: the attested gvisor one) at L2 under `restricted`, or at L3 under `restricted-microvm` */
+const placementSql = (auditId: string, o: { outcome?: "placed" | "refused"; executor?: string; l3?: boolean } = {}) => {
+  const [cls, digest] = o.l3 ? ["microvm", MICROVM_DIGEST] : ["user_space_kernel", RESTRICTED_DIGEST];
+  return o.outcome === "refused"
     ? sql`insert into execution_placements (audit_id, workload_kind, required_class, required_by, enforcement, profile_digest, executor_id, applied_class, report_sha256, outcome, refusal_code)
           values (${auditId}, 'mcp_stdio', 'microvm', 'data_sensitivity', 'enforce', ${RESTRICTED_DIGEST}, null, null, null, 'refused', 'no_executor') returning id`
     : sql`insert into execution_placements (audit_id, workload_kind, required_class, required_by, enforcement, profile_digest, executor_id, applied_class, report_sha256, outcome)
-          values (${auditId}, 'mcp_stdio', 'user_space_kernel', 'workload_kind', 'enforce', ${RESTRICTED_DIGEST}, ${executorId}, 'user_space_kernel', ${H("b")}, 'placed') returning id`;
+          values (${auditId}, 'mcp_stdio', ${cls}, 'workload_kind', 'enforce', ${digest}, ${o.executor ?? executorId}, ${cls}, ${H("b")}, 'placed') returning id`;
+};
+/** a kata executor (L3) with its own worker_runtime identity */
+async function kataExecutor(name: string): Promise<string> {
+  const identity = rows<{ id: string }>(
+    await db.execute(sql`insert into workload_identities (kind, identifier, sponsor_user_ids) values ('worker_runtime', ${`spiffe://i8.example.org/regulait/worker_runtime/${name}-${RUN}`}, ARRAY[${userId}]::uuid[]) returning id`),
+  )[0]!.id;
+  return rows<{ id: string }>(
+    await db.execute(sql`insert into executors (workload_identity_id, name, backend, runtime_version, classes_declared)
+      values (${identity}, ${`i8-${name}-${RUN}`}, 'kata', 'fake-0.0.0', '["hardened_container", "microvm"]'::jsonb) returning id`),
+  )[0]!.id;
+}
+const attest = (executor: string, digest: string, cls: string, report: string, verdict: "pass" | "fail", observedAgo: string, expiresIn: string) =>
+  sql`insert into executor_attestations (executor_id, profile_digest, class, report_sha256, report, verdict, observed_at, expires_at)
+      values (${executor}, ${digest}, ${cls}, ${report}, '{}'::jsonb, ${verdict}, now() - ${observedAgo}::interval, now() + ${expiresIn}::interval) returning id`;
 
 beforeAll(async () => {
   admin = createDb(DATABASE_URL);
@@ -120,8 +145,11 @@ beforeAll(async () => {
   userId = rows<{ id: string }>(await db.execute(sql`insert into users (email, display_name) values (${`i8-${RUN}@example.com`}, ${`i8 ${RUN}`}) returning id`))[0]!.id;
   const sName = `i8-stdio-${RUN}`;
   stdioId = (await db.insert(mcpServers).values({ name: sName, url: `stdio:${sName}`, transport: "stdio", stdioCommand: "/opt/mcp/bin/i8", stdioArgs: [], stdioCommandDigest: "0".repeat(64) }).returning())[0]!.id;
+  const s3Name = `i8-stdio-l3-${RUN}`;
+  stdioL3Id = (await db.insert(mcpServers).values({ name: s3Name, url: `stdio:${s3Name}`, transport: "stdio", stdioCommand: "/opt/mcp/bin/i8-l3", stdioArgs: [], stdioCommandDigest: "1".repeat(64) }).returning())[0]!.id;
   remoteId = (await db.insert(mcpServers).values({ name: `i8-remote-${RUN}`, url: "https://mcp.example.com/i8" }).returning())[0]!.id;
   profile = rows<{ id: string; name: string; version: number; digest: string }>(await db.execute(sql`select id, name, version, digest from execution_profiles where digest = ${RESTRICTED_DIGEST}`))[0]!;
+  microvmProfileId = rows<{ id: string }>(await db.execute(sql`select id from execution_profiles where digest = ${MICROVM_DIGEST}`))[0]!.id;
   executorIdentityId = rows<{ id: string }>(
     await db.execute(sql`insert into workload_identities (kind, identifier, sponsor_user_ids) values ('worker_runtime', ${EXECUTOR_URI}, ARRAY[${userId}]::uuid[]) returning id`),
   )[0]!.id;
@@ -129,16 +157,17 @@ beforeAll(async () => {
     await db.execute(sql`insert into executors (workload_identity_id, name, backend, runtime_version, classes_declared)
       values (${executorIdentityId}, ${`i8-${RUN}`}, 'gvisor', 'fake-0.0.0', '["hardened_container", "user_space_kernel"]'::jsonb) returning id`),
   )[0]!.id;
-  // the self-test the placement relies on: passing, observed before it, fresh at it
-  passingAttestation = rows<{ id: string; reportSha256: string }>(
-    await db.execute(sql`insert into executor_attestations (executor_id, profile_digest, class, report_sha256, report, verdict, observed_at, expires_at)
-      values (${executorId}, ${RESTRICTED_DIGEST}, 'user_space_kernel', ${H("c")}, '{}'::jsonb, 'pass', now() - interval '10 minutes', now() + interval '1 hour') returning id, report_sha256 as "reportSha256"`),
-  )[0]!;
-  // NEGATIVE CONTROLS: a newer FAILING self-test, and an older pass that had expired, are never the one named
-  await db.execute(sql`insert into executor_attestations (executor_id, profile_digest, class, report_sha256, report, verdict, observed_at, expires_at)
-    values (${executorId}, ${RESTRICTED_DIGEST}, 'user_space_kernel', ${H("d")}, '{}'::jsonb, 'fail', now() - interval '1 minute', now() + interval '1 hour')`);
-  await db.execute(sql`insert into executor_attestations (executor_id, profile_digest, class, report_sha256, report, verdict, observed_at, expires_at)
-    values (${executorId}, ${RESTRICTED_DIGEST}, 'user_space_kernel', ${H("e")}, '{}'::jsonb, 'pass', now() - interval '3 hours', now() - interval '2 hours')`);
+  // the gvisor executor: an older pass that EXPIRED, then the latest, a fresh pass: the latest decides, so it is named
+  await db.execute(attest(executorId, RESTRICTED_DIGEST, "user_space_kernel", H("e"), "pass", "3 hours", "-2 hours"));
+  passingAttestation = { id: rows<{ id: string }>(await db.execute(attest(executorId, RESTRICTED_DIGEST, "user_space_kernel", H("c"), "pass", "10 minutes", "1 hour")))[0]!.id, reportSha256: H("c") };
+  // amendment 3: a fresh PASS followed by a newer FAIL: the fail withdraws the class (attestation_stale)
+  failedExecutorId = await kataExecutor("failed");
+  await db.execute(attest(failedExecutorId, MICROVM_DIGEST, "microvm", H("6"), "pass", "10 minutes", "1 hour"));
+  await db.execute(attest(failedExecutorId, MICROVM_DIGEST, "microvm", H("7"), "fail", "1 minute", "1 hour"));
+  // amendment T: a fresh, unexpired PASS from before a quarantine and re-enable no longer counts
+  voidedExecutorId = await kataExecutor("voided");
+  await db.execute(attest(voidedExecutorId, MICROVM_DIGEST, "microvm", H("8"), "pass", "10 minutes", "1 hour"));
+  await db.execute(sql`update executors set reenabled_at = now() - interval '5 minutes' where id = ${voidedExecutorId}`);
 }, 120_000);
 
 afterAll(async () => {
@@ -223,10 +252,24 @@ describe("ADR-0190 I8: the placement row of the decision's transaction is captur
       refusalCode: null,
       profile: { id: profile.id, name: profile.name, version: profile.version, digest: RESTRICTED_DIGEST },
       executor: { id: executorId, backend: "gvisor", runtimeVersion: "fake-0.0.0", identityId: executorIdentityId, identity: EXECUTOR_URI },
-      // the passing self-test that was fresh at the placement; never the newer failure or the expired pass
+      // the LATEST counting self-test, a pass fresh at the placement; the older expired pass is never named
       attestation: { placementReportSha256: H("b"), executorAttestationId: passingAttestation.id, executorReportSha256: H("c") },
     });
   });
+
+  for (const [what, executor] of [["a FAIL after the pass (amendment 3)", () => failedExecutorId], ["a pass from before a re-enable (amendment T)", () => voidedExecutorId]] as const) {
+    it(`a placement whose executor's latest counting self-test is ${what} names no self-test`, async () => {
+      const auditId = randomUUID();
+      await db.transaction(async (tx) => {
+        await tx.execute(placementSql(auditId, { executor: executor(), l3: true }));
+        await tx.insert(auditLog).values(decisionValues({ id: auditId }));
+      });
+      expect(executionFactsOf(await factsOf(auditId))).toMatchObject({
+        placement: "placed", appliedClass: "microvm", profile: { digest: MICROVM_DIGEST },
+        attestation: { placementReportSha256: H("b"), executorAttestationId: null, executorReportSha256: null },
+      });
+    });
+  }
 
   it("a refusal written in the decision's transaction is captured with its reason and nothing it did not start", async () => {
     const auditId = randomUUID();
@@ -266,15 +309,23 @@ describe("ADR-0190 I8: the placement row of the decision's transaction is captur
 describe("ADR-0190 I8: the AI BOM loader reads profiles, assignments and executors (decision 9)", () => {
   it("the install snapshot carries the profile, the stdio server's assignment, and only the executor's fresh passing self-test", async () => {
     await db.update(mcpServers).set({ executionProfileId: profile.id }).where(eq(mcpServers.id, stdioId));
+    await db.update(mcpServers).set({ executionProfileId: microvmProfileId }).where(eq(mcpServers.id, stdioL3Id));
     const r = await loadAiBomRecords(db, { kind: "install", id: AI_BOM_INSTALL_SUBJECT_ID }, { personIdentifiers: "id_only", installId: null });
     expect(r.executionProfiles).toContainEqual({ id: profile.id, name: profile.name, version: profile.version, digest: RESTRICTED_DIGEST, minClass: "user_space_kernel", shipped: true, retired: false });
     expect(r.executionAssignments).toContainEqual({ targetKind: "mcp_server", targetId: stdioId, profileId: profile.id });
     const ours = r.executors!.find((e) => e.id === executorId)!;
     expect(ours).toMatchObject({ backend: "gvisor", status: "active", workloadIdentity: EXECUTOR_URI });
-    // the newer FAILING self-test and the expired pass are not evidence
+    // the latest counting self-test decides: the fresh pass, never the older expired one
     expect(ours.attestations.map((a) => a.reportSha256)).toEqual([H("c")]);
+    // amendment 3: a fail after a pass withdraws the class; amendment T: a pass from before a re-enable is void
+    expect(r.executors!.find((e) => e.id === failedExecutorId)!.attestations).toEqual([]);
+    expect(r.executors!.find((e) => e.id === voidedExecutorId)!.attestations).toEqual([]);
     // the record set builds: the server is attested at L2 for its profile, so it has no isolation gap
     const built = buildAiBom(r, { id: randomUUID(), subjectKind: "install", subjectId: AI_BOM_INSTALL_SUBJECT_ID, version: 1, supersedes: null, trigger: "on_demand", createdAt: new Date().toISOString() }, { cyclonedxVersions: ["1.7"] });
     expect(built.gaps.filter((g) => g.ref === `service:mcp:${stdioId}` && g.field === "isolation")).toEqual([]);
+    // the L3 server's only executors failed their latest self-test or were re-enabled since: the broker would refuse
+    // to place it, so the AI BOM shows an isolation gap and an incomplete composition, never an attested server
+    expect(built.gaps.filter((g) => g.ref === `service:mcp:${stdioL3Id}` && g.field === "isolation").map((g) => g.reason)).toEqual(["isolation_not_attested"]);
+    expect(built.body.compositions.filter((c) => c.assemblies.includes(`service:mcp:${stdioL3Id}`)).every((c) => c.aggregate !== "complete")).toBe(true);
   });
 });

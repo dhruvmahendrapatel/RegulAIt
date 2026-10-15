@@ -107,6 +107,17 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
     expect(out).toContain(H("c"));
     expect(out).toContain("Software-attested");
   });
+  it("review L1: a mismatch shows the reported class as disputed and claims no attestation", () => {
+    const mismatch = { ...PLACED, placement: "mismatch", refusalCode: "execution_profile_mismatch", appliedClass: "hardened_container" } as m.ExecutionView;
+    const out = html(<ExecutionFacts execution={mismatch} />);
+    expect(out).toContain("Reported class (disputed)");
+    expect(out).not.toContain("Applied isolation");
+    expect(out).not.toContain("Software-attested");
+    // NEGATIVE CONTROL: a placement keeps its applied class and the note
+    const placed = html(<ExecutionFacts execution={PLACED as m.ExecutionView} />);
+    expect(placed).toContain("Applied isolation");
+    expect(placed).not.toContain("disputed");
+  });
   it("an in-gateway call is L0, never a sandbox, with no attestation claimed", () => {
     const out = html(<ExecutionFacts execution={IN_GATEWAY as m.ExecutionView} />);
     expect(out).toContain("Ran in the gateway (L0, not isolated)");

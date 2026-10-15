@@ -102,6 +102,7 @@ import { AI_BOM_SNAPSHOTS_RELEASED } from "@regulait/shared";
 import { loadReceiptSigningKey, ReceiptKeyError, registerReceiptSigningKey, sameReceiptPublicKey } from "./decision-receipts.js";
 import { loadSpdxFieldsRecords } from "./ai-bom-spdx-fields.js";
 import { retentionFloorDays } from "./org-settings.js";
+import { freshAttestation } from "./executor-attestation.js";
 
 /**
  * R2/R17: RELEASED. A code constant, never a setting, defined ONCE in
@@ -424,13 +425,15 @@ export async function loadAiBomRecords(tx: Tx, subject: AiBomSubject, opts: AiBo
 
 /**
  * ADR-0190 decision 9 / slice I8: the execution part of an AI BOM, read in the snapshot's own REPEATABLE READ
- * capture (so `now()` is the capture's database clock, M-075).
+ * capture (`now()` is the capture's database clock, M-075).
  *  - Profiles: every profile for the install subject; otherwise the profiles assigned to the loaded agents, builder
  *    agents and stdio servers. Never a profile body: the digest stands for it.
  *  - Assignments: the agent and builder agent identities' and the servers' `execution_profile_id` (granted edges).
- *  - Executors: every executor for the install; otherwise those holding a fresh passing self-test for an in-scope
- *    profile. Each carries only its fresh passing self-tests (`verdict = pass`, not expired at capture, observed
- *    after its last re-enable): the same freshness the placement decision uses (decision 6, amendment T).
+ *  - Executors: every executor for the install; otherwise those with any attestation row for an in-scope profile.
+ *  - Each executor's attestations: for every (executor, profile) pair, the BROKER'S OWN predicate decides
+ *    (`freshAttestation`: the LATEST counting row, amendment 3, observed after the last re-enable, amendment T,
+ *    then a `pass` unexpired at capture). A fail after a pass, or a pass voided by a quarantine, lists nothing, so
+ *    the AI BOM never shows a class the broker would refuse to place on.
  */
 async function loadExecutionRecords(
   tx: Tx,
@@ -444,37 +447,34 @@ async function loadExecutionRecords(
       ? await tx.select(profileCols).from(executionProfiles).where(inArray(executionProfiles.id, assignedIds))
       : [];
   const digests = profileRows.map((p) => p.digest);
-  const fresh = sql`${executorAttestations.verdict} = 'pass' and ${executorAttestations.expiresAt} > now() and (${executors.reenabledAt} is null or ${executorAttestations.observedAt} > ${executors.reenabledAt})`;
-  const attCols = { executorId: executorAttestations.executorId, profileDigest: executorAttestations.profileDigest, class: executorAttestations.class, reportSha256: executorAttestations.reportSha256, observedAt: executorAttestations.observedAt };
-  const attRows = input.install
-    ? capped(await tx.select(attCols).from(executorAttestations).innerJoin(executors, eq(executors.id, executorAttestations.executorId)).where(fresh).limit(CAP + 1), "executor_attestations")
+  // the (executor, profile) pairs that have any attestation row; freshness is decided per pair below
+  const pairCols = { executorId: executorAttestations.executorId, profileDigest: executorAttestations.profileDigest };
+  const pairs = input.install
+    ? capped(await tx.selectDistinct(pairCols).from(executorAttestations).limit(CAP + 1), "executor_attestations")
     : digests.length
-      ? await tx.select(attCols).from(executorAttestations).innerJoin(executors, eq(executors.id, executorAttestations.executorId)).where(and(fresh, inArray(executorAttestations.profileDigest, digests)))
+      ? await tx.selectDistinct(pairCols).from(executorAttestations).where(inArray(executorAttestations.profileDigest, digests))
       : [];
   const executorCols = { id: executors.id, name: executors.name, backend: executors.backend, runtimeVersion: executors.runtimeVersion, classesDeclared: executors.classesDeclared, declaredClass: executors.declaredClass, status: executors.status, workloadIdentity: workloadIdentities.identifier };
-  const executorIds = uniq(attRows.map((a) => a.executorId));
+  const executorIds = uniq(pairs.map((a) => a.executorId));
   const executorRows = input.install
     ? capped(await tx.select(executorCols).from(executors).innerJoin(workloadIdentities, eq(workloadIdentities.id, executors.workloadIdentityId)).limit(CAP + 1), "executors")
     : executorIds.length
       ? await tx.select(executorCols).from(executors).innerJoin(workloadIdentities, eq(workloadIdentities.id, executors.workloadIdentityId)).where(inArray(executors.id, executorIds))
       : [];
-  // one self-test row per (profile, class): the newest, so a record never lists a superseded pass twice
-  const newest = new Map<string, (typeof attRows)[number]>();
-  for (const a of attRows) {
-    const k = `${a.executorId}\u0000${a.profileDigest}\u0000${a.class}`;
-    const seen = newest.get(k);
-    if (!seen || new Date(a.observedAt).getTime() > new Date(seen.observedAt).getTime()) newest.set(k, a);
+  const now = new Date(rowsOfNow(await tx.execute(sql`select now() as "now"`)));
+  const fresh = new Map<string, Array<{ profileDigest: string; class: string; reportSha256: string; observedAt: string }>>();
+  for (const p of pairs) {
+    const a = await freshAttestation(tx, p.executorId, p.profileDigest, now);
+    if (!a) continue;
+    fresh.set(p.executorId, [...(fresh.get(p.executorId) ?? []), { profileDigest: p.profileDigest, class: a.class, reportSha256: a.reportSha256, observedAt: iso(a.observedAt)! }]);
   }
   return {
     executionProfiles: profileRows.map((p) => ({ ...p, retired: Boolean(p.retired) })),
     executionAssignments: input.assignments,
-    executors: executorRows.map((e) => ({
-      ...e,
-      classesDeclared: [...e.classesDeclared],
-      attestations: [...newest.values()].filter((a) => a.executorId === e.id).map((a) => ({ profileDigest: a.profileDigest, class: a.class, reportSha256: a.reportSha256, observedAt: iso(a.observedAt)! })),
-    })),
+    executors: executorRows.map((e) => ({ ...e, classesDeclared: [...e.classesDeclared], attestations: fresh.get(e.id) ?? [] })),
   };
 }
+const rowsOfNow = (r: unknown): Date | string => ((r as { rows: Array<{ now: Date | string }> }).rows[0]!.now);
 
 // ---------------------------------------------------------------------------
 // settings
