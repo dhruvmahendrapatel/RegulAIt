@@ -14,6 +14,12 @@
  *  - ZERO UPSTREAM CONTACT on every refusal: no data key, no issuer, no active signing key, the protocol path's
  *    refusal, a policy deny and an approval hold on an opted-in server; none of them writes an "issued" row;
  *  - a url move turns it off; keeping it on at a new url needs a step-up bound to that url.
+ *  - the S8 follow-up, "disclose agent workload IDs" (migration 0196): off, `act.sub` is pairwise; on, it is the
+ *    agent's SPIFFE ID, and the issued row says so; turning it on needs the step-up (combined with turning
+ *    propagation on into ONE step-up); it is refused 409 while propagation is off; a url move and propagation turning
+ *    off reset it, audited; turning it off needs nothing; the compare-and-set includes the column (a concurrent change
+ *    to it alone is 409 `changed_concurrently`); the audit row is in the write's transaction (a refused audit insert
+ *    rolls the change back).
  *
  * Global state (M-068): org settings this file changes are put back, the issuer keys it activated are retired, and
  * the admin's passkey, sessions and step-up grants are removed (B4S-06) in afterAll.
@@ -313,7 +319,9 @@ async function restoreRest() {
   try {
     // this suite's servers stop receiving identity, so no leftover opted-in row can claim their audience
     const ids = [serverId, twinId].filter((id): id is string => typeof id === "string");
-    if (ids.length > 0) await db.update(mcpServers).set({ identityPropagation: "none" }).where(inArray(mcpServers.id, ids));
+    if (ids.length > 0) {
+      await db.update(mcpServers).set({ identityPropagation: "none", discloseAgentWorkloadIds: false }).where(inArray(mcpServers.id, ids));
+    }
     await db.execute(sql`update identity_signing_keys set retired_at = now() where activated_at is not null and retired_at is null and revoked_at is null`);
     for (const r of restores.reverse()) await r();
     if (prevPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
@@ -525,5 +533,257 @@ describe("S8 — the opt-in does not follow the url", () => {
     expect(got.every((r) => r.assertion === null)).toBe(true);
     // an explicit none asks for nothing either
     expect((await patchByKey({ identityPropagation: "none" })).statusCode).toBe(200);
+  });
+});
+
+describe("S8 follow-up — disclose agent workload IDs (migration 0196)", () => {
+  const column = async () =>
+    (
+      (await db.execute(sql`select identity_propagation, disclose_agent_workload_ids from mcp_servers where id = ${serverId}`)) as unknown as {
+        rows: Array<{ identity_propagation: string; disclose_agent_workload_ids: boolean }>;
+      }
+    ).rows[0]!;
+
+  /** an in-process agent's tools/call; returns the one assertion it carried and the agent's identity */
+  async function agentCall() {
+    const identityId = await grantOwnGrantsForTest(db, { kind: "agent", id: agentId }, { tools: [{ serverId, toolName: TOOL }] });
+    const [ident] = (await db.execute(sql`select identifier from workload_identities where id = ${identityId}`) as unknown as { rows: Array<{ identifier: string }> }).rows;
+    const chain = await startInProcessChain(db, {
+      sponsorUserId: userId,
+      projectId: null,
+      context: { runId: randomUUID() },
+      hops: [{ identityId, scope: toolScopeItems([{ serverId, toolName: TOOL, kind: "read" }]), capMicros: null }],
+    });
+    const got = await received(async () => expect((await callWith(DATA_KEY, TOOL, chain.leafGrantId)).kind).toBe("allowed"));
+    const carrying = got.filter((r) => r.assertion !== null);
+    expect(carrying).toHaveLength(1);
+    const { payload } = await verifyAgainstJwks(carrying[0]!.assertion!, canonicalMcpAudience(up.url)!);
+    return { payload, identityId, identifier: ident!.identifier };
+  }
+
+  it("is refused 409 while identity propagation is off, before any step-up, and nothing is saved", async () => {
+    expect(await column()).toEqual({ identity_propagation: "none", disclose_agent_workload_ids: false });
+    for (const res of [await patchByKey({ discloseAgentWorkloadIds: true }), await patchBySession({ discloseAgentWorkloadIds: true })]) {
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json()).toMatchObject({ error: "agent_id_disclosure_needs_assertion" });
+      expect(res.json().detail).toMatch(/only inside a signed identity assertion.*Nothing was saved/);
+    }
+    // turning propagation OFF in the same request is no way round it
+    const both = await patchBySession({ identityPropagation: "none", discloseAgentWorkloadIds: true });
+    expect(both.statusCode, both.body).toBe(409);
+    expect(await column()).toEqual({ identity_propagation: "none", disclose_agent_workload_ids: false });
+  });
+
+  it("the database refuses the pair too (CHECK mcp_servers_disclose_agent_ids_check)", async () => {
+    const err = await db.execute(sql`update mcp_servers set disclose_agent_workload_ids = true where id = ${serverId}`).then(
+      () => null,
+      (e: unknown) => e as { message?: string; constraint?: string; cause?: { message?: string; constraint?: string } },
+    );
+    expect(err, "the statement was refused").not.toBeNull();
+    expect([err!.message, err!.constraint, err!.cause?.message, err!.cause?.constraint].join(" ")).toMatch(/mcp_servers_disclose_agent_ids_check/);
+    expect(await column()).toEqual({ identity_propagation: "none", disclose_agent_workload_ids: false });
+  });
+
+  it("off (the default): an agent's act.sub is the pairwise id, and the issued row says nothing was disclosed", async () => {
+    const on = await relaxThroughStepUp(
+      { identityPropagation: "signed_assertion" },
+      { op: "mcp_server_update", serverId, url: up.url, values: { identityPropagation: "signed_assertion" } },
+    );
+    expect(on.statusCode, on.body).toBe(200);
+    expect(on.json()).toMatchObject({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: false });
+    const { payload, identityId, identifier } = await agentCall();
+    expect(payload.act).toEqual({ sub: pairwiseActor(PAIRWISE, canonicalMcpAudience(up.url)!, identityId) });
+    expect(JSON.stringify(payload)).not.toContain(identifier);
+    expect((await lastAudit("mcp-identity-assertion-issued", serverId))!.detail).toMatchObject({
+      jti: payload.jti,
+      agentIdsDisclosed: false,
+      actorIdForm: "pairwise",
+    });
+    // put propagation back off for the combined step-up below
+    expect((await patchByKey({ identityPropagation: "none" })).statusCode).toBe(200);
+  });
+
+  it("on: needs the step-up (one, combined with turning propagation on), and act.sub is then the agent's SPIFFE ID", async () => {
+    const on = await relaxThroughStepUp(
+      { identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true },
+      {
+        op: "mcp_server_update",
+        serverId,
+        url: up.url,
+        values: { identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true },
+      },
+    );
+    expect(on.statusCode, on.body).toBe(200);
+    expect(on.json()).toMatchObject({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true });
+    const changed = await lastAudit("mcp-server-agent-id-disclosure-changed", serverId);
+    expect(changed!.detail).toMatchObject({
+      from: { discloseAgentWorkloadIds: false },
+      to: { discloseAgentWorkloadIds: true },
+      relaxation: true,
+      relaxed: { discloseAgentWorkloadIds: true },
+      stepUp: "passkey",
+      url: up.url,
+      audience: canonicalMcpAudience(up.url),
+    });
+    expect((await lastAudit("mcp-server-identity-propagation-changed", serverId))!.detail).toMatchObject({ relaxation: true, stepUp: "passkey" });
+
+    const { payload, identityId, identifier } = await agentCall();
+    expect(identifier).toMatch(/^spiffe:\/\//);
+    expect(payload.act).toEqual({ sub: identifier });
+    // the person stays pairwise: only the agents are disclosed
+    expect(payload.sub).toBe(pairwiseSubject(PAIRWISE, canonicalMcpAudience(up.url)!, userId));
+    expect((await lastAudit("mcp-identity-assertion-issued", serverId))!.detail).toMatchObject({
+      jti: payload.jti,
+      actorChain: [identityId],
+      act: [identifier],
+      agentIdsDisclosed: true,
+      actorIdForm: "workload_id",
+    });
+    // a person calling directly has no agent to disclose: the row says so
+    const direct = await received(async () => expect((await call()).kind).toBe("allowed"));
+    expect(direct.filter((r) => r.assertion !== null)).toHaveLength(1);
+    expect((await lastAudit("mcp-identity-assertion-issued", serverId))!.detail).toMatchObject({ act: null, agentIdsDisclosed: false });
+  });
+
+  it("enabling it alone (propagation already on) is a step-up bound to the server, its url and the value; off needs nothing", async () => {
+    const off = await patchByKey({ discloseAgentWorkloadIds: false });
+    expect(off.statusCode, off.body).toBe(200);
+    expect(off.json()).toMatchObject({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: false });
+    expect((await lastAudit("mcp-server-agent-id-disclosure-changed", serverId))!.detail).toMatchObject({
+      from: { discloseAgentWorkloadIds: true },
+      to: { discloseAgentWorkloadIds: false },
+      relaxation: false,
+    });
+    const on = await relaxThroughStepUp(
+      { discloseAgentWorkloadIds: true },
+      { op: "mcp_server_update", serverId, url: up.url, values: { discloseAgentWorkloadIds: true } },
+    );
+    expect(on.statusCode, on.body).toBe(200);
+    expect(on.json()).toMatchObject({ discloseAgentWorkloadIds: true });
+  });
+
+  it("turning identity propagation off turns it off too, audited, with no step-up", async () => {
+    const off = await patchByKey({ identityPropagation: "none" });
+    expect(off.statusCode, off.body).toBe(200);
+    expect(off.json()).toMatchObject({ identityPropagation: "none", discloseAgentWorkloadIds: false });
+    expect((await lastAudit("mcp-server-agent-id-disclosure-changed", serverId))!.detail).toMatchObject({
+      from: { discloseAgentWorkloadIds: true },
+      to: { discloseAgentWorkloadIds: false },
+      relaxation: false,
+      resetByPropagationOff: true,
+    });
+  });
+
+  it("a url move resets it: silently off (audited), or kept on only through a step-up bound to the new url", async () => {
+    const on = await relaxThroughStepUp(
+      { identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true },
+      { op: "mcp_server_update", serverId, url: up.url, values: { identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true } },
+    );
+    expect(on.statusCode, on.body).toBe(200);
+    const moved = `${up.url}/v3`;
+    // kept on: both values are relaxations bound to the new url, in one step-up
+    const kept = await relaxThroughStepUp(
+      { url: moved, identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true },
+      { op: "mcp_server_update", serverId, url: moved, values: { identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true } },
+    );
+    expect(kept.statusCode, kept.body).toBe(200);
+    expect(kept.json()).toMatchObject({ url: moved, identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true });
+    expect((await lastAudit("mcp-server-agent-id-disclosure-changed", serverId))!.detail).toMatchObject({
+      from: { discloseAgentWorkloadIds: true },
+      to: { discloseAgentWorkloadIds: true },
+      url: moved,
+      relaxation: true,
+    });
+    // moving back and keeping only the identity: the disclosure resets, the identity needs its own step-up
+    const partial = await relaxThroughStepUp(
+      { url: up.url, identityPropagation: "signed_assertion" },
+      { op: "mcp_server_update", serverId, url: up.url, values: { identityPropagation: "signed_assertion" } },
+    );
+    expect(partial.statusCode, partial.body).toBe(200);
+    expect(partial.json()).toMatchObject({ url: up.url, identityPropagation: "signed_assertion", discloseAgentWorkloadIds: false });
+    expect((await lastAudit("mcp-server-agent-id-disclosure-changed", serverId))!.detail).toMatchObject({
+      to: { discloseAgentWorkloadIds: false },
+      resetByUrlMove: true,
+    });
+    // and the next agent call is pairwise again
+    const { payload, identityId } = await agentCall();
+    expect(payload.act).toEqual({ sub: pairwiseActor(PAIRWISE, canonicalMcpAudience(up.url)!, identityId) });
+
+    // a silent url move with both on turns both off, with no step-up
+    const again = await relaxThroughStepUp(
+      { discloseAgentWorkloadIds: true },
+      { op: "mcp_server_update", serverId, url: up.url, values: { discloseAgentWorkloadIds: true } },
+    );
+    expect(again.statusCode, again.body).toBe(200);
+    const silent = await patchByKey({ url: moved });
+    expect(silent.statusCode, silent.body).toBe(200);
+    expect(silent.json()).toMatchObject({ url: moved, identityPropagation: "none", discloseAgentWorkloadIds: false });
+    expect((await lastAudit("mcp-server-agent-id-disclosure-changed", serverId))!.detail).toMatchObject({
+      to: { discloseAgentWorkloadIds: false },
+      relaxation: false,
+      resetByUrlMove: true,
+    });
+    expect((await patchByKey({ url: up.url })).statusCode).toBe(200);
+  });
+
+  it("the PATCH compare-and-set includes the column: a concurrent change to it alone refuses the write 409", async () => {
+    // fixture, written directly: both on (the CHECK allows the pair)
+    await db.update(mcpServers).set({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true }).where(eq(mcpServers.id, serverId));
+    const [named] = await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, serverId));
+    const locker = createDb(DATABASE_URL!);
+    let res: Awaited<ReturnType<typeof patchByKey>> | undefined;
+    try {
+      await locker.transaction(async (tx) => {
+        // hold the row: the PATCH reads the committed row (disclose = true), then its UPDATE waits on this lock
+        await tx.execute(sql`select id from mcp_servers where id = ${serverId} for update`);
+        const pending = patchByKey({ name: `${named!.name}-renamed`, discloseAgentWorkloadIds: false }).then((r) => (res = r));
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const waiting = (await db.execute(sql`select count(*)::int as n from pg_stat_activity
+            where wait_event_type = 'Lock' and query ilike 'update "mcp_servers"%'`)) as unknown as { rows: Array<{ n: number }> };
+          if (waiting.rows[0]!.n > 0) break;
+          if (res !== undefined || Date.now() > deadline) throw new Error(`the PATCH never waited on the row lock (${res?.statusCode ?? "pending"})`);
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        // the concurrent change touches ONLY this column (url, ranges and propagation stay as the PATCH read them)
+        await tx.update(mcpServers).set({ discloseAgentWorkloadIds: false }).where(eq(mcpServers.id, serverId));
+        void pending;
+      });
+      while (res === undefined) await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      await locker.$client.end();
+    }
+    expect(res!.statusCode, res!.body).toBe(409);
+    expect(res!.json().error).toBe("changed_concurrently");
+    const [after] = await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, serverId));
+    expect(after!.name).toBe(named!.name);
+  });
+
+  it("the audit row is written in the same transaction: if it cannot be written, the change is rolled back", async () => {
+    await db.update(mcpServers).set({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true }).where(eq(mcpServers.id, serverId));
+    // a trigger scoped to THIS server and rule refuses the audit insert; dropped in finally (no state leaks)
+    const fn = `s8_refuse_audit_${RUN}`;
+    await db.execute(
+      sql.raw(`create function ${fn}() returns trigger language plpgsql as $$ begin
+        if new.rule_id = 'mcp-server-agent-id-disclosure-changed' and new.server_id = '${serverId}'::uuid then
+          raise exception 's8 test: audit insert refused';
+        end if;
+        return new;
+      end $$`),
+    );
+    await db.execute(sql.raw(`create trigger ${fn} before insert on audit_log for each row execute function ${fn}()`));
+    let res: Awaited<ReturnType<typeof patchByKey>>;
+    try {
+      res = await patchByKey({ discloseAgentWorkloadIds: false });
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fn} on audit_log`));
+      await db.execute(sql.raw(`drop function if exists ${fn}()`));
+    }
+    expect(res.statusCode, res.body).toBe(500);
+    expect(await column()).toEqual({ identity_propagation: "signed_assertion", disclose_agent_workload_ids: true });
+    // with the audit writable again, the same change goes through and is on the trail
+    const ok = await patchByKey({ discloseAgentWorkloadIds: false });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await lastAudit("mcp-server-agent-id-disclosure-changed", serverId))!.detail).toMatchObject({ to: { discloseAgentWorkloadIds: false } });
   });
 });

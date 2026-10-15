@@ -66,6 +66,10 @@ export const IDENTITY_ASSERTION_UNAVAILABLE_RULE_ID = "mcp-identity-assertion-un
 export const IDENTITY_AUDIENCE_SHARED = "identity_audience_shared" as const;
 /** the PATCH refusal for a stdio server, which has no HTTP request to carry a header */
 export const IDENTITY_PROPAGATION_UNSUPPORTED = "identity_propagation_unsupported" as const;
+/** the S8 follow-up's audit rule id: every change of a server's "disclose agent workload IDs" opt-in */
+export const AGENT_ID_DISCLOSURE_CHANGED_RULE_ID = "mcp-server-agent-id-disclosure-changed";
+/** the PATCH refusal when agent workload IDs are asked for on a server that is not sent a signed assertion */
+export const AGENT_ID_DISCLOSURE_NEEDS_ASSERTION = "agent_id_disclosure_needs_assertion" as const;
 
 /**
  * The upstream's canonical URI: `scheme://host[:port]/path`, lower-case scheme
@@ -124,5 +128,63 @@ export function identityPropagationUpdate(
     write: requested !== before.identityPropagation ? requested : null,
     relaxed: relaxes ? { identityPropagation: "signed_assertion" } : null,
     resetByUrlMove: false,
+  };
+}
+
+export interface AgentIdDisclosureUpdate {
+  /** the value to write, or null when the column does not change */
+  write: boolean | null;
+  /** ADR-0180: the relaxation this update makes (part of the request's one `settings_relax` step-up), or null */
+  relaxed: { discloseAgentWorkloadIds: true } | null;
+  /** it was on and turns off because the url moved, or because identity propagation turns off (the strict value) */
+  reset: "url_move" | "propagation_off" | null;
+  /** asked for on a server whose next identity propagation is not `signed_assertion`: refused 409, nothing saved */
+  refused: boolean;
+}
+
+/**
+ * ADR-0188 S8 follow-up — what a `PATCH /v1/servers/:id` does to
+ * `discloseAgentWorkloadIds`, given what it does to `identityPropagation`
+ * (`identity`, from `identityPropagationUpdate`).
+ *
+ * By default `act.sub` is a pairwise id per audience. Disclosing the agents'
+ * workload identifiers (their SPIFFE IDs, global and possibly admin-typed)
+ * lets upstreams correlate one agent across servers, so it is a separate,
+ * per-server relaxation, and it only means something while the server is
+ * sent an assertion. So:
+ *  - asking for it while the NEXT propagation is not `signed_assertion` is
+ *    refused (the caller answers 409 with a sentence);
+ *  - turning it on is a relaxation, and so is keeping it on across a url move
+ *    (the IDs would now go to a new third party: the step-up binds the new url);
+ *  - a url move that does not name it, or propagation turning off, turns it off
+ *    (the strict value, audited, no step-up);
+ *  - turning it off, or an unchanged value with no url move, is not a relaxation.
+ */
+export function agentIdDisclosureUpdate(
+  before: { identityPropagation: string; discloseAgentWorkloadIds: boolean; url: string },
+  body: { discloseAgentWorkloadIds?: boolean | undefined; url?: string | undefined },
+  identity: IdentityPropagationUpdate,
+): AgentIdDisclosureUpdate {
+  const urlMoves = body.url !== undefined && body.url !== before.url;
+  const nextPropagation = identity.write ?? before.identityPropagation;
+  const requested = body.discloseAgentWorkloadIds;
+  if (requested === true && nextPropagation !== "signed_assertion") {
+    return { write: null, relaxed: null, reset: null, refused: true };
+  }
+  if (requested === undefined) {
+    if (!before.discloseAgentWorkloadIds) return { write: null, relaxed: null, reset: null, refused: false };
+    if (urlMoves) return { write: false, relaxed: null, reset: "url_move", refused: false };
+    if (nextPropagation !== "signed_assertion") return { write: false, relaxed: null, reset: "propagation_off", refused: false };
+    return { write: null, relaxed: null, reset: null, refused: false };
+  }
+  if (requested === false) {
+    return { write: before.discloseAgentWorkloadIds ? false : null, relaxed: null, reset: null, refused: false };
+  }
+  const relaxes = !before.discloseAgentWorkloadIds || urlMoves;
+  return {
+    write: before.discloseAgentWorkloadIds ? null : true,
+    relaxed: relaxes ? { discloseAgentWorkloadIds: true } : null,
+    reset: null,
+    refused: false,
   };
 }
