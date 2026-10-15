@@ -22,7 +22,8 @@ When it is on:
 - Every assertion sent is audited (`mcp-identity-assertion-issued`). The row is written after the gateway's egress
   check allowed the request and just before it leaves, so a request the egress guard refuses leaves no "issued" row,
   and a request whose row cannot be written is not sent. The row holds the `jti`, the signing key id, the audience,
-  the pairwise subject and the pairwise actor ids (with the internal identity ids they stand for), but never the token.
+  the pairwise subject and the actor ids (with the internal identity ids they stand for), and whether agent workload
+  IDs were disclosed (`agentIdsDisclosed`, below), but never the token.
 - If RegulAIt cannot make an assertion, the call is refused and audited (`mcp-identity-assertion-unavailable`). It is
   never sent without one. This happens when there is no public URL, no data key, no active signing key, or the server
   is a stdio server; the call and any identity are refused before either is sent. A refusal at send time (a request
@@ -30,6 +31,28 @@ When it is on:
 - Two servers that receive assertions may not share an audience: turning it on for a server whose canonical URI
   (below) equals another opted-in server's is refused (409 `identity_audience_shared`), because an assertion for one
   would verify at the other.
+
+### Disclosing agent workload IDs (a second opt-in)
+
+By default each agent in `act` is a pairwise id for that server (below). An admin can instead turn on **"Disclose agent
+workload IDs"** for one server (the server's card, "Agent ids sent"; `PATCH /v1/servers/:id`
+`{ "discloseAgentWorkloadIds": true }`). Then `act.sub` is each agent's real workload identifier, its SPIFFE ID, for
+that server only. The person in `sub` stays pairwise.
+
+- **It is off by default.** Workload IDs are global: every server that receives them sees the same value, so two
+  upstreams can correlate the same agent across servers (and, through it, the calls it makes for a person). An
+  identifier an admin typed in when registering the agent is sent exactly as it was typed, so anything written in it
+  (a team or a person's name, say) goes to the upstream too.
+- **Turning it on is a relaxation (ADR-0180).** It needs a fresh step-up (`settings_relax`) bound to the server, its
+  URL and the value; if the same request also turns on the signed assertion, both go in one step-up. The change is
+  audited (`mcp-server-agent-id-disclosure-changed`). Turning it off needs no step-up and is audited too.
+- **It only exists inside an assertion.** It can be turned on only while the server is set to receive a signed
+  assertion (otherwise 409 `agent_id_disclosure_needs_assertion`), never for a stdio server, and it turns off when the
+  assertion is turned off.
+- **Consent does not follow the URL.** If the server's URL changes, it turns off (audited). To keep it on at the new
+  URL, an admin steps up again for that URL.
+- Every `mcp-identity-assertion-issued` row records `agentIdsDisclosed` (true when the assertion named an agent by its
+  workload ID) and `actorIdForm` (`pairwise` or `workload_id`).
 
 ## The format
 
@@ -43,15 +66,15 @@ A JWS (RFC 7515) compact JWT (RFC 7519), signed with EdDSA (Ed25519, RFC 8037).
 | `iss` | the RegulAIt deployment's public URL (`REGULAIT_PUBLIC_URL`) |
 | `aud` | the server's canonical URI (exact rule below). There is no query, fragment or credentials, so a secret in a URL query never ends up in a token. |
 | `sub` | the person the call is for, as a **pairwise** subject. It is an HMAC of the audience and the person's internal id. It is stable for one server, so the upstream can recognise a returning person, but it cannot be linked across servers. It is never an email, a name or a user id. |
-| `act` | only when an agent acts. This is the RFC 8693 §4.1 nested actor claim: `act.sub` is the acting agent and a nested `act` is the agent that delegated to it, back to the root. Each agent is named by a **pairwise** id: an HMAC of the audience and the agent's internal workload identity id, under the same key as `sub` but domain-separated from it. It is stable for one server and cannot be linked across servers. It is never the agent's global SPIFFE ID or any admin-typed identifier. |
+| `act` | only when an agent acts. This is the RFC 8693 §4.1 nested actor claim: `act.sub` is the acting agent and a nested `act` is the agent that delegated to it, back to the root. By default each agent is named by a **pairwise** id: an HMAC of the audience and the agent's internal workload identity id, under the same key as `sub` but domain-separated from it. It is stable for one server and cannot be linked across servers, and it is never the agent's global SPIFFE ID or any admin-typed identifier. Only when an admin has turned on "Disclose agent workload IDs" for this server (above) is each agent named by its workload identifier (SPIFFE ID) instead. |
 | `iat`, `exp` | issued-at and expiry; the lifetime is 60 seconds |
 | `jti` | unique per assertion; use it as the replay key |
 
 No other claim is sent. In particular, the assertion does not include the person's email, display name, user id,
 roles, the project, the delegation grant, the environment, the tool arguments, the scope or the budget.
 
-The `sub` and the actor ids change for everyone if the server's canonical URI changes (the audience is part of the
-HMAC), or if the RegulAIt deployment rotates its data key.
+The `sub` and the pairwise actor ids change for everyone if the server's canonical URI changes (the audience is part
+of the HMAC), or if the RegulAIt deployment rotates its data key. Disclosed workload IDs do not change with either.
 
 ### The audience, exactly
 
@@ -110,7 +133,8 @@ export function regulaitIdentityVerifier({ issuer, audience }) {
     seen.set(payload.jti, payload.exp);
     const actors = [];
     for (let a = payload.act; a; a = a.act) actors.unshift(a.sub);
-    // subject: the pairwise id of the person; actors: the pairwise ids of the agents, root first, acting agent last
+    // subject: the pairwise id of the person; actors: the agents, root first, acting agent last
+    // (pairwise ids, or workload IDs if this server was set to disclose them)
     return { subject: payload.sub, actors };
   };
 }
