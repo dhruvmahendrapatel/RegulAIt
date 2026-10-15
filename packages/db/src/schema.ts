@@ -13426,12 +13426,11 @@ export const executionPlacements = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     auditId: uuid("audit_id").notNull(),
     workloadKind: text("workload_kind", { enum: ISOLABLE_WORKLOAD_KINDS }).notNull(),
-    requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }).notNull(),
-    requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }).notNull(),
+    /** I4 (migration 0198): NULL only on a `refused` row whose code is `policy_unresolved` (requirement check) */
+    requiredClass: text("required_class", { enum: REQUIRABLE_ISOLATION_CLASSES }),
+    requiredBy: text("required_by", { enum: REQUIRED_CLASS_SOURCES }),
     enforcement: text("enforcement", { enum: ISOLATION_ENFORCEMENT_MODES }).notNull(),
-    profileDigest: text("profile_digest")
-      .notNull()
-      .references(() => executionProfiles.digest, { onDelete: "restrict" }),
+    profileDigest: text("profile_digest").references(() => executionProfiles.digest, { onDelete: "restrict" }),
     executorId: uuid("executor_id").references(() => executors.id, { onDelete: "restrict" }),
     appliedClass: text("applied_class", { enum: APPLIED_ISOLATION_KINDS }),
     reportSha256: text("report_sha256"),
@@ -13449,6 +13448,11 @@ export const executionPlacements = pgTable(
   },
   (t) => [
     unique("execution_placements_audit_id_uq").on(t.auditId),
+    unique("execution_placements_id_offer_uq").on(t.id, t.offerId),
+    check(
+      "execution_placements_requirement_check",
+      sql`(${t.requiredClass} IS NOT NULL AND ${t.requiredBy} IS NOT NULL AND ${t.profileDigest} IS NOT NULL) OR (${t.outcome} = 'refused' AND ${t.refusalCode} = 'policy_unresolved')`,
+    ),
     check("execution_placements_image_digest_check", sql`${t.imageDigest} IS NULL OR ${t.imageDigest} ~ '^sha256:[0-9a-f]{64}$'`),
     check("execution_placements_runtime_flags_sha256_check", sql`${t.runtimeFlagsSha256} IS NULL OR ${t.runtimeFlagsSha256} ~ '^[0-9a-f]{64}$'`),
     check(
@@ -13501,23 +13505,26 @@ export const executionPlacementReports = pgTable(
   "execution_placement_reports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    placementId: uuid("placement_id")
-      .notNull()
-      .references(() => executionPlacements.id, { onDelete: "restrict" }),
+    placementId: uuid("placement_id").notNull(),
     offerId: uuid("offer_id")
       .notNull()
       .references(() => executionOffers.id, { onDelete: "restrict" }),
     auditId: uuid("audit_id").notNull(),
-    outcome: text("outcome", { enum: ["placed", "mismatch", "refused"] }).notNull(),
+    outcome: text("outcome", { enum: ["placed", "mismatch", "refused", "cancelled", "session_lost"] }).notNull(),
     appliedClass: text("applied_class", { enum: APPLIED_ISOLATION_KINDS }),
     reportSha256: text("report_sha256"),
     refusalCode: text("refusal_code", { enum: [...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"] }),
+    /** why the gateway ended it (`cancelled`, `session_lost`): a fixed vocabulary */
+    endCode: text("end_code", { enum: ["later_gate", "placement_timeout", "session_abandoned", "session_unknown"] }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    unique("execution_placement_reports_placement_uq").on(t.placementId),
+    foreignKey({ name: "execution_placement_reports_parent_fk", columns: [t.placementId, t.offerId], foreignColumns: [executionPlacements.id, executionPlacements.offerId] }).onDelete("restrict"),
     unique("execution_placement_reports_audit_id_uq").on(t.auditId),
-    check("execution_placement_reports_outcome_check", sql`${t.outcome} IN ('placed', 'mismatch', 'refused')`),
+    uniqueIndex("execution_placement_reports_end_uq").on(t.placementId).where(sql`${t.outcome} IN ('placed', 'mismatch', 'refused')`),
+    uniqueIndex("execution_placement_reports_cancel_uq").on(t.placementId).where(sql`${t.outcome} = 'cancelled'`),
+    uniqueIndex("execution_placement_reports_session_uq").on(t.placementId).where(sql`${t.outcome} = 'session_lost'`),
+    check("execution_placement_reports_outcome_check", sql`${t.outcome} IN ('placed', 'mismatch', 'refused', 'cancelled', 'session_lost')`),
     check(
       "execution_placement_reports_applied_class_check",
       sql`${t.appliedClass} IS NULL OR ${t.appliedClass} IN ('hardened_container', 'user_space_kernel', 'microvm', 'customer_declared')`,
@@ -13525,7 +13532,7 @@ export const executionPlacementReports = pgTable(
     check("execution_placement_reports_report_sha256_check", sql`${t.reportSha256} IS NULL OR ${t.reportSha256} ~ '^[0-9a-f]{64}$'`),
     check(
       "execution_placement_reports_shape_check",
-      sql`(${t.outcome} = 'placed' AND ${t.appliedClass} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} IS NULL) OR (${t.outcome} = 'mismatch' AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} = 'execution_profile_mismatch') OR (${t.outcome} = 'refused' AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IN ('no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired', 'policy_unresolved'))`,
+      sql`(${t.outcome} = 'placed' AND ${t.appliedClass} IS NOT NULL AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} IS NULL AND ${t.endCode} IS NULL) OR (${t.outcome} = 'mismatch' AND ${t.reportSha256} IS NOT NULL AND ${t.refusalCode} = 'execution_profile_mismatch' AND ${t.endCode} IS NULL) OR (${t.outcome} = 'refused' AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.endCode} IS NULL AND ${t.refusalCode} IN ('no_executor', 'attestation_stale', 'class_below_required', 'executor_quarantined', 'profile_retired', 'policy_unresolved')) OR (${t.outcome} = 'cancelled' AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NULL AND ${t.endCode} IN ('later_gate', 'placement_timeout', 'session_abandoned')) OR (${t.outcome} = 'session_lost' AND ${t.appliedClass} IS NULL AND ${t.reportSha256} IS NULL AND ${t.refusalCode} IS NULL AND ${t.endCode} = 'session_unknown')`,
     ),
     index("execution_placement_reports_offer_idx").on(t.offerId),
   ],

@@ -5532,7 +5532,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0189 B9 (R51): supplier-declared SPDX properties of models and datasets (admin-only, audited)
   registerAiBomSpdxFieldRoutes(app, db);
   registerIsolationRoutes(app, db);
-  registerExecutorChannelRoutes(app, db, opts.executorChannel ?? {});
+  registerExecutorChannelRoutes(app, db, { ...(opts.executorChannel ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (the runner's self token only: registerEngineRunnerScopeHook).

@@ -60,7 +60,7 @@ import {
   type StdioRefusalCode,
   type UpstreamLaunch,
 } from "./mcp-transports.js";
-import { attachLinkedStdioSession, placeStdioSession, type StdioPlacementInput } from "./executor-stdio.js";
+import { attachLinkedStdioSession, placeStdioSession, type StdioPlacementInput, type StdioSessionFailure } from "./executor-stdio.js";
 import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
 import { identityAssertionMiddleware, type OutboundIdentity } from "./mcp-identity-assertion.js";
 import { loadEgressAllowList } from "./custom-providers.js";
@@ -338,7 +338,7 @@ export class McpUpstreamRefusedError extends McpEgressBlockedError {
     reason: string,
     readonly refusalCode?: StdioRefusalCode,
     /** ADR-0190 decision 7: the fixed reason of an `execution_profile_unavailable` refusal */
-    readonly executionRefusal?: ExecutionRefusalReason | "execution_profile_mismatch",
+    readonly executionRefusal?: ExecutionRefusalReason | "execution_profile_mismatch" | StdioSessionFailure,
   ) {
     super({ ok: false, code: (refusalCode ?? error) as unknown as EgressDenyCode, reason });
     this.error = error;
@@ -356,7 +356,7 @@ async function refuseUpstream(
   reason: string,
   detail: Record<string, unknown> = {},
   refusalCode?: StdioRefusalCode,
-  executionRefusal?: ExecutionRefusalReason | "execution_profile_mismatch",
+  executionRefusal?: ExecutionRefusalReason | "execution_profile_mismatch" | StdioSessionFailure,
   userId?: string | null,
 ): Promise<never> {
   await db.insert(auditLog).values({
@@ -536,7 +536,7 @@ export async function guardedMcpConnect(
     // a governed tools/call decided its placement in its own decision transaction: attach to that offer's session.
     // Every other connect (a manifest sync, a protocol method) is placed here, with its own audited decision 7.
     const placed = ctx?.linkedOfferId
-      ? await attachLinkedStdioSession(db, ctx.linkedOfferId, deps.placementTimeoutMs ?? deadlineMs)
+      ? await attachLinkedStdioSession(db, ctx.linkedOfferId, deps.placementTimeoutMs ?? deadlineMs, ctx.userId ?? null)
       : await placeStdioSession(db, {
       userId: ctx?.userId ?? null,
       projectId: ctx?.projectId ?? null,
@@ -623,7 +623,7 @@ export async function guardedMcpConnect(
 }
 
 /** the plain-language sentence for each isolation refusal of a stdio connect (decision 7's fixed reasons) */
-export function stdioRefusalSentence(reason: ExecutionRefusalReason | "execution_profile_mismatch"): string {
+export function stdioRefusalSentence(reason: ExecutionRefusalReason | "execution_profile_mismatch" | StdioSessionFailure): string {
   switch (reason) {
     case "no_executor":
       return "No sandbox executor is available to run this stdio server. An administrator must register an executor that attests the required isolation.";
@@ -639,6 +639,11 @@ export function stdioRefusalSentence(reason: ExecutionRefusalReason | "execution
       return "The isolation this call needs could not be worked out: the call must name a project whose AI use cases give it a data sensitivity.";
     case "execution_profile_mismatch":
       return "The sandbox did not match its execution profile, so it was stopped before receiving any input and its executor was quarantined.";
+    // ADR-0190 I4 (review lows): not decision 7 refusals, each labelled as what it is
+    case "placement_timeout":
+      return "The sandbox executor did not confirm the sandbox before the call's deadline, so the placement was withdrawn and the sandbox, if one started, got no input.";
+    case "session_lost":
+      return "The gateway no longer holds this call's sandbox session (it was abandoned or its executor side was lost); this is the gateway's own refusal, not the server's failure.";
   }
 }
 

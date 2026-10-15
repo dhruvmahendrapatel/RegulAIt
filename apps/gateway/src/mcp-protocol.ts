@@ -38,6 +38,7 @@
  * results go through the same output scans as a tool result (PII, guardrails
  * including prompt injection). An output block withholds the result.
  */
+import { randomUUID } from "node:crypto";
 import type { GovernedActor } from "@regulait/policy-kernel";
 import { DelegationRefusedError } from "./delegation.js";
 import { actorForGrant, delegationRefusalDecision } from "./in-process-delegation.js";
@@ -113,6 +114,16 @@ import {
   type GovernedToolCallOutcome,
 } from "./mcp-proxy.js";
 import { refuseOutboundCredentialAudience } from "./outbound-audience.js";
+import {
+  cancelUnattachedStdioSession,
+  placeGovernedStdio,
+  registerLinkedStdioSession,
+  stdioPlacementContext,
+  type GovernedStdioPlacement,
+  type StdioSession,
+} from "./executor-stdio.js";
+import { checkStdioClosure } from "./mcp-transports.js";
+import { stdioRefusalSentence } from "./mcp-egress.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
  * (`mcp:resources`, ...), so no upstream TOOL may carry it: a tool so named
@@ -249,7 +260,15 @@ export async function executeGovernedProtocolCall(
   args: GovernedProtocolCallArgs,
 ): Promise<GovernedProtocolCallOutcome> {
   const startedAt = new Date();
-  const outcome = await executeInner(db, args);
+  // ADR-0190 I4 (review M1/low): a governed stdio decision's session that no connect took (a later gate stopped the
+  // method) is cancelled: its evidence says `cancelled` (later_gate), never `placed`
+  const stdioHold: { session: StdioSession | null } = { session: null };
+  let outcome: GovernedProtocolCallOutcome;
+  try {
+    outcome = await executeInner(db, args, stdioHold);
+  } finally {
+    if (stdioHold.session) await cancelUnattachedStdioSession(db, stdioHold.session, args.userId).catch(() => undefined);
+  }
   if (args.trace) {
     const denied = outcome.kind !== "allowed" && outcome.kind !== "method_not_found" && outcome.kind !== "invalid_params";
     await recordSpan(db, args.trace, {
@@ -269,7 +288,7 @@ export async function executeGovernedProtocolCall(
   return outcome;
 }
 
-async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<GovernedProtocolCallOutcome> {
+async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: { session: StdioSession | null }): Promise<GovernedProtocolCallOutcome> {
   const { userId, serverId, method } = args;
   const projectId = args.projectId ?? null;
 
@@ -345,7 +364,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     }
   }
   const {
-    decision,
+    decision: evaluatedDecision,
     approvedApprovalId,
     argumentsDigest,
     approvalScope,
@@ -369,6 +388,8 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       // ADR-0188 S4: a delegated (workload) caller is decided with its stored chain; a person's own call is `null`
       { actor: delegatedActor },
     );
+  // ADR-0190 I4 (review M1): a stdio placement refused inside the decision's transaction makes the decision the refusal
+  let decision: Decision = evaluatedDecision;
   // ADR-0186 V, decision 32 — the decided params (EXACTLY what is sent) against
   // the registered upstream URL, after the entitlement decision and before its
   // row (see the tool path in mcp-proxy.ts: a refused payload leaves no
@@ -390,9 +411,36 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
   }
   // ADR-0189 B2: written only if the epoch and the kill-switch state it was decided under still hold, read in
   // this transaction (`decisionPolicyStillCurrent`); otherwise refused, nothing written, nothing run
+  //
+  // ADR-0190 I4 (review M1, with the I8 contract): an ALLOWED method on a stdio server decides its isolation placement
+  // in this same transaction, keyed to the decision row's id, exactly as a governed tools/call does (mcp-proxy.ts). A
+  // refused placement makes the decision itself the refusal (rule id `execution-profile`); an offered one is the
+  // session the connect below attaches to. A row whose closure image is not pinned is left to the connect, which
+  // refuses it (`mcp_stdio_image_unpinned`).
+  const decisionAuditId = randomUUID();
+  let stdioPlacement: GovernedStdioPlacement | null = null;
+  const stdioClosure = serverRow.transport === "stdio" ? checkStdioClosure(serverRow.stdioCommandDigest, serverRow.stdioCommand, serverRow.stdioArgs) : null;
   const recorded = await db.transaction(async (tx) => {
     if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName: grant }))) return false;
+    if (decision.effect === "allow" && stdioClosure?.ok) {
+      const placed = await placeGovernedStdio(tx as unknown as Db, decisionAuditId, {
+        ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null })),
+        mcpServerId: serverId,
+        imageDigest: stdioClosure.image,
+      });
+      stdioPlacement = placed;
+      if (placed.kind === "refused") {
+        decision = {
+          effect: "deny",
+          ruleId: "execution-profile",
+          ruleChain: decision.ruleChain,
+          reason: `stdio MCP server '${serverRow.name}' refused (execution_profile_unavailable: ${placed.code}): ${stdioRefusalSentence(placed.code)}`,
+        };
+      }
+    }
+    const placement = stdioPlacement as GovernedStdioPlacement | null;
     await tx.insert(auditLog).values({
+    id: decisionAuditId,
     userId,
     serverId,
     toolName: grant,
@@ -410,6 +458,15 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
       ...(approvedApprovalId ? { approvedApprovalId } : {}),
       policyEpoch,
       killSwitch,
+      // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
+      ...(placement
+        ? {
+            execution:
+              placement.kind === "offered"
+                ? { placementId: placement.placementId, offerId: placement.offerId }
+                : { placementId: placement.placementId, refusal: "execution_profile_unavailable", reason: placement.code },
+          }
+        : {}),
     },
     effect: decision.effect,
     ruleId: decision.ruleId,
@@ -429,6 +486,13 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
     });
     recordDecision({ surface: "mcp_protocol", effect: "deny" });
     return { kind: "denied", decision: refusal };
+  }
+  // ADR-0190 I4: the executor's stdio window must find the session as soon as its report is accepted. If this call
+  // returns without its connect taking the session, `executeGovernedProtocolCall` cancels it (later_gate).
+  const linked = stdioPlacement as GovernedStdioPlacement | null;
+  const linkedOfferId = linked?.kind === "offered" && stdioClosure?.ok ? linked.offerId : null;
+  if (linked?.kind === "offered" && stdioClosure?.ok) {
+    stdioHold.session = registerLinkedStdioSession(db, { offerId: linked.offerId, executorId: linked.executorId }, { command: stdioClosure.command, args: stdioClosure.args }, userId);
   }
   recordDecision({ surface: "mcp_protocol", effect: decision.effect });
   if (decision.effect === "deny") return { kind: "denied", decision };
@@ -567,7 +631,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs): Promise<Gov
   let upstream: Client | null = null;
   try {
     try {
-      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null } });
+      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId } });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
         await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));

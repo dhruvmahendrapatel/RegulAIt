@@ -81,6 +81,7 @@ import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamable
 import { McpAdmissionHeldError } from "./mcp-admission.js";
 import { McpEgressBlockedError } from "./mcp-egress.js";
 import { IdentityAssertionRefusedError } from "./mcp-identity-assertion.js";
+import { isStdioSessionLostError } from "./stdio-session-loss.js";
 import { observeUpstream, type MetricUpstreamOutcome } from "./metrics.js";
 import type { McpUpstreamTransport } from "@regulait/shared";
 
@@ -230,7 +231,8 @@ export function classifyUpstreamError(err: unknown): RetryVerdict {
   // OURS, not theirs. An adjudication does not become a different adjudication
   // because it is asked again.
   // ADR-0188 S8: an identity assertion refused at send time (another origin, a failed signature or audit write)
-  if (err instanceof McpEgressBlockedError || err instanceof McpAdmissionHeldError || err instanceof IdentityAssertionRefusedError) {
+  // ADR-0190 I4 (review M3): a stdio session the gateway lost (its executor side ended under a live call)
+  if (err instanceof McpEgressBlockedError || err instanceof McpAdmissionHeldError || err instanceof IdentityAssertionRefusedError || isStdioSessionLostError(err)) {
     return { retryable: false, why: "our_own_refusal" };
   }
   // We already waited exactly as long as the operator said to wait.

@@ -87,10 +87,12 @@ import {
 import { completeExecutorRequest, NO_IDENTITY, sendExecutorRefusal, verifyExecutorProofHeader, type ExecutorAuth, type ExecutorProofHeaderResult } from "./executor-channel-auth.js";
 import { databaseNow } from "./delegation.js";
 import { attestationCounts, freshAttestation, type FreshAttestationRow } from "./executor-attestation.js";
-import { endStdioSession, registerExecutorStdioRoutes } from "./executor-stdio.js";
+import { endStdioSession, registerExecutorStdioRoutes, setStdioMacRoot, stdioSecretFor } from "./executor-stdio.js";
 import { loadOrgSettings } from "./org-settings.js";
 
 export interface ExecutorChannelOptions {
+  /** I4 (review M4): the deploy-time data key the stdio session MAC root is derived from (every replica the same) */
+  dataKey?: string;
   /** how often the stream looks for offers and status changes (default 500 ms; tests shorten it) */
   streamPollMs?: number;
   /** keepalive interval on the stream (default 10 s) */
@@ -487,7 +489,11 @@ export type LinkedPlacementOutcome =
 
 export async function offerLinkedPlacement(tx: Db, auditId: string, input: OfferPlacementInput): Promise<LinkedPlacementOutcome> {
   const sel = await selectExecutor(tx, input);
-  if (sel.kind === "unresolved") return { kind: "refused", code: "policy_unresolved", placementId: null };
+  if (sel.kind === "unresolved") {
+    // review M2: still a row keyed to the decision; the requirement columns are NULL (the fact did not resolve)
+    const placementId = await refusedLinkedPlacement(tx, auditId, { workloadKind: input.workloadKind, imageDigest: input.imageDigest }, "policy_unresolved");
+    return { kind: "refused", code: "policy_unresolved", placementId };
+  }
   if (sel.kind === "unknown_profile") return { kind: "refused", code: "profile_retired", placementId: null };
   const base = {
     auditId,
@@ -518,9 +524,118 @@ export async function offerLinkedPlacement(tx: Db, auditId: string, input: Offer
   return { kind: "offered", placementId: row!.id, offerId, executorId: sel.executor.id, attestedClass: sel.cls };
 }
 
+/**
+ * I4 (review M2): a governed stdio decision's REFUSED placement row, keyed to the decision's audit id. For
+ * `policy_unresolved` the requirement columns are NULL (nothing resolved; migration 0198's requirement check allows
+ * NULL for that code only); every other refusal names the requirement it could not meet.
+ */
+export async function refusedLinkedPlacement(
+  tx: Db,
+  auditId: string,
+  input: { workloadKind: IsolableWorkloadKind; imageDigest: string; requiredClass?: RequirableIsolationClass; requiredBy?: RequiredClassSource; profileDigest?: string },
+  code: ExecutionRefusalReason,
+): Promise<string> {
+  const image = /^sha256:[0-9a-f]{64}$/.test(input.imageDigest) ? input.imageDigest : null;
+  const unresolved = code === "policy_unresolved";
+  const [row] = await tx
+    .insert(executionPlacements)
+    .values({
+      auditId,
+      workloadKind: input.workloadKind,
+      requiredClass: unresolved ? null : (input.requiredClass ?? null),
+      requiredBy: unresolved ? null : (input.requiredBy ?? null),
+      profileDigest: unresolved ? null : (input.profileDigest ?? null),
+      enforcement: ENFORCEMENT,
+      outcome: "refused",
+      refusalCode: code,
+      imageDigest: image,
+    })
+    .returning({ id: executionPlacements.id });
+  return row!.id;
+}
+
+/**
+ * I4 (review lows): the gateway withdraws an offer it made — a later gate refused the call (`later_gate`), the
+ * executor did not confirm the sandbox in time (`placement_timeout`), or nothing connected to the session
+ * (`session_abandoned`). An open offer is withdrawn; a placed one keeps its status (the session's `close` stops the
+ * sandbox, which then ends it). Either way it is audited (`execution-cancelled`) and, for a governed decision's
+ * placement, a `cancelled` report row records it: the evidence never says the call ran.
+ */
+export async function cancelOffer(db: Db, offerId: string, endCode: "later_gate" | "placement_timeout" | "session_abandoned", ctx: { userId?: string | null } = {}): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const txDb = tx as unknown as Db;
+    const [o] = await tx.select().from(executionOffers).where(eq(executionOffers.id, offerId)).for("update");
+    if (!o || o.status === "ended" || o.status === "mismatch" || o.status === "declined" || o.status === "expired" || o.status === "withdrawn") return false;
+    const linked = await linkedPlacementOf(txDb, o.id);
+    if (linked) {
+      const [already] = await tx
+        .select({ id: executionPlacementReports.id })
+        .from(executionPlacementReports)
+        .where(and(eq(executionPlacementReports.placementId, linked.id), eq(executionPlacementReports.outcome, "cancelled")));
+      if (already) return false;
+    }
+    const auditId = await auditExecutor(txDb, {
+      userId: ctx.userId ?? NO_IDENTITY,
+      objectType: "execution_placement",
+      objectId: o.id,
+      ruleId: "execution-cancelled",
+      effect: "deny",
+      detail: { offerId: o.id, placementId: linked?.id ?? o.placementId, executorId: o.executorId, workloadKind: o.workloadKind, statusAtCancel: o.status, endCode },
+      reason:
+        endCode === "later_gate"
+          ? "the governed call was refused by a later check after its placement was offered; the offer is withdrawn and the sandbox, if one started, gets no input"
+          : endCode === "placement_timeout"
+            ? "the executor did not confirm the sandbox before the call's deadline; the offer is withdrawn and the sandbox, if one started, gets no input"
+            : "nothing connected to the placed stdio session in time; the offer is withdrawn and the sandbox, if one started, gets no input",
+    });
+    if (linked) await tx.insert(executionPlacementReports).values({ placementId: linked.id, offerId: o.id, auditId, outcome: "cancelled", endCode });
+    if (o.status === "offered" || o.status === "accepted") {
+      await tx.update(executionOffers).set({ status: "withdrawn", endedAt: sql`now()`, ...(linked ? { placementId: linked.id } : {}) }).where(eq(executionOffers.id, o.id));
+    }
+    return true;
+  });
+}
+
+/**
+ * I4 (review M3): a stdio session the executor reached on a process that does not hold it, or that the holder lost
+ * (the executor ended its offer under a live session). Our own refusal: audited (`execution-session-lost`) and, for
+ * a governed decision's placement, ONE `session_lost` report row (a second attempt, from another replica, writes
+ * nothing). Never charged to the upstream's breaker.
+ */
+export async function recordSessionLost(db: Db, offerId: string, ctx: { executorId: string; where: "window" | "stdout" | "holder"; why: string }): Promise<boolean> {
+  try {
+    return await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      const linked = await linkedPlacementOf(txDb, offerId);
+      if (linked) {
+        const [already] = await tx
+          .select({ id: executionPlacementReports.id })
+          .from(executionPlacementReports)
+          .where(and(eq(executionPlacementReports.placementId, linked.id), eq(executionPlacementReports.outcome, "session_lost")));
+        if (already) return false;
+      }
+      const auditId = await auditExecutor(txDb, {
+        userId: NO_IDENTITY,
+        objectType: "execution_placement",
+        objectId: offerId,
+        ruleId: "execution-session-lost",
+        effect: "deny",
+        detail: { offerId, placementId: linked?.id ?? null, executorId: ctx.executorId, where: ctx.where, endCode: "session_unknown" },
+        reason: `the stdio session was lost (${ctx.why}); the call fails as the gateway's own refusal, never as the server's failure`,
+      });
+      if (linked) await tx.insert(executionPlacementReports).values({ placementId: linked.id, offerId, auditId, outcome: "session_lost", endCode: "session_unknown" });
+      return true;
+    });
+  } catch {
+    // a concurrent writer (another replica) won the one session_lost row: nothing more to record
+    return false;
+  }
+}
+
 export type PlacementResult =
   | { kind: "placed"; placementId: string; reportSha256: string; appliedClass: AppliedIsolationKind; executorId: string }
-  | { kind: "failed"; status: ExecutionOfferRow["status"]; code: ExecutionRefusalReason | "execution_profile_mismatch"; placementId: string | null };
+  /** `placement_timeout` (review low): the caller's deadline passed with the offer still open (not a decision 7 refusal) */
+  | { kind: "failed"; status: ExecutionOfferRow["status"]; code: ExecutionRefusalReason | "execution_profile_mismatch" | "placement_timeout"; placementId: string | null };
 
 /** wait for an offer to be placed (the report accepted) or to fail; expiries are applied while waiting */
 export async function awaitPlacement(db: Db, offerId: string, opts: { timeoutMs?: number; pollMs?: number } = {}): Promise<PlacementResult> {
@@ -542,7 +657,7 @@ export async function awaitPlacement(db: Db, offerId: string, opts: { timeoutMs?
       const [r] = p?.outcome === "offered" ? await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, p.id)) : [];
       return { kind: "failed", status: o.status, code: ((r?.refusalCode ?? p?.refusalCode) as ExecutionRefusalReason | null) ?? "no_executor", placementId: o.placementId };
     }
-    if (Date.now() >= deadline) return { kind: "failed", status: o.status, code: "no_executor", placementId: null };
+    if (Date.now() >= deadline) return { kind: "failed", status: o.status, code: "placement_timeout", placementId: o.placementId };
     await new Promise((r) => setTimeout(r, poll));
   }
 }
@@ -593,6 +708,7 @@ const declineToRefusal: Record<z.infer<typeof executorDeclineSchema>["reason"], 
 };
 
 export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts: ExecutorChannelOptions = {}): void {
+  setStdioMacRoot(opts.dataKey);
   const pollMs = Math.max(20, opts.streamPollMs ?? 500);
   const keepaliveMs = Math.max(pollMs, opts.keepaliveMs ?? 10_000);
 
@@ -997,7 +1113,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
               .values({ auditId, workloadKind: o.workloadKind, requiredClass: o.requiredClass, requiredBy: o.requiredBy, enforcement: ENFORCEMENT, profileDigest: o.profileDigest, executorId: ex.id, appliedClass: signed.report.class, reportSha256, outcome: "placed", imageDigest: o.imageDigest })
               .returning({ id: executionPlacements.id });
         await tx.update(executionOffers).set({ status: "placed", reportedAt: sql`now()`, placementId: pl!.id }).where(eq(executionOffers.id, o.id));
-        return { status: 200, placementId: pl!.id, reportSha256 } as const;
+        return { status: 200, placementId: pl!.id, reportSha256, workloadKind: o.workloadKind } as const;
       });
       if (out.status === 409 && out.code === "execution_profile_mismatch") {
         // outside the placement's transaction: the quarantine must hold even if nothing else does
@@ -1008,7 +1124,14 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         if (out.code === "executor_quarantined") await auditQuarantinedRefusal("report", current, row, p.data.offerId);
         return refused(reply, out.status, out.code, current);
       }
-      return reply.status(200).send({ release: true, placementId: out.placementId, reportSha256: out.reportSha256, next: nextFor(current) });
+      return reply.status(200).send({
+        release: true,
+        placementId: out.placementId,
+        reportSha256: out.reportSha256,
+        next: nextFor(current),
+        // review M4: the stdio session's MAC secret (derived; every replica the same), in this answer only
+        ...(out.workloadKind === "mcp_stdio" ? { stdioSecret: stdioSecretFor(p.data.offerId) } : {}),
+      });
     });
 
     // ---- end --------------------------------------------------------------

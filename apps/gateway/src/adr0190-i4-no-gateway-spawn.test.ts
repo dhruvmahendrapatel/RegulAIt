@@ -32,6 +32,35 @@ function sources(dir: string): string[] {
   return out;
 }
 
+/**
+ * A process-spawning import in any form (review low): a static `import … from`, a side-effect `import "…"`, a
+ * dynamic `import("…")`, a CommonJS `require("…")` and a `createRequire(…)("…")` all name the module as a string
+ * literal, so ANY quoted `child_process` / `node:child_process` literal in a serving module is an offender; and the
+ * SDK's stdio CLIENT transport by path or by name.
+ */
+const SPAWN_IMPORT = /["'`](?:node:)?child_process["'`]/;
+const SDK_STDIO_CLIENT = /@modelcontextprotocol\/sdk\/client\/stdio(?:\.js)?["'`]|\bStdioClientTransport\b/;
+const spawns = (s: string) => SPAWN_IMPORT.test(s) || SDK_STDIO_CLIENT.test(s);
+
+describe("the spawn-import guard catches every import form (shown to fire before it is trusted)", () => {
+  it.each([
+    'import { spawn } from "node:child_process";',
+    "import * as cp from 'child_process';",
+    'import "node:child_process";',
+    'const cp = await import("node:child_process");',
+    "const { execFile } = await import ( 'child_process' );",
+    'const cp = require("child_process");',
+    "const cp = createRequire(import.meta.url)('node:child_process');",
+    "import(`node:child_process`)",
+    'import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";',
+  ])("fires on %s", (line) => {
+    expect(spawns(line)).toBe(true);
+  });
+  it.each(['import { readFile } from "node:fs";', "// child processes are never started here", 'const s = "child_process_label";'])("is quiet on %s", (line) => {
+    expect(spawns(line)).toBe(false);
+  });
+});
+
 describe("no stdio server ever runs on the gateway host (ADR-0190 I4, OWNER DECISION 2)", () => {
   const files = sources(SRC);
 
@@ -43,7 +72,7 @@ describe("no stdio server ever runs on the gateway host (ADR-0190 I4, OWNER DECI
   it("no serving module imports a process-spawning API or the SDK's stdio client transport", () => {
     const offenders = files.filter((f) => {
       const s = readFileSync(f, "utf8");
-      return /from\s+["'](node:)?child_process["']/.test(s) || /@modelcontextprotocol\/sdk\/client\/stdio(\.js)?["']/.test(s) || /\bStdioClientTransport\b/.test(s);
+      return spawns(s);
     });
     expect(offenders.map((f) => path.relative(SRC, f))).toEqual([]);
   });
