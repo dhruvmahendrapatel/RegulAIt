@@ -518,7 +518,8 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
 > the gateway suite drives the executor channel with a fake backend), and the gVisor tarball and its sha512 are the
 > ones the I0 spike verified and ran (`spikes/isolation-i0`). The Docker steps themselves (`daemon.json`, the image
 > builds, the compose profile) have **not** been run yet. Run them on a test host before relying on them, and record
-> what you find against ADR-0190 "As built: slice I4".
+> what you find against ADR-0190 "As built: slice I4". **Until then the L2 (gVisor) class is unverified**: the
+> executor's proof that a sandbox ran under gVisor (below) has only been exercised against test doubles.
 
 1. **Install gVisor on the Docker host, as one unit** (amendment E). The release tarball holds `runsc`, its shim and
    the `gvisor-bin/` sidecars; a bare `runsc` copy no longer runs. Fetch and verify it with the I0 script, which pins
@@ -541,10 +542,17 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
    }
    ```
 
-   The executor checks this before it announces anything: a daemon with no `runsc` runtime, or one whose binary is
-   not `runsc`, stops it at start (exit 2). Every self-test and every sandbox then reports the runtime's arguments,
-   and the gateway fails a report that lacks any of the profile's flags (`runtime_flags_missing`).
-3. **Build the stdio base image** and note its digest (the executor's self-test canary):
+   The executor checks this before it announces anything, from OUTSIDE any sandbox: the daemon must name the
+   `runsc` runtime at exactly `REGULAIT_RUNSC_HOST_PATH` (default `/usr/local/lib/gvisor/runsc`), and that binary,
+   which compose mounts read-only into the executor, must hash (sha512) to the pinned `release-20261005.0` binary.
+   Anything else stops it at start (exit 2). Each sandbox's own runtime is then read with `docker inspect`; a
+   sandbox under any other runtime, or under a binary that is not the pinned release, is reported as `runc` and the
+   gateway refuses it. Every self-test and every sandbox reports the runtime's arguments, and the gateway fails a
+   report that lacks any of the profile's flags (`runtime_flags_missing`). A new gVisor release is accepted only
+   after its verified sha512 is added to `packages/sandbox-executor/src/init-pin.ts` in a reviewed change.
+3. **Build the stdio base image** and note its digest (the executor's self-test canary). It provides the Node
+   interpreter only: the sandbox init is the executor's own, hash-pinned file, mounted read-only into every sandbox
+   from the `regulait-sandbox-init` volume and run as its entry point, so no image can replace it:
    `docker build -f packages/sandbox-executor/stdio-base/Dockerfile -t regulait/stdio-base:local packages/sandbox-executor`
    then `docker image inspect --format '{{.Id}}' regulait/stdio-base:local`. Put it in `REGULAIT_STDIO_BASE_IMAGE`.
 4. **Build each stdio server's closure image FROM that base**
@@ -554,7 +562,14 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
    them on the Docker host (`docker load` in an air-gapped install).
 5. **Start the executor**: register a `worker_runtime` workload identity for it, set `REGULAIT_EXECUTOR_IDENTIFIER`,
    set `REGULAIT_DOCKER_GID` to the group that owns the host's `/var/run/docker.sock`, and run
-   `docker compose --profile isolation up -d sandbox-executor`. On its first start it prints its public key: register
+   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only
+   (`REGULAIT_EXECUTOR_GATEWAY_URL`; the default names the TLS profile's public host). The executor sits on the
+   internal-only `engines` network, which has no route to the public address, so in the stock stack you must set
+   `REGULAIT_EXECUTOR_GATEWAY_URL` to an https address of the gateway that the `engines` network can reach (a TLS
+   front on that network); until you do, the executor fails closed at start and nothing is placed. Plain http is for
+   a development box only, through the explicit override `docker compose -f docker-compose.yml -f
+   compose.isolation-insecure-dev.yml --profile isolation up`, and the executor logs a warning when it runs that way.
+   On its first start it prints its public key: register
    the executor with that key on the Engines page (`POST /v1/executors`, backend `gvisor`, class
    `user_space_kernel`). It then announces itself, self-tests every profile it can serve, and takes placements.
 

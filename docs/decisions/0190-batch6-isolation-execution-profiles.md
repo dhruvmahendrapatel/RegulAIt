@@ -744,8 +744,9 @@ decisions above leave open:
 I4 delivers the `runsc` backend, the stdio closure images, MCP over the executor's channel, the removal of the
 in-gateway stdio spawn, the ISACA item 5 collector, and (from the I8 review) the governed stdio decision's own
 placement row. Migration **0198** (`0198_isolation_stdio_placement_evidence.sql`) is hand-written; its journal entry
-is added only after 0196 and 0197 are on main (the journal stays contiguous). These points settle what the decisions
-above leave open:
+(idx 198) was added once 0196 and 0197 were on main. Items 2, 3, 6, 7 and 9 below were changed by the review round
+listed after item 11; where they disagree, the review round wins. These points settle what the decisions above leave
+open:
 
 1. **The runsc backend is Docker's own CLI on a host whose daemon registers gVisor as a runtime** (decision 4,
    amendments A to E). `packages/sandbox-executor/src/runsc-backend.ts` starts each sandbox with `docker run -i
@@ -827,6 +828,56 @@ above leave open:
     `daemon.json` registration and the compose `isolation` profile are written and marked unexecuted in their files
     and in INSTALL.md; they must be run on a test host before they are relied on.
 
+**Review round 1 (2026-10-15, PR #383).** An independent review of the first build found that the probes did not
+prove gVisor, and several evidence gaps. What changed:
+
+- **H2, what proves gVisor (replaces items 2 and 3).** The class is decided only from OUTSIDE the sandbox: the
+  container's own `HostConfig.Runtime` (`docker inspect` of that container, not the daemon's `/info`), and the
+  daemon's binary for that runtime, which must be at the configured host path and whose sha512 must equal the pinned
+  gVisor release (`packages/sandbox-executor/src/init-pin.ts`, from the I0-verified tarball; re-hashed on every
+  self-test and whenever its size or mtime changes). The sandbox init is executor-controlled: the executor ships it,
+  checks its pinned SHA-256, copies it into a volume it owns and mounts that volume read-only at `/.regulait-init`,
+  and runs it as the entry point under the image's Node (`--entrypoint /usr/local/bin/node`). The stdio base image no
+  longer carries the init. What the init prints corroborates the inside view (uid, capabilities, seccomp, root,
+  egress, DNS, interfaces, credentials, limits) and its kernel strings are recorded only: `/proc/version` and `dmesg`
+  never decide the runtime. A forged observation (an init that claims gVisor in a container the daemon ran under
+  runc, or under an unpinned binary) is refused in tests. **L2 is unverified until this has run on a real gVisor
+  host**: no session that built or fixed I4 had a Docker daemon (M-041).
+- **M1, placements keyed to the decision (amends items 6 and 7).** Governed protocol methods (`resources/*`,
+  `prompts/*`, `completion/complete`, `logging/setLevel`) now place inside their decision's transaction exactly as
+  `tools/call` does and attach to that session. The pre-decision manifest syncs (an unknown-tool sync, a `tools/list`
+  that needs the manifest, a worker's tool resolution) remain UNLINKED placements: their row is keyed to their own
+  audit row, they are not decision evidence, and they are outside the I4/I8 contract. The admission rescan and the
+  health sweep skip stdio servers before any connect, with no refusal row.
+- **M2.** A `policy_unresolved` refusal writes a `refused` row keyed to the decision; the requirement columns are
+  nullable for that code only (CHECK `execution_placements_requirement_check`).
+- **M3, a session this process does not hold (amends item 9).** It is recorded as our own refusal: an
+  `execution-session-lost` audit row and, for a governed placement, one `session_lost` report row (a second replica
+  writes nothing). The process that holds the session watches the offer and fails the call at once; its pending
+  requests are answered with a process-marked error that the retry classifier names `our_own_refusal`, so the
+  upstream's breaker is never charged. Sticky routing on the offer id, or a frames table, is still the follow-up.
+- **M4.** The compose default is https; plain http only through `compose.isolation-insecure-dev.yml`, with a warning.
+  Each `start` and `stdin` window line carries an HMAC-SHA-256 over the offer id, the type and (for stdin) the
+  sequence number and data. The key is derived per offer from the gateway's data key (HKDF), handed to the executor
+  in its accepted report's answer over the channel's TLS; every replica derives the same one. Injected argv or stdin
+  is never acted on.
+- **M5.** stdout is split on bytes and each line decoded once with a fatal UTF-8 decoder (linear); the init decodes
+  its release line once.
+- **M6.** stdin frames stay with the gateway until the executor acknowledges them (`?from=` the next sequence it
+  expects); a lost window loses nothing; one window per session at a time.
+- **Lows.** A placement timeout and a lost session are labelled `placement_timeout` and `session_lost`, never
+  `no_executor`. A session that a later gate stopped, that timed out or that nothing attached to is cancelled: a
+  `cancelled` report row with its `end_code`, the offer withdrawn, audited `execution-cancelled`. 0198 adds a trigger
+  that refuses a report whose parent is not `offered` and a `placed` report below the parent's required class, and a
+  composite foreign key so a report's `offer_id` is its placement's. A process holds at most 256 live stdio sessions.
+  A blank stdout line is skipped. The no-spawn guard flags any quoted `child_process` literal (dynamic `import()`,
+  `require`).
+- **H1, with I8.** I8's execution facts gain an `offered` branch: at decision time the facts record the offered row
+  (executor, attested class, the broker's stamped `attestation_id`, the offer, the closure image and the runtime
+  flags hash, no report hash), and a `policy_unresolved` refusal may name no requirement. The Decision BOM read
+  returns the placement's linked report rows beside the signed body (`placementReports`, unsigned: they are written
+  after the decision), and the Decision BOM panel shows them.
+
 Open questions I4 leaves (for the owner or the master):
 
 1. **Calls without an agent are placed as unknown agents (L3).** I2 maps `agent: null` on `mcp_stdio` to decision 7
@@ -838,6 +889,12 @@ Open questions I4 leaves (for the owner or the master):
    register `runsc` and run the integration suite. It was not added because it has never been run (M-041).
 4. **Engines (I5)** inherit the runsc backend for `engine_worker`; they need the input volume and task-scoped
    secrets channels the backend refuses today.
+5. **An https gateway address on the `engines` network** (review M4). The executor now requires https, but the
+   internal-only `engines` network has no route to the TLS profile's public host, so the stock stack needs
+   `REGULAIT_EXECUTOR_GATEWAY_URL` set to a TLS front on that network (until then the executor fails closed). Putting
+   Caddy on `engines` was not done: the gateway would then see some Caddy traffic from an untrusted address.
+6. **gVisor's sidecar binaries.** The pin covers the `runsc` binary the daemon names; the release's `gvisor-bin/`
+   sidecars (for example `gvisor_sentry`) are not hashed by the executor yet.
 
 ## Test strategy
 
