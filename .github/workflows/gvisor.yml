@@ -172,7 +172,7 @@ jobs:
           sudo install -d -m 0755 /etc/docker
           if sudo test -s /etc/docker/daemon.json; then sudo cat /etc/docker/daemon.json | tee "$RUNNER_TEMP/daemon.before.json" > /dev/null; else echo '{}' > "$RUNNER_TEMP/daemon.before.json"; fi
           jq --arg path "$GVISOR_DIR/runsc" --arg unpinned "$GVISOR_UNPINNED_DIR/runsc" --argjson flags "$(jq -c .flags "$pin")" \
-            '.runtimes.runsc = {path: $path, runtimeArgs: $flags} | .runtimes["runsc-unpinned"] = {path: $unpinned, runtimeArgs: $flags}' \
+            '.runtimes.runsc = {path: $path, runtimeArgs: $flags} | .runtimes["runsc-unpinned"] = {path: $unpinned, runtimeArgs: $flags} | .runtimes["runsc-diag"] = {path: $path, runtimeArgs: ($flags + ["--debug", "--debug-log=/tmp/runsc-diag/", "--strace"])}' \
             "$RUNNER_TEMP/daemon.before.json" > "$RUNNER_TEMP/daemon.json"
           sudo install -m 0644 -o root -g root "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
           cat /etc/docker/daemon.json
@@ -190,6 +190,20 @@ jobs:
           # the executor copies its pinned init into INIT_DIR; every sandbox mounts this volume (a bind of it) read-only
           sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" "$INIT_DIR"
           docker volume create --driver local --opt type=none --opt o=bind --opt device="$INIT_DIR" "$INIT_VOLUME"
+
+      - name: TEMP diagnostics - node under runsc variants
+        continue-on-error: true
+        run: |
+          img="$STDIO_BASE_IMAGE"
+          n='console.log("ok", require("node:os").release())'
+          echo "== runc"; docker run --rm --network none --pull never --entrypoint /usr/local/bin/node "$img" -e "$n" 2>&1 | tail -3
+          echo "== runsc limits"; docker run --rm --runtime runsc --network none --pull never --entrypoint /bin/sh "$img" -c 'cat /proc/self/limits; id' 2>&1 | tail -20
+          echo "== runsc seccomp=unconfined"; docker run --rm --runtime runsc --security-opt seccomp=unconfined --network none --pull never --entrypoint /usr/local/bin/node "$img" -e "$n" 2>&1 | tail -3
+          echo "== runsc user root"; docker run --rm --runtime runsc --user 0 --network none --pull never --entrypoint /usr/local/bin/node "$img" -e "$n" 2>&1 | tail -3
+          echo "== runsc nproc"; docker run --rm --runtime runsc --ulimit nproc=4096:4096 --network none --pull never --entrypoint /usr/local/bin/node "$img" -e "$n" 2>&1 | tail -3
+          echo "== runsc-diag strace"; docker run --rm --runtime runsc-diag --network none --pull never --entrypoint /usr/local/bin/node "$img" -e "$n" 2>&1 | tail -3
+          sudo sh -c 'grep -h -E "clone|E[A-Z]+ \(|errno" /tmp/runsc-diag/*.boot* 2>/dev/null | grep -v " = 0" | tail -60'
+          sudo sh -c 'grep -h -i -E "warn|error|denied" /tmp/runsc-diag/* 2>/dev/null | tail -30'
 
       - name: Smoke test - a container starts under runsc
         run: |
