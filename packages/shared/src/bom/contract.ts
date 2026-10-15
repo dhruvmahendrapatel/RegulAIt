@@ -21,17 +21,48 @@
 import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import { z } from "zod";
+import {
+  APPLIED_ISOLATION_KINDS,
+  EXECUTION_REFUSAL_REASONS,
+  EXECUTOR_BACKENDS,
+  ISOLABLE_WORKLOAD_KINDS,
+  NON_ISOLABLE_EXECUTION,
+  PLACEMENT_OUTCOMES,
+  REQUIRABLE_ISOLATION_CLASSES,
+  REQUIRED_CLASS_SOURCES,
+  WORKLOAD_KINDS,
+} from "../isolation/contract.js";
 
 // ---------------------------------------------------------------------------
 // versions (the `v` field is inside the signed bytes: domain separation, OWNER DECISION 2)
 // ---------------------------------------------------------------------------
 
+/** the first Decision BOM format (B1–B4); frozen v1 bodies stay verifiable for ever */
 export const DECISION_BOM_VERSION = "regulait.decision-bom.v1";
+/**
+ * ADR-0190 slice I8: v2 adds the `execution` section (decision 9). Every Decision BOM assembled from I8 on is v2,
+ * whatever version its facts are; a decision captured before I8 reads `execution: not_recorded, pre_isolation`.
+ */
+export const DECISION_BOM_VERSION_V2 = "regulait.decision-bom.v2";
+export const DECISION_BOM_VERSIONS = [DECISION_BOM_VERSION, DECISION_BOM_VERSION_V2] as const;
+export type DecisionBomVersion = (typeof DECISION_BOM_VERSIONS)[number];
+/** the version the assembler writes */
+export const DECISION_BOM_CURRENT_VERSION = DECISION_BOM_VERSION_V2;
+/**
+ * ADR-0190 I8: the AI BOM stays v1. Its `records` map is open-keyed and its verifier checks only `v`, so the
+ * executor and profile lists ride on v1 without breaking an older verifier (owner ruling, 2026-10-15).
+ */
 export const AI_BOM_VERSION = "regulait.ai-bom.v1";
+/** the first facts format (B2); stored v1 facts keep parsing for ever */
 export const DECISION_FACTS_VERSION = "regulait.decision-facts.v1";
+/** ADR-0190 I8: v2 adds `execution`, captured in the decision's own transaction (decision 9) */
+export const DECISION_FACTS_VERSION_V2 = "regulait.decision-facts.v2";
+export const DECISION_FACTS_VERSIONS = [DECISION_FACTS_VERSION, DECISION_FACTS_VERSION_V2] as const;
+/** the version the capture writes */
+export const DECISION_FACTS_CURRENT_VERSION = DECISION_FACTS_VERSION_V2;
 export const DECISION_FACTS_ADDENDUM_VERSION = "regulait.decision-facts-addendum.v1";
 /** every `v` a BOM verifier accepts; anything else is refused (OWNER DECISION 2) */
-export const BOM_BODY_VERSIONS = [DECISION_BOM_VERSION, AI_BOM_VERSION] as const;
+export const BOM_BODY_VERSIONS = [DECISION_BOM_VERSION, DECISION_BOM_VERSION_V2, AI_BOM_VERSION] as const;
 
 /** the internal install subject key (R20): never exported as an identity */
 export const AI_BOM_INSTALL_SUBJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -96,8 +127,13 @@ export const BOM_NOT_RECORDED_REASONS = [
   "unsigned_addendum",
   "not_captured_by_path",
   "anchor_absent",
+  /** ADR-0190 I8: the decision's facts were captured before execution facts existed (v1 facts); nothing is back-filled */
+  "pre_isolation",
+  /** ADR-0190 I8: an isolable call (or one whose server could not be resolved) has no placement row in its transaction */
+  "no_placement",
 ] as const;
 
+/** the sections of a `regulait.decision-bom.v1` body, in report order */
 export const DECISION_BOM_SECTIONS = [
   "decision",
   "receipt",
@@ -112,7 +148,12 @@ export const DECISION_BOM_SECTIONS = [
   "trace",
   "proof",
 ] as const;
-export type DecisionBomSection = (typeof DECISION_BOM_SECTIONS)[number];
+/** ADR-0190 I8: v2 appends `execution` (report order: the v1 sections, then `execution`) */
+export const DECISION_BOM_SECTIONS_V2 = [...DECISION_BOM_SECTIONS, "execution"] as const;
+export type DecisionBomSectionV1 = (typeof DECISION_BOM_SECTIONS)[number];
+export type DecisionBomSection = (typeof DECISION_BOM_SECTIONS_V2)[number];
+/** the sections a body of version `v` carries (an unknown version has the v2 list; its body_version check fails) */
+export const decisionBomSectionsFor = (v: unknown): readonly DecisionBomSection[] => (v === DECISION_BOM_VERSION ? DECISION_BOM_SECTIONS : DECISION_BOM_SECTIONS_V2);
 
 /** the anchor observation modes recorded at flush (R4; `sink_constant` = a sink with no `observe()`) */
 export const ANCHOR_OBSERVATION_MODES = [
@@ -558,24 +599,115 @@ export const decisionOutcomeFactsSchema = z
   })
   .strict();
 
-const rowsHaveDistinctIds = (rows: BoundRow[]) => new Set(rows.map((r) => `${r.table}\u0000${r.id}`)).size === rows.length;
+/**
+ * ADR-0190 decision 9 and slice I8: where and under what isolation one governed call ran, captured in the
+ * decision's own transaction (`execution_placements` is written in that transaction before the facts, the I4/I8
+ * contract). Ids, digests, enums and integers only. Every field has a source or is null; nothing is inferred:
+ *  - `in_gateway` (model and connector calls) and `external` (remote MCP): no placement exists, so every
+ *    placement field is null. The words say what ran where: L0 is never called a sandbox (decision 11).
+ *  - `placed`, `refused`, `mismatch`: the placement row's own values, its profile (id, name, version, digest),
+ *    the executor (id, backend, runtime version, its ADR-0188 workload identity) and the attestation references:
+ *    the per-placement report SHA-256 (decision 6) and the executor self-test the placement relied on (the newest
+ *    passing one for that executor and profile, observed at or before the placement and not expired at it).
+ */
+export const DECISION_EXECUTION_PLACEMENTS = ["in_gateway", "external", ...PLACEMENT_OUTCOMES] as const;
+export type DecisionExecutionPlacement = (typeof DECISION_EXECUTION_PLACEMENTS)[number];
+/** what ran the call: a class, or `in_gateway` / `external` for a call no executor places (decision 9) */
+export const DECISION_EXECUTION_APPLIED = ["in_gateway", "external", ...APPLIED_ISOLATION_KINDS] as const;
+export const DECISION_EXECUTION_REFUSAL_CODES = [...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"] as const;
 
-export const decisionFactsSchema = z
+export const decisionExecutionFactsSchema = z
   .object({
-    v: z.literal(DECISION_FACTS_VERSION),
-    auditId: bomUuidSchema,
-    auditSeq: bomIntSchema.positive(),
-    action: decisionActionFactsSchema.nullable(),
-    policy: decisionPolicyFactsSchema.nullable(),
-    model: decisionModelFactsSchema.nullable(),
-    /** null before ADR-0188's audit v2 boundary (`actors: not_recorded, reason: pre_identity`) */
-    actors: decisionActorFactsSchema.nullable(),
-    outcome: decisionOutcomeFactsSchema,
-    rows: z.array(boundRowSchema).max(512).refine(rowsHaveDistinctIds, "a row is bound at most once"),
+    workloadKind: z.enum(WORKLOAD_KINDS),
+    placement: z.enum(DECISION_EXECUTION_PLACEMENTS),
+    placementId: nullableUuid,
+    requiredClass: z.enum(REQUIRABLE_ISOLATION_CLASSES).nullable(),
+    requiredBy: z.enum(REQUIRED_CLASS_SOURCES).nullable(),
+    appliedClass: z.enum(DECISION_EXECUTION_APPLIED).nullable(),
+    refusalCode: z.enum(DECISION_EXECUTION_REFUSAL_CODES).nullable(),
+    profile: z.object({ id: bomUuidSchema, name: bomIdentifierSchema, version: bomIntSchema.positive(), digest: bomDigestSchema }).strict().nullable(),
+    executor: z
+      .object({
+        id: bomUuidSchema,
+        backend: z.enum(EXECUTOR_BACKENDS),
+        runtimeVersion: bomIdentifierSchema,
+        identityId: bomUuidSchema,
+        /** the executor's ADR-0188 workload identity URI; null when the identity row holds no SPIFFE ID */
+        identity: bomSpiffeSchema.nullable(),
+      })
+      .strict()
+      .nullable(),
+    attestation: z
+      .object({
+        /** decision 6: the SHA-256 of the per-placement report the gateway compared before delivering the call */
+        placementReportSha256: bomDigestSchema.nullable(),
+        /** decision 6: the executor self-test the placement relied on; null when none was fresh and passing */
+        executorAttestationId: nullableUuid,
+        executorReportSha256: bomDigestSchema.nullable(),
+      })
+      .strict()
+      .refine((a) => (a.executorAttestationId === null) === (a.executorReportSha256 === null), "the executor attestation id and report hash are recorded together")
+      .nullable(),
   })
   .strict()
+  .superRefine((e, ctx) => {
+    const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    const isolable = (ISOLABLE_WORKLOAD_KINDS as readonly string[]).includes(e.workloadKind);
+    if (e.placement === "in_gateway" || e.placement === "external") {
+      const want = isolable ? null : NON_ISOLABLE_EXECUTION[e.workloadKind as keyof typeof NON_ISOLABLE_EXECUTION];
+      if (want !== e.placement) issue(`${e.workloadKind} is not recorded as ${e.placement} (decision 9)`);
+      if (e.appliedClass !== e.placement) issue("a non-isolable call's applied class is its placement");
+      if (e.placementId !== null || e.requiredClass !== null || e.requiredBy !== null || e.refusalCode !== null || e.profile !== null || e.executor !== null || e.attestation !== null) {
+        issue("a call no executor places has no placement facts");
+      }
+      return;
+    }
+    if (!isolable) issue(`${e.workloadKind} is never placed by an executor (decision 3)`);
+    if (e.placementId === null || e.requiredClass === null || e.requiredBy === null || e.profile === null) issue("a placement names its row, required class, the floor that set it and its profile");
+    if (e.appliedClass === "in_gateway" || e.appliedClass === "external") issue("an executor placement applies an isolation class");
+    if (e.placement === "refused") {
+      if (e.executor !== null || e.appliedClass !== null || e.attestation !== null || e.refusalCode === null || e.refusalCode === "execution_profile_mismatch") issue("a refusal starts nothing and names its reason");
+    } else if (e.placement === "placed") {
+      if (e.executor === null || e.appliedClass === null || !e.attestation?.placementReportSha256 || e.refusalCode !== null) issue("a placement names its executor, applied class and report");
+    } else if (e.executor === null || !e.attestation?.placementReportSha256 || e.refusalCode !== "execution_profile_mismatch") {
+      issue("a mismatch names its executor and the report that disagreed");
+    }
+  });
+export type DecisionExecutionFacts = z.infer<typeof decisionExecutionFactsSchema>;
+
+const rowsHaveDistinctIds = (rows: BoundRow[]) => new Set(rows.map((r) => `${r.table}\u0000${r.id}`)).size === rows.length;
+
+const decisionFactsShape = {
+  auditId: bomUuidSchema,
+  auditSeq: bomIntSchema.positive(),
+  action: decisionActionFactsSchema.nullable(),
+  policy: decisionPolicyFactsSchema.nullable(),
+  model: decisionModelFactsSchema.nullable(),
+  /** null before ADR-0188's audit v2 boundary (`actors: not_recorded, reason: pre_identity`) */
+  actors: decisionActorFactsSchema.nullable(),
+  outcome: decisionOutcomeFactsSchema,
+  rows: z.array(boundRowSchema).max(512).refine(rowsHaveDistinctIds, "a row is bound at most once"),
+};
+/** `regulait.decision-facts.v1` (B2), unchanged: stored v1 facts parse for ever */
+export const decisionFactsV1Schema = z
+  .object({ v: z.literal(DECISION_FACTS_VERSION), ...decisionFactsShape })
+  .strict()
   .superRefine(jsonSafe);
-export type DecisionFacts = z.infer<typeof decisionFactsSchema>;
+/**
+ * `regulait.decision-facts.v2` (ADR-0190 I8): v1 plus `execution`. Null means NOT RECORDED: an approval decision
+ * (nothing executes; the BOM says `not_applicable`), or a call whose placement row is not in its transaction.
+ */
+export const decisionFactsV2Schema = z
+  .object({ v: z.literal(DECISION_FACTS_VERSION_V2), ...decisionFactsShape, execution: decisionExecutionFactsSchema.nullable() })
+  .strict()
+  .superRefine(jsonSafe);
+/** every facts version a reader accepts */
+export const decisionFactsSchema = z.union([decisionFactsV1Schema, decisionFactsV2Schema]);
+export type DecisionFactsV1 = z.infer<typeof decisionFactsV1Schema>;
+export type DecisionFactsV2 = z.infer<typeof decisionFactsV2Schema>;
+export type DecisionFacts = DecisionFactsV1 | DecisionFactsV2;
+/** the execution facts of any facts version (v1 has none) */
+export const executionFactsOf = (facts: DecisionFacts | null): DecisionExecutionFacts | null => (facts && facts.v === DECISION_FACTS_VERSION_V2 ? facts.execution : null);
 
 export const decisionFactsAddendumSchema = z
   .object({
@@ -645,9 +777,8 @@ export const decisionBomAnchorSchema = z
   })
   .strict();
 
-export const decisionBomBodySchema = z
-  .object({
-    v: z.literal(DECISION_BOM_VERSION),
+/** the fields every Decision BOM version shares (v1's whole body bar `v` and `completeness`) */
+const decisionBomBodyShape = {
     id: bomUuidSchema,
     auditId: bomUuidSchema,
     version: bomIntSchema.positive(),
@@ -706,19 +837,29 @@ export const decisionBomBodySchema = z
           .max(1024),
       })
       .strict(),
-    completeness: z.object(Object.fromEntries(DECISION_BOM_SECTIONS.map((s) => [s, completenessEntry])) as Record<DecisionBomSection, typeof completenessEntry>).strict(),
     basis: z
       .object({ auditSeq: bomIntSchema.positive(), anchorId: nullableUuid, receiptSeq: bomIntSchema.positive(), aiBomSnapshotId: nullableUuid })
       .strict(),
-  })
-  .strict()
-  .superRefine((body, ctx) => {
+};
+const completenessOf = <S extends string>(sections: readonly S[]) =>
+  z.object(Object.fromEntries(sections.map((s) => [s, completenessEntry])) as Record<S, typeof completenessEntry>).strict();
+
+type DecisionBomBodyCommon = {
+  version: number;
+  supersedes: string | null;
+  finality: DecisionBomFinalityState;
+  decision: { auditSeq: number };
+  proof: { chain: Array<{ seq: number; rowHash: string }>; anchor: { record: { seq: number; rowHash: string } } | null };
+  completeness: Record<string, { status: string }>;
+} & Record<string, unknown>;
+/** the rules every Decision BOM version keeps; `valued` lists the sections that are recorded exactly when present */
+function refineDecisionBomBody(body: DecisionBomBodyCommon, ctx: z.RefinementCtx, valued: readonly string[]): void {
     if ((body.version === 1) !== (body.supersedes === null)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "supersedes is set exactly when version > 1" });
     }
     // a section with no value is never `recorded`; a recorded section has a value (nothing is inferred)
-    for (const s of ["actors", "action", "policy", "model", "approval", "outcome", "cost", "trace"] as const) {
-      const recorded = body.completeness[s].status === "recorded";
+    for (const s of valued) {
+      const recorded = body.completeness[s]!.status === "recorded";
       if (recorded !== (body[s] !== null)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completeness", s], message: `${s}: recorded exactly when present` });
       }
@@ -735,8 +876,37 @@ export const decisionBomBodySchema = z
     }
     const emails = findEmailShapes(body);
     if (emails.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `email-shaped value at ${emails.join(", ")}` });
+}
+const V1_VALUED_SECTIONS = ["actors", "action", "policy", "model", "approval", "outcome", "cost", "trace"] as const;
+
+/** `regulait.decision-bom.v1` (B4), unchanged: frozen v1 bodies verify for ever */
+export const decisionBomBodyV1Schema = z
+  .object({ v: z.literal(DECISION_BOM_VERSION), ...decisionBomBodyShape, completeness: completenessOf(DECISION_BOM_SECTIONS) })
+  .strict()
+  .superRefine((body, ctx) => refineDecisionBomBody(body as unknown as DecisionBomBodyCommon, ctx, V1_VALUED_SECTIONS));
+/**
+ * `regulait.decision-bom.v2` (ADR-0190 I8): v1 plus the `execution` section and its completeness entry. It is
+ * recorded exactly when present; `not_applicable` only for an approval decision, where nothing executes.
+ */
+export const decisionBomBodyV2Schema = z
+  .object({
+    v: z.literal(DECISION_BOM_VERSION_V2),
+    ...decisionBomBodyShape,
+    execution: decisionExecutionFactsSchema.nullable(),
+    completeness: completenessOf(DECISION_BOM_SECTIONS_V2),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    refineDecisionBomBody(body as unknown as DecisionBomBodyCommon, ctx, [...V1_VALUED_SECTIONS, "execution"]);
+    if (body.completeness.execution.status === "not_applicable" && body.decision.objectType !== "approval") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completeness", "execution"], message: "execution is not applicable only to an approval decision" });
+    }
   });
-export type DecisionBomBody = z.infer<typeof decisionBomBodySchema>;
+/** every Decision BOM version a reader accepts */
+export const decisionBomBodySchema = z.union([decisionBomBodyV1Schema, decisionBomBodyV2Schema]);
+export type DecisionBomBodyV1 = z.infer<typeof decisionBomBodyV1Schema>;
+export type DecisionBomBodyV2 = z.infer<typeof decisionBomBodyV2Schema>;
+export type DecisionBomBody = DecisionBomBodyV1 | DecisionBomBodyV2;
 
 // ---------------------------------------------------------------------------
 // regulait.ai-bom.v1, the signed native body (§3, R2, R3, R19, R22, R27)

@@ -1,7 +1,7 @@
 /**
  * ADR-0189 slice B2 — DECISION FACT CAPTURE (the pure half).
  *
- * §4: every receipt-eligible decision writes `regulait.decision-facts.v1` in its
+ * §4: every receipt-eligible decision writes `regulait.decision-facts.v2` (ADR-0190 I8; v1 before it) in its
  * own transaction. Round-10 entry condition 4237346656: fact and capture-status
  * capture sit behind ONE shared, transaction-aware audit writer used by every
  * `receiptClass: "decision"` writer. That writer is `appendChainedAuditRows`
@@ -43,6 +43,10 @@
  *    `detail.approvedApprovalId`) with every `approval_decisions` row it has at
  *    that point, the leaf delegation grant and the chain's workload identities.
  *    Usage events and spans are written after the decision and belong to addenda.
+ *  - `execution` (ADR-0190 decision 9, slice I8): the decision's `execution_placements` row, read in the same
+ *    transaction (it is written there before the facts), with its profile, executor and attestation references;
+ *    without one, `in_gateway` for a model or connector call, `external` for a remote MCP server, and null (NOT
+ *    RECORDED) for a stdio call, an unknown server or an approval (`buildExecutionFacts`).
  *
  * A value the contract cannot represent truthfully makes its whole section null
  * rather than a guess (an unrepresentable compliance tag, a project that is
@@ -59,12 +63,13 @@ import {
   bomJsonSafeIssues,
   bomRowDigest,
   bomUuidSchema,
-  DECISION_FACTS_VERSION,
-  decisionFactsSchema,
+  DECISION_FACTS_CURRENT_VERSION,
+  decisionFactsV2Schema,
   isBomSpiffeId,
   projectBomRow,
   type BomProjectedTable,
   type BoundRow,
+  type DecisionExecutionFacts,
   type DecisionFacts,
 } from "./contract.js";
 
@@ -124,6 +129,8 @@ export interface DecisionFactRefs {
   approvalIds: string[];
   grantId: string | null;
   identityIds: string[];
+  /** ADR-0190 I8: an MCP tool decision's server, whose transport says remote (`external`) or stdio (placed) */
+  mcpServerId: string | null;
 }
 
 /** the ids a row's facts need; only the audit row decides them (never the request) */
@@ -136,7 +143,26 @@ export function decisionFactRefs(row: DecisionAuditRow): DecisionFactRefs {
     approvalIds,
     grantId: v2Actor && isUuid(row.delegationGrantId) ? row.delegationGrantId : null,
     identityIds: v2Actor ? [...new Set(row.actorChain ?? [])] : [],
+    mcpServerId: row.objectType === "mcp_tool" && isUuid(row.serverId) ? row.serverId : null,
   };
+}
+
+/**
+ * ADR-0190 I8: the placement of one decision, read in the decision's own transaction. The I4/I8 contract: the
+ * `execution_placements` row is written in the same transaction as the decision's audit row, BEFORE the facts are
+ * captured, so it is visible here. Drizzle field names, as read.
+ */
+export interface DecisionPlacementRead {
+  /** the `execution_placements` row */
+  placement: Record<string, unknown>;
+  /** the `execution_profiles` row its `profile_digest` names (id, name, version, digest) */
+  profile: Record<string, unknown> | null;
+  /** the `executors` row it names (id, backend, runtimeVersion, workloadIdentityId) */
+  executor: Record<string, unknown> | null;
+  /** that executor's workload identity URI (`workload_identities.identifier`) */
+  executorIdentity: string | null;
+  /** the executor self-test the placement relied on (id, reportSha256), or null */
+  executorAttestation: Record<string, unknown> | null;
 }
 
 /** the rows the loader read, keyed by id (drizzle field names, as `projectBomRow` expects) */
@@ -148,6 +174,71 @@ export interface DecisionFactReads {
   approvalDecisions: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
   grants: ReadonlyMap<string, Record<string, unknown>>;
   identities: ReadonlyMap<string, Record<string, unknown>>;
+  /** ADR-0190 I8: the placement row of each decision that has one, keyed by audit id (absent = none) */
+  placements?: ReadonlyMap<string, DecisionPlacementRead>;
+  /** ADR-0190 I8: `mcp_servers.transport` of each MCP tool decision's server that exists */
+  mcpServerTransports?: ReadonlyMap<string, string>;
+}
+
+const REMOTE_MCP_TRANSPORTS: ReadonlySet<string> = new Set(["streamable_http", "sse"]);
+/** `engine-runs.ts`'s `detail.phase` on an engine run's entitlement decision (ADR-0190 I8 review M1) */
+export const ENGINE_RUN_ENTITLEMENT_PHASE = "engine-run-entitlement";
+const asText = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+/**
+ * ADR-0190 decision 9 / I8: the `execution` facts of one decision, or null (NOT RECORDED).
+ *  - A placement row in the decision's transaction is the authority, whatever the object type.
+ *  - No row: a model call (`agent`) or a connector call runs in the gateway (`in_gateway`); an MCP tool call on a
+ *    remote server runs on the upstream's host (`external`); a stdio server's call, an MCP call whose server is
+ *    unknown, and an approval have no placement to record, so null. Nothing is inferred beyond these.
+ */
+export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactReads): DecisionExecutionFacts | null {
+  const p = reads.placements?.get(row.id);
+  if (p) {
+    const pl = p.placement;
+    const profile = p.profile
+      ? { id: asText(p.profile.id), name: asText(p.profile.name), version: p.profile.version, digest: asText(p.profile.digest) }
+      : null;
+    const executor = p.executor
+      ? {
+          id: asText(p.executor.id),
+          backend: asText(p.executor.backend),
+          runtimeVersion: asText(p.executor.runtimeVersion),
+          identityId: asText(p.executor.workloadIdentityId),
+          identity: p.executorIdentity !== null && isBomSpiffeId(p.executorIdentity) ? p.executorIdentity : null,
+        }
+      : null;
+    const outcome = asText(pl.outcome);
+    const report = asText(pl.reportSha256);
+    const att = p.executorAttestation;
+    return {
+      workloadKind: pl.workloadKind,
+      placement: outcome,
+      placementId: asText(pl.id),
+      requiredClass: pl.requiredClass ?? null,
+      requiredBy: pl.requiredBy ?? null,
+      appliedClass: pl.appliedClass ?? null,
+      refusalCode: pl.refusalCode ?? null,
+      profile,
+      executor,
+      attestation:
+        outcome === "refused"
+          ? null
+          : { placementReportSha256: report, executorAttestationId: att ? asText(att.id) : null, executorReportSha256: att ? asText(att.reportSha256) : null },
+    } as DecisionExecutionFacts;
+  }
+  const none = { placementId: null, requiredClass: null, requiredBy: null, refusalCode: null, profile: null, executor: null, attestation: null };
+  // an engine run's entitlement decision governs an engine worker (placed by an executor from slice I5), not a
+  // model call in the gateway: until I5 writes its placement row, its location is NOT RECORDED, never a guess
+  if (row.objectType === "agent" && asRecord(row.detail)?.phase === ENGINE_RUN_ENTITLEMENT_PHASE) return null;
+  if (row.objectType === "agent") return { workloadKind: "model_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
+  if (row.objectType === "connector") return { workloadKind: "connector_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
+  if (row.objectType === "mcp_tool") {
+    const serverId = decisionFactRefs(row).mcpServerId;
+    const transport = serverId ? reads.mcpServerTransports?.get(serverId) : undefined;
+    if (transport !== undefined && REMOTE_MCP_TRANSPORTS.has(transport)) return { workloadKind: "remote_mcp", placement: "external", appliedClass: "external", ...none };
+  }
+  return null;
 }
 
 /** a decision's facts cannot be captured truthfully; the decision's transaction fails with it */
@@ -166,7 +257,7 @@ const byTableThenId = (a: BoundRow, b: BoundRow) =>
   a.table < b.table ? -1 : a.table > b.table ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
 /**
- * Build the `regulait.decision-facts.v1` payload of one receipt-eligible row
+ * Build the `regulait.decision-facts.v2` payload of one receipt-eligible row
  * from the row and what the loader read in the same transaction. Validated
  * against the B1 contract (and its JSON-safety rule, F5) before it is returned.
  */
@@ -254,7 +345,7 @@ export function buildDecisionFacts(row: DecisionAuditRow, reads: DecisionFactRea
     throw new DecisionFactsCaptureError(row.id, `effect ${JSON.stringify(row.effect)} is not a decision outcome`);
   }
   const facts = {
-    v: DECISION_FACTS_VERSION,
+    v: DECISION_FACTS_CURRENT_VERSION,
     auditId: row.id,
     auditSeq: row.seq,
     action,
@@ -263,11 +354,13 @@ export function buildDecisionFacts(row: DecisionAuditRow, reads: DecisionFactRea
     actors,
     outcome: { effect: row.effect, refusalCode: null, upstreamStatusClass: null },
     rows,
+    execution: buildExecutionFacts(row, reads),
   };
   const unsafe = bomJsonSafeIssues(facts);
   if (unsafe.length) throw new DecisionFactsCaptureError(row.id, `facts are not canonical-safe JSON (${unsafe[0]})`);
-  const parsed = decisionFactsSchema.safeParse(facts);
-  if (!parsed.success) throw new DecisionFactsCaptureError(row.id, `facts do not match regulait.decision-facts.v1 (${parsed.error.issues[0]?.message ?? "invalid"})`);
+  // a placement row the contract cannot represent fails the capture, and the decision with it (fail closed)
+  const parsed = decisionFactsV2Schema.safeParse(facts);
+  if (!parsed.success) throw new DecisionFactsCaptureError(row.id, `facts do not match ${DECISION_FACTS_CURRENT_VERSION} (${parsed.error.issues[0]?.message ?? "invalid"})`);
   return parsed.data;
 }
 

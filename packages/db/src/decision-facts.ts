@@ -11,7 +11,7 @@
  * its marker, so a writer that goes around `createDb` fails loudly.
  *
  *  - `decision_facts_capture = on` (the strict default): a `captured` marker and
- *    the `regulait.decision-facts.v1` row, sharing one `facts_hash` and one
+ *    the `regulait.decision-facts.v2` row (ADR-0190 I8: with its execution facts), sharing one `facts_hash` and one
  *    `expires_at` (the decision's audit time plus the composed audit retention,
  *    null when unbounded; 4237322627).
  *  - `off` (an audited relaxation): a `capture_off` marker and no facts
@@ -36,6 +36,7 @@ import {
   isReceiptEligibleAuditRow,
   type DecisionAuditRow,
   type DecisionFactReads,
+  type DecisionPlacementRead,
 } from "@regulait/shared";
 import {
   approvalDecisions,
@@ -43,10 +44,15 @@ import {
   decisionCaptureStatus,
   decisionFacts,
   delegationGrants,
+  executionPlacements,
+  executionProfiles,
+  executors,
+  mcpServers,
   projects,
   workloadIdentities,
   ORG_SETTINGS_ID,
 } from "./schema.js";
+import { latestCountingAttestation } from "./executor-attestation.js";
 
 type Tx = Pick<NodePgDatabase<Record<string, never>>, "select" | "insert" | "execute">;
 
@@ -78,6 +84,9 @@ async function loadReads(tx: Tx, rows: DecisionAuditRow[]): Promise<DecisionFact
   const decisionRows = approvalIds.length ? await tx.select().from(approvalDecisions).where(inArray(approvalDecisions.approvalId, approvalIds)) : [];
   const grantRows = grantIds.length ? await tx.select().from(delegationGrants).where(inArray(delegationGrants.id, grantIds)) : [];
   const identityRows = identityIds.length ? await tx.select().from(workloadIdentities).where(inArray(workloadIdentities.id, identityIds)) : [];
+  const serverIds = [...new Set(refs.map((r) => r.mcpServerId).filter((x): x is string => x !== null))];
+  const serverRows = serverIds.length ? await tx.select({ id: mcpServers.id, transport: mcpServers.transport }).from(mcpServers).where(inArray(mcpServers.id, serverIds)) : [];
+  const placements = await loadPlacements(tx, rows.map((r) => r.id));
   const decisionsByApproval = new Map<string, Record<string, unknown>[]>();
   for (const d of decisionRows as Array<Record<string, unknown> & { approvalId: string }>) {
     const list = decisionsByApproval.get(d.approvalId) ?? [];
@@ -90,7 +99,64 @@ async function loadReads(tx: Tx, rows: DecisionAuditRow[]): Promise<DecisionFact
     approvalDecisions: decisionsByApproval,
     grants: new Map((grantRows as Array<Record<string, unknown> & { id: string }>).map((g) => [g.id, g])),
     identities: new Map((identityRows as Array<Record<string, unknown> & { id: string }>).map((i) => [i.id, i])),
+    placements,
+    mcpServerTransports: new Map(serverRows.map((s) => [s.id, s.transport])),
   };
+}
+
+/**
+ * ADR-0190 I8: the placement rows of these decisions, read in the decision's transaction (the I4/I8 contract: the
+ * row is written in that transaction before the facts). With each: its profile (by digest), its executor and the
+ * executor's identity URI, and the executor self-test the placement relied on, by the broker's own predicate
+ * (`latestCountingAttestation`, amendments T and 3) as of the placement: the LATEST counting row for that executor
+ * and profile decides, and it is named only if it is a pass, unexpired at the placement, for the applied class. A
+ * fail after a pass, or a pass voided by a later re-enable, names none (decision 6). Times compared are both
+ * database-clock stamps (M-075).
+ */
+async function loadPlacements(tx: Tx, auditIds: string[]): Promise<Map<string, DecisionPlacementRead>> {
+  const out = new Map<string, DecisionPlacementRead>();
+  if (!auditIds.length) return out;
+  const placementRows = await tx.select().from(executionPlacements).where(inArray(executionPlacements.auditId, auditIds));
+  if (!placementRows.length) return out;
+  const digests = [...new Set(placementRows.map((p) => p.profileDigest))];
+  const executorIds = [...new Set(placementRows.map((p) => p.executorId).filter((x): x is string => x !== null))];
+  const profileRows = await tx
+    .select({ id: executionProfiles.id, name: executionProfiles.name, version: executionProfiles.version, digest: executionProfiles.digest })
+    .from(executionProfiles)
+    .where(inArray(executionProfiles.digest, digests));
+  const executorRows = executorIds.length
+    ? await tx
+        .select({ id: executors.id, backend: executors.backend, runtimeVersion: executors.runtimeVersion, workloadIdentityId: executors.workloadIdentityId })
+        .from(executors)
+        .where(inArray(executors.id, executorIds))
+    : [];
+  const identityIds = [...new Set(executorRows.map((e) => e.workloadIdentityId))];
+  const identityRows = identityIds.length
+    ? await tx.select({ id: workloadIdentities.id, identifier: workloadIdentities.identifier }).from(workloadIdentities).where(inArray(workloadIdentities.id, identityIds))
+    : [];
+  const profileOf = new Map(profileRows.map((p) => [p.digest, p]));
+  const executorOf = new Map(executorRows.map((e) => [e.id, e]));
+  const identityOf = new Map(identityRows.map((i) => [i.id, i.identifier]));
+  for (const p of placementRows) {
+    const executor = p.executorId ? executorOf.get(p.executorId) ?? null : null;
+    // the broker's own predicate, as of the placement (amendments T and 3): the LATEST counting self-test for this
+    // executor and profile decides; it is named only if it is a pass, unexpired at the placement, for the class the
+    // placement applied. A later fail, a void pass from before a quarantine, or another class names nothing.
+    let attestation: Record<string, unknown> | null = null;
+    if (executor) {
+      const a = await latestCountingAttestation(tx, executor.id, p.profileDigest, p.createdAt);
+      const counts = a !== null && a.verdict === "pass" && a.expiresAt.getTime() > p.createdAt.getTime() && a.class === p.appliedClass;
+      attestation = counts ? { id: a.id, reportSha256: a.reportSha256 } : null;
+    }
+    out.set(p.auditId, {
+      placement: p as unknown as Record<string, unknown>,
+      profile: profileOf.get(p.profileDigest) ?? null,
+      executor,
+      executorIdentity: executor ? identityOf.get(executor.workloadIdentityId) ?? null : null,
+      executorAttestation: attestation,
+    });
+  }
+  return out;
 }
 
 /** a column the writer was not given is stored as NULL; read it the same way */
@@ -139,7 +205,7 @@ export async function captureDecisionFacts(tx: Tx, appended: ReadonlyArray<Recor
     built.map((b) => ({ auditId: b.r.id, auditSeq: b.r.seq, auditAt: b.r.at, status: "captured" as const, factsHash: b.hash, expiresAt: b.expiresAt })),
   );
   await tx.insert(decisionFacts).values(
-    built.map((b) => ({ auditId: b.r.id, auditSeq: b.r.seq, facts: b.facts, factsHash: b.hash, aiBomSnapshotId: null, expiresAt: b.expiresAt })),
+    built.map((b) => ({ auditId: b.r.id, auditSeq: b.r.seq, factsVersion: b.facts.v, facts: b.facts, factsHash: b.hash, aiBomSnapshotId: null, expiresAt: b.expiresAt })),
   );
   return decisions.length;
 }

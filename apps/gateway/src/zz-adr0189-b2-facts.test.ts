@@ -5,7 +5,7 @@
  * one-way), this file proves:
  *  - every governed path's receipt-eligible decision rows (MCP tool call allowed, refused and paused for
  *    approval, the approval decision itself, the approved call that spends it, MCP protocol, agent dispatch,
- *    connector invoke) carry their capture-status marker and their `regulait.decision-facts.v1` row, written
+ *    connector invoke) carry their capture-status marker and their `regulait.decision-facts.v2` row, written
  *    by the ONE shared audit writer, and no other row has a marker (round-10 entry condition 4237346656);
  *  - the facts are built only from the stored row and what existed in the decision's transaction: the
  *    argument digest the path recorded, the target, the project's compliance tags, the bound approval and
@@ -58,6 +58,8 @@ import {
   RECEIPT_OBJECT_TYPES,
   RECEIPT_PAYLOAD_VERSION,
   RECEIPT_PAYLOAD_VERSION_V2,
+  DECISION_FACTS_VERSION_V2,
+  executionFactsOf,
   type DecisionFacts,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
@@ -218,6 +220,16 @@ async function assertCaptured(seq: number): Promise<Array<{ row: AuditRow; facts
     for (const bound of facts.rows) expect(bound.digest).toBe(bomRowDigest(bound.table, bound.projection));
     // a v1 row has no actor columns covered by its hash: actors are not recorded (pre_identity)
     if (row.chainVersion !== 2) expect(facts.actors).toBeNull();
+    // ADR-0190 I8: every capture is v2 and says where the call ran. This suite has no executor, so nothing is
+    // placed: model and connector calls ran in the gateway, its MCP doubles are remote (external), and an approval
+    // (or an MCP decision that names no server) records no execution
+    expect(facts.v).toBe(DECISION_FACTS_VERSION_V2);
+    const execution = executionFactsOf(facts);
+    // (an engine run's entitlement decision governs an engine worker, placed from I5: no location until then, M1)
+    const engineRun = row.objectType === "agent" && detail.phase === "engine-run-entitlement";
+    const ran = engineRun ? null : row.objectType === "agent" || row.objectType === "connector" ? "in_gateway" : row.objectType === "mcp_tool" && row.serverId ? "external" : null;
+    if (ran === null) expect(execution, `${row.ruleId} (${row.objectType}) records no execution`).toBeNull();
+    else expect(execution, `${row.ruleId} (${row.objectType}) ran ${ran}`).toMatchObject({ placement: ran, appliedClass: ran, placementId: null, profile: null, executor: null });
     out.push({ row, facts });
   }
   return out;

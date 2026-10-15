@@ -9,6 +9,10 @@
  * retry, never as an empty or successful BOM. Completeness is shown as
  * recorded: a section that was not recorded says so and why, and is never
  * filled in from today's state.
+ *
+ * ADR-0190 I8: a v2 body's execution facts (where the call ran, the class it
+ * required and why, the profile, the executor and the attestation references)
+ * are shown from the signed body itself. L0 and L1 are never called a sandbox.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -18,16 +22,64 @@ import { BomVerifyPanel, Digest, OfflineVerifyNote, VerifyResult, exportUnavaila
 import {
   bomRefusalText,
   checkedAuditId,
+  executionPlacementLabel,
   finalityLabel,
+  isolationClassLabel,
+  requiredByLabel,
   formatLabel,
   isBomForbidden,
   notRecordedLabel,
   saveBlob,
   sectionLabel,
   shownTime,
+  type ExecutionView,
   type VerifyView,
 } from "./bomModel";
 import v from "../../views.module.css";
+
+/** ADR-0190 decision 9 / I8: the execution section of a v2 Decision BOM, as signed */
+export function ExecutionFacts({ execution: e }: { execution: ExecutionView }) {
+  const rows: Array<{ key: string; label: string; value: React.ReactNode }> = [
+    { key: "placement", label: "Where it ran", value: executionPlacementLabel(e.placement) },
+    { key: "kind", label: "Workload kind", value: <code className={v.mono}>{e.workloadKind}</code> },
+  ];
+  if (e.requiredClass) rows.push({ key: "required", label: "Required isolation", value: `${isolationClassLabel(e.requiredClass)}${e.requiredBy ? `, set by ${requiredByLabel(e.requiredBy)}` : ""}` });
+  // a mismatch's class is what the placement report claimed, which the gateway refused: the call never ran under it (decision 6)
+  if (e.placement !== "refused") rows.push({ key: "applied", label: e.placement === "mismatch" ? "Reported class (disputed)" : "Applied isolation", value: isolationClassLabel(e.appliedClass) });
+  if (e.refusalCode) rows.push({ key: "refusal", label: "Refusal", value: <code className={v.mono}>{e.refusalCode}</code> });
+  if (e.profile) rows.push({ key: "profile", label: "Execution profile", value: <>{e.profile.name} version {e.profile.version} · <Digest value={e.profile.digest} /></> });
+  if (e.executor) {
+    rows.push({
+      key: "executor",
+      label: "Executor",
+      value: (
+        <>
+          {e.executor.backend} {e.executor.runtimeVersion} · <code className={v.mono}>{e.executor.identity ?? e.executor.identityId}</code>
+        </>
+      ),
+    });
+  }
+  if (e.attestation) {
+    rows.push({
+      key: "attestation",
+      label: "Attestation",
+      value: (
+        <>
+          {e.attestation.placementReportSha256 ? <>placement report <Digest value={e.attestation.placementReportSha256} /></> : "no placement report"}
+          {" · "}
+          {e.attestation.executorReportSha256 ? <>executor self-test <Digest value={e.attestation.executorReportSha256} /></> : "no fresh executor self-test recorded"}
+        </>
+      ),
+    });
+  }
+  return (
+    <div className={v.stack} data-testid="decision-bom-execution">
+      <div className={v.sectionTitle}>Execution</div>
+      <Table rows={rows} rowKey={(r) => r.key} columns={[{ key: "label", header: "Fact", render: (r) => r.label }, { key: "value", header: "Recorded", render: (r) => r.value }]} />
+      {e.placement === "placed" && e.attestation && <p className={v.faint}>Software-attested: the reports come from software on the same host, not from hardware-rooted attestation.</p>}
+    </div>
+  );
+}
 
 export function DecisionBomPanel({ auditId, evidencePort = bomB4Api, onClose }: { auditId: string; evidencePort?: BomEvidencePort; onClose?: () => void }) {
   let id: string | null = null;
@@ -152,6 +204,7 @@ export function DecisionBomPanel({ auditId, evidencePort = bomB4Api, onClose }: 
                   { key: "reason", header: "Why not", render: (c) => (c.reason ? notRecordedLabel(c.reason) : "—") },
                 ]}
               />
+              {view.execution && <ExecutionFacts execution={view.execution} />}
               <div className={v.row}>
                 <Button
                   size="sm"
