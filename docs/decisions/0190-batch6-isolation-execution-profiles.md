@@ -739,6 +739,106 @@ decisions above leave open:
      `policy_unresolved`, with no fallback to the agent's or the default profile.
    - Malformed project classifications refuse `policy_unresolved`. A null column still means no tags.
 
+## As built: slice I4 gVisor backend and the stdio move (2026-10-15)
+
+I4 delivers the `runsc` backend, the stdio closure images, MCP over the executor's channel, the removal of the
+in-gateway stdio spawn, the ISACA item 5 collector, and (from the I8 review) the governed stdio decision's own
+placement row. Migration **0198** (`0198_isolation_stdio_placement_evidence.sql`) is hand-written; its journal entry
+is added only after 0196 and 0197 are on main (the journal stays contiguous). These points settle what the decisions
+above leave open:
+
+1. **The runsc backend is Docker's own CLI on a host whose daemon registers gVisor as a runtime** (decision 4,
+   amendments A to E). `packages/sandbox-executor/src/runsc-backend.ts` starts each sandbox with `docker run -i
+   --runtime runsc` from the image's content digest (`--pull never`), with every isolation property taken from the
+   profile: `--network none`, `--ipc none`, a read-only root, one tmpfs work directory (`noexec` under `exec:
+   image_only`), the profile's uid, `--cap-drop ALL`, `no-new-privileges`, the runtime-default or the profile's named
+   seccomp profile, CPU, memory without swap, the host `pids.max` with headroom and `RLIMIT_NPROC` for the workload
+   (amendment C), no log driver and no environment passed in. The executor-side observations come from the Docker
+   Engine API (`/info`, `/containers/{id}/json`, `/containers/{id}/stats`). The executor image carries the official
+   Docker CLI (pinned by digest, Apache-2.0); gVisor itself is installed on the host from the I0 tarball (amendment E).
+   The backend attests `user_space_kernel` only, refuses a placement whose profile asks for inputs, a scoped volume,
+   an allow-list network or secrets (none of those channels exists yet), and refuses to start when the daemon has no
+   `runsc` runtime or that runtime's binary is not `runsc`.
+2. **What proves the runtime is runsc** (decision 6, amendment U): from inside, the sandbox init reads
+   `/proc/version` (gVisor names itself) and `dmesg`; from outside, the container's `HostConfig.Runtime` must be the
+   configured runtime name and its binary must be `runsc`, and the runtime's `runtimeArgs` are reported verbatim as
+   `runtime_config.flags`. A sandbox under any other runtime is reported as `runc` with no flags, so the gateway fails
+   it (`backend_mismatch`, `class_above_observed_runtime`); a missing profile flag fails `runtime_flags_missing`.
+3. **The sandbox init and the closure images** (decision 4). Every stdio closure image is built FROM the RegulAIt
+   stdio base (`packages/sandbox-executor/stdio-base/`), which carries the init at `/regulait/sandbox-init` (a file
+   of the pinned image, so `exec: image_only` holds and nothing is mounted in). The init probes from inside the
+   sandbox, prints one observation line, then reads exactly one release line byte by byte: the gateway's `start`
+   message carries the registered entry point and argv, and only then does the init run the server with the
+   sandbox's own stdin and stdout. A canary (the self-test) is never given a workload. The registration keeps the
+   `mcp_servers` stdio columns with a new meaning (no migration): `stdio_command` is the absolute entry point inside
+   the image, `stdio_args` its argv, `stdio_command_digest` the closure image's content digest (`sha256:` + 64 hex).
+   Images are pinned by the content digest Docker reports (`docker image inspect --format '{{.Id}}'`), which
+   survives `docker save`/`docker load` for air-gapped bundles.
+4. **MCP over the executor's channel: a sibling stream on the same proof** (answers I3 open question 3). Two
+   routes join `EXECUTOR_CHANNEL_ROUTES`: `GET /v1/executor-channel/offers/:offerId/stdio?window=` (gateway to
+   sandbox: `start`, `stdin` frames, `close`, keepalives, `bye`) and `POST …/stdio` (sandbox to gateway: `stdout`
+   frames, `eof`). One frame is one JSON-RPC line (at most 768 KiB); sequence numbers per direction are contiguous
+   and a gap or repeat ends the session. The gateway side is an MCP SDK `Transport` using the SDK's own
+   `serializeMessage`/`deserializeMessage`.
+5. **No in-gateway spawn, no fallback** (OWNER DECISION 2, ADR-0180). `mcp-transports.ts` has no spawn path, no
+   process cap and no host opt-in; `REGULAIT_MCP_STDIO_ALLOWED_DIRS` and `REGULAIT_MCP_STDIO_MAX_PROCS` are gone. A
+   static guard (`adr0190-i4-no-gateway-spawn.test.ts`) fails if any serving gateway module imports
+   `node:child_process` or the SDK's stdio client. A stdio row registered before I4 (a host path, a 64-hex file hash)
+   is refused at connect `mcp_stdio_image_unpinned` (first load, no grandfathering). The refusal codes are now
+   `mcp_stdio_command_refused` (`not_absolute`, `invalid_argv`), `mcp_stdio_image_unpinned` and
+   `execution_profile_unavailable` (rule id `execution-profile`).
+6. **A governed `tools/call` on a stdio server decides its placement in its decision's transaction** (the I8
+   contract, from the I8 review). In `executeGovernedToolCall`, an ALLOWED call on a stdio server with a pinned image
+   runs decision 7 inside the transaction that writes its decision audit row, before that row, and writes the
+   `execution_placements` row keyed to the decision's audit id:
+   - `offered` (new outcome): the chosen executor, the class its fresh attestation shows, that attestation
+     (`attestation_id`), the image (`image_digest`), the SHA-256 of the runtime flags that attestation reported
+     (`runtime_flags_sha256`) and the offer (`offer_id`); the offer is inserted in the same transaction;
+   - `refused`: decision 7's code. The decision itself then becomes the refusal: effect `deny`, rule id
+     `execution-profile`, a plain-language reason. A policy fact that does not resolve writes no placement row
+     (its columns would have to hold the fact) and refuses `policy_unresolved`.
+   The executor's later report never rewrites that row (the table stays append-only): it is a LINKED row in the new
+   `execution_placement_reports` table (`placed`, `mismatch` or `refused` with its code, its own audit row), at most
+   one per placement. The I3 broker's selection is shared (`selectExecutor`), so both paths choose and refuse by one
+   rule; the I3 broker also stamps `image_digest` on the rows it writes. The session for the offer is registered as
+   soon as the decision commits; a call that a later gate refuses never attaches, and after 60 s the session is
+   closed (a started sandbox then gets `close` and no workload). The placement list route and the Isolation panel
+   show a linked placement's effective outcome; `offered` reads "Awaiting report".
+7. **Connects with no governed decision behind them** (a `tools/list` manifest sync, an unknown-tool sync, a
+   protocol method, the admission rescan and health sweeps) are placed at connect time with their own audited
+   decision 7 (`execution-refused`, I2), and answer `409 execution_profile_unavailable` before the reply is hijacked.
+   A sweep names no project, so it refuses `policy_unresolved`.
+8. **ISACA item 5**: `isaca-ai-agents@2` (v1 unchanged, its content hash pinned) evidences item 5 as `partial` by the
+   new `isolation_placements` collector: placements placed at L2 or L3 in the period. Org-scoped only (a placement
+   carries no project). The owner note says it covers only the workloads placed and is software-attested.
+9. **Where a session lives.** The stdio session (its queued frames and its MCP client) is held by the gateway
+   process that placed the call. An executor request for a session this process does not hold is refused
+   `stdio_session_unknown` and the call fails closed. A multi-replica gateway needs the stdio routes to reach the
+   placing replica, or a frames table; see the open questions below.
+10. **CI.** The runsc integration suite (`runsc-backend.integration.test.ts`) runs only where a Docker daemon with
+    gVisor exists (`REGULAIT_TEST_RUNSC_RUNTIME`, `REGULAIT_TEST_STDIO_BASE_IMAGE`) and is otherwise SKIPPED with its
+    reason in its title; the I0 spike did not run gVisor on CI runners (R13, "Needs a real host or CI"). The backend's
+    arguments, the probe mapping (a gVisor observation passes the gateway's evaluator; each property made untrue one
+    at a time fails with its code) and the real init's handshake (run on the host in place of `docker run`; its host
+    report is correctly refused) run in CI. The stdio move itself is proven against the fake backend through the real
+    app (`zz-adr0190-i4-stdio-move.test.ts`), including the decision-time placement row, the linked report and the
+    decision's facts naming the placement (that last assertion needs I8's capture, migration 0197).
+11. **Not executed here (M-041).** The session that built I4 had no Docker daemon. The image builds, the
+    `daemon.json` registration and the compose `isolation` profile are written and marked unexecuted in their files
+    and in INSTALL.md; they must be run on a test host before they are relied on.
+
+Open questions I4 leaves (for the owner or the master):
+
+1. **Calls without an agent are placed as unknown agents (L3).** I2 maps `agent: null` on `mcp_stdio` to decision 7
+   item 5's unknown agent, so a person's own stdio call requires `restricted-microvm` (L3) and refuses on a
+   gVisor-only (L2) host. Should a person's own authenticated call count as a known subject (L2 floor), or stay L3?
+2. **Multi-replica stdio sessions** (item 9): sticky routing of `/v1/executor-channel/offers/*/stdio`, or a frames
+   table (a migration).
+3. **A gVisor CI job**: GitHub-hosted runners have Docker and sudo, so a job could install the pinned tarball,
+   register `runsc` and run the integration suite. It was not added because it has never been run (M-041).
+4. **Engines (I5)** inherit the runsc backend for `engine_worker`; they need the input volume and task-scoped
+   secrets channels the backend refuses today.
+
 ## Test strategy
 
 Every rule gets a red proof (fails with the control removed, then passes), through the real app, with an upstream
