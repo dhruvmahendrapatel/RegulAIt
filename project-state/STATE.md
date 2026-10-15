@@ -52,8 +52,9 @@ queue below.
 - **CI:** the mocked UI suite runs in 5 shards (was 3), recorded on 2026-10-12.
 - **Last migration:** 0198.
 - **Open owner questions:**
-  1. Should a person's own authenticated stdio call (no agent) count as a known subject at L2, rather than as the
-     unknown agent at L3? Today a gVisor-only host always refuses it (ADR-0190 I4 open question 1).
+  1. ~~A person's own stdio call at L2?~~ **Decided 2026-10-15 (ADR-0190 owner decision C):** L3 by default; an
+     admin may lower it to L2 for interactive sessions only (never an API key), scoped, audited with step-up. Engines
+     keep their L2 floor and are never unknown agents. Build slice queued after I5.
   2. The source of project sensitivity for I2 (today the strictest use case, failing closed with none).
   3. The EU AI Act Art. 50 legal review.
   4. The I7 OpenShell go/no-go.
