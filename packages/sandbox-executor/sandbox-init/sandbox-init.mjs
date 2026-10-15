@@ -1,9 +1,16 @@
 #!/usr/local/bin/node
 /**
- * ADR-0190 slice I4 — THE SANDBOX INIT. Copied into the RegulAIt stdio base
- * image at /regulait/sandbox-init; every stdio closure image is built FROM
- * that base, so the init is a file of the pinned image (`exec: image_only`
- * holds: nothing is mounted in from the executor's host).
+ * ADR-0190 slice I4 — THE SANDBOX INIT. EXECUTOR-CONTROLLED (review H2): the
+ * executor ships this file, checks its pinned SHA-256 (`src/init-pin.ts`),
+ * copies it into a volume it owns and mounts that volume READ-ONLY at
+ * /.regulait-init, and starts the sandbox with this file as its entry point
+ * (run by the image's own Node). The workload's image cannot replace it.
+ *
+ * What it reports CORROBORATES; it never decides the class. It runs under the
+ * image's interpreter, so a hostile image could make it print anything: the
+ * executor decides the runtime from outside the sandbox (the container's
+ * runtime and the runtime binary's pinned hash), and the gateway refuses a
+ * report whose inside view disagrees with that.
  *
  * It runs as the sandbox's first process, as the profile's uid, BEFORE the
  * workload has any input, and does three things in order:
@@ -165,22 +172,31 @@ function runtimeIdentity() {
 }
 
 /** read exactly one line from fd 0, byte by byte (nothing after it is consumed) */
+/**
+ * read exactly one line from fd 0, byte by byte (nothing after it is consumed), and decode it as UTF-8 only
+ * once the whole line is in (review M5: a multi-byte character split across reads is never mangled; an invalid
+ * sequence is refused, never replaced)
+ */
 function readOneLine(max = 512 * 1024) {
-  const buf = Buffer.alloc(1);
-  let line = "";
+  const one = Buffer.alloc(1);
+  const bytes = [];
   for (;;) {
     let n;
     try {
-      n = readSync(0, buf, 0, 1, null);
+      n = readSync(0, one, 0, 1, null);
     } catch (e) {
       if (e && e.code === "EAGAIN") continue;
       return null;
     }
     if (n === 0) return null;
-    const ch = buf.toString("utf8");
-    if (ch === "\n") return line;
-    line += ch;
-    if (line.length > max) return null;
+    if (one[0] === 0x0a) break;
+    bytes.push(one[0]);
+    if (bytes.length > max) return null;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+  } catch {
+    return null;
   }
 }
 

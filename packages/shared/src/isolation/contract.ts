@@ -148,6 +148,16 @@ export const PLACEMENT_OUTCOMES = ["placed", "refused", "mismatch", "offered"] a
 export type PlacementOutcome = (typeof PLACEMENT_OUTCOMES)[number];
 
 /**
+ * I4 (review lows, migration 0198): the EFFECTIVE outcome a placement view shows — the row's own, or its linked
+ * report's. A report adds `cancelled`: the gateway withdrew an offered placement (a later gate refused the call, the
+ * executor did not confirm the sandbox in time, or nothing connected to the session). Its `endCode` says which.
+ */
+export const PLACEMENT_EFFECTIVE_OUTCOMES = [...PLACEMENT_OUTCOMES, "cancelled"] as const;
+export type PlacementEffectiveOutcome = (typeof PLACEMENT_EFFECTIVE_OUTCOMES)[number];
+export const PLACEMENT_END_CODES = ["later_gate", "placement_timeout", "session_abandoned", "session_unknown"] as const;
+export type PlacementEndCode = (typeof PLACEMENT_END_CODES)[number];
+
+/**
  * the kernel rule ids decision 7 and 8 add. `delegation-isolation` is also in `DELEGATION_RULE_IDS`
  * (identity/contract.ts), and its token-endpoint `error_code` `delegation_isolation` in `DELEGATION_ERROR_CODES`
  * (amendment item 11).
@@ -227,6 +237,10 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-ended",
   // I2: an execution profile assigned to (or unassigned from) an agent, builder agent or stdio MCP server
   "execution-profile-assigned",
+  // I4: an offered stdio placement the gateway stopped (a later gate, a timeout, an abandoned session)
+  "execution-cancelled",
+  // I4 (review M3): a stdio window reached a gateway process that does not hold the session (our own refusal)
+  "execution-session-lost",
 ] as const;
 
 // ---------------------------------------------------------------------------

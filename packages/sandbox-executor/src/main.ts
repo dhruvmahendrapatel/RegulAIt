@@ -10,6 +10,7 @@
  * rather than run anything that is not a real OS boundary — and the fake
  * backend is deliberately not reachable from here.
  */
+import { fileURLToPath } from "node:url";
 import { loadOrCreateExecutorKey } from "./keys.js";
 import { ProofChannelCredential } from "./channel-credential.js";
 import { checkGatewayUrl, ExecutorClient, ExecutorConfigError } from "./client.js";
@@ -31,6 +32,13 @@ const BACKENDS: Readonly<Record<string, (() => Promise<SandboxBackend>) | undefi
       runtimeVersion: required("REGULAIT_EXECUTOR_RUNSC_VERSION"),
       ...(process.env.REGULAIT_EXECUTOR_DOCKER_SOCKET ? { dockerSocket: process.env.REGULAIT_EXECUTOR_DOCKER_SOCKET } : {}),
       seccompDir: process.env.REGULAIT_EXECUTOR_SECCOMP_DIR || null,
+      // review H2: the init this build ships (next to dist/), copied into the init volume this executor owns
+      initSource: fileURLToPath(new URL("../sandbox-init/sandbox-init.mjs", import.meta.url)),
+      initDir: process.env.REGULAIT_EXECUTOR_INIT_DIR || "/regulait-init",
+      initVolume: required("REGULAIT_EXECUTOR_INIT_VOLUME"),
+      // review H2: the host's runsc, mounted read-only into this container, and the path the daemon names for it
+      runscBinary: process.env.REGULAIT_EXECUTOR_RUNSC_BINARY || "/host-gvisor/runsc",
+      runscHostPath: required("REGULAIT_EXECUTOR_RUNSC_HOST_PATH"),
     });
     await backend.preflight();
     return backend;

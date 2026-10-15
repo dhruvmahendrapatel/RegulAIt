@@ -6,6 +6,9 @@
  * stdio MCP servers"). Set:
  *   REGULAIT_TEST_RUNSC_RUNTIME     the daemon's runtime name for runsc (e.g. `runsc`)
  *   REGULAIT_TEST_STDIO_BASE_IMAGE  the stdio base image's content digest (`sha256:…`)
+ *   REGULAIT_TEST_RUNSC_HOST_PATH   the runsc binary the daemon names (hashed against the pinned release)
+ *   REGULAIT_TEST_INIT_VOLUME       a Docker volume whose host directory is REGULAIT_TEST_INIT_DIR
+ *   REGULAIT_TEST_INIT_DIR          (the executor copies its pinned init there; the sandbox mounts it read-only)
  *   REGULAIT_TEST_RUNC_RUNTIME      optional: `runc`, for the negative control
  * Otherwise the suite is SKIPPED, and its title says why: it never passes
  * vacuously. The CI runners do not install gVisor (the I0 spike did not run
@@ -19,6 +22,7 @@
  * daemon); and a runtime that is not runsc (the negative control) is refused
  * before any sandbox starts.
  */
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { evaluateExecutorReport, executionProfileDigest, requiredReportProbes, SHIPPED_EXECUTION_PROFILES } from "@regulait/shared";
 import { RunscDockerBackend } from "./runsc-backend.js";
@@ -27,16 +31,25 @@ import { buildReport } from "./report.js";
 const RUNTIME = process.env.REGULAIT_TEST_RUNSC_RUNTIME ?? "";
 const IMAGE = process.env.REGULAIT_TEST_STDIO_BASE_IMAGE ?? "";
 const RUNC = process.env.REGULAIT_TEST_RUNC_RUNTIME ?? "";
-const enabled = RUNTIME !== "" && IMAGE !== "";
+const enabled = RUNTIME !== "" && IMAGE !== "" && !!process.env.REGULAIT_TEST_RUNSC_HOST_PATH && !!process.env.REGULAIT_TEST_INIT_VOLUME && !!process.env.REGULAIT_TEST_INIT_DIR;
 const why = enabled
   ? "on a Docker daemon with gVisor"
-  : "SKIPPED: no Docker daemon with gVisor here (set REGULAIT_TEST_RUNSC_RUNTIME and REGULAIT_TEST_STDIO_BASE_IMAGE to run it)";
+  : "SKIPPED: no Docker daemon with gVisor here (set the REGULAIT_TEST_* variables above to run it); L2 is UNVERIFIED until it runs on a real gVisor host";
 
 const restricted = SHIPPED_EXECUTION_PROFILES.restricted;
 const ID = "spiffe://test.example/regulait/worker_runtime/runsc-it";
 
 async function canaryVerdict(runtimeName: string) {
-  const backend = new RunscDockerBackend({ runtimeName, canaryImage: IMAGE, runtimeVersion: "release-20261005.0" });
+  const backend = new RunscDockerBackend({
+    runtimeName,
+    canaryImage: IMAGE,
+    runtimeVersion: process.env.REGULAIT_TEST_RUNSC_VERSION ?? "release-20261005.0",
+    initSource: fileURLToPath(new URL("../sandbox-init/sandbox-init.mjs", import.meta.url)),
+    initDir: process.env.REGULAIT_TEST_INIT_DIR ?? "",
+    initVolume: process.env.REGULAIT_TEST_INIT_VOLUME ?? "",
+    runscBinary: process.env.REGULAIT_TEST_RUNSC_HOST_PATH ?? "",
+    runscHostPath: process.env.REGULAIT_TEST_RUNSC_HOST_PATH ?? "",
+  });
   const h = await backend.startCanary(restricted, "user_space_kernel");
   try {
     const probes = await h.probe(requiredReportProbes(restricted, "gvisor", "user_space_kernel"));
@@ -53,6 +66,6 @@ describe.skipIf(!enabled)(`the runsc backend ${why}`, () => {
   }, 120_000);
 
   it.skipIf(RUNC === "")("negative control: a runtime that is not runsc is refused before any sandbox starts", async () => {
-    await expect(canaryVerdict(RUNC)).rejects.toThrow(/not runsc/);
+    await expect(canaryVerdict(RUNC)).rejects.toThrow(/no runtime named|not the gVisor install|not the pinned one/);
   }, 120_000);
 });

@@ -35,6 +35,11 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
            /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=build /out /app
+# review H2: the executor-controlled sandbox init (hash-pinned in src/init-pin.ts; the executor refuses any other
+# bytes). It is copied at start into the init volume and mounted READ-ONLY into every sandbox as its entry point.
+COPY --chmod=0444 packages/sandbox-executor/sandbox-init/sandbox-init.mjs /app/sandbox-init/sandbox-init.mjs
+# the init volume's mount point, owned by the executor's uid (compose mounts the named volume here)
+RUN mkdir -p /regulait-init && chown 10001:10001 /regulait-init
 # the executor's own state volume: its key (0600, written by the executor itself) survives a restart
 RUN mkdir -p /state && chown 10001:10001 /state && chmod 0700 /state
 ENV NODE_ENV=production \

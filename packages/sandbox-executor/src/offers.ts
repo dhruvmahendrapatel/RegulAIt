@@ -10,7 +10,7 @@
  *     the sandbox and quarantines this executor; a transient failure kills the
  *     sandbox too (an unconfirmed sandbox never gets input: fail closed).
  */
-import { isolationClassRank, requiredReportProbes, type ExecutionOffer, type ExecutorProfileRef } from "@regulait/shared";
+import { isolationClassRank, requiredReportProbes, stdioMacKey, type ExecutionOffer, type ExecutorProfileRef } from "@regulait/shared";
 import type { SandboxBackend, SandboxHandle } from "./backend.js";
 import type { ChannelCredential } from "./channel-credential.js";
 import { ExecutorClient, ExecutorHttpError } from "./client.js";
@@ -128,11 +128,23 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       ctx.log?.(`offer ${offer.id}: placed but input withheld (${why}); sandbox killed`);
       return { kind: "unconfirmed", why };
     }
+    if (offer.workloadKind === "mcp_stdio" && handle.stdio && !answer.stdioSecret) {
+      // review M4: no session secret, no session: an unMACed window is never acted on (fail closed)
+      await handle.kill();
+      ctx.sandboxes.delete(offer.id);
+      try {
+        await ctx.client.end(offer.id, "killed");
+      } catch (e) {
+        ctx.log?.(`offer ${offer.id}: end (killed) not delivered: ${(e as Error).message}`);
+      }
+      ctx.log?.(`offer ${offer.id}: the gateway sent no stdio session secret; sandbox killed`);
+      return { kind: "unconfirmed", why: "stdio_unkeyed" };
+    }
     if (offer.workloadKind === "mcp_stdio" && handle.stdio) {
       // I4: the input is released by the stdio session, with the registered argv, once the gateway's `start` arrives.
       // Every real backend gives an mcp_stdio sandbox its stdio (the runsc backend always does); only the I3 fake
       // backend without a stdio responder has none, and is released as before.
-      const how = await pumpStdio({ client: ctx.client, offerId: offer.id, handle, ...(ctx.stdioWindowSeconds !== undefined ? { windowSeconds: ctx.stdioWindowSeconds } : {}), ...(ctx.log ? { log: ctx.log } : {}) });
+      const how = await pumpStdio({ client: ctx.client, offerId: offer.id, handle, macKey: stdioMacKey(answer.stdioSecret!, offer.id), ...(ctx.stdioWindowSeconds !== undefined ? { windowSeconds: ctx.stdioWindowSeconds } : {}), ...(ctx.log ? { log: ctx.log } : {}) });
       ctx.log?.(`offer ${offer.id}: stdio session ended (${how})`);
     } else {
       await handle.releaseInput();

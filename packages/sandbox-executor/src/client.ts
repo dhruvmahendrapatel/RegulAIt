@@ -276,11 +276,12 @@ export class ExecutorClient {
   /**
    * ADR-0190 I4: hold one window of a placed stdio session (gateway → sandbox):
    * `start`, `stdin` frames, `close`, keepalives, `bye`. Every line is parsed
-   * with the shared schema; anything else is dropped, never acted on.
+   * with the shared schema; anything else is dropped, never acted on. Review M6: `from` is the next stdin sequence
+   * number this executor expects; the gateway keeps every frame until it is acknowledged that way and re-sends from it.
    */
-  async stdioStream(offerId: string, windowSeconds: number, onMessage: (m: ExecutorStdioMessage) => Promise<void> | void, signal?: AbortSignal): Promise<void> {
+  async stdioStream(offerId: string, windowSeconds: number, from: number, onMessage: (m: ExecutorStdioMessage) => Promise<void> | void, signal?: AbortSignal): Promise<void> {
     const w = Math.min(EXECUTOR_STREAM_WINDOW.max, Math.max(EXECUTOR_STREAM_WINDOW.min, Math.floor(windowSeconds)));
-    const url = this.url(`/offers/${encodeURIComponent(offerId)}/stdio?window=${w}`);
+    const url = this.url(`/offers/${encodeURIComponent(offerId)}/stdio?window=${w}&from=${Math.max(0, Math.floor(from))}`);
     const auth = await this.opts.credential.authorizeRequest("GET", url, undefined);
     const abort = new AbortController();
     const onCallerAbort = () => abort.abort();

@@ -36,6 +36,8 @@
  * refused at connect (`mcp_stdio_image_unpinned`): built as for a first load,
  * no grandfathering (ADR-0180).
  */
+import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
+import canonicalize from "canonicalize";
 import { z } from "zod";
 import { EXECUTOR_CHANNEL_ROUTES } from "./channel.js";
 
@@ -45,16 +47,63 @@ export function isStdioClosureImage(v: unknown): v is string {
   return typeof v === "string" && v.length === 71 && STDIO_CLOSURE_IMAGE_RE.test(v);
 }
 
-/** where the RegulAIt stdio base puts the sandbox init; every closure image is built FROM that base */
-export const STDIO_SANDBOX_INIT_PATH = "/regulait/sandbox-init" as const;
+/**
+ * Review H2: the sandbox init is EXECUTOR-CONTROLLED. The executor ships it, checks its pinned SHA-256, copies it
+ * into a volume it owns, mounts that volume READ-ONLY at this directory and makes the init the sandbox's entry
+ * point, so the workload's image cannot replace or shadow it. The interpreter that runs it is the image's own
+ * Node (every closure image is built FROM the RegulAIt stdio base), which is why the in-sandbox probes corroborate
+ * and never decide: the class is decided by what the executor sees from outside (the container's runtime and the
+ * runtime binary's pinned hash).
+ */
+export const STDIO_SANDBOX_INIT_DIR = "/.regulait-init" as const;
+export const STDIO_SANDBOX_INIT_PATH = "/.regulait-init/sandbox-init.mjs" as const;
+/** the interpreter the stdio base image provides (Node 22, from the pinned base) */
+export const STDIO_SANDBOX_NODE = "/usr/local/bin/node" as const;
 
 /** the longest single stdio line either way (a JSON-RPC message), in UTF-8 bytes */
 export const STDIO_FRAME_MAX_BYTES = 768 * 1024;
 /** at most this many frames in one POST (and the POST body limit) */
 export const STDIO_POST_MAX_FRAMES = 64;
 export const STDIO_POST_BODY_LIMIT_BYTES = 4 * 1024 * 1024;
-/** the gateway holds at most this many unread `stdin` bytes for one session before it refuses more */
+/** the gateway holds at most this many unacknowledged `stdin` bytes for one session before it refuses more */
 export const STDIO_SESSION_BUFFER_MAX_BYTES = 4 * 1024 * 1024;
+/** at most this many stdio sessions live in one gateway process (a placement past it is refused, capacity) */
+export const STDIO_MAX_LIVE_SESSIONS = 256;
+
+// ---------------------------------------------------------------------------
+// Review M4: every gateway → executor window line that the sandbox acts on is MACed
+// ---------------------------------------------------------------------------
+
+/**
+ * The gateway derives a 32-byte secret for each stdio offer from its deploy-time data key (HKDF, salt = the offer
+ * id), so every replica derives the same one, and hands it to the executor in its answer to the accepted
+ * per-placement report. Both sides derive the session's MAC key from it with HKDF-SHA-256 (salt = the offer id).
+ * Each `start` and `stdin` line carries an HMAC-SHA-256 over its canonical text with the offer id, so a line
+ * injected into the window, replayed from another session or altered is refused by the executor. Over https this is
+ * defence in depth; it is not a substitute for TLS (an on-path reader of the report answer learns the secret).
+ */
+export function stdioSessionSecret(root: Buffer, offerId: string): string {
+  return Buffer.from(hkdfSync("sha256", root, Buffer.from(offerId, "utf8"), "regulait.executor-stdio-secret.v1", 32)).toString("base64url");
+}
+export const STDIO_SECRET_RE = /^[A-Za-z0-9_-]{43}$/;
+export function stdioMacKey(secretB64url: string, offerId: string): Buffer {
+  return Buffer.from(hkdfSync("sha256", Buffer.from(secretB64url, "base64url"), Buffer.from(offerId, "utf8"), "regulait.executor-stdio-mac.v1", 32));
+}
+type MacInput = { type: "start"; workload: StdioWorkload } | { type: "stdin"; seq: number; data: string };
+function macText(offerId: string, m: MacInput): string {
+  const body = m.type === "start" ? { v: 1, offerId, type: "start", workload: m.workload } : { v: 1, offerId, type: "stdin", seq: m.seq, data: m.data };
+  const t = canonicalize(body);
+  if (t === undefined) throw new TypeError("stdio MAC: not serialisable");
+  return t;
+}
+export function stdioFrameMac(key: Buffer, offerId: string, m: MacInput): string {
+  return createHmac("sha256", key).update(macText(offerId, m), "utf8").digest("base64url");
+}
+export function stdioFrameMacValid(key: Buffer, offerId: string, m: MacInput & { mac: string }): boolean {
+  const want = Buffer.from(stdioFrameMac(key, offerId, m), "utf8");
+  const got = Buffer.from(m.mac, "utf8");
+  return want.length === got.length && timingSafeEqual(want, got);
+}
 
 /** the two session routes (also members of `EXECUTOR_CHANNEL_ROUTES`) */
 export const EXECUTOR_STDIO_ROUTES = EXECUTOR_CHANNEL_ROUTES.filter((r) => r.endsWith("/stdio"));
@@ -81,11 +130,17 @@ export const stdioWorkloadSchema = z
   .strict();
 export type StdioWorkload = z.infer<typeof stdioWorkloadSchema>;
 
-/** gateway → executor, on the session's NDJSON window */
+const macField = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+
+/**
+ * gateway → executor, on the session's NDJSON window (`GET …/stdio?window=&from=`). Review M6: frames stay with the
+ * gateway until the executor acknowledges them; `from` is the next sequence number the executor expects, and the
+ * window re-sends every frame from there. One window per session at a time.
+ */
 export const executorStdioMessageSchema = z.discriminatedUnion("type", [
   /** first line of every window: what the sandbox runs once released (the executor uses the first it sees) */
-  z.object({ type: z.literal("start"), workload: stdioWorkloadSchema }).strict(),
-  z.object({ type: z.literal("stdin"), seq: z.number().int().min(0), data: frameData }).strict(),
+  z.object({ type: z.literal("start"), workload: stdioWorkloadSchema, mac: macField }).strict(),
+  z.object({ type: z.literal("stdin"), seq: z.number().int().min(0), data: frameData, mac: macField }).strict(),
   /** the gateway closed the session: the executor ends the server's stdin and stops the sandbox */
   z.object({ type: z.literal("close") }).strict(),
   z.object({ type: z.literal("keepalive") }).strict(),
@@ -124,5 +179,11 @@ export const EXECUTOR_STDIO_REFUSALS = [
   "stdio_session_unknown",
   /** a frame's sequence number is not the next one */
   "stdio_sequence",
+  /** another window of this session is open (one at a time, review M6) */
+  "stdio_window_open",
+  /** the gateway holds no MAC key for the session: it cannot be MACed (fail closed) */
+  "stdio_unkeyed",
+  /** `from` names frames the gateway no longer holds, or frames it never sent (review M6) */
+  "stdio_from_invalid",
   "invalid_body",
 ] as const;

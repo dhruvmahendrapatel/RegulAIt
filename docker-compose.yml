@@ -868,9 +868,19 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandbox-executor-state:/state
+      # review H2: the executor-controlled sandbox init. The executor copies its hash-pinned init here; every
+      # sandbox mounts this same named volume READ-ONLY as its entry point.
+      - sandbox-init:/regulait-init
+      # review H2: the host's runsc binary, READ-ONLY, so the executor can hash it against the pinned gVisor release
+      - ${REGULAIT_RUNSC_HOST_PATH:-/usr/local/bin/runsc}:/host-gvisor/runsc:ro
     environment:
-      REGULAIT_GATEWAY_URL: http://gateway:3000
-      REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP: "1"
+      # review M4: https by default (the TLS profile's public name). Plain http only through the explicit
+      # development override compose.isolation-insecure-dev.yml, which logs a warning at start.
+      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://${REGULAIT_TLS_HOST:-3-229-246-126.sslip.io}}
+      REGULAIT_EXECUTOR_INIT_VOLUME: regulait-sandbox-init
+      REGULAIT_EXECUTOR_INIT_DIR: /regulait-init
+      REGULAIT_EXECUTOR_RUNSC_BINARY: /host-gvisor/runsc
+      REGULAIT_EXECUTOR_RUNSC_HOST_PATH: ${REGULAIT_RUNSC_HOST_PATH:-/usr/local/bin/runsc}
       REGULAIT_PUBLIC_URL: ${REGULAIT_PUBLIC_URL:-}
       REGULAIT_EXECUTOR_IDENTIFIER: ${REGULAIT_EXECUTOR_IDENTIFIER:-}
       REGULAIT_EXECUTOR_KEY_FILE: /state/executor-key.json
@@ -1016,5 +1026,8 @@ volumes:
       o: "size=256m,uid=10001,gid=10001,mode=0750"
   # ADR-0190 I4: the sandbox executor's own state (its key only)
   sandbox-executor-state:
+  # review H2: a FIXED name, because the executor names it on each `docker run --mount` against the host daemon
+  sandbox-init:
+    name: regulait-sandbox-init
   caddy_data:
   caddy_config:

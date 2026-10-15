@@ -1,0 +1,12 @@
+# ADR-0190 slice I4 (review M4) — DEVELOPMENT ONLY: the sandbox executor talks to the gateway over PLAIN HTTP.
+#
+#   docker compose -f docker-compose.yml -f compose.isolation-insecure-dev.yml --profile isolation up
+#
+# WARNING: never use this in a deployment. Over plain http, an on-path reader of the executor channel sees every
+# stdio frame and the per-session MAC secret, and can inject into a sandbox's stdin. The executor logs a warning
+# at start whenever REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP is set. The default compose file uses https.
+services:
+  sandbox-executor:
+    environment:
+      REGULAIT_GATEWAY_URL: http://gateway:3000
+      REGULAIT_EXECUTOR_ALLOW_INSECURE_HTTP: "1"
