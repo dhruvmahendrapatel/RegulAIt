@@ -17,7 +17,9 @@
  *  - the S8 follow-up, "disclose agent workload IDs" (migration 0196): off, `act.sub` is pairwise; on, it is the
  *    agent's SPIFFE ID, and the issued row says so; turning it on needs the step-up (combined with turning
  *    propagation on into ONE step-up); it is refused 409 while propagation is off; a url move and propagation turning
- *    off reset it, audited; turning it off needs nothing.
+ *    off reset it, audited; turning it off needs nothing; the compare-and-set includes the column (a concurrent change
+ *    to it alone is 409 `changed_concurrently`); the audit row is in the write's transaction (a refused audit insert
+ *    rolls the change back).
  *
  * Global state (M-068): org settings this file changes are put back, the issuer keys it activated are retired, and
  * the admin's passkey, sessions and step-up grants are removed (B4S-06) in afterAll.
@@ -722,5 +724,66 @@ describe("S8 follow-up — disclose agent workload IDs (migration 0196)", () => 
       resetByUrlMove: true,
     });
     expect((await patchByKey({ url: up.url })).statusCode).toBe(200);
+  });
+
+  it("the PATCH compare-and-set includes the column: a concurrent change to it alone refuses the write 409", async () => {
+    // fixture, written directly: both on (the CHECK allows the pair)
+    await db.update(mcpServers).set({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true }).where(eq(mcpServers.id, serverId));
+    const [named] = await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, serverId));
+    const locker = createDb(DATABASE_URL!);
+    let res: Awaited<ReturnType<typeof patchByKey>> | undefined;
+    try {
+      await locker.transaction(async (tx) => {
+        // hold the row: the PATCH reads the committed row (disclose = true), then its UPDATE waits on this lock
+        await tx.execute(sql`select id from mcp_servers where id = ${serverId} for update`);
+        const pending = patchByKey({ name: `${named!.name}-renamed`, discloseAgentWorkloadIds: false }).then((r) => (res = r));
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const waiting = (await db.execute(sql`select count(*)::int as n from pg_stat_activity
+            where wait_event_type = 'Lock' and query ilike 'update "mcp_servers"%'`)) as unknown as { rows: Array<{ n: number }> };
+          if (waiting.rows[0]!.n > 0) break;
+          if (res !== undefined || Date.now() > deadline) throw new Error(`the PATCH never waited on the row lock (${res?.statusCode ?? "pending"})`);
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        // the concurrent change touches ONLY this column (url, ranges and propagation stay as the PATCH read them)
+        await tx.update(mcpServers).set({ discloseAgentWorkloadIds: false }).where(eq(mcpServers.id, serverId));
+        void pending;
+      });
+      while (res === undefined) await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      await locker.$client.end();
+    }
+    expect(res!.statusCode, res!.body).toBe(409);
+    expect(res!.json().error).toBe("changed_concurrently");
+    const [after] = await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, serverId));
+    expect(after!.name).toBe(named!.name);
+  });
+
+  it("the audit row is written in the same transaction: if it cannot be written, the change is rolled back", async () => {
+    await db.update(mcpServers).set({ identityPropagation: "signed_assertion", discloseAgentWorkloadIds: true }).where(eq(mcpServers.id, serverId));
+    // a trigger scoped to THIS server and rule refuses the audit insert; dropped in finally (no state leaks)
+    const fn = `s8_refuse_audit_${RUN}`;
+    await db.execute(
+      sql.raw(`create function ${fn}() returns trigger language plpgsql as $$ begin
+        if new.rule_id = 'mcp-server-agent-id-disclosure-changed' and new.server_id = '${serverId}'::uuid then
+          raise exception 's8 test: audit insert refused';
+        end if;
+        return new;
+      end $$`),
+    );
+    await db.execute(sql.raw(`create trigger ${fn} before insert on audit_log for each row execute function ${fn}()`));
+    let res: Awaited<ReturnType<typeof patchByKey>>;
+    try {
+      res = await patchByKey({ discloseAgentWorkloadIds: false });
+    } finally {
+      await db.execute(sql.raw(`drop trigger if exists ${fn} on audit_log`));
+      await db.execute(sql.raw(`drop function if exists ${fn}()`));
+    }
+    expect(res.statusCode, res.body).toBe(500);
+    expect(await column()).toEqual({ identity_propagation: "signed_assertion", disclose_agent_workload_ids: true });
+    // with the audit writable again, the same change goes through and is on the trail
+    const ok = await patchByKey({ discloseAgentWorkloadIds: false });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await lastAudit("mcp-server-agent-id-disclosure-changed", serverId))!.detail).toMatchObject({ to: { discloseAgentWorkloadIds: false } });
   });
 });

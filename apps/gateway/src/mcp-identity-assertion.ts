@@ -509,7 +509,7 @@ export async function lockIdentityAudiences(tx: DbOrTx): Promise<void> {
 
 /** every change of a server's identity propagation is on the trail with both values; turning it on as a relaxation */
 export async function auditIdentityPropagationChange(
-  db: Db,
+  db: DbOrTx,
   args: {
     userId: string;
     serverId: string;
@@ -551,7 +551,7 @@ export async function auditIdentityPropagationChange(
 
 /** every change of a server's "disclose agent workload IDs" opt-in is on the trail with both values; on as a relaxation */
 export async function auditAgentIdDisclosureChange(
-  db: Db,
+  db: DbOrTx,
   args: {
     userId: string;
     serverId: string;

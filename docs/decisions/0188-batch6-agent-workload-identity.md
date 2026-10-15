@@ -1472,7 +1472,9 @@ S8 item 1 kept agents pairwise and left this relaxation for a later migration nu
    - The grant is looked at (not spent) before anything is written, and spent after the compare-and-set inside the
      write's transaction, as before. The compare-and-set now also compares `disclose_agent_workload_ids`.
    - Every change is audited (`mcp-server-agent-id-disclosure-changed`, with both values, the url and the audience);
-     turning it on as a relaxation with its step-up.
+     turning it on as a relaxation with its step-up. The audit rows of this route (private ranges, identity
+     propagation, this disclosure and a stdio command change) are now written inside the write's transaction, so an
+     audit row that cannot be written rolls the change back (#381 review); before, they were written after the commit.
    - Asking for it while the server's next `identity_propagation` is not `signed_assertion` is refused
      `409 agent_id_disclosure_needs_assertion` with a refusal sentence, before any step-up; nothing is saved. A stdio
      server is refused `409 identity_propagation_unsupported`, as for the assertion itself.
@@ -1488,8 +1490,9 @@ S8 item 1 kept agents pairwise and left this relaxation for a later migration nu
    byte-equal (`mcpIdentityModel.test.ts`).
 6. **Tests.** Unit (`mcp-identity-assertion.test.ts`, `mcpIdentityModel.test.ts`); database
    (`zz-adr0188-s8-outbound-identity.test.ts`: off gives pairwise ids, on gives SPIFFE IDs, the step-up is required and
-   combined, a url move and propagation turning off reset it, refused while propagation is off, and the CHECK); mock
-   e2e (`u1-integrations-gaps.mock.spec.ts`, stable `data-` hooks). No route was added: the census stays at 0 known UI
+   combined, a url move and propagation turning off reset it, refused while propagation is off, the CHECK, a concurrent
+   change to the column alone refused `409 changed_concurrently`, and a refused audit insert rolling the change back);
+   mock e2e (`u1-integrations-gaps.mock.spec.ts`, stable `data-` hooks; its axe helper now also runs `heading-order`). No route was added: the census stays at 0 known UI
    gaps.
 
 Open after the follow-up: the AI BOM's MCP server records (`apps/gateway/src/ai-bom.ts`) carry `identityPropagation`

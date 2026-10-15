@@ -85,6 +85,10 @@ async function axeMcpServers(page: Page, label: string) {
       .analyze();
     expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`), `axe on "${label}" (${theme})`).toEqual([]);
   }
+  // heading-order is a best-practice rule, outside the WCAG tags above; other mock specs that axe this page with
+  // best practice on caught a skipped heading level that this check missed (#381), so it runs here too
+  const order = await new AxeBuilder({ page }).withRules(["heading-order"]).analyze();
+  expect(order.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`), `axe heading-order on "${label}"`).toEqual([]);
   await page.evaluate(() => {
     document.documentElement.dataset.theme = "light";
   });

@@ -217,7 +217,10 @@ export function McpIdentityAssertionCard(props: { server: McpServer | undefined 
             Never sent: the person&apos;s email, name or user id, roles, project, grant, tool arguments, scope or budget. An agent&apos;s global
             workload id is sent only if you choose to disclose it below.
           </p>
-          <h3 className={v.dim}>Agent ids sent</h3>
+          {/* a label, not a heading: the card's title is the section heading, and a sub-heading here skipped a level */}
+          <p className={v.dim}>
+            <strong>Agent ids sent</strong>
+          </p>
           {on ? (
             <>
               <p>

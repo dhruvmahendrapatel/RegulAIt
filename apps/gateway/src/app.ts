@@ -2270,6 +2270,73 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body);
           rangesStepUp = su.method;
         }
+        // every change is on the trail IN the write's transaction: an audit row that cannot be written rolls the
+        // change back, so no posture change is ever left unaudited (a step-up grant spent above stays spent)
+        // the private-range posture decides which network space this server's url may reach: every change of it is
+        // on the trail with both values, and an opening one as a relaxation with its step-up
+        if (body.allowPrivateRanges !== undefined && (body.allowPrivateRanges ?? null) !== before.allowPrivateRanges) {
+          await tx.insert(auditLog).values({
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            objectType: "mcp_server",
+            objectId: serverId,
+            detail: {
+              phase: "update",
+              from: { allowPrivateRanges: before.allowPrivateRanges },
+              to: { allowPrivateRanges: written.allowPrivateRanges },
+              url: written.url,
+              relaxation: rangesRelaxed !== null,
+              ...(rangesRelaxed ? { relaxed: rangesRelaxed, stepUp: rangesStepUp } : {}),
+            },
+            effect: "allow",
+            ruleId: "mcp-server-private-ranges-changed",
+            ruleChain: [],
+            reason:
+              `${label}: private ranges ${String(before.allowPrivateRanges ?? "inherit")} → ${String(written.allowPrivateRanges ?? "inherit")}` +
+              (rangesRelaxed ? " — a relaxation of the strict default" : ""),
+          });
+        }
+        // a url move that keeps it on writes no identity column, and is still a relaxation on the trail
+        if (identity.write !== null || identity.relaxed) {
+          await auditIdentityPropagationChange(tx, {
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            label,
+            from: before.identityPropagation,
+            to: written.identityPropagation,
+            url: written.url,
+            update: identity,
+            stepUp: identity.relaxed ? rangesStepUp : null,
+          });
+        }
+        // ADR-0188 S8 follow-up: every change of the agent-ID disclosure, and a url move that keeps it on, on the trail
+        if (disclosure.write !== null || disclosure.relaxed) {
+          await auditAgentIdDisclosureChange(tx, {
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            label,
+            from: before.discloseAgentWorkloadIds,
+            to: written.discloseAgentWorkloadIds,
+            url: written.url,
+            update: disclosure,
+            stepUp: disclosure.relaxed ? rangesStepUp : null,
+          });
+        }
+        if (stdioChange) {
+          await tx.insert(auditLog).values({
+            userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+            serverId,
+            objectType: "mcp_server",
+            objectId: serverId,
+            detail: { phase: "update", transport: "stdio", transitions: stdioChange },
+            effect: "allow",
+            ruleId: "mcp-stdio-command-changed",
+            ruleChain: [],
+            reason:
+              `${label}: stdio command changed to ${written.stdioCommand} (sha256 ${written.stdioCommandDigest} pinned); ` +
+              `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
+          });
+        }
         return { row: written };
       }).catch((err: unknown) => {
         if (err instanceof StepUpRefusedInTx) return { refused: { status: err.status, body: err.body } } as Patched;
@@ -2277,71 +2344,6 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
       if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
       row = out.row;
-      // the private-range posture decides which network space this server's url may reach: every change of it is
-      // on the trail with both values, and an opening one as a relaxation with its step-up
-      if (body.allowPrivateRanges !== undefined && (body.allowPrivateRanges ?? null) !== before.allowPrivateRanges) {
-        await db.insert(auditLog).values({
-          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-          serverId,
-          objectType: "mcp_server",
-          objectId: serverId,
-          detail: {
-            phase: "update",
-            from: { allowPrivateRanges: before.allowPrivateRanges },
-            to: { allowPrivateRanges: row.allowPrivateRanges },
-            url: row.url,
-            relaxation: rangesRelaxed !== null,
-            ...(rangesRelaxed ? { relaxed: rangesRelaxed, stepUp: rangesStepUp } : {}),
-          },
-          effect: "allow",
-          ruleId: "mcp-server-private-ranges-changed",
-          ruleChain: [],
-          reason:
-            `${label}: private ranges ${String(before.allowPrivateRanges ?? "inherit")} → ${String(row.allowPrivateRanges ?? "inherit")}` +
-            (rangesRelaxed ? " — a relaxation of the strict default" : ""),
-        });
-      }
-      // a url move that keeps it on writes no identity column, and is still a relaxation on the trail
-      if (identity.write !== null || identity.relaxed) {
-        await auditIdentityPropagationChange(db, {
-          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-          serverId,
-          label,
-          from: before.identityPropagation,
-          to: row.identityPropagation,
-          url: row.url,
-          update: identity,
-          stepUp: identity.relaxed ? rangesStepUp : null,
-        });
-      }
-      // ADR-0188 S8 follow-up: every change of the agent-ID disclosure, and a url move that keeps it on, on the trail
-      if (disclosure.write !== null || disclosure.relaxed) {
-        await auditAgentIdDisclosureChange(db, {
-          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-          serverId,
-          label,
-          from: before.discloseAgentWorkloadIds,
-          to: row.discloseAgentWorkloadIds,
-          url: row.url,
-          update: disclosure,
-          stepUp: disclosure.relaxed ? rangesStepUp : null,
-        });
-      }
-      if (stdioChange) {
-        await db.insert(auditLog).values({
-          userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-          serverId,
-          objectType: "mcp_server",
-          objectId: serverId,
-          detail: { phase: "update", transport: "stdio", transitions: stdioChange },
-          effect: "allow",
-          ruleId: "mcp-stdio-command-changed",
-          ruleChain: [],
-          reason:
-            `${label}: stdio command changed to ${row.stdioCommand} (sha256 ${row.stdioCommandDigest} pinned); ` +
-            `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
-        });
-      }
     }
     if (body.ownerUserId !== undefined) {
       const owned = await changeOwner(db, {
