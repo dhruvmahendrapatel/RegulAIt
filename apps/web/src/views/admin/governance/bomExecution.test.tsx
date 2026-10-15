@@ -6,7 +6,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import * as m from "./bomModel";
-import { ExecutionFacts } from "./DecisionBomPanel";
+import { ExecutionFacts, PlacementReports } from "./DecisionBomPanel";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Any = any;
@@ -29,7 +29,7 @@ const PLACED = {
 const IN_GATEWAY = { workloadKind: "model_call", placement: "in_gateway", placementId: null, requiredClass: null, requiredBy: null, appliedClass: "in_gateway", refusalCode: null, profile: null, executor: null, attestation: null };
 
 /** a v2 read response for one decision, assembled by the shared assembler from v2 facts carrying `execution` */
-async function v2Response(execution: Any, objectType = "mcp_tool"): Promise<Any> {
+async function v2Response(execution: Any, objectType = "mcp_tool", placementReports?: Any[]): Promise<Any> {
   const s = await sharedBom();
   const { canonicalJson } = await sharedFile("audit-chain.ts");
   const { RECEIPT_PAYLOAD_VERSION } = await sharedFile("batch4.ts");
@@ -57,6 +57,7 @@ async function v2Response(execution: Any, objectType = "mcp_tool"): Promise<Any>
     renderings: [],
     bundle: { schema: "regulait.export-bundle/3", subject: "decision-bom", href: `/v1/decisions/${auditId}/bom/bundle?version=1` },
     capabilities: caps,
+    ...(placementReports ? { placementReports } : {}),
   };
   expect(s.decisionBomReadResponseSchema.safeParse(r).success).toBe(true);
   return JSON.parse(JSON.stringify(r));
@@ -67,7 +68,8 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
   it("reads the execution section from the signed body, with its thirteen sections", async () => {
     const view = m.readDecisionBom(await v2Response(PLACED), U(1));
     expect(view.bodyVersion).toBe("regulait.decision-bom.v2");
-    expect(view.execution).toEqual(PLACED);
+    expect(view.execution).toEqual({ ...PLACED, offerId: null, imageDigest: null, runtimeFlagsSha256: null });
+    expect(view.placementReports).toEqual([]);
     expect(view.completeness.map((c) => c.section)).toEqual([...m.DECISION_BOM_SECTIONS_V2]);
     expect(view.completeness.find((c) => c.section === "execution")).toEqual({ section: "execution", status: "recorded", reason: null });
   });
@@ -86,7 +88,9 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
       return { ...r, document: doc, bom: { ...r.bom, body: JSON.stringify(doc) } };
     };
     for (const [what, bad] of [
-      ["an extra field", lie({ ...PLACED, imageDigest: H("d") })],
+      ["an extra field", lie({ ...PLACED, hostPath: "/srv" })],
+      ["an image digest that is not sha256:<64 hex>", lie({ ...PLACED, imageDigest: H("d") })],
+      ["a placed row naming an offer", lie({ ...PLACED, offerId: U(906) })],
       ["an unknown class", lie({ ...PLACED, appliedClass: "sandbox" })],
       ["a placement with no profile", lie({ ...PLACED, profile: null })],
       ["an in-gateway call with an executor", lie({ ...IN_GATEWAY, executor: PLACED.executor })],
@@ -117,6 +121,42 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
     const placed = html(<ExecutionFacts execution={PLACED as m.ExecutionView} />);
     expect(placed).toContain("Applied isolation");
     expect(placed).not.toContain("disputed");
+  });
+  it("ADR-0190 I4: an OFFERED placement (decided before anything ran) and its linked reports, shown as unsigned", async () => {
+    const OFFERED = {
+      ...PLACED,
+      placement: "offered",
+      offerId: U(906),
+      imageDigest: `sha256:${H("e")}`,
+      runtimeFlagsSha256: H("f"),
+      attestation: { placementReportSha256: null, executorAttestationId: U(905), executorReportSha256: H("c") },
+    };
+    const reports = [
+      { id: U(907), placementId: U(901), offerId: U(906), auditId: U(908), outcome: "placed", appliedClass: "user_space_kernel", reportSha256: H("b"), refusalCode: null, endCode: null, createdAt: T },
+      { id: U(909), placementId: U(901), offerId: U(906), auditId: U(910), outcome: "cancelled", appliedClass: null, reportSha256: null, refusalCode: null, endCode: "later_gate", createdAt: T },
+    ];
+    const view = m.readDecisionBom(await v2Response(OFFERED, "mcp_tool", reports), U(1));
+    expect(view.execution).toEqual(OFFERED);
+    expect(view.placementReports.map((r) => r.outcome)).toEqual(["placed", "cancelled"]);
+    const facts = html(<ExecutionFacts execution={view.execution!} />);
+    expect(facts).toContain("Offered to an executor");
+    expect(facts).toContain(`sha256:${H("e")}`);
+    expect(facts).toContain("no placement report");
+    const after = html(<PlacementReports reports={view.placementReports} />);
+    expect(after).toContain("not part of the signed Decision BOM");
+    expect(after).toContain("Ran: the sandbox&#x27;s report was accepted");
+    expect(after).toContain("Cancelled by the gateway before the call used it: a later check refused the call");
+    // an offered row with a report hash, or without its offer, is unreadable
+    const r = await v2Response(OFFERED);
+    for (const bad of [{ ...OFFERED, attestation: { ...OFFERED.attestation, placementReportSha256: H("b") } }, { ...OFFERED, offerId: null }]) {
+      const doc = { ...r.document, execution: bad };
+      expect(() => m.readDecisionBom({ ...r, document: doc, bom: { ...r.bom, body: JSON.stringify(doc) } }, U(1))).toThrow(m.BomEvidenceError);
+    }
+  });
+  it("ADR-0190 I4 review M2: a policy_unresolved refusal is readable with no requirement and no profile", async () => {
+    const unresolved = { ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "policy_unresolved", requiredClass: null, requiredBy: null, profile: null };
+    const view = m.readDecisionBom(await v2Response(unresolved), U(1));
+    expect(view.execution).toMatchObject({ placement: "refused", refusalCode: "policy_unresolved", requiredClass: null, profile: null });
   });
   it("an in-gateway call is L0, never a sandbox, with no attestation claimed", () => {
     const out = html(<ExecutionFacts execution={IN_GATEWAY as m.ExecutionView} />);

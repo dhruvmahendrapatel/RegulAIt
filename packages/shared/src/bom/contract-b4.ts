@@ -48,10 +48,35 @@ import {
   DECISION_BOM_VERSIONS,
   decisionBomSectionsFor,
   decisionBomBodySchema,
+  DECISION_EXECUTION_REFUSAL_CODES,
   findEmailShapes,
   hasEmailShape,
   type DecisionBomFinalityState,
 } from "./contract.js";
+import { APPLIED_ISOLATION_KINDS, PLACEMENT_END_CODES } from "../isolation/contract.js";
+
+/**
+ * ADR-0190 I4 (with the I8 contract): what happened to a decision's OFFERED placement after the decision, one
+ * `execution_placement_reports` row each (append-only). It is NOT part of the signed body: the decision's facts are
+ * frozen at the decision, when nothing had run yet; this is the live, linked record the read route shows beside the
+ * body (the placement row it links to is the one the body's `execution.placementId` names).
+ */
+export const decisionPlacementReportSchema = z
+  .object({
+    id: bomUuidSchema,
+    placementId: bomUuidSchema,
+    offerId: bomUuidSchema,
+    /** the audit row written for this outcome */
+    auditId: bomUuidSchema,
+    outcome: z.enum(["placed", "mismatch", "refused", "cancelled", "session_lost"]),
+    appliedClass: z.enum(APPLIED_ISOLATION_KINDS).nullable(),
+    reportSha256: bomDigestSchema.nullable(),
+    refusalCode: z.enum(DECISION_EXECUTION_REFUSAL_CODES).nullable(),
+    endCode: z.enum(PLACEMENT_END_CODES).nullable(),
+    createdAt: bomTimeSchema,
+  })
+  .strict();
+export type DecisionPlacementReport = z.infer<typeof decisionPlacementReportSchema>;
 
 // ---------------------------------------------------------------------------
 // shared pieces
@@ -238,6 +263,8 @@ export const decisionBomReadResponseSchema = z
     renderings: z.array(z.enum(BOM_RENDERING_FORMATS)).max(BOM_RENDERING_FORMATS.length),
     bundle: bomBundleLinkSchema,
     capabilities: bomCapabilitiesSchema,
+    /** ADR-0190 I4: the linked reports of the decision's offered placement (live, unsigned; absent before I4) */
+    placementReports: z.array(decisionPlacementReportSchema).max(8).optional(),
   })
   .strict()
   .superRefine((r, ctx) => {

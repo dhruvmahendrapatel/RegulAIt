@@ -74,6 +74,15 @@ const PLACED: DecisionExecutionFacts = {
   attestation: { placementReportSha256: D("b"), executorAttestationId: ATTESTATION, executorReportSha256: D("c") },
 };
 
+const OFFERED: DecisionExecutionFacts = {
+  ...PLACED,
+  placement: "offered",
+  offerId: U(906),
+  imageDigest: `sha256:${D("e")}`,
+  runtimeFlagsSha256: D("f"),
+  attestation: { placementReportSha256: null, executorAttestationId: ATTESTATION, executorReportSha256: D("c") },
+};
+
 /** P01's rows with v2 facts carrying `execution`, its receipt re-pointed at those facts and re-signed with R1 */
 function v2Input(execution: DecisionExecutionFacts | null): DecisionBomAssemblyInput {
   const facts = { ...JSON.parse(P01.facts.payload), v: "regulait.decision-facts.v2", execution };
@@ -104,6 +113,20 @@ describe("ADR-0190 I8: the execution facts contract", () => {
     expect(decisionExecutionFactsSchema.safeParse({ ...EXTERNAL, workloadKind: "model_call", placement: "in_gateway", appliedClass: "in_gateway" }).success).toBe(true);
     expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "no_executor" }).success).toBe(true);
     expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, placement: "mismatch", refusalCode: "execution_profile_mismatch" }).success).toBe(true);
+    // ADR-0190 I4: offered (no report yet), and a policy_unresolved refusal with no requirement
+    expect(decisionExecutionFactsSchema.safeParse(OFFERED).success).toBe(true);
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "policy_unresolved", requiredClass: null, requiredBy: null, profile: null }).success).toBe(true);
+  });
+  it("ADR-0190 I4: an offered placement has an executor, its attested class and its offer, and no report; only it names an offer", () => {
+    const bad: Array<[string, unknown]> = [
+      ["offered with a report hash", { ...OFFERED, attestation: { ...OFFERED.attestation!, placementReportSha256: D("b") } }],
+      ["offered without its offer", { ...OFFERED, offerId: null }],
+      ["offered without its executor", { ...OFFERED, executor: null }],
+      ["offered with a refusal code", { ...OFFERED, refusalCode: "no_executor" }],
+      ["a placed row naming an offer", { ...PLACED, offerId: U(906) }],
+      ["a refusal other than policy_unresolved without its requirement", { ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "no_executor", requiredClass: null }],
+    ];
+    for (const [what, value] of bad) expect(decisionExecutionFactsSchema.safeParse(value).success, what).toBe(false);
   });
   it("refuses what the placement could not have been: nothing is inferred or mixed", () => {
     const bad: Array<[string, unknown]> = [
@@ -119,7 +142,8 @@ describe("ADR-0190 I8: the execution facts contract", () => {
       ["an executor placement applying in_gateway", { ...PLACED, appliedClass: "in_gateway" }],
       ["an attestation id without its report", { ...PLACED, attestation: { ...PLACED.attestation!, executorReportSha256: null } }],
       ["an executor identity that is not a SPIFFE ID", { ...PLACED, executor: { ...PLACED.executor!, identity: "https://executor.invalid/x" } }],
-      ["an unknown field", { ...PLACED, imageDigest: D("d") }],
+      ["an unknown field", { ...PLACED, hostPath: "/srv" }],
+      ["an image digest that is not sha256:<64 hex>", { ...PLACED, imageDigest: D("d") }],
     ];
     for (const [what, value] of bad) expect(decisionExecutionFactsSchema.safeParse(value).success, what).toBe(false);
   });
@@ -179,7 +203,40 @@ describe("ADR-0190 I8: capture (buildExecutionFacts)", () => {
     // the transport says remote, but the placement row is the authority (the row exists only because it was placed)
     const f = buildDecisionFacts(row(), reads({ placements: new Map([[U(100), placedRead()]]), mcpServerTransports: new Map([[U(2), "sse"]]) }));
     expect(f.v).toBe("regulait.decision-facts.v2");
-    expect(f.v === "regulait.decision-facts.v2" && f.execution).toEqual(PLACED);
+    expect(f.v === "regulait.decision-facts.v2" && f.execution).toEqual({ ...PLACED, offerId: null, imageDigest: null, runtimeFlagsSha256: null });
+  });
+  it("ADR-0190 I4: an OFFERED row (a governed stdio decision) is captured as offered: the broker's attestation, the offer, no report", () => {
+    const offered = buildExecutionFacts(
+      row(),
+      reads({
+        placements: new Map([
+          [U(100), placedRead({}, { outcome: "offered", reportSha256: null, offerId: U(906), attestationId: ATTESTATION, imageDigest: `sha256:${D("e")}`, runtimeFlagsSha256: D("f") })],
+        ]),
+      }),
+    );
+    expect(offered).toEqual(OFFERED);
+    expect(decisionExecutionFactsSchema.safeParse(offered).success).toBe(true);
+    // and the whole v2 facts capture succeeds with it (H1: an `offered` outcome never falls into the mismatch branch)
+    const f = buildDecisionFacts(row(), reads({ placements: new Map([[U(100), placedRead({}, { outcome: "offered", reportSha256: null, offerId: U(906) })]]) }));
+    expect(f.v === "regulait.decision-facts.v2" && f.execution).toMatchObject({ placement: "offered", offerId: U(906) });
+  });
+  it("ADR-0190 I4 review M2: a policy_unresolved refusal records its row with no requirement (nothing resolved)", () => {
+    const unresolved = buildExecutionFacts(
+      row(),
+      reads({
+        placements: new Map([
+          [
+            U(100),
+            placedRead(
+              { profile: null, executor: null, executorIdentity: null, executorAttestation: null },
+              { outcome: "refused", requiredClass: null, requiredBy: null, profileDigest: null, executorId: null, appliedClass: null, reportSha256: null, refusalCode: "policy_unresolved" },
+            ),
+          ],
+        ]),
+      }),
+    );
+    expect(unresolved).toMatchObject({ placement: "refused", refusalCode: "policy_unresolved", requiredClass: null, requiredBy: null, profile: null });
+    expect(decisionExecutionFactsSchema.safeParse(unresolved).success).toBe(true);
   });
   it("a refusal and a mismatch keep their own shape; an executor without a SPIFFE identity records none", () => {
     const refused = buildExecutionFacts(row(), reads({ placements: new Map([[U(100), placedRead({ executor: null, executorIdentity: null, executorAttestation: null }, { outcome: "refused", executorId: null, appliedClass: null, reportSha256: null, refusalCode: "attestation_stale" })]]) }));

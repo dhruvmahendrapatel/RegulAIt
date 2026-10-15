@@ -36,9 +36,10 @@
  * refused at connect (`mcp_stdio_image_unpinned`): built as for a first load,
  * no grandfathering (ADR-0180).
  */
-import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
+import { createHmac, hkdfSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { z } from "zod";
+import { constantTimeEqual } from "../constant-time.js";
 import { EXECUTOR_CHANNEL_ROUTES } from "./channel.js";
 
 /** a closure image's content digest: what the registration pins and the offer names (linear, anchored) */
@@ -100,9 +101,7 @@ export function stdioFrameMac(key: Buffer, offerId: string, m: MacInput): string
   return createHmac("sha256", key).update(macText(offerId, m), "utf8").digest("base64url");
 }
 export function stdioFrameMacValid(key: Buffer, offerId: string, m: MacInput & { mac: string }): boolean {
-  const want = Buffer.from(stdioFrameMac(key, offerId, m), "utf8");
-  const got = Buffer.from(m.mac, "utf8");
-  return want.length === got.length && timingSafeEqual(want, got);
+  return constantTimeEqual(stdioFrameMac(key, offerId, m), m.mac);
 }
 
 /** the two session routes (also members of `EXECUTOR_CHANNEL_ROUTES`) */

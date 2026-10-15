@@ -20,6 +20,14 @@
  *    comes back through the same governed call; the placement row is `placed` at the class required.
  *  - MISMATCH: a sandbox whose report lies is refused before any input; the call fails with
  *    `execution_profile_mismatch`; the executor is quarantined.
+ *  - THE I4/I8 CROSS-PR CONTRACT (review H1): a governed stdio allow's facts parse under the I8 schema as `offered`
+ *    (the broker's attestation id, the offer, the image and runtime flags hash, no report hash), and the Decision
+ *    BOM read's linked reports show what happened next (`placed`).
+ *  - REVIEW M2: an unresolved policy fact still writes a `refused` placement row keyed to the decision, with no
+ *    requirement, and its facts record it.
+ *  - REVIEW M3 and LOWS: a lost session is one `session_lost` report row (a second attempt writes nothing); a later
+ *    gate cancels an unattached session (`cancelled`, `later_gate`, the offer withdrawn); a timed-out placement is
+ *    labelled `placement_timeout`, never `no_executor`.
  *
  * Global state (M-068): org transports and the relaxations are restored in afterAll; the placement affinity
  * test seam is cleared; this run's servers are deleted; executor and identity rows are scoped by this run's ids
@@ -36,7 +44,18 @@ import { buildApp } from "./app.js";
 import { guardedMcpConnect, McpUpstreamRefusedError } from "./mcp-egress.js";
 import { executeGovernedToolCall, syncUpstreamTools } from "./mcp-proxy.js";
 import { McpAdmissionHeldError } from "./mcp-admission.js";
-import { liveStdioSessions, setStdioPlacementAffinityForTest } from "./executor-stdio.js";
+import {
+  attachLinkedStdioSession,
+  cancelUnattachedStdioSession,
+  liveStdioSessions,
+  placeGovernedStdio,
+  registerLinkedStdioSession,
+  setStdioPlacementAffinityForTest,
+  stdioPlacementContext,
+} from "./executor-stdio.js";
+import { recordSessionLost } from "./executor-channel.js";
+import { decisionPlacementReports } from "./bom-routes.js";
+import { decisionFactsSchema, decisionPlacementReportSchema } from "@regulait/shared";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
@@ -64,6 +83,8 @@ let adminAuth = { authorization: "" };
 let memberId = "";
 let projectId = "";
 let serverId = "";
+/** the allowed call's offered placement (the review M3 test records a lost session against it) */
+let governedOffered: { auditId: string; placementId: string; offerId: string; executorId: string } | null = null;
 const createdServers: string[] = [];
 const restores: Array<() => Promise<void>> = [];
 const rows = <R>(r: unknown) => (r as { rows: R[] }).rows;
@@ -307,6 +328,28 @@ describe("MCP over the executor's channel: placed, proved, then the bytes", () =
     expect(reports[0]!.reportSha256).toMatch(/^[0-9a-f]{64}$/);
     expect((await db.select().from(executionPlacements).where(eq(executionPlacements.offerId, o!.id))).length).toBe(1);
     await expectFactsName(decisionRow!.id, p!.id, "offered");
+    // review H1 (the I4/I8 cross-PR contract): the facts parse under I8's own schema as OFFERED, naming the broker's
+    // stamped attestation (never re-derived), the offer, the closure image and the runtime flags hash, and no report
+    const [f] = await db.select().from(decisionFacts).where(eq(decisionFacts.auditId, decisionRow!.id));
+    const facts = decisionFactsSchema.parse(f!.facts) as { v: string; execution?: Record<string, unknown> | null };
+    expect(facts.v).toBe("regulait.decision-facts.v2");
+    expect(facts.execution).toMatchObject({
+      workloadKind: "mcp_stdio",
+      placement: "offered",
+      placementId: p!.id,
+      offerId: o!.id,
+      requiredClass: "microvm",
+      appliedClass: "microvm",
+      imageDigest: IMAGE,
+      runtimeFlagsSha256: p!.runtimeFlagsSha256,
+      refusalCode: null,
+      executor: { id: l3.executorId },
+      attestation: { placementReportSha256: null, executorAttestationId: p!.attestationId },
+    });
+    // ...and the Decision BOM read shows the linked report beside the signed body: what happened next
+    const linked = decisionPlacementReportSchema.array().parse(await decisionPlacementReports(db, decisionRow!.id));
+    expect(linked).toEqual([expect.objectContaining({ placementId: p!.id, offerId: o!.id, outcome: "placed", appliedClass: "microvm", reportSha256: reports[0]!.reportSha256, endCode: null })]);
+    governedOffered = { auditId: decisionRow!.id, placementId: p!.id, offerId: o!.id, executorId: l3.executorId };
     expect(liveStdioSessions()).toBe(0);
   }, 60_000);
 
@@ -359,6 +402,88 @@ describe("MCP over the executor's channel: placed, proved, then the bytes", () =
     expect(p).toMatchObject({ outcome: "offered", executorId: liar.executorId });
     const [r] = await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, p!.id));
     expect(r).toMatchObject({ outcome: "mismatch", refusalCode: "execution_profile_mismatch" });
+    expect(liveStdioSessions()).toBe(0);
+  }, 60_000);
+});
+
+describe("review M2: an unresolved policy fact is still a placement row keyed to the decision", () => {
+  it("a call that names no project: refused policy_unresolved, the row has no requirement, the facts record it", async () => {
+    setStdioPlacementAffinityForTest([randomUUID()]);
+    const out = await executeGovernedToolCall(db, undefined, { userId: memberId, serverId, toolName: "where_am_i", projectId: null, arguments: {} });
+    expect(out).toMatchObject({ kind: "denied", decision: { effect: "deny", ruleId: "execution-profile" } });
+    const decisionRow = await lastDecision();
+    expect(decisionRow!.detail).toMatchObject({ execution: { refusal: "execution_profile_unavailable", reason: "policy_unresolved" } });
+    const p = await placementOfDecision(decisionRow!.id);
+    expect(p).toMatchObject({ outcome: "refused", refusalCode: "policy_unresolved", requiredClass: null, requiredBy: null, profileDigest: null, executorId: null, imageDigest: IMAGE });
+    expect((decisionRow!.detail as { execution: { placementId: string } }).execution.placementId).toBe(p!.id);
+    const [f] = await db.select().from(decisionFacts).where(eq(decisionFacts.auditId, decisionRow!.id));
+    expect((decisionFactsSchema.parse(f!.facts) as { execution?: unknown }).execution).toMatchObject({ placement: "refused", placementId: p!.id, refusalCode: "policy_unresolved", requiredClass: null, profile: null });
+    // the requirement columns may be NULL for that code only (migration 0198's requirement check)
+    const other = await errorOf(
+      db.execute(sql`insert into execution_placements (audit_id, workload_kind, enforcement, outcome, refusal_code) values (${randomUUID()}, 'mcp_stdio', 'enforce', 'refused', 'no_executor')`),
+    );
+    expect(String((other as { cause?: { message?: string }; message?: string })?.cause?.message ?? (other as Error)?.message)).toMatch(/execution_placements_requirement_check/);
+  });
+});
+
+describe("review M3 and lows: a lost, cancelled or timed-out stdio placement is our own record, never no_executor", () => {
+  it("a lost session is ONE session_lost report row on the governed placement, audited; a second attempt writes nothing", async () => {
+    expect(governedOffered, "the allowed-call test placed a governed session").not.toBeNull();
+    const g = governedOffered!;
+    expect(await recordSessionLost(db, g.offerId, { executorId: g.executorId, where: "window", why: "test: a window reached another replica" })).toBe(true);
+    expect(await recordSessionLost(db, g.offerId, { executorId: g.executorId, where: "stdout", why: "test: again, from another replica" })).toBe(false);
+    const lost = await db.select().from(executionPlacementReports).where(and(eq(executionPlacementReports.placementId, g.placementId), eq(executionPlacementReports.outcome, "session_lost")));
+    expect(lost).toEqual([expect.objectContaining({ offerId: g.offerId, endCode: "session_unknown", appliedClass: null, refusalCode: null })]);
+    const [audited] = await db.select().from(auditLog).where(eq(auditLog.id, lost[0]!.auditId));
+    expect(audited).toMatchObject({ ruleId: "execution-session-lost", effect: "deny", objectId: g.offerId });
+    // the Decision BOM read lists it after the placed report
+    expect((await decisionPlacementReports(db, g.auditId)).map((r) => r.outcome)).toEqual(["placed", "session_lost"]);
+  });
+
+  /** a governed offer to an executor whose loop is NOT running (the offer stays open), keyed to a fresh audit id */
+  async function openGovernedOffer(executorId: string) {
+    setStdioPlacementAffinityForTest([executorId]);
+    const auditId = randomUUID();
+    const placed = await db.transaction(async (tx) =>
+      placeGovernedStdio(tx as unknown as Db, auditId, {
+        ...(await stdioPlacementContext(tx as unknown as Db, { userId: memberId, projectId, delegationGrantId: null })),
+        mcpServerId: serverId,
+        imageDigest: IMAGE,
+      }),
+    );
+    expect(placed, JSON.stringify(placed)).toMatchObject({ kind: "offered" });
+    return { auditId, ...(placed as { placementId: string; offerId: string; executorId: string }) };
+  }
+
+  it("a later gate cancels an unattached session: cancelled (later_gate), the offer withdrawn, audited; never placed", async () => {
+    const ex = await rig("cancel", new FakeSandboxBackend({ backend: "kata", classes: ["hardened_container", "microvm"], stdioServer: fakeMcpServer }));
+    await ex.run(1); // announce and self-test only: no window is held afterwards, so the offer stays open
+    const g = await openGovernedOffer(ex.executorId);
+    const session = registerLinkedStdioSession(db, { offerId: g.offerId, executorId: g.executorId }, { command: COMMAND, args: ARGS }, memberId);
+    await cancelUnattachedStdioSession(db, session, memberId);
+    const [o] = await db.select().from(executionOffers).where(eq(executionOffers.id, g.offerId));
+    expect(o!.status).toBe("withdrawn");
+    const reports = await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, g.placementId));
+    expect(reports).toEqual([expect.objectContaining({ outcome: "cancelled", endCode: "later_gate", reportSha256: null })]);
+    const [audited] = await db.select().from(auditLog).where(eq(auditLog.id, reports[0]!.auditId));
+    expect(audited).toMatchObject({ ruleId: "execution-cancelled", effect: "deny" });
+    // cancelling again writes nothing; and a session a connect took is never cancelled
+    await cancelUnattachedStdioSession(db, session, memberId);
+    expect((await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, g.placementId))).length).toBe(1);
+    expect(liveStdioSessions()).toBe(0);
+  }, 60_000);
+
+  it("a placement the executor never confirms is labelled placement_timeout (not no_executor) and cancelled", async () => {
+    const ex = await rig("timeout", new FakeSandboxBackend({ backend: "kata", classes: ["hardened_container", "microvm"], stdioServer: fakeMcpServer }));
+    await ex.run(1);
+    const g = await openGovernedOffer(ex.executorId);
+    registerLinkedStdioSession(db, { offerId: g.offerId, executorId: g.executorId }, { command: COMMAND, args: ARGS }, memberId);
+    const out = await attachLinkedStdioSession(db, g.offerId, 300, memberId);
+    expect(out).toMatchObject({ kind: "refused", reason: "placement_timeout" });
+    const reports = await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, g.placementId));
+    expect(reports).toEqual([expect.objectContaining({ outcome: "cancelled", endCode: "placement_timeout" })]);
+    // a second attach finds no session: the gateway's own refusal, labelled as such
+    expect(await attachLinkedStdioSession(db, g.offerId, 300, memberId)).toMatchObject({ kind: "refused", reason: "session_lost" });
     expect(liveStdioSessions()).toBe(0);
   }, 60_000);
 });

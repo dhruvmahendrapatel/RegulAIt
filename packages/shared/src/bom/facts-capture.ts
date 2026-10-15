@@ -187,7 +187,8 @@ const asText = (v: unknown): string | null => (typeof v === "string" ? v : null)
 
 /**
  * ADR-0190 decision 9 / I8: the `execution` facts of one decision, or null (NOT RECORDED).
- *  - A placement row in the decision's transaction is the authority, whatever the object type.
+ *  - A placement row in the decision's transaction is the authority, whatever the object type. An `offered` row
+ *    (ADR-0190 I4) is recorded as offered: executor, attested class, the broker's attestation, the offer, no report.
  *  - No row: a model call (`agent`) or a connector call runs in the gateway (`in_gateway`); an MCP tool call on a
  *    remote server runs on the upstream's host (`external`); a stdio server's call, an MCP call whose server is
  *    unknown, and an approval have no placement to record, so null. Nothing is inferred beyond these.
@@ -221,6 +222,10 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
       refusalCode: pl.refusalCode ?? null,
       profile,
       executor,
+      // ADR-0190 I4: the row's own stamps (the offer of an `offered` row, the closure image, the runtime flags hash)
+      offerId: outcome === "offered" ? asText(pl.offerId) : null,
+      imageDigest: asText(pl.imageDigest),
+      runtimeFlagsSha256: asText(pl.runtimeFlagsSha256),
       attestation:
         outcome === "refused"
           ? null

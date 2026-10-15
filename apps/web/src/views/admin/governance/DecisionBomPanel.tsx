@@ -29,10 +29,13 @@ import {
   formatLabel,
   isBomForbidden,
   notRecordedLabel,
+  placementEndLabel,
+  placementReportLabel,
   saveBlob,
   sectionLabel,
   shownTime,
   type ExecutionView,
+  type PlacementReportView,
   type VerifyView,
 } from "./bomModel";
 import v from "../../views.module.css";
@@ -59,6 +62,10 @@ export function ExecutionFacts({ execution: e }: { execution: ExecutionView }) {
       ),
     });
   }
+  // ADR-0190 I4: the offer, the closure image and the runtime flags hash the placement row was stamped with
+  if (e.offerId) rows.push({ key: "offer", label: "Offer", value: <code className={v.mono}>{e.offerId}</code> });
+  if (e.imageDigest) rows.push({ key: "image", label: "Closure image", value: <code className={v.mono}>{e.imageDigest}</code> });
+  if (e.runtimeFlagsSha256) rows.push({ key: "flags", label: "Runtime flags", value: <Digest value={e.runtimeFlagsSha256} /> });
   if (e.attestation) {
     rows.push({
       key: "attestation",
@@ -77,6 +84,26 @@ export function ExecutionFacts({ execution: e }: { execution: ExecutionView }) {
       <div className={v.sectionTitle}>Execution</div>
       <Table rows={rows} rowKey={(r) => r.key} columns={[{ key: "label", header: "Fact", render: (r) => r.label }, { key: "value", header: "Recorded", render: (r) => r.value }]} />
       {e.placement === "placed" && e.attestation && <p className={v.faint}>Software-attested: the reports come from software on the same host, not from hardware-rooted attestation.</p>}
+    </div>
+  );
+}
+
+/** ADR-0190 I4: what happened to an offered placement after the decision (live and unsigned, beside the signed body) */
+export function PlacementReports({ reports }: { reports: PlacementReportView[] }) {
+  return (
+    <div className={v.stack} data-testid="decision-bom-placement-reports">
+      <div className={v.sectionTitle}>After the decision</div>
+      <p className={v.faint}>These records were written after the decision and are not part of the signed Decision BOM.</p>
+      <Table
+        rows={reports}
+        rowKey={(r) => r.id}
+        columns={[
+          { key: "outcome", header: "Outcome", render: (r) => `${placementReportLabel(r.outcome)}${r.endCode ? `: ${placementEndLabel(r.endCode)}` : ""}` },
+          { key: "class", header: "Class", render: (r) => (r.appliedClass ? isolationClassLabel(r.appliedClass) : "—") },
+          { key: "detail", header: "Detail", render: (r) => (r.reportSha256 ? <Digest value={r.reportSha256} /> : r.refusalCode ? <code className={v.mono}>{r.refusalCode}</code> : "—") },
+          { key: "at", header: "Recorded", render: (r) => r.createdAt },
+        ]}
+      />
     </div>
   );
 }
@@ -205,6 +232,7 @@ export function DecisionBomPanel({ auditId, evidencePort = bomB4Api, onClose }: 
                 ]}
               />
               {view.execution && <ExecutionFacts execution={view.execution} />}
+              {view.execution?.placement === "offered" && view.placementReports.length > 0 && <PlacementReports reports={view.placementReports} />}
               <div className={v.row}>
                 <Button
                   size="sm"
