@@ -26,6 +26,8 @@ export interface BuildReportInput {
   probes: ProbeSet;
   offerId?: string;
   imageDigest?: string;
+  /** ADR-0190 I5: the digest of the read-only input the backend wrote and mounted (placement reports only) */
+  inputSha256?: string;
   now?: () => Date;
 }
 
@@ -40,7 +42,9 @@ export function buildReport(input: BuildReportInput): ExecutorReport {
     probes: input.probes,
     strength: ATTESTATION_STRENGTH,
   } satisfies Partial<ExecutorReport>;
-  return input.kind === "placement" ? { ...base, offerId: input.offerId!, imageDigest: input.imageDigest! } : base;
+  return input.kind === "placement"
+    ? { ...base, offerId: input.offerId!, imageDigest: input.imageDigest!, ...(input.inputSha256 !== undefined ? { inputSha256: input.inputSha256 } : {}) }
+    : base;
 }
 
 export function precheckReport(report: ExecutorReport, input: EvaluateReportInput): ReportVerdict {

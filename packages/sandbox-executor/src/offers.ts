@@ -12,6 +12,7 @@
  */
 import { isolationClassRank, requiredReportProbes, stdioMacKey, type ExecutionOffer, type ExecutorProfileRef } from "@regulait/shared";
 import type { SandboxBackend, SandboxHandle } from "./backend.js";
+import type { SandboxTaskInput } from "./task-input.js";
 import type { ChannelCredential } from "./channel-credential.js";
 import { ExecutorClient, ExecutorHttpError } from "./client.js";
 import { buildReport } from "./report.js";
@@ -81,7 +82,26 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
   }
 
   const desc = ctx.backend.describe();
-  const handle = await ctx.backend.start(offer, profile.body, admissible.cls);
+  // I5: a profile with declared inputs (an engine task) starts only on its input: the manifest is fetched now, and the
+  // backend writes and verifies every file before the sandbox exists (its digest goes into the report below)
+  let task: SandboxTaskInput | undefined;
+  if (profile.body.filesystem.inputs.length > 0) {
+    try {
+      const manifest = await ctx.client.inputManifest(offer.id);
+      task = { manifest, open: (n) => ctx.client.inputFile(offer.id, n) };
+    } catch (e) {
+      const why = e instanceof ExecutorHttpError ? (e.code ?? String(e.status)) : (e as Error).message;
+      ctx.log?.(`offer ${offer.id}: the task's input could not be read (${why}); nothing was started`);
+      return { kind: "unconfirmed", why: `input:${why}` };
+    }
+  }
+  let handle: SandboxHandle;
+  try {
+    handle = await ctx.backend.start(offer, profile.body, admissible.cls, task);
+  } catch (e) {
+    ctx.log?.(`offer ${offer.id}: the sandbox did not start (${(e as Error).message})`);
+    return { kind: "unconfirmed", why: (e as Error).message };
+  }
   ctx.sandboxes.set(offer.id, handle);
   try {
     const probes = await handle.probe(requiredReportProbes(profile.body, desc.backend, admissible.cls));
@@ -94,6 +114,7 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       probes,
       offerId: offer.id,
       imageDigest: handle.imageDigest,
+      ...(handle.inputSha256 !== undefined ? { inputSha256: handle.inputSha256 } : {}),
       ...(ctx.now ? { now: ctx.now } : {}),
     });
     let answer;
@@ -128,7 +149,20 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       ctx.log?.(`offer ${offer.id}: placed but input withheld (${why}); sandbox killed`);
       return { kind: "unconfirmed", why };
     }
-    if (offer.workloadKind === "mcp_stdio" && handle.stdio && !answer.stdioSecret) {
+    // I5: an engine task is an I4 stdio session (its `start` carries the task secret); one without stdio never runs
+    const session = (offer.workloadKind === "mcp_stdio" && handle.stdio) || offer.workloadKind === "engine_worker";
+    if (offer.workloadKind === "engine_worker" && !handle.stdio) {
+      await handle.kill();
+      ctx.sandboxes.delete(offer.id);
+      try {
+        await ctx.client.end(offer.id, "killed");
+      } catch (e) {
+        ctx.log?.(`offer ${offer.id}: end (killed) not delivered: ${(e as Error).message}`);
+      }
+      ctx.log?.(`offer ${offer.id}: an engine task's sandbox has no stdio channel; sandbox killed`);
+      return { kind: "unconfirmed", why: "engine_task_no_stdio" };
+    }
+    if (session && !answer.stdioSecret) {
       // review M4: no session secret, no session: an unMACed window is never acted on (fail closed)
       await handle.kill();
       ctx.sandboxes.delete(offer.id);
@@ -140,7 +174,7 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
       ctx.log?.(`offer ${offer.id}: the gateway sent no stdio session secret; sandbox killed`);
       return { kind: "unconfirmed", why: "stdio_unkeyed" };
     }
-    if (offer.workloadKind === "mcp_stdio" && handle.stdio) {
+    if (session) {
       // I4: the input is released by the stdio session, with the registered argv, once the gateway's `start` arrives.
       // Every real backend gives an mcp_stdio sandbox its stdio (the runsc backend always does); only the I3 fake
       // backend without a stdio responder has none, and is released as before.

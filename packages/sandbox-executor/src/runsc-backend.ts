@@ -37,10 +37,23 @@
  * interfaces, credentials, limits); those corroborate. Its kernel string is
  * recorded, never trusted to name the runtime.
  *
- * What this backend refuses to start (an error before any sandbox): a profile
- * with declared inputs, a scoped volume, an allow-list network, or secrets
- * other than `none` — I4 builds none of those channels, and running such a
- * profile without them would not be what the profile says.
+ * What this backend refuses to start (an error before any sandbox): a scoped
+ * volume, an allow-list network or `injected_at_egress` secrets (none of those
+ * channels exists, and running such a profile without them would not be what
+ * the profile says).
+ *
+ * I5 ADDS TWO CHANNELS for engine tasks (`engine_worker`):
+ *  - the INPUT VOLUME: the task's input is fetched from the gateway, written
+ *    under this executor's input volume and verified file by file
+ *    (`task-input.ts`) BEFORE the sandbox exists, then mounted READ-ONLY at
+ *    the profile's one `jobs` input (Docker's `volume-subpath`); its digest
+ *    is in the per-placement report and checked by the gateway; it is removed
+ *    with the sandbox;
+ *  - the TASK SECRET (`task_scoped`, decision 5): it arrives in the gateway's
+ *    MACed `start` line and is written once, on the release line, to the
+ *    init's stdin; the init hands it to the workload on fd 3. It is never in
+ *    the sandbox's environment, argv or labels (nothing `docker inspect`
+ *    shows), never logged, never on a disk.
  */
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -51,6 +64,7 @@ import { request } from "node:http";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
+  ENGINE_TASK_INPUT_NAME,
   STDIO_FRAME_MAX_BYTES,
   STDIO_SANDBOX_INIT_DIR,
   STDIO_SANDBOX_INIT_PATH,
@@ -64,6 +78,7 @@ import {
   type ProbeObserved,
 } from "@regulait/shared";
 import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle, SandboxStdio } from "./backend.js";
+import { removeTaskInput, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
 import { RUNSC_RELEASES, SANDBOX_INIT_SHA256 } from "./init-pin.js";
 
 /** sha512 of a file, streamed */
@@ -108,6 +123,13 @@ export interface RunscBackendOptions {
    */
   runscBinary: string;
   runscHostPath: string;
+  /**
+   * ADR-0190 I5: the executor's INPUT VOLUME (a Docker volume) and where this executor has it mounted. An engine task's
+   * input is written under `<inputDir>/<sandbox name>/jobs` and that sub-path is mounted read-only into the sandbox.
+   * Unset = profiles with inputs are refused (no engine tasks on this executor).
+   */
+  inputDir?: string | null;
+  inputVolume?: string | null;
   /** how long the sandbox init may take to print its probes (default 60 s) */
   probeTimeoutMs?: number;
   /** test seams */
@@ -166,6 +188,11 @@ export interface DockerRunInput {
   seccompDir?: string | null;
   /** the Docker volume holding the executor's pinned init (mounted read-only) */
   initVolume: string;
+  /**
+   * ADR-0190 I5: an engine task's input, a sub-directory of the executor's input volume, mounted READ-ONLY at the
+   * profile's input path (Docker's `volume-subpath`, Engine 26 or later)
+   */
+  input?: { volume: string; subpath: string; mountPath: string } | null;
 }
 
 /**
@@ -174,12 +201,21 @@ export interface DockerRunInput {
  */
 export const STDIO_SANDBOX_BLANKED_ENV = ["NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "NODE_COMPILE_CACHE", "NODE_PRESERVE_SYMLINKS", "NODE_PRESERVE_SYMLINKS_MAIN", "NODE_ICU_DATA"] as const;
 
-/** the profile features the Docker backend cannot honour in I4: refused before any sandbox */
-export function unsupportedProfileFeature(profile: ExecutionProfileBody): string | null {
-  if (profile.filesystem.inputs.length > 0) return "declared read-only inputs";
+/**
+ * The profile features the Docker backend cannot honour: refused before any sandbox. I5 adds the two channels I4
+ * refused: ONE read-only input named `jobs` (an engine task's, when this executor has an input volume) and
+ * `task_scoped` secrets (delivered on the release line, then fd 3). A scoped volume, an allow-list network and
+ * `injected_at_egress` secrets are still refused.
+ */
+export function unsupportedProfileFeature(profile: ExecutionProfileBody, opts: { inputVolume?: boolean } = {}): string | null {
+  const inputs = profile.filesystem.inputs;
+  if (inputs.length > 0) {
+    if (!opts.inputVolume) return "declared read-only inputs (this executor has no input volume)";
+    if (inputs.length !== 1 || inputs[0]!.name !== ENGINE_TASK_INPUT_NAME) return `declared read-only inputs other than the one ${ENGINE_TASK_INPUT_NAME} input`;
+  }
   if (profile.persistence !== "none") return "a scoped volume";
   if (profile.network.mode === "allow_list") return "an allow-list network";
-  if (profile.secrets !== "none") return `secrets: ${profile.secrets}`;
+  if (profile.secrets === "injected_at_egress") return "secrets: injected_at_egress";
   return null;
 }
 
@@ -189,6 +225,17 @@ export function dockerRunArgs(input: DockerRunInput): string[] {
   if (!isStdioClosureImage(input.image)) throw new RunscBackendError("the image must be a content digest (sha256:<64 hex>)");
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(input.runtimeName)) throw new RunscBackendError("the runtime name is not a Docker runtime name");
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(input.initVolume)) throw new RunscBackendError("the init volume is not a Docker volume name");
+  const inputMount: string[] = [];
+  if (input.input) {
+    const i = input.input;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(i.volume)) throw new RunscBackendError("the input volume is not a Docker volume name");
+    // the sub-path is ours (the sandbox name and the input name), never the workload's: plain segments only
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(i.subpath)) throw new RunscBackendError("the input sub-path is not ours");
+    if (!p.filesystem.inputs.some((x) => x.mountPath === i.mountPath)) throw new RunscBackendError("the input mount path is not the profile's");
+    // a comma would start a new mount option: the values above cannot hold one, the mount path is a sandbox path
+    if (i.mountPath.includes(",")) throw new RunscBackendError("the input mount path holds a comma");
+    inputMount.push("--mount", `type=volume,src=${i.volume},dst=${i.mountPath},readonly,volume-subpath=${i.subpath}`);
+  }
   const work = p.filesystem.workDir.path.replace(/\/$/, "");
   const tmpfsOpts = ["rw", "nosuid", "nodev", `size=${p.filesystem.workDir.tmpfsMiB}m`, `mode=0700`, `uid=${p.process.uid}`, `gid=${p.process.uid}`];
   if (p.process.exec === "image_only") tmpfsOpts.push("noexec");
@@ -242,6 +289,8 @@ export function dockerRunArgs(input: DockerRunInput): string[] {
     // review H2: the init is the executor's, read-only, and it is the entry point (the image cannot replace it)
     "--mount",
     `type=volume,src=${input.initVolume},dst=${STDIO_SANDBOX_INIT_DIR},readonly`,
+    // I5: an engine task's input, read-only, written and verified by this executor before the sandbox starts
+    ...inputMount,
     // recheck N4: the image's own environment may not make Node load code before the init (or the workload) runs.
     // These are the only `--env` flags: each BLANKS a variable the image may set, never passes a value in.
     ...STDIO_SANDBOX_BLANKED_ENV.flatMap((name) => ["--env", `${name}=`]),
@@ -580,16 +629,39 @@ export class RunscDockerBackend implements SandboxBackend {
     });
   }
 
-  private async sandbox(kind: "canary" | "placement", image: string, profile: ExecutionProfileBody, cls: AppliedIsolationKind): Promise<SandboxHandle> {
+  private async sandbox(kind: "canary" | "placement", image: string, profile: ExecutionProfileBody, cls: AppliedIsolationKind, task?: SandboxTaskInput): Promise<SandboxHandle> {
     if (cls !== "user_space_kernel") throw new RunscBackendError(`the runsc backend attests user_space_kernel only (asked ${cls})`);
+    const inputVolume = Boolean(this.opts.inputDir && this.opts.inputVolume);
     if (kind === "placement") {
-      const unsupported = unsupportedProfileFeature(profile);
+      const unsupported = unsupportedProfileFeature(profile, { inputVolume });
       if (unsupported) throw new RunscBackendError(`the profile asks for ${unsupported}, which the runsc backend does not provide in this release; nothing was started`);
+      // I5: an input is required exactly when the profile declares one (a task without one, or one with an input the
+      // profile does not declare, is refused: the sandbox never runs on an input nobody checked)
+      if ((profile.filesystem.inputs.length > 0) !== (task !== undefined)) throw new RunscBackendError("the task's input does not match the profile's declared inputs; nothing was started");
     }
     // a self-test re-hashes the runtime binary; a placement re-hashes it whenever its file identity changed
     const rt = await this.preflight(kind === "canary");
     const name = `regulait-sbx-${randomUUID()}`;
-    const args = dockerRunArgs({ name, runtimeName: this.opts.runtimeName, image, profile, canary: kind === "canary", seccompDir: this.opts.seccompDir ?? null, initVolume: this.opts.initVolume });
+    // I5: the input, written and verified under this executor's input volume BEFORE the sandbox exists
+    let inputSha256: string | undefined;
+    let inputRoot: string | null = null;
+    let input: DockerRunInput["input"] = null;
+    if (kind === "placement" && task) {
+      const declared = profile.filesystem.inputs[0]!;
+      inputRoot = path.join(this.opts.inputDir!, name);
+      inputSha256 = await writeTaskInput(path.join(inputRoot, declared.name), task);
+      input = { volume: this.opts.inputVolume!, subpath: `${name}/${declared.name}`, mountPath: declared.mountPath };
+    }
+    const cleanupInput = async () => {
+      if (inputRoot) await removeTaskInput(inputRoot).catch(() => undefined);
+    };
+    let args: string[];
+    try {
+      args = dockerRunArgs({ name, runtimeName: this.opts.runtimeName, image, profile, canary: kind === "canary", seccompDir: this.opts.seccompDir ?? null, initVolume: this.opts.initVolume, input });
+    } catch (e) {
+      await cleanupInput();
+      throw e;
+    }
     const child = this.run(args);
     // stderr is drained and discarded (bounded): the server's diagnostics never reach the executor's log
     child.stderr.resume();
@@ -612,6 +684,8 @@ export class RunscDockerBackend implements SandboxBackend {
           // the container may already be gone
         }
         await self.docker(["rm", "-f", name]);
+        // I5: the task's input goes with its sandbox (the task secret never touched a disk)
+        await cleanupInput();
         endedResolve(outcome ?? (oom ? "limit_exceeded" : code === 0 ? "completed" : "failed"));
       })();
     });
@@ -709,10 +783,17 @@ export class RunscDockerBackend implements SandboxBackend {
       async probe(probes) {
         return probesFrom(init!, side, { runtimeName: self.opts.runtimeName }, probes);
       },
-      async releaseInput(workload) {
+      ...(inputSha256 !== undefined ? { inputSha256 } : {}),
+      async releaseInput(workload, secret) {
         if (outcome !== null) throw new RunscBackendError("the sandbox has already ended");
+        // decision 5: a secret reaches only a profile that admits one (`task_scoped`), and only with a workload
+        if (secret !== undefined && (profile.secrets !== "task_scoped" || !workload)) throw new RunscBackendError("this sandbox's profile admits no task secret");
         released = true;
-        const line = JSON.stringify(workload ? { "regulait-release": 1, argv: [workload.command, ...workload.args] } : { "regulait-release": 1 });
+        // I5: the task secret rides the release line on the init's stdin (never env, argv or a file Docker can show);
+        // the init hands it to the workload on fd 3. The line is written once and not kept.
+        const line = JSON.stringify(
+          workload ? { "regulait-release": 1, argv: [workload.command, ...workload.args], ...(secret !== undefined ? { secret } : {}) } : { "regulait-release": 1 },
+        );
         await new Promise<void>((resolve, reject) => child.stdin.write(`${line}\n`, (err) => (err ? reject(err) : resolve())));
       },
       async kill() {
@@ -728,8 +809,14 @@ export class RunscDockerBackend implements SandboxBackend {
     return this.sandbox("canary", this.opts.canaryImage, profile, cls);
   }
 
-  async start(offer: ExecutionOffer, profile: ExecutionProfileBody, cls: AppliedIsolationKind): Promise<SandboxHandle> {
-    if (offer.workloadKind !== "mcp_stdio") throw new RunscBackendError(`the runsc backend runs mcp_stdio placements in this release (offer is ${offer.workloadKind})`);
-    return this.sandbox("placement", offer.imageDigest, profile, cls);
+  async start(offer: ExecutionOffer, profile: ExecutionProfileBody, cls: AppliedIsolationKind, task?: SandboxTaskInput): Promise<SandboxHandle> {
+    // I5: engine tasks (`engine_worker`) join I4's stdio servers; code execution and BYOC workers are not built
+    if (offer.workloadKind !== "mcp_stdio" && offer.workloadKind !== "engine_worker") {
+      throw new RunscBackendError(`the runsc backend runs mcp_stdio and engine_worker placements in this release (offer is ${offer.workloadKind})`);
+    }
+    if (offer.workloadKind === "mcp_stdio" && task) throw new RunscBackendError("a stdio MCP server takes no task input");
+    // an engine task runs on its input: a profile with no input cannot run one (the gateway would refuse its report)
+    if (offer.workloadKind === "engine_worker" && profile.filesystem.inputs.length === 0) throw new RunscBackendError("an engine task's profile declares no input; nothing was started");
+    return this.sandbox("placement", offer.imageDigest, profile, cls, task);
   }
 }

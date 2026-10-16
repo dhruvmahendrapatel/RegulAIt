@@ -11,7 +11,11 @@
  * started, probed, released and killed, so a test can assert "zero
  * sandboxes started", "input never released" and "killed on mismatch".
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { removeTaskInput, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
 import {
   BACKEND_ATTESTABLE_CLASSES,
   isolationClassRank,
@@ -42,6 +46,19 @@ export interface FakeBackendOptions {
    * workload completes as soon as its input is released).
    */
   stdioServer?: (line: string, workload: { command: string; args: string[] }) => string[];
+  /**
+   * I5: an in-process stand-in for an engine task (an `engine_worker` placement). The backend writes the task's
+   * input with the real `writeTaskInput` (verified, digested) into a temporary directory; on release this runs with
+   * the files it wrote, the task secret the release carried, the stdin lines and a stdout writer. When it returns,
+   * the task's stdout ends and the sandbox completes.
+   */
+  engineTask?: (ctx: {
+    files: ReadonlyMap<string, Buffer>;
+    secret: string | undefined;
+    workload: { command: string; args: string[] };
+    stdin: AsyncIterable<string>;
+    write: (line: string) => void;
+  }) => Promise<void>;
 }
 
 type Lie<P extends AttestationProbe> = (observed: ProbeObserved<P>) => ProbeObserved<P>;
@@ -58,6 +75,10 @@ export interface FakeSandboxRecord {
   workload: { command: string; args: string[] } | null;
   /** I4: every line the sandbox received on stdin, in order */
   stdin: string[];
+  /** I5: the digest of the input the backend wrote (null without one) */
+  inputSha256: string | null;
+  /** I5: the SHA-256 of the task secret the release carried (null: none; the value itself is not kept) */
+  secretSha256: string | null;
 }
 
 /** the runtime each backend's sandbox observes from inside, at a class */
@@ -142,14 +163,37 @@ export class FakeSandboxBackend implements SandboxBackend {
     return out;
   }
 
-  private handle(kind: "canary" | "placement", offer: ExecutionOffer | null, profile: ExecutionProfileBody, cls: AppliedIsolationKind): SandboxHandle {
-    const rec: FakeSandboxRecord = { id: randomUUID(), kind, offerId: offer?.id ?? null, cls, probed: false, released: false, killed: false, workload: null, stdin: [] };
+  private handle(
+    kind: "canary" | "placement",
+    offer: ExecutionOffer | null,
+    profile: ExecutionProfileBody,
+    cls: AppliedIsolationKind,
+    input: { sha256: string; files: Map<string, Buffer>; root: string } | null = null,
+  ): SandboxHandle {
+    const rec: FakeSandboxRecord = {
+      id: randomUUID(),
+      kind,
+      offerId: offer?.id ?? null,
+      cls,
+      probed: false,
+      released: false,
+      killed: false,
+      workload: null,
+      stdin: [],
+      inputSha256: input?.sha256 ?? null,
+      secretSha256: null,
+    };
     this.sandboxes.push(rec);
     let endedResolve!: (o: "completed" | "failed" | "killed" | "limit_exceeded") => void;
     let settled = false;
     const ended = new Promise<"completed" | "failed" | "killed" | "limit_exceeded">((r) => (endedResolve = r));
     const self = this;
-    const server = kind === "placement" ? this.opts.stdioServer : undefined;
+    const engineTask = kind === "placement" && offer?.workloadKind === "engine_worker" ? this.opts.engineTask : undefined;
+    const server = kind === "placement" && !engineTask ? this.opts.stdioServer : undefined;
+    // I5: the engine task's stdin lines, for its stand-in
+    const inbound: string[] = [];
+    let inboundEnded = false;
+    let inboundWake: (() => void) | null = null;
     // the stdout queue of a fake stdio server, and its waiting reader
     const out: string[] = [];
     let outEnded = false;
@@ -162,9 +206,37 @@ export class FakeSandboxBackend implements SandboxBackend {
       if (settled) return;
       settled = true;
       endOut();
+      inboundEnded = true;
+      inboundWake?.();
+      if (input) void removeTaskInput(input.root);
       endedResolve(how);
     };
-    const stdio: SandboxStdio | undefined = server
+    const stdio: SandboxStdio | undefined = engineTask
+      ? {
+          async write(line) {
+            if (!rec.released || rec.killed) throw new Error("fake backend: stdin before release or after kill");
+            rec.stdin.push(line);
+            inbound.push(line);
+            inboundWake?.();
+          },
+          async endInput() {
+            inboundEnded = true;
+            inboundWake?.();
+          },
+          lines: () =>
+            (async function* () {
+              for (;;) {
+                if (out.length > 0) {
+                  yield out.shift()!;
+                  continue;
+                }
+                if (outEnded) return;
+                await new Promise<void>((r) => (wake = r));
+                wake = null;
+              }
+            })(),
+        }
+      : server
       ? {
           async write(line) {
             if (!rec.released || rec.killed) throw new Error("fake backend: stdin before release or after kill");
@@ -196,9 +268,41 @@ export class FakeSandboxBackend implements SandboxBackend {
         rec.probed = true;
         return self.probeSet(kind, profile, cls, probes);
       },
-      async releaseInput(workload) {
+      ...(input ? { inputSha256: input.sha256 } : {}),
+      async releaseInput(workload, secret) {
         if (rec.killed) throw new Error("fake backend: input released to a killed sandbox");
+        if (secret !== undefined && (profile.secrets !== "task_scoped" || !workload)) throw new Error("fake backend: this profile admits no task secret");
         rec.released = true;
+        if (secret !== undefined) rec.secretSha256 = createHash("sha256").update(secret).digest("hex");
+        if (engineTask) {
+          if (!workload) throw new Error("fake backend: an engine task is released with its workload");
+          rec.workload = { command: workload.command, args: [...workload.args] };
+          const stdin = (async function* () {
+            for (;;) {
+              if (inbound.length > 0) {
+                yield inbound.shift()!;
+                continue;
+              }
+              if (inboundEnded) return;
+              await new Promise<void>((r) => (inboundWake = r));
+              inboundWake = null;
+            }
+          })();
+          void engineTask({
+            files: input?.files ?? new Map(),
+            secret,
+            workload: rec.workload,
+            stdin,
+            write: (line) => {
+              out.push(line);
+              wake?.();
+            },
+          }).then(
+            () => finish("completed"),
+            () => finish("killed"),
+          );
+          return;
+        }
         if (server) {
           if (!workload) throw new Error("fake backend: a stdio sandbox is released with its workload");
           rec.workload = { command: workload.command, args: [...workload.args] };
@@ -221,9 +325,19 @@ export class FakeSandboxBackend implements SandboxBackend {
     return this.handle("canary", null, profile, cls);
   }
 
-  async start(offer: ExecutionOffer, profile: ExecutionProfileBody, cls: AppliedIsolationKind): Promise<SandboxHandle> {
+  async start(offer: ExecutionOffer, profile: ExecutionProfileBody, cls: AppliedIsolationKind, task?: SandboxTaskInput): Promise<SandboxHandle> {
     this.assertClass(cls);
-    return this.handle("placement", offer, profile, cls);
+    // I5: as the runsc backend, an input exactly when the profile declares one, written and verified for real
+    if ((profile.filesystem.inputs.length > 0) !== (task !== undefined)) throw new Error("fake backend: the task's input does not match the profile's declared inputs");
+    let input: { sha256: string; files: Map<string, Buffer>; root: string } | null = null;
+    if (task) {
+      const root = await mkdtemp(path.join(tmpdir(), "regulait-fake-input-"));
+      const sha256 = await writeTaskInput(path.join(root, "jobs"), task);
+      const files = new Map<string, Buffer>();
+      for (const f of task.manifest.files) files.set(f.path, await readFile(path.join(root, "jobs", f.path)));
+      input = { sha256, files, root };
+    }
+    return this.handle("placement", offer, profile, cls, input);
   }
 
   private assertClass(cls: AppliedIsolationKind) {

@@ -15,3 +15,4 @@ export * from "./quarantine.js";
 export * from "./loop.js";
 export * from "./runsc-backend.js";
 export * from "./stdio-pump.js";
+export * from "./task-input.js";
