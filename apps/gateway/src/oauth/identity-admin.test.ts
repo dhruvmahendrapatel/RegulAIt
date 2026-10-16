@@ -10,11 +10,20 @@ import { generateKeyPairSync, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { calculateJwkThumbprint } from "jose";
 import { makeCert } from "../testing/x509-fixtures.js";
-import { certificateThumbprint, SPIFFE_TRUST_BUNDLES_ENV } from "./x509.js";
-import { IdentityAdminError, identityCreateStepUp, credentialAddStepUp, prepareCredential, withProposals, type PreparedCredential } from "./identity-admin.js";
+import { certificateThumbprint } from "./x509.js";
+import {
+  IdentityAdminError,
+  identityCreateStepUp,
+  credentialAddStepUp,
+  NO_SPIFFE_TRUST_DOMAINS,
+  prepareCredential,
+  withProposals,
+  type PreparedCredential,
+} from "./identity-admin.js";
 
 const NOW = new Date();
-const NO_ENV: NodeJS.ProcessEnv = {};
+// ADR-0188 S9: the trust domains come from the bundle table; none here
+const NO_ENV = NO_SPIFFE_TRUST_DOMAINS;
 
 async function ok(p: Promise<PreparedCredential | IdentityAdminError>): Promise<PreparedCredential> {
   const out = await p;
@@ -98,14 +107,18 @@ describe("a certificate credential", () => {
 });
 
 describe("a SPIFFE ID credential", () => {
-  it("needs a configured trust bundle for its trust domain (SPIFFE is off by default)", async () => {
+  it("needs an uploaded trust bundle for its trust domain (SPIFFE is off by default)", async () => {
     const body = { kind: "spiffe_id" as const, spiffeId: "spiffe://example.org/worker/one" };
     expect(await refused(prepareCredential(body, NOW, NO_ENV))).toBe("spiffe_trust_domain_unknown");
-    const ca = await makeCert({ isCA: true });
-    const env = { [SPIFFE_TRUST_BUNDLES_ENV]: JSON.stringify({ "example.org": ca.pem }) };
-    expect((await ok(prepareCredential(body, NOW, env))).spiffeId).toBe(body.spiffeId);
-    expect(await refused(prepareCredential({ ...body, spiffeId: "spiffe://other.org/worker/one" }, NOW, env))).toBe("spiffe_trust_domain_unknown");
-    expect(await refused(prepareCredential(body, NOW, { [SPIFFE_TRUST_BUNDLES_ENV]: "{not json" }))).toBe("trust_config_invalid");
+    // ADR-0188 S9: the active bundles' domains (the route reads them from spiffe_trust_bundles)
+    const uploaded = async (): Promise<ReadonlySet<string>> => new Set(["example.org"]);
+    expect((await ok(prepareCredential(body, NOW, uploaded))).spiffeId).toBe(body.spiffeId);
+    expect(await refused(prepareCredential({ ...body, spiffeId: "spiffe://other.org/worker/one" }, NOW, uploaded))).toBe("spiffe_trust_domain_unknown");
+    // the bundle table cannot be read: fail closed, nothing stored
+    const unreadable = async (): Promise<ReadonlySet<string>> => {
+      throw new Error("database unavailable");
+    };
+    expect(await refused(prepareCredential(body, NOW, unreadable))).toBe("trust_config_invalid");
   });
 });
 

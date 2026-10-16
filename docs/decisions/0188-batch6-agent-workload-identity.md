@@ -1498,6 +1498,158 @@ S8 item 1 kept agents pairwise and left this relaxation for a later migration nu
 Open after the follow-up: the AI BOM's MCP server records (`apps/gateway/src/ai-bom.ts`) carry `identityPropagation`
 but not this setting; adding it is left to the ADR-0189 owner, whose files a parallel slice is changing.
 
+## As built: slice S9 (2026-10-16, branch `identity-s9-spiffe`, migration 0199)
+
+S9 moves the SPIFFE trust bundles into audited storage (the S5 security review's ruling) and takes X.509-SVID client
+authentication end to end. The code is `apps/gateway/src/oauth/spiffe-bundles.ts` (routes and upload checks) and
+`oauth/spiffe-trust-domains.ts` (the reads every validator uses); the runbook is
+[`docs/deployment/SPIFFE.md`](../deployment/SPIFFE.md). These points settle what decisions 10, 11, 12 and 21 left open:
+
+1. **Storage (migration 0199).** `spiffe_trust_bundles`: one row per upload, PUBLIC X.509 authorities only (a CHECK
+   refuses any `PRIVATE KEY` text), the format, a per-authority summary, and a digest (hex SHA-256 over the sorted
+   authority thumbprints, so it does not depend on order or upload format). At most one **active** bundle per trust
+   domain (partial unique index). A row is never deleted; its content and each lifecycle stamp are written once
+   (trigger). `superseded_by_bundle_id` is a DEFERRABLE self-reference so the old row is superseded before the new one
+   is inserted. `created_by`/`revoked_by` carry no foreign key, like `audit_log.user_id` (the system principal acts for
+   the bootstrap token).
+2. **No grandfathering (ADR-0180).** `REGULAIT_SPIFFE_TRUST_BUNDLES` is ignored, never imported. An install that set it
+   has SPIFFE off until an admin uploads each bundle. The boot log warns while it is set, and the list view reports
+   `legacyEnvironmentIgnored`. The mTLS CA set (`REGULAIT_MTLS_CA_BUNDLE`) stays a deploy-time variable: the S5 ruling
+   named only the SPIFFE bundles.
+3. **Routes** (admin-only, `IDENTITY_ROUTES` slice S9, internal, tag `identity`):
+   - `GET /v1/identity/spiffe-trust-bundles`: every bundle, active first.
+   - `POST /v1/identity/spiffe-trust-bundles` `{trustDomain, bundle, replacesBundleId}`: the first upload names
+     `replacesBundleId: null`; a later one must name the active bundle's id (compare-and-set, else
+     `409 spiffe_bundle_conflict`); identical authorities are `409 spiffe_bundle_unchanged`.
+   - `POST /v1/identity/spiffe-trust-bundles/:bundleId/revoke` `{}`: only the active bundle
+     (`409 spiffe_bundle_not_active` for a superseded one).
+   The revoke is a POST, like the identity and signing-key revokes, so the identity route list keeps its single DELETE.
+4. **Step-up on every change.** `identity_manage` with facts `{op: "spiffe_bundle_set", trustDomain, digest,
+   replacesBundleId}` or `{op: "spiffe_bundle_revoke", bundleId}`. The upload is validated (and its digest computed)
+   before the step-up is asked for, so a bundle that could never be trusted is refused without a confirmation, and a
+   step-up for one bundle is refused (and not spent) for another. Revoking is a tightening, but it ends authority and
+   is irreversible, so it is stepped up too.
+5. **What an upload must be.** Concatenated PEM certificates, or the SPIFFE bundle format (an RFC 7517 JWKS). In the
+   SPIFFE format each `x509-svid` key carries exactly one `x5c` certificate and its key parameters must be that
+   certificate's public key; `jwt-svid` keys are counted and not stored (JWT-SVID client authentication is not built);
+   any other `use`, or a private JWK member, is refused. Every authority must be a CA with `keyCertSign` (the rule the
+   validator applies to every anchor) and inside its validity window on the database clock; duplicates, more than 64
+   authorities and more than 256 KB are refused. Every refusal is audited (`spiffe-trust-bundle-refused`, codes only,
+   never the bundle text); uploads are `spiffe-trust-bundle-set` (`add` or `replace`), revocations
+   `spiffe-trust-bundle-revoked`.
+6. **Read at the point of use, never cached.** The token endpoint, the resource verifier and introspection read the
+   active bundles for every certificate they judge (`matchCertificateCredential` now takes the database handle), so an
+   upload or a revocation applies to the next request on every replica. Binding a `spiffe_id` credential reads them in
+   the bind transaction (`prepareCredential` takes a trust-domain source instead of the environment).
+7. **Rotation is not revocation (decision 12).** Replacing supersedes the old bundle and revokes nothing. Because
+   decision 21 re-validates a presented certificate at every use, an SVID whose CA left the bundle stops authenticating
+   at once, including at its next use of a certificate-bound token. The runbook says to upload an overlap bundle (old
+   and new CA) first, as SPIRE's own bundle does during its CA overlap.
+8. **Revoking a bundle (decision 12's "A whole SPIFFE trust bundle" row).** The bundle row and every unexpired token
+   authenticated by a `spiffe_id` credential of that trust domain are revoked in one transaction (database clock).
+   After commit, every live grant those credentials authenticated (as `auth_credential_id` or
+   `subject_credential_id`) is revoked with its descendants, through S6's cascade (`revokeGrants`, now exported and
+   naming the bundle in its `workload-identity-cascade-incomplete` row). The cascade is domain-wide: a grant is not
+   recorded against the bundle version that authenticated it. The credentials themselves stay: uploading a new bundle
+   for the domain lets their SPIFFE IDs authenticate again, with SVIDs from the new CA.
+9. **The backstop.** `loadLiveChain` (decision 17) now treats a `spiffe_id` credential (auth or subject) whose trust
+   domain has no active bundle as `credential_not_live`, so a grant the cascade failed to end is refused at its next
+   use. The trust domain is the ID's authority, read with `split_part(spiffe_id, '/', 3)`.
+10. **Open source first (ADR-0176), recorded.** Searched npm for SPIFFE libraries: `spiffe` (MIT), `@jeengbe/spiffe`
+    (MIT) and `@defakto/spiffe` (Apache-2.0) are Workload API **clients** (gRPC to a SPIRE agent, the workload's side,
+    pulling gRPC, protobuf and cloud SDKs); none parses or validates a bundle on the relying-party side, so none fits.
+    Path validation stays `pkijs` (pinned, decision 21) plus Node's `X509Certificate`; the JWK-to-certificate check is
+    Node's `createPublicKey`. What is ours is the bundle-format and CA rules above. No dependency was added.
+11. **Steward edits** were the other half of the S5 ruling. They already live in audited storage: S4's
+    `PATCH /v1/workload-identities/:id` (stewards and environments, `identity_manage` step-up, audited); no
+    environment variable ever held them. Nothing more was needed.
+12. **UI.** A "SPIFFE trust bundles" card on the workload identities page lists every bundle, uploads a domain's first
+    bundle or replaces the active one (domain fixed, active id sent), and revokes with the cascade named; each write is
+    confirmed and resent once through the step-up. A private key or a malformed domain is refused in the browser. The
+    route census stays at 0 known UI gaps.
+13. **Tests.**
+    - Offline (`oauth/spiffe-bundles.test.ts`): every upload refusal with its positive control; a **real SPIRE 1.13.3**
+      bundle and X.509-SVID (`testing/spire-1.13.3/`, public halves only, made by the runbook's commands) validate
+      offline, the same SVID is refused an hour after it expired, under another trust domain, and under another CA; the
+      decision 21 claims with synthetic SVIDs: a wrong trust domain, an expired SVID, a non-SPIFFE URI SAN, two URI SANs,
+      and a CA certificate as the leaf, each refused. Two negative controls were run (the CA-authority check and the
+      key-mismatch check removed: each made its test fail).
+    - Database (`zz-adr0188-s9-spiffe.test.ts`, through the real app): the S5 variable set and ignored; admin-only and
+      no step-up with an API key; the step-up bound to the digest and unspent on a mismatch; audited refusals;
+      compare-and-set; the table's guard; an SVID through an authenticated proxy to a certificate-bound token accepted
+      at `/mcp/:serverId`; the six refusals at the token endpoint, each with its recorded code, plus an untrusted peer and
+      a wrong proxy secret; overlap rotation; revocation revoking the token and the grant and refusing at once; the
+      backstop with a forced cascade failure. `zz-adr0188-s5-token-endpoint.test.ts` now uploads its bundle through the
+      route.
+    - Mock browser (`workload-identities.mock.spec.ts`): list, legacy note, browser-side refusals, upload, replace and
+      revoke through the step-up, axe.
+
+Open after S9:
+
+- **Fetching a bundle through the egress guard** (decision 10 allows "uploaded or fetched") is not built; upload is the
+  strict subset and the only path air-gapped. A SPIFFE bundle endpoint fetch with `spiffe_refresh_hint` would be its
+  own slice.
+- **JWT-SVID client authentication** is not built; `jwt-svid` keys in an upload are counted, not stored.
+- **Runbook steps 5 to 9** (upload, registration, the proxy configuration, the exchange and the drills on a real
+  deployment) are pending execution (M-041); the proxy part depends on the executor TLS front work.
+- A test that forces a revocation to commit between the token endpoint's certificate match and its issuing
+  transaction (the `spiffe_bundle_revoked` refusal) does not exist yet; the opposite interleaving is tested.
+
+### S9 fix round (#389 independent review, 2026-10-16)
+
+The coordinator renumbered S9's migration from 0200 to **0199** (I5 takes 0200), and its journal entry is in.
+
+1. **M1: a revocation is never undone by a re-upload.** The live-chain rule of item 9 also refuses a grant a SPIFFE ID
+   authenticated when a bundle of its domain was **revoked at or after the grant was created**
+   (`revoked_at >= delegation_grants.created_at`), whatever is active now. Introspection and the resource verifier
+   reach this through the same `loadLiveChain`, and a token is judged through its grant. To close the race window, the
+   token endpoint holds the authenticating bundle row `FOR SHARE` in the transaction that creates the grant and token,
+   and refuses `spiffe_bundle_revoked` if it was revoked meanwhile (`lockSpiffeBundleUnrevoked`). The revocation takes
+   the row `FOR UPDATE` and stamps `revoked_at` with `clock_timestamp()` after that lock. So a grant made under a bundle
+   is always created before the revocation commits, and the revocation's token update and cascade see it. A superseded
+   bundle still qualifies at the token endpoint: rotation is not revocation.
+2. **M2: the leaf's critical extensions.** pkijs does not judge path index 0. After the engine, a critical leaf
+   extension outside {basicConstraints, keyUsage, extKeyUsage, subjectAltName, subjectKeyIdentifier,
+   authorityKeyIdentifier}, or an allowed one whose value does not parse as its own ASN.1 type (pkijs's lazy
+   `parsedValue` swallows a mismatch, so the type constructors are called directly), is refused
+   `certificate_extension` (RFC 5280 §4.2). This applies to plain `tls_client_auth` as well as to SVIDs.
+3. **L3: the step-up is spent after the compare-and-set.** The routes look at the grant (`spend: false`) and claim it
+   inside the write's transaction, on the root handle, after the compare-and-set and every refusal, so a 404 or a 409
+   leaves it unspent.
+4. **L4:** `pemBundleToDer` refuses any `-----BEGIN` block that is not `CERTIFICATE` (`PemNotCertificateError`); a
+   bundle upload names it `spiffe_bundle_not_certificate`.
+5. **L5:** the env test that could not fail is replaced by a source check that the retired variable is read in one
+   place only (`legacySpiffeEnvSet`).
+6. **Recheck Low 3: rotation then revocation.** A request could load bundle B1's authorities, an admin could rotate to
+   B2 and revoke B2, and the request, locking only B1 (superseded, not revoked), would issue a grant created after B2's
+   `revoked_at`, which rule (b) misses once B3 is uploaded. Now the issuing transaction locks **every** bundle row of
+   the domain FOR SHARE in one statement and applies `spiffeIssueAllowed`: refuse unless the authenticating bundle is
+   unrevoked, **no bundle of the domain created at or after it was revoked** (a rotation away from it that ended in a
+   revocation ends its authorities too), and the domain has an active bundle. Why this is final under READ COMMITTED:
+   - a locked row a concurrent writer holds is waited for and then read in its committed version, so the rule sees
+     every upload and revocation that committed first;
+   - when the rule passes, the transaction holds the domain's active row FOR SHARE until it commits; superseding that
+     row (an upload) and revoking it both take it FOR UPDATE first, so neither commits while the grant is made;
+   - the one write that takes no row lock is a first upload into a domain with no active bundle, and the rule's third
+     clause refuses exactly that state;
+   - so every revocation that follows a grant is stamped (`clock_timestamp()` after its lock) later than the grant's
+     `created_at`, and live-chain rule (b) refuses the grant for good, whatever is uploaded afterwards. That is the
+     backstop extension the recheck asked for: "superseded by a bundle that is now revoked" can only describe a grant
+     whose `created_at` precedes that revocation, which rule (b) already covers; the other order is refused at issue.
+   - Tests: the pure rule (`spiffe-bundles.test.ts`), and the reviewer's sequence driven deterministically through a
+     test hook between the certificate match and the issuing transaction (`zz-adr0188-s9-spiffe.test.ts`: refused
+     `spiffe_bundle_revoked`, no grant made; a re-upload authenticates afresh).
+
+Open after the fix round (recheck follow-ups):
+- **Low 1:** two concurrent FIRST uploads to one domain: the loser's step-up is spent before its unique-violation 409.
+  It fails safe (nothing is written; the admin steps up again).
+- **Low 2:** the critical-extension parse checks each allowed type's outer structure through pkijs, not every inner
+  field (for example the GeneralName forms inside a SAN). No authorization depends on those fields beyond what the
+  SPIFFE profile already reads.
+- **Pool note:** the issuing transaction now holds bundle row locks while it creates the grant and the token; a
+  revocation or upload for that domain waits on it. Under heavy issue load for one domain, an admin write may wait a
+  request's duration. No pool sizing was changed.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of

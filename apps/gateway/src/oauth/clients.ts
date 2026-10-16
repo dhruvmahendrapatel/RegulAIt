@@ -21,7 +21,8 @@
  *                                     no chain, the registered `x5t#S256`
  *   - `spiffe_svid`                   a `spiffe_id` credential: an X.509-SVID
  *                                     validated against THAT trust domain's
- *                                     bundle, URI SAN = the registered ID
+ *                                     ACTIVE uploaded bundle (S9), URI SAN =
+ *                                     the registered ID
  * `client_secret_*` does not exist.
  */
 import { and, eq, isNull, workloadCredentials, workloadIdentities, type Db, type WorkloadCredentialRow } from "@regulait/db";
@@ -29,7 +30,8 @@ import { JWK_THUMBPRINT_URI_PREFIX, WORKLOAD_SELF_KINDS, type WorkloadClientAuth
 import { credentialLiveAt } from "../delegation.js";
 import { importJWK, jwtVerify, type JWK } from "jose";
 import { loadOrgSettings } from "../org-settings.js";
-import { loadTrustConfig, selfSignedCertificateFacts, spiffeIdParts, validateClientCertificate, type PresentedCertificate } from "./x509.js";
+import { loadMtlsCaBundle, selfSignedCertificateFacts, spiffeIdParts, validateClientCertificate, type PresentedCertificate, type TrustConfig } from "./x509.js";
+import { loadSpiffeTrustAnchors } from "./spiffe-trust-domains.js";
 
 export interface WorkloadClient {
   identity: typeof workloadIdentities.$inferSelect;
@@ -104,18 +106,34 @@ export function clientJwks(client: WorkloadClient): Array<Record<string, string>
 }
 
 export type CertificateMatch =
-  | { ok: true; credentialId: string; method: WorkloadClientAuthMethod; thumbprint: string }
+  | {
+      ok: true;
+      credentialId: string;
+      method: WorkloadClientAuthMethod;
+      thumbprint: string;
+      /** S9: the SPIFFE bundle whose authorities validated the SVID (the token endpoint locks it while it issues) */
+      spiffeBundleId?: string;
+    }
   | { ok: false; code: string };
 
 /**
  * Which LIVE credential of `client` this presented certificate proves, after
  * decision 21's validation. Every credential is tried; the first that fully
  * matches wins. No match is a refusal with the most specific reason seen.
+ * The anchors are read at the point of use: the mTLS CA set from the
+ * environment, the SPIFFE bundles from `spiffe_trust_bundles` (ADR-0188 S9),
+ * so an upload or a revocation applies to the very next request on every replica.
  */
-export async function matchCertificateCredential(client: WorkloadClient, presented: PresentedCertificate, now: Date, env: NodeJS.ProcessEnv = process.env): Promise<CertificateMatch> {
-  let trust;
+export async function matchCertificateCredential(
+  db: Db,
+  client: WorkloadClient,
+  presented: PresentedCertificate,
+  now: Date,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<CertificateMatch> {
+  let trust: TrustConfig;
   try {
-    trust = loadTrustConfig(env);
+    trust = { mtlsCa: loadMtlsCaBundle(env), spiffe: await loadSpiffeTrustAnchors(db) };
   } catch {
     return { ok: false, code: "trust_config_invalid" };
   }
@@ -157,12 +175,17 @@ export async function matchCertificateCredential(client: WorkloadClient, present
         last = "spiffe_trust_domain_unknown";
         continue;
       }
-      const v = await validateClientCertificate(presented.der, { anchors, presentedIntermediates: presented.intermediates, now, spiffeTrustDomain: parts.trustDomain });
+      const v = await validateClientCertificate(presented.der, {
+        anchors: anchors.authorities,
+        presentedIntermediates: presented.intermediates,
+        now,
+        spiffeTrustDomain: parts.trustDomain,
+      });
       if (!v.ok) {
         last = v.code;
         continue;
       }
-      if (v.spiffeId === c.spiffeId) return { ok: true, credentialId: c.id, method: "spiffe_svid", thumbprint: v.thumbprint };
+      if (v.spiffeId === c.spiffeId) return { ok: true, credentialId: c.id, method: "spiffe_svid", thumbprint: v.thumbprint, spiffeBundleId: anchors.bundleId };
       last = "spiffe_id_mismatch";
     }
   }

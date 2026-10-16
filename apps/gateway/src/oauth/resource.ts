@@ -134,7 +134,7 @@ export async function authenticateWorkloadRequest(db: Db, req: FastifyRequest, o
       clientId = undefined;
     }
     const client = typeof clientId === "string" ? await findWorkloadClient(db, clientId, now) : null;
-    const m = client ? await matchCertificateCredential(client, presented, now) : null;
+    const m = client ? await matchCertificateCredential(db, client, presented, now) : null;
     if (m?.ok) clientCertificateDer = presented.der;
   }
 

@@ -33,6 +33,8 @@ export async function makeCert(
     keyUsage?: number;
     notBefore?: Date;
     notAfter?: Date;
+    /** further extensions, as raw DER values (S9 review M2: an unknown critical extension) */
+    extra?: Array<{ oid: string; critical: boolean; value: Uint8Array }>;
   } = {},
 ): Promise<TestCert> {
   const key = (await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -53,6 +55,9 @@ export async function makeCert(
   if (opts.uris && opts.uris.length > 0) {
     const alt = new GeneralNames({ names: opts.uris.map((value) => new GeneralName({ type: 6, value })) });
     cert.extensions.push(new Extension({ extnID: "2.5.29.17", extnValue: alt.toSchema().toBER(false), parsedValue: alt }));
+  }
+  for (const x of opts.extra ?? []) {
+    cert.extensions.push(new Extension({ extnID: x.oid, critical: x.critical, extnValue: x.value.buffer.slice(x.value.byteOffset, x.value.byteOffset + x.value.byteLength) as ArrayBuffer }));
   }
   await cert.sign((opts.issuer?.key ?? key).privateKey, "SHA-256");
   const der = Buffer.from(cert.toSchema().toBER(false));

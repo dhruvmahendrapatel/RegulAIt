@@ -1,8 +1,15 @@
-# Third-party components — `scripts/spdx3` (CI only, never shipped)
+# Third-party components — `scripts/spdx3` (CI only; never shipped or distributed by us, auditors fetch it themselves)
 
 ADR-0189 slice B5: the offline SHACL conformance check of the product's SPDX 3.0.1 renderings (`run_offline.py`), run
 in CI inside a network namespace. Nothing here is in an image, a package or a bundle (`.dockerignore` and the build
 never include `scripts/spdx3`). Ported from spike B0 (`spikes/bom-b0`, R12 §5).
+
+**Auditor-fetched, not distributed by us (ADR-0189 B8).** `docs/ops/BOM_VERIFICATION.md` has an auditor download this
+closure themselves, from PyPI, on their own connected machine (`pip download --require-hashes -r requirements.lock`),
+and install it on their air-gapped verification machine. RegulAIt provides only `requirements.lock` and the
+instructions, never the wheels or the sdist, so these packages are not redistributed by us and the CI-only admission
+of PSF-2.0 and W3C-20150513 (ADR-0189 amendment 6) is unchanged. The hash lock makes the auditor's files the exact
+ones CI uses.
 
 ## Vendored SPDX 3.0.1 files (specification data, not code)
 
@@ -21,7 +28,8 @@ sha256 differs from the pin below.
 `spdx3-validate` 0.0.7 (MIT, released 2026-08-10) and its 22 dependencies, every wheel hash pinned, installed with
 `pip install --no-deps --require-hashes` (halo 0.0.31 publishes only a py2 wheel, so its hash-pinned sdist is built). Licences per package metadata: MIT (13), BSD-3-Clause/BSD
 (3: rdflib, prettytable, colorama), Apache-2.0 (2: pyshacl, importlib_metadata), Apache-2.0 OR BSD-2-Clause
-(packaging), PSF-2.0 (typing_extensions), W3C-20150513 (owlrl). PSF-2.0 and W3C-20150513 are admitted for CI-only
+(packaging), PSF-2.0 (typing_extensions), W3C-20150513 (owlrl; its metadata `License:` field; the trove classifier says
+only "OSI Approved", which is what `requirements.lock` used to repeat). PSF-2.0 and W3C-20150513 are admitted for CI-only
 tooling by the ADR-0176 amendment of 2026-10-10 (ADR-0189 amendment 6). Each package's licence is also named on its
 line in `requirements.lock`. The stock `spdx3-validate` CLI is never run: it downloads the schema, model and context
 at run time (amendment 4).

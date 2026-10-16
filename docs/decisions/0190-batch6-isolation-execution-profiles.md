@@ -1376,7 +1376,7 @@ directly, rather than through the report hash? Doing so needs new `execution_pla
 I5 moves the ADR-0187 engine workers (the garak and promptfoo workers, the modelscan scanner) under decision 3's
 `engine_worker` kind. A worker now runs **only** as an engine TASK in a sandbox an executor starts under the run's
 placement. There is no long-lived worker container and no other place a worker can run. Migration **0200**
-(`0200_engine_task_placement.sql`, hand-written; journal idx 200, added once 0199 (ADR-0188 S9) is on main) adds `engine_runs.task_placement_id`, its set-once guard (search_path pinned) and a TRUNCATE refusal on `engine_runs` (migration 0185's invariants). These points
+(`0200_engine_task_placement.sql`, hand-written; journal idx 200, after 0199 (ADR-0188 S9)) adds `engine_runs.task_placement_id`, its set-once guard (search_path pinned) and a TRUNCATE refusal on `engine_runs` (migration 0185's invariants). These points
 settle what the decisions above leave open:
 
 1. **The task start is the decision.** The placement is decided when the runner holding a live lease asks to start
@@ -1542,8 +1542,7 @@ settle what the decisions above leave open:
   pending execution on a test host. Until then an executor refuses every engine task (no input volume), fail
   closed. The compose service is left to the executor TLS slice that owns it.
 - **The review round's database tests** (HIGH-1, the refusal ending the run, first enable, LOW-1) and the B5 suites
-  with the rig have not run in the session that wrote them (no database there). Migration 0200 is not in the
-  journal until 0199 is on main, so the database suites fail until then.
+  with the rig have not run in the session that wrote them (no database there); CI's database shards run them.
 - **No engine image is built.** `imageDigest` and `taskImage` are null in the shipped manifest, so the image builds,
   the in-image task entries and the gateway channel with the real garak and promptfoo are unexercised.
 

@@ -32,7 +32,7 @@ jsonschema-specifications==2025.9.1 \
 log-symbols==0.0.14 \
     --hash=sha256:4952106ff8b605ab7d5081dd2c7e6ca7374584eff7086f499c06edd1ce56dcca \
     --hash=sha256:cf0bbc6fe1a8e53f0d174a716bc625c4f87043cc21eb55dd8a740cfe22680556
-# owlrl 7.6.2: licence OSI Approved
+# owlrl 7.6.2: licence W3C-20150513 (package metadata `License:`; its classifier says only "OSI Approved")
 owlrl==7.6.2 \
     --hash=sha256:83347bf7f133979e87b2b18695d51d25510b99cec3f6919b5df05d4fbf058ae0 \
     --hash=sha256:c743f35c2d908396e77823852bb1ebbce88340cd49961493983bec42c93283a8

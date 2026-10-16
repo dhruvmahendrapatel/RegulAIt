@@ -255,3 +255,11 @@ paths = ['''^packages/sandbox-executor/src/stdio-pump\.test\.ts$''']
 commits = ["b2124861838dcf4b0e2140702ae3a37d86f496a2"]
 regexTarget = "secret"
 regexes = ['''^7b0c1a3e-6a1e-4a4b-9a2c-0f4e5d6c7b8a$''']
+
+[[allowlists]]
+description = "HISTORY ONLY: ADR-0189 B8 commit 90c44ef printed the PUBLIC fingerprint of the published TEST-ONLY CANARY receipt key (B4 vectors) as runbook example output. Not key material; the next commit elides it. This exact value, this one file, this one commit."
+condition = "AND"
+paths = ['''^docs/ops/BOM_VERIFICATION\.md$''']
+commits = ["90c44ef1f3b7079e9f1658e256e5870a24152171"]
+regexTarget = "secret"
+regexes = ['''^505e806bf46aedd490d099490e7e8d69bd2dec822045e37703cfb4749c746deb$''']

@@ -74,6 +74,16 @@ const TREE = {
   nextCursor: null,
 };
 
+/** ADR-0188 S9: one active SPIFFE trust bundle and one it replaced */
+const BUNDLE = {
+  id: U(70), trustDomain: "byoc.example.test", status: "active", format: "spiffe_jwks", digest: "a".repeat(64),
+  authorities: [{ thumbprint: "t1", subject: "C=US, O=SPIFFE", notBefore: ISO, notAfter: LATER }], jwtAuthoritiesIgnored: 1,
+  createdBy: STEWARD.id, createdAt: ISO, supersededAt: null, supersededByBundleId: null, revokedAt: null, revokedBy: null,
+};
+const OLD_BUNDLE = { ...BUNDLE, id: U(71), status: "superseded", digest: "b".repeat(64), supersededAt: ISO, supersededByBundleId: BUNDLE.id };
+/** a PEM block the browser forwards as typed (its body need not parse: the gateway judges it) */
+const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n";
+
 /** the identity routes the gateway answers 501 today (the model's list, itself pinned to the gateway): never called */
 const NOT_BUILT = IDENTITY_ROUTES_NOT_BUILT.map(
   (r) => [r.method, new RegExp(`^${r.path.replace(/:[A-Za-z]+/g, "[^/]+")}$`)] as const,
@@ -87,10 +97,12 @@ interface Mock {
   unmatched: string[];
   grantsRevision: number;
   listFails: boolean;
+  /** S9: the deployment still sets the retired bundle variable */
+  legacyEnv: boolean;
 }
 
 async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
-  const m: Mock = { calls: [], unmatched: [], grantsRevision: 4, listFails: false, ...opts };
+  const m: Mock = { calls: [], unmatched: [], grantsRevision: 4, listFails: false, legacyEnv: false, ...opts };
   current = m;
   const me = { userId: STEWARD.id, isAdmin: true, user: { id: STEWARD.id, email: STEWARD.email, displayName: STEWARD.displayName } };
   await page.route("**/*", async (route) => {
@@ -112,6 +124,15 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
     if (p === "/v1/agents") return json(route, { agents: [AGENT] });
     if (p === "/v1/connectors") return json(route, { connectors: [] });
     if (p === "/v1/identity/signing-keys") return json(route, { items: [] });
+    // ADR-0188 S9: the SPIFFE trust bundles card
+    if (p === "/v1/identity/spiffe-trust-bundles" && method === "GET") return json(route, { items: [BUNDLE, OLD_BUNDLE], legacyEnvironmentIgnored: m.legacyEnv });
+    if (p === "/v1/identity/spiffe-trust-bundles" && method === "POST") {
+      const body = req.postDataJSON() as { trustDomain: string; replacesBundleId: string | null };
+      return json(route, { ...BUNDLE, id: U(72), trustDomain: body.trustDomain, digest: "c".repeat(64) }, 201);
+    }
+    if (p === `/v1/identity/spiffe-trust-bundles/${BUNDLE.id}/revoke` && method === "POST") {
+      return json(route, { bundle: { ...BUNDLE, status: "revoked", revokedAt: ISO, revokedBy: STEWARD.id }, tokensRevoked: 2, grantsRevoked: [U(40)], cascade: "complete", grantsNotRevoked: [] });
+    }
     if (p === "/v1/roles") return json(route, { roles: [ROLE] });
     if (p === "/v1/workload-identities" && method === "GET") {
       if (m.listFails) return json(route, { error: "internal", detail: "SYNTHETIC_UNTRUSTED_SERVER_DETAIL" }, 500);
@@ -428,5 +449,90 @@ test.describe("ADR-0188 S6: workload identities", () => {
     await confirmStepUp(page);
     await su.expectResentOnce();
     expect(su.attempts[1]!.body).toEqual({ ...PROPOSALS.currentSet, agents: [{ agentId: AGENT.id, allowedModes: ["execute", "review"] }] });
+  });
+});
+
+test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
+  test.beforeEach(() => {
+    current = null;
+  });
+  test.afterEach(() => {
+    expect(current?.unmatched ?? [], "every /v1 call this page makes is mocked deliberately").toEqual([]);
+  });
+
+  const card = (page: Page) => page.getByTestId("spiffe-trust-bundles");
+  const bundlePosts = (m: Mock) => m.calls.filter((c) => c.method === "POST" && c.path === "/v1/identity/spiffe-trust-bundles");
+
+  test("lists bundles, says the retired variable is ignored, and refuses a private key in the browser", async ({ page }) => {
+    const m = await mockApi(page, { legacyEnv: true });
+    await page.goto("/ui/admin/workload-identities");
+    const c = card(page);
+    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("1 JWT-SVID key(s) not used");
+    await expect(c.getByRole("row", { name: /superseded/ })).toContainText("Replaced");
+    await expect(c.getByRole("note")).toContainText("REGULAIT_SPIFFE_TRUST_BUNDLES");
+    await c.getByLabel("Trust domain", { exact: true }).fill("new.example.test");
+    // assembled at runtime: no key-shaped literal in the repository
+    await c.getByLabel("Bundle (SPIFFE JSON or PEM CA certificates)").fill(`${CA_PEM}${["-----BEGIN", "PRIVATE KEY-----"].join(" ")}\n`);
+    await c.getByRole("button", { name: "Upload bundle" }).click();
+    await expect(c.getByText("This text contains a private key.")).toBeVisible();
+    // a domain that already has an active bundle must be replaced from its row
+    await c.getByLabel("Trust domain", { exact: true }).fill(BUNDLE.trustDomain);
+    await c.getByLabel("Bundle (SPIFFE JSON or PEM CA certificates)").fill(CA_PEM);
+    await c.getByRole("button", { name: "Upload bundle" }).click();
+    await expect(c.getByText("already has an active bundle")).toBeVisible();
+    expect(bundlePosts(m)).toHaveLength(0);
+    await expectNoAxeViolations(page, "the SPIFFE trust bundles card");
+  });
+
+  test("a first upload is confirmed, then resent once through the identity_manage step-up with the same body", async ({ page }) => {
+    await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/spiffe-trust-bundles", kind: "identity_manage" });
+    await page.goto("/ui/admin/workload-identities");
+    const c = card(page);
+    await c.getByLabel("Trust domain", { exact: true }).fill("new.example.test");
+    await c.getByLabel("Bundle (SPIFFE JSON or PEM CA certificates)").fill(CA_PEM);
+    await c.getByRole("button", { name: "Upload bundle" }).click();
+    const confirm = page.getByRole("dialog", { name: "Trust new.example.test?" });
+    await expect(confirm).toContainText("widens who can sign in");
+    await confirm.getByRole("button", { name: "Upload bundle" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ trustDomain: "new.example.test", bundle: CA_PEM, replacesBundleId: null });
+    await expect(page.getByText("Bundle uploaded.")).toBeVisible();
+  });
+
+  test("replacing names the active bundle (compare-and-set) and keeps the domain fixed", async ({ page }) => {
+    await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "POST", path: "/v1/identity/spiffe-trust-bundles", kind: "identity_manage" });
+    await page.goto("/ui/admin/workload-identities");
+    const c = card(page);
+    await c.getByRole("button", { name: `Replace the bundle of ${BUNDLE.trustDomain}` }).click();
+    await expect(c.getByLabel("Trust domain", { exact: true })).toHaveValue(BUNDLE.trustDomain);
+    await expect(c.getByLabel("Trust domain", { exact: true })).toHaveAttribute("readonly", "");
+    await c.getByLabel("Bundle (SPIFFE JSON or PEM CA certificates)").fill(CA_PEM);
+    await c.getByRole("button", { name: "Replace bundle" }).click();
+    const confirm = page.getByRole("dialog", { name: `Replace the bundle of ${BUNDLE.trustDomain}?` });
+    await expect(confirm).toContainText("Keep the old CA in the bundle");
+    await confirm.getByRole("button", { name: "Replace bundle" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ trustDomain: BUNDLE.trustDomain, bundle: CA_PEM, replacesBundleId: BUNDLE.id });
+    await expect(page.getByText("Bundle replaced.")).toBeVisible();
+  });
+
+  test("revoking is confirmed as permanent, with the cascade named, and stepped up", async ({ page }) => {
+    await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "POST", path: `/v1/identity/spiffe-trust-bundles/${BUNDLE.id}/revoke`, kind: "identity_manage" });
+    await page.goto("/ui/admin/workload-identities");
+    await card(page).getByRole("button", { name: `Revoke the bundle of ${BUNDLE.trustDomain}` }).click();
+    const confirm = page.getByRole("dialog", { name: `Revoke the bundle of ${BUNDLE.trustDomain}?` });
+    await expect(confirm).toContainText("cannot be undone");
+    await expect(confirm).toContainText("revoked with its descendants");
+    await expectNoAxeViolations(page, "the revoke-bundle confirmation");
+    await confirm.getByRole("button", { name: "Revoke bundle" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({});
+    await expect(page.getByText("Bundle revoked.")).toBeVisible();
   });
 });
