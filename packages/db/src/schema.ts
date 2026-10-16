@@ -93,7 +93,7 @@ import {
   type DelegationScope,
   type WorkloadClientAuthMethod,
   type WorkloadPublicJwk,
-  // ADR-0188 S9 (migration 0200): SPIFFE trust bundles
+  // ADR-0188 S9 (migration 0199): SPIFFE trust bundles
   SPIFFE_BUNDLE_FORMATS,
   type SpiffeTrustAuthorityView,
   // ADR-0189 (migration 0182): the BOM vocabularies, in lockstep with the CHECKs
@@ -12992,7 +12992,7 @@ export const identitySigningKeys = pgTable(
 export type IdentitySigningKeyRow = typeof identitySigningKeys.$inferSelect;
 
 /**
- * ADR-0188 S9 (migration 0200): the SPIFFE trust bundles, in audited storage
+ * ADR-0188 S9 (migration 0199): the SPIFFE trust bundles, in audited storage
  * (they were the `REGULAIT_SPIFFE_TRUST_BUNDLES` variable in S5). PUBLIC X.509
  * authorities only. At most one ACTIVE bundle per trust domain; uploading a
  * new one supersedes it (rotation, nothing revoked); revoking one ends the

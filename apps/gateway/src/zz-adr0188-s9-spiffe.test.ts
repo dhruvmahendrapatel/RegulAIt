@@ -59,7 +59,8 @@ import { loadLiveChain, createRootGrant } from "./delegation.js";
 import { configuredIdentitySigningKeys, rotateIdentitySigningKey } from "./identity-signing-keys.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { grantCascadeTestHooks } from "./oauth/identity-admin.js";
-import { parseSpiffeBundle, spiffeBundleSetStepUp } from "./oauth/spiffe-bundles.js";
+import { parseSpiffeBundle, spiffeBundleRevokeStepUp, spiffeBundleSetStepUp } from "./oauth/spiffe-bundles.js";
+import { tokenEndpointTestHooks } from "./oauth/token-endpoint.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -569,6 +570,118 @@ describe("S9 — rotation and revocation (decision 12)", () => {
     expect((await loadLiveChain(db, grant.id))!.failure).toMatchObject({ code: "credential_not_live" });
     const [inc] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "workload-identity-cascade-incomplete"), eq(auditLog.objectId, up.json().id)));
     expect(inc!.detail).toMatchObject({ bundleId: up.json().id, trustDomain: td, grantsNotRevoked: [grant.id] });
+  });
+
+  it("#389 review M1: re-uploading a bundle never revives what its revocation ended, even when the cascade failed", async () => {
+    const td = `s9m1-${RUN}.example.org`;
+    const a = await svidAgent(td, "m1");
+    const up = await upload(td, root.pem, null);
+    expect(up.statusCode, up.body).toBe(201);
+    // a real certificate-bound token, and a DPoP-bound grant the same SPIFFE ID authenticated
+    const svid = await makeCert({ issuer: root, uris: [a.clientId] });
+    const r = await tokenRequest(a, fwd(svid.der));
+    expect(r.statusCode, r.body).toBe(200);
+    const t = r.json().access_token as string;
+    const mtlsGrant = decodeJwt(t).grant_id as string;
+    const dpopGrant = await createRootGrant(db, {
+      sponsorUserId: sponsorId,
+      actorIdentityId: a.identityId,
+      scope: scope() as DelegationScope,
+      capMicros: null,
+      environment: ENV,
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+      projectId,
+      binding: { kind: "dpop", thumbprint: "s9-m1-dpop-thumbprint", authCredentialId: a.credentialId, audience: resource },
+    });
+    expect((await loadLiveChain(db, dpopGrant.id))!.failure).toBeNull();
+    grantCascadeTestHooks.failFor = (id) => id === mtlsGrant || id === dpopGrant.id;
+    try {
+      const rv = await inject("POST", `${BUNDLES}/${up.json().id}/revoke`, AUTH, {});
+      expect(rv.statusCode, rv.body).toBe(200);
+      expect(rv.json().cascade).toBe("incomplete");
+    } finally {
+      grantCascadeTestHooks.failFor = undefined;
+    }
+    // the trust domain is trusted again, under the same CA
+    const again = await upload(td, root.pem, null);
+    expect(again.statusCode, again.body).toBe(201);
+    for (const id of [mtlsGrant, dpopGrant.id]) {
+      const [g] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, id));
+      expect(g!.revokedAt, "the cascade was made to fail").toBeNull();
+      expect((await loadLiveChain(db, id))!.failure, id).toMatchObject({ code: "credential_not_live" });
+    }
+    expect((await mcpCall(t, fwd(svid.der))).statusCode).toBe(401);
+    // positive control: what the NEW bundle authenticates is live
+    const fresh = await tokenRequest(a, fwd(svid.der));
+    expect(fresh.statusCode, fresh.body).toBe(200);
+    expect((await loadLiveChain(db, decodeJwt(fresh.json().access_token as string).grant_id as string))!.failure).toBeNull();
+  });
+
+  it("#389 review M1: a revocation that arrives while a token is being issued waits for it, then ends it", async () => {
+    const td = `s9race-${RUN}.example.org`;
+    const a = await svidAgent(td, "race");
+    const up = await upload(td, root.pem, null);
+    expect(up.statusCode, up.body).toBe(201);
+    const svid = await makeCert({ issuer: root, uris: [a.clientId] });
+    let revoke: Promise<Awaited<ReturnType<typeof inject>>> | undefined;
+    tokenEndpointTestHooks.beforeGrantCommit = async () => {
+      // the issuing transaction holds the bundle row FOR SHARE: this revocation blocks on it until the commit
+      revoke = inject("POST", `${BUNDLES}/${up.json().id}/revoke`, AUTH, {});
+      await new Promise((r) => setTimeout(r, 300));
+    };
+    let r;
+    try {
+      r = await tokenRequest(a, fwd(svid.der));
+    } finally {
+      tokenEndpointTestHooks.beforeGrantCommit = undefined;
+    }
+    expect(r.statusCode, r.body).toBe(200);
+    const claims = decodeJwt(r.json().access_token as string);
+    const rv = await revoke!;
+    expect(rv.statusCode, rv.body).toBe(200);
+    expect(rv.json()).toMatchObject({ tokensRevoked: 1, cascade: "complete" });
+    expect(rv.json().grantsRevoked).toContain(claims.grant_id);
+    const [tok] = await db.select().from(issuedTokens).where(eq(issuedTokens.jti, claims.jti!));
+    expect(tok!.revokedAt).not.toBeNull();
+    const [g] = await db.select().from(delegationGrants).where(eq(delegationGrants.id, claims.grant_id as string));
+    const [b] = await db.select().from(spiffeTrustBundles).where(eq(spiffeTrustBundles.id, up.json().id));
+    expect(g!.createdAt.getTime()).toBeLessThanOrEqual(b!.revokedAt!.getTime());
+  });
+
+  it("#389 review L3: a step-up for a refused write (404, 409) stays unspent; the accepted write spends it", async () => {
+    const admin = await mkUser("l3-admin", true);
+    await db.update(users).set({ totpEnabled: true }).where(eq(users.id, admin.id));
+    try {
+      const td = `s9l3-${RUN}.example.org`;
+      const first = await upload(td, root.pem, null);
+      expect(first.statusCode, first.body).toBe(201);
+      const parsed = parseSpiffeBundle(root2.pem, new Date());
+      if (!("digest" in parsed)) throw new Error("fixture bundle refused");
+      const send = (su: { sessionToken: string; stepUpToken: string }, url: string, payload: object) =>
+        app.inject({ method: "POST", url, headers: { ...CSRF, "x-regulait-step-up": su.stepUpToken }, cookies: { regulait_session: su.sessionToken }, payload });
+      const used = async (id: string) => (await db.select({ usedAt: stepUpGrants.usedAt }).from(stepUpGrants).where(eq(stepUpGrants.id, id)))[0]!.usedAt;
+
+      // 409: a stale compare-and-set (the domain HAS an active bundle; the request says it has none)
+      const stale = await sessionWithStepUp(admin.id, spiffeBundleSetStepUp({ trustDomain: td, bundle: root2.pem, replacesBundleId: null }, parsed.digest));
+      const r409 = await send(stale, BUNDLES, { trustDomain: td, bundle: root2.pem, replacesBundleId: null });
+      expect([r409.statusCode, r409.json().error]).toEqual([409, "spiffe_bundle_conflict"]);
+      expect(await used(stale.grantId), "a refused upload spent its step-up").toBeNull();
+
+      // 404: revoking a bundle that does not exist
+      const missing = randomUUID();
+      const gone = await sessionWithStepUp(admin.id, spiffeBundleRevokeStepUp(missing));
+      const r404 = await send(gone, `${BUNDLES}/${missing}/revoke`, {});
+      expect([r404.statusCode, r404.json().error]).toEqual([404, "spiffe_bundle_not_found"]);
+      expect(await used(gone.grantId), "a refused revoke spent its step-up").toBeNull();
+
+      // positive control: the right compare-and-set is written, and only then is the step-up spent
+      const ok = await sessionWithStepUp(admin.id, spiffeBundleSetStepUp({ trustDomain: td, bundle: root2.pem, replacesBundleId: first.json().id }, parsed.digest));
+      const r201 = await send(ok, BUNDLES, { trustDomain: td, bundle: root2.pem, replacesBundleId: first.json().id });
+      expect(r201.statusCode, r201.body).toBe(201);
+      expect(await used(ok.grantId)).not.toBeNull();
+    } finally {
+      await db.update(users).set({ totpEnabled: false }).where(eq(users.id, admin.id));
+    }
   });
 
   it("a SPIFFE ID credential binds through the route once a bundle is active for its domain", async () => {

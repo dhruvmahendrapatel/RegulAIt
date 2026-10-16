@@ -1,7 +1,7 @@
 /**
  * ADR-0188 S9 — READING the SPIFFE trust bundles (decisions 10, 21).
  *
- * The bundles live in `spiffe_trust_bundles` (migration 0200), written only by
+ * The bundles live in `spiffe_trust_bundles` (migration 0199), written only by
  * the audited admin routes in `spiffe-bundles.ts`. These are the reads every
  * validator uses, at the point of use and never cached, so an upload or a
  * revocation reaches the next request on every replica:

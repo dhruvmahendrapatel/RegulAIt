@@ -1498,14 +1498,14 @@ S8 item 1 kept agents pairwise and left this relaxation for a later migration nu
 Open after the follow-up: the AI BOM's MCP server records (`apps/gateway/src/ai-bom.ts`) carry `identityPropagation`
 but not this setting; adding it is left to the ADR-0189 owner, whose files a parallel slice is changing.
 
-## As built: slice S9 (2026-10-16, branch `identity-s9-spiffe`, migration 0200)
+## As built: slice S9 (2026-10-16, branch `identity-s9-spiffe`, migration 0199)
 
 S9 moves the SPIFFE trust bundles into audited storage (the S5 security review's ruling) and takes X.509-SVID client
 authentication end to end. The code is `apps/gateway/src/oauth/spiffe-bundles.ts` (routes and upload checks) and
 `oauth/spiffe-trust-domains.ts` (the reads every validator uses); the runbook is
 [`docs/deployment/SPIFFE.md`](../deployment/SPIFFE.md). These points settle what decisions 10, 11, 12 and 21 left open:
 
-1. **Storage (migration 0200).** `spiffe_trust_bundles`: one row per upload, PUBLIC X.509 authorities only (a CHECK
+1. **Storage (migration 0199).** `spiffe_trust_bundles`: one row per upload, PUBLIC X.509 authorities only (a CHECK
    refuses any `PRIVATE KEY` text), the format, a per-authority summary, and a digest (hex SHA-256 over the sorted
    authority thumbprints, so it does not depend on order or upload format). At most one **active** bundle per trust
    domain (partial unique index). A row is never deleted; its content and each lifecycle stamp are written once
@@ -1592,7 +1592,34 @@ Open after S9:
 - **JWT-SVID client authentication** is not built; `jwt-svid` keys in an upload are counted, not stored.
 - **Runbook steps 5 to 9** (upload, registration, the proxy configuration, the exchange and the drills on a real
   deployment) are pending execution (M-041); the proxy part depends on the executor TLS front work.
-- **Migration 0200's journal entry** waits for 0199 (a concurrent I5 slice) to reach main.
+- A test that forces a revocation to commit between the token endpoint's certificate match and its issuing
+  transaction (the `spiffe_bundle_revoked` refusal) does not exist yet; the opposite interleaving is tested.
+
+### S9 fix round (#389 independent review, 2026-10-16)
+
+The coordinator renumbered S9's migration from 0200 to **0199** (I5 takes 0200), and its journal entry is in.
+
+1. **M1: a revocation is never undone by a re-upload.** The live-chain rule of item 9 also refuses a grant a SPIFFE ID
+   authenticated when a bundle of its domain was **revoked at or after the grant was created**
+   (`revoked_at >= delegation_grants.created_at`), whatever is active now. Introspection and the resource verifier
+   reach this through the same `loadLiveChain`, and a token is judged through its grant. To close the race window, the
+   token endpoint holds the authenticating bundle row `FOR SHARE` in the transaction that creates the grant and token,
+   and refuses `spiffe_bundle_revoked` if it was revoked meanwhile (`lockSpiffeBundleUnrevoked`). The revocation takes
+   the row `FOR UPDATE` and stamps `revoked_at` with `clock_timestamp()` after that lock. So a grant made under a bundle
+   is always created before the revocation commits, and the revocation's token update and cascade see it. A superseded
+   bundle still qualifies at the token endpoint: rotation is not revocation.
+2. **M2: the leaf's critical extensions.** pkijs does not judge path index 0. After the engine, a critical leaf
+   extension outside {basicConstraints, keyUsage, extKeyUsage, subjectAltName, subjectKeyIdentifier,
+   authorityKeyIdentifier}, or an allowed one whose value does not parse as its own ASN.1 type (pkijs's lazy
+   `parsedValue` swallows a mismatch, so the type constructors are called directly), is refused
+   `certificate_extension` (RFC 5280 §4.2). This applies to plain `tls_client_auth` as well as to SVIDs.
+3. **L3: the step-up is spent after the compare-and-set.** The routes look at the grant (`spend: false`) and claim it
+   inside the write's transaction, on the root handle, after the compare-and-set and every refusal, so a 404 or a 409
+   leaves it unspent.
+4. **L4:** `pemBundleToDer` refuses any `-----BEGIN` block that is not `CERTIFICATE` (`PemNotCertificateError`); a
+   bundle upload names it `spiffe_bundle_not_certificate`.
+5. **L5:** the env test that could not fail is replaced by a source check that the retired variable is read in one
+   place only (`legacySpiffeEnvSet`).
 
 ## Test strategy
 
