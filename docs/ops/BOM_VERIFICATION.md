@@ -248,8 +248,11 @@ node -e 'const k=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 ```
 
 ```text
-TEST-ONLY-CANARY-receipt-key-1 sha256:505e806bf46aedd490d099490e7e8d69bd2dec822045e37703cfb4749c746deb
+TEST-ONLY-CANARY-receipt-key-1 sha256:505e806b…4c746deb
 ```
+
+The fingerprint is elided here (the command was executed; the full value is the `fingerprint` of
+`TEST-ONLY-CANARY-receipt-key-1` in `packages/shared/test-vectors/decision-bom/b4-vectors.json`).
 
 The keyring file's `receiptV2FromAuditSeq` is the receipt v2 boundary (R42); it is part of the trust root, never
 read from the bundle. With pinned fingerprints instead of a keyring file, pass the boundary yourself with
