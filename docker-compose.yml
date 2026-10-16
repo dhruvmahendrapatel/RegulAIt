@@ -846,8 +846,10 @@ services:
   # generates on its own volume). Its only network is the internal `engines`
   # network, which reaches the gateway and nothing off the host. The sandboxes it
   # starts have no network at all (`--network none`): the MCP bytes travel over
-  # the executor's channel. Plain http to the gateway on that internal network is
-  # the development flag (amendment V); a deployment uses https.
+  # the executor's channel. It reaches the gateway over https through its own
+  # TLS front (`executor-front`, below), pinning that front's stack-local CA.
+  # Plain http to the gateway on that internal network is the development flag
+  # (amendment V, compose.isolation-insecure-dev.yml).
   sandbox-executor:
     profiles: ["isolation"]
     build:
@@ -857,6 +859,11 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
+      executor-front:
+        condition: service_started
+      # the front's CA root, copied once it exists; the executor pins it at start
+      executor-front-ca:
+        condition: service_completed_successfully
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -875,11 +882,16 @@ services:
       # daemon runs against the pinned release. A directory, never the file: a single-file bind mount pins the inode
       # at container start, so an upgrade in place would leave the executor hashing the old binary.
       - ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}:/host-gvisor:ro
+      # the TLS front's CA root certificate only (never its key), READ-ONLY; see executor-front-ca
+      - executor-front-ca:/etc/regulait/executor-front-ca:ro
     environment:
-      # review M4: https only. There is no working default: set REGULAIT_EXECUTOR_GATEWAY_URL to an https address of
-      # the gateway reachable from the `engines` network. The placeholder (.invalid never resolves) makes the executor
-      # exit at start with that instruction. Plain http only through compose.isolation-insecure-dev.yml (warned).
-      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://set-regulait-executor-gateway-url.invalid}
+      # review M4: https only. The default is the executor's own TLS front on `engines` (executor-front, below),
+      # whose certificate is checked against the pinned CA in REGULAIT_EXECUTOR_GATEWAY_CA_FILE and nothing else
+      # (not the public roots; there is no skip). Pointing the executor at a different https front: set both
+      # variables (an EMPTY CA file means the image's public roots). Plain http only through
+      # compose.isolation-insecure-dev.yml (warned; the CA file is then ignored).
+      REGULAIT_GATEWAY_URL: ${REGULAIT_EXECUTOR_GATEWAY_URL:-https://executor-front:8443}
+      REGULAIT_EXECUTOR_GATEWAY_CA_FILE: ${REGULAIT_EXECUTOR_GATEWAY_CA_FILE-/etc/regulait/executor-front-ca/ca.pem}
       REGULAIT_EXECUTOR_INIT_VOLUME: regulait-sandbox-init
       REGULAIT_EXECUTOR_INIT_DIR: /regulait-init
       REGULAIT_EXECUTOR_RUNSC_BINARY: /host-gvisor/runsc
@@ -894,6 +906,77 @@ services:
     restart: unless-stopped
     networks: [engines]
 
+  # --- the executor's internal TLS front (profile: isolation) — ADR-0190 I4 follow-ups
+  #
+  # A second Caddy, NOT the public one: on `engines` only, no host port, no
+  # admin endpoint, no outbound call. It serves https://executor-front:8443 for
+  # the executor channel (`/v1/executor-channel/*`) and answers 404 to every
+  # other path (infra/caddy/executor-front.Caddyfile). It strips every
+  # forwarding header and is NOT in REGULAIT_TRUSTED_PROXIES: the gateway sees
+  # this container as the peer, and its trust of client addresses is unchanged.
+  # Its certificate comes from its OWN local CA (`tls internal`), created on
+  # this service's first start in executor-front-data (only the front and
+  # the copier below mount the root key; the executor, holding the Docker
+  # socket, is host root anyway). Caddy renews the intermediate and the leaf.
+  # Nothing is committed; `docker compose down -v` destroys the CA, and the
+  # next start makes a new one that executor-front-ca copies again.
+  executor-front:
+    image: caddy:2-alpine
+    profiles: ["isolation"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    # the image's caddy binary carries the file capability cap_net_bind_service; exec fails without it in the
+    # bounding set. The front binds 8443 and needs nothing else.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - ./infra/caddy/executor-front.Caddyfile:/etc/caddy/Caddyfile:ro
+      - executor-front-data:/data
+      - executor-front-config:/config
+    networks: [engines]
+
+  # One-shot: copies the front's CA ROOT CERTIFICATE (public; never root.key)
+  # to the volume the executor mounts read-only. No network. It waits up to
+  # 120 s for the front to create its CA, and re-copies on every `up`, so a
+  # re-created CA is picked up by the executor's next start.
+  executor-front-ca:
+    image: caddy:2-alpine
+    profiles: ["isolation"]
+    depends_on:
+      executor-front:
+        condition: service_started
+    restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        src=/front-data/caddy/pki/authorities/local/root.crt
+        i=0
+        # wait for a COMPLETE PEM (its END line), not just a non-empty file
+        until [ -s "$$src" ] && grep -q -- '-----END CERTIFICATE-----' "$$src"; do
+          i=$$((i + 1))
+          if [ "$$i" -gt 120 ]; then echo "executor-front-ca: the front has not created its CA after 120 s ($$src)" >&2; exit 1; fi
+          sleep 1
+        done
+        grep -q -- '-----BEGIN CERTIFICATE-----' "$$src" || { echo "executor-front-ca: $$src is not a PEM certificate" >&2; exit 1; }
+        grep -q -- 'PRIVATE KEY' "$$src" && { echo "executor-front-ca: $$src holds a private key; refusing to copy it" >&2; exit 1; }
+        cp "$$src" /ca/.ca.pem.tmp
+        chmod 0444 /ca/.ca.pem.tmp
+        mv -f /ca/.ca.pem.tmp /ca/ca.pem
+        echo "executor-front-ca: copied the executor front's CA root to the executor's pinned bundle"
+    volumes:
+      - executor-front-data:/front-data:ro
+      - executor-front-ca:/ca
+
   caddy:
     image: caddy:2-alpine
     profiles: ["tls"]
@@ -901,10 +984,12 @@ services:
       - gateway
     restart: unless-stopped
     environment:
-      # Public hostname this stack serves. Default is the sslip.io name derived
-      # from the dev box's public IP (see infra/caddy/Caddyfile). Override when
-      # the IP changes or a real domain arrives.
-      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-3-229-246-126.sslip.io}
+      # Public hostname this stack serves. Set it (scripts/install.sh writes it
+      # to .env from --domain; compose.tls-local.yml sets localhost). The default
+      # is a placeholder under `.invalid`, which never resolves and can never be
+      # issued a certificate, so a `tls` stack started without it fails visibly
+      # instead of serving somebody else's name.
+      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-set-regulait-tls-host.invalid}
       # Where Caddy proxies to. Compose-network DNS name of the gateway.
       REGULAIT_TLS_UPSTREAM: ${REGULAIT_TLS_UPSTREAM:-gateway:3000}
       # Empty = real Let's Encrypt. compose.tls-local.yml sets `tls internal`.
@@ -1032,5 +1117,10 @@ volumes:
   # review H2: a FIXED name, because the executor names it on each `docker run --mount` against the host daemon
   sandbox-init:
     name: regulait-sandbox-init
+  # ADR-0190 I4 follow-ups: the executor front's Caddy storage (its local CA, root key included, and its
+  # certificates), its autosaved config, and the CA root certificate alone, which the executor mounts read-only
+  executor-front-data:
+  executor-front-config:
+  executor-front-ca:
   caddy_data:
   caddy_config:
