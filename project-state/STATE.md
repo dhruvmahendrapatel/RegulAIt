@@ -56,20 +56,23 @@ This paragraph supersedes the 2026-10-15 queue below.
   - There is no L1 (runc) backend, so relaxing the engine_worker floor is a no-op for placement today: the shipped
     `engine-worker` profile's L2 `minClass` still binds.
   - The executor TLS front has never been run on a real Docker host.
+- **Owner decisions 2026-10-16** (recorded in the ADRs):
+  - project sensitivity = the strictest use case MAX'd with an admin field that can only raise it (ADR-0190 owner
+    decision D);
+  - Art. 50: the owner gets counsel, and nothing claims Art. 50 compliance meanwhile (ADR-0193 Open);
+  - I7 OpenShell deferred until L2 is verified in CI and a Kata L3 backend exists (ADR-0190 owner decision E);
+  - adding any egress allow entry needs a step-up (ADR-0034 owner amendment 2026-10-16).
 - **Open owner questions:**
-  1. The source of project sensitivity for I2 (today the strictest use case, failing closed with none).
-  2. The EU AI Act Art. 50 legal review.
-  3. The I7 OpenShell go/no-go.
-  4. 5 Dependabot alerts on main (4 high, 1 moderate). The build environment can't read them (the alerts API
-     answers 403), so the owner has to check them.
-  5. Should plain egress allow entries need a step-up? Today they are audited with no step-up.
-  6. The demo-prep warn line the owner has not yet shared.
+  1. The demo-prep warn line (the owner will paste it).
+  2. Confirmation of the Dependabot risk acceptance to 2026-11-16 (PR #392).
 - **Next, in order:**
   1. Engine task images and the compose wiring (the executor input volume).
   2. The owner decision C admin relaxation build.
   3. A runc L1 backend plus a versionable engine-worker profile.
   4. The gVisor re-pin (#385), once a release carries the fix.
-  5. Smaller follow-ups, condensed under "Batch 6 follow-ups (2026-10-16)" in Known follow-ups.
+  5. The admin project-sensitivity field (ADR-0190 owner decision D).
+  6. The step-up for plain egress allow entries (ADR-0034 owner amendment 2026-10-16).
+  7. Smaller follow-ups, condensed under "Batch 6 follow-ups (2026-10-16)" in Known follow-ups.
 
 **2026-10-15 - bearer workload secrets retired, outbound MCP identity live, stdio servers moved off the gateway onto
 gVisor sandboxes, and execution facts in the evidence.** Full record:

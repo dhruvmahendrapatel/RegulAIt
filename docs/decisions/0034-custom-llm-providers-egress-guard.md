@@ -847,7 +847,7 @@ untrusted issuer still fails**. Those last two are the anti-regression for the t
 `egress-allow-host-set` audit row records `relaxation`, the relaxed opt-ins, the step-up method and the previous
 opt-ins. A stepped-up write is a compare-and-set on the opt-ins it was decided on (409 `changed_concurrently`).
 
-**A plain entry (a named host, https only, no opt-in) needs no step-up.** The allow-list is the mechanism of the
+*Superseded 2026-10-16 by the owner amendment below: adding a plain entry now needs a step-up. The sentence on registering an MCP server or provider at a public host still stands.* **A plain entry (a named host, https only, no opt-in) needs no step-up.** The allow-list is the mechanism of the
 default-deny posture, not a setting with a strict value to relax. A plain entry names one destination, and that
 destination still passes every check: DNS pinning, the unconditional ranges, the private-range rules and https.
 ADR-0181 treats such entries as ordinary configuration ("an allow-list entry for the demo's local MCP hosts"). What
@@ -856,3 +856,27 @@ host likewise needs no step-up. The refusal texts that suggest an opt-in now say
 
 The demo seeder writes its loopback entries (both opt-ins on) before Ada enrols her authenticator, while the
 bootstrap credential still passes a step-up (B4S-06, the pattern its passwords, grants and stewardship use).
+
+## Owner amendment — 2026-10-16: adding any allow entry needs a step-up
+
+The owner chose "require step-up" from the options the master session presented, 2026-10-16. **This replaces the
+"a plain entry needs no step-up" paragraph of the 2026-10-12 as-built section above.**
+
+- **Adding any egress allow entry needs a fresh `settings_relax` step-up**, the same as the private-range and
+  plaintext-http opt-ins already do, and the write is audited (`egress-allow-host-set`). A plain entry (a named host,
+  https only, no opt-in) is no longer exempt.
+- **Removing an entry needs no step-up.** Removing an entry tightens the allow-list, so by ADR-0180 it needs none. It
+  stays audited (`egress-allow-host-removed`).
+- **Unchanged:** turning an opt-in on still needs the step-up, and turning one off still needs nothing.
+- **Left open, build-time choices:**
+  - the exact facts the step-up is bound to for a plain new entry;
+  - whether a new entry with opt-ins presents one step-up or two;
+  - whether an upsert of an existing host that turns nothing on (for example, a note edit) counts as adding.
+    It names no new destination; the build slice decides and records it.
+- **Out of scope:** registering an MCP server or provider at a host that is already on the allow-list. This decision
+  does not change it.
+- **Where the rule lives in code today:** `POST /v1/egress-allow-hosts` in `apps/gateway/src/custom-providers.ts`
+  (the `relaxationsAgainst` check, which asks for a step-up only when an opt-in turns on). The demo seeder's plain
+  entry (`seedDemoEgressAllow` in `apps/gateway/src/seed.ts`) then needs a step-up too, through the bootstrap path
+  its loopback entries already use (B4S-06).
+- **Build:** a slice that applies the step-up to plain entries (queued in `STATE.md`).
