@@ -912,6 +912,32 @@ Open questions I4 leaves (for the owner or the master):
 6. **gVisor's sidecar binaries.** The pin covers the `runsc` binary the daemon names; the release's `gvisor-bin/`
    sidecars (for example `gvisor_sentry`) are not hashed by the executor yet.
 
+**gVisor CI job (2026-10-16, follow-up to open questions 3 and 6).** `.github/workflows/gvisor.yml` installs the pinned
+release on a GitHub-hosted `ubuntu-24.04` runner and runs the integration suite there. It fails if any test is skipped.
+The tarball is checked by the I0 fetch script. `runsc` and exactly the pinned `gvisor-bin/` sidecars are checked
+against `init-pin.ts`, which now also pins the sidecars (`RUNSC_RELEASE_SIDECARS`; the executor still hashes only
+`runsc` at placement time). The files are installed at the default `REGULAIT_GVISOR_HOST_DIR` layout and registered in
+`daemon.json` with the restricted profile's flags. Negative controls: plain `runc`, and a `runsc` that is not the
+pinned release. Its first runs found a blocker, so **L2 is still not verified**:
+
+- At `release-20261005.0`, gVisor's OCI seccomp conversion maps every `SCMP_ACT_ERRNO` rule to `EPERM` and ignores
+  `errnoRet` (`runsc/specutils/seccomp/seccomp.go`: "runc always returns EPERM").
+- Docker's default profile, which `RuntimeDefault` gives the sandbox under `--oci-seccomp`, answers `clone3` with
+  `errnoRet: 38` (`ENOSYS`) so that glibc falls back to `clone`. Under gVisor it gets `EPERM` instead, glibc (2.34 and
+  later; the trixie base has 2.41) does not fall back, and `pthread_create` fails. Node aborts at start
+  (`uv_thread_create` assertion), so the canary never prints its probes.
+- Evidence, CI runs 38826700988 and 38827133036:
+  - the runsc debug log shows `Syscall 435: denied by seccomp`;
+  - with `--security-opt seccomp=unconfined` and every other restricted argument unchanged, the canary ran under
+    gVisor (`4.19.0-gvisor`). Each observation except seccomp was what the profile requires: uid 10001, no
+    capabilities, `no_new_privs`, read-only root, no egress or DNS, only `lo`, and the memory, nproc and nofile limits.
+
+The fix is a security decision, so it is left open for the owner or the master. Options include:
+- an executor-shipped `Localhost` profile for gVisor that lets `clone3` reach the Sentry. Its flags cannot be filtered
+  by seccomp, so this loosens the namespace restriction that `seccomp_enforced` stands for;
+- a newer gVisor that honours `errnoRet`;
+- a base image whose libc does not use `clone3`.
+
 ## Test strategy
 
 Every rule gets a red proof (fails with the control removed, then passes), through the real app, with an upstream
