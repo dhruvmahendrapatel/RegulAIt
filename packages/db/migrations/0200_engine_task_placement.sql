@@ -18,7 +18,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS "engine_runs_task_placement_uq" ON "engine_runs" ("task_placement_id") WHERE "task_placement_id" IS NOT NULL;
 --> statement-breakpoint
 -- set once: a task placement is never replaced or cleared (the evidence it names stays the run's)
-CREATE OR REPLACE FUNCTION "engine_runs_task_placement_guard"() RETURNS trigger LANGUAGE plpgsql AS $$
+-- (migration 0185's invariants: the function pins its search_path, and the table it guards refuses TRUNCATE)
+CREATE OR REPLACE FUNCTION "engine_runs_task_placement_guard"() RETURNS trigger LANGUAGE plpgsql
+  SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
   IF OLD."task_placement_id" IS NOT NULL AND NEW."task_placement_id" IS DISTINCT FROM OLD."task_placement_id" THEN
     RAISE EXCEPTION 'engine_runs.task_placement_id is set once (ADR-0190 I5)' USING ERRCODE = 'check_violation';
@@ -30,3 +32,9 @@ DROP TRIGGER IF EXISTS "engine_runs_task_placement_guard" ON "engine_runs";
 --> statement-breakpoint
 CREATE TRIGGER "engine_runs_task_placement_guard" BEFORE UPDATE OF "task_placement_id" ON "engine_runs"
   FOR EACH ROW EXECUTE FUNCTION "engine_runs_task_placement_guard"();
+--> statement-breakpoint
+-- a TRUNCATE skips every row trigger: the set-once evidence link is refused that way too (0185's pattern)
+DROP TRIGGER IF EXISTS "engine_runs_no_truncate" ON public."engine_runs";
+--> statement-breakpoint
+CREATE TRIGGER "engine_runs_no_truncate" BEFORE TRUNCATE ON public."engine_runs"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
