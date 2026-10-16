@@ -149,7 +149,8 @@ export type EngineTaskInputUpload = z.infer<typeof engineTaskInputUploadSchema>;
 /** headers the tunnel carries either way (lower-case names; everything else is dropped) */
 export const ENGINE_TASK_HTTP_HEADERS = ["content-type", "accept", "authorization", "x-regulait-agent", "x-regulait-project"] as const;
 const headerValue = z.string().max(4096).regex(/^[\x20-\x7e]*$/);
-const headers = z.record(z.enum(ENGINE_TASK_HTTP_HEADERS), headerValue);
+// zod 4: a record keyed by an enum is exhaustive; a partial record admits any subset of the named headers
+const headers = z.partialRecord(z.enum(ENGINE_TASK_HTTP_HEADERS), headerValue);
 const requestId = z.string().regex(/^[0-9]{1,12}$/);
 const http_path = z
   .string()
