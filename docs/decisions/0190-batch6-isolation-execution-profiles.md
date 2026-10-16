@@ -918,7 +918,9 @@ The tarball is checked by the I0 fetch script. `runsc` and exactly the pinned `g
 against `init-pin.ts`, which now also pins the sidecars (`RUNSC_RELEASE_SIDECARS`; the executor still hashes only
 `runsc` at placement time). The files are installed at the default `REGULAIT_GVISOR_HOST_DIR` layout and registered in
 `daemon.json` with the restricted profile's flags. Negative controls: plain `runc`, and a `runsc` that is not the
-pinned release. Its first runs found a blocker, so **L2 is still not verified**:
+pinned release. Run 38827598419 passed both negative controls for real (each was refused before any sandbox
+started). The positive control failed: the backend refused, failing closed, because the init printed nothing. The
+first runs found the blocker behind that failure, so **L2 is still not verified**:
 
 - At `release-20261005.0`, gVisor's OCI seccomp conversion maps every `SCMP_ACT_ERRNO` rule to `EPERM` and ignores
   `errnoRet` (`runsc/specutils/seccomp/seccomp.go`: "runc always returns EPERM").
