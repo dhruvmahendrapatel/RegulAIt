@@ -11,11 +11,15 @@
 //     --fingerprint sha256:<hex>     repeatable; pins the bundled signing-key.pub (ADR-0116)
 //     --keyring <dir>                a directory of pinned <keyId>.pub files (ADR-0116)
 //   the receipt key (it signs the BOM body, the receipt and any addenda):
-//     --receipt-keyring <file>       the operator's `GET /v1/receipts/keys` or `/v1/receipts/export`
-//                                    JSON, obtained out of band; its `receiptV2FromAuditSeq` is the
-//                                    receipt v2 boundary
+//     --receipt-keyring <file>       the operator's `GET /v1/receipts/export` JSON, obtained out of band;
+//                                    its `receiptV2FromAuditSeq` is the receipt v2 boundary
 //     --receipt-fingerprint sha256:<hex>  repeatable; pins the bundle's receipt-keys.json entries
-//     --receipt-v2-from <seq|none>   the receipt v2 boundary (overrides the keyring file's)
+//     --receipt-v2-from <seq|none>   the receipt v2 boundary, from your trust record. REQUIRED with
+//                                    --receipt-fingerprint, and with a keyring file that has no
+//                                    `receiptV2FromAuditSeq` (such as `GET /v1/receipts/keys`): an absent
+//                                    boundary is refused, never read as "no cutover" (B8 review H1).
+//                                    It never overrides a boundary the keyring states: a different
+//                                    value is refused as a conflict (B8 recheck L1)
 //   optional:
 //     --tsa-trust <pem>              a TSA trust bundle, to check an anchor's RFC 3161 token
 //     --now <iso-8601>               the verification time (default: this machine's clock)
@@ -96,19 +100,70 @@ if (opt.keyring) {
 
 let receiptTrust;
 let boundary = null;
+// B8 recheck L3: inputs are read with a size cap, and a parse failure never echoes the file's content
+const MAX_KEYRING_BYTES = 1024 * 1024;
+const readCapped = (f, cap, what) => {
+  let st;
+  try {
+    st = statSync(f);
+  } catch {
+    process.stderr.write(`${what} is not readable\n`);
+    process.exit(2);
+  }
+  if (!st.isFile() || st.size > cap) {
+    process.stderr.write(`${what} is not a regular file of at most ${cap} bytes\n`);
+    process.exit(2);
+  }
+  return readFileSync(f);
+};
+// --receipt-v2-from, parsed once: undefined (not given), null (none) or a positive seq
+let flagBoundary;
+if (opt.v2From !== undefined) {
+  if (opt.v2From === "none") flagBoundary = null;
+  else if (/^[1-9][0-9]{0,15}$/.test(opt.v2From)) flagBoundary = Number(opt.v2From);
+  else usage();
+}
 if (opt.receiptKeyring) {
-  const file = JSON.parse(readFileSync(opt.receiptKeyring, "utf8"));
+  let file;
+  try {
+    file = JSON.parse(readCapped(opt.receiptKeyring, MAX_KEYRING_BYTES, "--receipt-keyring").toString("utf8"));
+  } catch {
+    process.stderr.write("--receipt-keyring is not readable JSON\n");
+    process.exit(2);
+  }
   if (!file || !Array.isArray(file.keys)) {
-    process.stderr.write("--receipt-keyring: expected {\"keys\": [{\"keyId\", \"jwk\"}], ...}\n");
+    process.stderr.write("--receipt-keyring: expected {\"keys\": [{\"keyId\", \"jwk\"}], \"receiptV2FromAuditSeq\": ...}\n");
     process.exit(2);
   }
   receiptTrust = { keys: file.keys.map((k) => ({ keyId: k.keyId, jwk: k.jwk })) };
-  if (typeof file.receiptV2FromAuditSeq === "number") boundary = file.receiptV2FromAuditSeq;
-} else receiptTrust = { pinnedFingerprints: opt.receiptFingerprints };
-if (opt.v2From !== undefined) {
-  if (opt.v2From === "none") boundary = null;
-  else if (/^[1-9][0-9]{0,15}$/.test(opt.v2From)) boundary = Number(opt.v2From);
-  else usage();
+  // B8 review H1: an ABSENT boundary is not "no cutover"; `GET /v1/receipts/keys` carries none. An explicit null is
+  // "no cutover recorded". B8 recheck L1: a boundary the keyring states is never overridden by --receipt-v2-from;
+  // the flag is accepted only when the field is absent, or when it states the same boundary.
+  if (!Object.hasOwn(file, "receiptV2FromAuditSeq")) {
+    if (flagBoundary === undefined) {
+      process.stderr.write("REFUSED: --receipt-keyring has no receiptV2FromAuditSeq (the receipt v2 boundary). Use the operator's `GET /v1/receipts/export` JSON, checked against your trust record; only if the boundary was recorded out of band, state it with --receipt-v2-from.\n");
+      process.exit(2);
+    }
+    boundary = flagBoundary;
+  } else {
+    const fb = file.receiptV2FromAuditSeq;
+    if (!(fb === null || (Number.isSafeInteger(fb) && fb >= 1))) {
+      process.stderr.write("REFUSED: --receipt-keyring's receiptV2FromAuditSeq must be null or a positive audit seq.\n");
+      process.exit(2);
+    }
+    if (flagBoundary !== undefined && flagBoundary !== fb) {
+      process.stderr.write(`REFUSED: conflicting receipt v2 boundaries: the keyring states ${fb === null ? "none" : fb}, --receipt-v2-from states ${flagBoundary === null ? "none" : flagBoundary}. A recorded boundary is never overridden; resolve the difference out of band.\n`);
+      process.exit(2);
+    }
+    boundary = fb;
+  }
+} else {
+  receiptTrust = { pinnedFingerprints: opt.receiptFingerprints };
+  if (flagBoundary === undefined) {
+    process.stderr.write("REFUSED: pinned receipt fingerprints carry no receipt v2 boundary. Pass --receipt-v2-from SEQ|none, from your trust record.\n");
+    process.exit(2);
+  }
+  boundary = flagBoundary;
 }
 
 // the RFC 3161 half lives with the gateway's pkijs validator (air-gapped, no network); it only reads a token
@@ -125,7 +180,7 @@ try {
 const now = opt.now ? new Date(opt.now) : new Date();
 if (!Number.isFinite(now.getTime())) usage();
 
-const report = await shared.verifyBomBundle(readFileSync(opt.bundle), {
+const report = await shared.verifyBomBundle(readCapped(opt.bundle, shared.BOM_ARCHIVE_MAX_TAR_BYTES, "the bundle"), {
   receipt: receiptTrust,
   receiptV2FromAuditSeq: boundary,
   export: exportTrust,

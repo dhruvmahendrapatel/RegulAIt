@@ -99,7 +99,9 @@ async function download(url: string) {
 function verifyScript(name: string, archive: Buffer) {
   const file = path.join(dir, `${name}.tar.gz`);
   writeFileSync(file, archive);
-  const r = spawnSync(process.execPath, [VERIFY_BOM, file, "--fingerprint", bomSpkiFingerprint(exportPublicPem), "--receipt-keyring", receiptKeyring, "--json"], { encoding: "utf8", timeout: 60_000 });
+  // `/v1/receipts/keys` carries no receipt v2 boundary, and an absent boundary is refused (ADR-0189 B8 review H1);
+  // this database records no cutover, so the boundary is stated as none
+  const r = spawnSync(process.execPath, [VERIFY_BOM, file, "--fingerprint", bomSpkiFingerprint(exportPublicPem), "--receipt-keyring", receiptKeyring, "--receipt-v2-from", "none", "--json"], { encoding: "utf8", timeout: 60_000 });
   const report = r.stdout ? (JSON.parse(r.stdout) as { outcome: string; checks: Array<{ check: string; status: string; reason?: string }> }) : null;
   return { status: r.status, stderr: r.stderr, outcome: report?.outcome ?? null, notValid: report?.checks.filter((c) => c.status !== "valid") ?? [] };
 }
