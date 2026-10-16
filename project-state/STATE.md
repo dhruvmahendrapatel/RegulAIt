@@ -1,10 +1,10 @@
 ---
-phase: batch-6-s7-s8-i4-i8-merged-s9-b8-next
-last_updated: 2026-10-15
+phase: batch-6-s9-i5-b8-merged-engine-images-next
+last_updated: 2026-10-16
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-15-session-01.md
+last_session: sessions/2026-10-16-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,56 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-16 - SPIFFE trust bundles audited, engines under execution profiles, an internal TLS front for the
+executor, and the B8 runbooks.** Full record: [sessions/2026-10-16-session-01.md](sessions/2026-10-16-session-01.md).
+This paragraph supersedes the 2026-10-15 queue below.
+- **Merged (UTC 2026-10-16)**, after #384 (the 2026-10-15 docs PR):
+  - #386 ADR-0190 owner decision C (docs only). A person's own stdio call (no agent) stays L3 by default. An admin
+    may lower it to L2 for interactive sessions only (never an API key), per server or project, audited with
+    step-up. Engines are never treated as unknown agents;
+  - #387 I4 follow-ups (no migration):
+    - the executor gets an internal TLS front, a Caddy `executor-front` on `engines` using a stack-local CA that
+      the executor pins;
+    - the compose `REGULAIT_TLS_HOST` default is now the neutral `set-regulait-tls-host.invalid`;
+    - a new import-cycle CI job: a dependency-cruiser ratchet (baseline 74 edges, which may only shrink) plus a
+      contained load-alone smoke check of each module under `unshare -rn`;
+  - #388 ADR-0189 B8 runbooks, `docs/ops/BOM_VERIFICATION.md` and `docs/ops/RECEIPT_V2_CUTOVER.md`. The verifier's
+    fail-open, where an absent receipt v2 boundary passed verification, is fixed: an absent boundary is refused.
+    Steps are marked executed or pending execution (M-041);
+  - #389 ADR-0188 S9, **migration 0199**. SPIFFE trust bundles move into audited, never-deleted storage (the
+    `REGULAIT_SPIFFE_TRUST_BUNDLES` variable is now ignored). X.509-SVID client authentication works end to end.
+    Revocation is final: the issuing transaction locks the domain's bundle rows, and the live-chain rule is the
+    backstop;
+  - #390 ADR-0190 I5 engines under execution profiles, **migration 0200**. Engine tasks run only through executor
+    placement, and a result is refused without a placed task. The sandbox's gateway channel allows only the model
+    routes. First-enable works from an executor attestation.
+- **Last migration:** 0200.
+- **Still open: PR #385, the gVisor CI job (HOLD).** The pinned runsc `release-20261005.0` maps every seccomp
+  ERRNO rule to EPERM. Docker's profile answers `clone3` with ENOSYS so that glibc falls back to `clone`; under
+  gVisor that becomes EPERM, glibc does not fall back, and Node aborts. The upstream fix (gVisor commit 7be4160, PR
+  #14721, merged 2026-10-12) is not yet in a release. The decision is to wait for the release and re-pin, not to
+  loosen seccomp. A scheduled check runs on 2026-10-20. **L2 (gVisor) stays UNVERIFIED.**
+- **Caveats:**
+  - Engines cannot run end to end in a stock install. They need engine task images (every shipped `taskImage` is
+    null, so such an engine places nothing), the executor input volume in compose, and the gVisor re-pin.
+  - There is no L1 (runc) backend, so relaxing the engine_worker floor is a no-op for placement today: the shipped
+    `engine-worker` profile's L2 `minClass` still binds.
+  - The executor TLS front has never been run on a real Docker host.
+- **Open owner questions:**
+  1. The source of project sensitivity for I2 (today the strictest use case, failing closed with none).
+  2. The EU AI Act Art. 50 legal review.
+  3. The I7 OpenShell go/no-go.
+  4. 5 Dependabot alerts on main (4 high, 1 moderate). The build environment can't read them (the alerts API
+     answers 403), so the owner has to check them.
+  5. Should plain egress allow entries need a step-up? Today they are audited with no step-up.
+  6. The demo-prep warn line the owner has not yet shared.
+- **Next, in order:**
+  1. Engine task images and the compose wiring (the executor input volume).
+  2. The owner decision C admin relaxation build.
+  3. A runc L1 backend plus a versionable engine-worker profile.
+  4. The gVisor re-pin (#385), once a release carries the fix.
+  5. Smaller follow-ups, condensed under "Batch 6 follow-ups (2026-10-16)" in Known follow-ups.
 
 **2026-10-15 - bearer workload secrets retired, outbound MCP identity live, stdio servers moved off the gateway onto
 gVisor sandboxes, and execution facts in the evidence.** Full record:
@@ -4953,6 +5003,11 @@ opt-in (#381, 0196) merged. S9 is next. ADR-0190 has I2, I8 (#382, 0197) and I4 
 as-built section in the ADR. L2 (gVisor) stays unverified until it has run on a real host. No new ADR was written in
 this window: the ADR index still ends at 0194, with 189 files and 189 rows.
 
+Batch 6 status (2026-10-16): ADR-0188 is built through S9 (#389, 0199), the last slice of its rollout. ADR-0189 B8
+(the verification and receipt v2 drain runbooks, #388) is merged. ADR-0190 records owner decision C (#386) and has
+as-built sections for the I4 follow-ups (#387) and I5 (#390, 0200); L2 (gVisor) stays unverified while #385 waits
+for a gVisor release. No new ADR was written: the index still ends at 0194, with 189 files and 189 rows.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
@@ -4967,15 +5022,62 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **Batch 6 follow-ups (2026-10-16)**, from the #386-#390 builder reports and reviews. Items already in the
+  2026-10-15 list below are not repeated. Unless a line says it was checked on main, these are taken from those
+  reports and were not re-verified one by one.
+  - **Next queue, in order:**
+    1. Engine task images and the compose wiring. Every shipped `taskImage` is null and compose has no executor
+       input volume (both checked on main), so engines cannot run end to end in a stock install.
+    2. The owner decision C admin relaxation build (ADR-0190, #386).
+    3. A runc L1 backend plus a versionable engine-worker profile. Until then, relaxing the engine_worker floor is a
+       no-op for placement.
+    4. The gVisor re-pin on #385 once a release carries upstream commit 7be4160, covering the `gvisor-bin/`
+       sidecars too. A scheduled check runs on 2026-10-20 (checked). Do not loosen seccomp.
+    5. The smaller follow-ups below.
+  - **I5 (ADR-0190, #390):**
+    - The task start does not re-check `judge_required` or `agent_not_dispatchable`, so I5 point 18 overstates.
+      Fix the code or the ADR.
+    - One gateway process caps unacknowledged task output at 512 MiB across every task: a noisy-neighbour risk.
+      Document it or share it fairly.
+    - ADR drift: point 13 (the attestation basis is now read outside the lease transaction) and point 12 (a
+      `not_run` from an unplaced task is also dropped) are stale.
+    - Tighten the d288081 test assertion to per-`runId`.
+    - The modelscan runner still downloads the artifact itself.
+    - Streaming over the gateway channel is not built.
+  - **I4 follow-ups (#387):**
+    - Digest-pin `caddy:2-alpine` in every Caddy service and in the image bundle.
+    - Multi-executor needs one TLS front per executor host.
+    - Run `docker compose --profile isolation up` once on a Docker host and record it in ADR-0190. The front has
+      never run on a real Docker host.
+    - The dev host name is still in an `apps/gateway/src/hsts.ts` comment, ADR-0029, ADR-0032, `docs/ops/TLS.md`
+      and `docs/product/ROADMAP.md` (a bare IP).
+  - **B8 (ADR-0189, #388):**
+    - Link `docs/ops/BOM_VERIFICATION.md` and `docs/ops/RECEIPT_V2_CUTOVER.md` from `docs/deployment/INSTALL.md`
+      (not linked, checked on main).
+    - `validateCycloneDx('1.6')` accepts a 1.7 document. Harden it in the product.
+    - Pin a prebuilt halo wheel to drop `--no-build-isolation` and the Python 3.11 dependency.
+    - The pending runbook steps need a running stack and an RFC 3161 TSA.
+    - Watch the `release-ai-bom.test.mjs` timeout under the parallel sweep.
+  - **S9 (ADR-0188, #389):**
+    - Fetch bundles through the egress guard (its own slice).
+    - Per-bundle-version attribution, so a revocation can be narrower than the whole trust domain. Whole-domain
+      revocation is the stricter default; keep it until then.
+    - JWT-SVID client authentication is not built.
+    - SPIFFE runbook steps 5-9 are pending a real deployment.
+    - Lows: a step-up is spent on a racing first-upload 409 (fails safe); pkijs is lenient about inner extension
+      fields (no authorization impact); the step-up spend takes a second pooled connection while the row lock is
+      held (a deadlock risk with small pools); add a test for the revoke-commits-first refusal path.
 - **Batch 6 follow-ups (2026-10-15)**, from the #377-#383 builder reports and reviews. Unless a line says it was
   checked on main, these are taken from those reports and were not re-verified one by one.
   - **I4 (ADR-0190, #383):**
-    - The executor needs an internal TLS front on `engines` that does not trust proxy addresses. Today it fails
-      closed without one.
-    - The `runsc` pin does not cover the release's `gvisor-bin/` sidecars.
+    - ~~The executor needs an internal TLS front on `engines` that does not trust proxy addresses.~~ **Done** (#387,
+      the Caddy `executor-front`, checked on main 2026-10-16).
+    - The `runsc` pin does not cover the release's `gvisor-bin/` sidecars. (Carry into the gVisor re-pin.)
     - Multi-replica stdio needs sticky routing or a frames table.
-    - Add a gVisor CI job. None exists, checked on main.
-    - I5 needs the input-volume and task-secret channels.
+    - ~~Add a gVisor CI job.~~ Built as PR #385, still open and held for the gVisor re-pin (see the 2026-10-16
+      paragraph).
+    - ~~I5 needs the input-volume and task-secret channels.~~ **Built in the executor** (#390). The compose input
+      volume is still missing (2026-10-16 queue item 1).
     - Bind-mount a pinned Node for the sandbox init.
     - MAC the close, keepalive and bye lines.
     - Lows: `awaitPlacement` maps a later-gate-withdrawn offer to `no_executor`; a null profile is allowed on any
@@ -5003,10 +5105,12 @@ to personal `dhruvmahendrapatel`.
     - The shadow-AI plan could take an optional `?environment=`.
     - Narrow race: a concurrent change between the check and the owner write on `PATCH /v1/servers/:id`.
   - **Repo hygiene:**
-    - The compose Caddy `REGULAIT_TLS_HOST` default still names the owner's dev host. Replace it with a neutral
-      placeholder (checked on main).
-    - An import cycle from `mcp-proxy` to `compat-core` remains (#383 moved only the constant). Consider a cycle
-      check in CI.
+    - ~~The compose Caddy `REGULAIT_TLS_HOST` default still names the owner's dev host.~~ **Done** (#387; the
+      default is `set-regulait-tls-host.invalid`, checked on main 2026-10-16). Other files still name it: see the
+      2026-10-16 list.
+    - ~~An import cycle from `mcp-proxy` to `compat-core` remains. Consider a cycle check in CI.~~ **Done** (#387): a
+      CI ratchet now refuses any new cycle edge. The existing edges stay in the 74-edge baseline, which may only
+      shrink.
     - Flaky candidate: the `zz-b4c-review-fixes.test.ts` TOTP-activate test got a 401 once on #381.
     - Sweep the mocked e2e specs for forms filled right after a POST that don't wait for the post-success reset
       (seen on #377).
