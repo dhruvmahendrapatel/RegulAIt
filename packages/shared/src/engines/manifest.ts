@@ -60,6 +60,14 @@ export interface EngineManifestEntry {
    * (B5-P2, decisions 170 on); modelscan's scanner split waits for its verified image (decision 104).
    */
   credentialIsolation: boolean;
+  /**
+   * ADR-0190 I5: the image an executor starts this engine's TASK sandbox from, by its Docker content digest (`docker
+   * image inspect --format '{{.Id}}'`, which `docker save`/`load` keep), or null until the image is built. Null =
+   * the task's placement does not resolve (`policy_unresolved`): the run ends `not_run`, it never runs elsewhere.
+   */
+  taskImage: string | null;
+  /** ADR-0190 I5: the task's entry point inside that image (the sandbox init runs it, never a shell) */
+  taskEntry: { command: string; args: readonly string[] };
   /** the named sets this build classes; any set not listed counts as offensive (secure default) */
   sets: Readonly<Record<string, EngineSetClass>>;
   /** what an air-gapped install cannot run, published as data */
@@ -109,6 +117,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // virtual key. The runner key stays in the runner container, which never runs promptfoo. The
     // worker proves it at run time (the switch above), so decision 79's gate no longer applies.
     credentialIsolation: true,
+    // ADR-0190 I5: the task image is built with the engine image; until then nothing can be placed (fail closed)
+    taskImage: null,
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
     // every set that runs here, by class; a set not listed is offensive (fail closed)
     sets: promptfooManifestSets(),
     // remote generation is off on every install, not only air-gapped ones: this never runs
@@ -148,6 +159,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // (ADR-0187 decision 104), but the flag stays false until the built image is verified, so
     // decision 79's gate applies: enabling needs the audited, stepped-up acceptance
     credentialIsolation: false,
+    // ADR-0190 I5: the task image is built with the engine image; until then nothing can be placed (fail closed)
+    taskImage: null,
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
     // one set: scan the target artifact. Any other set is unclassified (offensive: approval first).
     sets: { scan: "standard" },
     // planning-time exclusions (decision 61): a format this build has no scanner for
@@ -192,6 +206,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // runs garak; the worker runs garak with no runner key and no state volume, and holds only the
     // run's own virtual key for the run's lifetime. Decision 79's acceptance therefore does not apply.
     credentialIsolation: true,
+    // ADR-0190 I5: the task image is built with the engine image; until then nothing can be placed (fail closed)
+    taskImage: null,
+    taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
     // every probe that runs, by class; a probe not listed is offensive (fail closed)
     sets: garakManifestSets(),
     // planning-time exclusions (decision 61), keyed by the probe name the runner reports

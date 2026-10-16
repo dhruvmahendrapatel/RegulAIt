@@ -59,6 +59,9 @@ export const EXECUTOR_CHANNEL_ROUTES = [
   // I4: a placed stdio session's bytes (stdio.ts), on the same proof
   `GET ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/stdio`,
   `POST ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/stdio`,
+  // I5: an engine task's read-only input (its manifest, then each file), fetched before the sandbox starts
+  `GET ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/input`,
+  `GET ${EXECUTOR_CHANNEL_PREFIX}/offers/:offerId/input/:n`,
 ] as const;
 
 export const EXECUTOR_PROOF_HEADER = "executor-proof" as const;

@@ -446,6 +446,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/engine-runner/runs/:runId/heartbeat": "internal",
   "GET /v1/engine-runner/artifacts/:artifactId": "internal",
   "POST /v1/engine-runner/runs/:runId/result": "internal",
+  // ADR-0190 I5: the run's task in an executor's sandbox
+  "POST /v1/engine-runner/runs/:runId/task/input": "internal",
+  "GET /v1/engine-runner/runs/:runId/task/frames": "internal",
+  "POST /v1/engine-runner/runs/:runId/task/frames": "internal",
   "POST /v1/engine-runs": "internal",
   "GET /v1/engine-runs": "internal",
   "GET /v1/engine-runs/:runId": "internal",
@@ -1067,6 +1071,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0190 I4: a placed stdio session's bytes
   "GET /v1/executor-channel/offers/:offerId/stdio": "internal",
   "POST /v1/executor-channel/offers/:offerId/stdio": "internal",
+  // ADR-0190 I5: an engine task's read-only input
+  "GET /v1/executor-channel/offers/:offerId/input": "internal",
+  "GET /v1/executor-channel/offers/:offerId/input/:n": "internal",
 };
 
 /**
@@ -1479,6 +1486,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/engine-runner/runs/:runId/heartbeat": "engines",
   "GET /v1/engine-runner/artifacts/:artifactId": "engines",
   "POST /v1/engine-runner/runs/:runId/result": "engines",
+  "POST /v1/engine-runner/runs/:runId/task/input": "engines",
+  "GET /v1/engine-runner/runs/:runId/task/frames": "engines",
+  "POST /v1/engine-runner/runs/:runId/task/frames": "engines",
   "POST /v1/engine-runs": "engines",
   "GET /v1/engine-runs": "engines",
   "GET /v1/engine-runs/:runId": "engines",
@@ -2009,4 +2019,6 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/executor-channel/offers/:offerId/end": "executor-channel",
   "GET /v1/executor-channel/offers/:offerId/stdio": "executor-channel",
   "POST /v1/executor-channel/offers/:offerId/stdio": "executor-channel",
+  "GET /v1/executor-channel/offers/:offerId/input": "executor-channel",
+  "GET /v1/executor-channel/offers/:offerId/input/:n": "executor-channel",
 };

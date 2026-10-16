@@ -5559,12 +5559,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0189 B9 (R51): supplier-declared SPDX properties of models and datasets (admin-only, audited)
   registerAiBomSpdxFieldRoutes(app, db);
   registerIsolationRoutes(app, db);
-  registerExecutorChannelRoutes(app, db, { ...(opts.executorChannel ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}) });
+  // ADR-0190 I5: an engine task's artifact input is streamed from the same artifact store the upload route writes
+  const engineTaskStore = opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore };
+  registerExecutorChannelRoutes(app, db, { ...(opts.executorChannel ?? {}), ...(opts.dataKey ? { dataKey: opts.dataKey } : {}), ...engineTaskStore });
   // ADR-0187 (batch 5, AgentCoordination §4.10): the engines (admin; GET is any
   // user), engine runs and schedules (any user, own runs), and the runner routes
   // (the runner's self token only: registerEngineRunnerScopeHook).
   registerEngineRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
-  registerEngineRunRoutes(app, db, { dataKey: opts.dataKey, ...opts.engines });
+  registerEngineRunRoutes(app, db, { dataKey: opts.dataKey, ...engineTaskStore, ...opts.engines });
   // ADR-0187 B5-M: model-artifact upload, list and view (own uploads; an admin sees all), and the
   // runner's artifact stream (the runner's self token, live lease only)
   registerModelArtifactRoutes(app, db, opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore });

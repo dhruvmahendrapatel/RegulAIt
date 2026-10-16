@@ -84,6 +84,8 @@ export interface EngineOptions {
   taxonomy?: EngineTaxonomy;
   /** the gateway's OpenAI-compatible base as a runner reaches it on the engines network */
   gatewayBaseUrl?: string;
+  /** ADR-0190 I5: where an engine task's artifact input is read from (default: the artifact store from the environment) */
+  artifactStore?: import("./model-artifacts.js").ArtifactStore | null;
 }
 
 export function manifestOf(opts: EngineOptions): Readonly<Record<EngineId, EngineManifestEntry>> {

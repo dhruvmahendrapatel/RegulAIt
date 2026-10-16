@@ -105,7 +105,8 @@ import {
 import { z } from "zod";
 import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
-import { artifactAccessible, recordArtifactScanTx } from "./model-artifacts.js";
+import { artifactAccessible, artifactStoreFromEnv, recordArtifactScanTx } from "./model-artifacts.js";
+import { registerEngineTaskRoutes } from "./engine-tasks.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -1435,7 +1436,18 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
   setEngineRuntime(opts);
   const manifest = manifestOf(opts);
 
-  const visible = (req: { authCtx: { isAdmin: boolean; userId: string | null } }, run: EngineRunRow) =>
+  // ADR-0190 I5: the run's task (its worker) runs only in an executor's sandbox; the start decision ends a run that
+  // cannot be placed through this module's single terminal path
+  const taskStore = opts.artifactStore === undefined ? artifactStoreFromEnv() : opts.artifactStore;
+  registerEngineTaskRoutes(app, db, {
+    manifest: () => manifest,
+    artifactStore: () => taskStore,
+    endRunTx: async (tx, run, end, now) =>
+      (await endLockedRun(tx, run, { status: end.status, errorCode: end.errorCode, normalised: noResult(end.status), cause: end.cause, actorUserId: NO_IDENTITY }, now)) ?? null,
+    notifyEnded: notifyWorkflowsOfEndedRuns,
+  });
+
+  const visible =(req: { authCtx: { isAdmin: boolean; userId: string | null } }, run: EngineRunRow) =>
     req.authCtx.isAdmin || (req.authCtx.userId !== null && run.runAsUserId === req.authCtx.userId);
 
   // ---- POST /v1/engine-runs ---------------------------------------------------

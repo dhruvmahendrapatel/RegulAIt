@@ -134,6 +134,10 @@ export const ENGINE_RUNNER_ROUTES = [
   "POST /v1/engine-runner/runs/:runId/heartbeat",
   "GET /v1/engine-runner/artifacts/:artifactId",
   "POST /v1/engine-runner/runs/:runId/result",
+  // ADR-0190 I5: the run's task runs in an executor's sandbox; the runner hands it its input and reads its frames
+  "POST /v1/engine-runner/runs/:runId/task/input",
+  "GET /v1/engine-runner/runs/:runId/task/frames",
+  "POST /v1/engine-runner/runs/:runId/task/frames",
 ] as const;
 export const ENGINE_ENROLLMENT_ROUTES = ["POST /v1/engine-runner/register"] as const;
 

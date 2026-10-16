@@ -97,9 +97,16 @@ export const STDIO_SECRET_RE = /^[A-Za-z0-9_-]{43}$/;
 export function stdioMacKey(secretB64url: string, offerId: string): Buffer {
   return Buffer.from(hkdfSync("sha256", Buffer.from(secretB64url, "base64url"), Buffer.from(offerId, "utf8"), "regulait.executor-stdio-mac.v1", 32));
 }
-type MacInput = { type: "start"; workload: StdioWorkload } | { type: "stdin"; seq: number; data: string };
+/**
+ * I5: an engine task's `start` also carries its task secret (decision 5, `task_scoped`), covered by the same MAC. A
+ * `start` with no secret is MACed exactly as in I4 (the key is absent from the canonical text, not null).
+ */
+type MacInput = { type: "start"; workload: StdioWorkload; secret?: string | undefined } | { type: "stdin"; seq: number; data: string };
 function macText(offerId: string, m: MacInput): string {
-  const body = m.type === "start" ? { v: 1, offerId, type: "start", workload: m.workload } : { v: 1, offerId, type: "stdin", seq: m.seq, data: m.data };
+  const body =
+    m.type === "start"
+      ? { v: 1, offerId, type: "start", workload: m.workload, ...(m.secret !== undefined ? { secret: m.secret } : {}) }
+      : { v: 1, offerId, type: "stdin", seq: m.seq, data: m.data };
   const t = canonicalize(body);
   if (t === undefined) throw new TypeError("stdio MAC: not serialisable");
   return t;
@@ -145,7 +152,15 @@ const macField = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
  */
 export const executorStdioMessageSchema = z.discriminatedUnion("type", [
   /** first line of every window: what the sandbox runs once released (the executor uses the first it sees) */
-  z.object({ type: z.literal("start"), workload: stdioWorkloadSchema, mac: macField }).strict(),
+  z
+    .object({
+      type: z.literal("start"),
+      workload: stdioWorkloadSchema,
+      /** I5: an engine task's secret (the run's key), released to the workload on fd 3; never for an MCP server */
+      secret: z.string().regex(/^[\x21-\x7e]{1,1024}$/).optional(),
+      mac: macField,
+    })
+    .strict(),
   z.object({ type: z.literal("stdin"), seq: z.number().int().min(0), data: frameData, mac: macField }).strict(),
   /** the gateway closed the session: the executor ends the server's stdin and stops the sandbox */
   z.object({ type: z.literal("close") }).strict(),
