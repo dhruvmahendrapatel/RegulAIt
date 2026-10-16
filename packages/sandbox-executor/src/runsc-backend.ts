@@ -126,7 +126,8 @@ export interface RunscBackendOptions {
   /**
    * ADR-0190 I5: the executor's INPUT VOLUME (a Docker volume) and where this executor has it mounted. An engine task's
    * input is written under `<inputDir>/<sandbox name>/jobs` and that sub-path is mounted read-only into the sandbox.
-   * Unset = profiles with inputs are refused (no engine tasks on this executor).
+   * Unset here = `REGULAIT_EXECUTOR_INPUT_DIR` and `REGULAIT_EXECUTOR_INPUT_VOLUME` (null = none). Without both, profiles
+   * with inputs are refused (no engine tasks on this executor).
    */
   inputDir?: string | null;
   inputVolume?: string | null;
@@ -551,7 +552,15 @@ export class RunscDockerBackend implements SandboxBackend {
     this.socket = opts.dockerSocket ?? "/var/run/docker.sock";
     this.api = opts.dockerApi ?? dockerApiGet(this.socket);
     this.dockerBin = opts.dockerBin ?? "docker";
+    // I5: the input volume, from the options or (unset there) the executor's environment; both or neither (a half
+    // configuration refuses engine tasks, never runs them without their input)
+    const dir = opts.inputDir === undefined ? (process.env.REGULAIT_EXECUTOR_INPUT_DIR ?? null) : opts.inputDir;
+    const vol = opts.inputVolume === undefined ? (process.env.REGULAIT_EXECUTOR_INPUT_VOLUME ?? null) : opts.inputVolume;
+    this.inputDir = dir && vol ? dir : null;
+    this.inputVolume = dir && vol ? vol : null;
   }
+  private readonly inputDir: string | null;
+  private readonly inputVolume: string | null;
 
   describe(): BackendDescription {
     // a runsc host attests L2 only: an L1 (runc) placement is never served by this backend
@@ -631,7 +640,7 @@ export class RunscDockerBackend implements SandboxBackend {
 
   private async sandbox(kind: "canary" | "placement", image: string, profile: ExecutionProfileBody, cls: AppliedIsolationKind, task?: SandboxTaskInput): Promise<SandboxHandle> {
     if (cls !== "user_space_kernel") throw new RunscBackendError(`the runsc backend attests user_space_kernel only (asked ${cls})`);
-    const inputVolume = Boolean(this.opts.inputDir && this.opts.inputVolume);
+    const inputVolume = this.inputDir !== null && this.inputVolume !== null;
     if (kind === "placement") {
       const unsupported = unsupportedProfileFeature(profile, { inputVolume });
       if (unsupported) throw new RunscBackendError(`the profile asks for ${unsupported}, which the runsc backend does not provide in this release; nothing was started`);
@@ -648,9 +657,9 @@ export class RunscDockerBackend implements SandboxBackend {
     let input: DockerRunInput["input"] = null;
     if (kind === "placement" && task) {
       const declared = profile.filesystem.inputs[0]!;
-      inputRoot = path.join(this.opts.inputDir!, name);
+      inputRoot = path.join(this.inputDir!, name);
       inputSha256 = await writeTaskInput(path.join(inputRoot, declared.name), task);
-      input = { volume: this.opts.inputVolume!, subpath: `${name}/${declared.name}`, mountPath: declared.mountPath };
+      input = { volume: this.inputVolume!, subpath: `${name}/${declared.name}`, mountPath: declared.mountPath };
     }
     const cleanupInput = async () => {
       if (inputRoot) await removeTaskInput(inputRoot).catch(() => undefined);
