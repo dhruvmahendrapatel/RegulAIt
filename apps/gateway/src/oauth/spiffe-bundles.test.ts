@@ -10,14 +10,15 @@
  * Two sources of certificates:
  *  - synthetic ones made per run (`makeCert`, in-memory keys);
  *  - a REAL SPIRE 1.13.3 trust bundle and X.509-SVID (`testing/spire-1.13.3/`,
- *    public halves only), produced by `spire-server bundle show -format spiffe`,
+ *    public halves only; the PEM files are named `.crt` because the repository
+ *    ignores `*.pem`), produced by `spire-server bundle show -format spiffe`,
  *    `-format pem` and `spire-server x509 mint`, exactly as the BYOC runbook
  *    records. The SVID was valid from 2026-10-16T00:18:43Z to 01:18:53Z, its
  *    CA from 00:18:11Z to 2026-10-23T00:18:21Z, so the test judges them at a
  *    fixed instant inside (and one after) those windows.
  */
 import { readFileSync } from "node:fs";
-import { X509Certificate } from "node:crypto";
+import { generateKeyPairSync, X509Certificate } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { exportJWK } from "jose";
 import { makeCert, type TestCert } from "../testing/x509-fixtures.js";
@@ -85,7 +86,8 @@ describe("a bundle upload: PEM or the SPIFFE bundle format, public CAs only", ()
   });
 
   it("a private key anywhere is refused, in PEM or as a JWK member", async () => {
-    const pkcs8 = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n";
+    // a real key made at runtime (no key-shaped literal in the repository)
+    const pkcs8 = generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }).toString();
     expect(code(parseSpiffeBundle(`${root.pem}${pkcs8}`, now()))).toBe("spiffe_bundle_private_material");
     const doc = JSON.parse(await spiffeJwks([root])) as { keys: Array<Record<string, unknown>> };
     doc.keys[0]!.d = "AAAA";
@@ -141,21 +143,21 @@ describe("a bundle upload: PEM or the SPIFFE bundle format, public CAs only", ()
 describe("a REAL SPIRE 1.13.3 bundle and X.509-SVID (testing/spire-1.13.3)", () => {
   it("the SPIFFE-format and PEM exports of the same SPIRE CA are the same bundle, with its jwt-svid key ignored", () => {
     const jwks = ok(parseSpiffeBundle(fixture("bundle.spiffe.json"), SPIRE_VALID_AT));
-    const pem = ok(parseSpiffeBundle(fixture("bundle.pem"), SPIRE_VALID_AT));
+    const pem = ok(parseSpiffeBundle(fixture("bundle.crt"), SPIRE_VALID_AT));
     expect([jwks.format, jwks.jwtAuthoritiesIgnored, jwks.views.length]).toEqual(["spiffe_jwks", 1, 1]);
     expect(jwks.digest).toBe(pem.digest);
   });
 
   it("the SVID validates offline under the uploaded bundle, inside its window (positive control)", async () => {
     const anchors = ok(parseSpiffeBundle(fixture("bundle.spiffe.json"), SPIRE_VALID_AT)).authorities;
-    const svid = Buffer.from(new X509Certificate(fixture("svid.pem")).raw);
+    const svid = Buffer.from(new X509Certificate(fixture("svid.crt")).raw);
     const r = await validateClientCertificate(svid, { anchors, now: SPIRE_VALID_AT, spiffeTrustDomain: SPIRE_TD });
     expect(r.ok && r.spiffeId).toBe(SPIRE_ID);
   });
 
   it("the same SVID, an hour after it expired, is refused (the CA is still valid then)", async () => {
-    const anchors = ok(parseSpiffeBundle(fixture("bundle.pem"), SPIRE_VALID_AT)).authorities;
-    const svid = Buffer.from(new X509Certificate(fixture("svid.pem")).raw);
+    const anchors = ok(parseSpiffeBundle(fixture("bundle.crt"), SPIRE_VALID_AT)).authorities;
+    const svid = Buffer.from(new X509Certificate(fixture("svid.crt")).raw);
     const r = await validateClientCertificate(svid, { anchors, now: SPIRE_SVID_EXPIRED_AT, spiffeTrustDomain: SPIRE_TD });
     // pkijs judges every certificate's validity while it builds the path, so an expired leaf has no valid path; only
     // the instant differs from the positive control above
@@ -163,18 +165,18 @@ describe("a REAL SPIRE 1.13.3 bundle and X.509-SVID (testing/spire-1.13.3)", () 
   });
 
   it("judged for another trust domain, the genuine SVID is refused", async () => {
-    const anchors = ok(parseSpiffeBundle(fixture("bundle.pem"), SPIRE_VALID_AT)).authorities;
-    const svid = Buffer.from(new X509Certificate(fixture("svid.pem")).raw);
+    const anchors = ok(parseSpiffeBundle(fixture("bundle.crt"), SPIRE_VALID_AT)).authorities;
+    const svid = Buffer.from(new X509Certificate(fixture("svid.crt")).raw);
     expect(await validateClientCertificate(svid, { anchors, now: SPIRE_VALID_AT, spiffeTrustDomain: "other.example.org" })).toEqual({ ok: false, code: "spiffe_trust_domain" });
   });
 
   it("under another domain's bundle (our synthetic CA), the genuine SVID has no path", async () => {
-    const svid = Buffer.from(new X509Certificate(fixture("svid.pem")).raw);
+    const svid = Buffer.from(new X509Certificate(fixture("svid.crt")).raw);
     expect(await validateClientCertificate(svid, { anchors: [root.der], now: SPIRE_VALID_AT, spiffeTrustDomain: SPIRE_TD })).toEqual({ ok: false, code: "certificate_path" });
   });
 
   it("the SPIRE CA itself, presented as a client certificate, is refused as a leaf", async () => {
-    const anchors = ok(parseSpiffeBundle(fixture("bundle.pem"), SPIRE_VALID_AT)).authorities;
+    const anchors = ok(parseSpiffeBundle(fixture("bundle.crt"), SPIRE_VALID_AT)).authorities;
     const r = await validateClientCertificate(anchors[0]!, { anchors, now: SPIRE_VALID_AT, spiffeTrustDomain: SPIRE_TD });
     expect(r.ok).toBe(false);
   });
