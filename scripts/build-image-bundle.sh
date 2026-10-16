@@ -20,6 +20,11 @@
 # that were built somewhere else and loaded from a file. That is the whole
 # reason the air-gapped install path refuses to build and passes --no-build.
 #
+# caddy:2-alpine serves two roles: the public TLS front (`tls` profile) and the
+# sandbox executor's internal TLS front and CA copy (`isolation` profile,
+# ADR-0190 I4 follow-ups). Both name this one reference, so one saved image
+# covers both.
+#
 # The tag matters: install.sh pins the gateway to `regulait/gateway:<version>`
 # with `pull_policy: never`, so the tag written here and the --version passed
 # to the installer must be the same string.

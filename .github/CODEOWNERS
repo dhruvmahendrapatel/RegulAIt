@@ -22,3 +22,7 @@
 /scripts/preflight-ui-affordances.test.mjs        @dhruvmahendrapatel
 /scripts/preflight-ui-route-census.mjs            @dhruvmahendrapatel
 /scripts/preflight-ui-route-census.test.mjs       @dhruvmahendrapatel
+# ADR-0190 I4 follow-ups (#387 review): the import-cycle ratchet and its baseline; a baseline that grows, or a
+# check that stops counting an edge, needs the owner.
+/scripts/preflight-import-cycles.mjs              @dhruvmahendrapatel
+/scripts/import-cycles-gateway.baseline.txt       @dhruvmahendrapatel
