@@ -12,7 +12,7 @@
  * Needs the built packages (`pnpm -r build`): the script imports the dist.
  */
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,6 +79,7 @@ beforeAll(() => {
   const { receiptV2FromAuditSeq: _boundary, ...keysOnly } = corpus.positives[0].trust.receipt.keyring as Record<string, unknown>;
   writeFileSync(path.join(dir, "receipt-keys-no-boundary.json"), JSON.stringify(keysOnly));
   writeFileSync(path.join(dir, "receipt-keys-null-boundary.json"), JSON.stringify({ ...keysOnly, receiptV2FromAuditSeq: null }));
+  writeFileSync(path.join(dir, "receipt-keys-boundary-100.json"), JSON.stringify({ ...keysOnly, receiptV2FromAuditSeq: 100 }));
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -89,8 +90,12 @@ const withTrust = (id: string, ...extra: string[]) =>
 describe("ADR-0189 R19: scripts/verify-bom.mjs, one offline tool for both subjects", () => {
   it("valid Decision BOM and AI BOM bundles exit 0; the JSON report meets the vectors", () => {
     for (const id of ["P01", "P02", "P28", "A02", "A03"]) {
-      // P02's trust root records the boundary at 100 (a v1 receipt below it); the keyring file's 42 is overridden
-      const r = withTrust(id, "--json", ...(id === "P02" ? ["--receipt-v2-from", "100"] : []));
+      // P02's trust root records the boundary at 100 (a v1 receipt below it): its own keyring file says so (a flag
+      // never overrides a keyring's boundary, B8 recheck L1)
+      const r =
+        id === "P02"
+          ? verifyBom(bundle(id), "--fingerprint", EXPORT_FPR, "--receipt-keyring", path.join(dir, "receipt-keys-boundary-100.json"), "--now", "2026-10-11T00:00:00.000Z", "--json")
+          : withTrust(id, "--json");
       expect(r.status, `${id}: ${r.stderr}${r.stdout.slice(0, 400)}`).toBe(0);
       expect(JSON.parse(r.stdout).outcome, id).toBe("valid");
     }
@@ -129,6 +134,37 @@ describe("ADR-0189 R19: scripts/verify-bom.mjs, one offline tool for both subjec
     expect(fromFile.status).toBe(1);
     expect(JSON.parse(fromFile.stdout).checks).toContainEqual(expect.objectContaining({ check: "receipt_facts_binding", status: "invalid", reason: "v1_receipt_after_boundary" }));
     expect(verifyBom(bundle("N-R12"), "--fingerprint", EXPORT_FPR, "--receipt-keyring", noBoundary, "--receipt-v2-from", "42", "--now", "2026-10-11T00:00:00.000Z").status).toBe(1);
+  });
+  it("B8 recheck L1: --receipt-v2-from never overrides a boundary the keyring states; it must match or be refused", () => {
+    const now = ["--now", "2026-10-11T00:00:00.000Z"];
+    const kr = (f: string) => ["--fingerprint", EXPORT_FPR, "--receipt-keyring", path.join(dir, f)];
+    // the reviewer's case: keyring 42, flag none, N-R12 must not come out VALID
+    const conflict = verifyBom(bundle("N-R12"), ...kr("receipt-keys.json"), "--receipt-v2-from", "none", ...now);
+    expect(conflict.status).toBe(2);
+    expect(conflict.stderr).toContain("conflicting receipt v2 boundaries: the keyring states 42, --receipt-v2-from states none");
+    // an explicit null in the keyring conflicts with a number, too
+    expect(verifyBom(bundle("A02"), ...kr("receipt-keys-null-boundary.json"), "--receipt-v2-from", "42", ...now).status).toBe(2);
+    // a matching flag is accepted, and the boundary is enforced
+    expect(verifyBom(bundle("N-R12"), ...kr("receipt-keys.json"), "--receipt-v2-from", "42", ...now).status).toBe(1);
+    expect(verifyBom(bundle("A02"), ...kr("receipt-keys-null-boundary.json"), "--receipt-v2-from", "none", ...now).status).toBe(0);
+  });
+  it("B8 recheck L3: a malformed or oversized keyring, and an oversized bundle, exit 2 without echoing content", () => {
+    const junk = path.join(dir, "junk-keyring.json");
+    writeFileSync(junk, "CANARY-not-json");
+    const r = verifyBom(bundle("A02"), "--fingerprint", EXPORT_FPR, "--receipt-keyring", junk);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("--receipt-keyring is not readable JSON");
+    expect(r.stderr + r.stdout).not.toContain("CANARY");
+    const big = path.join(dir, "big-keyring.json");
+    writeFileSync(big, "");
+    truncateSync(big, 1024 * 1024 + 1);
+    expect(verifyBom(bundle("A02"), "--fingerprint", EXPORT_FPR, "--receipt-keyring", big).stderr).toContain("not a regular file of at most 1048576 bytes");
+    const bigBundle = path.join(dir, "big.tar.gz");
+    writeFileSync(bigBundle, "");
+    truncateSync(bigBundle, 64 * 1024 * 1024 + 1);
+    const b = verifyBom(bigBundle, "--fingerprint", EXPORT_FPR, "--receipt-keyring", path.join(dir, "receipt-keys.json"));
+    expect(b.status).toBe(2);
+    expect(b.stderr).toContain("the bundle is not a regular file of at most 67108864 bytes");
   });
   it("review item 2: a crafted file is reported invalid (exit 1), never a crash", () => {
     const junk = path.join(dir, "junk.tar.gz");

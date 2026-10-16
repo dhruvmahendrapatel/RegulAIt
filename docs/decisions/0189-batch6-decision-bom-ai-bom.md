@@ -2227,7 +2227,8 @@ came from the review (H1 below).
   provide the lock and the instructions, never the wheels, so nothing under amendment 6's CI-only licence admission
   is redistributed by us). Part B verifies on the air-gapped machine: install the
   SPDX validator from the wheelhouse; prove the toolchain on specification vectors (each must give the outcome the
-  vector expects: 26 positives `VALID`, 7 `UNVERIFIABLE`, every negative `INVALID`) before trusting it; check the
+  vector expects; of the 31 positives the offline script can express, 24 are `VALID` and 7 `UNVERIFIABLE`, and every
+  negative is `INVALID` with its named check and reason) before trusting it; check the
   keys received against the auditor's out-of-band trust record by script; check the envelope with `verify-export-bundle.sh` and the body, receipt,
   chain and renderings with `verify-bom.mjs`; then validate the CycloneDX and SPDX renderings against the bundled
   official schemas and SPDX SHACL. Part C lists the operator's side (keys, `GET /v1/exports/signing-key`,
@@ -2241,8 +2242,9 @@ came from the review (H1 below).
   as a real archive through the product's `writeBomTar`, refusing unless the tar is the vector's pinned `tarSha256`,
   plus its TEST-ONLY trust root files. It is the known-answer self-test of an auditor's kit. It refuses, writing
   nothing, any vector the offline script cannot express exactly (non-file entries; the online vectors P20, P21,
-  N-M02 and N-M05; an export keyring fingerprint that is not its key's; a trust root with no boundary), and a CI
-  test sweeps all 141 vectors: each is refused or gives its expected outcome.
+  N-M02 and N-M05; an export keyring fingerprint that is not its key's; N-M04's export key id named twice; a trust
+  root with no boundary), and a CI test sweeps all 141 vectors: each is refused or gives its expected outcome and
+  every check and reason the vector names.
 - **`scripts/bom-trust-check.mjs`** compares the keys an auditor is sent (export `.pub` files, a receipt keyring and
   its boundary) with the auditor's trust record by exact string, printing `MATCH` or `NOT IN RECORD` and exiting
   non-zero on any difference.
@@ -2256,6 +2258,9 @@ came from the review (H1 below).
   `receiptV2FromAuditSeq`, and pinned receipt fingerprints without `--receipt-v2-from`; and `verifyBomBundle`,
   `verifyStoredDecisionBom` and `verifyStoredAiBom` throw a `TypeError` for a trust boundary that is not `null` or a
   positive audit seq. An explicit `null` still means "no cutover recorded". No vector's expected outcome changed.
+  After the recheck, `--receipt-v2-from` no longer overrides a boundary the keyring states: a different value is a
+  conflict (exit 2), so the flag cannot turn a recorded boundary back into "none"; and the keyring and the bundle
+  are read with size caps, a malformed keyring answering exit 2 without echoing its content.
 - **Review M2, the trust record.** The trust root is no longer whatever keyring arrives: the export and receipt key
   fingerprints and the boundary are recorded out of band once (key generation or first engagement), every later
   keyring is checked against that record by script, and a key not in it needs a separate attestation.

@@ -231,8 +231,10 @@ If either answer differs, stop: the kit is not the one the specification describ
 expect `UNVERIFIABLE` (for example P14, an anchored BOM with no timestamp token). The writer refuses, writing nothing,
 any vector the offline script cannot express exactly: the two with a directory or symlink entry (N-M16, N-M18) and
 the four with the online route's trust root (P20, P21, N-M02, N-M05: `trust.mode` online, the deployment's own
-export key, or an export keyring entry whose fingerprint is not its key's). Every other vector, run through the
-writer and `verify-bom.mjs`, gives its expected outcome (checked by `scripts/bom-vector-bundle.test.mjs` in CI).
+export key, or an export keyring entry whose fingerprint is not its key's), and N-M04, whose export trust root names
+one key id twice (a `--keyring` directory holds one `<keyId>.pub` per id). Every other vector, run through the writer
+and `verify-bom.mjs`, gives its expected outcome and every check and reason the vector names (checked by
+`scripts/bom-vector-bundle.test.mjs` in CI).
 
 **Every key in these vectors is a published CANARY test key.** Never configure one, and never accept a real bundle
 signed by one.
@@ -305,12 +307,14 @@ MATCH  receipt key TEST-ONLY-CANARY-receipt-key-1
 NOT IN RECORD  receipt v2 boundary: absent from the keyring (use GET /v1/receipts/export)
 TRUST RECORD: MISMATCH. Do not verify with these keys until the difference is attested out of band.
 exit code: 1
-REFUSED: --receipt-keyring has no receiptV2FromAuditSeq (the receipt v2 boundary). Use the operator's `GET /v1/receipts/export` JSON, or pass --receipt-v2-from SEQ|none, obtained out of band.
+REFUSED: --receipt-keyring has no receiptV2FromAuditSeq (the receipt v2 boundary). Use the operator's `GET /v1/receipts/export` JSON, checked against your trust record; only if the boundary was recorded out of band, state it with --receipt-v2-from.
 exit code: 2
 ```
 
 With pinned receipt fingerprints (`--receipt-fingerprint`) instead of a keyring file, `--receipt-v2-from <seq>` or
-`--receipt-v2-from none` is required, taken from your trust record.
+`--receipt-v2-from none` is required, taken from your trust record. `--receipt-v2-from` never overrides a boundary a
+keyring states (a number or an explicit `null`): a different value is refused as a conflict (exit 2; tested in
+`apps/gateway/src/adr0189-b4-verify-script.test.ts`).
 
 ### Step 4. Verify the bundle you received
 
@@ -338,7 +342,7 @@ echo "exit code: $?"
 ==> Verifying …/selftest/A02/regulait-export-ai-bom-ab000000-0000-4000-8000-000000000001-cyclonedx-1.7.tar.gz
   [pass] structure: manifest and signature present
   [pass] manifest: regulait.export-bundle/3, subject 'ai-bom', signed by key id 'TEST-ONLY-CANARY-export-key-1'
-  [pass] signing key fingerprint matches the one you pinned: sha256:3133075a6bffc999dede86075e66ac42685946d768c1ffbfdacb7c7009096b20
+  [pass] signing key fingerprint matches the one you pinned: sha256:3133075a…09096b20
   [pass] signature verifies over manifest.json's exact bytes
   [pass] all 6 signed files match their SHA-256
   [pass] bundle contains nothing the manifest does not list
@@ -348,7 +352,7 @@ echo "exit code: $?"
 
 [VERIFIED] regulait export — subject ai-bom, install <none recorded>
            exported 2026-10-10T12:30:00.000Z (database clock), signed by TEST-ONLY-CANARY-export-key-1
-           sha256:3133075a6bffc999dede86075e66ac42685946d768c1ffbfdacb7c7009096b20
+           sha256:3133075a…09096b20
 
 exit code: 0
 ```
@@ -416,19 +420,24 @@ both passed**, into a directory of its own, and cross-check the committed hash b
 ```bash
 # where: air-gapped
 if [ -e "$WORK/reports/$NAME.envelope-verified" ] && grep -q '"outcome": "valid"' "$WORK/reports/$NAME.json"; then
-  mkdir -p "$WORK/unpacked/$NAME" && tar -xzf "$BUNDLE" -C "$WORK/unpacked/$NAME" && echo "unpacked into its own directory"
+  rm -rf "$WORK/unpacked/$NAME" && mkdir -p "$WORK/unpacked/$NAME" && tar -xzf "$BUNDLE" -C "$WORK/unpacked/$NAME" &&
+  echo "unpacked into its own, freshly emptied directory" &&
+  R="$WORK/unpacked/$NAME/$(ls "$WORK/unpacked/$NAME")/content" &&
+  sha256sum "$R/ai-bom.cyclonedx-1.7.json" &&
+  node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).renderings))' "$R/ai-bom.json" &&
+  node scripts/validate-bom-rendering.mjs --format cyclonedx-1.7 "$R/ai-bom.cyclonedx-1.7.json"
+  echo "exit code: $?"
 else
   echo "NOT UNPACKED: steps 4a and 4b must both pass first"; false
 fi
-R="$WORK/unpacked/$NAME/$(ls "$WORK/unpacked/$NAME")/content"
-sha256sum "$R/ai-bom.cyclonedx-1.7.json"
-node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).renderings))' "$R/ai-bom.json"
-node scripts/validate-bom-rendering.mjs --format cyclonedx-1.7 "$R/ai-bom.cyclonedx-1.7.json"
-echo "exit code: $?"
 ```
 
+Nothing in the bundle is unpacked or read unless both checks passed; each command runs only if the one before it
+succeeded. Run on the NA01 bundle (its report `INVALID`), the block printed `NOT UNPACKED: steps 4a and 4b must both pass
+first` and created no directory (executed).
+
 ```text
-unpacked into its own directory
+unpacked into its own, freshly emptied directory
 6d6c7a7601df04683145f8354e2e8441dc42a8edda7cda9e27d8d2d5b869b2c2  …/content/ai-bom.cyclonedx-1.7.json
 {"cyclonedx-1.7":{"bytes":849,"sha256":"6d6c7a7601df04683145f8354e2e8441dc42a8edda7cda9e27d8d2d5b869b2c2","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 cyclonedx-library 10.3.0 bom-1.7.SNAPSHOT.schema.json"},"spdx-3.0.1":{"bytes":3326,"sha256":"bb69d44087a694d4ca9ec9b8734d62082b3933ef9fc5d9c9ed25d3a1c4037012","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 spdx-json-schema-3.0.1 sha256:582c64e809d5b3ef9bd0c4de13a32391b47b0284a3e8d199569fb96f649234b1"}}
 [valid] …/content/ai-bom.cyclonedx-1.7.json: cyclonedx-1.7 schema

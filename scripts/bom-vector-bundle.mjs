@@ -22,7 +22,8 @@
 // with a non-file entry (a symlink or a directory; writeBomTar writes regular
 // files only), online vectors (`trust.mode` not "offline", or trusting the
 // deployment's own export key), an export keyring entry whose `fingerprint` is not
-// its key's, and a trust root that states no receipt v2 boundary.
+// its key's, an export keyring naming one key id twice (N-M04), and a trust
+// root that states no receipt v2 boundary.
 //
 // TEST-ONLY: every key in the vectors is a published CANARY key. Never configure one.
 // Exit: 0 written. 1 refused. 2 usage error.
@@ -34,11 +35,17 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const VECTORS = path.join(root, "packages/shared/test-vectors/decision-bom/b4-vectors.json");
-
-const [id, out, ...extra] = process.argv.slice(2);
-if (!id || !out || extra.length) {
-  process.stderr.write("Usage: node scripts/bom-vector-bundle.mjs <vector id> <out dir>\n");
+const argv = process.argv.slice(2);
+// --vectors FILE: another file in the b4-vectors.json shape (this script's own tests use it to reach refusals no
+// published vector reaches); the default is the published vectors
+let VECTORS = path.join(root, "packages/shared/test-vectors/decision-bom/b4-vectors.json");
+if (argv[0] === "--vectors") {
+  VECTORS = argv[1];
+  argv.splice(0, 2);
+}
+const [id, out, ...extra] = argv;
+if (!id || !out || extra.length || !VECTORS) {
+  process.stderr.write("Usage: node scripts/bom-vector-bundle.mjs [--vectors FILE] <vector id> <out dir>\n");
   process.exit(2);
 }
 const fail = (m) => {
@@ -68,12 +75,16 @@ else {
 if (entries.some((e) => e.type !== "file")) fail(`vector ${id} holds a non-file entry; this writer writes regular files only`);
 
 // B8 review M1: write only a trust root the offline script can express exactly. An online vector (the route's
-// keyring-plus-own-key trust, P20, P21, N-M02, N-M05) or an export keyring entry whose `fingerprint` is not its key's
+// keyring-plus-own-key trust, P20, P21, N-M02, N-M05), or an export keyring entry whose `fingerprint` is not its key's
 // (a load-time refusal online, which a `--keyring` directory cannot carry) is refused, never silently approximated.
 const t = vec.trust;
 if (t.mode !== "offline") fail(`vector ${id} is a ${t.mode} vector (the online route's trust root); this writer writes offline trust roots only`);
 if (t.export.ownKey) fail(`vector ${id} trusts the deployment's own export key (online only); refusing`);
 const spkiFingerprint = (pem) => `sha256:${createHash("sha256").update(createPublicKey(pem).export({ type: "spki", format: "der" })).digest("hex")}`;
+// B8 recheck L2: a `--keyring` directory holds one `<keyId>.pub` per id, so a trust root naming an id twice (N-M04)
+// cannot be written without one key overwriting the other
+const exportIds = (t.export.keyring ?? []).map((k) => k.keyId);
+if (new Set(exportIds).size !== exportIds.length) fail(`vector ${id}: the export keyring names a key id twice, which a --keyring directory cannot hold; refusing`);
 for (const k of t.export.keyring ?? []) {
   if (k.fingerprint !== undefined && k.fingerprint !== spkiFingerprint(k.publicKeyPem)) fail(`vector ${id}: export keyring entry ${k.keyId} names a fingerprint that is not its key's; refusing`);
 }
