@@ -1,0 +1,64 @@
+# RegulAIt — the sandbox executor's INTERNAL TLS front (ADR-0190 I4 follow-ups).
+#
+# The executor (packages/sandbox-executor) speaks to the gateway over https only, and its one network is the
+# internal `engines` network, which the public Caddy (./Caddyfile) is deliberately NOT on. This second Caddy
+# instance is the https address the executor dials: `https://executor-front:8443`. It lives on `engines` only,
+# publishes no host port, and:
+#
+#   - serves ONLY the executor channel (`/v1/executor-channel/*`). Every other path, and any request URI that is
+#     not a plain channel path (dot segments, percent-encoding, doubled slashes, anything outside the character
+#     set below), is answered 404 HERE and never reaches the gateway;
+#   - REMOVES every forwarding header before proxying, and is NOT in the gateway's REGULAIT_TRUSTED_PROXIES, so the
+#     gateway sees this container's own address as the peer and nothing it could claim about a client. The
+#     gateway's trust of client addresses is not widened. (The executor channel authenticates on its own proof,
+#     whose `htu` is built from REGULAIT_PUBLIC_URL, not from the address dialled, so a front changes nothing there.)
+#   - issues its certificate from its OWN stack-local CA (`tls internal`): Caddy creates the root on this
+#     container's first start, in its own data volume, and renews the intermediate and the leaf itself. The root
+#     KEY never leaves that volume; the one-shot `executor-front-ca` service copies the root CERTIFICATE alone to
+#     the volume the executor mounts read-only and pins (REGULAIT_EXECUTOR_GATEWAY_CA_FILE). Nothing is committed.
+#   - makes no outbound call: no ACME, no OCSP, no admin endpoint, no attempt to touch a host trust store.
+#
+# Two placeholders exist only so the front can be exercised outside compose (a local proof against a test
+# upstream); compose sets neither, and the defaults are the stock stack's names.
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+	# the internal CA runs no OCSP responder, and `engines` has no route out
+	ocsp_stapling off
+	# no plain-http listener at all (redirects are off and no site is http)
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$REGULAIT_EXECUTOR_FRONT_HOST:executor-front}:8443 {
+	tls internal
+
+	# The executor's request URIs are `/v1/executor-channel/<segments>` with an optional `?window=N&from=N`
+	# (packages/sandbox-executor/src/client.ts; offer ids are UUIDs). The ORIGINAL request URI is matched, not the
+	# cleaned path, so what is matched is exactly what the gateway receives. RE2 (CEL `matches`) is linear.
+	@channel expression `{http.request.orig_uri}.matches("^/v1/executor-channel(/[A-Za-z0-9_-]+)+([?][A-Za-z0-9_=&-]*)?$")`
+
+	handle @channel {
+		reverse_proxy {$REGULAIT_EXECUTOR_FRONT_UPSTREAM:gateway:3000} {
+			# no forwarding claims reach the gateway from this front
+			header_up -X-Forwarded-For
+			header_up -X-Forwarded-Proto
+			header_up -X-Forwarded-Host
+			header_up -X-Real-IP
+			header_up -Forwarded
+			# the channel's stream routes are NDJSON: pass each line through as it is written
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond 404
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

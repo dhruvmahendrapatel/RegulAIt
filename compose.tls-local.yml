@@ -5,8 +5,9 @@
 #
 # What it changes, and why:
 #
-#  * REGULAIT_TLS_HOST=localhost — the sslip.io name points at the real EC2 box,
-#    not at your machine, so serving it locally would be meaningless.
+#  * REGULAIT_TLS_HOST=localhost — a deployment's public hostname points at that
+#    deployment, not at your machine, so serving it locally would be meaningless
+#    (and the base file's default is a `.invalid` placeholder).
 #  * REGULAIT_TLS_ISSUER="tls internal" — Caddy mints the certificate from its
 #    own local CA instead of calling Let's Encrypt. THIS IS THE POINT OF THE
 #    FILE: a laptop cannot pass an HTTP-01 challenge for the box's hostname, and
