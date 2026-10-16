@@ -54,6 +54,8 @@ export const ENGINE_TASK_CHUNK_MAX_BYTES = 384 * 1024;
 export const ENGINE_TASK_HTTP_BODY_MAX_BYTES = 512 * 1024;
 /** the gateway holds at most this many unacknowledged stdout bytes of one task for its runner */
 export const ENGINE_TASK_OUTPUT_BUFFER_MAX_BYTES = 32 * 1024 * 1024;
+/** review LOW-4: at most this many unacknowledged stdout bytes across EVERY task one gateway process holds */
+export const ENGINE_TASK_OUTPUT_TOTAL_MAX_BYTES = 512 * 1024 * 1024;
 /** at most this many frames in one answer to the runner */
 export const ENGINE_TASK_FRAMES_MAX = 64;
 /** review LOW-2: an executor's whole input fetch (manifest and every file) is abandoned past this (inside the report deadline) */

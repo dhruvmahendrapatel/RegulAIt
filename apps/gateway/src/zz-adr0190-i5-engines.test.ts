@@ -46,6 +46,7 @@ import {
   executionPlacementReports,
   executionPlacements,
   executors,
+  modelArtifacts,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
@@ -393,6 +394,40 @@ describe("review HIGH-1: a result counts only for a run whose task an executor r
       const status = await client.result(runId, completedEnvelope(runId));
       expect(status).toBe(409);
       expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable" });
+    } finally {
+      setEngineTaskPlacementAffinityForTest(null);
+    }
+  }, 60_000);
+});
+
+describe("review LOW-3: the task start re-runs the lease's checks; a started task's lease is never re-issued", () => {
+  it("a run whose person may no longer use its artifact is refused at the task start (artifact_not_accessible) and ends not_run", async () => {
+    const art = await uploadedAs(alice, maliciousPickle());
+    const runId = await startScan(art.id, projectId);
+    expect((await client.lease(MS_BUILD))?.runId).toBe(runId);
+    // the artifact changes hands after the lease (alice is neither its uploader nor an admin any more)
+    await db.update(modelArtifacts).set({ uploadedByUserId: admin.id }).where(eq(modelArtifacts.id, art.id));
+    const out = await client.taskInput(runId, scanJobUpload(runId));
+    expect(out).toMatchObject({ status: 403, error: "artifact_not_accessible" });
+    expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "artifact_not_accessible", taskPlacementId: null });
+    expect(await taskDecision(runId)).toMatchObject({ objectType: "engine_run", effect: "deny" });
+  });
+
+  it("a lease retry (same request id) for a run whose task started ends it not_run instead of rotating the sandbox's key", async () => {
+    const ex = await rig("reissue", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }));
+    setEngineTaskPlacementAffinityForTest([ex.executorId]);
+    try {
+      await ex.run(1);
+      const art = await uploadedAs(alice, maliciousPickle());
+      const runId = await startScan(art.id, projectId);
+      const requestId = randomUUID();
+      expect((await client.lease(MS_BUILD, requestId))?.runId).toBe(runId);
+      expect((await client.taskInput(runId, scanJobUpload(runId))).status).toBe(201);
+      // the runner lost the lease answer and retries it: nothing is re-issued
+      expect(await client.lease(MS_BUILD, requestId)).toBeNull();
+      const run = await runRow(runId);
+      expect(run).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable" });
+      expect((run.summary as { cause: string }).cause).toBe("engine_task_lease_reissued");
     } finally {
       setEngineTaskPlacementAffinityForTest(null);
     }

@@ -59,6 +59,7 @@ import {
   ENGINE_RUN_ENTITLEMENT_PHASE,
   ENGINE_TASK_FRAMES_MAX,
   ENGINE_TASK_OUTPUT_BUFFER_MAX_BYTES,
+  ENGINE_TASK_OUTPUT_TOTAL_MAX_BYTES,
   ENGINE_TASK_UPLOAD_BODY_LIMIT_BYTES,
   EXECUTION_PROFILE_RULE_ID,
   EXECUTOR_CHANNEL_PREFIX,
@@ -81,7 +82,8 @@ import { expireOffers, linkedReportOf, offerLinkedPlacement, pickLinkedReport, r
 import { resolveRequirement } from "./execution-placement.js";
 import { holdStdioSession, liveStdioSessions, StdioSession, watchHeldStdioSession } from "./executor-stdio.js";
 import { buildAgentDecider } from "./evals.js";
-import type { ArtifactStore } from "./model-artifacts.js";
+import { artifactAccessible, type ArtifactStore } from "./model-artifacts.js";
+import { assertProjectAttribution } from "./projects.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -126,6 +128,7 @@ export class EngineTask {
   refusal: string | null = null;
   /** review MEDIUM-2: the refusal has ended the run (once) */
   runEnded = false;
+  private released = false;
   private waiters: Array<() => void> = [];
 
   constructor(
@@ -154,11 +157,14 @@ export class EngineTask {
     for (const f of w) f();
   }
 
-  /** one stdout line of the sandbox, held for the runner (bounded: past the bound the task is stopped) */
+  /**
+   * one stdout line of the sandbox, held for the runner (bounded per task AND across every task this process holds,
+   * review LOW-4: past either bound the task is stopped `output_overflow`, which ends its run not_run)
+   */
   private take(line: string) {
-    if (line.trim() === "") return;
+    if (line.trim() === "" || this.released) return;
     const n = stdioLineBytes(line);
-    if (this.outBytes + n > ENGINE_TASK_OUTPUT_BUFFER_MAX_BYTES) {
+    if (this.outBytes + n > ENGINE_TASK_OUTPUT_BUFFER_MAX_BYTES || bufferedTotal + n > bufferedTotalCap) {
       if (this.refusal === null) this.refusal = "output_overflow";
       this.session.close();
       this.wake();
@@ -166,13 +172,27 @@ export class EngineTask {
     }
     this.out.push({ seq: this.nextOut++, data: line, bytes: n });
     this.outBytes += n;
+    bufferedTotal += n;
     this.wake();
+  }
+
+  /** the task is forgotten: its held output no longer counts (and nothing more is held) */
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    bufferedTotal -= this.outBytes;
+    this.outBytes = 0;
+    this.out = [];
   }
 
   /** acknowledge every frame below `from`; false when `from` names frames already dropped or never held */
   ack(from: number): boolean {
     if (from < this.ackedTo || from > this.nextOut) return false;
-    while (this.out.length > 0 && this.out[0]!.seq < from) this.outBytes -= this.out.shift()!.bytes;
+    while (this.out.length > 0 && this.out[0]!.seq < from) {
+      const b = this.out.shift()!.bytes;
+      this.outBytes -= b;
+      bufferedTotal -= b;
+    }
     this.ackedTo = from;
     return true;
   }
@@ -197,10 +217,25 @@ export class EngineTask {
   }
 }
 
+/**
+ * Review LOW-4: the unacknowledged task output this process holds, across every task, and its cap
+ * (ENGINE_TASK_OUTPUT_TOTAL_MAX_BYTES; tests lower it). Without it 32 MiB per task times the live-session cap could
+ * hold gigabytes.
+ */
+let bufferedTotal = 0;
+let bufferedTotalCap: number = ENGINE_TASK_OUTPUT_TOTAL_MAX_BYTES;
+export function engineTaskBufferedBytes(): number {
+  return bufferedTotal;
+}
+export function setEngineTaskOutputTotalCapForTest(n: number | null): void {
+  bufferedTotalCap = n ?? ENGINE_TASK_OUTPUT_TOTAL_MAX_BYTES;
+}
+
 const tasksByRun = new Map<string, EngineTask>();
 const tasksByOffer = new Map<string, EngineTask>();
 
 function forget(task: EngineTask): void {
+  task.release();
   if (tasksByRun.get(task.runId) === task) tasksByRun.delete(task.runId);
   if (tasksByOffer.get(task.offerId) === task) tasksByOffer.delete(task.offerId);
 }
@@ -239,7 +274,7 @@ export interface EngineTaskDeps {
 
 type StartOutcome =
   | { kind: "refused_request"; status: number; error: string; detail?: string }
-  | { kind: "not_entitled"; ended: EngineRunRow | null }
+  | { kind: "not_entitled"; code: string; ended: EngineRunRow | null }
   | { kind: "unplaced"; code: ExecutionRefusalReason; placementId: string | null; ended: EngineRunRow | null }
   | { kind: "offered"; task: EngineTask; run: EngineRunRow };
 
@@ -315,10 +350,10 @@ async function startEngineTaskTx(
       return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "the task secret is the run's key: present exactly when the engine calls models" };
     }
     const files: HeldFile[] = body.files.map((f) => inlineFile(f.path, f.data));
-    if (body.artifact) {
-      const [art] = await tx.select().from(modelArtifacts).where(eq(modelArtifacts.id, run.targetArtifactId!));
-      if (!art || !deps.artifactStore()) return { kind: "refused_request" as const, status: 409, error: "artifact_store_unavailable" };
-      files.push({ meta: { path: body.artifact.path, size: art.sizeBytes, sha256: art.sha256 }, source: { kind: "artifact", artifactId: art.id, storageKey: art.storageKey } });
+    const [artifactRow] = body.artifact ? await tx.select().from(modelArtifacts).where(eq(modelArtifacts.id, run.targetArtifactId!)) : [];
+    if (body.artifact && artifactRow) {
+      if (!deps.artifactStore()) return { kind: "refused_request" as const, status: 409, error: "artifact_store_unavailable" };
+      files.push({ meta: { path: body.artifact.path, size: artifactRow.sizeBytes, sha256: artifactRow.sha256 }, source: { kind: "artifact", artifactId: artifactRow.id, storageKey: artifactRow.storageKey } });
     }
 
     const userId = run.runAsUserId ?? NO_IDENTITY;
@@ -326,38 +361,53 @@ async function startEngineTaskTx(
     const isAgentRun = run.targetKind === "agent";
     const baseDetail = { engineRunId: run.id, engineId: run.engineId, runnerId, projectId: run.projectId };
 
-    // 1. the entitlement (agent runs): the run-as person may still execute the target and the judge
-    if (isAgentRun) {
-      const [person] = run.runAsUserId ? await tx.select({ id: users.id, disabledAt: users.disabledAt }).from(users).where(eq(users.id, run.runAsUserId)) : [];
+    // 1. the lease's own checks, again (review LOW-3): the run-as person is still there; an agent run's person may
+    //    still execute the target and the judge and still attribute to the run's project; an artifact scan's person
+    //    may still use the artifact. A refusal ends the run `not_run` with the lease's own code.
+    const [person] = run.runAsUserId
+      ? await tx.select({ id: users.id, disabledAt: users.disabledAt, isAdmin: users.isAdmin }).from(users).where(eq(users.id, run.runAsUserId))
+      : [];
+    let deny: { ruleId: string; ruleChain: unknown[]; reason: string; code: string } | null = null;
+    if (!person || person.disabledAt) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person is gone", code: "run_as_gone" };
+    else if (isAgentRun) {
       const [target] = run.targetAgentId ? await tx.select().from(agents).where(eq(agents.id, run.targetAgentId)) : [];
       const [judge] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
-      let deny: { ruleId: string; ruleChain: unknown[]; reason: string } | null = null;
-      if (!person || person.disabledAt || !target) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person or the target agent is gone" };
+      if (!target) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the target agent is gone", code: "run_as_not_entitled" };
       else {
         const decide = await buildAgentDecider(txDb, person.id);
         for (const a of [target, ...(judge ? [judge] : [])]) {
           const d = decide(a as Parameters<typeof decide>[0], "execute");
           if (d.effect !== "allow") {
-            deny = { ruleId: d.ruleId, ruleChain: d.ruleChain as unknown[], reason: d.reason };
+            deny = { ruleId: d.ruleId, ruleChain: d.ruleChain as unknown[], reason: d.reason, code: "run_as_not_entitled" };
             break;
           }
         }
       }
-      if (deny) {
-        await tx.insert(auditLog).values({
-          id: decisionAuditId,
-          userId,
-          objectType: "agent",
-          objectId: run.targetAgentId,
-          detail: { phase: ENGINE_RUN_ENTITLEMENT_PHASE, role: "target", receiptClass: "decision", ...baseDetail, step: "task_start" },
-          effect: "deny",
-          ruleId: deny.ruleId,
-          ruleChain: deny.ruleChain as never,
-          reason: deny.reason,
-        });
-        const ended = await deps.endRunTx(tx, run, { status: "not_run", errorCode: "run_as_not_entitled", cause: "run_as_not_entitled" }, now);
-        return { kind: "not_entitled" as const, ended };
+      if (!deny && !run.projectId) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run's project is gone", code: "project_gone" };
+      if (!deny) {
+        const attribution = await assertProjectAttribution(txDb, run.projectId!, person.id, person.isAdmin);
+        if (!attribution.ok) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person may no longer attribute to the run's project", code: "project_not_attributable" };
       }
+    } else if (!artifactRow) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run's artifact is gone", code: "artifact_gone" };
+    else if (!artifactAccessible(artifactRow, { userId: person.id, isAdmin: person.isAdmin })) {
+      deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run-as person may no longer use the run's artifact", code: "artifact_not_accessible" };
+    }
+    if (deny) {
+      await tx.insert(auditLog).values({
+        id: decisionAuditId,
+        userId,
+        objectType: isAgentRun ? "agent" : "engine_run",
+        objectId: isAgentRun ? run.targetAgentId : run.id,
+        detail: isAgentRun
+          ? { phase: ENGINE_RUN_ENTITLEMENT_PHASE, role: "target", receiptClass: "decision", ...baseDetail, step: "task_start", code: deny.code }
+          : { ...baseDetail, step: "task_start", code: deny.code },
+        effect: "deny",
+        ruleId: deny.ruleId,
+        ruleChain: deny.ruleChain as never,
+        reason: deny.reason,
+      });
+      const ended = await deps.endRunTx(tx, run, { status: "not_run", errorCode: deny.code, cause: deny.code }, now);
+      return { kind: "not_entitled" as const, code: deny.code, ended };
     }
 
     // 2. the placement (decision 7), keyed to the decision written below
@@ -541,7 +591,7 @@ export function registerEngineTaskRoutes(app: FastifyInstance, db: Db, deps: Eng
     if (out.kind === "refused_request") return reply.status(out.status).send({ error: out.error, ...(out.detail ? { detail: out.detail } : {}) });
     if (out.kind === "not_entitled") {
       if (out.ended) await deps.notifyEnded(db, [out.ended]);
-      return reply.status(403).send({ error: "run_as_not_entitled", detail: "the run ended not_run: its run-as person may no longer execute its agents" });
+      return reply.status(403).send({ error: out.code, detail: "the run ended not_run: the lease's checks no longer hold for its run-as person (entitlement, attribution or artifact access)" });
     }
     if (out.kind === "unplaced") {
       if (out.ended) await deps.notifyEnded(db, [out.ended]);

@@ -1701,6 +1701,14 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
             const ended = await endLockedRun(tx, prior, { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: NO_IDENTITY }, at);
             return { kind: "refused" as const, ended };
           }
+          // ADR-0190 I5 (review LOW-3): a run whose task has started is never re-issued. Rotation would revoke the
+          // key the sandbox holds and the task cannot be restarted (its placement is set once), so the run ends
+          // `not_run` (isolation_unavailable) cleanly instead, its key revoked, and the runner gets no work.
+          if (prior.taskPlacementId !== null) {
+            const cause = "engine_task_lease_reissued";
+            const ended = await endLockedRun(tx, prior, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, normalised: noResult("not_run"), cause, actorUserId: NO_IDENTITY }, at);
+            return { kind: "refused" as const, ended };
+          }
           return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
         }
       }
