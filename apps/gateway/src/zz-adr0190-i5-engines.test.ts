@@ -52,7 +52,18 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import { BATCH5_STRICT_DEFAULTS, decisionFactsSchema, ENGINE_MANIFEST, ENGINE_RUN_ENTITLEMENT_PHASE, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
+import {
+  BATCH5_STRICT_DEFAULTS,
+  decisionFactsSchema,
+  ENGINE_MANIFEST,
+  ENGINE_RESULT_VERSION,
+  ENGINE_RUN_ENTITLEMENT_PHASE,
+  evaluateRunnerSelfTest,
+  ISOLATION_STRICT_DEFAULTS,
+  STEP_UP_HEADER,
+  type EngineId,
+  type EngineManifestEntry,
+} from "@regulait/shared";
 import { buildSelfTest, ExecutorTaskBridge, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
 import { runSandboxTask } from "@regulait/engine-runner/worker";
 import { ARTIFACT_NAME, ExchangeScanExecutor, modelscanAdapter } from "@regulait/engine-modelscan";
@@ -69,7 +80,8 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { resolveRequirement } from "./execution-placement.js";
-import { liveEngineTasks, setEngineTaskPlacementAffinityForTest, startEngineTask } from "./engine-tasks.js";
+import { engineTaskInputDigestFor, liveEngineTasks, setEngineTaskPlacementAffinityForTest, startEngineTask } from "./engine-tasks.js";
+import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -244,6 +256,18 @@ const placementOf = async (auditId: string) => (await db.select().from(execution
 async function endRun(id: string) {
   await db.execute(sql`UPDATE engine_runs SET status = 'cancelled', finished_at = now(), error_code = 'test_cleanup' WHERE id = ${id} AND status IN ('queued', 'leased')`);
 }
+/** a completed modelscan result with nothing found (what a runner that never ran the scanner might claim) */
+const completedEnvelope = (runId: string) => ({
+  version: ENGINE_RESULT_VERSION as typeof ENGINE_RESULT_VERSION,
+  runId,
+  engineId: "modelscan" as const,
+  engineVersion: MANIFEST.modelscan.version,
+  status: "completed" as const,
+  errorCode: null,
+  items: [],
+  notRun: [],
+  rawReport: null,
+});
 /** a scan's job, as the runner publishes it, for a task started by hand */
 const scanJobUpload = (runId: string) => ({
   files: [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId, format: "pickle", artifactName: "artifact.pkl", timeoutMs: 60_000 })).toString("base64") }],
@@ -327,6 +351,65 @@ describe("OWNER DECISION C: an engine worker is never the unknown agent", () => 
     // NEGATIVE CONTROL: the same call as a stdio server's with no agent IS the unknown agent (L3, restricted-microvm)
     const stdio = await resolveRequirement(db, { workloadKind: "code_exec", projectId, agent: null, parentGrantId: null });
     expect(stdio).toMatchObject({ kind: "required", requiredClass: "microvm", agentAssurance: "unknown" });
+  });
+
+  it("review LOW-1: a relaxed engine-worker floor is honoured for the shipped profile's configured floor (never below L1)", async () => {
+    try {
+      await db.update(orgSettings).set({ isolationFloorEngineWorker: "hardened_container", isolationFloorInternal: "hardened_container" }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      const r = await resolveRequirement(db, { workloadKind: "engine_worker", projectId, agent: null, parentGrantId: null });
+      expect(r).toMatchObject({ kind: "required", requiredClass: "hardened_container", agentAssurance: "known" });
+      // the shipped profile itself is unchanged: its own minClass still bounds where it can be placed (the broker)
+      expect((r as { profile: { name: string; minClass: string } }).profile).toMatchObject({ name: "engine-worker", minClass: "user_space_kernel" });
+    } finally {
+      await db.update(orgSettings).set({ isolationFloorEngineWorker: ISOLATION_STRICT_DEFAULTS.isolationFloorEngineWorker, isolationFloorInternal: ISOLATION_STRICT_DEFAULTS.isolationFloorInternal }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+    expect(await resolveRequirement(db, { workloadKind: "engine_worker", projectId, agent: null, parentGrantId: null })).toMatchObject({ requiredClass: "user_space_kernel" });
+  });
+});
+
+describe("review HIGH-1: a result counts only for a run whose task an executor reported placed", () => {
+  it("a result for a leased run with no task is refused engine_task_not_placed, and the run ends not_run", async () => {
+    const art = await uploadedAs(alice, maliciousPickle());
+    const runId = await startScan(art.id, projectId);
+    expect((await client.lease(MS_BUILD))?.runId).toBe(runId);
+    // the runner claims a clean completed scan with no sandbox ever placed: refused, never ingested
+    expect(await client.result(runId, completedEnvelope(runId))).toBe(409);
+    const run = await runRow(runId);
+    expect(run).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable", taskPlacementId: null });
+    expect((run.summary as { cause: string }).cause).toBe("engine_task_not_placed");
+    expect(await db.select().from(artifactScans).where(eq(artifactScans.engineRunId, runId)).then((r) => r.filter((s) => s.verdict === "unsafe" || s.verdict === "clean"))).toEqual([]);
+  });
+
+  it("a run whose task was offered but never reported placed is refused the same way (an offer is not a placement)", async () => {
+    const ex = await rig("silent", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }));
+    setEngineTaskPlacementAffinityForTest([ex.executorId]);
+    try {
+      await ex.run(1); // attested, then no longer serving: the offer is never taken
+      const art = await uploadedAs(alice, maliciousPickle());
+      const runId = await startScan(art.id, projectId);
+      expect((await client.lease(MS_BUILD))?.runId).toBe(runId);
+      expect((await client.taskInput(runId, scanJobUpload(runId))).status).toBe(201);
+      expect((await runRow(runId)).taskPlacementId).not.toBeNull();
+      const status = await client.result(runId, completedEnvelope(runId));
+      expect(status).toBe(409);
+      expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable" });
+    } finally {
+      setEngineTaskPlacementAffinityForTest(null);
+    }
+  }, 60_000);
+});
+
+describe("ADR-0190 I5: the first-enable basis is a fresh executor attestation of the engine-worker profile", () => {
+  it("an active executor's fresh L2 pass for the shipped engine-worker profile is the basis, recorded whole", async () => {
+    const ex = await rig("basis", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }));
+    await ex.run(1);
+    const basis = await engineWorkerAttestationBasis(db);
+    expect(basis).toMatchObject({ attested: true, reason: "attested", requiredClass: "user_space_kernel", attestationClass: "user_space_kernel" });
+    expect(basis.profileDigest).toMatch(/^[0-9a-f]{64}$/);
+    // and the verdict a runner without its worker's own report gets rests on it
+    const st = { imageDigest: MS_DIGEST, engineVersion: MANIFEST.modelscan.version, usageDataEnv: {}, egress: { host: "x.invalid", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false }, at: new Date().toISOString() };
+    expect(evaluateRunnerSelfTest(MANIFEST.modelscan, st, new Date(), { executorAttested: basis.attested })).toEqual({ passed: true, failures: [] });
+    expect(evaluateRunnerSelfTest(MANIFEST.modelscan, st, new Date(), { executorAttested: false }).failures).toEqual(["executor_attestation_missing:REGULAIT_MODELSCAN_SCANNER_ISOLATED"]);
   });
 });
 
@@ -450,6 +533,11 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
       let frames = await client.taskFrames(runId, 0, 1);
       for (let i = 0; i < 60 && frames.state !== "refused"; i++) frames = await client.taskFrames(runId, 0, 1);
       expect(frames).toMatchObject({ state: "refused", refusal: "execution_profile_mismatch" });
+      // review MEDIUM-2: the refusal after the offer ended the run in the gateway (the runner is told on its next beat)
+      const ended = await runRow(runId);
+      expect(ended).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable" });
+      expect((ended.summary as { cause: string }).cause).toBe("engine_task_execution_profile_mismatch");
+      expect((await client.heartbeat(runId, "running", 0.5)).cancel).toBe(true);
       await loop;
       const [mismatch] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-profile-mismatch"), sql`${auditLog.detail}->>'executorId' = ${ex.executorId}`));
       expect((mismatch!.detail as { failures: Array<{ code: string }> }).failures.map((f) => f.code)).toContain("input_digest_mismatch");
@@ -488,6 +576,9 @@ describe("I8: an agent run's task start is an entitlement decision whose facts n
         { files: [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }], artifact: null, secret: keyMaterial },
       );
       expect(r, JSON.stringify(r)).toMatchObject({ kind: "offered" });
+      // review MEDIUM-2: the task is held before the decision commits: its input is here the moment the offer exists
+      const offerId = (r as { task: { offerId: string } }).task.offerId;
+      expect(engineTaskInputDigestFor(offerId)).toMatch(/^[0-9a-f]{64}$/);
       const d = await taskDecision(runId);
       expect(d).toMatchObject({ objectType: "agent", objectId: agentId, effect: "allow", ruleId: "engine-run-task-started" });
       expect((d!.detail as { phase: string; receiptClass: string })).toMatchObject({ phase: ENGINE_RUN_ENTITLEMENT_PHASE, receiptClass: "decision" });

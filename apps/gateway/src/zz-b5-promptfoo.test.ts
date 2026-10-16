@@ -76,6 +76,7 @@ import { relaxAgentEntitlementsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
+import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -114,6 +115,7 @@ let restoreIssuerKey: (() => Promise<void>) | undefined;
 let restoreAgentEntitlements: (() => Promise<void>) | undefined;
 let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean } | null = null;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
+let rig: EngineTaskRig | undefined;
 let alice: { id: string; key: { authorization: string } };
 let targetId: string;
 let judgeId: string;
@@ -162,11 +164,13 @@ const asAdmin = (method: Method, url: string, payload?: unknown, headers: Record
   app.inject({ method, url, headers: { ...CSRF, ...headers }, cookies: { regulait_session: admin.session.token }, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
 /** the runner's HTTP, through the app (the runner core's own client code is what runs) */
-const runnerHttp: RunnerHttp = async (url, init) => {
+const rawRunnerHttp: RunnerHttp = async (url, init) => {
   const u = new URL(url);
   const r = await app.inject({ method: init.method as Method, url: u.pathname, headers: init.headers, ...(init.body !== undefined ? { payload: init.body } : {}) });
   return { status: r.statusCode, headers: r.headers as Record<string, unknown>, json: async () => (r.body ? JSON.parse(r.body) : null) };
 };
+/** ADR-0190 I5 (review HIGH-1): a run is placed under its engine_worker profile (the rig) before its result POST */
+const runnerHttp: RunnerHttp = (url, init) => (rig ? rig.wrapHttp(rawRunnerHttp)(url, init) : rawRunnerHttp(url, init));
 
 async function makeUser(email: string, isAdmin = false) {
   const u = await inject("POST", "/v1/users", AUTH, { email, displayName: email.split("@")[0], isAdmin });
@@ -343,9 +347,11 @@ beforeAll(async () => {
   expect(refused.statusCode, refused.body).toBe(403);
   const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", { enabled: true, acceptCredentialIsolationRisk: true, expectedVersion: MANIFEST.promptfoo.version, expectedDigest: PF_DIGEST }, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
   expect(ok.statusCode, ok.body).toBe(200);
+  rig = await startEngineTaskRig({ app, db, issuer: ORIGIN, admin, manifest: MANIFEST, name: "b5p" });
 }, 180_000);
 
 afterAll(async () => {
+  await rig?.stop();
   if (priorInterception) await db.update(interceptionSettings).set(priorInterception).where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
   await forgetStepUpMethodsForTest(db, [admin?.id]);
   await db.execute(sql`UPDATE engines SET enabled = false, self_test = NULL, self_test_passed_at = NULL, max_budget_usd = 5, timeout_seconds = 1800, max_concurrent = 1`);

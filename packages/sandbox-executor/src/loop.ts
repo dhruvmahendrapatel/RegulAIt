@@ -89,6 +89,8 @@ export interface ExecutorLoopOptions {
   maxBackoffMs?: number;
   /** stop after this many stream windows (tests); unset = forever */
   maxWindows?: number;
+  /** stop at the end of the current stream window once this is aborted (tests running a loop in the background) */
+  signal?: AbortSignal;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   log?: (m: string) => void;
@@ -242,7 +244,7 @@ export async function runExecutorLoop(opts: ExecutorLoopOptions): Promise<void> 
           await go(ev, whyOf(e));
           if (ev.kind === "transient") await backOff();
         }
-        if (opts.maxWindows !== undefined && windows >= opts.maxWindows) {
+        if ((opts.maxWindows !== undefined && windows >= opts.maxWindows) || opts.signal?.aborted) {
           await Promise.allSettled([...inFlight]);
           return;
         }
