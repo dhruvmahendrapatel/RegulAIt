@@ -1050,8 +1050,13 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
      - no `process.argv[1]`;
      - Node's permission model (`--permission`, in Node 22): read the repository and its sandbox, write only its
        sandbox, no child process, no worker, no native addon;
-     - no network, where the host allows `unshare -rn` (GitHub-hosted runners do). Node 22's permission model has no
-       network control, so where `unshare` is unavailable the check says so and runs with network;
+     - no network, through `unshare -rn` (Node 22's permission model has no network control). ubuntu-latest blocks
+       unprivileged user namespaces through AppArmor, so the workflow first sets
+       `kernel.apparmor_restrict_unprivileged_userns=0` on its ephemeral runner (skipped where the sysctl does not
+       exist). Under `CI=true` the check refuses to run without `unshare -rn` (exit 2, `::error::`). A local run without
+       it warns and runs with network;
+     - SIGINT and SIGTERM handlers that kill every live child group and exit 130 or 143, so an interrupted run leaves no
+       orphan;
      - its own process group, killed whole on timeout, after the child exits, and when the script exits;
      - after the import, a check that no listening server or UDP socket was left open (that fails: such a module is
        an entry point); then an exit, under a 30-second timeout.

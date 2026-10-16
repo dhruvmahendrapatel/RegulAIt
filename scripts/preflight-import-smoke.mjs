@@ -18,9 +18,11 @@
  *     sandbox, and WRITE only its sandbox. It may not start a child process or a worker, or load a native addon. Node
  *     22 has no network permission, hence the next item;
  *   - no network where the host allows it: the child runs under `unshare -rn` (new user and network namespaces, with
- *     only a loopback that is down). Where `unshare` is unavailable the check says so and runs without it;
+ *     only a loopback that is down). Under CI=true the check REFUSES to run without it (exit 2); a local run without
+ *     it warns and continues. ubuntu-latest needs its AppArmor user-namespace restriction relaxed first (the workflow
+ *     step before this check);
  *   - its own process group (spawned detached), killed whole on timeout, once the child has exited, and when this
- *     script exits;
+ *     script exits or is interrupted (SIGINT exits 130, SIGTERM 143);
  *   - a check, right after the import resolves, that the module left no listening server or UDP socket open (a module
  *     that listens at top level is an entry point, so it fails); then `process.exit`, under a hard timeout.
  * Command-line and demo ENTRY POINTS, which do their work at top level (start a server, write keys, migrate a
@@ -97,6 +99,14 @@ const killGroup = (pid) => {
 process.on("exit", () => {
   for (const pid of liveGroups) killGroup(pid);
 });
+// an interrupted run (Ctrl-C, a cancelled CI job) must not orphan children: kill every live group, then exit
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.on(signal, () => {
+    for (const pid of liveGroups) killGroup(pid);
+    liveGroups.clear();
+    process.exit(code);
+  });
+}
 
 /** import one module in a contained child; resolves to null when it loaded, else the failure */
 export function importAlone(file, { timeoutMs = 30_000, readRoots = [REPO_ROOT, dirname(file)], noNetwork = unshareAvailable() } = {}) {
@@ -179,11 +189,11 @@ export async function smokeAll(packageRoot, { concurrency = Math.max(2, availabl
 }
 
 async function main() {
-  console.log(
-    unshareAvailable()
-      ? "children run with no network (unshare -rn) under Node's permission model"
-      : "unshare -rn is not available here: children run WITH network access (Node's permission model still applies)",
-  );
+  if (unshareAvailable()) console.log("children run with no network (unshare -rn) under Node's permission model");
+  else if (process.env.CI === "true") {
+    console.error("::error::unshare -rn is not available, so the children would run WITH network access; CI refuses that. On ubuntu-latest, relax kernel.apparmor_restrict_unprivileged_userns first (see .github/workflows/import-cycles.yml)");
+    process.exit(2);
+  } else console.warn("unshare -rn is not available here: children run WITH network access (Node's permission model still applies; CI refuses this)");
   let result;
   try {
     result = await smokeAll(GATEWAY_ROOT);

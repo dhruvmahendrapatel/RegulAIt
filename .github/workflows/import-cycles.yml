@@ -11,8 +11,9 @@ name: Gateway import cycles
 #   2. scripts/preflight-import-smoke.mjs — imports every non-test gateway module ALONE, as the first module of a
 #      contained child process and fails on any error at init, or on a listener left open. Each child has a
 #      throwaway HOME and working directory, a scrubbed environment, Node's permission model (read the repo, write
-#      only its sandbox, no child processes or workers), no network (`unshare -rn`, which these runners allow) and
-#      its own process group. Command-line and demo entry points are skipped by an explicit list in the script.
+#      only its sandbox, no child processes or workers), no network (`unshare -rn`; ubuntu-latest needs the AppArmor
+#      user-namespace restriction relaxed first, the step before the check, and the check fails under CI=true when
+#      `unshare -rn` still does not work) and its own process group. Command-line and demo entry points are skipped by an explicit list in the script.
 #      It also covers what the ratchet cannot see: a top-level `await import()` and a `createRequire` require.
 #
 # Its own workflow (not a step of CI's build-and-test-base) so the ~2 minutes of child processes do not eat that
@@ -86,6 +87,19 @@ jobs:
       - name: No new import cycle in apps/gateway (baseline ratchet)
         if: success() || failure()
         run: node scripts/preflight-import-cycles.mjs
+
+      # ubuntu-latest blocks unprivileged user namespaces through AppArmor, so `unshare -rn` fails there until this
+      # is relaxed (for this ephemeral runner only). An image without the sysctl skips it; the smoke check then
+      # refuses to run without network isolation under CI=true.
+      - name: Allow unprivileged user namespaces for the smoke check's network isolation
+        if: success() || failure()
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "kernel.apparmor_restrict_unprivileged_userns does not exist here; nothing to relax"
+          fi
+          if unshare -rn true; then echo "unshare -rn works"; else echo "unshare -rn still does not work"; fi
 
       - name: Every gateway module loads alone, as the first module
         if: success() || failure()
