@@ -107,7 +107,8 @@ import { resolveTrustDomain } from "../in-process-delegation.js";
 import { loadOrgSettings } from "../org-settings.js";
 import { requireStepUp, type StepUpCheckArgs } from "../step-up.js";
 import { firstItemNoStewardHolds, getIdentityGrants } from "../workload-identity-admin.js";
-import { certificateThumbprint, certificateUriSans, loadTrustConfig, pemBundleToDer, spiffeIdParts } from "./x509.js";
+import { certificateThumbprint, certificateUriSans, pemBundleToDer, spiffeIdParts } from "./x509.js";
+import { activeSpiffeTrustDomains } from "./spiffe-trust-domains.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ identityId: z.string().uuid() });
@@ -343,14 +344,16 @@ export const grantCascadeTestHooks: { failFor?: ((grantId: string) => boolean) |
  * Revoke each live grant (and its subtree) once, shallowest first; ids already cascaded are skipped. Runs AFTER the
  * revocation it follows has committed, so it never throws: a grant it cannot end is reported and recorded in a
  * `workload-identity-cascade-incomplete` row. Nothing is lost by that: the use-time chain check (decision 17) refuses
- * every such grant because the identity or credential behind it is already revoked.
+ * every such grant because the identity or credential behind it is already revoked. ADR-0188 S9: a revoked SPIFFE trust
+ * bundle cascades through here too (`subject.bundleId`); the chain check refuses its grants because a SPIFFE ID
+ * credential with no active bundle for its trust domain is not live.
  */
-async function revokeGrants(
+export async function revokeGrants(
   db: Db,
   grants: Array<{ id: string; depth: number }> | Error,
   reason: "identity_revoked" | "credential_revoked",
   actorUserId: string,
-  subject: { identityId: string; credentialId?: string },
+  subject: { identityId: string; credentialId?: string } | { bundleId: string; trustDomain: string },
 ): Promise<GrantCascadeOutcome> {
   const done = new Set<string>();
   const failed: string[] = [];
@@ -372,16 +375,25 @@ async function revokeGrants(
   }
   const outcome: GrantCascadeOutcome = { grantsRevoked: [...done].sort(), cascade: failed.length || lookupFailed ? "incomplete" : "complete", grantsNotRevoked: failed.sort() };
   if (outcome.cascade === "incomplete") {
+    const bundle = "bundleId" in subject ? subject : null;
+    const ident = "identityId" in subject ? subject : null;
     try {
       await db.insert(auditLog).values({
         userId: actorUserId,
-        objectType: "workload_identity",
-        objectId: subject.identityId,
-        detail: { phase: "cascade_incomplete", reason, credentialId: subject.credentialId ?? null, grantsRevoked: outcome.grantsRevoked, grantsNotRevoked: failed, lookupFailed },
+        objectType: bundle ? "spiffe_trust_bundle" : "workload_identity",
+        objectId: bundle ? bundle.bundleId : ident!.identityId,
+        detail: {
+          phase: "cascade_incomplete",
+          reason,
+          ...(bundle ? { bundleId: bundle.bundleId, trustDomain: bundle.trustDomain } : { credentialId: ident!.credentialId ?? null }),
+          grantsRevoked: outcome.grantsRevoked,
+          grantsNotRevoked: failed,
+          lookupFailed,
+        },
         effect: "deny",
         ruleId: "workload-identity-cascade-incomplete",
         ruleChain: [],
-        reason: `the revocation committed, but ${lookupFailed ? "its live grants could not be listed" : `${failed.length} grant(s) could not be revoked on the record`}; each is still refused at its next use because the ${subject.credentialId ? "credential" : "identity"} behind it is revoked (ADR-0188 decision 17)`,
+        reason: `the revocation committed, but ${lookupFailed ? "its live grants could not be listed" : `${failed.length} grant(s) could not be revoked on the record`}; each is still refused at its next use because the ${bundle ? "SPIFFE trust bundle" : ident!.credentialId ? "credential" : "identity"} behind it is revoked (ADR-0188 decision 17)`,
       });
     } catch {
       // the response still says the cascade is incomplete
@@ -391,7 +403,7 @@ async function revokeGrants(
 }
 
 /** the live grants (database clock) matching `where`, for eager revocation; an Error if they cannot be read */
-async function liveGrants(db: Db, where: SQL): Promise<Array<{ id: string; depth: number }> | Error> {
+export async function liveGrants(db: Db, where: SQL): Promise<Array<{ id: string; depth: number }> | Error> {
   try {
     return await db
       .select({ id: delegationGrants.id, depth: delegationGrants.depth })
@@ -489,8 +501,16 @@ export interface PreparedCredential {
 
 const PRIVATE_PEM = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|-----BEGIN ENCRYPTED PRIVATE KEY-----/;
 
+/**
+ * ADR-0188 S9: the trust domains with an ACTIVE SPIFFE bundle, read only when a
+ * `spiffe_id` credential is prepared (lazily: a key or a certificate never needs them).
+ */
+export type SpiffeTrustDomainsSource = () => Promise<ReadonlySet<string>>;
+/** for callers that bind keys only (an engine runner): no trust domain is ever offered */
+export const NO_SPIFFE_TRUST_DOMAINS: SpiffeTrustDomainsSource = async () => new Set<string>();
+
 /** validate and reduce a credential to the public facts we keep; a refusal is an `IdentityAdminError` */
-export async function prepareCredential(body: AddWorkloadCredential, now: Date, env: NodeJS.ProcessEnv): Promise<PreparedCredential | IdentityAdminError> {
+export async function prepareCredential(body: AddWorkloadCredential, now: Date, spiffeTrustDomains: SpiffeTrustDomainsSource): Promise<PreparedCredential | IdentityAdminError> {
   if (body.kind === "jwk") {
     const j = body.publicJwk as Record<string, unknown>;
     // only the RFC 7638 members are kept: a `kid`, `use` or anything else a caller sends is not stored
@@ -574,15 +594,15 @@ export async function prepareCredential(body: AddWorkloadCredential, now: Date, 
   }
   const parts = spiffeIdParts(body.spiffeId);
   if (!parts) return new IdentityAdminError("credential_invalid", 422, "not a SPIFFE ID");
-  let domains: Set<string>;
+  let domains: ReadonlySet<string>;
   try {
-    domains = new Set(loadTrustConfig(env).spiffe.keys());
+    domains = await spiffeTrustDomains();
   } catch {
-    return new IdentityAdminError("trust_config_invalid", 503, "the configured SPIFFE trust bundles could not be read; nothing was stored");
+    return new IdentityAdminError("trust_config_invalid", 503, "the SPIFFE trust bundles could not be read; nothing was stored");
   }
-  // SPIFFE is off until a bundle for the trust domain is configured (decision 10: `spiffe_trust_bundles` empty)
+  // SPIFFE is off until an admin uploads a bundle for the trust domain (decision 10: `spiffe_trust_bundles` empty; S9)
   if (!domains.has(parts.trustDomain)) {
-    return new IdentityAdminError("spiffe_trust_domain_unknown", 422, `no trust bundle is configured for ${parts.trustDomain}; an ID there could never authenticate`);
+    return new IdentityAdminError("spiffe_trust_domain_unknown", 422, `no trust bundle is uploaded for ${parts.trustDomain}; an ID there could never authenticate`);
   }
   return { kind: "spiffe_id", publicJwk: null, jwkThumbprint: null, x5tS256: null, spkiThumbprint: null, sanUri: null, subjectDn: null, spiffeId: body.spiffeId, selfSigned: false, certificateNotAfter: null };
 }
@@ -708,7 +728,6 @@ export async function addWorkloadCredential(
   identityId: string,
   body: AddWorkloadCredential,
   actorUserId: string,
-  env: NodeJS.ProcessEnv = process.env,
 ): Promise<WorkloadCredentialView> {
   const input = addWorkloadCredentialSchema.parse(body);
   let out: WorkloadCredentialView | IdentityAdminError;
@@ -726,7 +745,8 @@ export async function addWorkloadCredential(
         if (limit) return limit;
       }
       const now = await databaseNow(t);
-      const prepared = await prepareCredential(input, now, env);
+      // S9: the trust domains come from the audited bundle table, read in this transaction
+      const prepared = await prepareCredential(input, now, () => activeSpiffeTrustDomains(t));
       if (prepared instanceof IdentityAdminError) return prepared;
       return bindPreparedCredentialTx(t, identityId, prepared, actorUserId, now, input.notAfter);
     });

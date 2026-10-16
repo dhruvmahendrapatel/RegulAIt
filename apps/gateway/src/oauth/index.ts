@@ -11,9 +11,12 @@ import { registerGrantAdminRoutes } from "./grant-admin.js";
 import { registerTokenAdminEndpoints } from "./token-admin.js";
 import { registerTokenEndpoint } from "./token-endpoint.js";
 import { registerClientCertificateHook } from "./x509.js";
+import { warnIfLegacySpiffeEnv } from "./spiffe-bundles.js";
 
 export function registerOAuthRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined }): void {
   registerClientCertificateHook(app);
+  // ADR-0188 S9: the S5 SPIFFE bundle variable is ignored; say so once at boot
+  warnIfLegacySpiffeEnv(app.log);
   registerTokenEndpoint(app, db, opts);
   registerTokenAdminEndpoints(app, db);
   app.post("/v1/delegations/proofs", async (req, reply) => createDelegationProofRoute(db, req, reply));

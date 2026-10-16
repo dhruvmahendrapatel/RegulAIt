@@ -31,6 +31,7 @@
  *   /v1/delegation-grants[...]              list (a run's tree with ?runId=), inspect, cascade-revoke (S6 UI)
  *   /v1/identity/picker-sources             the options the identity forms offer (S6 UI)
  *   /v1/identity/signing-keys[...]          issuer key list, rotate, revoke (S3, built)
+ *   /v1/identity/spiffe-trust-bundles[...]  SPIFFE trust bundles: list, upload, revoke (S9, `oauth/spiffe-bundles.ts`)
  *
  * The routes are written out literally (not looped over IDENTITY_ROUTES) so the
  * affordance census (`scripts/preflight-ui-affordances.mjs`) sees the DELETE.
@@ -57,6 +58,7 @@ import {
 } from "./identity-signing-keys.js";
 import { workloadIdentityAdminHandlers } from "./workload-identity-admin.js";
 import { workloadIdentityS6Handlers } from "./oauth/identity-admin.js";
+import { spiffeTrustBundleHandlers } from "./oauth/spiffe-bundles.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const kidParam = z.object({ kid: z.string().regex(IDENTITY_SIGNING_KID_PATTERN) });
@@ -76,6 +78,7 @@ function signingKeyRefusal(reply: FastifyReply, err: unknown) {
 export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined } = {}): void {
   const s4 = workloadIdentityAdminHandlers(db);
   const s6 = workloadIdentityS6Handlers(db);
+  const s9 = spiffeTrustBundleHandlers(db);
   // public: the issuer's PUBLIC keys (decision 5) — active, and retired ones
   // inside their overlap; never a revoked key. Short cache: a revocation must
   // reach verifiers quickly.
@@ -99,6 +102,10 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   app.get("/v1/workload-identities/:identityId/grant-proposals", s6.grantProposals);
   // admin: what the identity forms may offer (sponsors, subjects, environments, grant targets)
   app.get("/v1/identity/picker-sources", s6.pickerSources);
+  // admin (S9): the SPIFFE trust bundles, in audited storage (decisions 10, 12, 21)
+  app.get("/v1/identity/spiffe-trust-bundles", s9.list);
+  app.post("/v1/identity/spiffe-trust-bundles", s9.set);
+  app.post("/v1/identity/spiffe-trust-bundles/:bundleId/revoke", s9.revoke);
   // admin: the issuer's signing keys (public halves only; every write needs an
   // `identity_manage` step-up and is audited inside identity-signing-keys.ts)
   app.get("/v1/identity/signing-keys", async (_req, reply) => {

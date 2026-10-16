@@ -46,7 +46,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { calculateJwkThumbprint, decodeJwt, SignJWT, type JWK } from "jose";
 import * as oauth from "oauth4webapi";
-import { auditLog, createDb, delegationGrants, eq, identitySigningKeys, issuedTokens, orgSettings, replayClaims, runMigrations, sql, and, desc, traceSpans, usageEvents, type Db } from "@regulait/db";
+import { auditLog, createDb, delegationGrants, eq, identitySigningKeys, issuedTokens, orgSettings, replayClaims, runMigrations, spiffeTrustBundles, sql, and, desc, traceSpans, usageEvents, type Db } from "@regulait/db";
 import { canonicalDelegationBody, IDENTITY_SIGNING_KEY_ENV, type DelegationBody } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { deriveIdentitySecrets, issueDpopNonce, mintDelegatedToken } from "./delegated-token.js";
@@ -301,7 +301,7 @@ beforeAll(async () => {
   root = await makeCert({ isCA: true, name: `s5-root-${RUN}` });
   otherRoot = await makeCert({ isCA: true, name: `s5-other-${RUN}` });
   process.env.REGULAIT_MTLS_CA_BUNDLE = root.pem;
-  process.env.REGULAIT_SPIFFE_TRUST_BUNDLES = JSON.stringify({ [TD]: root.pem });
+  // ADR-0188 S9: the SPIFFE bundle is uploaded through the audited route below (the S5 variable is ignored)
 
   keyDir = mkdtempSync(path.join(os.tmpdir(), "s5-issuer-"));
   const pem = generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }).toString();
@@ -314,6 +314,13 @@ beforeAll(async () => {
 
   const inject = (method: "GET" | "POST" | "PUT", url: string, headers: Record<string, string>, payload?: unknown) =>
     app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  // ADR-0188 S9: this run's root becomes the active SPIFFE bundle of TD (replacing an earlier run's, compare-and-set)
+  const [activeBundle] = await db
+    .select({ id: spiffeTrustBundles.id })
+    .from(spiffeTrustBundles)
+    .where(and(eq(spiffeTrustBundles.trustDomain, TD), sql`superseded_at is null and revoked_at is null`));
+  const bundle = await inject("POST", "/v1/identity/spiffe-trust-bundles", AUTH, { trustDomain: TD, bundle: root.pem, replacesBundleId: activeBundle?.id ?? null });
+  expect(bundle.statusCode, bundle.body).toBe(201);
   const u = await inject("POST", "/v1/users", AUTH, { email: `s5-sponsor-${RUN}@example.com`, displayName: `s5 sponsor ${RUN}` });
   expect(u.statusCode, u.body).toBe(201);
   sponsorId = u.json().id;

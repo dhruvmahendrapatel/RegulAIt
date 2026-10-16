@@ -12,14 +12,13 @@ import {
   CLIENT_CERT_HEADER_ENV,
   CLIENT_CERT_PROXY_SECRET_ENV,
   CLIENT_CERT_PROXY_SECRET_HEADER,
-  loadTrustConfig,
+  loadMtlsCaBundle,
   MTLS_CA_BUNDLE_ENV,
   pemBundleToDer,
   presentedClientCertificate,
   registerClientCertificateHook,
   selfSignedCertificateFacts,
   spiffeIdParts,
-  SPIFFE_TRUST_BUNDLES_ENV,
   validateClientCertificate,
 } from "./x509.js";
 
@@ -150,14 +149,11 @@ describe("decision 21 — self-signed and bundles", () => {
     expect(selfSignedCertificateFacts(old.der, now()).ok).toBe(false);
   });
 
-  it("PEM bundles and the SPIFFE bundle map parse; a malformed bundle throws (fail closed)", () => {
+  it("PEM bundles and the mTLS CA set parse; a malformed bundle throws (fail closed)", () => {
     expect(pemBundleToDer(`${root.pem}${inter.pem}`)).toHaveLength(2);
-    const cfg = loadTrustConfig({ [MTLS_CA_BUNDLE_ENV]: root.pem, [SPIFFE_TRUST_BUNDLES_ENV]: JSON.stringify({ [TD]: root.pem }) });
-    expect(cfg.mtlsCa).toHaveLength(1);
-    expect(cfg.spiffe.get(TD)).toHaveLength(1);
-    expect(loadTrustConfig({})).toEqual({ mtlsCa: [], spiffe: new Map() });
-    expect(() => loadTrustConfig({ [SPIFFE_TRUST_BUNDLES_ENV]: "[1]" })).toThrow();
-    expect(() => loadTrustConfig({ [SPIFFE_TRUST_BUNDLES_ENV]: JSON.stringify({ "Bad Domain": root.pem }) })).toThrow();
+    expect(loadMtlsCaBundle({ [MTLS_CA_BUNDLE_ENV]: root.pem })).toHaveLength(1);
+    expect(loadMtlsCaBundle({})).toEqual([]);
+    expect(() => loadMtlsCaBundle({ [MTLS_CA_BUNDLE_ENV]: "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n" })).toThrow();
   });
 });
 
