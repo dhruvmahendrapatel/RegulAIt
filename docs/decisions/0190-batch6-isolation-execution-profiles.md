@@ -1240,7 +1240,7 @@ settle what the decisions above leave open:
    `409 execution_profile_unavailable` with the decision 7 code. A `policy_unresolved` refusal still writes a
    refused placement row (I4 review M2). Placing at the task start rather than the lease keeps the lease's
    contract (ADR-0187 decisions 67 to 98) unchanged; the lease's own refusals write no placement.
-2. **OWNER DECISION C (recorded in its own docs PR).** `resolveRequirement` already treats `agent: null` on
+2. **OWNER DECISION C** (see "Owner decision C" above). `resolveRequirement` already treats `agent: null` on
    `engine_worker` as a known subject: an engine task is placed at the `engine_worker` floor (L2, OWNER DECISION 4),
    MAX the sensitivity floor, the compliance tags and the parent grant, never the unknown-agent rule. Pinned by
    `zz-adr0190-i5-engines.test.ts` (an `internal` project requires L2; the negative control, `code_exec` with no
