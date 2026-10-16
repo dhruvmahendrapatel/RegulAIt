@@ -1024,6 +1024,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/identity/signing-keys": "internal",
   "POST /v1/identity/signing-keys/rotate": "internal",
   "POST /v1/identity/signing-keys/:kid/revoke": "internal",
+  // ADR-0188 S9: SPIFFE trust bundles in audited storage
+  "GET /v1/identity/spiffe-trust-bundles": "internal",
+  "POST /v1/identity/spiffe-trust-bundles": "internal",
+  "POST /v1/identity/spiffe-trust-bundles/:bundleId/revoke": "internal",
   // --- ADR-0189 (batch 6 item 2) B1: 501 stubs until their slices land
   "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
   "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": "internal",
@@ -1970,6 +1974,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/identity/signing-keys": "identity",
   "POST /v1/identity/signing-keys/rotate": "identity",
   "POST /v1/identity/signing-keys/:kid/revoke": "identity",
+  "GET /v1/identity/spiffe-trust-bundles": "identity",
+  "POST /v1/identity/spiffe-trust-bundles": "identity",
+  "POST /v1/identity/spiffe-trust-bundles/:bundleId/revoke": "identity",
   // --- ADR-0189 (batch 6 item 2) B1: 501 stubs until their slices land
   "POST /v1/ai-bom/:subjectKind/:subjectId/snapshots": "audit",
   "GET /v1/ai-bom/:subjectKind/:subjectId/snapshots": "audit",

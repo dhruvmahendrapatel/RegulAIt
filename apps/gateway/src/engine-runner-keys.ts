@@ -38,7 +38,7 @@ import {
 } from "@regulait/shared";
 import { databaseNow } from "./delegation.js";
 import { claimReplay, WORKLOAD_PROOF_ALGS } from "./delegated-token.js";
-import { bindPreparedCredentialTx, IdentityAdminError, prepareCredential, runnerKeyLimitRefusal, type PreparedCredential } from "./oauth/identity-admin.js";
+import { bindPreparedCredentialTx, IdentityAdminError, NO_SPIFFE_TRUST_DOMAINS, prepareCredential, runnerKeyLimitRefusal, type PreparedCredential } from "./oauth/identity-admin.js";
 import { identityIssuer } from "./oauth/common.js";
 
 /** the system actor of a runner's own registration and rotation (no person acted) */
@@ -49,7 +49,7 @@ export const RUNNER_KEY_ROTATION_PATH = "/v1/engine-runner/credentials";
 
 /** a runner's public key, validated and reduced to its RFC 7638 members exactly as S6 binds a JWK */
 export async function prepareRunnerKey(publicJwk: WorkloadPublicJwk, now: Date): Promise<PreparedCredential | IdentityAdminError> {
-  return prepareCredential({ kind: "jwk", publicJwk }, now, process.env);
+  return prepareCredential({ kind: "jwk", publicJwk }, now, NO_SPIFFE_TRUST_DOMAINS);
 }
 
 /** the RFC 7638 thumbprint a registration names its key by */

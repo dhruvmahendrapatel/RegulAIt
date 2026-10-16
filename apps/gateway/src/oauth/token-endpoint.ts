@@ -899,7 +899,7 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
   const presented = presentedClientCertificate(req);
   if (presented && clientId && !form.has("client_assertion")) {
     const client = await findWorkloadClient(db, clientId, now);
-    s.mtls = { clientId, match: client ? await matchCertificateCredential(client, presented, now) : { ok: false, code: "client_unknown" } };
+    s.mtls = { clientId, match: client ? await matchCertificateCredential(db, client, presented, now) : { ok: false, code: "client_unknown" } };
     if (!s.mtls.match.ok) s.code = s.mtls.match.code;
   }
 

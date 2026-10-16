@@ -22,9 +22,10 @@
  * and checks its signatures and the validity of every certificate on it at
  * `now`, against LOCAL trust anchors only — the mTLS CA set
  * (`REGULAIT_MTLS_CA_BUNDLE`) or the SPIFFE bundle of the ID's trust domain
- * (`REGULAIT_SPIFFE_TRUST_BUNDLES`). Both default to EMPTY: with no anchors
- * every chain is refused (secure by default, ADR-0180; S9 moves bundles into
- * managed, audited storage). Nothing is fetched: no AIA, no CRL, no OCSP.
+ * (ADR-0188 S9: the `spiffe_trust_bundles` table, uploaded through the audited
+ * admin route in `spiffe-bundles.ts`; the S5 environment variable is ignored).
+ * Both default to EMPTY: with no anchors every chain is refused (secure by
+ * default, ADR-0180). Nothing is fetched: no AIA, no CRL, no OCSP.
  * The engine does NOT enforce the issuer rules (S5 security review, ADR-0188
  * amendments item 3), and it takes the LAST certificate of `certs` as the
  * end entity, so OUR code passes the leaf last, requires the built path to
@@ -59,7 +60,6 @@ export const CLIENT_CERT_PROXY_SECRET_ENV = "REGULAIT_CLIENT_CERT_PROXY_SECRET";
 /** the header a proxy proves itself with when it cannot use mTLS to the gateway */
 export const CLIENT_CERT_PROXY_SECRET_HEADER = "x-regulait-proxy-auth";
 export const MTLS_CA_BUNDLE_ENV = "REGULAIT_MTLS_CA_BUNDLE";
-export const SPIFFE_TRUST_BUNDLES_ENV = "REGULAIT_SPIFFE_TRUST_BUNDLES";
 
 const MAX_CERT_BYTES = 16 * 1024;
 const MAX_BUNDLE_CERTS = 64;
@@ -96,28 +96,20 @@ function parsePkijs(der: Uint8Array): Certificate {
 export interface TrustConfig {
   /** anchors (and intermediates) for plain `tls_client_auth` */
   mtlsCa: Buffer[];
-  /** SPIFFE trust domain → its bundle (anchors and intermediates) */
+  /** SPIFFE trust domain → its ACTIVE bundle's authorities (ADR-0188 S9: `spiffe_trust_bundles`) */
   spiffe: Map<string, Buffer[]>;
 }
 
 /**
- * Read the anchors from the environment, at the point of use (like the deploy
+ * The mTLS CA set from the environment, at the point of use (like the deploy
  * mode). A bundle that is set but unparsable throws: fail closed, the caller
- * refuses the request.
+ * refuses the request. SPIFFE bundles are NOT read from the environment any
+ * more (ADR-0188 S9): `loadSpiffeTrustAnchors` in `spiffe-bundles.ts` reads
+ * the active rows of `spiffe_trust_bundles`.
  */
-export function loadTrustConfig(env: NodeJS.ProcessEnv = process.env): TrustConfig {
+export function loadMtlsCaBundle(env: NodeJS.ProcessEnv = process.env): Buffer[] {
   const mtls = env[MTLS_CA_BUNDLE_ENV];
-  const spiffeRaw = env[SPIFFE_TRUST_BUNDLES_ENV];
-  const spiffe = new Map<string, Buffer[]>();
-  if (spiffeRaw && spiffeRaw.trim() !== "") {
-    const parsed: unknown = JSON.parse(spiffeRaw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${SPIFFE_TRUST_BUNDLES_ENV}: a JSON object of trust domain → PEM`);
-    for (const [domain, pem] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!SPIFFE_TRUST_DOMAIN_PATTERN.test(domain) || typeof pem !== "string") throw new Error(`${SPIFFE_TRUST_BUNDLES_ENV}: bad entry`);
-      spiffe.set(domain, pemBundleToDer(pem));
-    }
-  }
-  return { mtlsCa: mtls && mtls.trim() !== "" ? pemBundleToDer(mtls) : [], spiffe };
+  return mtls && mtls.trim() !== "" ? pemBundleToDer(mtls) : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +154,19 @@ function uriSansOf(cert: Certificate): string[] {
 /** S6 (credential registration): a certificate's URI SANs, read with the same parser the validator uses; throws on bad DER */
 export function certificateUriSans(der: Uint8Array): string[] {
   return uriSansOf(parsePkijs(der));
+}
+
+/**
+ * ADR-0188 S9 (bundle upload): may this certificate be a trust anchor? It must
+ * be a CA (`basicConstraints.cA`) carrying `keyCertSign`: the rule
+ * `issuerRulesFailure` applies to every anchor at validation, checked at upload
+ * too so a bundle that could never validate anything is refused. Throws on bad DER.
+ */
+export function certificateIsAuthority(der: Uint8Array): boolean {
+  const cert = parsePkijs(der);
+  const bc = cert.extensions?.find((e) => e.extnID === "2.5.29.19")?.parsedValue as { cA?: boolean } | undefined;
+  const ku = keyUsageByte(cert);
+  return bc?.cA === true && ku !== null && (ku & KU_KEY_CERT_SIGN) !== 0;
 }
 
 const sameCertificate = (a: Certificate, b: Certificate) => Buffer.from(a.tbsView).equals(Buffer.from(b.tbsView));

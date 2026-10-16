@@ -93,6 +93,9 @@ import {
   type DelegationScope,
   type WorkloadClientAuthMethod,
   type WorkloadPublicJwk,
+  // ADR-0188 S9 (migration 0200): SPIFFE trust bundles
+  SPIFFE_BUNDLE_FORMATS,
+  type SpiffeTrustAuthorityView,
   // ADR-0189 (migration 0182): the BOM vocabularies, in lockstep with the CHECKs
   AI_BOM_SNAPSHOT_TRIGGERS,
   AI_BOM_SNAPSHOT_TRIGGER_MODES,
@@ -1492,6 +1495,8 @@ export const auditLog = pgTable(
         // ADR-0188 S4: an internal workload identity created at first load, and
         // an admin replacing an identity's own grant set. Plain text — no DDL.
         "workload_identity",
+        // ADR-0188 S9: a SPIFFE trust bundle (uploaded, superseded, revoked). Plain text — no DDL.
+        "spiffe_trust_bundle",
       ],
     })
       .notNull()
@@ -12985,6 +12990,54 @@ export const identitySigningKeys = pgTable(
   ],
 );
 export type IdentitySigningKeyRow = typeof identitySigningKeys.$inferSelect;
+
+/**
+ * ADR-0188 S9 (migration 0200): the SPIFFE trust bundles, in audited storage
+ * (they were the `REGULAIT_SPIFFE_TRUST_BUNDLES` variable in S5). PUBLIC X.509
+ * authorities only. At most one ACTIVE bundle per trust domain; uploading a
+ * new one supersedes it (rotation, nothing revoked); revoking one ends the
+ * domain's SPIFFE trust with decision 12's cascade. Never deleted; content and
+ * each lifecycle stamp written once (trigger).
+ */
+export const spiffeTrustBundles = pgTable(
+  "spiffe_trust_bundles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    trustDomain: text("trust_domain").notNull(),
+    format: text("format", { enum: SPIFFE_BUNDLE_FORMATS }).notNull(),
+    /** the X.509 authorities, as concatenated PEM certificates (normalised from either upload format) */
+    authoritiesPem: text("authorities_pem").notNull(),
+    /** public facts of each authority, for the list view */
+    authorities: jsonb("authorities").$type<SpiffeTrustAuthorityView[]>().notNull(),
+    /** hex SHA-256 over the sorted authority thumbprints */
+    digest: text("digest").notNull(),
+    jwtAuthoritiesIgnored: integer("jwt_authorities_ignored").notNull().default(0),
+    /** the acting principal, as in `audit_log.user_id` (no foreign key: the system principal acts for the bootstrap token) */
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    /** the bundle that replaced this one (a DEFERRABLE self-reference in the migration) */
+    supersededByBundleId: uuid("superseded_by_bundle_id"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by"),
+  },
+  (t) => [
+    check("spiffe_trust_bundles_trust_domain_check", sql`${t.trustDomain} ~ '^[a-z0-9._-]{1,255}$'`),
+    check("spiffe_trust_bundles_format_check", sql`${t.format} IN ('pem', 'spiffe_jwks')`),
+    check("spiffe_trust_bundles_digest_check", sql`${t.digest} ~ '^[0-9a-f]{64}$'`),
+    check("spiffe_trust_bundles_authorities_check", sql`jsonb_typeof(${t.authorities}) = 'array' AND jsonb_array_length(${t.authorities}) BETWEEN 1 AND 64`),
+    check("spiffe_trust_bundles_public_only_check", sql`position('PRIVATE KEY' in ${t.authoritiesPem}) = 0`),
+    check("spiffe_trust_bundles_jwt_ignored_check", sql`${t.jwtAuthoritiesIgnored} >= 0`),
+    check(
+      "spiffe_trust_bundles_lifecycle_check",
+      sql`(${t.supersededAt} IS NULL) = (${t.supersededByBundleId} IS NULL) AND (${t.revokedAt} IS NULL) = (${t.revokedBy} IS NULL) AND NOT (${t.supersededAt} IS NOT NULL AND ${t.revokedAt} IS NOT NULL) AND (${t.supersededAt} IS NULL OR ${t.supersededAt} >= ${t.createdAt}) AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
+    ),
+    uniqueIndex("spiffe_trust_bundles_one_active_uq")
+      .on(t.trustDomain)
+      .where(sql`${t.supersededAt} IS NULL AND ${t.revokedAt} IS NULL`),
+  ],
+);
+export type SpiffeTrustBundleRow = typeof spiffeTrustBundles.$inferSelect;
 
 /**
  * THE UNIT OF AUTHORITY (decisions 4, 12, 17, 22): one row per delegation.

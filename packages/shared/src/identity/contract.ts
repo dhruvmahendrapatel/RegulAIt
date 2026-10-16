@@ -1022,6 +1022,87 @@ export type RotateIdentitySigningKey = z.infer<typeof rotateIdentitySigningKeySc
 export const revokeIdentitySigningKeySchema = z.object({}).strict();
 
 // ---------------------------------------------------------------------------
+// ADR-0188 S9 — SPIFFE trust bundles, in audited storage (decisions 10, 12, 21)
+// ---------------------------------------------------------------------------
+
+/** the largest bundle text accepted (a SPIFFE JWKS or a PEM file) */
+export const SPIFFE_BUNDLE_MAX_BYTES = 256 * 1024;
+/** the most X.509 authorities one bundle may hold */
+export const SPIFFE_BUNDLE_MAX_AUTHORITIES = 64;
+/** how the bundle was supplied: concatenated PEM certificates, or the SPIFFE bundle format (an RFC 7517 JWKS with `x5c`) */
+export const SPIFFE_BUNDLE_FORMATS = ["pem", "spiffe_jwks"] as const;
+export type SpiffeBundleFormat = (typeof SPIFFE_BUNDLE_FORMATS)[number];
+/** `active` is trusted; `superseded` was replaced (rotation, nothing revoked); `revoked` ended with a cascade */
+export const SPIFFE_BUNDLE_STATUSES = ["active", "superseded", "revoked"] as const;
+export type SpiffeBundleStatus = (typeof SPIFFE_BUNDLE_STATUSES)[number];
+/** the environment variable S5 read bundles from; ignored from S9 on (the boot log and the list view say so) */
+export const SPIFFE_TRUST_BUNDLES_LEGACY_ENV = "REGULAIT_SPIFFE_TRUST_BUNDLES";
+
+/**
+ * `POST /v1/identity/spiffe-trust-bundles` (S9; admin, `identity_manage`
+ * step-up bound to the trust domain, the bundle's digest and the bundle it
+ * replaces, audited). Uploads the X.509 authorities of one trust domain. A
+ * domain has at most one active bundle: the first upload names
+ * `replacesBundleId: null`; a later one must name the active bundle's id
+ * (compare-and-set), which it supersedes. Nothing is ever fetched: the bundle
+ * is uploaded (air-gapped safe).
+ */
+export const putSpiffeTrustBundleSchema = z
+  .object({
+    trustDomain: z.string().regex(SPIFFE_TRUST_DOMAIN_PATTERN),
+    bundle: z.string().min(1).max(SPIFFE_BUNDLE_MAX_BYTES),
+    replacesBundleId: z.string().uuid().nullable(),
+  })
+  .strict();
+export type PutSpiffeTrustBundle = z.infer<typeof putSpiffeTrustBundleSchema>;
+
+/** `POST /v1/identity/spiffe-trust-bundles/:bundleId/revoke` (S9): the domain's SPIFFE trust ends, with decision 12's cascade */
+export const revokeSpiffeTrustBundleSchema = z.object({}).strict();
+
+/** one X.509 authority of a bundle: public facts only */
+export interface SpiffeTrustAuthorityView {
+  /** base64url SHA-256 of the certificate DER */
+  thumbprint: string;
+  subject: string;
+  notBefore: string;
+  notAfter: string;
+}
+
+export interface SpiffeTrustBundleView {
+  id: string;
+  trustDomain: string;
+  status: SpiffeBundleStatus;
+  format: SpiffeBundleFormat;
+  /** hex SHA-256 over the sorted authority thumbprints (what the step-up binds) */
+  digest: string;
+  authorities: SpiffeTrustAuthorityView[];
+  /** `jwt-svid` keys in an uploaded SPIFFE JWKS: not stored, JWT-SVID client authentication is not built */
+  jwtAuthoritiesIgnored: number;
+  createdBy: string;
+  createdAt: string;
+  supersededAt: string | null;
+  supersededByBundleId: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+}
+
+/** `GET /v1/identity/spiffe-trust-bundles`: every bundle ever recorded, active first */
+export interface SpiffeTrustBundleListView {
+  items: SpiffeTrustBundleView[];
+  /** true when `REGULAIT_SPIFFE_TRUST_BUNDLES` is set: it is ignored, and the admin should remove it */
+  legacyEnvironmentIgnored: boolean;
+}
+
+export interface SpiffeTrustBundleRevokeResult {
+  bundle: SpiffeTrustBundleView;
+  /** unexpired tokens authenticated by a SPIFFE ID credential in this domain, revoked in the same transaction */
+  tokensRevoked: number;
+  grantsRevoked: string[];
+  cascade: "complete" | "incomplete";
+  grantsNotRevoked: string[];
+}
+
+// ---------------------------------------------------------------------------
 // The routes (S1 registers every one as a 501 stub)
 // ---------------------------------------------------------------------------
 
@@ -1068,4 +1149,7 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "GET", path: "/v1/identity/signing-keys", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/rotate", cls: "admin", slice: "S3" },
   { method: "POST", path: "/v1/identity/signing-keys/:kid/revoke", cls: "admin", slice: "S3" },
+  { method: "GET", path: "/v1/identity/spiffe-trust-bundles", cls: "admin", slice: "S9" },
+  { method: "POST", path: "/v1/identity/spiffe-trust-bundles", cls: "admin", slice: "S9" },
+  { method: "POST", path: "/v1/identity/spiffe-trust-bundles/:bundleId/revoke", cls: "admin", slice: "S9" },
 ];

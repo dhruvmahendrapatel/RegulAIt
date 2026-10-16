@@ -79,6 +79,7 @@ import {
   toolGrants,
   users,
   workloadCredentials,
+  spiffeTrustBundles,
   workloadIdentities,
   type Db,
   type DelegationAllocationRow,
@@ -334,6 +335,11 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, nowIn?: Dat
       // the subject credential (decision 12): a workload credential that is revoked or outside its window
       subjectCredentialRevoked: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} sc WHERE sc.id = ${delegationGrants.subjectCredentialId} AND sc.revoked_at IS NOT NULL)`,
       subjectCredentialOutsideWindow: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} sc WHERE sc.id = ${delegationGrants.subjectCredentialId} AND sc.revoked_at IS NULL AND (sc.not_before > ${at} OR sc.not_after <= ${at}))`,
+      // ADR-0188 S9 (decision 12, "a whole SPIFFE trust bundle"): a SPIFFE ID credential is live only while its trust
+      // domain has an ACTIVE uploaded bundle. Revoking the bundle refuses every grant it authenticated at the next use,
+      // even if the eager cascade could not end one on the record. The trust domain is the ID's authority
+      // (`spiffe://<td>/...`), which the credential CHECK and `spiffeIdParts` already require to be well formed.
+      spiffeTrustEnded: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} wc WHERE wc.id IN (${delegationGrants.authCredentialId}, ${delegationGrants.subjectCredentialId}) AND wc.kind = 'spiffe_id' AND NOT EXISTS (SELECT 1 FROM ${spiffeTrustBundles} b WHERE b.trust_domain = split_part(wc.spiffe_id, '/', 3) AND b.superseded_at IS NULL AND b.revoked_at IS NULL))`,
     })
     .from(delegationGrants)
     .innerJoin(workloadIdentities, eq(workloadIdentities.id, delegationGrants.actorIdentityId))
@@ -393,7 +399,8 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, nowIn?: Dat
     // the full credential predicate: this identity's, unrevoked, and inside its [not_before, not_after) window
     else if ((g.authCredentialId !== null && !credentialLiveAt(authCred, r.identity.id, now)) || r.subjectCredentialOutsideWindow === true) {
       code = "credential_not_live";
-    } else if (r.sponsorDisabledAt) code = "sponsor_disabled";
+    } else if (r.spiffeTrustEnded === true) code = "credential_not_live";
+    else if (r.sponsorDisabledAt) code = "sponsor_disabled";
     else if (org.executionMode === "halted") code = "org_halted";
     else if (placementFailures.has(g.id)) code = placementFailures.get(g.id)!;
     if (code && !failure) failure = { index: i, code };
