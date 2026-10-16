@@ -89,7 +89,6 @@ import { completeExecutorRequest, NO_IDENTITY, sendExecutorRefusal, verifyExecut
 import { databaseNow } from "./delegation.js";
 import { attestationCounts, freshAttestation, type FreshAttestationRow } from "./executor-attestation.js";
 import { endStdioSession, registerExecutorStdioRoutes, setStdioMacRoot, stdioSecretFor } from "./executor-stdio.js";
-import { engineTaskInputDigestFor, registerEngineTaskChannelRoutes } from "./engine-tasks.js";
 import { artifactStoreFromEnv, type ArtifactStore } from "./model-artifacts.js";
 import { loadOrgSettings } from "./org-settings.js";
 
@@ -102,6 +101,28 @@ export interface ExecutorChannelOptions {
   keepaliveMs?: number;
   /** I5: where an engine task's artifact input is streamed from (default: the artifact store from the environment) */
   artifactStore?: ArtifactStore | null;
+  /**
+   * I5: the engine task side (engine-tasks.ts), handed in by the app so this module never imports it (no import
+   * cycle). Absent: no engine task input is served and every engine task report is refused `engine_task_unknown`
+   * (fail closed).
+   */
+  engineTasks?: EngineTaskChannelHooks;
+}
+
+/** I5: what the executor channel needs from the engine tasks this process holds (engine-tasks.ts implements it) */
+export interface EngineTaskChannelHooks {
+  /** the input digest of the engine task this process holds for an offer (null: none held here) */
+  inputDigestFor(offerId: string): string | null;
+  /** register the executor's input routes inside the channel scope (behind its one-use proof) */
+  registerChannelRoutes(
+    scope: { get(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>): unknown },
+    db: Db,
+    deps: {
+      authed: (req: FastifyRequest, reply: FastifyReply) => Promise<ExecutorRow | null>;
+      refused: (reply: FastifyReply, status: number, code: string, executor: ExecutorRow | null, extra?: Record<string, unknown>) => FastifyReply;
+      artifactStore: () => ArtifactStore | null;
+    },
+  ): void;
 }
 
 /** the bound on a self-test or report body (64 reports of at most 64 KiB each fit well inside) */
@@ -1090,7 +1111,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
       if (!(await verifyReportSignature(auth, signed))) return refused(reply, 401, "report_signature_invalid", row);
       // ADR-0190 I5: an engine task's report is checked against the input THIS process holds for the offer; a process
       // that holds none cannot check it, so it refuses (fail closed; never a quarantine: it is our own gap)
-      const expectedInput = engineTaskInputDigestFor(p.data.offerId);
+      const expectedInput = opts.engineTasks?.inputDigestFor(p.data.offerId) ?? null;
 
       // the executor as the transaction sees it (the row loaded at authentication is not trusted for class or status);
       // an executor that is not active is refused there, once, and audited below
@@ -1228,7 +1249,7 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
     });
 
     // ---- I5: an engine task's read-only input (same proof, same scope) ----------------------------------------
-    registerEngineTaskChannelRoutes(scope, db, {
+    opts.engineTasks?.registerChannelRoutes(scope, db, {
       authed: async (req, reply) => (await authed(req, reply, true))?.executor ?? null,
       refused,
       artifactStore: () => taskArtifactStore,

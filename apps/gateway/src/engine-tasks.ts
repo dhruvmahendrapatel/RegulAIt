@@ -78,7 +78,7 @@ import {
   type ExecutionRefusalReason,
 } from "@regulait/shared";
 import { databaseNow } from "./delegation.js";
-import { expireOffers, linkedReportOf, offerLinkedPlacement, pickLinkedReport, refusedLinkedPlacement } from "./executor-channel.js";
+import { expireOffers, linkedReportOf, offerLinkedPlacement, pickLinkedReport, refusedLinkedPlacement, type EngineTaskChannelHooks } from "./executor-channel.js";
 import { resolveRequirement } from "./execution-placement.js";
 import { holdStdioSession, liveStdioSessions, StdioSession, watchHeldStdioSession } from "./executor-stdio.js";
 import { buildAgentDecider } from "./evals.js";
@@ -722,3 +722,9 @@ export function registerEngineTaskChannelRoutes(scope: ChannelScope, db: Db, dep
     return reply.send(opened.stream);
   });
 }
+
+/** I5: the engine task side the executor channel is handed by the app (it never imports this module: no cycle) */
+export const engineTaskChannelHooks: EngineTaskChannelHooks = {
+  inputDigestFor: engineTaskInputDigestFor,
+  registerChannelRoutes: registerEngineTaskChannelRoutes,
+};
