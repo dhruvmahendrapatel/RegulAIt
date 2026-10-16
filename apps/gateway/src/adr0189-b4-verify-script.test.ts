@@ -74,8 +74,11 @@ let dir: string;
 const bundle = (id: string) => path.join(dir, `${id}.tar.gz`);
 beforeAll(() => {
   dir = mkdtempSync(path.join(tmpdir(), "b4-script-"));
-  for (const id of ["P01", "P02", "P14", "P28", "A02", "A03", "N-M01", "N-M09", "N-B07", "N-L01"]) writeFileSync(bundle(id), gzipSync(tarOf(entriesOf(id))));
+  for (const id of ["P01", "P02", "P14", "P28", "A02", "A03", "N-M01", "N-M09", "N-B07", "N-L01", "N-R12"]) writeFileSync(bundle(id), gzipSync(tarOf(entriesOf(id))));
   writeFileSync(path.join(dir, "receipt-keys.json"), JSON.stringify(corpus.positives[0].trust.receipt.keyring));
+  const { receiptV2FromAuditSeq: _boundary, ...keysOnly } = corpus.positives[0].trust.receipt.keyring as Record<string, unknown>;
+  writeFileSync(path.join(dir, "receipt-keys-no-boundary.json"), JSON.stringify(keysOnly));
+  writeFileSync(path.join(dir, "receipt-keys-null-boundary.json"), JSON.stringify({ ...keysOnly, receiptV2FromAuditSeq: null }));
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -107,6 +110,25 @@ describe("ADR-0189 R19: scripts/verify-bom.mjs, one offline tool for both subjec
     expect(r.status, r.stdout).toBe(0);
     // with no boundary a v2 receipt is invalid (B4.9 G10): nothing emits v2 before the recorded cutover
     expect(verifyBom(bundle("P01"), "--fingerprint", EXPORT_FPR, "--receipt-fingerprint", RECEIPT_FPR, "--receipt-v2-from", "none").status).toBe(1);
+  });
+  it("B8 review H1: a keyring with NO receipt v2 boundary is refused (absent is not null); null and a value are honoured", () => {
+    const noBoundary = path.join(dir, "receipt-keys-no-boundary.json");
+    const nullBoundary = path.join(dir, "receipt-keys-null-boundary.json");
+    // absent: refused, whatever the bundle (the reviewer's case: N-R12 came out VALID when absent read as null)
+    for (const id of ["N-R12", "A02"]) {
+      const r = verifyBom(bundle(id), "--fingerprint", EXPORT_FPR, "--receipt-keyring", noBoundary, "--now", "2026-10-11T00:00:00.000Z");
+      expect(r.status, id).toBe(2);
+      expect(r.stderr).toContain("no receiptV2FromAuditSeq");
+    }
+    // pinned fingerprints carry no boundary either: --receipt-v2-from is required
+    expect(verifyBom(bundle("P01"), "--fingerprint", EXPORT_FPR, "--receipt-fingerprint", RECEIPT_FPR, "--now", "2026-10-11T00:00:00.000Z").status).toBe(2);
+    // an explicit null is "no cutover recorded": an AI BOM verifies
+    expect(verifyBom(bundle("A02"), "--fingerprint", EXPORT_FPR, "--receipt-keyring", nullBoundary, "--now", "2026-10-11T00:00:00.000Z").status).toBe(0);
+    // a value is enforced: N-R12's v1 receipt at the boundary is invalid, from the file or stated on the command line
+    const fromFile = withTrust("N-R12", "--json");
+    expect(fromFile.status).toBe(1);
+    expect(JSON.parse(fromFile.stdout).checks).toContainEqual(expect.objectContaining({ check: "receipt_facts_binding", status: "invalid", reason: "v1_receipt_after_boundary" }));
+    expect(verifyBom(bundle("N-R12"), "--fingerprint", EXPORT_FPR, "--receipt-keyring", noBoundary, "--receipt-v2-from", "42", "--now", "2026-10-11T00:00:00.000Z").status).toBe(1);
   });
   it("review item 2: a crafted file is reported invalid (exit 1), never a crash", () => {
     const junk = path.join(dir, "junk.tar.gz");

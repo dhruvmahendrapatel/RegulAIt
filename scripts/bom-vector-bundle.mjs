@@ -18,13 +18,16 @@
 // Offline: no network, no database, no clock. Needs `pnpm -r build` (imports the
 // built @regulait/shared). Refuses (exit 1) when the written tar is not the
 // vector's pinned `tarSha256`, so it can never hand out a different bundle than
-// the one the vector specifies. Vectors with a non-file entry (a symlink or a
-// directory) are refused: writeBomTar writes regular files only.
+// the one the vector specifies. Refused too, rather than approximated: vectors
+// with a non-file entry (a symlink or a directory; writeBomTar writes regular
+// files only), online vectors (`trust.mode` not "offline", or trusting the
+// deployment's own export key), an export keyring entry whose `fingerprint` is not
+// its key's, and a trust root that states no receipt v2 boundary.
 //
 // TEST-ONLY: every key in the vectors is a published CANARY key. Never configure one.
 // Exit: 0 written. 1 refused. 2 usage error.
 // =============================================================================
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +67,20 @@ else {
 }
 if (entries.some((e) => e.type !== "file")) fail(`vector ${id} holds a non-file entry; this writer writes regular files only`);
 
+// B8 review M1: write only a trust root the offline script can express exactly. An online vector (the route's
+// keyring-plus-own-key trust, P20, P21, N-M02, N-M05) or an export keyring entry whose `fingerprint` is not its key's
+// (a load-time refusal online, which a `--keyring` directory cannot carry) is refused, never silently approximated.
+const t = vec.trust;
+if (t.mode !== "offline") fail(`vector ${id} is a ${t.mode} vector (the online route's trust root); this writer writes offline trust roots only`);
+if (t.export.ownKey) fail(`vector ${id} trusts the deployment's own export key (online only); refusing`);
+const spkiFingerprint = (pem) => `sha256:${createHash("sha256").update(createPublicKey(pem).export({ type: "spki", format: "der" })).digest("hex")}`;
+for (const k of t.export.keyring ?? []) {
+  if (k.fingerprint !== undefined && k.fingerprint !== spkiFingerprint(k.publicKeyPem)) fail(`vector ${id}: export keyring entry ${k.keyId} names a fingerprint that is not its key's; refusing`);
+}
+
+const boundaryOf = t.receipt.keyring ? t.receipt.keyring : t.receipt;
+if (!Object.hasOwn(boundaryOf, "receiptV2FromAuditSeq")) fail(`vector ${id} states no receipt v2 boundary; refusing (an absent boundary is never read as none)`);
+
 const tar = shared.writeBomTar(entries.map((e) => ({ path: e.name, body: Buffer.from(e.text, "utf8") })));
 const tarSha = createHash("sha256").update(tar).digest("hex");
 if (tarSha !== vec.bundle.tarSha256 || tar.length !== vec.bundle.tarBytes) fail(`the written tar (${tarSha}, ${tar.length} bytes) is not vector ${id}'s pinned tar; refusing`);
@@ -74,7 +91,6 @@ const archive = path.join(out, `${rootDir}.tar.gz`);
 writeFileSync(archive, gzipSync(tar, { level: 9 }));
 
 const trustArgs = [];
-const t = vec.trust;
 if (t.export.keyring) {
   const dir = path.join(out, "trust", "export-keyring");
   mkdirSync(dir, { recursive: true });

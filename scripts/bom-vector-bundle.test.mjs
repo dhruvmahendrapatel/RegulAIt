@@ -3,7 +3,7 @@
 // Each case runs the real CLIs as an auditor would: write a vector's bundle, then verify it with
 // scripts/verify-bom.mjs using only the trust arguments the writer printed.
 import { describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,7 +26,7 @@ function writeAndVerify(id) {
 }
 const vec = (id) => [...vectors.positives, ...vectors.negatives].find((x) => x.id === id);
 
-describe("bom-vector-bundle.mjs", () => {
+describe("bom-vector-bundle.mjs", { timeout: 60_000 }, () => {
   it.each(["P01", "A01", "A02", "A03"])("positive %s: writes the pinned tar, and verify-bom.mjs answers VALID (exit 0)", (id) => {
     const r = writeAndVerify(id);
     const tar = gunzipSync(readFileSync(r.archive));
@@ -48,6 +48,39 @@ describe("bom-vector-bundle.mjs", () => {
     expect(r.verify.status).toBe(1);
   });
 
+  // B8 review M1: every vector is either refused (exactly the set below) or verifies to its expected outcome
+  it("sweep: every B4 vector is refused or yields its expected outcome through verify-bom.mjs", async () => {
+    const REFUSED = ["N-M16", "N-M18", "P20", "P21", "N-M02", "N-M05"];
+    const nodeAsync = (script, args) =>
+      new Promise((resolve) => execFile(process.execPath, [path.join(here, script), ...args], { encoding: "utf8" }, (err, stdout, stderr) => resolve({ status: err ? (err.code ?? 1) : 0, stdout, stderr })));
+    const one = async (x) => {
+      const out = mkdtempSync(path.join(tmpdir(), `b8-sweep-${x.id}-`));
+      const w = await nodeAsync("bom-vector-bundle.mjs", [x.id, out]);
+      if (REFUSED.includes(x.id)) return w.status === 1 && !readdirSync(out).length ? null : `${x.id}: expected a refusal, got exit ${w.status}`;
+      if (w.status !== 0) return `${x.id}: writer exit ${w.status} ${w.stderr.trim()}`;
+      const archive = readdirSync(out).find((f) => f.endsWith(".tar.gz"));
+      const trust = /verify-bom\.mjs trust arguments: (.*)\n/.exec(w.stdout)[1].split(" ");
+      const r = await nodeAsync("verify-bom.mjs", [path.join(out, archive), ...trust, "--json"]);
+      let outcome;
+      try {
+        outcome = JSON.parse(r.stdout).outcome;
+      } catch {
+        outcome = `exit ${r.status}`;
+      }
+      return outcome === x.expect.outcome ? null : `${x.id}: expected ${x.expect.outcome}, got ${outcome}`;
+    };
+    const queue = [...vectors.positives, ...vectors.negatives];
+    expect(queue.length).toBe(141);
+    const wrong = [];
+    await Promise.all(Array.from({ length: 8 }, async () => {
+      for (let x = queue.shift(); x; x = queue.shift()) {
+        const w = await one(x);
+        if (w) wrong.push(w);
+      }
+    }));
+    expect(wrong).toEqual([]);
+  }, 600_000);
+
   it("the gzip member has no flags and MTIME 0 (B4.1), so the product's reader accepts it", () => {
     const r = writeAndVerify("A01");
     const gz = readFileSync(r.archive);
@@ -55,9 +88,9 @@ describe("bom-vector-bundle.mjs", () => {
     expect(gz.readUInt32LE(4)).toBe(0);
   });
 
-  it("refuses a vector holding a non-file entry (N-M16 directory, N-M18 symlink) and an unknown id; usage is exit 2", () => {
+  it("refuses a non-file entry (N-M16, N-M18), an online trust root (P20, P21, N-M02, N-M05) and an unknown id, writing nothing; usage is exit 2", () => {
     const out = mkdtempSync(path.join(tmpdir(), "b8-refuse-"));
-    for (const id of ["N-M16", "N-M18", "P99"]) {
+    for (const id of ["N-M16", "N-M18", "P99", "P20", "P21", "N-M02", "N-M05"]) {
       const r = node("bom-vector-bundle.mjs", [id, out]);
       expect(r.status).toBe(1);
       expect(readdirSync(out)).toEqual([]);

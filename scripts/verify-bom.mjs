@@ -11,11 +11,13 @@
 //     --fingerprint sha256:<hex>     repeatable; pins the bundled signing-key.pub (ADR-0116)
 //     --keyring <dir>                a directory of pinned <keyId>.pub files (ADR-0116)
 //   the receipt key (it signs the BOM body, the receipt and any addenda):
-//     --receipt-keyring <file>       the operator's `GET /v1/receipts/keys` or `/v1/receipts/export`
-//                                    JSON, obtained out of band; its `receiptV2FromAuditSeq` is the
-//                                    receipt v2 boundary
+//     --receipt-keyring <file>       the operator's `GET /v1/receipts/export` JSON, obtained out of band;
+//                                    its `receiptV2FromAuditSeq` is the receipt v2 boundary
 //     --receipt-fingerprint sha256:<hex>  repeatable; pins the bundle's receipt-keys.json entries
-//     --receipt-v2-from <seq|none>   the receipt v2 boundary (overrides the keyring file's)
+//     --receipt-v2-from <seq|none>   the receipt v2 boundary (overrides the keyring file's). REQUIRED with
+//                                    --receipt-fingerprint, and with a keyring file that has no
+//                                    `receiptV2FromAuditSeq` (such as `GET /v1/receipts/keys`): an absent
+//                                    boundary is refused, never read as "no cutover" (B8 review H1)
 //   optional:
 //     --tsa-trust <pem>              a TSA trust bundle, to check an anchor's RFC 3161 token
 //     --now <iso-8601>               the verification time (default: this machine's clock)
@@ -103,8 +105,26 @@ if (opt.receiptKeyring) {
     process.exit(2);
   }
   receiptTrust = { keys: file.keys.map((k) => ({ keyId: k.keyId, jwk: k.jwk })) };
-  if (typeof file.receiptV2FromAuditSeq === "number") boundary = file.receiptV2FromAuditSeq;
-} else receiptTrust = { pinnedFingerprints: opt.receiptFingerprints };
+  // B8 review H1: an ABSENT boundary is not "no cutover". `GET /v1/receipts/keys` carries no boundary; a keyring
+  // without the field is refused unless --receipt-v2-from states it. An explicit null is "no cutover recorded".
+  if (!Object.hasOwn(file, "receiptV2FromAuditSeq")) {
+    if (opt.v2From === undefined) {
+      process.stderr.write("REFUSED: --receipt-keyring has no receiptV2FromAuditSeq (the receipt v2 boundary). Use the operator's `GET /v1/receipts/export` JSON, or pass --receipt-v2-from SEQ|none, obtained out of band.\n");
+      process.exit(2);
+    }
+  } else if (file.receiptV2FromAuditSeq === null) boundary = null;
+  else if (Number.isSafeInteger(file.receiptV2FromAuditSeq) && file.receiptV2FromAuditSeq >= 1) boundary = file.receiptV2FromAuditSeq;
+  else {
+    process.stderr.write("REFUSED: --receipt-keyring's receiptV2FromAuditSeq must be null or a positive audit seq.\n");
+    process.exit(2);
+  }
+} else {
+  receiptTrust = { pinnedFingerprints: opt.receiptFingerprints };
+  if (opt.v2From === undefined) {
+    process.stderr.write("REFUSED: pinned receipt fingerprints carry no receipt v2 boundary. Pass --receipt-v2-from SEQ|none, obtained out of band.\n");
+    process.exit(2);
+  }
+}
 if (opt.v2From !== undefined) {
   if (opt.v2From === "none") boundary = null;
   else if (/^[1-9][0-9]{0,15}$/.test(opt.v2From)) boundary = Number(opt.v2From);

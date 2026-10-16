@@ -4,7 +4,7 @@
 // product's own renderings, written by scripts/spdx3/render-fixtures.mjs.
 import { beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,7 @@ beforeAll(() => {
   if (r.status !== 0) throw new Error(r.stderr);
 });
 
-describe("validate-bom-rendering.mjs", () => {
+describe("validate-bom-rendering.mjs", { timeout: 60_000 }, () => {
   it("a CycloneDX 1.7 rendering is valid as cyclonedx-1.7 (exit 0)", () => {
     const r = run("--format", "cyclonedx-1.7", cdx);
     expect(r.stdout).toContain("[valid]");
@@ -55,6 +55,15 @@ describe("validate-bom-rendering.mjs", () => {
     const r = run("--format", "spdx-3.0.1", junk);
     expect(r.status).toBe(1);
     expect(r.stdout).not.toContain("CANARY");
+  });
+
+  it("B8 review L7: a file over the archive cap is refused without being read (exit 1)", () => {
+    const big = path.join(dir, "big.json");
+    writeFileSync(big, "");
+    truncateSync(big, 64 * 1024 * 1024 + 1);
+    const r = run("--format", "cyclonedx-1.7", big);
+    expect(r.stdout).toContain("not a regular file of at most 67108864 bytes");
+    expect(r.status).toBe(1);
   });
 
   it("usage errors exit 2: no format, an unknown format, no file, a repeated --format", () => {

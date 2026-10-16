@@ -18,7 +18,7 @@
 // Needs `pnpm -r build` (imports the built @regulait/shared).
 // Exit: 0 every file valid. 1 a file is invalid or unreadable. 2 usage error.
 // =============================================================================
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,6 +50,13 @@ let failed = false;
 for (const f of files) {
   let doc;
   try {
+    // B8 review L7: never read more than a whole BOM archive may hold (the product's own cap)
+    const st = statSync(f);
+    if (!st.isFile() || st.size > shared.BOM_ARCHIVE_MAX_TAR_BYTES) {
+      process.stdout.write(`[invalid] ${f}: not a regular file of at most ${shared.BOM_ARCHIVE_MAX_TAR_BYTES} bytes\n`);
+      failed = true;
+      continue;
+    }
     doc = JSON.parse(readFileSync(f, "utf8"));
   } catch {
     // value-free: never echo a file's content

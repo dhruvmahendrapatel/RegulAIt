@@ -3,7 +3,7 @@
 **For the operator of a multi-replica deployment.** ADR-0189 amendment R43 makes the drain of old replicas before
 the receipt v2 cutover "a runbook step (B8)". This file is that step's home.
 
-> **Status, 2026-10-16 (commit `6b35301`): no cutover or drain step in this file has been executed, and none has a
+> **Status, 2026-10-16 (this PR's tree, based on `6b35301`): no cutover or drain step in this file has been executed, and none has a
 > command.** The one command here is an offline verification of a specification vector, executed as shown. The
 > receipt v2 cutover itself is not built: `RECEIPT_EMITTER_SUPPORTS_V2` is `false`
 > (`packages/shared/src/batch4.ts`), no operation records a receipt v2 boundary, and every receipt is v1. A cutover
@@ -89,7 +89,7 @@ a BYOC orchestrator) and are written by the cutover slice once executed.
    [BOM_VERIFICATION.md](BOM_VERIFICATION.md) Part B.
 7. **Prove the boot refusal on staging:** a build that cannot emit v2 refuses to start against the cut-over database
    (R43). Do this on a staging copy, never in a live deployment.
-8. **Give auditors the new keyring file**, so their offline trust root carries the boundary.
+8. **Tell every auditor the new boundary, attested out of band**, so they update their trust record (BOM_VERIFICATION.md step 3), then give them the new `GET /v1/receipts/export` keyring. A keyring whose boundary differs from the trust record fails `bom-trust-check.mjs` until then.
 
 ## Pending
 

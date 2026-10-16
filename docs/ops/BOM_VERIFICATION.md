@@ -6,9 +6,11 @@ bundle in a BYOC or air-gapped deployment. ADR-0189 slice B8; the design is ADR-
 (air-gapped and BYOC fit), R19 (one verifier for both subjects) and B4.1 to B4.10 (the bundle and signature
 specification).
 
-> **M-041 status of this file.** Every command in a fenced block below was executed on 2026-10-16 at commit
-> `6b35301` (Node 22.22.2, pnpm 10.34.5, CPython 3.11.15, OpenSSL 3.0.13, Linux x86_64), and the output shown is
-> the real output, shortened only where marked `…`. The air-gapped steps (Part B) were executed inside
+> **M-041 status of this file.** Every command in a fenced block below was executed on 2026-10-16 on this PR's
+> tree, based on commit `6b35301` (Node 22.22.2, pnpm 10.34.5, CPython 3.11.15, OpenSSL 3.0.13, Linux x86_64), and
+> the output shown is the real output, shortened only where marked `…`. Fingerprints and digests that sit next to a
+> key name are elided as `sha256:<first 8>…<last 8>` so the secret scanner does not mistake them for secrets; the
+> full values are in the files the text names. The air-gapped steps (Part B) were executed inside
 > `unshare --net` (a Linux network namespace with no interface but loopback), so nothing in them reached a network.
 > The bundles verified were the specification's own TEST-ONLY vectors, not a bundle exported by a running
 > deployment. Steps that need a running stack are listed under **Pending** with no command, because none has been
@@ -37,12 +39,20 @@ commitment. The outcome is `VALID` (exit 0), `UNVERIFIABLE` (exit 3: evidence th
 copies; whoever forged a bundle would ship their own. Both verifiers refuse to run without a trust root you supply
 (executed, Part B step 4).
 
+**Nor is the keyring you are sent, on its own.** A keyring that arrives with the bundle, or through the same channel,
+proves nothing about who made it. The trust root is the **trust record**: the fingerprints of the export key and of
+every receipt key, and the receipt v2 boundary, written down once, out of band, at key generation or at the first
+engagement (for example in the signed engagement letter), and kept with your working papers. Every keyring you
+receive later is checked against that record by script (step 3). A key that is not in the record is not trusted
+until it is attested separately, through a channel independent of the bundle and the keyring (a rotated receipt key,
+for example, is attested by the operator in writing); only then is it added to the record.
+
 ## Who holds what
 
 | Role | Holds | Hands over, out of band, once per engagement |
 |---|---|---|
-| Customer operator (control plane) | the export signing key (ADR-0116, `infra/export-keys/README.md`) and the receipt signing key (deploy-time, ADR-0186) | the export key fingerprint (`sha256:` + 64 hex), or its `<keyId>.pub`; the receipt keyring (`GET /v1/receipts/keys`, or `GET /v1/receipts/export`, which also carries `receiptV2FromAuditSeq`) |
-| Auditor | the verifier kit (Part A) | nothing; the auditor only receives |
+| Customer operator (control plane) | the export signing key (ADR-0116, `infra/export-keys/README.md`) and the receipt signing key (deploy-time, ADR-0186) | once, for the trust record: the export key fingerprint and every receipt key fingerprint, and the receipt v2 boundary. With each engagement: the receipt keyring from `GET /v1/receipts/export`, which carries `receiptV2FromAuditSeq`. `GET /v1/receipts/keys` carries no boundary and is refused as a keyring (an absent boundary is never read as "no cutover") |
+| Auditor | the verifier kit (Part A) and the trust record | nothing; the auditor only receives |
 
 **BYOC.** The control plane builds and signs every BOM from control-plane records (ADR-0189 §10). Facts from an
 execution plane arrive as ADR-0188 identity and grant ids, never as content, so a bundle respects the ADR-0015 data
@@ -213,8 +223,12 @@ exit code: 1
 ```
 
 If either answer differs, stop: the kit is not the one the specification describes. Every vector id (33 positives,
-108 negatives) is listed in `packages/shared/test-vectors/decision-bom/README.md`; the writer refuses the two
-negatives whose archive holds a directory or symlink entry (N-M16, N-M18).
+108 negatives) is listed in `packages/shared/test-vectors/decision-bom/README.md`. Not every positive is `VALID`: 7
+expect `UNVERIFIABLE` (for example P14, an anchored BOM with no timestamp token). The writer refuses, writing nothing,
+any vector the offline script cannot express exactly: the two with a directory or symlink entry (N-M16, N-M18) and
+the four with the online route's trust root (P20, P21, N-M02, N-M05: `trust.mode` online, the deployment's own
+export key, or an export keyring entry whose fingerprint is not its key's). Every other vector, run through the
+writer and `verify-bom.mjs`, gives its expected outcome (checked by `scripts/bom-vector-bundle.test.mjs` in CI).
 
 **Every key in these vectors is a published CANARY test key.** Never configure one, and never accept a real bundle
 signed by one.
@@ -223,58 +237,96 @@ The B4 vectors carry `regulait.decision-bom.v1` bodies. Since ADR-0190 I8 a depl
 `regulait.decision-bom.v2` bodies, which add an `execution` section; the same verifier checks both versions. No v2
 bundle has been through this runbook yet (Pending, item 1).
 
-### Step 3. Fix the trust root
+### Step 3. Check the keys you were sent against your trust record
 
-For a real bundle, the operator gives you the export fingerprint and the receipt keyring out of band (see
-**Who holds what**). If you were given the export key's `.pub` rather than its fingerprint, compute the fingerprint
-(SHA-256 of the DER SubjectPublicKeyInfo, ADR-0116) and compare it with the value from the engagement letter:
+Your trust record (see **What a successful verification proves**) is a JSON file you wrote from the out-of-band
+record:
+
+```json
+{ "exportFingerprints": ["sha256:<64 hex>"],
+  "receiptFingerprints": { "<receipt keyId>": "sha256:<64 hex>" },
+  "receiptV2FromAuditSeq": null }
+```
+
+An export key fingerprint is the SHA-256 of the key's DER SubjectPublicKeyInfo (ADR-0116); a receipt key fingerprint
+is the SHA-256 of `302a300506032b6570032100` followed by the base64url-decoded `x` of its JWK (B4.2). The boundary is
+`null` until the receipt v2 cutover has run (see [RECEIPT_V2_CUTOVER.md](RECEIPT_V2_CUTOVER.md)), then the recorded
+audit seq. In the rehearsal, the record is written from the vector file's published CANARY keys, standing in for the
+engagement letter (**never do this for a real engagement**: a record taken from the same place as the keys is no
+record):
 
 ```bash
 # where: air-gapped
-openssl pkey -pubin -in "$WORK/selftest/A02/trust/export-keyring/TEST-ONLY-CANARY-export-key-1.pub" -outform DER | sha256sum
+mkdir -p "$WORK/record"
+node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const k=(id)=>v.keys.find((x)=>x.keyId===id);console.log(JSON.stringify({exportFingerprints:[k("TEST-ONLY-CANARY-export-key-1").fingerprint],receiptFingerprints:{"TEST-ONLY-CANARY-receipt-key-1":k("TEST-ONLY-CANARY-receipt-key-1").fingerprint},receiptV2FromAuditSeq:42}))' \
+  packages/shared/test-vectors/decision-bom/b4-vectors.json > "$WORK/record/trust-record.json"
 ```
 
-```text
-3133075a6bffc999dede86075e66ac42685946d768c1ffbfdacb7c7009096b20  -
-```
-
-A receipt key's fingerprint (B4.2) is the SHA-256 of `302a300506032b6570032100` followed by the base64url-decoded
-`x` of its JWK. To list the fingerprints of a receipt keyring file, to compare them with the operator's:
+Then compare by script, never by eye. `scripts/bom-trust-check.mjs` computes each fingerprint, compares it with the
+record as an exact string, checks the keyring's boundary against the recorded one, and exits non-zero on any
+difference:
 
 ```bash
 # where: air-gapped
-node -e 'const k=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));for(const e of k.keys){const d=Buffer.concat([Buffer.from("302a300506032b6570032100","hex"),Buffer.from(e.jwk.x,"base64url")]);console.log(e.keyId,"sha256:"+require("crypto").createHash("sha256").update(d).digest("hex"))}' \
-  "$WORK/selftest/A02/trust/receipt-keyring.json"
+node scripts/bom-trust-check.mjs --record "$WORK/record/trust-record.json" \
+  --export-pub "$WORK/selftest/A02/trust/export-keyring/TEST-ONLY-CANARY-export-key-1.pub" \
+  --receipt-keyring "$WORK/selftest/A02/trust/receipt-keyring.json"
+echo "exit code: $?"
 ```
 
 ```text
-TEST-ONLY-CANARY-receipt-key-1 sha256:505e806b…4c746deb
+MATCH  export key TEST-ONLY-CANARY-export-key-1.pub
+MATCH  receipt key TEST-ONLY-CANARY-receipt-key-1
+MATCH  receipt v2 boundary 42
+TRUST RECORD: MATCH
+exit code: 0
 ```
 
-The fingerprint is elided here (the command was executed; the full value is the `fingerprint` of
-`TEST-ONLY-CANARY-receipt-key-1` in `packages/shared/test-vectors/decision-bom/b4-vectors.json`).
+A keyring with no boundary, such as the output of `GET /v1/receipts/keys`, fails the check, and `verify-bom.mjs`
+refuses it rather than reading it as "no cutover":
 
-The keyring file's `receiptV2FromAuditSeq` is the receipt v2 boundary (R42); it is part of the trust root, never
-read from the bundle. With pinned fingerprints instead of a keyring file, pass the boundary yourself with
-`--receipt-v2-from <seq>` or `--receipt-v2-from none`.
+```bash
+# where: air-gapped
+node -e 'const k=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));delete k.receiptV2FromAuditSeq;console.log(JSON.stringify(k))' \
+  "$WORK/selftest/A02/trust/receipt-keyring.json" > "$WORK/selftest/keys-only.json"
+node scripts/bom-trust-check.mjs --record "$WORK/record/trust-record.json" --receipt-keyring "$WORK/selftest/keys-only.json"
+echo "exit code: $?"
+node scripts/verify-bom.mjs "$WORK/selftest/P01/regulait-export-decision-bom-a0000000-0000-4000-8000-000000000042-v1.tar.gz" \
+  --keyring "$WORK/selftest/P01/trust/export-keyring" --receipt-keyring "$WORK/selftest/keys-only.json"
+echo "exit code: $?"
+```
+
+```text
+MATCH  receipt key TEST-ONLY-CANARY-receipt-key-1
+NOT IN RECORD  receipt v2 boundary: absent from the keyring (use GET /v1/receipts/export)
+TRUST RECORD: MISMATCH. Do not verify with these keys until the difference is attested out of band.
+exit code: 1
+REFUSED: --receipt-keyring has no receiptV2FromAuditSeq (the receipt v2 boundary). Use the operator's `GET /v1/receipts/export` JSON, or pass --receipt-v2-from SEQ|none, obtained out of band.
+exit code: 2
+```
+
+With pinned receipt fingerprints (`--receipt-fingerprint`) instead of a keyring file, `--receipt-v2-from <seq>` or
+`--receipt-v2-from none` is required, taken from your trust record.
 
 ### Step 4. Verify the bundle you received
 
-Set `BUNDLE` to the archive you received, `EXPORT_FPR` to the export fingerprint and `RECEIPT_KEYRING` to the receipt
-keyring file. In the rehearsal they were the A02 vector:
+Set `BUNDLE` to the archive you received and `RECEIPT_KEYRING` to the keyring that passed step 3, and take the
+export fingerprint from your trust record, never from the bundle. In the rehearsal the bundle was the A02 vector:
 
 ```bash
 # where: air-gapped
 BUNDLE="$WORK/selftest/A02/regulait-export-ai-bom-ab000000-0000-4000-8000-000000000001-cyclonedx-1.7.tar.gz"
-EXPORT_FPR="sha256:3133075a6bffc999dede86075e66ac42685946d768c1ffbfdacb7c7009096b20"
 RECEIPT_KEYRING="$WORK/selftest/A02/trust/receipt-keyring.json"
+EXPORT_FPR="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).exportFingerprints[0])' "$WORK/record/trust-record.json")"
+NAME="$(basename "$BUNDLE" .tar.gz)"
+mkdir -p "$WORK/reports"
 ```
 
 **4a. The envelope, with stock tools only** (ADR-0116; `openssl`, `sha256sum`, `tar`, a POSIX shell):
 
 ```bash
 # where: air-gapped
-scripts/verify-export-bundle.sh "$BUNDLE" --fingerprint "$EXPORT_FPR"
+scripts/verify-export-bundle.sh "$BUNDLE" --fingerprint "$EXPORT_FPR" && touch "$WORK/reports/$NAME.envelope-verified"
 echo "exit code: $?"
 ```
 
@@ -307,8 +359,8 @@ node scripts/verify-bom.mjs "$BUNDLE" --fingerprint "$EXPORT_FPR" --receipt-keyr
   --now 2026-10-11T00:00:00.000Z
 echo "exit code: $?"
 node scripts/verify-bom.mjs "$BUNDLE" --fingerprint "$EXPORT_FPR" --receipt-keyring "$RECEIPT_KEYRING" \
-  --now 2026-10-11T00:00:00.000Z --json > "$WORK/verify-report.json"
-grep '"outcome"' "$WORK/verify-report.json"
+  --now 2026-10-11T00:00:00.000Z --json > "$WORK/reports/$NAME.json"
+grep '"outcome"' "$WORK/reports/$NAME.json"
 ```
 
 ```text
@@ -354,13 +406,17 @@ exit code: 2
 
 `rendering_hashes` (step 4b) already proves each carried rendering is the exact file the signed body commits to.
 This step checks the file against the standard itself, offline, with the schemas the product bundles (the same Ajv
-and schema files the product validated with when it froze the snapshot). Unpack the bundle and cross-check the
-committed hash by hand:
+and schema files the product validated with when it froze the snapshot). Unpack the bundle **only after 4a and 4b
+both passed**, into a directory of its own, and cross-check the committed hash by hand:
 
 ```bash
 # where: air-gapped
-mkdir -p "$WORK/unpacked" && tar -xzf "$BUNDLE" -C "$WORK/unpacked"
-R="$WORK/unpacked/regulait-export-ai-bom-ab000000-0000-4000-8000-000000000001-cyclonedx-1.7/content"
+if [ -e "$WORK/reports/$NAME.envelope-verified" ] && grep -q '"outcome": "valid"' "$WORK/reports/$NAME.json"; then
+  mkdir -p "$WORK/unpacked/$NAME" && tar -xzf "$BUNDLE" -C "$WORK/unpacked/$NAME" && echo "unpacked into its own directory"
+else
+  echo "NOT UNPACKED: steps 4a and 4b must both pass first"; false
+fi
+R="$WORK/unpacked/$NAME/$(ls "$WORK/unpacked/$NAME")/content"
 sha256sum "$R/ai-bom.cyclonedx-1.7.json"
 node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).renderings))' "$R/ai-bom.json"
 node scripts/validate-bom-rendering.mjs --format cyclonedx-1.7 "$R/ai-bom.cyclonedx-1.7.json"
@@ -368,6 +424,7 @@ echo "exit code: $?"
 ```
 
 ```text
+unpacked into its own directory
 6d6c7a7601df04683145f8354e2e8441dc42a8edda7cda9e27d8d2d5b869b2c2  …/content/ai-bom.cyclonedx-1.7.json
 {"cyclonedx-1.7":{"bytes":849,"sha256":"6d6c7a7601df04683145f8354e2e8441dc42a8edda7cda9e27d8d2d5b869b2c2","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 cyclonedx-library 10.3.0 bom-1.7.SNAPSHOT.schema.json"},"spdx-3.0.1":{"bytes":3326,"sha256":"bb69d44087a694d4ca9ec9b8734d62082b3933ef9fc5d9c9ed25d3a1c4037012","status":"rendered","validator":"ajv 8.20.0 ajv-formats 3.0.1 spdx-json-schema-3.0.1 sha256:582c64e809d5b3ef9bd0c4de13a32391b47b0284a3e8d199569fb96f649234b1"}}
 [valid] …/content/ai-bom.cyclonedx-1.7.json: cyclonedx-1.7 schema
@@ -405,7 +462,7 @@ exit code: 0
 `run_offline.py` runs `spdx3-validate`'s own JSON-schema and SHACL checks with the vendored, sha256-pinned schema,
 model and context. The JSON schema is necessary but not sufficient: the fixture `use_case.supplied-by-tool.expect-fail.json`
 passes the schema and fails SHACL (R12 §5; executed: `"shaclErrors": 1, "conforms": false`). `--require-offline`
-refuses to run if an outside TCP connection succeeds; on a connected machine it answered
+makes two outside TCP probes and refuses to run if either connects; on a connected machine it answered
 `run_offline.py: reached 1.1.1.1:443; this run is NOT network-isolated (refused)` and exit 3 (executed).
 
 ### Reading the results
@@ -418,7 +475,9 @@ refuses to run if an outside TCP connection succeeds; on a connected machine it 
 | `OUTCOME: UNVERIFIABLE`, exit 3 | evidence that should be there is missing | ask the operator for a fresh export; do not treat it as valid |
 | `[invalid] … unknown_key` | a signature by a key your trust root does not hold | re-confirm the keyring and fingerprint with the operator, out of band |
 | `OUTCOME: INVALID`, exit 1 | a signature, hash, link or binding failed | treat the bundle as not evidence; report it |
+| `REFUSED: … no receiptV2FromAuditSeq`, exit 2 | the receipt keyring states no v2 boundary (for example `GET /v1/receipts/keys`) | use the operator's `GET /v1/receipts/export` keyring, checked against your trust record |
 | `REFUSED: …`, exit 2 | no trust root, or a usage error | supply the trust root; never use the bundle's own keys |
+| `TRUST RECORD: MISMATCH`, exit 1 | a key or the boundary is not the one you recorded | stop; get the difference attested out of band before trusting it |
 
 ## Part C — BYOC and air-gapped operator steps
 
@@ -428,9 +487,14 @@ are named from the code, and no command or output is given for them.
 1. Confirm the deployment can sign: ADR-0189 §10 specifies that the posture page reports the Decision BOM as
    unavailable until a receipt key is set, and export signing needs `REGULAIT_EXPORT_SIGNING_KEY` and
    `REGULAIT_EXPORT_SIGNING_KEY_ID` (`infra/export-keys/README.md`).
-2. Publish the export key fingerprint to the auditor out of band, once. `GET /v1/exports/signing-key` reports it.
-3. Give the auditor the receipt keyring: `GET /v1/receipts/keys` (keys only) or `GET /v1/receipts/export`, which also
-   carries `receiptV2FromAuditSeq`. Retired keys stay listed; they are needed to verify older BOMs.
+2. At key generation or the first engagement, give the auditor, out of band, the fingerprints for the trust record:
+   the export key (`GET /v1/exports/signing-key` reports it) and every receipt key, and the receipt v2 boundary. Give
+   them again, attested, whenever a key rotates or the cutover runs.
+3. Give the auditor the receipt keyring from `GET /v1/receipts/export`, which carries `receiptV2FromAuditSeq`. Not
+   `GET /v1/receipts/keys`: it has no boundary, and the verifier refuses a keyring without one. Retired keys stay
+   listed; they are needed to verify older BOMs. Read from the code, not executed: `/v1/receipts/export` answers 400
+   `invalid_receipt_export_range` while the deployment has no receipt yet; until then, state the boundary to the
+   auditor out of band and they pass it with `--receipt-v2-from`.
 4. Export the bundle as a person in `bom_export_roles` (admins only by default; an auditor grant is an audited
    admin act): `GET /v1/decisions/:auditId/bom/bundle` for a Decision BOM; `GET /v1/ai-bom/snapshots/:snapshotId/bundle`
    or `GET /v1/ai-bom/snapshots/:snapshotId?format=native|cyclonedx-1.7|cyclonedx-1.6|spdx-3.0.1` for an AI BOM.
