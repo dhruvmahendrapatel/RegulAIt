@@ -57,6 +57,28 @@ Dockerfile fails. Evidence for keeping the pins:
 The Dependabot alerts for these two advisories should be dismissed as "no bump available" with a link to this
 section. The fix path is unchanged: pin the first garak release that allows datasets 5.x.
 
+**Re-checked 2026-10-16 for Dependabot alerts #83 (nltk), #84 (datasets, PR #239) and #85 (fsspec, PR #347). None can
+be patched today; the pins stay, and the acceptance below runs until 2026-11-16** (ADR-0187 decision 225). Read from PyPI's
+JSON API, OSV and garak's repository on 2026-10-16:
+- garak 0.17.0 (2026-09-09) is still the latest release and still declares `datasets>=3.0.0,<4.0` and `nltk>=3.10.3`.
+  **New since 2026-10-11:** garak's development branch (`0.17.1.pre1`) now declares `datasets>=5.0.1,<6.0` (with
+  `transformers>=5.14.1,<5.20.0`, which our 5.19.0 meets). The first garak release that carries it clears #84 and #85:
+  re-resolve the closure with `uv pip compile` as the header of `requirements.txt` says (datasets 5.1.0 caps fsspec at
+  `<=2026.7.0`, past the 2026.6.0 fix), re-hash, and drop the fsspec image allow-list entry. An unreleased commit is not
+  pinned.
+- fsspec GHSA-27vj-qcqg-25rc (CVE-2026-104851, high): fixed in 2026.6.0; every datasets 3.x caps fsspec at or below
+  2025.3.0. Allow-listed in the image gate until 2026-12-09 (decision 160), unchanged.
+- datasets GHSA-379c-qx7v-6h59 (CVE-2026-66007, moderate): fixed only in 5.0.1 (latest 5.1.0); garak forbids 4.x and up.
+  Unreachable as described above.
+- nltk GHSA-8mgp-746c-j5xp (CVE-2026-81726, high): still no patched release (OSV `last_affected` 3.10.3, the latest on
+  PyPI; nltk's development branch is also 3.10.3). The flaw is in `TransitionParser.train/parse`,
+  `AveragedPerceptron.save/load`, `PerceptronTagger.save_to_json` and `save_maxent_params`, which open a caller-chosen
+  model path without nltk's `pathsec` checks; it matters only to code that enables `pathsec` and lets untrusted input
+  choose that path. garak 0.17.0 (the pinned wheel, sha256 `9a67e629…db145`, grepped) calls none of them: it uses
+  `pos_tag` (in `sata`, loading nltk's own tagger from the data directory), `word_tokenize`, the `words`, `stopwords` and
+  `wordnet` corpora, `jaro_winkler_similarity`, and `nltk.download`; no path comes from a run. When a fixed nltk is
+  released, bump its pin and hash here (garak's `nltk>=3.10.3` allows it).
+
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | `garak` (PyPI, github.com/NVIDIA/garak) | `0.17.0` (released 2026-09-09; wheel sha256 `9a67e629…db145`, the hash R10 checked independently) | Apache-2.0 (`LICENSE`, SPDX headers; its METADATA names no licence) | The engine (ADR-0187 B5-G). Only the probes in the shared catalogue run (`packages/shared/src/engines/garak.ts`); 23 data paths whose licence or provenance is excluded are DELETED from the image (`excluded-data.txt`, decisions 145 and 197). Its probe metadata (`plugin_cache.json`, sha256 `25484e24…134a52`) is what the catalogue's detector and OWASP columns are generated from; the build refuses another. |

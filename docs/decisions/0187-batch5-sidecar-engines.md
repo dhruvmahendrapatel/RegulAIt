@@ -2694,3 +2694,37 @@ real gateway). Each guard was shown red by breaking it (named with each decision
      is mocked; the model-backed judge path ran end to end against the mock), and the judge rubrics are ours, not the
      upstream judge prompts. The approval hold does not pre-check the caller's agent entitlement before queueing; the
      run re-checks it on release.
+
+### Implementation decision (Dependabot engine alerts re-check, 2026-10-16, branch `security/dependabot-engines-1016`)
+
+225. **The five open engine alerts have no fix that the pins allow; each is accepted until 2026-11-16, with no pin
+     changed.** Alerts #83 (nltk GHSA-8mgp-746c-j5xp), #84 (datasets GHSA-379c-qx7v-6h59) and #85 (fsspec
+     GHSA-27vj-qcqg-25rc) are on `engines/garak/requirements.txt`, and #80 (node-forge GHSA-86w9-cpqp-85rv) and #81
+     (braces GHSA-vfj7-8cjw-p6xm) are on `engines/promptfoo/package-lock.json`. All five were re-read on 2026-10-16
+     from OSV, PyPI and the npm registry:
+     - nltk, node-forge and braces have no patched release. Each one's latest version is its `last_affected`.
+     - datasets is fixed only in 5.0.1 and fsspec only in 2026.6.0. garak 0.17.0, still its latest release, forbids
+       datasets 4.x and up, and every datasets 3.x caps fsspec at 2025.3.0 or below.
+
+     garak's development branch now declares `datasets>=5.0.1,<6.0`. The first garak release that carries that range is
+     the fix path for #84 and #85. At that release the closure is re-resolved with `uv pip compile` and re-hashed, and
+     decision 160's allow-list entry is removed. An unreleased commit is not pinned.
+
+     None of the five is reachable:
+     - nltk: garak calls none of the affected model-persistence APIs with a path a run supplies.
+     - datasets and fsspec: these load only the image's own read-only, hash-pinned Hub cache (decisions 160 and 201).
+     - node-forge and braces: both are optional in the lockfile, and `npm ci --omit=optional` never installs them
+       (decision 177; `npm audit --omit=optional` reports 0).
+
+     Dependabot PRs #347 and #239 still cannot build, because garak's `datasets<4.0` fails `pip check`. They are left
+     for Dependabot to close.
+
+     Not done:
+     - No override forcing nunjucks' optional peer to chokidar 5. That is outside nunjucks' declared range, for a
+       package that is never installed.
+     - No fork of any package.
+     - No image-gate allow-list entry for the unpatched advisories. The gate counts only fixable HIGH or CRITICAL
+       findings, so such an entry would be stale.
+
+     The evidence is in each engine's `THIRD_PARTY.md`. Re-check at each garak, nltk, promptfoo, jks-js or nunjucks
+     release, and by 2026-11-16 at the latest.
