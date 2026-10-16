@@ -205,6 +205,25 @@ jobs:
           sudo sh -c 'grep -h -E "clone|E[A-Z]+ \(|errno" /tmp/runsc-diag/*.boot* 2>/dev/null | grep -v " = 0" | tail -60'
           sudo sh -c 'grep -h -i -E "warn|error|denied" /tmp/runsc-diag/* 2>/dev/null | tail -30'
 
+      - name: TEMP diagnostics - the canary's own docker run, seccomp unconfined
+        continue-on-error: true
+        working-directory: packages/sandbox-executor
+        run: |
+          cp sandbox-init/sandbox-init.mjs "$INIT_DIR/sandbox-init.mjs" && chmod 0444 "$INIT_DIR/sandbox-init.mjs"
+          # shellcheck disable=SC2016
+          node --input-type=module -e '
+            import { dockerRunArgs } from "./dist/runsc-backend.js";
+            import { SHIPPED_EXECUTION_PROFILES } from "@regulait/shared";
+            const a = dockerRunArgs({ name: "diag-canary", runtimeName: "runsc", image: process.env.STDIO_BASE_IMAGE, profile: SHIPPED_EXECUTION_PROFILES.restricted, canary: true, initVolume: process.env.INIT_VOLUME });
+            const i = a.indexOf("--security-opt");
+            a.splice(i, 0, "--security-opt", "seccomp=unconfined");
+            for (const x of a) console.log(x);
+          ' > "$RUNNER_TEMP/diag-args.txt"
+          mapfile -t args < "$RUNNER_TEMP/diag-args.txt"
+          printf '%s ' "${args[@]}"; echo
+          timeout 60 docker "${args[@]}" < /dev/null 2>&1 | head -c 4000; echo
+          docker rm -f diag-canary > /dev/null 2>&1 || true
+
       - name: Smoke test - a container starts under runsc
         run: |
           set -euo pipefail
