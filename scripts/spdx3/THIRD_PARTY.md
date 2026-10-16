@@ -1,13 +1,15 @@
-# Third-party components — `scripts/spdx3` (CI and auditor tooling, never shipped in the product)
+# Third-party components — `scripts/spdx3` (CI only; never shipped or distributed by us, auditors fetch it themselves)
 
 ADR-0189 slice B5: the offline SHACL conformance check of the product's SPDX 3.0.1 renderings (`run_offline.py`), run
 in CI inside a network namespace. Nothing here is in an image, a package or a bundle (`.dockerignore` and the build
 never include `scripts/spdx3`). Ported from spike B0 (`spikes/bom-b0`, R12 §5).
 
-**Also handed to auditors (ADR-0189 B8).** `docs/ops/BOM_VERIFICATION.md` has an auditor download this exact closure
-(`pip download --require-hashes -r requirements.lock`) into a wheelhouse and install it on an air-gapped verification
-machine. It stays outside the product image, but it is now redistributed tooling in a customer's audit, so the licence
-list below is what the auditor receives; every package is still hash-pinned.
+**Auditor-fetched, not distributed by us (ADR-0189 B8).** `docs/ops/BOM_VERIFICATION.md` has an auditor download this
+closure themselves, from PyPI, on their own connected machine (`pip download --require-hashes -r requirements.lock`),
+and install it on their air-gapped verification machine. RegulAIt provides only `requirements.lock` and the
+instructions, never the wheels or the sdist, so these packages are not redistributed by us and the CI-only admission
+of PSF-2.0 and W3C-20150513 (ADR-0189 amendment 6) is unchanged. The hash lock makes the auditor's files the exact
+ones CI uses.
 
 ## Vendored SPDX 3.0.1 files (specification data, not code)
 

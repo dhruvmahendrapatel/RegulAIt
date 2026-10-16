@@ -2222,8 +2222,10 @@ Slice B8 (rollout table; R43's drain step) ships two runbooks and three small CL
 came from the review (H1 below).
 
 - **[docs/ops/BOM_VERIFICATION.md](../ops/BOM_VERIFICATION.md)**, for the auditor and the customer operator,
-  air-gapped and BYOC (§6, §10, R19). Part A prepares a verifier kit on a connected staging machine (a built
-  checkout and a hash-locked wheelhouse for `spdx3-validate`). Part B verifies on the air-gapped machine: install the
+  air-gapped and BYOC (§6, §10, R19). Part A has the auditor prepare a verifier kit on their own connected staging machine (a built
+  checkout, and a wheelhouse for `spdx3-validate` that the auditor downloads from PyPI against our hash lock; we
+  provide the lock and the instructions, never the wheels, so nothing under amendment 6's CI-only licence admission
+  is redistributed by us). Part B verifies on the air-gapped machine: install the
   SPDX validator from the wheelhouse; prove the toolchain on specification vectors (each must give the outcome the
   vector expects: 26 positives `VALID`, 7 `UNVERIFIABLE`, every negative `INVALID`) before trusting it; check the
   keys received against the auditor's out-of-band trust record by script; check the envelope with `verify-export-bundle.sh` and the body, receipt,

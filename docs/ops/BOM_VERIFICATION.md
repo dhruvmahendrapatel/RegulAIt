@@ -64,10 +64,12 @@ receipt keyring are the whole input. Verification is therefore the same for BYOC
 RFC 3161 timestamp exists only if the deployment has an internal TSA (ADR-0186 S); without one the anchor carries no
 token and the verifier says so.
 
-## Part A — prepare the verifier kit (once, on a connected staging machine)
+## Part A — prepare the verifier kit (once, on the auditor's own connected staging machine)
 
-The kit is a built checkout of the RegulAIt release whose bundles you will verify, plus a wheelhouse for the SPDX
-SHACL validator. Pick a working directory for the evidence and tools:
+The auditor builds the kit; RegulAIt hands over no binaries or wheels. The kit is a built checkout of the RegulAIt
+release whose bundles you will verify, plus a wheelhouse for the SPDX SHACL validator that **you download yourself
+from PyPI**, checked against the hash lock in the release (`scripts/spdx3/requirements.lock`). We provide the lock and
+these instructions, never the wheels. Pick a working directory for the evidence and tools:
 
 ```bash
 # where: staging (connected). Run from the root of the checkout.
@@ -89,8 +91,10 @@ apps/gateway build$ tsc -p tsconfig.json
 apps/gateway build: Done
 ```
 
-Download the SPDX validator's hash-locked closure (`spdx3-validate` 0.0.7, CI-only, never shipped; ADR-0189
-amendment 4) so it can be installed with no network later:
+Download the SPDX validator's closure (`spdx3-validate` 0.0.7 and its dependencies; never shipped in the product,
+ADR-0189 amendment 4) from PyPI yourself, so it can be installed with no network later. `--require-hashes` makes pip
+refuse any file whose SHA-256 is not the one in our lock; the licences of these third-party packages are listed in
+`scripts/spdx3/THIRD_PARTY.md`:
 
 ```bash
 # where: staging (connected)
