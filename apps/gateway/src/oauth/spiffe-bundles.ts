@@ -59,10 +59,10 @@ import {
   type SpiffeTrustBundleView,
 } from "@regulait/shared";
 import { databaseNow } from "../delegation.js";
-import { requireStepUp, type StepUpCheckArgs } from "../step-up.js";
+import { checkStepUp, type StepUpCheckArgs, type StepUpOutcome } from "../step-up.js";
 import { IdentityAdminError, liveGrants, revokeGrants } from "./identity-admin.js";
 import { legacySpiffeEnvSet } from "./spiffe-trust-domains.js";
-import { certificateIsAuthority, certificateThumbprint, pemBundleToDer } from "./x509.js";
+import { certificateIsAuthority, certificateThumbprint, pemBundleToDer, PemNotCertificateError } from "./x509.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const PEM_BEGIN = "-----BEGIN CERTIFICATE-----";
@@ -154,7 +154,9 @@ export function parseSpiffeBundle(text: string, now: Date): ParsedSpiffeBundle |
   } else if (trimmed.includes(PEM_BEGIN)) {
     try {
       ders = pemBundleToDer(trimmed);
-    } catch {
+    } catch (e) {
+      // #389 review L4: a block that is not a certificate is named, never skipped
+      if (e instanceof PemNotCertificateError) return refused("spiffe_bundle_not_certificate", "the bundle holds a PEM block that is not a CERTIFICATE; upload CA certificates only");
       return refused("spiffe_bundle_invalid", `the PEM certificates do not parse (at most ${SPIFFE_BUNDLE_MAX_AUTHORITIES})`);
     }
     format = "pem";
@@ -258,7 +260,38 @@ export async function listSpiffeTrustBundles(db: Db, env: NodeJS.ProcessEnv = pr
  * when there is none), it is superseded, the new row is inserted and audited
  * `spiffe-trust-bundle-set`. A refusal writes a deny row and changes nothing.
  */
-export async function setSpiffeTrustBundle(db: Db, input: PutSpiffeTrustBundle, parsed: ParsedSpiffeBundle, actorUserId: string): Promise<SpiffeTrustBundleView> {
+/**
+ * #389 review L3: the step-up is spent only once the write is certain. The route LOOKS at the grant first
+ * (`spend: false`); this callback claims it inside the write's transaction, after the compare-and-set and every other
+ * refusal, so a 404 or a 409 leaves it unspent. It claims on the root handle: single use, and its own rows survive a
+ * rollback (the S8 pattern in `app.ts`).
+ */
+export type SpendStepUp = () => Promise<StepUpOutcome>;
+
+/** the in-transaction claim was refused (a race with another use of the same grant): nothing was written */
+export class StepUpRefusedInWrite extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: Record<string, unknown>,
+  ) {
+    super("step-up refused");
+    this.name = "StepUpRefusedInWrite";
+  }
+}
+
+async function spendOrThrow(spend: SpendStepUp | undefined): Promise<void> {
+  if (!spend) return;
+  const su = await spend();
+  if (!su.ok) throw new StepUpRefusedInWrite(su.status, su.body);
+}
+
+export async function setSpiffeTrustBundle(
+  db: Db,
+  input: PutSpiffeTrustBundle,
+  parsed: ParsedSpiffeBundle,
+  actorUserId: string,
+  spend?: SpendStepUp,
+): Promise<SpiffeTrustBundleView> {
   let out: SpiffeTrustBundleView | IdentityAdminError;
   try {
     out = await db.transaction(async (tx): Promise<SpiffeTrustBundleView | IdentityAdminError> => {
@@ -278,6 +311,8 @@ export async function setSpiffeTrustBundle(db: Db, input: PutSpiffeTrustBundle, 
         );
       }
       if (active && active.digest === parsed.digest) return new IdentityAdminError("spiffe_bundle_unchanged", 409, "the active bundle already holds exactly these authorities");
+      // the compare-and-set held: only now is the step-up claimed
+      await spendOrThrow(spend);
       const id = randomUUID();
       // the old row first: the one-active index allows no overlap; the self-reference is checked at commit
       if (active) {
@@ -339,7 +374,7 @@ export async function setSpiffeTrustBundle(db: Db, input: PutSpiffeTrustBundle, 
  * credential of that trust domain. Then, after commit, every live grant those
  * credentials authenticated, with descendants. Audited `spiffe-trust-bundle-revoked`.
  */
-export async function revokeSpiffeTrustBundle(db: Db, bundleId: string, actorUserId: string): Promise<SpiffeTrustBundleRevokeResult> {
+export async function revokeSpiffeTrustBundle(db: Db, bundleId: string, actorUserId: string, spend?: SpendStepUp): Promise<SpiffeTrustBundleRevokeResult> {
   // the SPIFFE ID credentials of a domain: `spiffe://<domain>/...` (the third '/'-separated part)
   const domainCredentials = (domain: string) => sql`select id from workload_credentials where kind = 'spiffe_id' and split_part(spiffe_id, '/', 3) = ${domain}`;
   const out = await db.transaction(async (tx) => {
@@ -350,9 +385,13 @@ export async function revokeSpiffeTrustBundle(db: Db, bundleId: string, actorUse
     if (bundle.supersededAt) {
       return new IdentityAdminError("spiffe_bundle_not_active", 409, `bundle ${bundleId} was replaced; revoke the active bundle of ${bundle.trustDomain} to end the domain's trust`);
     }
+    await spendOrThrow(spend);
+    // #389 review M1: the stamp is taken AFTER the row lock (`clock_timestamp()`, the database clock), so every grant a
+    // token request created while it held this bundle FOR SHARE has `created_at` <= `revoked_at`, and the live-chain
+    // check refuses it even after a new bundle is uploaded for the domain
     const [row] = await t
       .update(spiffeTrustBundles)
-      .set({ revokedAt: sql`GREATEST(now(), ${spiffeTrustBundles.createdAt})`, revokedBy: actorUserId })
+      .set({ revokedAt: sql`GREATEST(clock_timestamp(), ${spiffeTrustBundles.createdAt})`, revokedBy: actorUserId })
       .where(eq(spiffeTrustBundles.id, bundleId))
       .returning();
     // decision 12: every token a SPIFFE ID credential of this domain authenticated (lifecycle stamps on the DB clock)
@@ -409,6 +448,7 @@ async function invalidRequest(db: Db, req: FastifyRequest, reply: FastifyReply, 
 }
 
 function answer(reply: FastifyReply, err: unknown) {
+  if (err instanceof StepUpRefusedInWrite) return reply.status(err.status).send(err.body);
   if (!(err instanceof IdentityAdminError)) throw err;
   return reply.status(err.status).send({ error: err.code, detail: err.message });
 }
@@ -427,10 +467,12 @@ export function spiffeTrustBundleHandlers(db: Db) {
         await auditRefusal(db, actorOf(req), input.replacesBundleId, "set_refused", parsed, { trustDomain: input.trustDomain });
         return answer(reply, parsed);
       }
-      const su = await requireStepUp(db, req, reply, spiffeBundleSetStepUp(input, parsed.digest));
-      if (!su.ok) return reply;
+      // look, do not spend (#389 review L3): the grant is claimed inside the write, after the compare-and-set
+      const args = spiffeBundleSetStepUp(input, parsed.digest);
+      const look = await checkStepUp(db, req, args, { spend: false });
+      if (!look.ok) return reply.status(look.status).send(look.body);
       try {
-        return reply.status(201).send(await setSpiffeTrustBundle(db, input, parsed, actorOf(req)));
+        return reply.status(201).send(await setSpiffeTrustBundle(db, input, parsed, actorOf(req), () => checkStepUp(db, req, args)));
       } catch (e) {
         return answer(reply, e);
       }
@@ -442,10 +484,11 @@ export function spiffeTrustBundleHandlers(db: Db) {
       const { bundleId } = params.data;
       const body = revokeSpiffeTrustBundleSchema.safeParse(req.body ?? {});
       if (!body.success) return invalidRequest(db, req, reply, route, body.error.issues, bundleId);
-      const su = await requireStepUp(db, req, reply, spiffeBundleRevokeStepUp(bundleId));
-      if (!su.ok) return reply;
+      const args = spiffeBundleRevokeStepUp(bundleId);
+      const look = await checkStepUp(db, req, args, { spend: false });
+      if (!look.ok) return reply.status(look.status).send(look.body);
       try {
-        return reply.send(await revokeSpiffeTrustBundle(db, bundleId, actorOf(req)));
+        return reply.send(await revokeSpiffeTrustBundle(db, bundleId, actorOf(req), () => checkStepUp(db, req, args)));
       } catch (e) {
         return answer(reply, e);
       }

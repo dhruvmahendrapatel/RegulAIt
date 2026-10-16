@@ -106,7 +106,14 @@ export function clientJwks(client: WorkloadClient): Array<Record<string, string>
 }
 
 export type CertificateMatch =
-  | { ok: true; credentialId: string; method: WorkloadClientAuthMethod; thumbprint: string }
+  | {
+      ok: true;
+      credentialId: string;
+      method: WorkloadClientAuthMethod;
+      thumbprint: string;
+      /** S9: the SPIFFE bundle whose authorities validated the SVID (the token endpoint locks it while it issues) */
+      spiffeBundleId?: string;
+    }
   | { ok: false; code: string };
 
 /**
@@ -168,12 +175,17 @@ export async function matchCertificateCredential(
         last = "spiffe_trust_domain_unknown";
         continue;
       }
-      const v = await validateClientCertificate(presented.der, { anchors, presentedIntermediates: presented.intermediates, now, spiffeTrustDomain: parts.trustDomain });
+      const v = await validateClientCertificate(presented.der, {
+        anchors: anchors.authorities,
+        presentedIntermediates: presented.intermediates,
+        now,
+        spiffeTrustDomain: parts.trustDomain,
+      });
       if (!v.ok) {
         last = v.code;
         continue;
       }
-      if (v.spiffeId === c.spiffeId) return { ok: true, credentialId: c.id, method: "spiffe_svid", thumbprint: v.thumbprint };
+      if (v.spiffeId === c.spiffeId) return { ok: true, credentialId: c.id, method: "spiffe_svid", thumbprint: v.thumbprint, spiffeBundleId: anchors.bundleId };
       last = "spiffe_id_mismatch";
     }
   }

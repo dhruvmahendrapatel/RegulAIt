@@ -120,18 +120,6 @@ describe("a SPIFFE ID credential", () => {
     };
     expect(await refused(prepareCredential(body, NOW, unreadable))).toBe("trust_config_invalid");
   });
-
-  it("the S5 environment variable is never read: a domain configured only there stays unknown (S9)", async () => {
-    const body = { kind: "spiffe_id" as const, spiffeId: "spiffe://example.org/worker/one" };
-    const before = process.env.REGULAIT_SPIFFE_TRUST_BUNDLES;
-    process.env.REGULAIT_SPIFFE_TRUST_BUNDLES = JSON.stringify({ "example.org": (await makeCert({ isCA: true })).pem });
-    try {
-      expect(await refused(prepareCredential(body, NOW, NO_ENV))).toBe("spiffe_trust_domain_unknown");
-    } finally {
-      if (before === undefined) delete process.env.REGULAIT_SPIFFE_TRUST_BUNDLES;
-      else process.env.REGULAIT_SPIFFE_TRUST_BUNDLES = before;
-    }
-  });
 });
 
 describe("step-up facts bind exactly the write", () => {

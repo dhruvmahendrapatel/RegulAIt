@@ -335,11 +335,15 @@ export async function loadLiveChain(db: DbOrTx, leafGrantId: string, nowIn?: Dat
       // the subject credential (decision 12): a workload credential that is revoked or outside its window
       subjectCredentialRevoked: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} sc WHERE sc.id = ${delegationGrants.subjectCredentialId} AND sc.revoked_at IS NOT NULL)`,
       subjectCredentialOutsideWindow: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} sc WHERE sc.id = ${delegationGrants.subjectCredentialId} AND sc.revoked_at IS NULL AND (sc.not_before > ${at} OR sc.not_after <= ${at}))`,
-      // ADR-0188 S9 (decision 12, "a whole SPIFFE trust bundle"): a SPIFFE ID credential is live only while its trust
-      // domain has an ACTIVE uploaded bundle. Revoking the bundle refuses every grant it authenticated at the next use,
-      // even if the eager cascade could not end one on the record. The trust domain is the ID's authority
-      // (`spiffe://<td>/...`), which the credential CHECK and `spiffeIdParts` already require to be well formed.
-      spiffeTrustEnded: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} wc WHERE wc.id IN (${delegationGrants.authCredentialId}, ${delegationGrants.subjectCredentialId}) AND wc.kind = 'spiffe_id' AND NOT EXISTS (SELECT 1 FROM ${spiffeTrustBundles} b WHERE b.trust_domain = split_part(wc.spiffe_id, '/', 3) AND b.superseded_at IS NULL AND b.revoked_at IS NULL))`,
+      // ADR-0188 S9 (decision 12, "a whole SPIFFE trust bundle"): a grant a SPIFFE ID credential authenticated (as the
+      // client, or as a parent's subject credential) is refused when
+      //  (a) its trust domain has no ACTIVE uploaded bundle now, OR
+      //  (b) a bundle of its domain was REVOKED at or after the grant was created (#389 review M1): a revocation is
+      //      never undone by uploading a new bundle, even for a grant the eager cascade could not end on the record.
+      // The token endpoint holds the authenticating bundle row FOR SHARE while it creates the grant, so a grant made
+      // under a bundle is always created before that bundle's revocation commits. The trust domain is the ID's
+      // authority (`spiffe://<td>/...`), which the credential CHECK and `spiffeIdParts` require to be well formed.
+      spiffeTrustEnded: sql<boolean>`EXISTS (SELECT 1 FROM ${workloadCredentials} wc WHERE wc.id IN (${delegationGrants.authCredentialId}, ${delegationGrants.subjectCredentialId}) AND wc.kind = 'spiffe_id' AND (NOT EXISTS (SELECT 1 FROM ${spiffeTrustBundles} b WHERE b.trust_domain = split_part(wc.spiffe_id, '/', 3) AND b.superseded_at IS NULL AND b.revoked_at IS NULL) OR EXISTS (SELECT 1 FROM ${spiffeTrustBundles} rb WHERE rb.trust_domain = split_part(wc.spiffe_id, '/', 3) AND rb.revoked_at IS NOT NULL AND rb.revoked_at >= ${delegationGrants.createdAt})))`,
     })
     .from(delegationGrants)
     .innerJoin(workloadIdentities, eq(workloadIdentities.id, delegationGrants.actorIdentityId))

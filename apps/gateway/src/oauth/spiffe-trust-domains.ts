@@ -15,21 +15,42 @@
  * the audited route); `legacySpiffeEnvSet` only lets the boot log and the list
  * view say it is ignored.
  */
-import { and, isNull, spiffeTrustBundles, type Db } from "@regulait/db";
+import { and, eq, isNull, spiffeTrustBundles, type Db } from "@regulait/db";
 import { SPIFFE_TRUST_BUNDLES_LEGACY_ENV } from "@regulait/shared";
 import { pemBundleToDer } from "./x509.js";
 
 const activeWhere = () => and(isNull(spiffeTrustBundles.supersededAt), isNull(spiffeTrustBundles.revokedAt));
 
+/** one domain's active bundle: its id (the token endpoint locks it while it issues, #389 review M1) and its authorities */
+export interface SpiffeTrustAnchors {
+  bundleId: string;
+  authorities: Buffer[];
+}
+
 /** trust domain → the active bundle's X.509 authorities (DER). A stored bundle that does not parse throws (fail closed). */
-export async function loadSpiffeTrustAnchors(db: Db): Promise<Map<string, Buffer[]>> {
+export async function loadSpiffeTrustAnchors(db: Db): Promise<Map<string, SpiffeTrustAnchors>> {
   const rows = await db
-    .select({ trustDomain: spiffeTrustBundles.trustDomain, authoritiesPem: spiffeTrustBundles.authoritiesPem })
+    .select({ id: spiffeTrustBundles.id, trustDomain: spiffeTrustBundles.trustDomain, authoritiesPem: spiffeTrustBundles.authoritiesPem })
     .from(spiffeTrustBundles)
     .where(activeWhere());
-  const out = new Map<string, Buffer[]>();
-  for (const r of rows) out.set(r.trustDomain, pemBundleToDer(r.authoritiesPem));
+  const out = new Map<string, SpiffeTrustAnchors>();
+  for (const r of rows) out.set(r.trustDomain, { bundleId: r.id, authorities: pemBundleToDer(r.authoritiesPem) });
   return out;
+}
+
+/**
+ * #389 review M1: inside the transaction that creates a SPIFFE-authenticated grant, hold the authenticating bundle
+ * row FOR SHARE and require it unrevoked. A concurrent revocation (which takes the row FOR UPDATE) then either commits
+ * first, and this refuses, or waits for this grant and token to commit, and its cascade ends them. A superseded
+ * bundle still qualifies: rotation is not revocation (decision 12).
+ */
+export async function lockSpiffeBundleUnrevoked(tx: Db, bundleId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: spiffeTrustBundles.id })
+    .from(spiffeTrustBundles)
+    .where(and(eq(spiffeTrustBundles.id, bundleId), isNull(spiffeTrustBundles.revokedAt)))
+    .for("share");
+  return row !== undefined;
 }
 
 /** the trust domains with an active bundle */

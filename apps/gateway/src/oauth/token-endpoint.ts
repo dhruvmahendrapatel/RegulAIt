@@ -98,6 +98,7 @@ import { assertionCredentialOf, clientJwks, findWorkloadClient, matchCertificate
 import { deploymentEnvironment, gatewayResource, identityIssuer, identitySecretsFor, OAUTH_TOKEN_ROUTE_PATH, tokenEndpointUrl } from "./common.js";
 import { rootCapFor, verifyDelegationProof, type VerifiedDelegationProof } from "./delegation-proof.js";
 import { presentedClientCertificate } from "./x509.js";
+import { lockSpiffeBundleUnrevoked } from "./spiffe-trust-domains.js";
 import { mintWorkloadSelfToken, selfKindForResource } from "./workload-self.js";
 
 /** the form parameters the exchange grant reads (everything else is stripped by the provider) */
@@ -583,6 +584,12 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
       const txDb = tx as unknown as Db;
       let grantId: string;
       let parentGrantId: string | null = null;
+      // ADR-0188 S9 (#389 review M1): a client authenticated by an X.509-SVID holds its bundle row FOR SHARE for the
+      // whole issue, and the bundle must still be unrevoked; a concurrent revocation cannot interleave
+      const spiffeBundleId = s.mtls && s.mtls.clientId === clientId && s.mtls.match.ok && pf.authCredentialId === s.mtls.match.credentialId ? s.mtls.match.spiffeBundleId : undefined;
+      if (spiffeBundleId !== undefined && !(await lockSpiffeBundleUnrevoked(txDb, spiffeBundleId))) {
+        throw refuse(new InvalidClientAuth("the SPIFFE trust bundle that authenticated this client was revoked"), "spiffe_bundle_revoked");
+      }
       try {
         if (pf.root) {
           const b = pf.root.proof.body;

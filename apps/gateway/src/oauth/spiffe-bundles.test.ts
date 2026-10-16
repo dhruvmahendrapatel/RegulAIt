@@ -17,14 +17,17 @@
  *    CA from 00:18:11Z to 2026-10-23T00:18:21Z, so the test judges them at a
  *    fixed instant inside (and one after) those windows.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateKeyPairSync, X509Certificate } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { exportJWK } from "jose";
 import { makeCert, type TestCert } from "../testing/x509-fixtures.js";
 import { IdentityAdminError } from "./identity-admin.js";
 import { parseSpiffeBundle, spiffeBundleRevokeStepUp, spiffeBundleSetStepUp, type ParsedSpiffeBundle } from "./spiffe-bundles.js";
-import { certificateThumbprint, validateClientCertificate } from "./x509.js";
+import { certificateThumbprint, pemBundleToDer, PemNotCertificateError, validateClientCertificate } from "./x509.js";
+import { legacySpiffeEnvSet } from "./spiffe-trust-domains.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../testing/spire-1.13.3/${name}`, import.meta.url), "utf8");
 const SPIRE_TD = "byoc.example.org";
@@ -124,6 +127,31 @@ describe("a bundle upload: PEM or the SPIFFE bundle format, public CAs only", ()
     expect(code(parseSpiffeBundle(JSON.stringify(use), SPIRE_VALID_AT))).toBe("spiffe_bundle_invalid");
   });
 
+  it("#389 review L4: a PEM block that is not a certificate is refused by name, never skipped", async () => {
+    const crl = "-----BEGIN X509 CRL-----\nMIIBsynthetic\n-----END X509 CRL-----\n";
+    expect(code(parseSpiffeBundle(`${root.pem}${crl}`, now()))).toBe("spiffe_bundle_not_certificate");
+    expect(code(parseSpiffeBundle(`${crl}${root.pem}`, now()))).toBe("spiffe_bundle_not_certificate");
+    expect(() => pemBundleToDer(`${root.pem}${crl}`)).toThrow(PemNotCertificateError);
+    // positive control: the certificate alone parses
+    expect(pemBundleToDer(root.pem)).toHaveLength(1);
+  });
+
+  it("#389 review L5: the retired S5 variable is read in exactly one place, which only reports that it is set", () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const sources = readdirSync(here).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+    const readers = sources.filter((f) => {
+      const text = readFileSync(path.join(here, f), "utf8");
+      return text.includes("SPIFFE_TRUST_BUNDLES_LEGACY_ENV") || text.includes("REGULAIT_SPIFFE_TRUST_BUNDLES");
+    });
+    // spiffe-bundles.ts names it only in the boot warning text; spiffe-trust-domains.ts reads it in legacySpiffeEnvSet
+    expect(readers.sort()).toEqual(["spiffe-bundles.ts", "spiffe-trust-domains.ts"]);
+    const reads = readFileSync(path.join(here, "spiffe-trust-domains.ts"), "utf8").split("env[SPIFFE_TRUST_BUNDLES_LEGACY_ENV]").length - 1;
+    expect(reads).toBe(1);
+    expect(legacySpiffeEnvSet({ REGULAIT_SPIFFE_TRUST_BUNDLES: "{}" })).toBe(true);
+    expect(legacySpiffeEnvSet({ REGULAIT_SPIFFE_TRUST_BUNDLES: "  " })).toBe(false);
+    expect(readFileSync(path.join(here, "spiffe-bundles.ts"), "utf8").split("process.env[").length - 1).toBe(0);
+  });
+
   it("duplicates, garbage, empty and oversized bundles are refused, never thrown", async () => {
     expect(code(parseSpiffeBundle(`${root.pem}${root.pem}`, now()))).toBe("spiffe_bundle_duplicate");
     for (const bad of ["", "   ", "hello", "{", "[]", '{"keys": 3}', "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n"]) {
@@ -217,6 +245,30 @@ describe("the decision 21 SVID profile under an uploaded bundle (synthetic SVIDs
   it("multiple URI SANs are refused, even when both are SPIFFE IDs of the domain", async () => {
     const two = await makeCert({ issuer: root, uris: [ID, `${ID}-2`] });
     expect(await validateClientCertificate(two.der, { anchors: anchors(), now: now(), spiffeTrustDomain: TD })).toEqual({ ok: false, code: "spiffe_san" });
+  });
+
+  it("#389 review M2: an unknown CRITICAL extension on the leaf is refused; the same extension non-critical is not", async () => {
+    // an ASN.1 NULL as the extension value, under an OID nobody processes
+    const value = new Uint8Array([0x05, 0x00]);
+    const critical = await makeCert({ issuer: root, uris: [ID], extra: [{ oid: "1.2.3.4.5.6.7", critical: true, value }] });
+    expect(await validateClientCertificate(critical.der, { anchors: anchors(), now: now(), spiffeTrustDomain: TD })).toEqual({ ok: false, code: "certificate_extension" });
+    // positive control: only the critical flag differs
+    const plain = await makeCert({ issuer: root, uris: [ID], extra: [{ oid: "1.2.3.4.5.6.7", critical: false, value }] });
+    const r = await validateClientCertificate(plain.der, { anchors: anchors(), now: now(), spiffeTrustDomain: TD });
+    expect(r.ok && r.spiffeId).toBe(ID);
+    // and for plain tls_client_auth too (no SPIFFE profile): the rule is the leaf's, not the SPIFFE profile's
+    expect(await validateClientCertificate(critical.der, { anchors: anchors(), now: now() })).toEqual({ ok: false, code: "certificate_extension" });
+  });
+
+  it("#389 review M2: an allowed extension marked critical that does not parse is refused", async () => {
+    // extKeyUsage (allowed when critical) whose value is not a SEQUENCE of OIDs
+    const broken = await makeCert({ issuer: root, uris: [ID], extra: [{ oid: "2.5.29.37", critical: true, value: new Uint8Array([0x05, 0x00]) }] });
+    expect(await validateClientCertificate(broken.der, { anchors: anchors(), now: now(), spiffeTrustDomain: TD })).toEqual({ ok: false, code: "certificate_extension" });
+    // positive control: a well-formed critical extKeyUsage (SEQUENCE { id-kp-clientAuth }) is accepted
+    const eku = new Uint8Array([0x30, 0x0a, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02]);
+    const good = await makeCert({ issuer: root, uris: [ID], extra: [{ oid: "2.5.29.37", critical: true, value: eku }] });
+    const r = await validateClientCertificate(good.der, { anchors: anchors(), now: now(), spiffeTrustDomain: TD });
+    expect(r.ok && r.spiffeId).toBe(ID);
   });
 
   it("a CA SVID used as a leaf is refused, even with a SPIFFE ID SAN and a valid path", async () => {
