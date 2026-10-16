@@ -1220,8 +1220,8 @@ directly, rather than through the report hash? Doing so needs new `execution_pla
 
 I5 moves the ADR-0187 engine workers (the garak and promptfoo workers, the modelscan scanner) under decision 3's
 `engine_worker` kind. A worker now runs **only** as an engine TASK in a sandbox an executor starts under the run's
-placement. There is no long-lived worker container and no other place a worker can run. Migration **0199**
-(`0199_engine_task_placement.sql`, hand-written; journal idx 199) adds `engine_runs.task_placement_id`. These points
+placement. There is no long-lived worker container and no other place a worker can run. Migration **0200**
+(`0200_engine_task_placement.sql`, hand-written; journal idx 200, added once 0199 (ADR-0188 S9) is on main) adds `engine_runs.task_placement_id`. These points
 settle what the decisions above leave open:
 
 1. **The task start is the decision.** The placement is decided when the runner holding a live lease asks to start

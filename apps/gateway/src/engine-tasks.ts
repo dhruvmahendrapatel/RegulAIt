@@ -19,7 +19,7 @@
  *        facts capture the placement) for an agent run, an `engine_run` decision for an artifact scan. A refused
  *        placement makes it a refusal (rule id `execution-profile`) and ends the run `not_run` in the same
  *        transaction;
- *     4. names the placement on the run (`engine_runs.task_placement_id`, migration 0199, set once).
+ *     4. names the placement on the run (`engine_runs.task_placement_id`, migration 0200, set once).
  *   After the commit the task's session is held here (an I4 stdio session, so the executor's channel routes serve
  *   it unchanged): the input, the task secret for the MACed `start` line, and the sandbox's stdout for the runner.
  *
@@ -374,7 +374,7 @@ export async function startEngineTask(db: Db, deps: EngineTaskDeps, runnerId: st
       const ended = await deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause: ENGINE_TASK_ISOLATION_UNAVAILABLE }, now);
       return { kind: "unplaced" as const, code: placed.code, placementId: placed.placementId, ended };
     }
-    // 4. the run names its placement (set once: migration 0199's trigger)
+    // 4. the run names its placement (set once: migration 0200's trigger)
     const [updated] = await tx.update(engineRuns).set({ taskPlacementId: placed.placementId }).where(eq(engineRuns.id, run.id)).returning();
     return { kind: "offered" as const, placementId: placed.placementId, offerId: placed.offerId, executorId: placed.executorId, files, secret: body.secret, run: updated! };
   });

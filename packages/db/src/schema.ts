@@ -12620,7 +12620,7 @@ export const engineRuns = pgTable(
     workflowNotifiedAt: timestamp("workflow_notified_at", { withTimezone: true }),
     /** ADR-0187 decision 94 (migration 0174): the runner's own request id for the lease that took this run */
     leaseRequestId: uuid("lease_request_id"),
-    /** ADR-0190 I5 (migration 0199): the engine_worker placement of the run's task, set once at the task start decision */
+    /** ADR-0190 I5 (migration 0200): the engine_worker placement of the run's task, set once at the task start decision */
     taskPlacementId: uuid("task_placement_id").references((): AnyPgColumn => executionPlacements.id, { onDelete: "restrict" }),
   },
   (t) => [
