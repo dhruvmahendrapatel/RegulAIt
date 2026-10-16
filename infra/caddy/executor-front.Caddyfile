@@ -13,8 +13,8 @@
 #     gateway's trust of client addresses is not widened. (The executor channel authenticates on its own proof,
 #     whose `htu` is built from REGULAIT_PUBLIC_URL, not from the address dialled, so a front changes nothing there.)
 #   - issues its certificate from its OWN stack-local CA (`tls internal`): Caddy creates the root on this
-#     container's first start, in its own data volume, and renews the intermediate and the leaf itself. The root
-#     KEY never leaves that volume; the one-shot `executor-front-ca` service copies the root CERTIFICATE alone to
+#     container's first start, in its own data volume, and renews the intermediate and the leaf itself. No container
+#     mounts the root KEY except this one and the one-shot copier; the one-shot `executor-front-ca` service copies the root CERTIFICATE alone to
 #     the volume the executor mounts read-only and pins (REGULAIT_EXECUTOR_GATEWAY_CA_FILE). Nothing is committed.
 #   - makes no outbound call: no ACME, no OCSP, no admin endpoint, no attempt to touch a host trust store.
 #

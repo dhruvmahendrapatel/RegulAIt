@@ -911,12 +911,13 @@ services:
   # A second Caddy, NOT the public one: on `engines` only, no host port, no
   # admin endpoint, no outbound call. It serves https://executor-front:8443 for
   # the executor channel (`/v1/executor-channel/*`) and answers 404 to every
-  # other path (infra/caddy/Caddyfile.executor-front). It strips every
+  # other path (infra/caddy/executor-front.Caddyfile). It strips every
   # forwarding header and is NOT in REGULAIT_TRUSTED_PROXIES: the gateway sees
   # this container as the peer, and its trust of client addresses is unchanged.
   # Its certificate comes from its OWN local CA (`tls internal`), created on
-  # this service's first start in executor-front-data (the root key never
-  # leaves that volume; Caddy renews the intermediate and the leaf itself).
+  # this service's first start in executor-front-data (only the front and
+  # the copier below mount the root key; the executor, holding the Docker
+  # socket, is host root anyway). Caddy renews the intermediate and the leaf.
   # Nothing is committed; `docker compose down -v` destroys the CA, and the
   # next start makes a new one that executor-front-ca copies again.
   executor-front:
@@ -934,7 +935,7 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=1777
     volumes:
-      - ./infra/caddy/Caddyfile.executor-front:/etc/caddy/Caddyfile:ro
+      - ./infra/caddy/executor-front.Caddyfile:/etc/caddy/Caddyfile:ro
       - executor-front-data:/data
       - executor-front-config:/config
     networks: [engines]
@@ -960,7 +961,8 @@ services:
         set -eu
         src=/front-data/caddy/pki/authorities/local/root.crt
         i=0
-        until [ -s "$$src" ]; do
+        # wait for a COMPLETE PEM (its END line), not just a non-empty file
+        until [ -s "$$src" ] && grep -q -- '-----END CERTIFICATE-----' "$$src"; do
           i=$$((i + 1))
           if [ "$$i" -gt 120 ]; then echo "executor-front-ca: the front has not created its CA after 120 s ($$src)" >&2; exit 1; fi
           sleep 1

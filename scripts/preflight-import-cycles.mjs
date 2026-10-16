@@ -13,6 +13,13 @@
  * out too: they run after every module has initialised, which is how the existing fixes break a cycle. Test files
  * (`*.test.js`) are left out, and so is any `dist` file with no `src` counterpart (a stale output on a dev machine).
  *
+ * What escapes this ratchet: a TOP-LEVEL `await import()` (it runs during initialisation, but it is a dynamic edge,
+ * so it is left out with the lazy ones) and a `require` through `createRequire` (not followed). Both are covered only
+ * by `preflight-import-smoke.mjs`, which loads every module first in a fresh process.
+ *
+ * CI also refuses a PR whose baseline file GAINS an edge line against the base branch
+ * (.github/workflows/import-cycles.yml), so `--update` can only ever shrink it in a merged change.
+ *
  * The unit is an EDGE ("a.js -> b.js") that dependency-cruiser marks `circular`, i.e. the edge lies on some cycle.
  * Unlike a list of cycle paths, the set of such edges does not depend on the order a search visits modules in, so
  * the baseline is deterministic (sorted, one edge per line).

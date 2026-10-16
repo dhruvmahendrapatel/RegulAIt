@@ -3,7 +3,7 @@
 # Caddy fronts the gateway and terminates TLS with a real, browser-trusted
 # Let's Encrypt certificate for the hostname this deployment is reached at.
 # (The sandbox executor does NOT come through here: it has its own internal
-# front on the `engines` network, ./Caddyfile.executor-front.)
+# front on the `engines` network, ./executor-front.Caddyfile.)
 #
 # The hostname is whatever REGULAIT_TLS_HOST names: a real domain, or for a
 # box with only a public IP a free wildcard-DNS name such as

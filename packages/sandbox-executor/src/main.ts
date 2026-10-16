@@ -121,8 +121,17 @@ export function pinGatewayCa(opts: {
     if (e instanceof ExecutorConfigError) throw e;
     throw new ExecutorConfigError(`${name} cannot be read (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
   }
-  const pems = splitPemCertificates(text);
-  if (pems.length === 0) throw new ExecutorConfigError(`${name} holds no PEM certificate`);
+  // the stock stack's bundle is written by the one-shot `executor-front-ca` service; an incomplete one means it did not
+  // finish, and running that service again rewrites it
+  const recopy = "In the stock compose stack, run the executor-front-ca service again to copy the front's CA";
+  let pems: string[];
+  try {
+    pems = splitPemCertificates(text);
+  } catch (e) {
+    if (e instanceof ExecutorConfigError) throw new ExecutorConfigError(`${name}: ${e.message} (truncated?). ${recopy}`);
+    throw e;
+  }
+  if (pems.length === 0) throw new ExecutorConfigError(`${name} holds no PEM certificate. ${recopy}`);
   const now = (opts.now ?? new Date()).getTime();
   const fingerprints = pems.map((pem, i) => {
     let cert: X509Certificate;
@@ -172,6 +181,9 @@ export async function main(): Promise<void> {
     const pin = pinGatewayCa({ gatewayUrl, caFile });
     if (pin) console.log(`pinned the gateway CA bundle ${pin.file}: ${pin.fingerprints.join(", ")}`);
     else if (caFile) console.warn("REGULAIT_EXECUTOR_GATEWAY_CA_FILE is ignored: the gateway URL is not https");
+    else if (new URL(gatewayUrl).protocol === "https:") {
+      console.warn("REGULAIT_EXECUTOR_GATEWAY_CA_FILE is not set: the gateway's certificate is verified against the image's public roots, not a pinned CA");
+    }
   } catch (e) {
     if (e instanceof ExecutorConfigError) {
       console.error(e.message);

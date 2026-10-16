@@ -49,6 +49,19 @@ describe("import smoke pre-flight", () => {
     delete process.env.DATABASE_URL;
   });
 
+  it("fails a module that listens at top level, and denies writes outside the sandbox and child processes", async () => {
+    const outside = join(tmpdir(), `${marker}-outside`);
+    put("x/listens.js", 'import { createServer } from "node:net";\ncreateServer().listen(0, "127.0.0.1");\nawait new Promise((r) => setTimeout(r, 200));\n');
+    put("x/writes-outside.js", `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(outside)}, "x");\n`);
+    put("x/spawns.js", 'import { execFileSync } from "node:child_process";\nexecFileSync("true");\n');
+    put("x/perm.js", 'if (!process.permission || process.permission.has("child") || process.permission.has("worker") || process.permission.has("fs.write", "/etc/passwd") || !process.permission.has("fs.write", process.cwd())) throw new Error("no permission model");\n');
+    expect(await importAlone(join(pkg, "x/listens.js"))).toMatchObject({ kind: "listening" });
+    expect(await importAlone(join(pkg, "x/writes-outside.js"))).toMatchObject({ kind: "threw" });
+    expect(existsSync(outside)).toBe(false);
+    expect(await importAlone(join(pkg, "x/spawns.js"))).toMatchObject({ kind: "threw" });
+    expect(await importAlone(join(pkg, "x/perm.js"))).toBeNull();
+  });
+
   it("skips the named entry points and fails on the rest", async () => {
     rmSync(join(pkg, "dist/hangs.js"));
     const r = await smokeAll(pkg, { concurrency: 2, timeoutMs: 10_000 });

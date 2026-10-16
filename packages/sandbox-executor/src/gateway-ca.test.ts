@@ -75,6 +75,7 @@ describe("pinGatewayCa", () => {
     for (const caFile of [file("missing.pem"), file("empty.pem"), file("truncated.pem"), file("leaf.crt"), dir]) {
       expect(() => pinGatewayCa({ gatewayUrl: https, caFile, env: {}, setDefault }), caFile).toThrow(ExecutorConfigError);
     }
+    expect(() => pinGatewayCa({ gatewayUrl: https, caFile: file("truncated.pem"), env: {}, setDefault })).toThrow(/truncated\?\)\. .*executor-front-ca/);
     const later = new Date(Date.now() + 30 * 24 * 3600 * 1000);
     expect(() => pinGatewayCa({ gatewayUrl: https, caFile: file("front-ca.crt"), env: {}, now: later, setDefault })).toThrow(/not valid now/);
   });

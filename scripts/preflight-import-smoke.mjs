@@ -6,28 +6,39 @@
  * that (a temporal-dead-zone ReferenceError at init), and the I4 builder found it by importing every module by
  * hand. This makes that sweep a CI step: each non-test module in `apps/gateway/dist` is imported, alone, as the first
  * module of a fresh `node` child process, and the step fails when any import throws while modules initialise.
- * `preflight-import-cycles.mjs` stops a NEW cycle; this catches an OLD cycle that a change made fatal.
+ * `preflight-import-cycles.mjs` stops a NEW static cycle; this catches an OLD cycle that a change made fatal, and the
+ * imports that ratchet cannot see (a top-level `await import()`, a `createRequire` require).
  *
  * Containment (the manual sweep once wrote a demo receipt key into the real home directory): every child runs with
  *   - an empty temporary HOME, TMPDIR and working directory, removed afterwards;
  *   - an environment holding only PATH, NODE_ENV=test and the marker REGULAIT_IMPORT_SMOKE=1 (no database URL, no
  *     data key, no REGULAIT_* settings), so nothing can reach a real database or real key material;
  *   - no `process.argv[1]`, so a module's `if (process.argv[1] === this file) main()` guard stays shut;
- *   - `process.exit` straight after the import resolves, and a hard timeout.
+ *   - Node's permission model (`--permission`): it may READ the repository (and the module's own directory) and its
+ *     sandbox, and WRITE only its sandbox. It may not start a child process or a worker, or load a native addon. Node
+ *     22 has no network permission, hence the next item;
+ *   - no network where the host allows it: the child runs under `unshare -rn` (new user and network namespaces, with
+ *     only a loopback that is down). Where `unshare` is unavailable the check says so and runs without it;
+ *   - its own process group (spawned detached), killed whole on timeout, once the child has exited, and when this
+ *     script exits;
+ *   - a check, right after the import resolves, that the module left no listening server or UDP socket open (a module
+ *     that listens at top level is an entry point, so it fails); then `process.exit`, under a hard timeout.
  * Command-line and demo ENTRY POINTS, which do their work at top level (start a server, write keys, migrate a
  * database), are never imported: they are listed by name in ENTRY_POINTS below, each with what it would do. A new
- * entry point must be added there in the PR that adds it; a module that does not finish loading within the timeout
- * fails the step, which is how a missing entry is noticed.
+ * entry point must be added there in the PR that adds it; a module that does not finish loading within the timeout,
+ * or that leaves a listener open, fails the step, which is how a missing entry is noticed.
  *
  * Usage (from the repository root, after `pnpm -r build`): node scripts/preflight-import-smoke.mjs
  * Exit 0: every module loaded; 1: at least one failed (each failure is printed); 2: the check could not run.
  */
-import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { GATEWAY_ROOT, liveDistModules } from "./preflight-import-cycles.mjs";
+
+const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 /** dist-relative paths of modules that act when imported; never loaded by this check */
 export const ENTRY_POINTS = new Map([
@@ -53,20 +64,56 @@ export const ENTRY_POINTS = new Map([
 
 const CHILD = [
   "const target = process.env.REGULAIT_IMPORT_SMOKE_TARGET;",
+  "const fail = (o) => { process.stdout.write('\\n@@IMPORT_SMOKE_FAIL@@' + JSON.stringify(o) + '\\n'); process.exit(1); };",
   "try { await import(target); }",
   "catch (e) {",
   "  const err = e instanceof Error ? e : new Error(String(e));",
-  "  process.stdout.write('\\n@@IMPORT_SMOKE_FAIL@@' + JSON.stringify({ name: err.name, message: err.message, stack: String(err.stack ?? '').split('\\n').slice(0, 6).join('\\n') }) + '\\n');",
-  "  process.exit(1);",
+  "  fail({ kind: 'threw', name: err.name, message: err.message, stack: String(err.stack ?? '').split('\\n').slice(0, 6).join('\\n') });",
   "}",
+  "const open = process.getActiveResourcesInfo().filter((r) => r === 'TCPServerWrap' || r === 'PipeServerWrap' || r === 'UDPWrap');",
+  "if (open.length > 0) fail({ kind: 'listening', message: 'left a listening server or socket open after loading (' + open.join(', ') + '): an entry point missing from ENTRY_POINTS?' });",
   "process.exit(0);",
 ].join("\n");
 
+let unshareChecked;
+/** whether `unshare -rn` works on this host (GitHub-hosted runners: yes; some containers: no) */
+export function unshareAvailable() {
+  if (unshareChecked === undefined) {
+    const r = spawnSync("unshare", ["-rn", "true"], { stdio: "ignore", timeout: 5000 });
+    unshareChecked = r.status === 0;
+  }
+  return unshareChecked;
+}
+
+/** process groups of children still running; killed when this script exits */
+const liveGroups = new Set();
+const killGroup = (pid) => {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    /* already gone */
+  }
+};
+process.on("exit", () => {
+  for (const pid of liveGroups) killGroup(pid);
+});
+
 /** import one module in a contained child; resolves to null when it loaded, else the failure */
-export function importAlone(file, { timeoutMs = 30_000 } = {}) {
-  const sandbox = mkdtempSync(join(tmpdir(), "regulait-import-smoke-"));
+export function importAlone(file, { timeoutMs = 30_000, readRoots = [REPO_ROOT, dirname(file)], noNetwork = unshareAvailable() } = {}) {
+  const sandbox = realpathSync(mkdtempSync(join(tmpdir(), "regulait-import-smoke-")));
+  const nodeArgs = [
+    "--permission",
+    ...readRoots.map((r) => `--allow-fs-read=${r}`),
+    `--allow-fs-read=${sandbox}`,
+    `--allow-fs-write=${sandbox}`,
+    "--input-type=module",
+    "-e",
+    CHILD,
+  ];
+  const [cmd, args] = noNetwork ? ["unshare", ["-rn", process.execPath, ...nodeArgs]] : [process.execPath, nodeArgs];
   return new Promise((done) => {
-    const child = spawn(process.execPath, ["--input-type=module", "-e", CHILD], {
+    const child = spawn(cmd, args, {
+      detached: true,
       cwd: sandbox,
       env: {
         PATH: process.env.PATH ?? "",
@@ -78,31 +125,38 @@ export function importAlone(file, { timeoutMs = 30_000 } = {}) {
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    liveGroups.add(child.pid);
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out = (out + d).slice(-64 * 1024)));
     child.stderr.on("data", (d) => (err = (err + d).slice(-16 * 1024)));
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup(child.pid);
+    }, timeoutMs);
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      killGroup(child.pid);
+      liveGroups.delete(child.pid);
       rmSync(sandbox, { recursive: true, force: true });
-      if (code === 0) return done(null);
+      if (code === 0 && !timedOut) return done(null);
       const marker = out.lastIndexOf("@@IMPORT_SMOKE_FAIL@@");
       if (marker >= 0) {
         const line = out.slice(marker + "@@IMPORT_SMOKE_FAIL@@".length).split("\n")[0];
         try {
-          return done({ kind: "threw", ...JSON.parse(line) });
+          return done(JSON.parse(line));
         } catch {
           /* fall through */
         }
       }
-      if (signal === "SIGKILL") return done({ kind: "timeout", message: `did not finish loading in ${timeoutMs} ms (an entry point missing from ENTRY_POINTS?)` });
+      if (timedOut) return done({ kind: "timeout", message: `did not finish loading in ${timeoutMs} ms (an entry point missing from ENTRY_POINTS?)` });
       return done({ kind: "exit", message: `exited ${code ?? signal} while loading (an entry point missing from ENTRY_POINTS?)`, stack: err.trim().split("\n").slice(-6).join("\n") });
     });
   });
 }
 
-export async function smokeAll(packageRoot, { concurrency = Math.max(2, availableParallelism()), timeoutMs } = {}) {
+export async function smokeAll(packageRoot, { concurrency = Math.max(2, availableParallelism()), timeoutMs, noNetwork } = {}) {
   const modules = liveDistModules(packageRoot).map((m) => m.slice("dist/".length));
   const targets = modules.filter((m) => !ENTRY_POINTS.has(m));
   const unknownEntries = [...ENTRY_POINTS.keys()].filter((e) => !modules.includes(e));
@@ -111,7 +165,11 @@ export async function smokeAll(packageRoot, { concurrency = Math.max(2, availabl
   const worker = async () => {
     while (next < targets.length) {
       const rel = targets[next++];
-      const failure = await importAlone(join(packageRoot, "dist", rel), timeoutMs ? { timeoutMs } : {});
+      const failure = await importAlone(join(packageRoot, "dist", rel), {
+        readRoots: [REPO_ROOT, packageRoot],
+        ...(timeoutMs ? { timeoutMs } : {}),
+        ...(noNetwork !== undefined ? { noNetwork } : {}),
+      });
       if (failure) failures.push({ module: rel, ...failure });
     }
   };
@@ -121,6 +179,11 @@ export async function smokeAll(packageRoot, { concurrency = Math.max(2, availabl
 }
 
 async function main() {
+  console.log(
+    unshareAvailable()
+      ? "children run with no network (unshare -rn) under Node's permission model"
+      : "unshare -rn is not available here: children run WITH network access (Node's permission model still applies)",
+  );
   let result;
   try {
     result = await smokeAll(GATEWAY_ROOT);

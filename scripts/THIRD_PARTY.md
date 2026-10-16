@@ -6,7 +6,7 @@ Root `devDependencies` used only by the scripts in this directory. Nothing here 
 
 | Package | Version | Licence | Used by | Why |
 |---|---|---|---|---|
-| `dependency-cruiser` | 18.6.0 | MIT | `preflight-import-cycles.mjs` (and the module list of `preflight-import-smoke.mjs`) | ADR-0190 I4 follow-ups: finds the static import cycles of the compiled gateway, for the CI ratchet against new ones. It parses (acorn) and resolves (enhanced-resolve); the script only selects, sorts and compares edges. Works offline, no network at run time. 34 transitive packages added, all MIT or ISC (checked 2026-10-16). |
+| `dependency-cruiser` | 18.6.0 | MIT | `preflight-import-cycles.mjs` (and the module list of `preflight-import-smoke.mjs`) | ADR-0190 I4 follow-ups: finds the static import cycles of the compiled gateway, for the CI ratchet against new ones. It parses (acorn) and resolves (enhanced-resolve); the script only selects, sorts and compares edges. Works offline, no network at run time. Its transitive runtime closure is 42 packages (39 MIT, 3 ISC; checked 2026-10-16), 34 of them new to the lockfile. |
 
 ## Search record (ADR-0176)
 

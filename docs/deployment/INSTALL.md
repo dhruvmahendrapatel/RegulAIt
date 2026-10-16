@@ -572,8 +572,9 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
      (`/v1/executor-channel/*`) only, and answers 404 to every other path. It removes every forwarding header and is
      not in `REGULAIT_TRUSTED_PROXIES`, so the gateway's trust of client addresses does not change.
    - Its certificate comes from its own local CA, which Caddy creates on the front's first start in the
-     `executor-front-data` volume and renews itself (leaf and intermediate). Nothing is committed or shipped. The CA's
-     private key never leaves that volume. **Back the volume up with the others if you want the CA to survive a
+     `executor-front-data` volume and renews itself (leaf and intermediate). Nothing is committed or shipped. No container
+     mounts the CA's private key except the front and the one-shot copier below (which reads only the
+     certificate). The executor holds the host's Docker socket, so it is host root anyway. **Back the volume up with the others if you want the CA to survive a
      rebuild**: after `docker compose down -v` the next start creates a new CA, and the copy step picks it up.
    - `executor-front-ca` copies the CA's root certificate (only the certificate) to the `executor-front-ca` volume. The
      executor mounts it read-only and **pins** it (`REGULAIT_EXECUTOR_GATEWAY_CA_FILE`): the front's certificate is

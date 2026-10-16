@@ -9,8 +9,11 @@ name: Gateway import cycles
 #      `node scripts/preflight-import-cycles.mjs --update` after breaking a cycle). Tool: dependency-cruiser (MIT,
 #      pinned; scripts/THIRD_PARTY.md).
 #   2. scripts/preflight-import-smoke.mjs — imports every non-test gateway module ALONE, as the first module of a
-#      contained child process (throwaway HOME and working directory, scrubbed environment), and fails on any error
-#      at init. Command-line and demo entry points are skipped by an explicit list in the script.
+#      contained child process and fails on any error at init, or on a listener left open. Each child has a
+#      throwaway HOME and working directory, a scrubbed environment, Node's permission model (read the repo, write
+#      only its sandbox, no child processes or workers), no network (`unshare -rn`, which these runners allow) and
+#      its own process group. Command-line and demo entry points are skipped by an explicit list in the script.
+#      It also covers what the ratchet cannot see: a top-level `await import()` and a `createRequire` require.
 #
 # Its own workflow (not a step of CI's build-and-test-base) so the ~2 minutes of child processes do not eat that
 # job's time cap; it needs only the gateway and its workspace dependencies built, and no services.
@@ -56,7 +59,32 @@ jobs:
       - name: Build the gateway and its workspace dependencies
         run: pnpm --filter "@regulait/gateway..." build
 
+      # The baseline may only SHRINK: a PR that adds an edge line to it (rather than breaking a cycle) fails here,
+      # whatever `--update` wrote. Compared with the PR's base branch. On a schedule or manual run there is no
+      # base to compare with, so only the ratchet below runs. A base without the file (the PR that introduced it)
+      # is skipped.
+      - name: The import-cycle baseline only shrinks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          f=scripts/import-cycles-gateway.baseline.txt
+          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          if ! git cat-file -e "origin/$BASE_REF:$f" 2>/dev/null; then
+            echo "origin/$BASE_REF has no $f yet; nothing to compare."
+            exit 0
+          fi
+          added="$(git diff --no-ext-diff "origin/$BASE_REF" -- "$f" | grep '^+[^#+]' || true)"
+          if [ -n "$added" ]; then
+            echo "::error file=$f::the import-cycle baseline gained edges; break the cycle instead of listing it:"
+            echo "$added"
+            exit 1
+          fi
+          echo "the baseline did not grow"
+
       - name: No new import cycle in apps/gateway (baseline ratchet)
+        if: success() || failure()
         run: node scripts/preflight-import-cycles.mjs
 
       - name: Every gateway module loads alone, as the first module

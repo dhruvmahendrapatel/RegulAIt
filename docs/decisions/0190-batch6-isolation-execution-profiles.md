@@ -962,7 +962,7 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
          with an openssl CLI;
        - mkcert is a developer tool that installs into trust stores;
        - step-ca would add an image, a service and a provisioner for what Caddy's internal CA already does.
-   - **What it serves** (`infra/caddy/Caddyfile.executor-front`):
+   - **What it serves** (`infra/caddy/executor-front.Caddyfile`):
      - It listens on `https://executor-front:8443` only. It has no plain-http listener (redirects off), no admin
        endpoint (`admin off`), no trust-store install and no OCSP stapling.
      - It forwards a request only when the ORIGINAL request URI matches
@@ -979,8 +979,9 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
      - Nothing on `engines` gains a route it lacked: the engine runners already reach `gateway:3000` directly, and
        through the front only the channel is reachable.
    - **The CA and certificates are made at the front's first start, never committed.**
-     - Caddy creates the root and intermediate in the `executor-front-data` volume. The root key never leaves that
-       volume.
+     - Caddy creates the root and intermediate in the `executor-front-data` volume. No container mounts the
+       root key except the front and the one-shot copier below (which reads only the certificate). The executor
+       holds the host's Docker socket, so it is host root anyway and the volume does not keep the key from it.
      - Lifetimes are Caddy's defaults: about 10 years for the root, 7 days for the intermediate, 12 hours for the
        leaf. Caddy renews the intermediate and the leaf itself.
      - The one-shot `executor-front-ca` service copies the root CERTIFICATE alone to the `executor-front-ca` volume,
@@ -999,7 +1000,10 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
        that are valid now.
      - A Node without that API, an unreadable or empty file, or `NODE_TLS_REJECT_UNAUTHORIZED=0` stops the executor
        at start (exit 2). There is no skip.
-     - With an http URL (the development override) the file is ignored with a warning.
+     - With an http URL (the development override) the file is ignored with a warning. With an https URL and no CA
+       file, the executor warns that it verifies against the image's public roots.
+     - The copy step waits for a COMPLETE PEM (its `END CERTIFICATE` line). A truncated or empty bundle stops the
+       executor with a message to run `executor-front-ca` again.
      - Compose defaults: `REGULAIT_EXECUTOR_GATEWAY_URL=https://executor-front:8443` and
        `REGULAIT_EXECUTOR_GATEWAY_CA_FILE=/etc/regulait/executor-front-ca/ca.pem` (the volume, mounted read-only).
        An explicitly EMPTY CA file means the image's public roots, for a front with a publicly issued certificate.
@@ -1029,7 +1033,12 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
      - the unit is an edge that dependency-cruiser marks `circular`, not a cycle path, so the file does not depend on
        search order;
      - CI fails on an edge that is not listed, and on a listed edge that is no longer on a cycle;
-     - to shrink the baseline, break a cycle, rebuild, run the script with `--update` and commit the shorter file.
+     - to shrink the baseline, break a cycle, rebuild, run the script with `--update` and commit the shorter file;
+     - the baseline can only shrink: on a PR, the workflow fails when the file gains an edge line against the base
+       branch (a base without the file, as for this PR, is skipped; scheduled and manual runs have no base and run
+       only the ratchet);
+     - what escapes it: a top-level `await import()` (a dynamic edge, left out with the lazy ones, although it runs
+       during initialisation) and a `createRequire` require (not followed). Only the smoke check below covers them.
    - Tool: `dependency-cruiser` 18.6.0 (MIT, pinned, root devDependency; `scripts/THIRD_PARTY.md` has the search
      record).
      - dpdm was rejected: its `glob` dependency is BlueOak-1.0.0.
@@ -1039,13 +1048,22 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
      - an empty temporary HOME, TMPDIR and working directory, removed afterwards;
      - an environment of only PATH, `NODE_ENV=test` and a marker (no database URL, no data key);
      - no `process.argv[1]`;
-     - an exit right after the import, and a 30-second timeout.
+     - Node's permission model (`--permission`, in Node 22): read the repository and its sandbox, write only its
+       sandbox, no child process, no worker, no native addon;
+     - no network, where the host allows `unshare -rn` (GitHub-hosted runners do). Node 22's permission model has no
+       network control, so where `unshare` is unavailable the check says so and runs with network;
+     - its own process group, killed whole on timeout, after the child exits, and when the script exits;
+     - after the import, a check that no listening server or UDP socket was left open (that fails: such a module is
+       an entry point); then an exit, under a 30-second timeout.
    - Entry points that act at top level are never imported. They are listed by name in `ENTRY_POINTS` in the script,
      each with what it would do: `main`, `seed`, `reencrypt`, `first-admin`, the key-init tools, the `demo-*` tools,
      `openapi-client-gen` and a test helper. A name that no longer exists fails the check, and so does a module that
      does not finish loading.
-   - Locally, 283 modules loaded alone (18 skipped by name), in about 1 minute 40 seconds. The real home directory
-     was unchanged before and after the run.
+   - Locally, 283 modules loaded alone under that containment (18 skipped by name), in about 1 minute 20 seconds. The
+     real home directory was unchanged before and after the run.
+   - The front's Caddyfile is `infra/caddy/executor-front.Caddyfile`, not `Caddyfile.executor-front`: the repository's
+     filename guard (`scripts/basename-collisions.test.mjs`) treats two files that differ only by extension as a
+     collision.
 4. **What was and was not run (M-041).**
    - Run:
      - the front's Caddyfile, locally, with the Caddy 2.10.2 release binary (sha512 checked against the release's
@@ -1057,7 +1075,9 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
      - the executor's own `pinGatewayCa` accepted the front's leaf under the copied root;
      - the copy step's shell script, against that storage;
      - `docker compose config` with the `isolation` and `tls` profiles, and with the insecure-dev override;
-     - the executor's suite (now with real-TLS pinning tests) and the two new script suites.
+     - the executor's suite (now with real-TLS pinning tests), the scripts suite as CI runs it, and the two new
+       checks;
+     - the baseline-only-shrinks shell step, against a base with and without the file, with a line added and removed.
    - NOT run:
      - `docker compose up` itself: no session had a Docker daemon;
      - a placement through the front;
@@ -1065,7 +1085,10 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
        `NET_BIND_SERVICE` + `no-new-privileges`;
      - the Node version inside the pinned `node:22-trixie-slim` digest (the executor fails closed below 22.19).
 5. **Follow-ups this leaves:**
-   - Pin `caddy:2-alpine` by digest, for both Caddy services and the image bundle together.
+   - Pin `caddy:2-alpine` by digest, for both Caddy services and the image bundle together (left out of this slice on
+     purpose: the bundle and both services must move in one change).
+   - Re-check the smoke check's containment when CI moves to a Node with a network permission (`--allow-net`), which
+     would replace the `unshare` dependency.
    - A front per executor host when there are several executors (one front serves one compose stack today).
    - Run the stack once on Docker and record the result here.
 
