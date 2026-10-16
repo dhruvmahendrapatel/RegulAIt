@@ -35,6 +35,13 @@ import {
   type WorkloadIdentityView,
 } from "./workloadIdentityModel";
 import { kidOk, type DelegationGrantDetailView, type IdentitySigningKeyListView } from "./signingKeyModel";
+import {
+  bundleDraftError,
+  type PutSpiffeTrustBundleBody,
+  type SpiffeTrustBundleListView,
+  type SpiffeTrustBundleRevokeResult,
+  type SpiffeTrustBundleView,
+} from "./spiffeBundleModel";
 
 export const workloadIdentityKeys = {
   root: ["admin", "workload-identities"] as const,
@@ -198,6 +205,30 @@ export function revokeSigningKey(kid: string): Promise<{ kid: string; tokensRevo
   if (!kidOk(kid)) return Promise.reject(new Error("That key id could not be read. Refresh the list."));
   const path = `/v1/identity/signing-keys/${encodeURIComponent(kid)}/revoke`;
   return withStepUp((h) => stepUpApi.post<{ kid: string; tokensRevoked: number }>(path, {}, h));
+}
+
+// ---- ADR-0188 S9: SPIFFE trust bundles (identity_manage step-up on every write) --
+
+export const spiffeBundleKeys = { list: ["admin", "workload-identities", "spiffe-trust-bundles"] as const };
+
+/** `GET /v1/identity/spiffe-trust-bundles`: every bundle ever recorded, public facts only */
+export function listSpiffeTrustBundles(): Promise<SpiffeTrustBundleListView> {
+  return api.get<SpiffeTrustBundleListView>("/v1/identity/spiffe-trust-bundles");
+}
+
+/** upload a trust domain's bundle; `replacesBundleId` names the active bundle it replaces (null for the first) */
+export function uploadSpiffeTrustBundle(input: PutSpiffeTrustBundleBody): Promise<SpiffeTrustBundleView> {
+  const problem = bundleDraftError(input);
+  if (problem) return Promise.reject(new Error(problem));
+  if (input.replacesBundleId !== null) seg(input.replacesBundleId);
+  const body = deepFreeze({ trustDomain: input.trustDomain, bundle: input.bundle, replacesBundleId: input.replacesBundleId });
+  return withStepUp((h) => stepUpApi.post<SpiffeTrustBundleView>("/v1/identity/spiffe-trust-bundles", body, h));
+}
+
+/** end a domain's SPIFFE trust: its tokens and grants are revoked; never undone */
+export function revokeSpiffeTrustBundle(bundleId: string): Promise<SpiffeTrustBundleRevokeResult> {
+  const id = seg(bundleId);
+  return withStepUp((h) => stepUpApi.post<SpiffeTrustBundleRevokeResult>(`/v1/identity/spiffe-trust-bundles/${id}/revoke`, {}, h));
 }
 
 /** `GET /v1/delegation-grants/:grantId`: one grant with its incoming and outgoing allocations */

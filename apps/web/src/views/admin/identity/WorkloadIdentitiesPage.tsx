@@ -87,6 +87,7 @@ import {
   type WorkloadIdentityView,
 } from "./workloadIdentityModel";
 import { DelegationGrantDetail, IssuerSigningKeysCard } from "./IssuerSigningKeys";
+import { SpiffeTrustBundlesCard } from "./SpiffeTrustBundles";
 import s from "./workloadIdentities.module.css";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 
@@ -303,6 +304,9 @@ export default function WorkloadIdentitiesPage() {
         />
 
         <IssuerSigningKeysCard busy={write.busy} ask={ask} />
+
+        {/* ADR-0188 S9: the SPIFFE trust bundles, in audited storage */}
+        <SpiffeTrustBundlesCard busy={write.busy} ask={ask} />
 
         <RunDelegationTree busy={write.busy} personLabel={personLabel} identities={rows} ask={ask} />
       </div>
