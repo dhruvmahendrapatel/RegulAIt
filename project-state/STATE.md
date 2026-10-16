@@ -52,8 +52,9 @@ queue below.
 - **CI:** the mocked UI suite runs in 5 shards (was 3), recorded on 2026-10-12.
 - **Last migration:** 0198.
 - **Open owner questions:**
-  1. Should a person's own authenticated stdio call (no agent) count as a known subject at L2, rather than as the
-     unknown agent at L3? Today a gVisor-only host always refuses it (ADR-0190 I4 open question 1).
+  1. ~~A person's own stdio call at L2?~~ **Decided 2026-10-15 (ADR-0190 owner decision C):** L3 by default; an
+     admin may lower it to L2 for interactive sessions only (never an API key), scoped, audited with step-up. Engines
+     keep their L2 floor and are never unknown agents. Build slice queued after I5.
   2. The source of project sensitivity for I2 (today the strictest use case, failing closed with none).
   3. The EU AI Act Art. 50 legal review.
   4. The I7 OpenShell go/no-go.
@@ -63,7 +64,7 @@ queue below.
      private-range and plaintext-http opt-ins take `settings_relax`.
   7. The demo-prep warn line the owner has not yet shared.
 - **Still queued from 2026-10-12:** ADR-0188 S9 (SPIFFE backend and runbooks) and ADR-0189 B8 runbooks. New from I4:
-  a TLS front for the executor, a gVisor CI job, and I5 (engines under profiles). Condensed open items are under "Batch 6 follow-ups (2026-10-15)" in Known
+  a TLS front for the executor, a gVisor CI job, I5 (engines under profiles), and the owner decision C relaxation (after I5). Condensed open items are under "Batch 6 follow-ups (2026-10-15)" in Known
   follow-ups.
 
 **2026-10-12 - every built API route has UI or a stated reason; the installer sets the first admin.** Full record:
