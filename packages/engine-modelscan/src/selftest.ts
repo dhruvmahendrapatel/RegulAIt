@@ -17,7 +17,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { probeEgress, type EgressProbeOptions, type EgressProbeResult } from "@regulait/engine-runner";
-import { isPublicAddress, MODELSCAN_ENGINE_VERSION } from "@regulait/shared";
+import { isPublicAddress, MODELSCAN_ENGINE_VERSION, sandboxRuntimeObservationSchema, type SandboxRuntimeObservation } from "@regulait/shared";
 
 export const SCANNER_SELF_TEST_FILE = ".scanner-selftest.json";
 /** the manifest's usage-data entry the runner derives from the scanner's report */
@@ -38,14 +38,19 @@ const reportSchema = z
         addressConnected: z.boolean(),
       })
       .strict(),
+    // ADR-0190 decision 10 (I5): the runtime the scanner observed from inside its sandbox (recorded, never decisive)
+    runtime: sandboxRuntimeObservationSchema.optional(),
   })
   .strict();
 export type ScannerSelfTest = z.infer<typeof reportSchema>;
 
 /** the scanner writes its report (atomically) */
-export async function writeScannerSelfTest(resultsRoot: string, args: { modelscanVersion: string; egress?: EgressProbeOptions; now?: Date }): Promise<ScannerSelfTest> {
+export async function writeScannerSelfTest(
+  resultsRoot: string,
+  args: { modelscanVersion: string; egress?: EgressProbeOptions; now?: Date; runtime?: SandboxRuntimeObservation },
+): Promise<ScannerSelfTest> {
   const egress: EgressProbeResult = await probeEgress(args.egress);
-  const report: ScannerSelfTest = { at: (args.now ?? new Date()).toISOString(), modelscanVersion: args.modelscanVersion, egress };
+  const report: ScannerSelfTest = { at: (args.now ?? new Date()).toISOString(), modelscanVersion: args.modelscanVersion, egress, ...(args.runtime ? { runtime: args.runtime } : {}) };
   const file = path.join(resultsRoot, SCANNER_SELF_TEST_FILE);
   const tmp = `${file}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(report), { mode: 0o640 });

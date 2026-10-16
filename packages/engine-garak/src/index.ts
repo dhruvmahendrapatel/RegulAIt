@@ -6,5 +6,6 @@ export * from "./config.js";
 export * from "./mapper.js";
 export * from "./garak-run.js";
 export * from "./exchange.js";
+export * from "./worker.js";
 export * from "./selftest.js";
 export * from "./adapter.js";

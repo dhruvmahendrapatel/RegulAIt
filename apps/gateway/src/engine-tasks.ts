@@ -250,15 +250,15 @@ export async function startEngineTask(db: Db, deps: EngineTaskDeps, runnerId: st
     if (run.taskPlacementId !== null) return { kind: "refused_request" as const, status: 409, error: "engine_task_started", detail: "a run's task is started once; its input never changes" };
     const m = manifests[run.engineId as EngineId];
     // the input: inline files from the runner, the run's own artifact by reference (and only that one)
-    if (run.targetKind === "artifact" ? body.artifact?.artifactId !== run.targetArtifactId : body.artifact !== null) {
-      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an artifact scan's input names the run's artifact; an agent run's names none" };
+    if (run.targetKind === "artifact" ? body.artifact === null || run.targetArtifactId === null : body.artifact !== null) {
+      return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "an artifact scan's input places the run's artifact; an agent run's has none" };
     }
     if (m.needsModelAccess !== (body.secret !== null)) {
       return { kind: "refused_request" as const, status: 422, error: "engine_task_input_invalid", detail: "the task secret is the run's key: present exactly when the engine calls models" };
     }
     const files: HeldFile[] = body.files.map((f) => inlineFile(f.path, f.data));
     if (body.artifact) {
-      const [art] = await tx.select().from(modelArtifacts).where(eq(modelArtifacts.id, body.artifact.artifactId));
+      const [art] = await tx.select().from(modelArtifacts).where(eq(modelArtifacts.id, run.targetArtifactId!));
       if (!art || !deps.artifactStore()) return { kind: "refused_request" as const, status: 409, error: "artifact_store_unavailable" };
       files.push({ meta: { path: body.artifact.path, size: art.sizeBytes, sha256: art.sha256 }, source: { kind: "artifact", artifactId: art.id, storageKey: art.storageKey } });
     }

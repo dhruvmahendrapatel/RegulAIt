@@ -24,7 +24,10 @@ import {
   engineRunnerKeyRotationResponseSchema,
   engineRunnerRegisterResponseSchema,
   engineRunnerSelfTestResponseSchema,
+  engineTaskFramesResponseSchema,
   WORKLOAD_SELF_RESOURCE_PATHS,
+  type EngineTaskFramesResponse,
+  type EngineTaskInputUpload,
   type EngineId,
   type EngineLease,
   type EngineResultEnvelope,
@@ -87,7 +90,7 @@ export class RunnerMalformedResponseError extends Error {
 }
 
 /** the runner routes a refusal can name (S7 adds the token endpoint and key rotation) */
-export type RunnerRoute = "register" | "lease" | "self-test" | "heartbeat" | "token" | "rotate";
+export type RunnerRoute = "register" | "lease" | "self-test" | "heartbeat" | "token" | "rotate" | "task";
 
 /** what `call` read: the status, and the body only when it parsed (`parsed: false` = the body was not JSON) */
 interface CallAnswer {
@@ -487,6 +490,42 @@ export class RunnerClient {
   async artifact(artifactId: string, signal: AbortSignal): Promise<Response> {
     this.requireKey();
     return this.authorizedResponse("lease", "GET", `/v1/engine-runner/artifacts/${encodeURIComponent(artifactId)}`, undefined, undefined, signal);
+  }
+
+  /**
+   * ADR-0190 I5: start the run's TASK. The gateway decides the run's engine_worker placement on this request (the
+   * run's entitlement decision); a 201 means an executor was offered the task. Any refusal is definitive for the run
+   * (the gateway ended it `not_run`), except a 5xx, 408 or 429 (transient: thrown).
+   */
+  async taskInput(runId: string, body: EngineTaskInputUpload): Promise<{ status: number; error: string | null; reason: string | null }> {
+    this.requireKey();
+    const res = await this.authorized("task", "POST", `/v1/engine-runner/runs/${encodeURIComponent(runId)}/task/input`, body);
+    if (res.status >= 500 || res.status === 408 || res.status === 429) throw new RunnerHttpError("task", res.status, null);
+    const j = refusalOf(res) as { error?: unknown; reason?: unknown };
+    return { status: res.status, error: typeof j.error === "string" ? j.error : null, reason: typeof j.reason === "string" ? j.reason : null };
+  }
+
+  /** ADR-0190 I5: the task's stdout frames from `from` on (long-polled up to `waitSeconds`); `from` acknowledges what is before it */
+  async taskFrames(runId: string, from: number, waitSeconds: number): Promise<EngineTaskFramesResponse> {
+    this.requireKey();
+    const res = await this.authorized("task", "GET", `/v1/engine-runner/runs/${encodeURIComponent(runId)}/task/frames?from=${Math.max(0, Math.floor(from))}&wait=${Math.max(0, Math.min(25, Math.floor(waitSeconds)))}`);
+    if (is2xx(res.status)) {
+      if (!res.parsed) throw new RunnerMalformedResponseError("task", res.status, "unparseable");
+      const a = engineTaskFramesResponseSchema.safeParse(res.body);
+      if (!a.success) throw new RunnerMalformedResponseError("task", res.status, "schema");
+      return a.data;
+    }
+    const j = refusalOf(res);
+    throw new RunnerHttpError("task", res.status, typeof j.error === "string" ? j.error : null, nextOf(j));
+  }
+
+  /** ADR-0190 I5: frames for the task's stdin (the gateway channel's answers), and/or close the task */
+  async taskPost(runId: string, frames: string[], close = false): Promise<void> {
+    this.requireKey();
+    const res = await this.authorized("task", "POST", `/v1/engine-runner/runs/${encodeURIComponent(runId)}/task/frames`, { frames, ...(close ? { close: true } : {}) });
+    if (res.status === 204) return;
+    const j = refusalOf(res);
+    throw new RunnerHttpError("task", res.status, typeof j.error === "string" ? j.error : null, nextOf(j));
   }
 }
 

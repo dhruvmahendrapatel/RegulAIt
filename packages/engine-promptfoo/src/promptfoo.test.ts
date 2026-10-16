@@ -49,7 +49,8 @@ import {
   RUN_KEY_ENV,
 } from "./config.js";
 import { classifyError, mapPromptfooResults, type PromptfooEnvelopeBody } from "./mapper.js";
-import { promptfooAdapter, PROMPTFOO_MAX_RESULTS_BYTES } from "./adapter.js";
+import { PROMPTFOO_MAX_RESULTS_BYTES } from "./adapter.js";
+import { promptfooAdapter } from "./worker.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = (name: string) => readFileSync(path.join(here, "fixtures", name));

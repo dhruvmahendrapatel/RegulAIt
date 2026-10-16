@@ -1,7 +1,9 @@
 /**
  * ADR-0187 B5-M — the modelscan RUNNER's entrypoint (`node dist/main.js`), in the runner container:
  * on the internal `engines` network, holding the runner key on its state volume, never running
- * modelscan itself. Scans go to the scanner container through the exchange volumes (exchange.ts).
+ * modelscan itself. ADR-0190 I5: each scan runs in an executor's sandbox under the run's engine_worker placement;
+ * the task bridge hands it the job (the artifact is placed by the gateway, never uploaded) and writes its results
+ * back into the exchange directories, so the exchange (exchange.ts) reads them as before. No scanner container.
  *
  * Its life comes from the shared core (`runRunnerLoop`): token persistence, enrolment, the
  * self-test refresh, result retention, the `next` state machine. Its self-test adds one thing: the
@@ -9,10 +11,10 @@
  * switch. No listening port. The token is never logged.
  */
 import path from "node:path";
-import { buildSelfTest, FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
+import { buildSelfTest, ExecutorTaskBridge, FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST, type RunnerSelfTest } from "@regulait/shared";
 import { modelscanAdapter } from "./adapter.js";
-import { ExchangeScanExecutor } from "./exchange.js";
+import { ARTIFACT_NAME, ExchangeScanExecutor } from "./exchange.js";
 import { judgeScannerSelfTest, SCANNER_ISOLATED_SWITCH } from "./selftest.js";
 import { installedModelscanVersion } from "./version.js";
 
@@ -42,6 +44,16 @@ async function main(): Promise<void> {
   // PR #212 review [4234946104]: at start this runner holds no run, so no job of any run may remain
   const stale = await executor.reconcile(null);
   if (stale.length) console.log(`modelscan runner: removed ${stale.length} job(s) left by an earlier process`);
+  // ADR-0190 I5: the only place a scan runs is an executor's sandbox (the scanner calls nothing: no gateway channel)
+  const bridge = new ExecutorTaskBridge({
+    client,
+    jobsRoot,
+    resultsRoot,
+    gatewayBaseUrl: process.env.REGULAIT_ENGINE_GATEWAY_URL ?? `${gatewayUrl.replace(/\/$/, "")}/v1`,
+    isArtifact: (name) => ARTIFACT_NAME.test(name),
+    log: (m) => console.log(`modelscan runner: ${m}`),
+  });
+  void bridge.run(new AbortController().signal);
   await runRunnerLoop(client, modelscanAdapter({ artifacts: client, executor }), {
     engineId: "modelscan",
     engineVersion,

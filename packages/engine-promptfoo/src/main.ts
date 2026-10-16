@@ -8,14 +8,16 @@
  * replace it stops the process (after a pause, so a restart policy cannot hammer the gateway).
  * No listening port. The token is never logged.
  *
- * B5-P2 (ADR-0187 decisions 170 on): the runner NEVER runs promptfoo. Every job goes to the worker
- * container through the exchange volumes (exchange.ts), and the runner's self-test carries the
- * worker's own report (worker-selftest.ts) as the manifest's `REGULAIT_PROMPTFOO_WORKER_ISOLATED`.
+ * B5-P2 (ADR-0187 decisions 170 on): the runner NEVER runs promptfoo, and the runner's self-test carries the
+ * worker's own report (worker-selftest.ts) as the manifest's `REGULAIT_PROMPTFOO_WORKER_ISOLATED`. ADR-0190 I5: every
+ * job runs in an executor's sandbox under the run's engine_worker placement; the task bridge hands it over (the
+ * run's key as the task secret), carries its gateway channel and writes its results back into the exchange
+ * directories (exchange.ts), which read them as before. No worker container.
  */
 import path from "node:path";
-import { buildSelfTest, FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
+import { buildSelfTest, ExecutorTaskBridge, FileRunnerKeyStore, pinnedImageDigest, runRunnerLoop, RunnerClient, RunnerObsoleteBuildError, runnerIssuerFromEnv } from "@regulait/engine-runner";
 import { ENGINE_MANIFEST, type RunnerSelfTest } from "@regulait/shared";
-import { promptfooAdapter } from "./adapter.js";
+import { promptfooRunnerAdapter } from "./adapter.js";
 import { ExchangePromptfooExecutor } from "./exchange.js";
 import { installedPromptfooVersion, PROMPTFOO_HOME } from "./version.js";
 import { judgeWorkerSelfTest, WORKER_ISOLATED_SWITCH } from "./worker-selftest.js";
@@ -49,7 +51,16 @@ async function main(): Promise<void> {
   // at start this runner holds no run, so no job of any run may remain in the exchange
   const stale = await executor.reconcile(null);
   if (stale.length) console.log(`promptfoo runner: removed ${stale.length} job(s) left by an earlier process`);
-  await runRunnerLoop(client, promptfooAdapter({ entrypoint: `${PROMPTFOO_HOME}/dist/src/entrypoint.js`, executor }), {
+  // ADR-0190 I5: the only place promptfoo runs is an executor's sandbox; its model calls come back through this bridge
+  const bridge = new ExecutorTaskBridge({
+    client,
+    jobsRoot,
+    resultsRoot,
+    gatewayBaseUrl: process.env.REGULAIT_ENGINE_GATEWAY_URL ?? `${gatewayUrl.replace(/\/$/, "")}/v1`,
+    log: (m) => console.log(`promptfoo runner: ${m}`),
+  });
+  void bridge.run(new AbortController().signal);
+  await runRunnerLoop(client, promptfooRunnerAdapter({ entrypoint: `${PROMPTFOO_HOME}/dist/src/entrypoint.js`, executor }), {
     engineId: "promptfoo",
     engineVersion,
     imageDigest,

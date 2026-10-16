@@ -507,28 +507,19 @@ services:
   #     enrolment token (the enrolment token is single-use and ignored once a
   #     stored token works). Deleting the volume means re-enrolling.
   #
-  # ONE image, TWO containers (B5-P2, ADR-0187 decisions 170 on): the runner
-  # credential is out of promptfoo's reach.
+  # ADR-0190 I5: the runner NEVER runs promptfoo, and there is no worker
+  # container. Each run's job runs as an engine TASK in a gVisor sandbox that
+  # the sandbox executor (profile `isolation`) starts under the run's
+  # `engine_worker` placement; the runner's task bridge hands the job over
+  # through the gateway (the run's key as the task secret, never in the input),
+  # carries the sandbox's gateway channel and writes the task's results into
+  # its own result volume. Without an executor attested for the engine-worker
+  # profile, a run ends `not_run` (isolation_unavailable): no fallback.
   #
-  #   engine-promptfoo         the runner: the hardened template, on `engines`,
-  #                            its own state volume (the runner key), the job
-  #                            volume read-write, the result volume READ-ONLY.
-  #                            It leases, heartbeats and posts results, and
-  #                            NEVER runs promptfoo.
-  #   engine-promptfoo-worker  the worker: runs promptfoo. On `engines` (its
-  #                            model calls go to the gateway's compat routes on
-  #                            each run's virtual key, the only credential it
-  #                            ever holds), read-only root, non-root, cap_drop
-  #                            ALL, no-new-privileges; NO state volume, NO
-  #                            runner or enrolment token, its own PID and IPC
-  #                            namespaces (it cannot see the runner process);
-  #                            the job volume READ-ONLY; its one shared
-  #                            writable volume is /out (the result volume).
-  #                            It proves this at run time (its self-test, which
-  #                            the runner reports as
-  #                            REGULAIT_PROMPTFOO_WORKER_ISOLATED).
-  #
-  # Both exchange volumes are tmpfs-backed: a job's run key never reaches a disk.
+  #   engine-promptfoo  the runner: the hardened template, on `engines`, its own
+  #                     state volume (the runner key), the job and result
+  #                     volumes (both its own, tmpfs-backed). It leases,
+  #                     heartbeats and posts results.
   engine-promptfoo:
     <<: *engine-runner
     platform: linux/amd64
@@ -536,7 +527,7 @@ services:
     volumes:
       - engine-promptfoo-state:/state
       - engine-promptfoo-jobs:/jobs
-      - engine-promptfoo-results:/results:ro
+      - engine-promptfoo-results:/results
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_PROMPTFOO_ENROLLMENT_TOKEN:-}
@@ -545,56 +536,19 @@ services:
       REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
       REGULAIT_PROMPTFOO_RESULTS_DIR: /results
 
-  engine-promptfoo-worker:
-    profiles: ["engines"]
-    platform: linux/amd64
-    image: ${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    command: ["node", "/app/dist/worker-main.js"]
-    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
-    networks: [engines]
-    read_only: true
-    tmpfs:
-      - /work:size=1g,mode=0700,uid=10001,gid=10001
-      - /tmp:size=256m,mode=1777
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    user: "10001:10001"
-    mem_limit: 2g
-    cpus: 2
-    pids_limit: 256
-    volumes:
-      - engine-promptfoo-jobs:/jobs:ro
-      - engine-promptfoo-results:/out
-    environment:
-      REGULAIT_PROMPTFOO_JOBS_DIR: /jobs
-      REGULAIT_PROMPTFOO_RESULTS_DIR: /out
-    restart: unless-stopped
-
   # --- modelscan engine: runner + scanner (profile: engines) — ADR-0187 B5-M --
   #
-  # ONE image (engines/modelscan/Dockerfile), TWO containers (decision 104).
-  # Every uploaded model artifact is hostile input, so the process that parses
-  # it has no network at all and never holds the runner credential:
-  #
-  #   engine-modelscan          the runner: the hardened template, on `engines`
-  #                             (reaches only the gateway), its own state volume
-  #                             (the runner key), the job volume read-write,
-  #                             the result volume READ-ONLY. It fetches the
-  #                             artifact (sha256 checked) and never runs
-  #                             modelscan.
-  #   engine-modelscan-scanner  the scanner: network_mode none, read-only root,
-  #                             non-root, cap_drop ALL, no-new-privileges, no
-  #                             token, no state; the job volume (the artifact)
-  #                             READ-ONLY; its one writable place is /out (the
-  #                             result volume, a tmpfs); smaller memory, CPU and
-  #                             pids limits; the wall-clock limit is the run's
-  #                             deadline, enforced per scan by killing
-  #                             modelscan's process group.
-  #
-  # Both exchange volumes are tmpfs-backed, so nothing of an artifact survives
-  # the containers. The job volume must hold the largest artifact the org
-  # setting admits (512 MiB strict default): raise
-  # REGULAIT_ENGINE_MODELSCAN_JOBS_SIZE with that setting.
+  # Every uploaded model artifact is hostile input. ADR-0190 I5: there is no
+  # scanner container; each scan runs as an engine TASK in a gVisor sandbox
+  # with no network at all, started by the sandbox executor under the run's
+  # `engine_worker` placement, with the artifact on a read-only input the
+  # executor wrote and verified (streamed to it by the gateway from the
+  # artifact store, never through this runner). The runner (the hardened
+  # template, on `engines`, its own state volume) leases, bridges the task and
+  # never runs modelscan. Both exchange volumes are the runner's own,
+  # tmpfs-backed. The job volume must hold the largest artifact the org setting
+  # admits (512 MiB strict default): raise REGULAIT_ENGINE_MODELSCAN_JOBS_SIZE
+  # with that setting.
   # Digest pinning as for promptfoo: one variable,
   # REGULAIT_ENGINE_MODELSCAN_DIGEST=sha256:<digest>, names the image of BOTH
   # containers and the digest the runner reports; the all-zero default names
@@ -606,7 +560,7 @@ services:
     volumes:
       - engine-modelscan-state:/state
       - engine-modelscan-jobs:/jobs
-      - engine-modelscan-results:/results:ro
+      - engine-modelscan-results:/results
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_MODELSCAN_ENROLLMENT_TOKEN:-}
@@ -615,51 +569,14 @@ services:
       REGULAIT_MODELSCAN_JOBS_DIR: /jobs
       REGULAIT_MODELSCAN_RESULTS_DIR: /results
 
-  engine-modelscan-scanner:
-    profiles: ["engines"]
-    platform: linux/amd64
-    image: ${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-regulait/engine-modelscan}@${REGULAIT_ENGINE_MODELSCAN_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    command: ["node", "/app/dist/scanner-main.js"]
-    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
-    network_mode: none
-    read_only: true
-    tmpfs:
-      - /work:size=64m,mode=0700,uid=10001,gid=10001
-      - /tmp:size=64m,mode=1777
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    user: "10001:10001"
-    mem_limit: 1g
-    cpus: 1
-    pids_limit: 64
-    volumes:
-      - engine-modelscan-jobs:/jobs:ro
-      - engine-modelscan-results:/out
-    environment:
-      REGULAIT_MODELSCAN_JOBS_DIR: /jobs
-      REGULAIT_MODELSCAN_RESULTS_DIR: /out
-    restart: unless-stopped
-
   # --- garak engine: runner + worker (profile: engines) — ADR-0187 B5-G -------
   #
-  # ONE image (engines/garak/Dockerfile), TWO containers (decision 140), so the
-  # process that runs garak never holds the runner credential:
-  #
-  #   engine-garak         the runner: the hardened template, on `engines`, its
-  #                        own state volume (the runner key), the job volume
-  #                        read-write, the result volume READ-ONLY. It never
-  #                        runs garak.
-  #   engine-garak-worker  the worker: runs one garak process per probe. It must
-  #                        reach the gateway's model routes, so it is on
-  #                        `engines` (internal: reaches only the gateway) — but
-  #                        it has NO runner key, NO enrolment token and NO
-  #                        state volume: what it holds, for one run at a time, is
-  #                        that run's own virtual key (in the job). Read-only
-  #                        root, non-root, cap_drop ALL, no-new-privileges; the
-  #                        job volume READ-ONLY; its writable places are /work
-  #                        (garak's per-probe directories) and /out (results).
-  #
-  # Both exchange volumes are tmpfs-backed. Digest pinning as for the other
+  # ADR-0190 I5: the runner never runs garak and there is no worker container.
+  # Each run's probes run as an engine TASK in a gVisor sandbox started by the
+  # sandbox executor under the run's `engine_worker` placement; the run's key
+  # reaches it only as the task secret, and its model calls reach the gateway
+  # only through the gateway channel this runner's task bridge carries. Both
+  # exchange volumes are the runner's own, tmpfs-backed. Digest pinning as for the other
   # engines: one variable, REGULAIT_ENGINE_GARAK_DIGEST=sha256:<digest>, names
   # the image of BOTH containers and the digest the runner reports; the
   # all-zero default names no image.
@@ -670,7 +587,7 @@ services:
     volumes:
       - engine-garak-state:/state
       - engine-garak-jobs:/jobs
-      - engine-garak-results:/results:ro
+      - engine-garak-results:/results
     environment:
       REGULAIT_GATEWAY_URL: http://gateway:3000
       REGULAIT_ENGINE_ENROLLMENT_TOKEN: ${REGULAIT_ENGINE_GARAK_ENROLLMENT_TOKEN:-}
@@ -678,35 +595,6 @@ services:
       REGULAIT_ENGINE_IMAGE_DIGEST: ${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
       REGULAIT_GARAK_JOBS_DIR: /jobs
       REGULAIT_GARAK_RESULTS_DIR: /results
-
-  engine-garak-worker:
-    profiles: ["engines"]
-    platform: linux/amd64
-    image: ${REGULAIT_ENGINE_GARAK_REPOSITORY:-regulait/engine-garak}@${REGULAIT_ENGINE_GARAK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    command: ["node", "/app/dist/worker-main.js"]
-    depends_on:
-      gateway:
-        condition: service_healthy
-    pull_policy: ${REGULAIT_ENGINE_PULL_POLICY:-never}
-    networks: [engines]
-    read_only: true
-    tmpfs:
-      - /work:size=1g,mode=0700,uid=10001,gid=10001
-      - /tmp:size=256m,mode=1777
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    user: "10001:10001"
-    mem_limit: 3g
-    cpus: 2
-    pids_limit: 256
-    volumes:
-      - engine-garak-jobs:/jobs:ro
-      - engine-garak-results:/out
-    environment:
-      REGULAIT_GARAK_JOBS_DIR: /jobs
-      REGULAIT_GARAK_RESULTS_DIR: /out
-      REGULAIT_WORK_DIR: /work
-    restart: unless-stopped
 
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #

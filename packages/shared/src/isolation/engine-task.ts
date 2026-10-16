@@ -60,6 +60,11 @@ export const ENGINE_TASK_FRAMES_MAX = 64;
 export const ENGINE_TASK_INPUT_WAIT_MS = 90_000;
 /** a refusal of the executor's input fetch that means "not yet": the runner has not uploaded it */
 export const ENGINE_TASK_INPUT_PENDING = "engine_task_input_pending" as const;
+/**
+ * the public literal address an engine task's in-sandbox egress probe must FAIL to reach (ADR-0187 decision 19; the
+ * engine images' `REGULAIT_EGRESS_PROBE_ADDRESS`, which the sandbox init does not pass to the workload)
+ */
+export const ENGINE_TASK_EGRESS_PROBE_ADDRESS = "93.184.215.14" as const;
 /** the workload's file descriptor the sandbox init writes the task secret to (a pipe; never env or argv) */
 export const ENGINE_TASK_SECRET_FD = 3;
 
@@ -117,8 +122,11 @@ export const engineTaskInputUploadSchema = z
   .object({
     /** small files written by the runner's adapter (the job description), base64 */
     files: z.array(z.object({ path: taskPath, data: b64 }).strict()).max(ENGINE_TASK_MAX_FILES),
-    /** the run's target artifact, streamed by the gateway from its store (never through the runner) */
-    artifact: z.object({ path: taskPath, artifactId: z.string().uuid() }).strict().nullable(),
+    /**
+     * where the run's OWN target artifact goes in the input (an artifact scan only); the gateway streams it from its
+     * store to the executor (never through the runner), and the runner cannot name any other artifact
+     */
+    artifact: z.object({ path: taskPath }).strict().nullable(),
     /** the task secret (the run's key), or null for a worker that calls nothing (the modelscan scanner) */
     secret: engineTaskSecretSchema.nullable(),
   })
@@ -212,6 +220,23 @@ export const engineTaskFramesPostSchema = z
   })
   .strict()
   .refine((b) => b.frames.length > 0 || b.close === true, { message: "frames, close, or both" });
+
+/**
+ * ADR-0190 decision 10 — the RUNTIME PROBE an engine worker's self-test records (written inside its sandbox at the
+ * start of every task): what the worker observes of its runtime from inside. Recorded, never decisive (review H2):
+ * the isolation class is decided from outside the sandbox by the executor.
+ */
+export const sandboxRuntimeObservationSchema = z
+  .object({
+    kernelRelease: z.string().max(128),
+    procVersionGvisor: z.boolean(),
+    uid: z.number().int().min(-1),
+    capEff: z.string().max(16),
+    noNewPrivs: z.number().int().min(-1).max(1),
+    seccomp: z.number().int().min(-1).max(2),
+  })
+  .strict();
+export type SandboxRuntimeObservation = z.infer<typeof sandboxRuntimeObservationSchema>;
 
 /** the lease's task: where the run executes (always an executor placement from I5 on) */
 export const engineLeaseTaskSchema = z.object({ placementId: z.string().uuid(), offerId: z.string().uuid() }).strict();
