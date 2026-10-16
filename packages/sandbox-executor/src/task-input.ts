@@ -45,8 +45,14 @@ export async function writeTaskInput(root: string, input: SandboxTaskInput): Pro
         for await (const chunk of await input.open(n)) {
           size += chunk.length;
           if (size > f.size) throw new TaskInputError(`input ${f.path} is longer than its manifest says`);
-          h.update(chunk);
-          await fh.write(chunk);
+          // review LOW-2: the digest covers the bytes the file actually holds (a short write is continued, never assumed)
+          let off = 0;
+          while (off < chunk.length) {
+            const { bytesWritten } = await fh.write(chunk, off, chunk.length - off);
+            if (bytesWritten <= 0) throw new TaskInputError(`input ${f.path} could not be written`);
+            h.update(chunk.subarray(off, off + bytesWritten));
+            off += bytesWritten;
+          }
         }
         await fh.sync();
       } finally {
@@ -69,6 +75,21 @@ export async function writeTaskInput(root: string, input: SandboxTaskInput): Pro
 async function lockDirs(dir: string): Promise<void> {
   for (const e of await readdir(dir, { withFileTypes: true })) if (e.isDirectory()) await lockDirs(path.join(dir, e.name));
   await chmod(dir, 0o555);
+}
+
+/**
+ * Review LOW-2: at executor start, remove every task input a previous run of this executor left under its input
+ * directory (a crash between the write and the sandbox's end). Only the entries `isOurs` names are touched; returns
+ * how many were removed.
+ */
+export async function reconcileTaskInputs(dir: string, isOurs: (name: string) => boolean): Promise<number> {
+  let n = 0;
+  for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (!e.isDirectory() || !isOurs(e.name)) continue;
+    await removeTaskInput(path.join(dir, e.name));
+    n += 1;
+  }
+  return n;
 }
 
 /** remove a task's input (its directories are read-only, so they are opened up first) */

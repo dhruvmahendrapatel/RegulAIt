@@ -76,4 +76,11 @@ export interface SandboxBackend {
    * and mounted read-only before the sandbox starts (required exactly when the profile declares inputs)
    */
   start(offer: ExecutionOffer, profile: ExecutionProfileBody, cls: AppliedIsolationKind, task?: SandboxTaskInput): Promise<SandboxHandle>;
+  /**
+   * ADR-0190 I5 (review MEDIUM-2): why this backend cannot serve a placement under `profile` on this host (e.g. an
+   * engine_worker profile's input with no input volume configured), or null. A profile it cannot serve is never
+   * self-tested, so never attested: the broker never offers it here, and an offer that still arrives is declined
+   * (`attestation_stale`) before anything is accepted.
+   */
+  unsupported?(profile: ExecutionProfileBody): string | null;
 }

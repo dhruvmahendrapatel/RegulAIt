@@ -10,7 +10,7 @@
  *     the sandbox and quarantines this executor; a transient failure kills the
  *     sandbox too (an unconfirmed sandbox never gets input: fail closed).
  */
-import { isolationClassRank, requiredReportProbes, stdioMacKey, type ExecutionOffer, type ExecutorProfileRef } from "@regulait/shared";
+import { ENGINE_TASK_INPUT_WAIT_MS, isolationClassRank, requiredReportProbes, stdioMacKey, type ExecutionOffer, type ExecutorProfileRef } from "@regulait/shared";
 import type { SandboxBackend, SandboxHandle } from "./backend.js";
 import type { SandboxTaskInput } from "./task-input.js";
 import type { ChannelCredential } from "./channel-credential.js";
@@ -38,6 +38,8 @@ export interface OfferContext {
   log?: (m: string) => void;
   /** I4: the stdio session window (seconds; default 25) */
   stdioWindowSeconds?: number;
+  /** I5: the deadline of an engine task's whole input fetch (default ENGINE_TASK_INPUT_WAIT_MS; tests shorten it) */
+  inputWaitMs?: number;
 }
 
 export type OfferOutcome =
@@ -85,10 +87,12 @@ export async function handleOffer(offer: ExecutionOffer, ctx: OfferContext): Pro
   // I5: a profile with declared inputs (an engine task) starts only on its input: the manifest is fetched now, and the
   // backend writes and verifies every file before the sandbox exists (its digest goes into the report below)
   let task: SandboxTaskInput | undefined;
+  // review LOW-2: the whole input fetch (manifest and every file, while the backend writes them) has one deadline
+  const inputDeadline = AbortSignal.timeout(ctx.inputWaitMs ?? ENGINE_TASK_INPUT_WAIT_MS);
   if (profile.body.filesystem.inputs.length > 0) {
     try {
       const manifest = await ctx.client.inputManifest(offer.id);
-      task = { manifest, open: (n) => ctx.client.inputFile(offer.id, n) };
+      task = { manifest, open: (n) => ctx.client.inputFile(offer.id, n, inputDeadline) };
     } catch (e) {
       const why = e instanceof ExecutorHttpError ? (e.code ?? String(e.status)) : (e as Error).message;
       ctx.log?.(`offer ${offer.id}: the task's input could not be read (${why}); nothing was started`);

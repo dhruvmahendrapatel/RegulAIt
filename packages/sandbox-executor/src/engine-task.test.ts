@@ -17,7 +17,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +39,7 @@ import { RunscDockerBackend, type DockerChild } from "./runsc-backend.js";
 import { removeTaskInput, TaskInputError, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
 import { FakeSandboxBackend } from "./fake-backend.js";
 import { handleOffer, type OfferContext } from "./offers.js";
+import { runSelfTests } from "./self-test.js";
 import type { ExecutorClient } from "./client.js";
 
 const INIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../sandbox-init/sandbox-init.mjs");
@@ -209,6 +210,50 @@ describe("the runsc backend: an engine task's input volume and task secret", () 
     await expect(b.start(offer, ENGINE, "user_space_kernel", taskOf(FILES, (n, x) => (n === 0 ? Buffer.from("other") : x)))).rejects.toThrow(TaskInputError);
     expect(calls, "no docker run for a refused sandbox").toEqual([]);
   }, 30_000);
+
+  it("review LOW-2: a refused input leaves no sandbox directory behind, and the first preflight removes leftovers", async () => {
+    const inputDir = mkdtempSync(path.join(tmpdir(), "regulait-i5-vol-"));
+    dirs.push(inputDir);
+    const calls: string[][] = [];
+    const b = hostBackend(calls, inputDir);
+    // a previous run of this executor left an input behind (read-only, as written); an unrelated entry stays
+    const left = path.join(inputDir, "regulait-sbx-11111111-2222-4333-8444-555555555555");
+    await writeTaskInput(path.join(left, "jobs"), taskOf(FILES));
+    mkdirSync(path.join(inputDir, "not-ours"));
+    await expect(b.start(offer, ENGINE, "user_space_kernel", taskOf(FILES, (n, x) => (n === 0 ? Buffer.from("other") : x)))).rejects.toThrow(TaskInputError);
+    expect(readdirSync(inputDir)).toEqual(["not-ours"]);
+    expect(calls).toEqual([]);
+  }, 30_000);
+
+  it("review MEDIUM-2: without an input volume the engine-worker profile is unsupported (never self-tested, never attested)", () => {
+    expect(hostBackend([], null).unsupported(ENGINE)).toMatch(/no input volume/);
+    const inputDir = mkdtempSync(path.join(tmpdir(), "regulait-i5-vol-"));
+    dirs.push(inputDir);
+    expect(hostBackend([], inputDir).unsupported(ENGINE)).toBeNull();
+    expect(hostBackend([], null).unsupported(SHIPPED_EXECUTION_PROFILES.restricted)).toBeNull();
+  });
+
+  it("review MEDIUM-2: the self-test skips a profile the backend cannot serve, so the gateway never sees an attestation of it", async () => {
+    const ref = (name: string, body: typeof ENGINE) => ({ digest: executionProfileDigest(body), name, version: 1, minClass: "user_space_kernel" as const, body });
+    const profiles = new Map([ENGINE, SHIPPED_EXECUTION_PROFILES.restricted].map((b, i) => [executionProfileDigest(b), ref(`p${i}`, b)]));
+    const submitted: string[] = [];
+    const backend = new FakeSandboxBackend({ unsupported: (p) => (p.filesystem.inputs.length > 0 ? "declared read-only inputs (this executor has no input volume)" : null) });
+    const out = await runSelfTests({
+      backend,
+      credential: { identifier: "spiffe://regulait.test/executor/i5", signReport: async (r: ExecutorReport) => ({ report: r }) as unknown as SignedExecutorReport } as never,
+      client: {
+        selfTest: async (reports: SignedExecutorReport[]) => {
+          for (const r of reports) submitted.push((r as unknown as { report: ExecutorReport }).report.profileDigest);
+          return { results: [], next: "ok" };
+        },
+      } as never,
+      profiles,
+      classesDeclared: ["user_space_kernel"],
+    });
+    expect(out.fresh).toEqual([]);
+    expect(submitted).toEqual([executionProfileDigest(SHIPPED_EXECUTION_PROFILES.restricted)]);
+    expect(backend.sandboxes.filter((s) => s.kind === "canary")).toHaveLength(1);
+  });
 
   it("a profile with secrets: none never takes a task secret", async () => {
     const calls: string[][] = [];

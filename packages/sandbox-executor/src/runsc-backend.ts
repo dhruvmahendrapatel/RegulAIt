@@ -78,8 +78,11 @@ import {
   type ProbeObserved,
 } from "@regulait/shared";
 import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle, SandboxStdio } from "./backend.js";
-import { removeTaskInput, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
+import { reconcileTaskInputs, removeTaskInput, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
 import { RUNSC_RELEASES, SANDBOX_INIT_SHA256 } from "./init-pin.js";
+
+/** the name of every sandbox this backend starts (and of its input directory) */
+const SANDBOX_NAME = /^regulait-sbx-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** sha512 of a file, streamed */
 export function sha512FileHex(file: string): Promise<string> {
@@ -561,6 +564,12 @@ export class RunscDockerBackend implements SandboxBackend {
   }
   private readonly inputDir: string | null;
   private readonly inputVolume: string | null;
+  private inputsReconciled = false;
+
+  /** review MEDIUM-2: a profile this host cannot place under (no input volume for an engine task, …) is never attested */
+  unsupported(profile: ExecutionProfileBody): string | null {
+    return unsupportedProfileFeature(profile, { inputVolume: this.inputDir !== null && this.inputVolume !== null });
+  }
 
   describe(): BackendDescription {
     // a runsc host attests L2 only: an L1 (runc) placement is never served by this backend
@@ -618,6 +627,11 @@ export class RunscDockerBackend implements SandboxBackend {
     const verified = await this.binaryVerified(rt.path, force);
     if (!verified) throw new RunscBackendError(`the binary at ${this.opts.runscHostPath} is not gVisor ${this.opts.runtimeVersion} (its sha512 is not the pinned one)`);
     await this.verifyInit();
+    // review LOW-2: the first preflight removes the inputs a previous run of this executor left behind
+    if (!this.inputsReconciled && this.inputDir !== null) {
+      await reconcileTaskInputs(this.inputDir, (n) => SANDBOX_NAME.test(n));
+      this.inputsReconciled = true;
+    }
     return { path: rt.path, args: rt.args, verified };
   }
 
@@ -658,7 +672,13 @@ export class RunscDockerBackend implements SandboxBackend {
     if (kind === "placement" && task) {
       const declared = profile.filesystem.inputs[0]!;
       inputRoot = path.join(this.inputDir!, name);
-      inputSha256 = await writeTaskInput(path.join(inputRoot, declared.name), task);
+      try {
+        inputSha256 = await writeTaskInput(path.join(inputRoot, declared.name), task);
+      } catch (e) {
+        // review LOW-2: the sandbox's whole input directory goes, not only the input under it
+        await removeTaskInput(inputRoot).catch(() => undefined);
+        throw e;
+      }
       input = { volume: this.inputVolume!, subpath: `${name}/${declared.name}`, mountPath: declared.mountPath };
     }
     const cleanupInput = async () => {

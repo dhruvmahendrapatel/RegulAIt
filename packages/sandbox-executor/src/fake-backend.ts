@@ -33,6 +33,8 @@ import type { BackendDescription, ProbeSet, SandboxBackend, SandboxHandle, Sandb
 
 export interface FakeBackendOptions {
   backend?: ExecutorBackend;
+  /** I5: the profiles this fake cannot serve (default: every profile is served) */
+  unsupported?: (profile: ExecutionProfileBody) => string | null;
   runtimeVersion?: string;
   /** default: everything the backend may attest */
   classes?: readonly AppliedIsolationKind[];
@@ -106,6 +108,10 @@ export class FakeSandboxBackend implements SandboxBackend {
 
   describe(): BackendDescription {
     return this.description;
+  }
+
+  unsupported(profile: ExecutionProfileBody): string | null {
+    return this.opts.unsupported?.(profile) ?? null;
   }
 
   /**
