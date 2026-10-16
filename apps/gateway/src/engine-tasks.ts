@@ -245,6 +245,11 @@ export function engineTaskInputDigestFor(offerId: string): string | null {
   return tasksByOffer.get(offerId)?.manifest.digest ?? null;
 }
 
+/** recheck L3: the refusal this process holds for a run's task (null: none, or no task held here) */
+export function engineTaskRefusalOf(runId: string): string | null {
+  return tasksByRun.get(runId)?.refusal ?? null;
+}
+
 /** tests only: how many engine tasks this process holds */
 export function liveEngineTasks(): number {
   return tasksByRun.size;
@@ -531,13 +536,14 @@ async function readTaskState(db: Db, task: EngineTask): Promise<{ state: EngineT
  */
 async function endRunOfRefusedTask(db: Db, deps: EngineTaskDeps, task: EngineTask): Promise<void> {
   if (task.runEnded || task.refusal === null) return;
-  task.runEnded = true;
   const cause = `engine_task_${task.refusal}`.slice(0, 120);
   const ended = await db.transaction(async (tx) => {
     const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, task.runId)).for("update");
     if (!run || run.status !== "leased" || run.taskPlacementId !== task.placementId) return null;
     return deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause }, await databaseNow(tx as unknown as Db));
   });
+  // recheck L5: marked only once the transaction committed (a throw leaves it to the watchdog's next tick)
+  task.runEnded = true;
   task.session.close();
   if (ended) await deps.notifyEnded(db, [ended]);
 }

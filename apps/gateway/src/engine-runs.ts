@@ -106,7 +106,7 @@ import { z } from "zod";
 import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
 import { artifactAccessible, artifactStoreFromEnv, recordArtifactScanTx } from "./model-artifacts.js";
-import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPlacedTx, registerEngineTaskRoutes } from "./engine-tasks.js";
+import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPlacedTx, engineTaskRefusalOf, registerEngineTaskRoutes } from "./engine-tasks.js";
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
@@ -602,9 +602,12 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       args = { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
     }
   }
-  if (given.requirePlacedTask && args === given && locked.status === "leased" && given.status !== "not_run" && !(await engineTaskPlacedTx(tx, locked))) {
+  // (recheck L1: a `not_run` envelope of an unplaced task is dropped too: no items, no raw report, no scan verdict)
+  let unplaced = false;
+  if (given.requirePlacedTask && args === given && locked.status === "leased" && !(await engineTaskPlacedTx(tx, locked))) {
     const cause = ENGINE_TASK_NOT_PLACED;
     args = { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, normalised: noResult("not_run"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
+    unplaced = true;
   }
   const costUsd = await runCostUsd(tx, locked);
   const summary = runSummary(args.normalised, args.cause, args.envelope ?? null);
@@ -649,7 +652,7 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
   for (let i = 0; i < itemRows.length; i += 500) await tx.insert(engineRunItems).values(itemRows.slice(i, i + 500));
   // B5-M: an artifact run's scan record is written in this same transaction, whatever ended the run
   // (the verdict is the gateway's, from the format it detected at upload)
-  await recordArtifactScanTx(tx, locked, args.status, args.normalised);
+  if (!unplaced) await recordArtifactScanTx(tx, locked, args.status, args.normalised);
   let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
   if (args.status === "completed") {
     const kind = manifestOf(opts)[locked.engineId as EngineId].kind;
@@ -1626,7 +1629,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const m = manifest[engineId];
     const now = new Date();
     // the order and meaning of each refusal: `leaseAdmission` (ADR-0187 decisions 67, 69 and 71)
-    const refuse = (r: LeaseRefusal) => reply.status(409).send(r);
+    // ADR-0190 I5 (recheck L4): the executor attestation the worker switches may rest on, read ONCE per poll, named
+    // on every refusal (attested and why) and recorded whole on the lease's audit row
+    const workerBasis = await engineWorkerAttestationBasis(db);
+    const refuse = (r: LeaseRefusal) => reply.status(409).send({ ...r, executorAttestation: { attested: workerBasis.attested, reason: workerBasis.reason } });
     // PR #205 review round 6 [71]: this first pass is only a FAST PATH (no transaction for a runner
     // that will be refused anyway); the decision that hands out work is taken again below, under locks
     // PR #205 review round 14 [98]: a retry of an attempt that leased a run (same runner, same request
@@ -1638,7 +1644,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           .from(engineRuns)
           .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
       : [];
-    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now, (await engineWorkerAttestationBasis(db)).attested);
+    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now, workerBasis.attested);
     if (early) return refuse(early);
     await engineRunTestHooks.beforeLeaseTx?.(runnerId);
     const leased = await db.transaction(async (tx) => {
@@ -1655,8 +1661,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
       const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
-      // ADR-0190 I5: the executor attestation the worker switches may rest on, read again in this transaction
-      const workerAttested = (await engineWorkerAttestationBasis(tx as unknown as Db)).attested;
+      const workerAttested = workerBasis.attested;
       // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
       // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
       // leased — to THIS runner only: the lookup is by (runner, request id), and the unique index is
@@ -1860,7 +1865,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         userId: run.runAsUserId ?? NO_IDENTITY,
         objectType: "engine_run",
         objectId: run.id,
-        detail: { phase: "lease", engineId, runnerId, deadlineAt: deadlineAt.toISOString(), virtualKeyId: keyId },
+        detail: { phase: "lease", engineId, runnerId, deadlineAt: deadlineAt.toISOString(), virtualKeyId: keyId, executorAttestation: workerBasis },
         effect: "allow",
         ruleId: "engine-run-leased",
         ruleChain: [],
@@ -1960,6 +1965,19 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         });
         return reply.status(409).send({ error: "engine_run_finished", status: run.status });
       }
+      // ADR-0190 I5 (recheck L3): a refusal this process holds for the run's task (not yet ended by the watchdog)
+      // refuses the result now: the run ends not_run, nothing is ingested
+      const heldRefusal = engineTaskRefusalOf(run.id);
+      if (heldRefusal !== null) {
+        await finishEngineRun(db, run.id, ["leased"], {
+          status: "not_run",
+          errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE,
+          normalised: noResult("not_run"),
+          cause: `engine_task_${heldRefusal}`.slice(0, 120),
+          actorUserId: run.runAsUserId ?? NO_IDENTITY,
+        });
+        return reply.status(409).send({ error: "engine_task_refused", refusal: heldRefusal, status: "not_run" });
+      }
       const parsed = engineResultEnvelopeSchema.safeParse(req.body);
       let problem: string | null = null;
       let envelope: EngineResultEnvelope | null = null;
@@ -2023,7 +2041,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         requirePlacedTask: true,
       });
       if (!done) return reply.status(409).send({ error: "engine_run_finished" });
-      if (isUnplacedEnd(done) && envelope!.status !== "not_run") return unplacedReply(reply);
+      if (isUnplacedEnd(done)) return unplacedReply(reply);
       if (done.status === "timeout" && envelope!.status !== "timeout") {
         return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout", detail: "the result arrived after the run's deadline or lease; it was not ingested" });
       }

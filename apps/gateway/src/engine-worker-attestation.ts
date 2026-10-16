@@ -32,7 +32,11 @@ export interface EngineWorkerAttestationBasis {
 
 const isRequirable = (c: unknown): c is RequirableIsolationClass => typeof c === "string" && (REQUIRABLE_ISOLATION_CLASSES as readonly string[]).includes(c);
 
-export async function engineWorkerAttestationBasis(db: Db): Promise<EngineWorkerAttestationBasis> {
+/**
+ * `scope` is for tests only (the shared test database holds other suites' executors): restrict to these executors,
+ * and read freshness at `now` instead of the database clock. The product passes nothing.
+ */
+export async function engineWorkerAttestationBasis(db: Db, scope: { onlyExecutorIds?: readonly string[]; now?: Date } = {}): Promise<EngineWorkerAttestationBasis> {
   const none = { profileDigest: null, requiredClass: null, executorId: null, attestationId: null, attestationClass: null, expiresAt: null };
   const name = defaultProfileFor("engine_worker", "known");
   const [profile] = (await db.select().from(executionProfiles).where(and(eq(executionProfiles.name, name), isNull(executionProfiles.retiredAt)))).sort((a, b) => b.version - a.version);
@@ -41,8 +45,9 @@ export async function engineWorkerAttestationBasis(db: Db): Promise<EngineWorker
   const floor = org.isolationFloorEngineWorker as unknown;
   if (!isRequirable(floor) || !isRequirable(profile.minClass)) return { attested: false, reason: "floor_unresolved", ...none, profileDigest: profile.digest };
   const requiredClass = isolationClassRank(profile.minClass) > isolationClassRank(floor) ? profile.minClass : floor;
-  const now = await databaseNow(db);
-  for (const ex of await db.select().from(executors).where(eq(executors.status, "active"))) {
+  const now = scope.now ?? (await databaseNow(db));
+  const active = (await db.select().from(executors).where(eq(executors.status, "active"))).filter((e) => !scope.onlyExecutorIds || scope.onlyExecutorIds.includes(e.id));
+  for (const ex of active) {
     const fresh = await freshAttestation(db, ex.id, profile.digest, now);
     if (!fresh) continue;
     // OWNER DECISION 6 (as the broker): a customer plane satisfies a class only through the admin's mapping

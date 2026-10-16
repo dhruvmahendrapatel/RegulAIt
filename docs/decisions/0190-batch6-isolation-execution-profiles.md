@@ -1492,13 +1492,29 @@ settle what the decisions above leave open:
 14. **The engine-worker floor setting** (review LOW-1). For an agent-null engine run whose configured profile is the
     shipped default, `resolveRequirement` caps that profile's class as a configured floor at the org's
     `isolationFloorEngineWorker`, so relaxing the setting (a `settings_relax` step-up, audited, never below L1) is
-    honoured. The shipped `engine-worker` profile's own `minClass` (L2) still bounds where a task can be PLACED (the
-    broker raises the requirement to it). There is **no L1 (runc) backend** yet: an L1 engine task needs a relaxed
-    profile version and that backend. Follow-up.
+    honoured in the requirement. **For placement it is a no-op today:** the shipped `engine-worker` profile's own
+    `minClass` (L2) still binds (the broker raises the requirement to it), and there is no L1 backend. Follow-up: a
+    versionable engine-worker profile and a runc L1 backend.
 15. **Executor input hygiene** (review LOW-2). A refused input removes the sandbox's whole input directory; the
     first preflight removes inputs a previous run of the executor left (`regulait-sbx-<uuid>` entries only); the
     whole input fetch has one deadline (`ENGINE_TASK_INPUT_WAIT_MS`, 90 s, inside the report deadline); the digest
     is computed from the bytes each write actually wrote. `ENGINE_TASK_INPUT_PENDING` (never used) is removed.
+16. **The run needs a project with an AI use case.** An engine run with no project, or whose project has no linked
+    AI use case, has no sensitivity, so its placement does not resolve: the task start refuses it
+    `policy_unresolved` and the run ends `not_run` (`isolation_unavailable`). The B5 test rig adds a project and a
+    use case to such runs for that reason.
+17. **garak's environment switches** (the usage-data switches among its `workerAttestedSwitches`) are met by the
+    executor's attestation of the profile, which does not read the task's environment. The real control is the
+    sandbox's network denial (`--network=none`, the gateway channel only), as decision 19 of ADR-0187 already says.
+18. **Review round 1, the rest.** The task start re-runs the lease's own checks (the run-as person; an agent run's
+    entitlement and project attribution; an artifact scan's artifact access) and ends the run `not_run` with the
+    lease's code. A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
+    than rotating the key the sandbox holds. One gateway process holds at most 512 MiB of unacknowledged task output
+    across every task (`output_overflow` past it). A `not_run` envelope of an unplaced task is dropped too (no items,
+    raw report or scan record). The result route also refuses on a task refusal held in memory before the watchdog
+    ends the run, and a refused task is marked ended only after the run's end commits. The lease records the
+    attestation basis on its audit row and names it on its refusals, read once per poll. The executor channel no
+    longer imports `engine-tasks.ts`: the app hands it the task hooks (no import cycle; fail closed when absent).
 11. **Tests.**
     - **Shared:** `i5-engine-task.test.ts`.
     - **Executor:** `engine-task.test.ts`. The real init runs on the host in place of `docker run`; its fd 3

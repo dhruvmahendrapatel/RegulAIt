@@ -227,7 +227,9 @@ async function rig(name: string, backend: FakeSandboxBackend) {
   const logs: string[] = [];
   const run = (maxWindows: number) =>
     runExecutorLoop({ client: exClient, backend, credential, maxWindows, streamWindowSeconds: 1, stdioWindowSeconds: 1, backoffMs: 5, maxBackoffMs: 10, log: (m) => logs.push(m) });
-  return { executorId: reg.json().executorId as string, backend, run, logs };
+  const runWith = (o: { capacity?: number; maxWindows: number }) =>
+    runExecutorLoop({ client: exClient, backend, credential, streamWindowSeconds: 1, stdioWindowSeconds: 1, backoffMs: 5, maxBackoffMs: 10, log: (m) => logs.push(m), ...o });
+  return { executorId: reg.json().executorId as string, backend, run, runWith, logs };
 }
 
 async function uploadedAs(who: { key: { authorization: string } }, bytes: Buffer): Promise<{ id: string; sha256: string }> {
@@ -381,6 +383,26 @@ describe("review HIGH-1: a result counts only for a run whose task an executor r
     expect(await db.select().from(artifactScans).where(eq(artifactScans.engineRunId, runId)).then((r) => r.filter((s) => s.verdict === "unsafe" || s.verdict === "clean"))).toEqual([]);
   });
 
+  it("recheck L1: a not_run envelope from a run with no placed task is dropped too: no items, no raw report, no scan record", async () => {
+    const art = await uploadedAs(alice, maliciousPickle());
+    const runId = await startScan(art.id, projectId);
+    expect((await client.lease(MS_BUILD))?.runId).toBe(runId);
+    const raw = Buffer.from("{}");
+    const status = await client.result(runId, {
+      ...completedEnvelope(runId),
+      status: "not_run",
+      notRun: [{ key: "modelscan/scan", reason: "unsupported_format" }],
+      rawReport: { sha256: createHash("sha256").update(raw).digest("hex"), bytes: raw.length, contentBase64: raw.toString("base64") },
+    });
+    expect(status).toBe(409);
+    const run = await runRow(runId);
+    expect(run).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable", rawReportSha256: null });
+    expect((run.summary as { cause: string }).cause).toBe("engine_task_not_placed");
+    expect(await db.select().from(artifactScans).where(eq(artifactScans.engineRunId, runId))).toEqual([]);
+    const ingested = await db.select().from(auditLog).where(and(eq(auditLog.objectId, runId), eq(auditLog.ruleId, "engine-run-result-ingested")));
+    expect(ingested).toEqual([]);
+  });
+
   it("a run whose task was offered but never reported placed is refused the same way (an offer is not a placement)", async () => {
     const ex = await rig("silent", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }));
     setEngineTaskPlacementAffinityForTest([ex.executorId]);
@@ -446,6 +468,59 @@ describe("ADR-0190 I5: the first-enable basis is a fresh executor attestation of
     expect(evaluateRunnerSelfTest(MANIFEST.modelscan, st, new Date(), { executorAttested: basis.attested })).toEqual({ passed: true, failures: [] });
     expect(evaluateRunnerSelfTest(MANIFEST.modelscan, st, new Date(), { executorAttested: false }).failures).toEqual(["executor_attestation_missing:REGULAIT_MODELSCAN_SCANNER_ISOLATED"]);
   });
+
+  it("recheck L6: the basis fails closed when the attestation is stale, failed, of another profile, below the floor, or the executor is quarantined", async () => {
+    const only = (id: string) => ({ onlyExecutorIds: [id] });
+    // STALE: a pass read after its expiry
+    const fresh = await rig("basis-stale", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }));
+    await fresh.run(1);
+    const ok = await engineWorkerAttestationBasis(db, only(fresh.executorId));
+    expect(ok.attested).toBe(true);
+    expect(await engineWorkerAttestationBasis(db, { ...only(fresh.executorId), now: new Date(Date.parse(ok.expiresAt!) + 1_000) })).toMatchObject({ attested: false, reason: "no_fresh_attestation" });
+    // FAILED: the self-test of the engine-worker profile fails (a probe lies in the canary)
+    const failed = await rig("basis-failed", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }).lie("root_read_only", (o) => ({ ...o, readOnly: false }), "canary"));
+    await failed.run(1);
+    expect(await engineWorkerAttestationBasis(db, only(failed.executorId))).toMatchObject({ attested: false, reason: "no_fresh_attestation" });
+    // ANOTHER PROFILE: the executor attests every live profile but the engine-worker one (its backend cannot serve it)
+    const other = await rig("basis-other", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"], unsupported: (p) => (p.filesystem.inputs.length > 0 ? "no input volume" : null) }));
+    await other.run(1);
+    expect(await engineWorkerAttestationBasis(db, only(other.executorId))).toMatchObject({ attested: false, reason: "no_fresh_attestation" });
+    // BELOW THE FLOOR: an L2 pass when the org raises the engine-worker floor to L3
+    try {
+      await db.update(orgSettings).set({ isolationFloorEngineWorker: "microvm" }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+      expect(await engineWorkerAttestationBasis(db, only(fresh.executorId))).toMatchObject({ attested: false, reason: "no_fresh_attestation", requiredClass: "microvm" });
+    } finally {
+      await db.update(orgSettings).set({ isolationFloorEngineWorker: ISOLATION_STRICT_DEFAULTS.isolationFloorEngineWorker }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    }
+    // QUARANTINED: the same fresh pass no longer counts once its executor is quarantined
+    await db.execute(sql`UPDATE executors SET status = 'quarantined', quarantine_code = 'admin', quarantined_at = now(), updated_at = now() WHERE id = ${fresh.executorId} AND status = 'active'`);
+    expect(await engineWorkerAttestationBasis(db, only(fresh.executorId))).toMatchObject({ attested: false, reason: "no_fresh_attestation" });
+  }, 60_000);
+});
+
+describe("recheck L6: the watchdog ends a run whose offer is refused while nobody reads its frames", () => {
+  it("an executor that declines the offer: the run ends not_run (isolation_unavailable) within the watchdog, no frames read", async () => {
+    const ex = await rig("declines", new FakeSandboxBackend({ backend: "gvisor", classes: ["user_space_kernel"] }));
+    setEngineTaskPlacementAffinityForTest([ex.executorId]);
+    try {
+      await ex.run(1);
+      const art = await uploadedAs(alice, maliciousPickle());
+      const runId = await startScan(art.id, projectId);
+      expect((await client.lease(MS_BUILD))?.runId).toBe(runId);
+      expect((await client.taskInput(runId, scanJobUpload(runId))).status).toBe(201);
+      // at capacity 0 the executor declines every offer
+      await ex.runWith({ capacity: 0, maxWindows: 2 });
+      let run = await runRow(runId);
+      for (let i = 0; i < 80 && run.status === "leased"; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        run = await runRow(runId);
+      }
+      expect(run).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable" });
+      expect((run.summary as { cause: string }).cause).toMatch(/^engine_task_/);
+    } finally {
+      setEngineTaskPlacementAffinityForTest(null);
+    }
+  }, 60_000);
 });
 
 describe("the task start is the decision; fail closed, no fallback", () => {
