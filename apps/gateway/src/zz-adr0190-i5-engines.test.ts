@@ -525,6 +525,8 @@ describe("recheck L6: the watchdog ends a run whose offer is refused while nobod
 
 describe("the task start is the decision; fail closed, no fallback", () => {
   it("no project: refused policy_unresolved WITH a refused placement row keyed to the decision; the run ends not_run", async () => {
+    // earlier tests may still hold a task their watchdog has not closed yet: a refusal holds none of its own
+    const held = liveEngineTasks();
     const art = await uploadedAs(alice, maliciousPickle());
     const runId = await startScan(art.id, null);
     const lease = await client.lease(MS_BUILD);
@@ -536,7 +538,7 @@ describe("the task start is the decision; fail closed, no fallback", () => {
     const p = await placementOf(d!.id);
     expect(p).toMatchObject({ workloadKind: "engine_worker", outcome: "refused", refusalCode: "policy_unresolved", requiredClass: null, executorId: null, imageDigest: TASK_IMAGE });
     expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable", taskPlacementId: null });
-    expect(liveEngineTasks()).toBe(0);
+    expect(liveEngineTasks()).toBeLessThanOrEqual(held);
   });
 
   it("no executor that can take it: refused no_executor with the L2 requirement; the run ends not_run; a second start is refused", async () => {
