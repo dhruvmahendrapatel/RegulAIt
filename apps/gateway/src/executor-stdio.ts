@@ -113,6 +113,11 @@ export class StdioSession {
   /** the transport's callbacks (set when the transport is attached) */
   onLine: ((line: string) => void) | null = null;
   onEnd: (() => void) | null = null;
+  /**
+   * ADR-0190 I5: an engine task's secret (the run's key), sent only in the MACed `start` line. Dropped as soon as the
+   * sandbox has spoken (its first stdout POST proves the release happened) and when the session ends.
+   */
+  secret: string | undefined = undefined;
 
   constructor(
     readonly offerId: string,
@@ -124,7 +129,13 @@ export class StdioSession {
 
   /** the `start` line, MACed */
   startLine(): ExecutorStdioMessage {
-    return { type: "start", workload: this.workload, mac: stdioFrameMac(this.macKey, this.offerId, { type: "start", workload: this.workload }) };
+    const secret = this.secret;
+    return {
+      type: "start",
+      workload: this.workload,
+      ...(secret !== undefined ? { secret } : {}),
+      mac: stdioFrameMac(this.macKey, this.offerId, { type: "start", workload: this.workload, secret }),
+    };
   }
 
   /** a `stdin` line, MACed */
@@ -202,6 +213,7 @@ export class StdioSession {
   end(): void {
     if (this.ended) return;
     this.ended = true;
+    this.secret = undefined;
     this.wake();
     stdioSessions.delete(this.offerId);
     rememberEnded(this.offerId);
@@ -230,6 +242,21 @@ function endedRecently(offerId: string): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * ADR-0190 I5: hold a session created elsewhere (an engine task's) under its offer id, so the stdio routes serve it
+ * exactly as a stdio server's. Refused past the live-session cap (the caller then refuses the placement).
+ */
+export function holdStdioSession(session: StdioSession): boolean {
+  if (stdioSessions.size >= STDIO_MAX_LIVE_SESSIONS || stdioSessions.has(session.offerId)) return false;
+  stdioSessions.set(session.offerId, session);
+  return true;
+}
+
+/** ADR-0190 I5: the holder's watchdog on a session it holds (the executor ending the offer fails it at once) */
+export function watchHeldStdioSession(db: Db, session: StdioSession): void {
+  watchStdioSession(db, session);
 }
 
 /** the offer ended on the executor's side (its `/end`): a session this process holds ends with it */
@@ -653,6 +680,8 @@ export function registerExecutorStdioRoutes(scope: RouteScope, db: Db, deps: Std
         return deps.refused(reply, 409, "stdio_sequence", executor, { expected: session.nextOutSeq + i });
       }
     }
+    // I5: the sandbox spoke, so the release (and any task secret with it) reached it: the gateway forgets the secret
+    session.secret = undefined;
     for (const f of body.data.frames) {
       session.nextOutSeq += 1;
       if (!session.closed) session.onLine?.(f.data);

@@ -72,6 +72,7 @@ import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { engineRunTestHooks, engineRuntime, runEngineRunSweep, runEngineScheduleSweep, setEngineRuntime } from "./engine-runs.js";
 import { setEngineDetectionScrub } from "./engine-scrub.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
+import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -114,6 +115,7 @@ let restoreAgentEntitlements: (() => Promise<void>) | undefined;
 let restoreIssuerKey: (() => Promise<void>) | undefined;
 let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean } | null = null;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
+let rig: EngineTaskRig | undefined;
 let alice: { id: string; key: { authorization: string } };
 let approver: { id: string; key: { authorization: string } };
 let targetId: string;
@@ -295,7 +297,11 @@ function item(key: string, sourceId: string, over: Record<string, unknown> = {})
   };
 }
 
-const postResult = (runId: string, body: unknown, runner = pfRunner) => inject("POST", `/v1/engine-runner/runs/${runId}/result`, runner.auth, body);
+/** ADR-0190 I5 (review HIGH-1): a leased run is placed under its engine_worker profile (the rig) before its result */
+const postResult = async (runId: string, body: unknown, runner = pfRunner) => {
+  await rig?.place(runId);
+  return inject("POST", `/v1/engine-runner/runs/${runId}/result`, runner.auth, body);
+};
 
 async function runRow(runId: string) {
   const [r] = await db.select().from(engineRuns).where(eq(engineRuns.id, runId));
@@ -362,9 +368,11 @@ beforeAll(async () => {
   const p2 = await inject("POST", "/v1/projects", AUTH, { name: `b5-other-project-${RUN}` });
   expect(p2.statusCode, p2.body).toBe(201);
   otherProjectId = p2.json().id;
+  rig = await startEngineTaskRig({ app, db, issuer: ORIGIN, admin, manifest: MANIFEST, name: "b5e" });
 }, 180_000);
 
 afterAll(async () => {
+  await rig?.stop();
   setEngineDetectionScrub((await import("@regulait/shared")).scrubAuditText);
   // M-068 / B4S-06: global state goes back before the suite ends — the compat
   // surfaces, the admin's passkey (an admin with a step-up method changes what

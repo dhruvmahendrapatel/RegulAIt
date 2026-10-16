@@ -35,6 +35,7 @@ const DECISION_WRITERS = [
   "decompose.ts", // orchestration lead entitlement
   "delegated-evaluate.ts", // ADR-0188 delegated dispatch
   "engine-runs.ts",
+  "engine-tasks.ts", // ADR-0190 I5: an engine run's task start (its entitlement decision, with its engine_worker placement)
   "governed-evaluate.ts", // the `governance-policy-changed` refusal row of the MCP tool, MCP protocol and connector paths
   "guardrails.ts",
   "mcp-identity-assertion.ts", // ADR-0188 S8: an opted-in server's call refused because no identity assertion can be made

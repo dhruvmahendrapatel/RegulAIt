@@ -22,7 +22,7 @@ import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { probeEgress, type EgressProbeOptions, type EgressProbeResult } from "@regulait/engine-runner";
-import { ENGINE_ENROLLMENT_TOKEN_PREFIX, ENGINE_RUNNER_KEY_PREFIX, isPublicAddress, PROMPTFOO_ENGINE_VERSION } from "@regulait/shared";
+import { ENGINE_ENROLLMENT_TOKEN_PREFIX, ENGINE_RUNNER_KEY_PREFIX, isPublicAddress, PROMPTFOO_ENGINE_VERSION, sandboxRuntimeObservationSchema, type SandboxRuntimeObservation } from "@regulait/shared";
 
 export const WORKER_SELF_TEST_FILE = ".worker-selftest.json";
 /** the manifest's usage-data entry the runner derives from the worker's report */
@@ -58,6 +58,8 @@ const reportSchema = z
       })
       .strict(),
     credential: credentialSchema,
+    // ADR-0190 decision 10 (I5): the runtime the worker observed from inside its sandbox (recorded, never decisive)
+    runtime: sandboxRuntimeObservationSchema.optional(),
   })
   .strict();
 export type WorkerSelfTest = z.infer<typeof reportSchema>;
@@ -94,11 +96,11 @@ export async function workerCredentialReach(opts: { env?: NodeJS.ProcessEnv; sta
 /** the worker writes its report (atomically) */
 export async function writeWorkerSelfTest(
   resultsRoot: string,
-  args: { promptfooVersion: string; egress?: EgressProbeOptions; reach?: Parameters<typeof workerCredentialReach>[0]; now?: Date },
+  args: { promptfooVersion: string; egress?: EgressProbeOptions; reach?: Parameters<typeof workerCredentialReach>[0]; now?: Date; runtime?: SandboxRuntimeObservation },
 ): Promise<WorkerSelfTest> {
   const egress: EgressProbeResult = await probeEgress(args.egress);
   const credential = await workerCredentialReach(args.reach);
-  const report: WorkerSelfTest = { at: (args.now ?? new Date()).toISOString(), promptfooVersion: args.promptfooVersion, egress, credential };
+  const report: WorkerSelfTest = { at: (args.now ?? new Date()).toISOString(), promptfooVersion: args.promptfooVersion, egress, credential, ...(args.runtime ? { runtime: args.runtime } : {}) };
   const file = path.join(resultsRoot, WORKER_SELF_TEST_FILE);
   const tmp = `${file}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(report), { mode: 0o640 });

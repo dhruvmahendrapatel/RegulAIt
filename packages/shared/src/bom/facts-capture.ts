@@ -195,6 +195,13 @@ const asText = (v: unknown): string | null => (typeof v === "string" ? v : null)
  */
 export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactReads): DecisionExecutionFacts | null {
   const p = reads.placements?.get(row.id);
+  const engineRunEntitlement = row.objectType === "agent" && asRecord(row.detail)?.phase === ENGINE_RUN_ENTITLEMENT_PHASE;
+  // ADR-0190 I5: an ALLOWED engine run entitlement decision is the run's task start, and its engine_worker placement is
+  // written in the same transaction. Without one (or with another kind of workload) the I5 contract is broken: the
+  // capture fails, and the decision with it (fail closed), rather than record a run whose isolation is unknown.
+  if (engineRunEntitlement && row.effect === "allow" && (!p || p.placement.workloadKind !== "engine_worker")) {
+    throw new DecisionFactsCaptureError(row.id, "an allowed engine run entitlement decision has no engine_worker placement in its transaction (ADR-0190 I5)");
+  }
   if (p) {
     const pl = p.placement;
     const profile = p.profile
@@ -233,9 +240,10 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
     } as DecisionExecutionFacts;
   }
   const none = { placementId: null, requiredClass: null, requiredBy: null, refusalCode: null, profile: null, executor: null, attestation: null };
-  // an engine run's entitlement decision governs an engine worker (placed by an executor from slice I5), not a
-  // model call in the gateway: until I5 writes its placement row, its location is NOT RECORDED, never a guess
-  if (row.objectType === "agent" && asRecord(row.detail)?.phase === ENGINE_RUN_ENTITLEMENT_PHASE) return null;
+  // an engine run's entitlement decision governs an engine worker, not a model call in the gateway. From I5 an
+  // allowed one always has its placement (above). A refusal written before any task start (run creation, the
+  // lease's re-check) placed nothing: its location is NOT RECORDED (`no_placement`), never a guess
+  if (engineRunEntitlement) return null;
   if (row.objectType === "agent") return { workloadKind: "model_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
   if (row.objectType === "connector") return { workloadKind: "connector_call", placement: "in_gateway", appliedClass: "in_gateway", ...none };
   if (row.objectType === "mcp_tool") {

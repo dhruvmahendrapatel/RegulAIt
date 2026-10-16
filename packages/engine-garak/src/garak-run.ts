@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { runProcessGroup, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
+import { runProcessGroup, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner/worker";
 import { assertGatewayOnly, buildGarakConfig, buildGarakEnv, garakDatasetsCacheDir, GARAK_HF_PRESEED_DIR, GARAK_REPORT_PREFIX, type GarakJudge, type GarakTarget } from "./config.js";
 import { GARAK_MAX_REPORT_BYTES, type GarakProbeOutcome } from "./mapper.js";
 

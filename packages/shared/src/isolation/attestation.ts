@@ -179,6 +179,12 @@ export const executorReportSchema = z
     /** placement reports only */
     offerId: z.string().uuid().optional(),
     imageDigest: z.string().regex(IMAGE_DIGEST_RE).optional(),
+    /**
+     * ADR-0190 I5: a placement whose profile declares read-only inputs names the digest of the input the executor
+     * WROTE into the volume it mounts (`engineTaskInputDigest`), before any input is released. The gateway checks it
+     * against the input it holds for the offer (`input_digest_mismatch`).
+     */
+    inputSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     probes: z.object(probesShape).strict(),
     strength: z.literal(ATTESTATION_STRENGTH),
   })
@@ -187,8 +193,8 @@ export const executorReportSchema = z
     if (r.kind === "placement") {
       if (!r.offerId) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["offerId"], message: "a placement report names its offer" });
       if (!r.imageDigest) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["imageDigest"], message: "a placement report names the image digest applied" });
-    } else if (r.offerId !== undefined || r.imageDigest !== undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["kind"], message: "a self-test report names no offer or image" });
+    } else if (r.offerId !== undefined || r.imageDigest !== undefined || r.inputSha256 !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["kind"], message: "a self-test report names no offer, image or input" });
     }
   });
 export type ExecutorReport = z.infer<typeof executorReportSchema>;
@@ -262,6 +268,8 @@ export const REPORT_FAILURE_CODES = [
   "placement_fields_missing",
   /** the placement report names an image other than the offer's (checked by the gateway against the offer) */
   "image_digest_mismatch",
+  /** I5: the placement report's input digest is not the input the gateway holds for the offer (or is missing) */
+  "input_digest_mismatch",
   /** the report's signature does not verify under a live credential of the executor's identity */
   "signature_invalid",
 ] as const;
@@ -317,6 +325,8 @@ export function evaluateExecutorReport(report: ExecutorReport, input: EvaluateRe
   if (!BACKEND_ATTESTABLE_CLASSES[input.backend].includes(report.class)) fail("report", "class_not_attestable_by_backend");
   if (report.kind === "placement") {
     if (!report.offerId || !report.imageDigest) fail("report", "placement_fields_missing");
+    // I5: a profile with declared inputs is placed only with the digest of the input the executor mounted
+    if (p.filesystem.inputs.length > 0 && !report.inputSha256) fail("report", "placement_fields_missing");
     if (input.requiredClass && report.class !== "customer_declared" && isolationClassRank(report.class) < isolationClassRank(input.requiredClass)) {
       fail("report", "class_below_required");
     }

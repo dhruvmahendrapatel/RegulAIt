@@ -22,7 +22,8 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { type EngineAdapter, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
+import type { EngineAdapter } from "@regulait/engine-runner";
+import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner/worker";
 import { PROMPTFOO_STRATEGY_SET_PREFIX } from "@regulait/shared";
 import {
   assertGatewayOnly,
@@ -32,7 +33,7 @@ import {
   PromptfooConfigRefused,
   type PromptfooPlan,
 } from "./config.js";
-import { LocalPromptfooExecutor, type PromptfooExecutor, type PromptfooJob } from "./job.js";
+import type { PromptfooExecutor, PromptfooJob } from "./job.js";
 import { mapPromptfooResults, notRunPairs, plannedPairs, type PromptfooEnvelopeBody } from "./mapper.js";
 
 /**
@@ -83,15 +84,13 @@ function notRunAll(plan: PromptfooPlan, errorCode: string, status: "not_run" | "
   return { status, errorCode, items: pairs.items, notRun: [...plan.notRun, ...pairs.notRun, ...strategies], rawReport: null };
 }
 
-export function promptfooAdapter(opts: PromptfooAdapterOptions): EngineAdapter {
-  const executor =
-    opts.executor ??
-    new LocalPromptfooExecutor({
-      entrypoint: opts.entrypoint,
-      ...(opts.nodeBin ? { nodeBin: opts.nodeBin } : {}),
-      ...(opts.run ? { run: opts.run } : {}),
-      ...(opts.path ? { path: opts.path } : {}),
-    });
+/**
+ * ADR-0190 I5: the adapter as the RUNNER uses it: the executor is always given (the exchange, bridged to an
+ * executor's sandbox). The variant that defaults to running promptfoo in this process (`promptfooAdapter`, tests and
+ * the opt-in real-engine test) is in worker.ts, which no runner entry point imports.
+ */
+export function promptfooRunnerAdapter(opts: PromptfooAdapterOptions & { executor: PromptfooExecutor }): EngineAdapter {
+  const executor = opts.executor;
   return async (lease, ctx) => {
     const plan = planPromptfooRun(lease.spec.config.sets);
     if (plan.plugins.length === 0) return notRunAll(plan, plan.strategies.length > 0 ? "no_runnable_plugin" : "nothing_runnable");

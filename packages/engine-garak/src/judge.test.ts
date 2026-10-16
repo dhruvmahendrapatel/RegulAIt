@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ENGINE_MANIFEST, engineConfigNeedsApproval, engineRunNeedsJudge, garakJudgeSets, garakProbeForSet, type EngineLease } from "@regulait/shared";
-import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
+import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner/worker";
 import { garakAdapter } from "./adapter.js";
 import {
   assertGatewayOnly,
@@ -31,7 +31,8 @@ import {
   garakProbeNeedsJudge,
   planGarakRun,
 } from "./config.js";
-import { ExchangeGarakExecutor, garakJobSchema, workerTick, type GarakExecutor, type GarakJob } from "./exchange.js";
+import { ExchangeGarakExecutor, garakJobSchema, type GarakExecutor, type GarakJob } from "./exchange.js";
+import { workerTick } from "./worker.js";
 
 const AB = "agent_breaker.AgentBreaker";
 const AB_DET = "agent_breaker.AgentBreakerResult";

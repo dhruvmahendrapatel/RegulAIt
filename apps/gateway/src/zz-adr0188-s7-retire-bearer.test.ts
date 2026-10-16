@@ -70,6 +70,7 @@ import { relaxAgentEntitlementsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest, relaxStepUpAround } from "./testing/step-up-posture.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
+import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -99,6 +100,8 @@ let app: ReturnType<typeof buildApp>;
 const restores: Array<() => Promise<void>> = [];
 let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean } | null = null;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
+/** ADR-0190 I5 (review HIGH-1): a run's result counts only once its task is placed (the rig places it) */
+let rig: EngineTaskRig | undefined;
 let alice: { id: string; key: { authorization: string } };
 let targetId: string;
 let judgeId: string;
@@ -299,9 +302,11 @@ beforeAll(async () => {
   const ok = await asAdmin("PATCH", "/v1/engines/promptfoo", accept, { [STEP_UP_HEADER]: await grantFor(refused.json().action) });
   expect(ok.statusCode, ok.body).toBe(200);
   await first.revoke();
+  rig = await startEngineTaskRig({ app, db, issuer: ORIGIN, admin, manifest: MANIFEST, name: "s7" });
 }, 180_000);
 
 afterAll(async () => {
+  await rig?.stop();
   if (priorInterception) await db.update(interceptionSettings).set(priorInterception).where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
   await forgetStepUpMethodsForTest(db, [admin?.id]);
   await db.execute(sql`UPDATE engines SET enabled = false, self_test = NULL, self_test_passed_at = NULL, max_budget_usd = 5, timeout_seconds = 1800, max_concurrent = 1`);
@@ -379,7 +384,8 @@ describe("S7 — the engine runner keeps ADR-0187's ceilings, pinning and sponso
       expect(me.statusCode).toBe(403);
       expect(me.json().error).toBe("virtual_key_scope");
 
-      // the run ends: the key is revoked and the grant with it
+      // the run ends: the key is revoked and the grant with it (ADR-0190 I5: its task placed first, review HIGH-1)
+      expect(await rig!.place(runId)).not.toBeNull();
       const res = await call(runner.caller, "POST", `/v1/engine-runner/runs/${runId}/result`, {
         version: "regulait.engine-result.v1",
         runId,

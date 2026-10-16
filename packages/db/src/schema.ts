@@ -12625,8 +12625,11 @@ export const engineRuns = pgTable(
     workflowNotifiedAt: timestamp("workflow_notified_at", { withTimezone: true }),
     /** ADR-0187 decision 94 (migration 0174): the runner's own request id for the lease that took this run */
     leaseRequestId: uuid("lease_request_id"),
+    /** ADR-0190 I5 (migration 0200): the engine_worker placement of the run's task, set once at the task start decision */
+    taskPlacementId: uuid("task_placement_id").references((): AnyPgColumn => executionPlacements.id, { onDelete: "restrict" }),
   },
   (t) => [
+    uniqueIndex("engine_runs_task_placement_uq").on(t.taskPlacementId).where(sql`${t.taskPlacementId} IS NOT NULL`),
     check(
       "engine_runs_target_check",
       sql`(${t.targetKind} = 'agent' AND ${t.targetArtifactId} IS NULL) OR (${t.targetKind} = 'artifact' AND ${t.targetAgentId} IS NULL AND ${t.judgeAgentId} IS NULL)`,

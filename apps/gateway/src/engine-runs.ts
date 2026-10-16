@@ -37,7 +37,7 @@
  * state. A lease is one `FOR UPDATE SKIP LOCKED` statement.
  */
 import { createHash } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   agents,
   and,
@@ -105,7 +105,9 @@ import {
 import { z } from "zod";
 import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
-import { artifactAccessible, recordArtifactScanTx } from "./model-artifacts.js";
+import { artifactAccessible, artifactStoreFromEnv, recordArtifactScanTx } from "./model-artifacts.js";
+import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPlacedTx, engineTaskRefusalOf, registerEngineTaskRoutes } from "./engine-tasks.js";
+import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -523,6 +525,13 @@ export interface FinishArgs {
   rawReport?: { sha256: string; bytes: number; ciphertext: string | null; expiresAt: Date | null } | null;
   /** a runner's result: refused (the run times out) when the deadline or lease has passed */
   requireLive?: boolean;
+  /**
+   * ADR-0190 I5 (review HIGH-1): a runner's result. Any status but `not_run` is accepted only when the run names its
+   * task placement AND that placement's linked report is `placed` (an executor ran the worker under the run's
+   * `engine_worker` profile). Otherwise, decided under the row lock, the run ends `not_run` (`isolation_unavailable`):
+   * a result that no placed sandbox produced is never ingested.
+   */
+  requirePlacedTask?: boolean;
 }
 
 /**
@@ -593,6 +602,13 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       args = { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
     }
   }
+  // (recheck L1: a `not_run` envelope of an unplaced task is dropped too: no items, no raw report, no scan verdict)
+  let unplaced = false;
+  if (given.requirePlacedTask && args === given && locked.status === "leased" && !(await engineTaskPlacedTx(tx, locked))) {
+    const cause = ENGINE_TASK_NOT_PLACED;
+    args = { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, normalised: noResult("not_run"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
+    unplaced = true;
+  }
   const costUsd = await runCostUsd(tx, locked);
   const summary = runSummary(args.normalised, args.cause, args.envelope ?? null);
   const [updated] = await tx
@@ -636,7 +652,7 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
   for (let i = 0; i < itemRows.length; i += 500) await tx.insert(engineRunItems).values(itemRows.slice(i, i + 500));
   // B5-M: an artifact run's scan record is written in this same transaction, whatever ended the run
   // (the verdict is the gateway's, from the format it detected at upload)
-  await recordArtifactScanTx(tx, locked, args.status, args.normalised);
+  if (!unplaced) await recordArtifactScanTx(tx, locked, args.status, args.normalised);
   let ledgers: { evalRunId: string | null; redteamRunId: string | null } = { evalRunId: null, redteamRunId: null };
   if (args.status === "completed") {
     const kind = manifestOf(opts)[locked.engineId as EngineId].kind;
@@ -1387,6 +1403,8 @@ function leaseAdmission(
   build: { imageDigest: string; engineVersion: string },
   m: EngineManifestEntry,
   now: Date,
+  /** ADR-0190 I5: a fresh, passing executor attestation of the engine-worker profile (engine-worker-attestation.ts) */
+  executorAttested: boolean,
 ): LeaseRefusal | null {
   // PR #205 review round 13 [95]: a replica whose manifest is older than the engine row decides
   // nothing about this engine (an old replica during a rolling upgrade). No `next` signal: the runner
@@ -1409,7 +1427,7 @@ function leaseAdmission(
       detail: "this runner runs a build that is not the current one: deploy the current image and re-enrol it with a new enrolment token",
     };
   }
-  const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now);
+  const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now, { executorAttested });
   if (!runnerVerdict.passed) {
     return {
       next: "self_test_required",
@@ -1435,7 +1453,18 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
   setEngineRuntime(opts);
   const manifest = manifestOf(opts);
 
-  const visible = (req: { authCtx: { isAdmin: boolean; userId: string | null } }, run: EngineRunRow) =>
+  // ADR-0190 I5: the run's task (its worker) runs only in an executor's sandbox; the start decision ends a run that
+  // cannot be placed through this module's single terminal path
+  const taskStore = opts.artifactStore === undefined ? artifactStoreFromEnv() : opts.artifactStore;
+  registerEngineTaskRoutes(app, db, {
+    manifest: () => manifest,
+    artifactStore: () => taskStore,
+    endRunTx: async (tx, run, end, now) =>
+      (await endLockedRun(tx, run, { status: end.status, errorCode: end.errorCode, normalised: noResult(end.status), cause: end.cause, actorUserId: NO_IDENTITY }, now)) ?? null,
+    notifyEnded: notifyWorkflowsOfEndedRuns,
+  });
+
+  const visible =(req: { authCtx: { isAdmin: boolean; userId: string | null } }, run: EngineRunRow) =>
     req.authCtx.isAdmin || (req.authCtx.userId !== null && run.runAsUserId === req.authCtx.userId);
 
   // ---- POST /v1/engine-runs ---------------------------------------------------
@@ -1600,7 +1629,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const m = manifest[engineId];
     const now = new Date();
     // the order and meaning of each refusal: `leaseAdmission` (ADR-0187 decisions 67, 69 and 71)
-    const refuse = (r: LeaseRefusal) => reply.status(409).send(r);
+    // ADR-0190 I5 (recheck L4): the executor attestation the worker switches may rest on, read ONCE per poll, named
+    // on every refusal (attested and why) and recorded whole on the lease's audit row
+    const workerBasis = await engineWorkerAttestationBasis(db);
+    const refuse = (r: LeaseRefusal) => reply.status(409).send({ ...r, executorAttestation: { attested: workerBasis.attested, reason: workerBasis.reason } });
     // PR #205 review round 6 [71]: this first pass is only a FAST PATH (no transaction for a runner
     // that will be refused anyway); the decision that hands out work is taken again below, under locks
     // PR #205 review round 14 [98]: a retry of an attempt that leased a run (same runner, same request
@@ -1612,7 +1644,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           .from(engineRuns)
           .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
       : [];
-    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now);
+    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now, workerBasis.attested);
     if (early) return refuse(early);
     await engineRunTestHooks.beforeLeaseTx?.(runnerId);
     const leased = await db.transaction(async (tx) => {
@@ -1629,6 +1661,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
       const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
+      const workerAttested = workerBasis.attested;
       // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
       // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
       // leased — to THIS runner only: the lookup is by (runner, request id), and the unique index is
@@ -1651,7 +1684,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           // the run already ended (cancelled, disabled, timed out): nothing to re-issue. The runner is told
           // why, if the lease would be refused now, else there is no work (its next attempt is a new one)
           if (prior.status !== "leased") {
-            const why = leaseAdmission(live, lockedEngine ?? null, build, m, at);
+            const why = leaseAdmission(live, lockedEngine ?? null, build, m, at, workerAttested);
             return why ? { kind: "not_admitted" as const, refusal: why } : { kind: "none" as const };
           }
           if (lockedEngine && engineManifestOutdated(lockedEngine, m)) {
@@ -1673,10 +1706,18 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
             const ended = await endLockedRun(tx, prior, { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: NO_IDENTITY }, at);
             return { kind: "refused" as const, ended };
           }
+          // ADR-0190 I5 (review LOW-3): a run whose task has started is never re-issued. Rotation would revoke the
+          // key the sandbox holds and the task cannot be restarted (its placement is set once), so the run ends
+          // `not_run` (isolation_unavailable) cleanly instead, its key revoked, and the runner gets no work.
+          if (prior.taskPlacementId !== null) {
+            const cause = "engine_task_lease_reissued";
+            const ended = await endLockedRun(tx, prior, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, normalised: noResult("not_run"), cause, actorUserId: NO_IDENTITY }, at);
+            return { kind: "refused" as const, ended };
+          }
           return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
         }
       }
-      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date());
+      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date(), workerAttested);
       if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
       const engine = lockedEngine!;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
@@ -1824,7 +1865,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         userId: run.runAsUserId ?? NO_IDENTITY,
         objectType: "engine_run",
         objectId: run.id,
-        detail: { phase: "lease", engineId, runnerId, deadlineAt: deadlineAt.toISOString(), virtualKeyId: keyId },
+        detail: { phase: "lease", engineId, runnerId, deadlineAt: deadlineAt.toISOString(), virtualKeyId: keyId, executorAttestation: workerBasis },
         effect: "allow",
         ruleId: "engine-run-leased",
         ruleChain: [],
@@ -1924,6 +1965,19 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         });
         return reply.status(409).send({ error: "engine_run_finished", status: run.status });
       }
+      // ADR-0190 I5 (recheck L3): a refusal this process holds for the run's task (not yet ended by the watchdog)
+      // refuses the result now: the run ends not_run, nothing is ingested
+      const heldRefusal = engineTaskRefusalOf(run.id);
+      if (heldRefusal !== null) {
+        await finishEngineRun(db, run.id, ["leased"], {
+          status: "not_run",
+          errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE,
+          normalised: noResult("not_run"),
+          cause: `engine_task_${heldRefusal}`.slice(0, 120),
+          actorUserId: run.runAsUserId ?? NO_IDENTITY,
+        });
+        return reply.status(409).send({ error: "engine_task_refused", refusal: heldRefusal, status: "not_run" });
+      }
       const parsed = engineResultEnvelopeSchema.safeParse(req.body);
       let problem: string | null = null;
       let envelope: EngineResultEnvelope | null = null;
@@ -1961,8 +2015,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           cause: problem,
           actorUserId: run.runAsUserId ?? NO_IDENTITY,
           requireLive: true,
+          requirePlacedTask: true,
         });
         if (failed?.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
+        if (failed && isUnplacedEnd(failed)) return unplacedReply(reply);
         return reply.status(422).send({
           error: "engine_result_invalid",
           detail: problem,
@@ -1982,14 +2038,28 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         envelope,
         rawReport,
         requireLive: true,
+        requirePlacedTask: true,
       });
       if (!done) return reply.status(409).send({ error: "engine_run_finished" });
+      if (isUnplacedEnd(done)) return unplacedReply(reply);
       if (done.status === "timeout" && envelope!.status !== "timeout") {
         return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout", detail: "the result arrived after the run's deadline or lease; it was not ingested" });
       }
       return reply.send({ runId: run.id, status: done.status, verdict: normalised.verdict, counts: normalised.counts });
     },
   );
+}
+
+/** review HIGH-1: the run was ended because its result came from no placed task */
+function isUnplacedEnd(run: EngineRunRow): boolean {
+  return run.status === "not_run" && run.errorCode === ENGINE_TASK_ISOLATION_UNAVAILABLE && (run.summary as { cause?: unknown } | null)?.cause === ENGINE_TASK_NOT_PLACED;
+}
+function unplacedReply(reply: FastifyReply) {
+  return reply.status(409).send({
+    error: ENGINE_TASK_NOT_PLACED,
+    status: "not_run",
+    detail: "no executor reported this run's task placed under its engine_worker profile; the result was not ingested and the run ended not_run (ADR-0190 I5)",
+  });
 }
 
 /** read-only helpers for tests and views */

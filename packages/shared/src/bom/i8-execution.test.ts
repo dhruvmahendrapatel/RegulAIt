@@ -186,8 +186,10 @@ describe("ADR-0190 I8: capture (buildExecutionFacts)", () => {
       expect(buildExecutionFacts(row(), reads({ mcpServerTransports: new Map([[U(2), transport]]) }))).toEqual(EXTERNAL);
     }
   });
-  it("review M1: an engine run's entitlement decision records no location (an engine worker, placed from I5), never in_gateway", () => {
-    const entitlement = row({ objectType: "agent", objectId: U(7), serverId: null, detail: { receiptClass: "decision", phase: ENGINE_RUN_ENTITLEMENT_PHASE, role: "target" } });
+  it("review M1 (ADR-0190 I5): an engine run's entitlement REFUSAL placed nothing and records no location, never in_gateway", () => {
+    // I5: a refusal before any task start (run creation, the lease) placed nothing; an ALLOWED one is the task start
+    // and always has its engine_worker placement (pinned in i5-engine-task.test.ts)
+    const entitlement = row({ objectType: "agent", objectId: U(7), serverId: null, effect: "deny", detail: { receiptClass: "decision", phase: ENGINE_RUN_ENTITLEMENT_PHASE, role: "target" } });
     expect(buildExecutionFacts(entitlement, reads())).toBeNull();
     expect(ENGINE_RUN_ENTITLEMENT_PHASE).toBe("engine-run-entitlement");
     // its Decision BOM says not_recorded, no_placement (a v2 null that is not an approval)

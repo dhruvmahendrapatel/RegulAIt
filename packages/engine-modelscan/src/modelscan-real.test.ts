@@ -15,7 +15,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ExchangeScanExecutor, LocalScanExecutor, scannerTick } from "./exchange.js";
+import { ExchangeScanExecutor } from "./exchange.js";
+import { LocalScanExecutor, scannerTick } from "./worker.js";
 import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, npzFile, numericNpy, objectNpy, safetensorsFile, torchZip, truncatedMaliciousPickle } from "./fixtures.js";
 import { scanAndJudge } from "./harness.js";
 

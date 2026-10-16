@@ -8,8 +8,9 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
-import { ExchangeScanExecutor, scannerTick } from "./exchange.js";
+import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner/worker";
+import { ExchangeScanExecutor } from "./exchange.js";
+import { scannerTick } from "./worker.js";
 import { modelscanArgs, modelscanEnv, runModelscan } from "./scan.js";
 import { judgeScannerSelfTest, SCANNER_SELF_TEST_FILE, writeScannerSelfTest } from "./selftest.js";
 

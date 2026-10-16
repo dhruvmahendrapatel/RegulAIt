@@ -40,6 +40,7 @@ import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, safetensorsFi
 import { buildApp } from "./app.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
 import { FileArtifactStore } from "./model-artifacts.js";
+import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -65,6 +66,9 @@ let storeDir: string;
 let restoreIdentity: (() => Promise<void>) | undefined;
 let restoreGates: (() => Promise<void>) | undefined;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
+/** ADR-0190 I5 (review HIGH-1): every run is placed under its engine_worker profile before its result counts */
+let rig: EngineTaskRig | undefined;
+let store: FileArtifactStore;
 let alice: { id: string; key: { authorization: string } };
 let bob: { id: string; key: { authorization: string } };
 let client: RunnerClient;
@@ -184,7 +188,8 @@ beforeAll(async () => {
   // afterAll restores every batch-5 setting to its strict default.
   await db.update(orgSettings).set({ modelArtifactUploaderQuotaCount: 1000 }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   storeDir = await mkdtemp(path.join(tmpdir(), "b5m-store-"));
-  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, engines: { manifest: MANIFEST }, artifactStore: new FileArtifactStore(storeDir) });
+  store = new FileArtifactStore(storeDir);
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, engines: { manifest: MANIFEST }, artifactStore: store });
   await app.ready();
   await db.execute(sql`UPDATE engine_runs SET status = 'cancelled', finished_at = now(), error_code = 'test_cleanup' WHERE engine_id = 'modelscan' AND status IN ('queued', 'awaiting_approval')`);
 
@@ -208,7 +213,8 @@ beforeAll(async () => {
   // the runner registers with its self-test: the scanner's isolation switch judged true
   const t = await inject("POST", "/v1/engines/modelscan/enrollment-tokens", admin.key, { label: "b5m" });
   expect(t.statusCode, t.body).toBe(201);
-  client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: ORIGIN, http: runnerHttp });
+  rig = await startEngineTaskRig({ app, db, issuer: ORIGIN, admin, manifest: MANIFEST, artifactStore: () => store, name: "b5m" });
+  client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: ORIGIN, http: rig.wrapHttp(runnerHttp) });
   const selfTest = await buildSelfTest({
     ...MS_BUILD,
     requiredEnv: MANIFEST.modelscan.usageDataEnv,
@@ -227,6 +233,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await rig?.stop();
   await forgetStepUpMethodsForTest(db, [admin?.id]);
   await db.execute(sql`UPDATE engines SET enabled = false, self_test = NULL, self_test_passed_at = NULL, max_budget_usd = 5, timeout_seconds = 1800, max_concurrent = 1`);
   await db.execute(sql`UPDATE engine_runners SET revoked_at = now(), revoke_reason = 'test suite finished' WHERE revoked_at IS NULL`);

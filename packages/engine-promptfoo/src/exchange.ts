@@ -33,7 +33,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { promptfooJobSchema, REFUSAL_CODE, runPromptfooJob, type PromptfooExecutor, type PromptfooJob, type PromptfooJobOutcome, type PromptfooJobRunnerOptions } from "./job.js";
+import { promptfooJobSchema, REFUSAL_CODE, type PromptfooExecutor, type PromptfooJob, type PromptfooJobOutcome } from "./job.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -51,6 +51,8 @@ const doneSchema = z
   })
   .strict();
 type Done = z.infer<typeof doneSchema>;
+/** the worker's done file (worker.ts writes it) */
+export type PromptfooWorkerDone = Done;
 
 async function writeAtomic(file: string, content: string): Promise<void> {
   const tmp = `${file}.${randomUUID()}.tmp`;
@@ -151,79 +153,8 @@ export class ExchangePromptfooExecutor implements PromptfooExecutor {
   }
 }
 
-export interface WorkerOptions {
-  jobsRoot: string;
-  resultsRoot: string;
-  /** the worker's own work area (promptfoo's HOME, sqlite store, cache and generated tests) */
-  workRoot: string;
-  pollMs?: number;
-  promptfoo: PromptfooJobRunnerOptions;
-}
-
-/** the WORKER's side: one job at a time, until the signal stops it */
-export async function runPromptfooWorkerLoop(
-  opts: WorkerOptions & { signal?: AbortSignal; log?: (m: string) => void; onIdle?: () => Promise<void> },
-): Promise<void> {
-  const poll = opts.pollMs ?? 250;
-  const log = opts.log ?? (() => undefined);
-  while (!opts.signal?.aborted) {
-    await promptfooWorkerTick(opts, log).catch((e: unknown) => log(`promptfoo worker: ${e instanceof Error ? e.message : String(e)}`));
-    await opts.onIdle?.().catch(() => undefined);
-    await new Promise((r) => setTimeout(r, poll));
-  }
-}
-
-/** one pass: run every waiting job, then drop results whose job is gone */
-export async function promptfooWorkerTick(opts: WorkerOptions, log: (m: string) => void = () => undefined): Promise<number> {
-  let ran = 0;
-  const jobs = (await readdir(opts.jobsRoot).catch(() => [] as string[])).filter((n) => UUID.test(n));
-  for (const runId of jobs) {
-    const outDir = path.join(opts.resultsRoot, runId);
-    const donePath = path.join(outDir, DONE_FILE);
-    if (existsSync(donePath)) continue;
-    await mkdir(outDir, { recursive: true, mode: 0o750 });
-    let job: PromptfooJob;
-    try {
-      const parsed = promptfooJobSchema.safeParse(JSON.parse(await readFile(path.join(opts.jobsRoot, runId, "job.json"), "utf8")));
-      if (!parsed.success || parsed.data.runId !== runId) throw new Error("invalid job");
-      job = parsed.data;
-    } catch {
-      // an unreadable job is answered (refused), so the runner is not left waiting; promptfoo never starts
-      await writeAtomic(donePath, JSON.stringify({ ...doneOf(NOTHING, null), refused: "job_invalid" }));
-      log(`promptfoo worker: job ${runId} is invalid; answered without running`);
-      continue;
-    }
-    const workDir = path.join(opts.workRoot, runId);
-    await rm(workDir, { recursive: true, force: true });
-    await mkdir(workDir, { recursive: true, mode: 0o700 });
-    const abort = new AbortController();
-    const cancelFile = path.join(opts.jobsRoot, runId, "cancel");
-    const watch = setInterval(() => {
-      if (existsSync(cancelFile) || !existsSync(path.join(opts.jobsRoot, runId))) abort.abort();
-    }, opts.pollMs ?? 250);
-    let outcome: PromptfooJobOutcome;
-    try {
-      if (existsSync(cancelFile)) abort.abort();
-      outcome = await runPromptfooJob(job, { ...opts.promptfoo, workDir, resultsPath: path.join(outDir, RESULTS_FILE), signal: abort.signal });
-    } catch (e) {
-      log(`promptfoo worker: job ${runId} failed: ${e instanceof Error ? e.message : String(e)}`);
-      outcome = { ...NOTHING };
-    } finally {
-      clearInterval(watch);
-      await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
-    }
-    const sha = outcome.results ? await sha256OfFile(outcome.results.path).catch(() => null) : null;
-    await writeAtomic(donePath, JSON.stringify(doneOf(outcome, sha)));
-    ran += 1;
-  }
-  // results whose job the runner has removed
-  for (const name of await readdir(opts.resultsRoot).catch(() => [] as string[])) {
-    if (UUID.test(name) && !existsSync(path.join(opts.jobsRoot, name))) await rm(path.join(opts.resultsRoot, name), { recursive: true, force: true });
-  }
-  return ran;
-}
-
-function doneOf(o: PromptfooJobOutcome, resultsSha256: string | null): Done {
+/** the done file the worker writes for an outcome (worker.ts) */
+export function doneOf(o: PromptfooJobOutcome, resultsSha256: string | null): Done {
   return {
     refused: o.refused,
     generateExitCode: o.generateExitCode,

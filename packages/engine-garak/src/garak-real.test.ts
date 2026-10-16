@@ -30,7 +30,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { planGarakRun } from "./config.js";
-import { LocalGarakExecutor } from "./exchange.js";
+import { LocalGarakExecutor } from "./worker.js";
 import { mapGarakRun } from "./mapper.js";
 
 const PY = process.env.REGULAIT_GARAK_PYTHON;

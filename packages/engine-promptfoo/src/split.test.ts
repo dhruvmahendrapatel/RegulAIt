@@ -22,11 +22,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENGINE_MANIFEST, evaluateRunnerSelfTest, PROMPTFOO_ENGINE_VERSION, type EngineLease } from "@regulait/shared";
-import { FileRunnerKeyStore, generateRunnerSecret, type ProcessGroupOptions, type ProcessGroupResult } from "@regulait/engine-runner";
-import { promptfooAdapter } from "./adapter.js";
+import { FileRunnerKeyStore, generateRunnerSecret } from "@regulait/engine-runner";
+import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner/worker";
+import { promptfooAdapter } from "./worker.js";
 import { buildPromptfooConfig, planPromptfooRun, RUN_KEY_ENV } from "./config.js";
-import { DONE_FILE, ExchangePromptfooExecutor, promptfooWorkerTick, RESULTS_FILE } from "./exchange.js";
-import { LocalPromptfooExecutor } from "./job.js";
+import { DONE_FILE, ExchangePromptfooExecutor, RESULTS_FILE } from "./exchange.js";
+import { LocalPromptfooExecutor, promptfooWorkerTick } from "./worker.js";
 import { promptfooRunnerSelfTest } from "./main.js";
 import { judgeWorkerSelfTest, WORKER_ISOLATED_SWITCH, WORKER_SELF_TEST_FILE, workerCredentialReach, writeWorkerSelfTest } from "./worker-selftest.js";
 
@@ -253,8 +254,11 @@ describe("B5-P2: the runner hands promptfoo to the worker", () => {
   it("the local executor is the in-process path the tests use; the image's runner uses only the exchange", () => {
     const main = readFileSync(path.join(here, "main.ts"), "utf8");
     expect(main).toMatch(/new ExchangePromptfooExecutor\(/);
-    expect(main).toMatch(/promptfooAdapter\(\{ entrypoint: `\$\{PROMPTFOO_HOME\}\/dist\/src\/entrypoint\.js`, executor \}\)/);
-    expect(main).not.toMatch(/LocalPromptfooExecutor|runProcessGroup|runPromptfooJob/);
+    // ADR-0190 I5: the runner adapter always takes the exchange (bridged to an executor's sandbox); the import closure
+    // check is the gateway suite's static guard (adr0190-i5-engine-runner-no-spawn.test.ts)
+    expect(main).toMatch(/promptfooRunnerAdapter\(\{ entrypoint: `\$\{PROMPTFOO_HOME\}\/dist\/src\/entrypoint\.js`, executor \}\)/);
+    expect(main).toMatch(/new ExecutorTaskBridge\(/);
+    expect(main).not.toMatch(/LocalPromptfooExecutor|runProcessGroup|runPromptfooJob|engine-runner\/worker/);
     expect(new LocalPromptfooExecutor({ entrypoint: "/x" })).toBeInstanceOf(LocalPromptfooExecutor);
   });
 });
@@ -322,6 +326,9 @@ describe("B5-P2: the worker proves the runner's credential is out of its reach",
     const env = { ...ENGINE_MANIFEST.promptfoo.usageDataEnv };
     const without = await promptfooRunnerSelfTest({ imageDigest: m.imageDigest, engineVersion: m.version, resultsRoot: v.results, env });
     const verdict = evaluateRunnerSelfTest(m, { ...without, egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false } }, new Date());
-    expect(verdict.failures).toEqual([`usage_env_missing:${WORKER_ISOLATED_SWITCH}`]);
+    // ADR-0190 I5: the worker's proof is now a fresh executor attestation of the engine-worker profile (fail closed)
+    expect(verdict.failures).toEqual([`executor_attestation_missing:${WORKER_ISOLATED_SWITCH}`]);
+    const sel = { ...without, egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false } };
+    expect(evaluateRunnerSelfTest(m, sel, new Date(), { executorAttested: true })).toEqual({ passed: true, failures: [] });
   });
 });

@@ -20,9 +20,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner";
+import type { ProcessGroupOptions, ProcessGroupResult } from "@regulait/engine-runner/worker";
 import { mapModelscanReport, NPY_OBJECT_PAYLOAD_MAX_BYTES, NPZ_MAX_MEMBERS, NPZ_MAX_UNCOMPRESSED_BYTES, type ArtifactFormat } from "@regulait/shared";
-import { ExchangeScanExecutor, LocalScanExecutor, scannerTick } from "./exchange.js";
+import { ExchangeScanExecutor } from "./exchange.js";
+import { LocalScanExecutor, scannerTick } from "./worker.js";
 import { cleanPickle, maliciousPickle, npyFile, npyHeader, numericNpy, npzFile, objectNpy, storedZip, zipArchive } from "./fixtures.js";
 import { scanAndJudge } from "./harness.js";
 

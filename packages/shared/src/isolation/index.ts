@@ -8,3 +8,4 @@ export * from "./attestation.js";
 export * from "./channel.js";
 export * from "./placement.js";
 export * from "./stdio.js";
+export * from "./engine-task.js";

@@ -25,7 +25,9 @@
  *     input, exits 3 with the workload never started;
  *  3. starts the workload (`argv`, never a shell) with the sandbox's own stdin
  *     and stdout, so from here on the MCP bytes are the server's, and exits
- *     with its status.
+ *     with its status. ADR-0190 I5: a release line may also carry an engine
+ *     task's `secret`; it is written to the workload's fd 3 (a pipe) and
+ *     nowhere else.
  *
  * `--canary` (the executor self-test) exits 0 on a release line with no
  * `argv`: a canary never runs a workload.
@@ -231,9 +233,18 @@ async function main() {
     argv.every((a) => typeof a === "string" && !a.includes("\0")) &&
     argv[0].startsWith("/");
   if (!okArgv) process.exit(4);
+  // ADR-0190 I5: an engine task's secret (decision 5, task_scoped) arrives on this release line only, and goes to the
+  // workload on fd 3, a pipe: never its environment, its argv, or a file
+  const secret = release.secret;
+  if (secret !== undefined && (typeof secret !== "string" || !/^[\x21-\x7e]{1,1024}$/.test(secret))) process.exit(4);
+  release.secret = undefined;
   const [command, ...args] = argv;
   // the workload's environment: nothing but a PATH and HOME (the work directory the executor set as the cwd) (decision 5: no secret, nothing inherited from the executor)
-  const child = spawn(command, args, { stdio: "inherit", env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.cwd() } });
+  const child = spawn(command, args, {
+    stdio: secret === undefined ? "inherit" : ["inherit", "inherit", "inherit", "pipe"],
+    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: process.cwd() },
+  });
+  if (secret !== undefined) child.stdio[3].end(secret);
   child.on("error", () => process.exit(5));
   child.on("exit", (code, signal) => process.exit(code ?? (signal ? 128 : 1)));
 }
