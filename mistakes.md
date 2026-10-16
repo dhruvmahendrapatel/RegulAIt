@@ -1613,9 +1613,10 @@ package's own test script, never a bare `vitest` invocation.
 
 ### M-083 (2026-10-16) - Two migrations broke the 0185 database invariant guard, invisible without Postgres
 
-Two builders (I5 and S9) wrote migrations that failed `apps/gateway/src/zz-dbguard-0185.test.ts`: a new function
-without `SET search_path = pg_catalog, public, pg_temp`, and a table with a row-level UPDATE/DELETE refusal trigger
-but no statement-level TRUNCATE refusal. Postgres is not available in the build environment, so the guard never ran
+Two builders wrote migrations that failed `apps/gateway/src/zz-dbguard-0185.test.ts`, and both broke both rules:
+I5 (migration 0200, `engine_runs`) and S9 (migration 0199, `spiffe_trust_bundles`) each added a function without
+`SET search_path = pg_catalog, public, pg_temp`, and a row-level UPDATE/DELETE refusal trigger with no
+statement-level TRUNCATE refusal. Both were fixed before merge. Postgres is not available in the build environment, so the guard never ran
 before CI. The builder brief did not mention the guard.
 
 Rule: read `apps/gateway/src/zz-dbguard-0185.test.ts` before writing any migration, and check every new function and
