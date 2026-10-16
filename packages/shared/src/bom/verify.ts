@@ -991,14 +991,33 @@ async function guarded(source: BomVerifySource, run: () => Promise<BomVerifyRepo
   }
 }
 
-/** verify an `export-bundle/3` archive (the gzip bytes) against an out-of-band trust root; never throws */
-export const verifyBomBundle = (archive: Uint8Array, trust: BomVerifyTrust): Promise<BomVerifyReport> =>
-  guarded("bundle", () => verifyBomBundleUnguarded(archive, trust));
+/**
+ * ADR-0189 B8 review H1: the receipt v2 boundary is part of the trust root, and an ABSENT boundary is not "no cutover".
+ * Treating a missing value as null would accept a v1 receipt past a real boundary. `null` (no cutover recorded) or a
+ * positive audit seq only; anything else is a caller's configuration error, so it throws (crafted bundle input still
+ * never throws).
+ */
+function assertReceiptBoundary(trust: BomVerifyTrust): void {
+  const b: unknown = (trust as { receiptV2FromAuditSeq?: unknown }).receiptV2FromAuditSeq;
+  if (b === null || (typeof b === "number" && Number.isSafeInteger(b) && b >= 1)) return;
+  throw new TypeError("BOM verify trust root: receiptV2FromAuditSeq must be null (no cutover recorded) or a positive audit seq; it is never defaulted");
+}
+
+/** verify an `export-bundle/3` archive (the gzip bytes) against an out-of-band trust root; never throws on crafted input */
+export const verifyBomBundle = (archive: Uint8Array, trust: BomVerifyTrust): Promise<BomVerifyReport> => {
+  assertReceiptBoundary(trust);
+  return guarded("bundle", () => verifyBomBundleUnguarded(archive, trust));
+};
 /** a frozen `decision_boms` row, with its linked AI BOM snapshot when it still exists (`null` when pruned or none); never throws */
-export const verifyStoredDecisionBom = (input: StoredSignedBody & { linkedAiBom: StoredSignedBody | null }, trust: BomVerifyTrust): Promise<BomVerifyReport> =>
-  guarded("decision_bom", () => verifyStoredDecisionBomUnguarded(input, trust));
+export const verifyStoredDecisionBom = (input: StoredSignedBody & { linkedAiBom: StoredSignedBody | null }, trust: BomVerifyTrust): Promise<BomVerifyReport> => {
+  assertReceiptBoundary(trust);
+  return guarded("decision_bom", () => verifyStoredDecisionBomUnguarded(input, trust));
+};
 /** a frozen `ai_bom_snapshots` row, its `bom_renderings` rows, and the subject's previous version (if any); never throws */
 export const verifyStoredAiBom = (
   input: StoredSignedBody & { renderings: Array<{ format: string; bytes: string }>; previous: { id: string } | "pruned" | null },
   trust: BomVerifyTrust,
-): Promise<BomVerifyReport> => guarded("ai_bom_snapshot", () => verifyStoredAiBomUnguarded(input, trust));
+): Promise<BomVerifyReport> => {
+  assertReceiptBoundary(trust);
+  return guarded("ai_bom_snapshot", () => verifyStoredAiBomUnguarded(input, trust));
+};

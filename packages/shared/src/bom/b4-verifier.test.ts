@@ -25,7 +25,7 @@ import { bomCanonicalBytes, bomRowDigest, bomSha256, decisionBomBodyV2Schema, de
 import { bomVerifyResponseSchema, type BomVerifyCheck } from "./contract-b4.js";
 import { assembleDecisionBom, bomDecimalSum, DecisionBomAssemblyError, decisionBomSameContent, type DecisionBomAssemblyInput } from "./decision-bom-assembly.js";
 import { decisionBomFinalityDetail } from "./finality.js";
-import { BomExportKeyringError, bomOnlineExportTrust, verifyBomBundle, type BomVerifyReport, type BomVerifyTrust } from "./verify.js";
+import { BomExportKeyringError, bomOnlineExportTrust, verifyBomBundle, verifyStoredAiBom, verifyStoredDecisionBom, type BomVerifyReport, type BomVerifyTrust } from "./verify.js";
 import { BomExportRefusal, buildAiBomBundle, buildDecisionBomBundle, type BomBundleEnvelope, type BuiltBomBundle } from "./bom-bundle.js";
 import { buildAiBom } from "./ai-bom-builder.js";
 import { AI_BOM_INSTALL_SUBJECT_ID } from "./contract.js";
@@ -436,3 +436,28 @@ describe("ADR-0189 B4.1: the bundle builder", () => {
   });
 });
 
+
+describe("ADR-0189 B8 review H1: the receipt v2 boundary is never defaulted", () => {
+  const vec = (id: string): Vector => [...corpus.positives, ...corpus.negatives].find((x: Vector) => x.id === id);
+  const bytes = (id: string) => gzipSync(tarOf(entriesOf(vec(id))));
+  it("an ABSENT boundary is refused at every entry point (absent is not null)", () => {
+    const { receiptV2FromAuditSeq: _absent, ...noBoundary } = trustOf(vec("N-R12"));
+    const t = noBoundary as unknown as BomVerifyTrust;
+    expect(() => verifyBomBundle(bytes("N-R12"), t)).toThrow(TypeError);
+    expect(() => verifyStoredDecisionBom({} as never, t)).toThrow(TypeError);
+    expect(() => verifyStoredAiBom({} as never, t)).toThrow(TypeError);
+  });
+  it("a boundary that is not null or a positive audit seq is refused", () => {
+    for (const bad of [0, -1, 1.5, "42", Number.NaN, undefined]) {
+      expect(() => verifyBomBundle(bytes("A02"), { ...trustOf(vec("A02")), receiptV2FromAuditSeq: bad as never }), String(bad)).toThrow(TypeError);
+    }
+  });
+  it("an explicit null is honoured (no cutover recorded): an AI BOM verifies", async () => {
+    expect((await verifyBomBundle(bytes("A02"), { ...trustOf(vec("A02")), receiptV2FromAuditSeq: null })).outcome).toBe("valid");
+  });
+  it("a value is enforced: N-R12's v1 receipt at boundary 42 is invalid v1_receipt_after_boundary", async () => {
+    const r = await verifyBomBundle(bytes("N-R12"), trustOf(vec("N-R12")));
+    expect(r.outcome).toBe("invalid");
+    expect(r.checks).toContainEqual(expect.objectContaining({ check: "receipt_facts_binding", status: "invalid", reason: "v1_receipt_after_boundary" }));
+  });
+});
