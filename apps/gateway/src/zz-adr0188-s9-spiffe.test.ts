@@ -555,7 +555,7 @@ describe("S9 — rotation and revocation (decision 12)", () => {
       environment: ENV,
       expiresAt: new Date(Date.now() + 10 * 60_000),
       projectId,
-      binding: { kind: "mtls", thumbprint: "s9-backstop-thumbprint", authCredentialId: a.credentialId, audience: resource },
+      binding: { kind: "mtls", thumbprint: createHash("sha256").update(`s9-backstop-${RUN}`).digest("base64url"), authCredentialId: a.credentialId, audience: resource },
     });
     // positive control: live while the bundle is active
     expect((await loadLiveChain(db, grant.id))!.failure).toBeNull();
@@ -593,7 +593,7 @@ describe("S9 — rotation and revocation (decision 12)", () => {
       environment: ENV,
       expiresAt: new Date(Date.now() + 10 * 60_000),
       projectId,
-      binding: { kind: "dpop", thumbprint: "s9-m1-dpop-thumbprint", authCredentialId: a.credentialId, audience: resource },
+      binding: { kind: "dpop", thumbprint: createHash("sha256").update(`s9-m1-${RUN}`).digest("base64url"), authCredentialId: a.credentialId, audience: resource },
     });
     expect((await loadLiveChain(db, dpopGrant.id))!.failure).toBeNull();
     grantCascadeTestHooks.failFor = (id) => id === mtlsGrant || id === dpopGrant.id;
@@ -682,12 +682,14 @@ describe("S9 — rotation and revocation (decision 12)", () => {
   });
 
   it("#389 review L3: a step-up for a refused write (404, 409) stays unspent; the accepted write spends it", async () => {
+    // the domain's first bundle, with the bootstrap credential, BEFORE an admin can step up (which ends the
+    // bootstrap credential's step-up)
+    const td = `s9l3-${RUN}.example.org`;
+    const first = await upload(td, root.pem, null);
+    expect(first.statusCode, first.body).toBe(201);
     const admin = await mkUser("l3-admin", true);
     await db.update(users).set({ totpEnabled: true }).where(eq(users.id, admin.id));
     try {
-      const td = `s9l3-${RUN}.example.org`;
-      const first = await upload(td, root.pem, null);
-      expect(first.statusCode, first.body).toBe(201);
       const parsed = parseSpiffeBundle(root2.pem, new Date());
       if (!("digest" in parsed)) throw new Error("fixture bundle refused");
       const send = (su: { sessionToken: string; stepUpToken: string }, url: string, payload: object) =>
