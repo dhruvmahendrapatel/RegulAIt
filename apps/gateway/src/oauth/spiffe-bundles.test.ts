@@ -27,7 +27,7 @@ import { makeCert, type TestCert } from "../testing/x509-fixtures.js";
 import { IdentityAdminError } from "./identity-admin.js";
 import { parseSpiffeBundle, spiffeBundleRevokeStepUp, spiffeBundleSetStepUp, type ParsedSpiffeBundle } from "./spiffe-bundles.js";
 import { certificateThumbprint, pemBundleToDer, PemNotCertificateError, validateClientCertificate } from "./x509.js";
-import { legacySpiffeEnvSet } from "./spiffe-trust-domains.js";
+import { legacySpiffeEnvSet, spiffeIssueAllowed } from "./spiffe-trust-domains.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../testing/spire-1.13.3/${name}`, import.meta.url), "utf8");
 const SPIRE_TD = "byoc.example.org";
@@ -150,6 +150,25 @@ describe("a bundle upload: PEM or the SPIFFE bundle format, public CAs only", ()
     expect(legacySpiffeEnvSet({ REGULAIT_SPIFFE_TRUST_BUNDLES: "{}" })).toBe(true);
     expect(legacySpiffeEnvSet({ REGULAIT_SPIFFE_TRUST_BUNDLES: "  " })).toBe(false);
     expect(readFileSync(path.join(here, "spiffe-bundles.ts"), "utf8").split("process.env[").length - 1).toBe(0);
+  });
+
+  it("#389 recheck Low 3: the issue rule refuses a bundle whose rotation ended in a revocation, even after a re-upload", () => {
+    const t = (m: number) => new Date(Date.UTC(2026, 9, 16, 0, m));
+    const B1 = { id: "b1", createdAt: t(0), supersededAt: t(1), revokedAt: null };
+    const B2 = { id: "b2", createdAt: t(1), supersededAt: null, revokedAt: t(2) };
+    const B3 = { id: "b3", createdAt: t(3), supersededAt: null, revokedAt: null };
+    // B1 rotated to B2, B2 revoked: B1 is dead with no active bundle, and stays dead once B3 is uploaded
+    expect(spiffeIssueAllowed([B1, B2], "b1")).toBe(false);
+    expect(spiffeIssueAllowed([B1, B2, B3], "b1")).toBe(false);
+    // positive controls: B3 issues; a plain rotation (B2 active, nothing revoked) still lets B1's authorities issue
+    expect(spiffeIssueAllowed([B1, B2, B3], "b3")).toBe(true);
+    expect(spiffeIssueAllowed([B1, { ...B2, revokedAt: null }], "b1")).toBe(true);
+    // a revoked bundle itself, an unknown id, and a domain with no active bundle
+    expect(spiffeIssueAllowed([{ ...B3, revokedAt: t(4) }], "b3")).toBe(false);
+    expect(spiffeIssueAllowed([B3], "nope")).toBe(false);
+    expect(spiffeIssueAllowed([{ ...B3, supersededAt: t(4) }], "b3")).toBe(false);
+    // a revocation of an EARLIER bundle does not touch a later one
+    expect(spiffeIssueAllowed([{ ...B1, supersededAt: null, revokedAt: t(1) }, B3], "b3")).toBe(true);
   });
 
   it("duplicates, garbage, empty and oversized bundles are refused, never thrown", async () => {

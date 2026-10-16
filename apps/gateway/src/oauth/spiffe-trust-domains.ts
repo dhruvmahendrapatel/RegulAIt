@@ -39,18 +39,49 @@ export async function loadSpiffeTrustAnchors(db: Db): Promise<Map<string, Spiffe
 }
 
 /**
- * #389 review M1: inside the transaction that creates a SPIFFE-authenticated grant, hold the authenticating bundle
- * row FOR SHARE and require it unrevoked. A concurrent revocation (which takes the row FOR UPDATE) then either commits
- * first, and this refuses, or waits for this grant and token to commit, and its cascade ends them. A superseded
- * bundle still qualifies: rotation is not revocation (decision 12).
+ * #389 review M1 and recheck Low 3: inside the transaction that creates a SPIFFE-authenticated grant, hold every
+ * bundle row of the domain FOR SHARE and apply `spiffeIssueAllowed`. A concurrent upload or revocation (each takes
+ * the active row FOR UPDATE) then either commits first, and the rule sees it, or waits for this grant and token to
+ * commit, and its cascade ends them. A superseded bundle still qualifies while no later bundle was revoked: rotation
+ * is not revocation (decision 12).
  */
 export async function lockSpiffeBundleUnrevoked(tx: Db, bundleId: string): Promise<boolean> {
-  const [row] = await tx
-    .select({ id: spiffeTrustBundles.id })
+  const [auth] = await tx.select({ trustDomain: spiffeTrustBundles.trustDomain }).from(spiffeTrustBundles).where(eq(spiffeTrustBundles.id, bundleId));
+  if (!auth) return false;
+  // #389 recheck Low 3: EVERY bundle row of the domain, FOR SHARE, in one statement. Under READ COMMITTED a row a
+  // concurrent writer holds is waited for and then read in its committed version, so the facts below are current
+  const rows = await tx
+    .select({ id: spiffeTrustBundles.id, createdAt: spiffeTrustBundles.createdAt, supersededAt: spiffeTrustBundles.supersededAt, revokedAt: spiffeTrustBundles.revokedAt })
     .from(spiffeTrustBundles)
-    .where(and(eq(spiffeTrustBundles.id, bundleId), isNull(spiffeTrustBundles.revokedAt)))
+    .where(eq(spiffeTrustBundles.trustDomain, auth.trustDomain))
+    .orderBy(spiffeTrustBundles.createdAt)
     .for("share");
-  return row !== undefined;
+  return spiffeIssueAllowed(rows, bundleId);
+}
+
+/**
+ * The issue rule (#389 recheck Low 3), pure so it is tested on its own. A token may be issued under bundle `authId`
+ * only when:
+ *  1. it is not revoked;
+ *  2. no bundle of the domain created at or after it was revoked: a rotation away from it that ended in a revocation
+ *     ends what it authenticated too (B1 superseded by B2, B2 revoked: B1's authorities are dead);
+ *  3. the domain has an ACTIVE bundle now.
+ * Why this is final under READ COMMITTED: when the rule passes, the issuing transaction holds the domain's active row
+ * FOR SHARE until it commits. Superseding that row (an upload) and revoking it both take it FOR UPDATE first, so
+ * neither can commit while the grant is being made, and a later revocation stamps `revoked_at` with
+ * `clock_timestamp()` after its own lock, i.e. after this grant's `created_at`. Live-chain rule (b)
+ * (`revoked_at >= grant.created_at`) then refuses the grant for good, whatever is uploaded later. When the rule fails,
+ * nothing is issued. A first upload into a domain with no active bundle is the one write that takes no row lock, and
+ * rule 3 refuses exactly that state.
+ */
+export function spiffeIssueAllowed(
+  rows: ReadonlyArray<{ id: string; createdAt: Date; supersededAt: Date | null; revokedAt: Date | null }>,
+  authId: string,
+): boolean {
+  const auth = rows.find((r) => r.id === authId);
+  if (!auth || auth.revokedAt !== null) return false;
+  if (rows.some((r) => r.revokedAt !== null && r.createdAt.getTime() >= auth.createdAt.getTime())) return false;
+  return rows.some((r) => r.supersededAt === null && r.revokedAt === null);
 }
 
 /** the trust domains with an active bundle */

@@ -648,6 +648,37 @@ describe("S9 — rotation and revocation (decision 12)", () => {
     expect(g!.createdAt.getTime()).toBeLessThanOrEqual(b!.revokedAt!.getTime());
   });
 
+  it("#389 recheck Low 3: rotate then revoke between the certificate match and the issue → refused, and nothing revives after a re-upload", async () => {
+    const td = `s9low3-${RUN}.example.org`;
+    const a = await svidAgent(td, "low3");
+    const b1 = await upload(td, root.pem, null);
+    expect(b1.statusCode, b1.body).toBe(201);
+    // B1's CA stays in B2 (an overlap bundle), so the SVID would validate under either: only the revocation refuses it
+    const svid = await makeCert({ issuer: root, uris: [a.clientId] });
+    tokenEndpointTestHooks.afterCertificateMatch = async () => {
+      tokenEndpointTestHooks.afterCertificateMatch = undefined;
+      // the request has matched under B1's authorities; now the admin rotates to B2 and revokes B2
+      const b2 = await upload(td, `${root.pem}${root2.pem}`, b1.json().id);
+      expect(b2.statusCode, b2.body).toBe(201);
+      const rv = await inject("POST", `${BUNDLES}/${b2.json().id}/revoke`, AUTH, {});
+      expect(rv.statusCode, rv.body).toBe(200);
+    };
+    let r;
+    try {
+      r = await tokenRequest(a, fwd(svid.der));
+    } finally {
+      tokenEndpointTestHooks.afterCertificateMatch = undefined;
+    }
+    expect([r.statusCode, r.json().error]).toEqual([401, "invalid_client"]);
+    expect(await lastTokenCode(a.clientId)).toBe("spiffe_bundle_revoked");
+    const made = await db.select({ id: delegationGrants.id }).from(delegationGrants).where(eq(delegationGrants.actorIdentityId, a.identityId));
+    expect(made, "nothing was issued under the dead bundle").toEqual([]);
+    // positive control: a new bundle (B3) lets the domain authenticate again, under its own trust
+    expect((await upload(td, root.pem, null)).statusCode).toBe(201);
+    const fresh = await tokenRequest(a, fwd(svid.der));
+    expect(fresh.statusCode, fresh.body).toBe(200);
+  });
+
   it("#389 review L3: a step-up for a refused write (404, 409) stays unspent; the accepted write spends it", async () => {
     const admin = await mkUser("l3-admin", true);
     await db.update(users).set({ totpEnabled: true }).where(eq(users.id, admin.id));

@@ -133,7 +133,7 @@ let requestTimeoutMs = TOKEN_REQUEST_TIMEOUT_MS;
  * transaction just before its timeout re-check. Production code never sets
  * either; `setTokenRequestTimeoutForTest` returns the restore.
  */
-export const tokenEndpointTestHooks: { beforeGrantCommit?: () => Promise<void> } = {};
+export const tokenEndpointTestHooks: { beforeGrantCommit?: () => Promise<void>; afterCertificateMatch?: () => Promise<void> } = {};
 export function setTokenRequestTimeoutForTest(ms: number): () => void {
   const before = requestTimeoutMs;
   requestTimeoutMs = ms;
@@ -584,11 +584,12 @@ async function exchangeSteps(provider: Provider, ctx: KoaContextLike, s: Request
       const txDb = tx as unknown as Db;
       let grantId: string;
       let parentGrantId: string | null = null;
-      // ADR-0188 S9 (#389 review M1): a client authenticated by an X.509-SVID holds its bundle row FOR SHARE for the
-      // whole issue, and the bundle must still be unrevoked; a concurrent revocation cannot interleave
+      // ADR-0188 S9 (#389 review M1, recheck Low 3): a client authenticated by an X.509-SVID holds EVERY bundle row of
+      // its trust domain FOR SHARE for the whole issue (`lockSpiffeBundleUnrevoked`), so no revocation or rotation can
+      // interleave, and refuses when its bundle was revoked or a rotation away from it ended in a revocation
       const spiffeBundleId = s.mtls && s.mtls.clientId === clientId && s.mtls.match.ok && pf.authCredentialId === s.mtls.match.credentialId ? s.mtls.match.spiffeBundleId : undefined;
       if (spiffeBundleId !== undefined && !(await lockSpiffeBundleUnrevoked(txDb, spiffeBundleId))) {
-        throw refuse(new InvalidClientAuth("the SPIFFE trust bundle that authenticated this client was revoked"), "spiffe_bundle_revoked");
+        throw refuse(new InvalidClientAuth("the SPIFFE trust bundle that authenticated this client was revoked, or a rotation away from it ended in a revocation"), "spiffe_bundle_revoked");
       }
       try {
         if (pf.root) {
@@ -908,6 +909,8 @@ async function tokenRoute(db: Db, opts: { dataKey?: string | undefined }, req: F
     const client = await findWorkloadClient(db, clientId, now);
     s.mtls = { clientId, match: client ? await matchCertificateCredential(db, client, presented, now) : { ok: false, code: "client_unknown" } };
     if (!s.mtls.match.ok) s.code = s.mtls.match.code;
+    // test only: a rotation and a revocation landing between the certificate match and the issuing transaction
+    await tokenEndpointTestHooks.afterCertificateMatch?.();
   }
 
   // hand the bounded, already-parsed body to Koa. Only the headers the provider needs are passed on; the scheme and

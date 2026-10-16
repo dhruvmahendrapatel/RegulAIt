@@ -1620,6 +1620,35 @@ The coordinator renumbered S9's migration from 0200 to **0199** (I5 takes 0200),
    bundle upload names it `spiffe_bundle_not_certificate`.
 5. **L5:** the env test that could not fail is replaced by a source check that the retired variable is read in one
    place only (`legacySpiffeEnvSet`).
+6. **Recheck Low 3: rotation then revocation.** A request could load bundle B1's authorities, an admin could rotate to
+   B2 and revoke B2, and the request, locking only B1 (superseded, not revoked), would issue a grant created after B2's
+   `revoked_at`, which rule (b) misses once B3 is uploaded. Now the issuing transaction locks **every** bundle row of
+   the domain FOR SHARE in one statement and applies `spiffeIssueAllowed`: refuse unless the authenticating bundle is
+   unrevoked, **no bundle of the domain created at or after it was revoked** (a rotation away from it that ended in a
+   revocation ends its authorities too), and the domain has an active bundle. Why this is final under READ COMMITTED:
+   - a locked row a concurrent writer holds is waited for and then read in its committed version, so the rule sees
+     every upload and revocation that committed first;
+   - when the rule passes, the transaction holds the domain's active row FOR SHARE until it commits; superseding that
+     row (an upload) and revoking it both take it FOR UPDATE first, so neither commits while the grant is made;
+   - the one write that takes no row lock is a first upload into a domain with no active bundle, and the rule's third
+     clause refuses exactly that state;
+   - so every revocation that follows a grant is stamped (`clock_timestamp()` after its lock) later than the grant's
+     `created_at`, and live-chain rule (b) refuses the grant for good, whatever is uploaded afterwards. That is the
+     backstop extension the recheck asked for: "superseded by a bundle that is now revoked" can only describe a grant
+     whose `created_at` precedes that revocation, which rule (b) already covers; the other order is refused at issue.
+   - Tests: the pure rule (`spiffe-bundles.test.ts`), and the reviewer's sequence driven deterministically through a
+     test hook between the certificate match and the issuing transaction (`zz-adr0188-s9-spiffe.test.ts`: refused
+     `spiffe_bundle_revoked`, no grant made; a re-upload authenticates afresh).
+
+Open after the fix round (recheck follow-ups):
+- **Low 1:** two concurrent FIRST uploads to one domain: the loser's step-up is spent before its unique-violation 409.
+  It fails safe (nothing is written; the admin steps up again).
+- **Low 2:** the critical-extension parse checks each allowed type's outer structure through pkijs, not every inner
+  field (for example the GeneralName forms inside a SAN). No authorization depends on those fields beyond what the
+  SPIFFE profile already reads.
+- **Pool note:** the issuing transaction now holds bundle row locks while it creates the grant and the token; a
+  revocation or upload for that domain waits on it. Under heavy issue load for one domain, an admin write may wait a
+  request's duration. No pool sizing was changed.
 
 ## Test strategy
 
