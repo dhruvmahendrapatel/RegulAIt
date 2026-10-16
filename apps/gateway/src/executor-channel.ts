@@ -667,7 +667,7 @@ export function pickLinkedReport<R extends LinkedReport>(rows: readonly R[]): R 
   );
   return sorted[0] ?? null;
 }
-async function linkedReportOf(db: Db, placementId: string): Promise<LinkedReport | null> {
+export async function linkedReportOf(db: Db, placementId: string): Promise<LinkedReport | null> {
   const rows = await db
     .select({ id: executionPlacementReports.id, outcome: executionPlacementReports.outcome, appliedClass: executionPlacementReports.appliedClass, reportSha256: executionPlacementReports.reportSha256, refusalCode: executionPlacementReports.refusalCode, endCode: executionPlacementReports.endCode, createdAt: executionPlacementReports.createdAt })
     .from(executionPlacementReports)

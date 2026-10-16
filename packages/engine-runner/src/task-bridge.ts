@@ -14,9 +14,9 @@
  *   2. the task's stdout frames are read back: `file` frames are written under `results/` (each file in chunks, then
  *      checked against its size and sha256 and renamed into place, so `done.json` appears whole and last, as the
  *      exchange expects); `http` frames are the sandbox's gateway channel (decision 4, `gateway_only`): the bridge
- *      sends each one to the gateway's model routes, with exactly the headers the sandbox gave (the run's own key),
- *      NEVER the runner's credentials, and only under the gateway's base path; anything else is answered
- *      `not_gateway`;
+ *      sends each one to the gateway's model routes, with exactly the headers the sandbox gave (which must carry the
+ *      run's own key), NEVER the runner's credentials; only POST to exactly the model routes, at most
+ *      ENGINE_TASK_HTTP_MAX_IN_FLIGHT at once, each answer read under a byte cap (forwardGatewayRequest);
  *   3. a cancel (`jobs/<runId>/cancel`, or the job directory gone) closes the task: the executor stops the sandbox.
  *
  * Nothing here starts a process: the bridge only reads and writes files and speaks HTTP (the static guard
@@ -27,8 +27,10 @@ import { existsSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import {
+  ENGINE_TASK_GATEWAY_ROUTES,
   ENGINE_TASK_HTTP_BODY_MAX_BYTES,
   ENGINE_TASK_HTTP_HEADERS,
+  ENGINE_TASK_HTTP_MAX_IN_FLIGHT,
   ENGINE_TASK_INLINE_MAX_BYTES,
   ENGINE_TASK_MAX_FILES,
   engineTaskOutFrameSchema,
@@ -37,6 +39,7 @@ import {
   type EngineTaskInputUpload,
 } from "@regulait/shared";
 import type { RunnerClient } from "./runner.js";
+import { signalTaskOver } from "./task-signal.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** the top-level result files a task may write besides its run's own (the worker's in-sandbox self-test) */
@@ -106,16 +109,36 @@ function resultPathAllowed(runId: string, p: string): boolean {
   return (segs[0] === runId && segs.length >= 2) || (segs.length === 1 && SELF_TEST_FILE.test(segs[0]!));
 }
 
-/** the gateway channel: one sandbox request sent to the gateway's model routes, or why not */
+/** a raw request path the gateway channel may carry: plain segments only (no `%`, no query, no backslash, no `..`) */
+const RAW_PATH = /^\/[A-Za-z0-9._~/-]{0,2047}$/;
+
+/**
+ * The gateway channel: one sandbox request sent to the gateway's model routes, or why not (review MEDIUM-1).
+ *
+ *  - only POST to EXACTLY the gateway's model routes (`<base path>chat/completions`, `<base path>messages`), matched on
+ *    the normalised `URL.pathname`, which must equal the raw path (a dot segment or any `%` is refused before it can
+ *    normalise into another route);
+ *  - only with `authorization: Bearer <the run's own key>` (the task secret the bridge took out of `job.json`): the
+ *    sandbox can spend the run's key and nothing else;
+ *  - the answer is read as a stream and abandoned past ENGINE_TASK_HTTP_BODY_MAX_BYTES (never buffered whole first).
+ */
 export async function forwardGatewayRequest(
   frame: { id: string; method: "GET" | "POST"; path: string; headers: Record<string, string>; body: string },
-  opts: { gatewayBaseUrl: string; fetch?: typeof fetch; timeoutMs?: number },
+  opts: { gatewayBaseUrl: string; runKey: string | null; fetch?: typeof fetch; timeoutMs?: number },
 ): Promise<EngineTaskInFrame> {
+  const notGateway: EngineTaskInFrame = { t: "http_err", id: frame.id, code: "not_gateway" };
   const base = new URL(opts.gatewayBaseUrl);
   const basePath = base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`;
-  const reqPath = frame.path.split("?")[0]!;
-  // only the gateway's model routes under its base; never the runner's or the executor's own channels
-  if (!reqPath.startsWith(basePath) || /\/(?:engine-runner|executor-channel|oauth)(?:\/|$)/.test(reqPath)) return { t: "http_err", id: frame.id, code: "not_gateway" };
+  if (frame.method !== "POST" || !RAW_PATH.test(frame.path)) return notGateway;
+  let target: URL;
+  try {
+    target = new URL(frame.path, base.origin);
+  } catch {
+    return notGateway;
+  }
+  if (target.origin !== base.origin || target.pathname !== frame.path || target.search !== "" || target.hash !== "") return notGateway;
+  if (!ENGINE_TASK_GATEWAY_ROUTES.some((r) => target.pathname === `${basePath}${r}`)) return notGateway;
+  if (opts.runKey === null || frame.headers.authorization !== `Bearer ${opts.runKey}`) return { t: "http_err", id: frame.id, code: "unauthorized" };
   const body = Buffer.from(frame.body, "base64");
   if (body.length > ENGINE_TASK_HTTP_BODY_MAX_BYTES) return { t: "http_err", id: frame.id, code: "too_large" };
   const headers: Record<string, string> = {};
@@ -123,19 +146,32 @@ export async function forwardGatewayRequest(
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), opts.timeoutMs ?? 120_000);
   try {
-    const res = await (opts.fetch ?? fetch)(new URL(frame.path, base.origin).toString(), {
-      method: frame.method,
-      headers,
-      ...(frame.method === "POST" ? { body } : {}),
-      signal: abort.signal,
-      redirect: "manual",
-    });
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > ENGINE_TASK_HTTP_BODY_MAX_BYTES) return { t: "http_err", id: frame.id, code: "too_large" };
+    const res = await (opts.fetch ?? fetch)(target.toString(), { method: "POST", headers, body, signal: abort.signal, redirect: "manual" });
+    const declared = Number(res.headers.get("content-length") ?? "0");
+    if (Number.isFinite(declared) && declared > ENGINE_TASK_HTTP_BODY_MAX_BYTES) {
+      abort.abort();
+      return { t: "http_err", id: frame.id, code: "too_large" };
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    if (res.body) {
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > ENGINE_TASK_HTTP_BODY_MAX_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          abort.abort();
+          return { t: "http_err", id: frame.id, code: "too_large" };
+        }
+        chunks.push(Buffer.from(value));
+      }
+    }
     const out: Record<string, string> = {};
     const ct = res.headers.get("content-type");
     if (ct && /^[\x20-\x7e]{0,4096}$/.test(ct)) out["content-type"] = ct;
-    return { t: "http_res", id: frame.id, status: res.status, headers: out, body: buf.toString("base64") };
+    return { t: "http_res", id: frame.id, status: res.status, headers: out, body: Buffer.concat(chunks).toString("base64") };
   } catch {
     return { t: "http_err", id: frame.id, code: abort.signal.aborted ? "timeout" : "unreachable" };
   } finally {
@@ -167,6 +203,8 @@ export class ExecutorTaskBridge {
       void this.bridge(name)
         .catch((e: unknown) => this.opts.log?.(`task ${name}: ${e instanceof Error ? e.message : String(e)}`))
         .finally(() => {
+          // review MEDIUM-2: the run loop asks the gateway at once (a refused task's run has ended there)
+          signalTaskOver(name);
           // a run is bridged once; it is forgotten only when its job directory is gone
           const forget = setInterval(() => {
             if (!existsSync(path.join(this.opts.jobsRoot, name))) {
@@ -192,6 +230,7 @@ export class ExecutorTaskBridge {
     let from = 0;
     const parts = new Map<string, { file: string; chunk: number; size: number; hash: ReturnType<typeof createHash> }>();
     let closed = false;
+    let inFlight = 0;
     const jobDir = path.join(this.opts.jobsRoot, runId);
     try {
       for (;;) {
@@ -220,10 +259,17 @@ export class ExecutorTaskBridge {
             if (!resultPathAllowed(runId, m.path)) throw new TaskBridgeError(`a result path outside the run: ${m.path}`);
             await this.writeChunk(parts, m);
           } else if (m.t === "http") {
-            // answered in the background: a slow model call never holds the frame reader
-            void forwardGatewayRequest(m, { gatewayBaseUrl: this.opts.gatewayBaseUrl, ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}), ...(this.opts.httpTimeoutMs ? { timeoutMs: this.opts.httpTimeoutMs } : {}) }).then((answer) =>
-              this.opts.client.taskPost(runId, [JSON.stringify(answer)]).catch((e: unknown) => log(`task ${runId}: an answer was not delivered (${(e as Error).message})`)),
-            );
+            // answered in the background: a slow model call never holds the frame reader; bounded per task (MEDIUM-1)
+            const deliver = (answer: EngineTaskInFrame) =>
+              this.opts.client.taskPost(runId, [JSON.stringify(answer)]).catch((e: unknown) => log(`task ${runId}: an answer was not delivered (${(e as Error).message})`));
+            if (inFlight >= ENGINE_TASK_HTTP_MAX_IN_FLIGHT) {
+              void deliver({ t: "http_err", id: m.id, code: "busy" });
+              continue;
+            }
+            inFlight += 1;
+            void forwardGatewayRequest(m, { gatewayBaseUrl: this.opts.gatewayBaseUrl, runKey: input.secret, ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}), ...(this.opts.httpTimeoutMs ? { timeoutMs: this.opts.httpTimeoutMs } : {}) })
+              .then(deliver)
+              .finally(() => (inFlight -= 1));
           }
         }
         if (got.state === "refused") {

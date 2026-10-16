@@ -37,6 +37,7 @@ import {
 import { fsyncDir, writeFileDurable } from "./durable.js";
 import { probeEgress, type EgressProbeOptions } from "./egress.js";
 import { isRunnerKeySecret, rotationProof, runnerKeyMaterial, supersedeProof } from "./key.js";
+import { onTaskOver } from "./task-signal.js";
 
 /** what a runner request returns: the status, the JSON body, and (S7) the headers the OAuth flows read */
 export interface RunnerHttpResponse {
@@ -818,6 +819,8 @@ async function runLeased(
     }
   };
   const interval = setInterval(() => void beat(), opts.heartbeatMs ?? 15_000);
+  // ADR-0190 I5 (review MEDIUM-2): the task bridge says the run's sandbox task is over: ask the gateway now
+  const offTaskOver = onTaskOver(lease.runId, () => void beat());
   const deadline = setTimeout(() => abort.abort(), Math.max(0, Date.parse(lease.deadlineAt) - Date.now()));
   try {
     // PR #205 review round 10 [83]: the starting heartbeat is retried on a transient failure (a
@@ -882,6 +885,7 @@ async function runLeased(
     return { outcome: envelope.status === "failed" ? "failed" : "posted", runId: lease.runId, status };
   } finally {
     clearInterval(interval);
+    offTaskOver();
     clearTimeout(deadline);
     if (!keepWorkDir) await rm(workDir, { recursive: true, force: true });
   }

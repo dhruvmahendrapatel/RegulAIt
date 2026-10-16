@@ -18,9 +18,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
-import type { EngineTaskFramesResponse, EngineTaskInputUpload } from "@regulait/shared";
+import { ENGINE_TASK_HTTP_BODY_MAX_BYTES, ENGINE_TASK_HTTP_MAX_IN_FLIGHT, type EngineTaskFramesResponse, type EngineTaskInputUpload } from "@regulait/shared";
 import { ExecutorTaskBridge, forwardGatewayRequest, taskInputFromJobDir } from "./task-bridge.js";
 import { prepareJobCopy, runSandboxTask, viaGatewayChannel } from "./sandbox-task.js";
+import { onTaskOver } from "./task-signal.js";
 
 const RUN = "0f1e2d3c-4b5a-4968-8776-655443322110";
 // a synthetic run key, derived at run time (never a secret-shaped literal)
@@ -74,16 +75,77 @@ describe("the gateway channel's forwarder (the runner is the trusted side)", () 
   it("forwards a request under the gateway's base path with only the sandbox's own headers", async () => {
     const a = await forwardGatewayRequest(
       { id: "1", method: "POST", path: "/v1/chat/completions", headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" }, body: Buffer.from("{}").toString("base64") },
-      { gatewayBaseUrl: "http://gateway:3000/v1", fetch: fakeFetch },
+      { gatewayBaseUrl: "http://gateway:3000/v1", runKey: KEY, fetch: fakeFetch },
     );
     expect(a).toMatchObject({ t: "http_res", id: "1", status: 200, headers: { "content-type": "application/json" } });
     expect(seen.at(-1)).toEqual({ url: "http://gateway:3000/v1/chat/completions", headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" } });
   });
 
-  it.each(["/admin", "/v1/engine-runner/lease", "/v1/executor-channel/stream", "/v1/oauth/token", "/v1x/models"])("refuses %s (not_gateway), with nothing sent", async (p) => {
+  const auth = { authorization: `Bearer ${KEY}` };
+  it.each([
+    "/admin",
+    "/v1/engine-runner/lease",
+    "/v1/executor-channel/stream",
+    "/v1/oauth/token",
+    "/v1x/models",
+    "/v1/models",
+    "/v1/admin/users",
+    // review MEDIUM-1: encoded and dot-segment paths that `new URL` would normalise onto another route
+    "/v1/%2e%2e/admin/users",
+    "/v1/%2E%2E/v1/engine-runner/lease",
+    "/v1/chat/completions/%2e%2e/%2e%2e/engine-runner/lease",
+    "/v1/chat%2Fcompletions",
+    "/v1/../v1/engine-runner/lease",
+    "/v1/chat/completions/../../admin",
+    "/v1/./chat/completions",
+    "/v1//chat/completions",
+    "/v1/chat/completions?x=1",
+    "/v1/chat/completions#x",
+    "/v1\\chat/completions",
+    "//evil.example/v1/chat/completions",
+  ])("refuses POST %s (not_gateway), with nothing sent", async (p) => {
     const before = seen.length;
-    expect(await forwardGatewayRequest({ id: "2", method: "GET", path: p, headers: {}, body: "" }, { gatewayBaseUrl: "http://gateway:3000/v1", fetch: fakeFetch })).toEqual({ t: "http_err", id: "2", code: "not_gateway" });
+    expect(await forwardGatewayRequest({ id: "2", method: "POST", path: p, headers: auth, body: "" }, { gatewayBaseUrl: "http://gateway:3000/v1", runKey: KEY, fetch: fakeFetch })).toEqual({ t: "http_err", id: "2", code: "not_gateway" });
     expect(seen.length).toBe(before);
+  });
+
+  it("refuses GET even on a model route", async () => {
+    const before = seen.length;
+    expect(await forwardGatewayRequest({ id: "3", method: "GET", path: "/v1/chat/completions", headers: auth, body: "" }, { gatewayBaseUrl: "http://gateway:3000/v1", runKey: KEY, fetch: fakeFetch })).toMatchObject({ code: "not_gateway" });
+    expect(seen.length).toBe(before);
+  });
+
+  it.each([
+    ["no authorization", {}],
+    ["another key", { authorization: "Bearer someone-elses-key" }],
+    ["the key without Bearer", { authorization: KEY }],
+  ])("refuses a model call with %s (unauthorized), with nothing sent", async (_n, headers) => {
+    const before = seen.length;
+    expect(await forwardGatewayRequest({ id: "4", method: "POST", path: "/v1/messages", headers, body: "" }, { gatewayBaseUrl: "http://gateway:3000/v1", runKey: KEY, fetch: fakeFetch })).toEqual({ t: "http_err", id: "4", code: "unauthorized" });
+    expect(seen.length).toBe(before);
+  });
+
+  it("refuses every model call of a task with no run key", async () => {
+    expect(await forwardGatewayRequest({ id: "5", method: "POST", path: "/v1/messages", headers: auth, body: "" }, { gatewayBaseUrl: "http://gateway:3000/v1", runKey: null, fetch: fakeFetch })).toMatchObject({ code: "unauthorized" });
+  });
+
+  it("abandons an answer past the byte cap while streaming it (a lying or absent content-length)", async () => {
+    let pulled = 0;
+    const huge = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(c) {
+            pulled += 1;
+            if (pulled > 64) return c.close();
+            c.enqueue(new Uint8Array(64 * 1024));
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    expect(await forwardGatewayRequest({ id: "6", method: "POST", path: "/v1/chat/completions", headers: auth, body: "" }, { gatewayBaseUrl: "http://gateway:3000/v1", runKey: KEY, fetch: huge })).toEqual({ t: "http_err", id: "6", code: "too_large" });
+    expect(pulled).toBeLessThan(64);
+    const declared = (async () => new Response("x", { status: 200, headers: { "content-length": String(ENGINE_TASK_HTTP_BODY_MAX_BYTES + 1) } })) as typeof fetch;
+    expect(await forwardGatewayRequest({ id: "7", method: "POST", path: "/v1/chat/completions", headers: auth, body: "" }, { gatewayBaseUrl: "http://gateway:3000/v1", runKey: KEY, fetch: declared })).toMatchObject({ code: "too_large" });
   });
 });
 
@@ -201,5 +263,63 @@ describe("the bridge and the sandbox task, end to end over the relay", () => {
     r.stdout.end();
     await expect(bridged).rejects.toThrow(/outside the run/);
     expect(r.closed()).toBe(true);
+  });
+
+  it("review MEDIUM-1: at most ENGINE_TASK_HTTP_MAX_IN_FLIGHT model calls of one task are in flight; the rest are answered busy", async () => {
+    const jobs = tmp("i5-jobs-");
+    const results = tmp("i5-results-");
+    await publishJob(jobs, { runId: RUN, apiKey: KEY });
+    const r = relay();
+    const answers: Array<{ t: string; id: string; code?: string }> = [];
+    createInterface({ input: r.stdin }).on("line", (l) => answers.push(JSON.parse(l) as { t: string; id: string; code?: string }));
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    let reached = 0;
+    const bridge = new ExecutorTaskBridge({
+      client: r.client,
+      jobsRoot: jobs,
+      resultsRoot: results,
+      gatewayBaseUrl: "http://gateway:3000/v1",
+      fetch: (async () => {
+        reached += 1;
+        await gate;
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch,
+    });
+    const bridged = bridge.bridge(RUN);
+    while (!r.started()) await new Promise((res) => setTimeout(res, 5));
+    const n = ENGINE_TASK_HTTP_MAX_IN_FLIGHT + 3;
+    for (let i = 0; i < n; i++) {
+      r.stdout.write(`${JSON.stringify({ t: "http", id: String(i), method: "POST", path: "/v1/chat/completions", headers: { authorization: `Bearer ${KEY}` }, body: "" })}\n`);
+    }
+    for (let i = 0; i < 200 && answers.length < 3; i++) await new Promise((res) => setTimeout(res, 10));
+    expect(reached).toBe(ENGINE_TASK_HTTP_MAX_IN_FLIGHT);
+    expect(answers.filter((a) => a.t === "http_err" && a.code === "busy")).toHaveLength(3);
+    release();
+    for (let i = 0; i < 200 && answers.length < n; i++) await new Promise((res) => setTimeout(res, 10));
+    expect(answers.filter((a) => a.t === "http_res")).toHaveLength(ENGINE_TASK_HTTP_MAX_IN_FLIGHT);
+    r.stdout.end();
+    expect(await bridged).toBe("ended");
+  });
+
+  it("review MEDIUM-2: a refused start signals the run loop at once (it asks the gateway, which has ended the run)", async () => {
+    const jobs = tmp("i5-jobs-");
+    const results = tmp("i5-results-");
+    await publishJob(jobs, { runId: RUN });
+    let signalled = 0;
+    const off = onTaskOver(RUN, () => (signalled += 1));
+    const client = {
+      taskInput: async () => ({ status: 409, error: "execution_profile_unavailable", reason: "no_executor" }),
+      taskFrames: async (): Promise<EngineTaskFramesResponse> => {
+        throw new Error("never read");
+      },
+      taskPost: async () => undefined,
+    };
+    const bridge = new ExecutorTaskBridge({ client, jobsRoot: jobs, resultsRoot: results, gatewayBaseUrl: "http://gateway:3000/v1", pollMs: 5 });
+    expect(await bridge.tick()).toEqual([RUN]);
+    for (let i = 0; i < 100 && signalled === 0; i++) await new Promise((res) => setTimeout(res, 5));
+    off();
+    expect(signalled).toBe(1);
+    await rm(path.join(jobs, RUN), { recursive: true, force: true });
   });
 });

@@ -20,8 +20,11 @@
  *        placement makes it a refusal (rule id `execution-profile`) and ends the run `not_run` in the same
  *        transaction;
  *     4. names the placement on the run (`engine_runs.task_placement_id`, migration 0200, set once).
- *   After the commit the task's session is held here (an I4 stdio session, so the executor's channel routes serve
- *   it unchanged): the input, the task secret for the MACed `start` line, and the sandbox's stdout for the runner.
+ *     5. holds the task here BEFORE the commit (an I4 stdio session, so the executor's channel routes serve it
+ *        unchanged): the input, the task secret for the MACed `start` line, and the sandbox's stdout for the runner.
+ *   Any refusal after the offer (declined, expired, start failure, input digest mismatch, lost session, output
+ *   overflow) ends the run `not_run` (`isolation_unavailable`) here; a result is ingested only for a run whose
+ *   placement's linked report is `placed` (engine-runs.ts, review HIGH-1).
  *
  *   THE INPUT (`GET /v1/executor-channel/offers/:offerId/input[/:n]`): the manifest and each file, to the executor that
  *   accepted the offer, before its report; the run's artifact is streamed from the artifact store (never through the
@@ -74,7 +77,7 @@ import {
   type ExecutionRefusalReason,
 } from "@regulait/shared";
 import { databaseNow } from "./delegation.js";
-import { expireOffers, offerLinkedPlacement, pickLinkedReport, refusedLinkedPlacement } from "./executor-channel.js";
+import { expireOffers, linkedReportOf, offerLinkedPlacement, pickLinkedReport, refusedLinkedPlacement } from "./executor-channel.js";
 import { resolveRequirement } from "./execution-placement.js";
 import { holdStdioSession, liveStdioSessions, StdioSession, watchHeldStdioSession } from "./executor-stdio.js";
 import { buildAgentDecider } from "./evals.js";
@@ -85,6 +88,19 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /** the error code a run ends with when its task cannot be placed (decision 7: never clean, never run elsewhere) */
 export const ENGINE_TASK_ISOLATION_UNAVAILABLE = "isolation_unavailable" as const;
+/** review HIGH-1: the cause a result is refused with when no executor reported the run's task placed */
+export const ENGINE_TASK_NOT_PLACED = "engine_task_not_placed" as const;
+
+/**
+ * Review HIGH-1: the run names its task placement AND that placement's linked report is `placed` (an executor started
+ * the worker under the run's engine_worker profile and attested it). Read in the caller's transaction, on the locked
+ * run: the result route accepts a result (any status but not_run) only when this holds.
+ */
+export async function engineTaskPlacedTx(tx: Tx, run: Pick<EngineRunRow, "taskPlacementId">): Promise<boolean> {
+  if (run.taskPlacementId === null) return false;
+  const r = await linkedReportOf(tx as unknown as Db, run.taskPlacementId);
+  return r?.outcome === "placed";
+}
 
 // ---------------------------------------------------------------------------
 // The tasks this process holds
@@ -108,6 +124,8 @@ export class EngineTask {
   eof = false;
   /** why the task cannot (or can no longer) run: a decision 7 code, a mismatch, or a session failure */
   refusal: string | null = null;
+  /** review MEDIUM-2: the refusal has ended the run (once) */
+  runEnded = false;
   private waiters: Array<() => void> = [];
 
   constructor(
@@ -223,7 +241,10 @@ type StartOutcome =
   | { kind: "refused_request"; status: number; error: string; detail?: string }
   | { kind: "not_entitled"; ended: EngineRunRow | null }
   | { kind: "unplaced"; code: ExecutionRefusalReason; placementId: string | null; ended: EngineRunRow | null }
-  | { kind: "offered"; placementId: string; offerId: string; executorId: string; files: HeldFile[]; secret: string | null; run: EngineRunRow };
+  | { kind: "offered"; task: EngineTask; run: EngineRunRow };
+
+/** the live-session cap was reached between the check and the hold: the start is rolled back (nothing was offered) */
+class EngineTaskCapacityError extends Error {}
 
 const runParam = z.object({ runId: z.string().uuid() });
 
@@ -235,8 +256,45 @@ function inlineFile(path: string, data: string): HeldFile {
 /**
  * THE TASK START, in one transaction (see the module comment). Exported for the suite; the route below is its only
  * product caller.
+ *
+ * Review MEDIUM-2: the task is HELD (its session under the offer id, its input under the run and offer ids) INSIDE the
+ * transaction, before the commit makes the offer visible to any executor; a rollback forgets it. An executor that
+ * accepts the offer therefore always finds its input here (never `engine_task_unknown` from a commit-then-register
+ * race). A start the live-session cap refuses after the check is rolled back and the run ends not_run.
  */
 export async function startEngineTask(db: Db, deps: EngineTaskDeps, runnerId: string, runId: string, body: z.infer<typeof engineTaskInputUploadSchema>): Promise<StartOutcome> {
+  let held: EngineTask | null = null;
+  try {
+    return await startEngineTaskTx(db, deps, runnerId, runId, body, (t) => (held = t));
+  } catch (e) {
+    const t = held as EngineTask | null;
+    if (t) {
+      forget(t);
+      t.session.end();
+    }
+    if (!(e instanceof EngineTaskCapacityError)) throw e;
+    const ended = await endUnstartedRun(db, deps, runnerId, runId, "engine_task_capacity");
+    return { kind: "unplaced", code: "no_executor", placementId: null, ended };
+  }
+}
+
+/** a run whose task could not even be offered (the start was rolled back): it ends not_run, isolation_unavailable */
+async function endUnstartedRun(db: Db, deps: EngineTaskDeps, runnerId: string, runId: string, cause: string): Promise<EngineRunRow | null> {
+  return db.transaction(async (tx) => {
+    const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
+    if (!run || run.runnerId !== runnerId || run.status !== "leased" || run.taskPlacementId !== null) return null;
+    return deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause }, await databaseNow(tx as unknown as Db));
+  });
+}
+
+async function startEngineTaskTx(
+  db: Db,
+  deps: EngineTaskDeps,
+  runnerId: string,
+  runId: string,
+  body: z.infer<typeof engineTaskInputUploadSchema>,
+  hold: (task: EngineTask) => void,
+): Promise<StartOutcome> {
   const manifests = deps.manifest();
   return db.transaction(async (tx) => {
     const txDb = tx as unknown as Db;
@@ -376,7 +434,15 @@ export async function startEngineTask(db: Db, deps: EngineTaskDeps, runnerId: st
     }
     // 4. the run names its placement (set once: migration 0200's trigger)
     const [updated] = await tx.update(engineRuns).set({ taskPlacementId: placed.placementId }).where(eq(engineRuns.id, run.id)).returning();
-    return { kind: "offered" as const, placementId: placed.placementId, offerId: placed.offerId, executorId: placed.executorId, files, secret: body.secret, run: updated! };
+    // 5. the task is held BEFORE the commit (review MEDIUM-2; the caller forgets it on a rollback)
+    const session = new StdioSession(placed.offerId, placed.executorId, { command: m.taskEntry.command, args: [...m.taskEntry.args] });
+    if (body.secret !== null) session.secret = body.secret;
+    const task = new EngineTask(run.id, runnerId, placed.placementId, placed.offerId, session, files);
+    if (!holdStdioSession(session)) throw new EngineTaskCapacityError("the live stdio session cap was reached");
+    hold(task);
+    tasksByRun.set(task.runId, task);
+    tasksByOffer.set(task.offerId, task);
+    return { kind: "offered" as const, task, run: updated! };
   });
 }
 
@@ -385,7 +451,7 @@ export async function startEngineTask(db: Db, deps: EngineTaskDeps, runnerId: st
 // ---------------------------------------------------------------------------
 
 /** a task's state as the runner sees it, from the placement's linked report and the session */
-async function taskState(db: Db, task: EngineTask): Promise<{ state: EngineTaskState; refusal: string | null }> {
+async function readTaskState(db: Db, task: EngineTask): Promise<{ state: EngineTaskState; refusal: string | null }> {
   if (task.refusal !== null) return { state: "refused", refusal: task.refusal };
   // an offer whose deadline passed is expired (its refused report row written) before it is read, as awaitPlacement does
   await expireOffers(db);
@@ -397,10 +463,39 @@ async function taskState(db: Db, task: EngineTask): Promise<{ state: EngineTaskS
   }
   if (!r) {
     const [o] = await db.select({ status: executionOffers.status }).from(executionOffers).where(eq(executionOffers.id, task.offerId));
-    if (o && (o.status === "expired" || o.status === "declined" || o.status === "withdrawn")) return { state: "refused", refusal: `offer_${o.status}` };
+    if (o && (o.status === "expired" || o.status === "declined" || o.status === "withdrawn")) {
+      task.refusal = `offer_${o.status}`;
+      return { state: "refused", refusal: task.refusal };
+    }
     return { state: "awaiting_placement", refusal: null };
   }
   return { state: task.eof ? "ended" : "running", refusal: null };
+}
+
+/**
+ * Review MEDIUM-2: a task refused at ANY point after its offer (the offer declined or expired, a start failure, an input
+ * digest mismatch, a lost session, an output overflow) ends its run `not_run` (`isolation_unavailable`) at once, here
+ * in the gateway, with the refusal as the cause. The runner learns it from its next frames read and its next heartbeat
+ * (`cancel`), so it is freed promptly instead of holding the lease to the deadline. Once per task; a run that is no
+ * longer leased, or names another placement, is left alone.
+ */
+async function endRunOfRefusedTask(db: Db, deps: EngineTaskDeps, task: EngineTask): Promise<void> {
+  if (task.runEnded || task.refusal === null) return;
+  task.runEnded = true;
+  const cause = `engine_task_${task.refusal}`.slice(0, 120);
+  const ended = await db.transaction(async (tx) => {
+    const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, task.runId)).for("update");
+    if (!run || run.status !== "leased" || run.taskPlacementId !== task.placementId) return null;
+    return deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause }, await databaseNow(tx as unknown as Db));
+  });
+  task.session.close();
+  if (ended) await deps.notifyEnded(db, [ended]);
+}
+
+async function taskState(db: Db, deps: EngineTaskDeps, task: EngineTask): Promise<{ state: EngineTaskState; refusal: string | null }> {
+  const st = await readTaskState(db, task);
+  if (st.state === "refused") await endRunOfRefusedTask(db, deps, task);
+  return st;
 }
 
 /** the run's task is over (its run ended, or the session did and the runner read everything): stop and forget it */
@@ -410,9 +505,12 @@ function closeTask(task: EngineTask): void {
   forget(task);
 }
 
-/** a watchdog: a task whose run is no longer leased is stopped (a cancel, a timeout, a result: nothing runs on) */
+/**
+ * A watchdog: a task whose run is no longer leased is stopped (a cancel, a timeout, a result: nothing runs on), and a
+ * task refused while nobody reads its frames still ends its run (review MEDIUM-2).
+ */
 export const ENGINE_TASK_WATCHDOG_MS = 2_000;
-function watchRun(db: Db, task: EngineTask): void {
+function watchRun(db: Db, deps: EngineTaskDeps, task: EngineTask): void {
   const timer = setInterval(() => {
     if (!tasksByRun.has(task.runId)) {
       clearInterval(timer);
@@ -423,7 +521,9 @@ function watchRun(db: Db, task: EngineTask): void {
       if (!r || r.status !== "leased") {
         clearInterval(timer);
         closeTask(task);
+        return;
       }
+      await taskState(db, deps, task);
     })().catch(() => undefined);
   }, ENGINE_TASK_WATCHDOG_MS);
   timer.unref?.();
@@ -447,19 +547,10 @@ export function registerEngineTaskRoutes(app: FastifyInstance, db: Db, deps: Eng
       if (out.ended) await deps.notifyEnded(db, [out.ended]);
       return reply.status(409).send({ statusCode: 409, error: "execution_profile_unavailable", ruleId: EXECUTION_PROFILE_RULE_ID, reason: out.code, placementId: out.placementId });
     }
-    const m = deps.manifest()[out.run.engineId as EngineId];
-    const session = new StdioSession(out.offerId, out.executorId, { command: m.taskEntry.command, args: [...m.taskEntry.args] });
-    if (out.secret !== null) session.secret = out.secret;
-    const task = new EngineTask(out.run.id, runnerId, out.placementId, out.offerId, session, out.files);
-    if (!holdStdioSession(session)) {
-      // the cap was reached between the decision and now: the offer stays unattached and expires (its report row says so)
-      return reply.status(503).send({ error: "engine_task_capacity" });
-    }
-    tasksByRun.set(task.runId, task);
-    tasksByOffer.set(task.offerId, task);
-    watchHeldStdioSession(db, session);
-    watchRun(db, task);
-    return reply.status(201).send({ placementId: out.placementId, offerId: out.offerId, inputDigest: task.manifest.digest });
+    const task = out.task;
+    watchHeldStdioSession(db, task.session);
+    watchRun(db, deps, task);
+    return reply.status(201).send({ placementId: task.placementId, offerId: task.offerId, inputDigest: task.manifest.digest });
   });
 
   // ---- the sandbox's stdout, for the runner (long-polled, acknowledged with `from`) ----------------------------------
@@ -473,10 +564,10 @@ export function registerEngineTaskRoutes(app: FastifyInstance, db: Db, deps: Eng
     if (!task || task.runnerId !== req.authCtx.engineRunnerId) return reply.status(409).send({ error: "engine_task_unknown", detail: "this gateway process holds no task of that run for this runner" });
     if (!task.ack(q.data.from)) return reply.status(409).send({ error: "engine_task_from_invalid" });
     const until = Date.now() + q.data.wait * 1000;
-    let st = await taskState(db, task);
+    let st = await taskState(db, deps, task);
     while (task.framesFrom(q.data.from).length === 0 && st.state !== "refused" && !task.eof && Date.now() < until) {
       await task.waitForWork(Math.min(250, Math.max(1, until - Date.now())), q.data.from);
-      st = await taskState(db, task);
+      st = await taskState(db, deps, task);
     }
     const frames = task.framesFrom(q.data.from);
     const last = frames.length > 0 ? frames[frames.length - 1]!.seq + 1 : q.data.from;

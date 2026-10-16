@@ -56,10 +56,8 @@ export const ENGINE_TASK_HTTP_BODY_MAX_BYTES = 512 * 1024;
 export const ENGINE_TASK_OUTPUT_BUFFER_MAX_BYTES = 32 * 1024 * 1024;
 /** at most this many frames in one answer to the runner */
 export const ENGINE_TASK_FRAMES_MAX = 64;
-/** how long an executor waits for the runner's input (within the report deadline of an accepted offer) */
+/** review LOW-2: an executor's whole input fetch (manifest and every file) is abandoned past this (inside the report deadline) */
 export const ENGINE_TASK_INPUT_WAIT_MS = 90_000;
-/** a refusal of the executor's input fetch that means "not yet": the runner has not uploaded it */
-export const ENGINE_TASK_INPUT_PENDING = "engine_task_input_pending" as const;
 /**
  * the public literal address an engine task's in-sandbox egress probe must FAIL to reach (ADR-0187 decision 19; the
  * engine images' `REGULAIT_EGRESS_PROBE_ADDRESS`, which the sandbox init does not pass to the workload)
@@ -186,7 +184,15 @@ export const engineTaskOutFrameSchema = z.discriminatedUnion("t", [
 export type EngineTaskOutFrame = z.infer<typeof engineTaskOutFrameSchema>;
 
 /** why the runner did not forward a tunnelled request (a fixed vocabulary) */
-export const ENGINE_TASK_HTTP_ERRORS = ["not_gateway", "too_large", "unreachable", "timeout", "invalid"] as const;
+/**
+ * review MEDIUM-1: `unauthorized` — the request does not carry exactly the run's own key; `busy` — the task already has
+ * ENGINE_TASK_HTTP_MAX_IN_FLIGHT requests in flight
+ */
+export const ENGINE_TASK_HTTP_ERRORS = ["not_gateway", "too_large", "unreachable", "timeout", "invalid", "unauthorized", "busy"] as const;
+/** review MEDIUM-1: at most this many gateway channel requests of one task are in flight at once */
+export const ENGINE_TASK_HTTP_MAX_IN_FLIGHT = 8;
+/** review MEDIUM-1: the gateway channel reaches exactly these model routes (POST, under the gateway's base path) */
+export const ENGINE_TASK_GATEWAY_ROUTES = ["chat/completions", "messages"] as const;
 
 /** runner → sandbox (stdin) */
 export const engineTaskInFrameSchema = z.discriminatedUnion("t", [

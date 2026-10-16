@@ -151,7 +151,7 @@ async function startGatewayProxy(write: (f: EngineTaskOutFrame) => Promise<void>
       answers.set(id, (a) => {
         clearTimeout(timer);
         answers.delete(id);
-        if (a.t === "http_err") return fail(a.code === "not_gateway" ? 403 : a.code === "too_large" ? 413 : 502);
+        if (a.t === "http_err") return fail(a.code === "not_gateway" ? 403 : a.code === "too_large" ? 413 : a.code === "unauthorized" ? 401 : a.code === "busy" ? 429 : 502);
         res.statusCode = a.status;
         if (a.headers["content-type"]) res.setHeader("content-type", a.headers["content-type"]);
         res.end(Buffer.from(a.body, "base64"));

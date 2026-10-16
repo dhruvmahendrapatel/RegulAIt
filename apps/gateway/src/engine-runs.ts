@@ -37,7 +37,7 @@
  * state. A lease is one `FOR UPDATE SKIP LOCKED` statement.
  */
 import { createHash } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   agents,
   and,
@@ -106,7 +106,7 @@ import { z } from "zod";
 import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gatewayBaseUrlOf, manifestOf, NO_IDENTITY, runnerCountsForCurrentBuild, selfTestAdmitsEnable, syncEngineManifest, taxonomyOf, type EngineOptions } from "./engines.js";
 import { engineDetectionScrub } from "./engine-scrub.js";
 import { artifactAccessible, artifactStoreFromEnv, recordArtifactScanTx } from "./model-artifacts.js";
-import { registerEngineTaskRoutes } from "./engine-tasks.js";
+import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPlacedTx, registerEngineTaskRoutes } from "./engine-tasks.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -524,6 +524,13 @@ export interface FinishArgs {
   rawReport?: { sha256: string; bytes: number; ciphertext: string | null; expiresAt: Date | null } | null;
   /** a runner's result: refused (the run times out) when the deadline or lease has passed */
   requireLive?: boolean;
+  /**
+   * ADR-0190 I5 (review HIGH-1): a runner's result. Any status but `not_run` is accepted only when the run names its
+   * task placement AND that placement's linked report is `placed` (an executor ran the worker under the run's
+   * `engine_worker` profile). Otherwise, decided under the row lock, the run ends `not_run` (`isolation_unavailable`):
+   * a result that no placed sandbox produced is never ingested.
+   */
+  requirePlacedTask?: boolean;
 }
 
 /**
@@ -593,6 +600,10 @@ async function endLockedRun(tx: Tx, locked: EngineRunRow, given: FinishArgs, now
       const cause = deadline ? "deadline_passed" : "lease_expired";
       args = { status: "timeout", errorCode: cause, normalised: noResult("timeout"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
     }
+  }
+  if (given.requirePlacedTask && args === given && locked.status === "leased" && given.status !== "not_run" && !(await engineTaskPlacedTx(tx, locked))) {
+    const cause = ENGINE_TASK_NOT_PLACED;
+    args = { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, normalised: noResult("not_run"), cause, actorUserId: given.actorUserId, envelope: null, rawReport: null };
   }
   const costUsd = await runCostUsd(tx, locked);
   const summary = runSummary(args.normalised, args.cause, args.envelope ?? null);
@@ -1973,8 +1984,10 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           cause: problem,
           actorUserId: run.runAsUserId ?? NO_IDENTITY,
           requireLive: true,
+          requirePlacedTask: true,
         });
         if (failed?.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
+        if (failed && isUnplacedEnd(failed)) return unplacedReply(reply);
         return reply.status(422).send({
           error: "engine_result_invalid",
           detail: problem,
@@ -1994,14 +2007,28 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
         envelope,
         rawReport,
         requireLive: true,
+        requirePlacedTask: true,
       });
       if (!done) return reply.status(409).send({ error: "engine_run_finished" });
+      if (isUnplacedEnd(done) && envelope!.status !== "not_run") return unplacedReply(reply);
       if (done.status === "timeout" && envelope!.status !== "timeout") {
         return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout", detail: "the result arrived after the run's deadline or lease; it was not ingested" });
       }
       return reply.send({ runId: run.id, status: done.status, verdict: normalised.verdict, counts: normalised.counts });
     },
   );
+}
+
+/** review HIGH-1: the run was ended because its result came from no placed task */
+function isUnplacedEnd(run: EngineRunRow): boolean {
+  return run.status === "not_run" && run.errorCode === ENGINE_TASK_ISOLATION_UNAVAILABLE && (run.summary as { cause?: unknown } | null)?.cause === ENGINE_TASK_NOT_PLACED;
+}
+function unplacedReply(reply: FastifyReply) {
+  return reply.status(409).send({
+    error: ENGINE_TASK_NOT_PLACED,
+    status: "not_run",
+    detail: "no executor reported this run's task placed under its engine_worker profile; the result was not ingested and the run ended not_run (ADR-0190 I5)",
+  });
 }
 
 /** read-only helpers for tests and views */
