@@ -1587,3 +1587,37 @@ follow that redirect, so no log comes back. The GitHub MCP `get_job_logs` tool f
 entry covers this.
 
 Rule: read a CI job's log with the GitHub MCP `get_job_logs` tool. Don't retry `gh api` against the logs endpoint.
+
+### M-081 (2026-10-16) - REPEAT of M-058: a PR release ran after the edit it depended on had failed
+
+The master session put an edit script and the release of PR #386 (title prefix stripped, hold removed) in one Bash
+call, joined with `;`. The edit script's assert failed and nothing was committed, but the release still ran, so the
+unfixed PR #386 was briefly released to the merge loop. It was caught and re-held within a minute, before the loop
+merged it. M-058 already says to chain an edit into the step that depends on it with `&&`, never `;`. That rule was
+written for commits; a release is a dependent step of the same kind, and is worse to get wrong because another
+process acts on it.
+
+Rule: never put a release (or any step another process acts on) in the same command as the change it depends on.
+Release only in a separate step, after confirming the push landed (`git rev-parse HEAD origin/<branch>` match).
+
+### M-082 (2026-10-16) - A builder ran repo-wide guard tests with new files untracked, reported a pass, and CI went red
+
+On #387 a builder ran `vitest --dir scripts` while its new files were still untracked. A guard among those tests
+checks basenames through `git ls-files`, so it could not see the new files, and the builder reported a pass. CI ran on
+the committed tree and failed. The run was also not CI's: bare `vitest` picks up compiled copies under `dist` as well,
+where the package script does not. This is the family of M-047 and M-068 (the check run was not the check CI runs),
+but its cause, guard tests that read git's index, is new.
+
+Rule: `git add` new files before running any test that reads the git index, and run tests exactly as CI does: the
+package's own test script, never a bare `vitest` invocation.
+
+### M-083 (2026-10-16) - Two migrations broke the 0185 database invariant guard, invisible without Postgres
+
+Two builders wrote migrations that failed `apps/gateway/src/zz-dbguard-0185.test.ts`, and both broke both rules:
+I5 (migration 0200, `engine_runs`) and S9 (migration 0199, `spiffe_trust_bundles`) each added a function without
+`SET search_path = pg_catalog, public, pg_temp`, and a row-level UPDATE/DELETE refusal trigger with no
+statement-level TRUNCATE refusal. Both were fixed before merge. Postgres is not available in the build environment, so the guard never ran
+before CI. The builder brief did not mention the guard.
+
+Rule: read `apps/gateway/src/zz-dbguard-0185.test.ts` before writing any migration, and check every new function and
+every new refusal trigger against it by hand when Postgres is not available. The builder brief now says so.
