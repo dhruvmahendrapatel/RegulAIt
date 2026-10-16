@@ -57,9 +57,12 @@ Dockerfile fails. Evidence for keeping the pins:
 The Dependabot alerts for these two advisories should be dismissed as "no bump available" with a link to this
 section. The fix path is unchanged: pin the first garak release that allows datasets 5.x.
 
-**Re-checked 2026-10-16 for Dependabot alerts #83 (nltk), #84 (datasets, PR #239) and #85 (fsspec, PR #347). None can
-be patched today; the pins stay, and the acceptance below runs until 2026-11-16** (ADR-0187 decision 225). Read from PyPI's
-JSON API, OSV and garak's repository on 2026-10-16:
+**Re-checked 2026-10-16 for Dependabot alerts #83 (nltk), #84 (datasets) and #85 (fsspec). None can be patched
+today; the pins stay, and the acceptance below runs until 2026-11-16** (ADR-0187 decision 225). Dependabot PRs #239 and
+#347 were the same grouped bump (datasets 5.0.1 with fsspec 2026.6.0, covering both #84 and #85); both were closed
+unmerged (2026-10-10 and 2026-10-11) because garak's `datasets<4.0` fails `pip check`. The fsspec image allow-list entry
+(`security/image-allowlist.engine-garak.json`) expires later, on 2026-12-09; the earlier date, 2026-11-16, governs the
+re-check. Read from PyPI's JSON API, OSV and garak's repository on 2026-10-16:
 - garak 0.17.0 (2026-09-09) is still the latest release and still declares `datasets>=3.0.0,<4.0` and `nltk>=3.10.3`.
   **New since 2026-10-11:** garak's development branch (`0.17.1.pre1`) now declares `datasets>=5.0.1,<6.0` (with
   `transformers>=5.14.1,<5.20.0`, which our 5.19.0 meets). The first garak release that carries it clears #84 and #85:

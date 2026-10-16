@@ -2716,8 +2716,9 @@ real gateway). Each guard was shown red by breaking it (named with each decision
      - node-forge and braces: both are optional in the lockfile, and `npm ci --omit=optional` never installs them
        (decision 177; `npm audit --omit=optional` reports 0).
 
-     Dependabot PRs #347 and #239 still cannot build, because garak's `datasets<4.0` fails `pip check`. They are left
-     for Dependabot to close.
+     Dependabot PRs #239 (closed 2026-10-10) and #347 (closed 2026-10-11) were the same grouped bump (datasets 5.0.1
+     with fsspec 2026.6.0, covering both #84 and #85). Both were closed unmerged, because garak's `datasets<4.0` fails
+     the build's `pip check`. No Dependabot PR is open for these alerts.
 
      Not done:
      - No override forcing nunjucks' optional peer to chokidar 5. That is outside nunjucks' declared range, for a
@@ -2726,5 +2727,6 @@ real gateway). Each guard was shown red by breaking it (named with each decision
      - No image-gate allow-list entry for the unpatched advisories. The gate counts only fixable HIGH or CRITICAL
        findings, so such an entry would be stale.
 
-     The evidence is in each engine's `THIRD_PARTY.md`. Re-check at each garak, nltk, promptfoo, jks-js or nunjucks
-     release, and by 2026-11-16 at the latest.
+     The evidence is in each engine's `THIRD_PARTY.md`. Re-check at each garak, nltk, promptfoo, jks-js, nunjucks,
+     node-forge or braces release, and by 2026-11-16 at the latest. That date governs: the fsspec image allow-list entry
+     (decision 160) runs to 2026-12-09, but this acceptance, fsspec included, ends on 2026-11-16 and is re-checked then.
