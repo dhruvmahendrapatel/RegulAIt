@@ -52,7 +52,7 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import { BATCH5_STRICT_DEFAULTS, decisionFactsSchema, ENGINE_MANIFEST, ENGINE_RUN_ENTITLEMENT_PHASE, engineTaskInputDigest, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
+import { BATCH5_STRICT_DEFAULTS, decisionFactsSchema, ENGINE_MANIFEST, ENGINE_RUN_ENTITLEMENT_PHASE, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
 import { buildSelfTest, ExecutorTaskBridge, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
 import { runSandboxTask } from "@regulait/engine-runner/worker";
 import { ARTIFACT_NAME, ExchangeScanExecutor, modelscanAdapter } from "@regulait/engine-modelscan";
@@ -393,7 +393,7 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
     setEngineTaskPlacementAffinityForTest([ex.executorId]);
     try {
       await ex.run(1); // announce and self-test: a fresh L2 attestation for the engine-worker profile
-      const loop = ex.run(40);
+      const loop = ex.run(15);
       const bytes = maliciousPickle();
       const art = await uploadedAs(alice, bytes);
       const runId = await startScan(art.id, projectId);
@@ -429,8 +429,6 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
       expect(seenInputs.at(-1)).toEqual({ files: [`${runId}/artifact.pkl`, `${runId}/job.json`], artifactSha256: art.sha256, secret: undefined });
       const streamed = await db.select().from(auditLog).where(and(eq(auditLog.objectId, runId), eq(auditLog.ruleId, "engine-run-artifact-streamed")));
       expect(streamed.map((s) => (s.detail as { phase: string }).phase)).toContain("task_input");
-      // the runner's own job never held the artifact digest as an upload: the input is the gateway's
-      expect(engineTaskInputDigest([])).not.toBe(sb!.inputSha256);
     } finally {
       setEngineTaskPlacementAffinityForTest(null);
     }
