@@ -564,15 +564,40 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
    them on the Docker host (`docker load` in an air-gapped install).
 5. **Start the executor**: register a `worker_runtime` workload identity for it, set `REGULAIT_EXECUTOR_IDENTIFIER`,
    set `REGULAIT_DOCKER_GID` to the group that owns the host's `/var/run/docker.sock`, and run
-   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only,
-   at `REGULAIT_EXECUTOR_GATEWAY_URL`, which has no working default (the placeholder ends in `.invalid`). The executor
-   sits on the internal-only `engines` network, which has no route to the public address, so set it to an https
-   address of the gateway that the `engines` network can reach (a TLS front on that network). At start the executor
-   checks that address over TLS; if it cannot reach it, it exits (code 2) with the reason and this instruction, and
-   compose restarts it, so nothing is placed until the address works. Plain http is for
-   a development box only, through the explicit override `docker compose -f docker-compose.yml -f
-   compose.isolation-insecure-dev.yml --profile isolation up`, and the executor logs a warning when it runs that way.
-   On its first start it prints its public key: register
+   `docker compose --profile isolation up -d sandbox-executor`. The executor reaches the gateway over **https** only.
+   It sits on the internal-only `engines` network, so the same command also starts its own **internal TLS front**
+   (`executor-front`) and a one-shot copy step (`executor-front-ca`); no extra step is needed:
+   - `executor-front` is a second Caddy on `engines` only, with no host port. It serves
+     `https://executor-front:8443`, the executor's default `REGULAIT_EXECUTOR_GATEWAY_URL`, for the executor channel
+     (`/v1/executor-channel/*`) only, and answers 404 to every other path. It removes every forwarding header and is
+     not in `REGULAIT_TRUSTED_PROXIES`, so the gateway's trust of client addresses does not change.
+   - Its certificate comes from its own local CA, which Caddy creates on the front's first start in the
+     `executor-front-data` volume and renews itself (leaf and intermediate). Nothing is committed or shipped. No container
+     mounts the CA's private key except the front and the one-shot copier below (which reads only the
+     certificate). The executor holds the host's Docker socket, so it is host root anyway. **Back the volume up with the others if you want the CA to survive a
+     rebuild**: after `docker compose down -v` the next start creates a new CA, and the copy step picks it up.
+   - `executor-front-ca` copies the CA's root certificate (only the certificate) to the `executor-front-ca` volume. The
+     executor mounts it read-only and **pins** it (`REGULAIT_EXECUTOR_GATEWAY_CA_FILE`): the front's certificate is
+     checked against that CA and nothing else, not the public roots. There is no switch that skips verification, and
+     `NODE_TLS_REJECT_UNAUTHORIZED=0` stops the executor at start. At start the executor logs the pinned CA's SHA-256
+     fingerprint (`docker compose logs sandbox-executor`). The root certificate it came from is
+     `caddy/pki/authorities/local/root.crt` in the `executor-front-data` volume.
+
+   To use a TLS front of your own instead, set `REGULAIT_EXECUTOR_GATEWAY_URL` to its https address on a network the
+   executor can reach, and `REGULAIT_EXECUTOR_GATEWAY_CA_FILE` to the CA that issued its certificate (mounted into the
+   executor), or to an empty value to verify against the image's public roots. At start the executor checks the
+   address over TLS; if it cannot reach it or does not trust it, it exits (code 2) with the reason, and compose restarts
+   it, so nothing is placed until the address works. Plain http is for a development box only, through the explicit
+   override `docker compose -f docker-compose.yml -f compose.isolation-insecure-dev.yml --profile isolation up`, and the
+   executor logs a warning when it runs that way.
+
+   > **Not yet executed end to end (M-041).** The front's Caddyfile was run locally with the Caddy 2.10.2 release
+   > binary: channel paths reached a test upstream with no forwarding header, every other path got 404, and the
+   > executor's own pinning code accepted the front's certificate under the copied root. The compose services
+   > themselves (`executor-front`, `executor-front-ca`) and a real placement through them have **not** been run on
+   > Docker yet. Record what you find against ADR-0190 "I4 follow-ups".
+
+   On its first start the executor prints its public key: register
    the executor with that key on the Engines page (`POST /v1/executors`, backend `gvisor`, class
    `user_space_kernel`). It then announces itself, self-tests every profile it can serve, and takes placements.
 

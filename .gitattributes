@@ -20,3 +20,6 @@ scripts/spdx3/spdx-model.ttl -text
 scripts/spdx3/spdx-context.jsonld -text
 scripts/spdx3/*.py text eol=lf
 scripts/spdx3/requirements.lock text eol=lf
+# ADR-0190 I4 follow-ups (M-069): Caddy parses these inside Linux containers (the executor front's CEL matcher sits
+# at a line end)
+infra/caddy/*Caddyfile text eol=lf
