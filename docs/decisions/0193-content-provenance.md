@@ -44,6 +44,14 @@ Option B.
 - **EU AI Act Art. 50 machine-readable marking.** R5 lists these items as UNVERIFIED, because the primary text was
   unreachable from the session. This needs legal review. If a verified duty applies, decision 6 is revisited and C2PA,
   or another marking, becomes a requirement. This ADR makes no legal claim.
+  - **Owner decision (accepted 2026-10-16): get counsel, no claims.** The owner chose this from the options the
+    master session presented.
+    - The owner obtains a legal opinion on the Art. 50 marking duty.
+    - Until that opinion is in, the product, the docs and marketing text make **no** claim of Art. 50 compliance, and
+      content marking stays optional.
+    - If counsel says the duty applies, decision 6 is revisited and C2PA (or an equivalent marking) becomes a
+      requirement.
+    - The item stays open until the opinion arrives. No build follows from this decision.
 
 ## Consequences
 

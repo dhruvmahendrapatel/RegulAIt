@@ -403,6 +403,8 @@ strict default: each makes a default stricter or a definition more exact (ADR-01
   interceptors are used, because supervisor middleware is https-only and outside owner decision 7. Decision 7's
   mitigations gain an `SO_PEERCRED` check and a `0600` socket. OpenShell reuses tokens until rotation, so `jti` replay
   detection is not available; this is recorded as a residual.
+  *These conditions still bind I7 whenever it is built. On 2026-10-16 the owner deferred I7 (owner decision E):
+  the I0 GO above is not an owner go.*
 - **H. Survey corrections.** The survey table is corrected as in R13 §4: Kata 4.2.0 and 3.32.0, the nsjail date, the
   OpenShell PyPI scope, and `go-landlock` (MIT). Open question 8 drops the items R13 verified.
 - **I. Open question 6.** Rootless `runsc` works on Linux without root. The macOS and Windows path is still untested
@@ -686,6 +688,39 @@ admin relaxation to L2 for interactive persons), master session, 2026-10-15, ans
 - **Build:** a slice after I5 (it touches the same placement code). The Decision BOM panel and the settings UI show the
   relaxation; vectors pin the API-key case as L3.
 
+## Owner decision D: the source of a project's sensitivity (accepted 2026-10-16)
+
+The owner chose "use cases + admin field" from the options the master session presented, 2026-10-16, answering the
+open question in the I2 as-built section, item 1.
+
+- **The rule.** A project's sensitivity is the strictest sensitivity among its AI use cases, MAX'd with an optional
+  project sensitivity set by an admin. Decision 7's data-sensitivity floor uses this value.
+- **The admin field can only raise.** It can never bring the project's sensitivity below what its use cases give. A
+  field value lower than the use cases' strictest has no effect on the MAX.
+- **Audited, with step-up.** Setting or changing the field is audited and needs a fresh step-up. It uses the existing
+  `settings_relax` kind, as decision 11's rows and the I2 as-built assignment and profile rules do. No new step-up kind
+  is added.
+- **Fail closed, unchanged.** A project with no use case and no field set cannot resolve the fact and is refused
+  `policy_unresolved` (owner decision B), exactly as today.
+- **Left open, build-time choices:** where the field is stored and its column name, the route and UI that set it, the
+  audit action name, and the exact facts the step-up is bound to. The build slice records these in an as-built
+  section.
+- **Build:** a slice adding the admin project-sensitivity field (queued in `STATE.md`).
+
+## Owner decision E: the I7 OpenShell backend is deferred (accepted 2026-10-16)
+
+The owner chose "defer until L2/L3 proven" from the options the master session presented, 2026-10-16, answering the
+I7 go/no-go ("if I0 says go" in the slice table).
+
+- **No-go for now.** I7 is not built. Amendment G's admission conditions stay recorded and still bind I7 when it is
+  built.
+- **When it is revisited.** Only after both of these hold:
+  1. gVisor L2 is verified in CI (PR #385, waiting on the runsc re-pin);
+  2. a Kata L3 backend exists.
+- **Never the only path.** OpenShell may only ever be an additional backend. It is never the sole path to a required
+  class (owner decision 1 and the second friction above).
+- **Build:** none.
+
 ## Rollout: slices (one PR each)
 
 Hot files as in earlier batches (`schema.ts`, migrations, `app.ts`, `route-classes.ts`, `openapi-registry.ts`, the
@@ -703,7 +738,7 @@ checked against the specification rather than against themselves.
 | **I4 gVisor backend and stdio move** | Claude | `runsc` backend (compose and Kubernetes), stdio closure images pinned by digest, MCP over the executor stream, **removal of the in-gateway stdio spawn**, ISACA item 5 collector | I2, I3 | serial |
 | **I5 engines under profiles** | Claude | ADR-0187 workers and scanner placed as `engine_worker`, runtime probes in their self-tests | I4 | **Yes**, with I6 |
 | **I6 Kubernetes and Kata** | Claude | RuntimeClass `gvisor`/`kata` manifests, PSS `restricted` namespace, deny-all NetworkPolicy, BYOC and air-gapped runbooks (every command executed first, M-041) | I4 | **Yes**, with I5 |
-| **I7 OpenShell backend** (if I0 says go) | Claude | Compute via OpenShell's drivers, our interceptor on `unix://`, prover findings to the approvals queue as a new kind `isolation_policy_change`, `injected_at_egress` secrets | I4; owner go after I0 | **Yes**, with I5/I6 |
+| **I7 OpenShell backend** (if I0 says go) | Claude | Compute via OpenShell's drivers, our interceptor on `unix://`, prover findings to the approvals queue as a new kind `isolation_policy_change`, `injected_at_egress` secrets. **Deferred, no-go for now (owner decision E, 2026-10-16):** revisited only once gVisor L2 is verified in CI and a Kata L3 backend exists | I4; owner go after I0; **owner decision E's two conditions** | **Yes**, with I5/I6 |
 | **I8 evidence** | Claude | `decision_facts.execution`, the Decision BOM section, AI BOM executor and profile components | I2; ADR-0189 B2/B3 merged | **Yes**, with I5–I7 |
 | **I9 web UI** | Codex | Execution profile option on the agent builder and the MCP server page (ADR-0177 §3: no new navigation group); profiles and executors under the existing Engines page (Integrations); placement refusals with their reason; attestation chips; posture rows | I1 stubs | **Yes** (web only); merges after I2–I4's real routes |
 
@@ -732,6 +767,8 @@ decisions above leave open:
    fact and is refused `policy_unresolved` (fail closed, ADR-0180). Once I4/I5 route calls through placement, a
    stdio call in a project without a use case is refused until one is registered. Whether projects should get
    their own sensitivity field is an open question for the owner. Until it is settled, the fail-closed rule stands.
+   **Answered 2026-10-16 by owner decision D below:** use cases plus an optional admin field that can only raise the
+   sensitivity. The fail-closed rule for a project with neither stays.
 2. **Agents with no autonomy class.** Registry agents and RegulAIt's own workers get a defined L1 autonomy floor.
    A floor that is genuinely null stays unresolved and is refused, as the `unknown-autonomyFloor` vector requires.
 3. **Assurance vocabulary.** It adds `unknown`, for a workload kind that acts for an agent but names none. That
