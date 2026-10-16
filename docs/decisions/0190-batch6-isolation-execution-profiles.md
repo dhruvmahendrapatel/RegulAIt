@@ -659,19 +659,24 @@ The owner accepted both recommendations ("go with your recommendations", master 
 
 ## Owner decision C: a person's own stdio call (accepted 2026-10-15)
 
-The owner chose option 3 of three (master session, 2026-10-15), answering I4 open question 1.
+The owner chose the third of three options put to them (keep L3; L2 for every authenticated person; L3 by default with an
+admin relaxation to L2 for interactive persons), master session, 2026-10-15, answering I4 open question 1.
 
 - **The default does not change.** A call with no agent identity (`agent: null`) is still placed as decision 7 item
   5's unknown agent and requires the most restrictive shipped profile (L3). A gVisor-only host keeps refusing it out of
-  the box (ADR-0180).
+  the box (ADR-0180). Decision 7 item 5 is amended by this section.
 - **An admin may lower it to L2, and only for an interactive person.** A new relaxation, "a person's own stdio call",
-  lowers the unknown-agent floor for `mcp_stdio` from L3 to L2 when the caller is a person in an interactive session:
+  lowers the unknown-agent floor for `mcp_stdio` from L3 to L2 only for a call with no agent identity (`agent: null`)
+  whose caller is a person in an interactive session. A low-assurance agent (decision 7 item 5's other case) stays at
+  L3:
   - **Interactive session only.** It applies to a browser session or a passkey sign-in, never to an API key, a service
     token, or anything an agent or script can hold. A request carrying a person's API key with no agent identity stays
     an unknown agent at L3. This closes the gap where an unregistered agent uses a person's credentials.
-  - **Scoped.** It is set per MCP server or per project, never org-wide by default.
-  - **Audited, with step-up.** It is a decision 11 relaxation like the other floors (`settings_relax`), and each use
-    is recorded in the decision's facts (the subject kind and the relaxation id).
+  - **Scoped.** It is set per MCP server or per project, never org-wide.
+  - **Audited, with step-up.** Decision 11's table gains a row: the unknown-agent floor for `mcp_stdio`, default L3,
+    relaxable to L2 for interactive persons only, scoped per server or project, audited, step-up (`settings_relax`).
+    Owner decision A's list of relaxations includes it. Each use is recorded in the decision's facts (the subject
+    kind and the relaxation id).
   - **It never overrides another floor.** The required class is still the MAX of decision 7. A `regulated` project
     (L3), a compliance tag's `min_isolation_class`, a parent grant or a server's own `minClass` still win.
   - It can never place below L2: the `mcp_stdio` floor's own L1 relaxation is a separate, existing setting.

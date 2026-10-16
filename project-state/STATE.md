@@ -64,7 +64,7 @@ queue below.
      private-range and plaintext-http opt-ins take `settings_relax`.
   7. The demo-prep warn line the owner has not yet shared.
 - **Still queued from 2026-10-12:** ADR-0188 S9 (SPIFFE backend and runbooks) and ADR-0189 B8 runbooks. New from I4:
-  a TLS front for the executor, a gVisor CI job, and I5 (engines under profiles). Condensed open items are under "Batch 6 follow-ups (2026-10-15)" in Known
+  a TLS front for the executor, a gVisor CI job, I5 (engines under profiles), and the owner decision C relaxation (after I5). Condensed open items are under "Batch 6 follow-ups (2026-10-15)" in Known
   follow-ups.
 
 **2026-10-12 - every built API route has UI or a stated reason; the installer sets the first admin.** Full record:
