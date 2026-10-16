@@ -697,9 +697,9 @@ open question in the I2 as-built section, item 1.
   project sensitivity set by an admin. Decision 7's data-sensitivity floor uses this value.
 - **The admin field can only raise.** It can never bring the project's sensitivity below what its use cases give. A
   field value lower than the use cases' strictest has no effect on the MAX.
-- **Audited, with step-up.** Setting or changing the field is audited and needs a fresh step-up. It uses the existing
-  `settings_relax` kind, as decision 11's rows and the I2 as-built assignment and profile rules do. No new step-up kind
-  is added.
+- **Audited, with step-up.** Setting or changing the field is audited and needs a fresh step-up. The owner did not name a step-up
+  kind; the master session's choice is the existing `settings_relax` kind, as decision 11's rows and the I2 as-built
+  assignment and profile rules use, so no new step-up kind is added.
 - **Fail closed, unchanged.** A project with no use case and no field set cannot resolve the fact and is refused
   `policy_unresolved` (owner decision B), exactly as today.
 - **Left open, build-time choices:** where the field is stored and its column name, the route and UI that set it, the

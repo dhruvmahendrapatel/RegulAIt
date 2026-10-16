@@ -847,7 +847,7 @@ untrusted issuer still fails**. Those last two are the anti-regression for the t
 `egress-allow-host-set` audit row records `relaxation`, the relaxed opt-ins, the step-up method and the previous
 opt-ins. A stepped-up write is a compare-and-set on the opt-ins it was decided on (409 `changed_concurrently`).
 
-**A plain entry (a named host, https only, no opt-in) needs no step-up.** The allow-list is the mechanism of the
+*Superseded 2026-10-16 by the owner amendment below: adding a plain entry now needs a step-up. The sentence on registering an MCP server or provider at a public host still stands.* **A plain entry (a named host, https only, no opt-in) needs no step-up.** The allow-list is the mechanism of the
 default-deny posture, not a setting with a strict value to relax. A plain entry names one destination, and that
 destination still passes every check: DNS pinning, the unconditional ranges, the private-range rules and https.
 ADR-0181 treats such entries as ordinary configuration ("an allow-list entry for the demo's local MCP hosts"). What
