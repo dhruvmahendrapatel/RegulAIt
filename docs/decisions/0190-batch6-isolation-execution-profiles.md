@@ -1221,7 +1221,7 @@ directly, rather than through the report hash? Doing so needs new `execution_pla
 I5 moves the ADR-0187 engine workers (the garak and promptfoo workers, the modelscan scanner) under decision 3's
 `engine_worker` kind. A worker now runs **only** as an engine TASK in a sandbox an executor starts under the run's
 placement. There is no long-lived worker container and no other place a worker can run. Migration **0200**
-(`0200_engine_task_placement.sql`, hand-written; journal idx 200, added once 0199 (ADR-0188 S9) is on main) adds `engine_runs.task_placement_id`. These points
+(`0200_engine_task_placement.sql`, hand-written; journal idx 200, added once 0199 (ADR-0188 S9) is on main) adds `engine_runs.task_placement_id`, its set-once guard (search_path pinned) and a TRUNCATE refusal on `engine_runs` (migration 0185's invariants). These points
 settle what the decisions above leave open:
 
 1. **The task start is the decision.** The placement is decided when the runner holding a live lease asks to start
@@ -1281,9 +1281,12 @@ settle what the decisions above leave open:
    worker that calls models (garak, promptfoo) reaches the gateway through a loopback proxy inside the sandbox
    (`runSandboxTask`): each request becomes an `http` stdout frame. The RUNNER, the trusted side on the engines
    network, sends it to the gateway with exactly the headers the sandbox gave (the run's key, never the runner's
-   credentials). It forwards only under the gateway's base path and never to the runner, executor or OAuth
-   routes; anything else is answered `not_gateway` (403 inside). Each request and answer body is at most 512 KiB.
-   Streaming answers are not carried.
+   credentials). It forwards only `POST` to exactly the model routes (`<base path>chat/completions`,
+   `<base path>messages`), matched on the normalised `URL.pathname`, which must equal the raw path; any `%`, dot
+   segment, query or other route is answered `not_gateway` (403 inside). The request must carry
+   `authorization: Bearer <the run's key>` (`unauthorized`, 401 inside, otherwise). At most 8 requests of one task
+   are in flight (`busy`, 429 inside). Each request body is at most 512 KiB, and each answer is read as a stream and
+   abandoned past 512 KiB. Streaming answers are not carried.
 7. **The runner side.** Each runner keeps its ADR-0187 exchange (a job directory written whole, results read once
    `done.json` exists). The new `ExecutorTaskBridge` (`@regulait/engine-runner`) plays the worker's half over the
    gateway:
@@ -1312,7 +1315,35 @@ settle what the decisions above leave open:
     for a task this process does not hold is refused `engine_task_unknown`, and a report for one is refused (not
     quarantined: it is our own gap). Sticky routing on the run and offer ids is the same follow-up as I4's. The
     gateway holds at most 32 MiB of unacknowledged task output; past that the task is stopped
-    (`output_overflow`). A watchdog stops a task whose run is no longer leased.
+    (`output_overflow`). The task is held BEFORE the start transaction commits (a rollback forgets it), so an
+    executor that sees the offer always finds its input. Any refusal after the offer (declined or expired offer,
+    start failure, `input_digest_mismatch`, `session_lost`, `output_overflow`, a mismatch) ends the run `not_run`
+    (`isolation_unavailable`, cause `engine_task_<refusal>`) in the gateway, from the runner's frames read or a 2 s
+    watchdog. The bridge then signals the runner's run loop, which heartbeats at once and is cancelled.
+12. **A result needs a placed task** (review HIGH-1). In the result transaction, on the locked run, any status but
+    `not_run` is accepted only when `task_placement_id` is set and that placement's linked report is `placed`.
+    Otherwise the run ends `not_run` (`isolation_unavailable`, cause `engine_task_not_placed`) and the route answers
+    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested.
+13. **First enable** (review; was open question 1). The manifest names each engine's `workerAttestedSwitches`
+    (promptfoo `REGULAIT_PROMPTFOO_WORKER_ISOLATED`, modelscan `REGULAIT_MODELSCAN_SCANNER_ISOLATED`, garak its
+    worker switches and `REGULAIT_GARAK_WORKER_SELFTEST`). The runner's report meets them, or a fresh, passing
+    attestation by an ACTIVE executor of the shipped `engine-worker` profile at or above the engine_worker floor
+    (the org floor raised to the profile's `minClass`; a customer plane through the admin's mapping), found by
+    `engine-worker-attestation.ts`. Without one they fail `executor_attestation_missing:<switch>` (fail closed). The
+    basis is recorded whole in the self-test verdict and its audit row (`executorAttestation`), on the admin
+    self-test, the registration and the runner's report; the lease admission reads it again in its transaction.
+    An executor never self-tests, so never attests, a profile its backend cannot serve on this host (runsc without
+    an input volume for `engine-worker`); no offer of it ever reaches that executor.
+14. **The engine-worker floor setting** (review LOW-1). For an agent-null engine run whose configured profile is the
+    shipped default, `resolveRequirement` caps that profile's class as a configured floor at the org's
+    `isolationFloorEngineWorker`, so relaxing the setting (a `settings_relax` step-up, audited, never below L1) is
+    honoured. The shipped `engine-worker` profile's own `minClass` (L2) still bounds where a task can be PLACED (the
+    broker raises the requirement to it). There is **no L1 (runc) backend** yet: an L1 engine task needs a relaxed
+    profile version and that backend. Follow-up.
+15. **Executor input hygiene** (review LOW-2). A refused input removes the sandbox's whole input directory; the
+    first preflight removes inputs a previous run of the executor left (`regulait-sbx-<uuid>` entries only); the
+    whole input fetch has one deadline (`ENGINE_TASK_INPUT_WAIT_MS`, 90 s, inside the report deadline); the digest
+    is computed from the bytes each write actually wrote. `ENGINE_TASK_INPUT_PENDING` (never used) is removed.
 11. **Tests.**
     - **Shared:** `i5-engine-task.test.ts`.
     - **Executor:** `engine-task.test.ts`. The real init runs on the host in place of `docker run`; its fd 3
@@ -1322,8 +1353,10 @@ settle what the decisions above leave open:
     - **Gateway, on a real database:** `zz-adr0190-i5-engines.test.ts`, driven by the real executor package with
       its fake backend. It covers the refusals with their rows, an end-to-end scan, input digest mismatch, and
       the I8 facts of an agent run's entitlement decision.
-    - The B5 and I4 suites are unchanged except `zz-b5-compose.test.ts` (the worker containers are gone) and the
-      decision-writer list.
+    - The B5 suites that post results (`zz-b5-modelscan`, `zz-b5-garak`, `zz-b5-promptfoo`, `zz-b5-engines`,
+      `zz-adr0188-s7-retire-bearer`) place each leased run first through `testing/engine-task-rig.ts`: a real
+      executor (fake backend) and the gateway's own task start, so their results meet the HIGH-1 rule.
+      `zz-b5-compose.test.ts` (the worker containers are gone) and the decision-writer list also change.
 
 **Not verified (M-041).**
 - **Real gVisor.** Nothing here has run under gVisor: no session that built I5 had a Docker daemon. The PR #385
@@ -1337,16 +1370,14 @@ settle what the decisions above leave open:
   `REGULAIT_EXECUTOR_INPUT_DIR`/`REGULAIT_EXECUTOR_INPUT_VOLUME` and a volume on the `sandbox-executor` service are
   pending execution on a test host. Until then an executor refuses every engine task (no input volume), fail
   closed. The compose service is left to the executor TLS slice that owns it.
+- **The review round's database tests** (HIGH-1, the refusal ending the run, first enable, LOW-1) and the B5 suites
+  with the rig have not run in the session that wrote them (no database there). Migration 0200 is not in the
+  journal until 0199 is on main, so the database suites fail until then.
 - **No engine image is built.** `imageDigest` and `taskImage` are null in the shipped manifest, so the image builds,
   the in-image task entries and the gateway channel with the real garak and promptfoo are unexercised.
 
 **Open questions I5 leaves (for the owner or the master).**
-1. **How an engine is first enabled.** The garak, promptfoo and scanner isolation switches are still proven by the
-   worker's own self-test, which now exists only once a task has run. Engine enablement needs a passing self-test
-   first, so a newly built engine cannot be enabled. *Recommended:* the gateway satisfies those switches from a
-   fresh executor attestation for the engine's profile at or above the `engine_worker` floor. That attestation is
-   the same decision 6 probe set, taken from outside and per placement, which is stronger. The worker switches
-   would then leave the runner's report. This does not bite until an engine image is built.
+1. *(Resolved in review round 1: point 13.)* How an engine is first enabled.
 2. **The runner's artifact copy.** The modelscan runner still downloads the artifact to stage its job (ADR-0187)
    although the sandbox receives it from the gateway. Should the stage skip the download? It is harmless but
    wasteful for large artifacts.

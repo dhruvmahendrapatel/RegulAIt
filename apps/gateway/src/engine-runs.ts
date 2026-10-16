@@ -107,6 +107,7 @@ import { auditEngine, engineManifestOutdated, engineManifestOutdatedRefusal, gat
 import { engineDetectionScrub } from "./engine-scrub.js";
 import { artifactAccessible, artifactStoreFromEnv, recordArtifactScanTx } from "./model-artifacts.js";
 import { ENGINE_TASK_ISOLATION_UNAVAILABLE, ENGINE_TASK_NOT_PLACED, engineTaskPlacedTx, registerEngineTaskRoutes } from "./engine-tasks.js";
+import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 import { writeEngineRunLedgers } from "./engine-ledger.js";
 import { agentConfigHash, buildAgentDecider } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
@@ -1399,6 +1400,8 @@ function leaseAdmission(
   build: { imageDigest: string; engineVersion: string },
   m: EngineManifestEntry,
   now: Date,
+  /** ADR-0190 I5: a fresh, passing executor attestation of the engine-worker profile (engine-worker-attestation.ts) */
+  executorAttested: boolean,
 ): LeaseRefusal | null {
   // PR #205 review round 13 [95]: a replica whose manifest is older than the engine row decides
   // nothing about this engine (an old replica during a rolling upgrade). No `next` signal: the runner
@@ -1421,7 +1424,7 @@ function leaseAdmission(
       detail: "this runner runs a build that is not the current one: deploy the current image and re-enrol it with a new enrolment token",
     };
   }
-  const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now);
+  const runnerVerdict = evaluateRunnerSelfTest(m, runner.selfTest as RunnerSelfTest, now, { executorAttested });
   if (!runnerVerdict.passed) {
     return {
       next: "self_test_required",
@@ -1635,7 +1638,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           .from(engineRuns)
           .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
       : [];
-    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now);
+    const early = retried ? null : leaseAdmission(runner, engine ?? null, build, m, now, (await engineWorkerAttestationBasis(db)).attested);
     if (early) return refuse(early);
     await engineRunTestHooks.beforeLeaseTx?.(runnerId);
     const leased = await db.transaction(async (tx) => {
@@ -1652,6 +1655,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
       const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
+      // ADR-0190 I5: the executor attestation the worker switches may rest on, read again in this transaction
+      const workerAttested = (await engineWorkerAttestationBasis(tx as unknown as Db)).attested;
       // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
       // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
       // leased — to THIS runner only: the lookup is by (runner, request id), and the unique index is
@@ -1674,7 +1679,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           // the run already ended (cancelled, disabled, timed out): nothing to re-issue. The runner is told
           // why, if the lease would be refused now, else there is no work (its next attempt is a new one)
           if (prior.status !== "leased") {
-            const why = leaseAdmission(live, lockedEngine ?? null, build, m, at);
+            const why = leaseAdmission(live, lockedEngine ?? null, build, m, at, workerAttested);
             return why ? { kind: "not_admitted" as const, refusal: why } : { kind: "none" as const };
           }
           if (lockedEngine && engineManifestOutdated(lockedEngine, m)) {
@@ -1699,7 +1704,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
         }
       }
-      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date());
+      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date(), workerAttested);
       if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
       const engine = lockedEngine!;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);

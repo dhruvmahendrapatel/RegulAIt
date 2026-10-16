@@ -184,6 +184,22 @@ describe("the self-test verdict", () => {
     // the shipped manifest has no built image: nothing passes
     expect(evaluateRunnerSelfTest(ENGINE_MANIFEST.promptfoo, ok, new Date()).failures).toContain("image_not_built");
   });
+  it("ADR-0190 I5: a worker switch the runner cannot report rests on a fresh executor attestation, never on nothing", () => {
+    for (const engine of [ENGINE_MANIFEST.promptfoo, ENGINE_MANIFEST.garak, ENGINE_MANIFEST.modelscan]) {
+      expect(engine.workerAttestedSwitches.length).toBeGreaterThan(0);
+      for (const s of engine.workerAttestedSwitches) expect(Object.keys(engine.usageDataEnv)).toContain(s);
+    }
+    const worker = m.workerAttestedSwitches[0]!;
+    const noWorker = { ...ok, usageDataEnv: { ...ok.usageDataEnv, [worker]: false } };
+    // before the first enable no sandbox has run: without an attestation it fails closed, with one it passes
+    expect(evaluateRunnerSelfTest(m, noWorker, new Date()).failures).toEqual([`executor_attestation_missing:${worker}`]);
+    expect(evaluateRunnerSelfTest(m, noWorker, new Date(), { executorAttested: false }).passed).toBe(false);
+    expect(evaluateRunnerSelfTest(m, noWorker, new Date(), { executorAttested: true })).toEqual({ passed: true, failures: [] });
+    // a switch the RUNNER owns is never met by an attestation
+    const runnerOwned = Object.keys(m.usageDataEnv).find((k) => !m.workerAttestedSwitches.includes(k))!;
+    expect(runnerOwned).toBeDefined();
+    expect(evaluateRunnerSelfTest(m, { ...ok, usageDataEnv: { ...ok.usageDataEnv, [runnerOwned]: false } }, new Date(), { executorAttested: true }).failures).toEqual([`usage_env_missing:${runnerOwned}`]);
+  });
   it("an unlisted set needs approval (fail closed)", () => {
     expect(engineConfigNeedsApproval({ ...m, sets: { basic: "standard" } }, ["basic"])).toBe(false);
     expect(engineConfigNeedsApproval({ ...m, sets: { basic: "standard" } }, ["basic", "new-set"])).toBe(true);

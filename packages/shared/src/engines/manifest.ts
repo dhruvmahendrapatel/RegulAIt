@@ -68,6 +68,14 @@ export interface EngineManifestEntry {
   taskImage: string | null;
   /** ADR-0190 I5: the task's entry point inside that image (the sandbox init runs it, never a shell) */
   taskEntry: { command: string; args: readonly string[] };
+  /**
+   * ADR-0190 I5 (review: the first-enable deadlock): the `usageDataEnv` switches the WORKER's own self-test confirms.
+   * The worker now runs only in an executor's sandbox, which runs only for an enabled engine, so a runner cannot
+   * report them before the first enable. Each is met EITHER by the runner's report OR by a fresh, passing executor
+   * attestation of the shipped `engine-worker` profile at or above the engine_worker floor (the gateway decides
+   * `executorAttested`, audits its basis, and fails closed when it is stale or missing).
+   */
+  workerAttestedSwitches: readonly string[];
   /** the named sets this build classes; any set not listed counts as offensive (secure default) */
   sets: Readonly<Record<string, EngineSetClass>>;
   /** what an air-gapped install cannot run, published as data */
@@ -106,6 +114,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // pinned version, reached nothing off the gateway and found no runner credential in reach
     // (packages/engine-promptfoo/src/worker-selftest.ts; ADR-0187 decisions 170 on)
     usageDataEnv: { ...PROMPTFOO_USAGE_DATA_ENV, REGULAIT_PROMPTFOO_WORKER_ISOLATED: "1" },
+    workerAttestedSwitches: ["REGULAIT_PROMPTFOO_WORKER_ISOLATED"],
     needsModelAccess: true,
     // PR #205 review round 6 [73]: promptfoo grades with a judge behind the gateway (without one it
     // would fall back to a vendor default, which the config refuses)
@@ -152,6 +161,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // report is fresh, names the pinned version and reached nothing (ADR-0187 decision 104;
     // packages/engine-modelscan/src/selftest.ts). Network denial is the control.
     usageDataEnv: { REGULAIT_MODELSCAN_SCANNER_ISOLATED: "1" },
+    workerAttestedSwitches: ["REGULAIT_MODELSCAN_SCANNER_ISOLATED"],
     needsModelAccess: false,
     requiresJudge: false,
     judgeSets: [],
@@ -194,6 +204,7 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // the WORKER's switches (it runs garak), each confirmed by the worker's own fresh self-test, plus that
     // self-test itself (ADR-0187 decisions 140-141; packages/engine-garak/src/selftest.ts)
     usageDataEnv: { ...GARAK_USAGE_DATA_ENV, [GARAK_WORKER_SELF_TEST_SWITCH]: "1" },
+    workerAttestedSwitches: [...Object.keys(GARAK_USAGE_DATA_ENV), GARAK_WORKER_SELF_TEST_SWITCH],
     needsModelAccess: true,
     // most of garak's admitted probes are judged by local detectors and need no judge model, so the engine
     // as a whole does not require one (decision 146)...
@@ -256,7 +267,9 @@ export type SelfTestFailure =
   | "egress_connected"
   | "egress_address_missing"
   | "egress_address_connected"
-  | "stale";
+  | "stale"
+  /** ADR-0190 I5: a worker switch the runner did not report, with no fresh executor attestation in its place */
+  | `executor_attestation_missing:${string}`;
 
 export interface SelfTestVerdict {
   passed: boolean;
@@ -274,13 +287,21 @@ export function evaluateRunnerSelfTest(
   manifest: EngineManifestEntry,
   report: RunnerSelfTest,
   now: Date,
+  /**
+   * ADR-0190 I5: `executorAttested` — the gateway found a fresh, passing executor attestation of the engine-worker
+   * profile at or above the engine_worker floor. Default false (fail closed).
+   */
+  opts: { executorAttested?: boolean } = {},
 ): SelfTestVerdict {
   const failures: SelfTestFailure[] = [];
+  const workerSwitches = new Set(manifest.workerAttestedSwitches);
   if (manifest.imageDigest === null) failures.push("image_not_built");
   else if (report.imageDigest !== manifest.imageDigest) failures.push("digest_mismatch");
   if (report.engineVersion !== manifest.version) failures.push("version_mismatch");
   for (const name of Object.keys(manifest.usageDataEnv)) {
-    if (report.usageDataEnv[name] !== true) failures.push(`usage_env_missing:${name}`);
+    if (report.usageDataEnv[name] === true) continue;
+    if (!workerSwitches.has(name)) failures.push(`usage_env_missing:${name}`);
+    else if (opts.executorAttested !== true) failures.push(`executor_attestation_missing:${name}`);
   }
   if (report.egress.dnsResolved) failures.push("egress_dns_resolved");
   if (report.egress.connected) failures.push("egress_connected");

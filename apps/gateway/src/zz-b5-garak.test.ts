@@ -51,6 +51,7 @@ import { useTestIssuerKey } from "./testing/workload-client.js";
 import { relaxAgentEntitlementsForTest } from "./testing/agent-own-grants.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -86,6 +87,8 @@ let restoreGates: (() => Promise<void>) | undefined;
 let restoreAgentEntitlements: (() => Promise<void>) | undefined;
 let priorInterception: { anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean } | null = null;
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
+/** ADR-0190 I5 (review HIGH-1): every run is placed under its engine_worker profile before its result counts */
+let rig: EngineTaskRig | undefined;
 let alice: { id: string; key: { authorization: string } };
 let targetId: string;
 let judgeId: string;
@@ -278,11 +281,13 @@ beforeAll(async () => {
   const p = await inject("POST", "/v1/projects", AUTH, { name: `b5g-project-${RUN}` });
   expect(p.statusCode, p.body).toBe(201);
   projectId = p.json().id;
-  client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: ORIGIN, http: runnerHttp });
+  rig = await startEngineTaskRig({ app, db, issuer: ORIGIN, admin, manifest: MANIFEST, name: "b5g" });
+  client = new RunnerClient({ gatewayUrl: "http://gateway.test", issuer: ORIGIN, http: rig.wrapHttp(runnerHttp) });
   workerResults = await mkdtemp(path.join(tmpdir(), "b5g-results-"));
 }, 180_000);
 
 afterAll(async () => {
+  await rig?.stop();
   if (priorInterception) await db.update(interceptionSettings).set(priorInterception).where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
   await forgetStepUpMethodsForTest(db, [admin?.id]);
   await db.execute(sql`UPDATE engines SET enabled = false, self_test = NULL, self_test_passed_at = NULL, max_budget_usd = 5, timeout_seconds = 1800, max_concurrent = 1 WHERE id = 'garak'`);
@@ -306,8 +311,10 @@ describe("B5-G garak registration", () => {
       const st = await garakRunnerSelfTest({ imageDigest: GK_DIGEST, engineVersion: MANIFEST.garak.version, resultsRoot: empty, egress: EGRESS });
       const v = evaluateRunnerSelfTest(MANIFEST.garak, st, new Date());
       expect(v.passed).toBe(false);
-      expect(v.failures).toContain(`usage_env_missing:${GARAK_WORKER_SELF_TEST_SWITCH}`);
-      expect(v.failures).toContain("usage_env_missing:HF_HUB_OFFLINE");
+      // ADR-0190 I5: the worker switches rest on a fresh executor attestation when the runner cannot report them
+      expect(v.failures).toContain(`executor_attestation_missing:${GARAK_WORKER_SELF_TEST_SWITCH}`);
+      expect(v.failures).toContain("executor_attestation_missing:HF_HUB_OFFLINE");
+      expect(evaluateRunnerSelfTest(MANIFEST.garak, st, new Date(), { executorAttested: true }).failures.filter((f) => f.startsWith("executor_attestation_missing:"))).toEqual([]);
     } finally {
       await rm(empty, { recursive: true, force: true });
     }

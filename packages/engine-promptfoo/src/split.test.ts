@@ -326,6 +326,9 @@ describe("B5-P2: the worker proves the runner's credential is out of its reach",
     const env = { ...ENGINE_MANIFEST.promptfoo.usageDataEnv };
     const without = await promptfooRunnerSelfTest({ imageDigest: m.imageDigest, engineVersion: m.version, resultsRoot: v.results, env });
     const verdict = evaluateRunnerSelfTest(m, { ...without, egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false } }, new Date());
-    expect(verdict.failures).toEqual([`usage_env_missing:${WORKER_ISOLATED_SWITCH}`]);
+    // ADR-0190 I5: the worker's proof is now a fresh executor attestation of the engine-worker profile (fail closed)
+    expect(verdict.failures).toEqual([`executor_attestation_missing:${WORKER_ISOLATED_SWITCH}`]);
+    const sel = { ...without, egress: { host: "example.com", dnsResolved: false, connected: false, address: "93.184.215.14", addressConnected: false } };
+    expect(evaluateRunnerSelfTest(m, sel, new Date(), { executorAttested: true })).toEqual({ passed: true, failures: [] });
   });
 });

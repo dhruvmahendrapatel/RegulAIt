@@ -67,6 +67,7 @@ import {
   NO_AUTONOMY_CLASS_FLOOR,
   NON_ISOLABLE_EXECUTION,
   PLACEMENT_SENSITIVITIES,
+  REQUIRABLE_ISOLATION_CLASSES,
   SENSITIVITY_FLOOR_KEYS,
   workloadKindFloor,
   type AgentAssurance,
@@ -134,6 +135,7 @@ export type Requirement =
   | { kind: "unresolved"; workloadKind: WorkloadKind; fact: RequirementFact };
 
 const isIsolable = (k: unknown): k is IsolableWorkloadKind => typeof k === "string" && (ISOLABLE_WORKLOAD_KINDS as readonly string[]).includes(k);
+const isRequirableClass = (c: unknown): c is RequirableIsolationClass => typeof c === "string" && (REQUIRABLE_ISOLATION_CLASSES as readonly string[]).includes(c);
 const SENSITIVITY_RANK: Record<PlacementSensitivity, number> = { public: 0, internal: 1, confidential: 2, regulated: 3 };
 
 function profileView(row: ExecutionProfileRow, source: ResolvedProfile["source"]): ResolvedProfile {
@@ -254,7 +256,14 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
     if (row) configured = profileView(row, "shipped_default");
   }
   if (!configured) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
-  raise(configured.minClass);
+  // ADR-0190 I5 (review LOW-1): an agent-null engine run's configured profile is the SHIPPED engine-worker default; its
+  // class as a configured floor is capped at the org's engine-worker floor, so relaxing that setting (a `settings_relax`
+  // step-up, audited, never below L1: the floors are requirable classes) is honoured here. The shipped profile's own
+  // minClass still bounds where it can be PLACED (the broker raises the requirement to it), and there is no L1 (runc)
+  // backend yet: an L1 engine-worker placement needs both a relaxed profile and that backend (ADR-0190 I5 as built).
+  const engineWorkerFloor = org.isolationFloorEngineWorker as unknown;
+  const relaxable = kind === "engine_worker" && req.agent === null && !serverRow && !agentRow && isRequirableClass(engineWorkerFloor);
+  raise(relaxable && isolationClassRank(engineWorkerFloor) < isolationClassRank(configured.minClass) ? engineWorkerFloor : configured.minClass);
   if (agentRow && agentRow.id !== configured.id) raise(agentRow.minClass as RequirableIsolationClass);
   if (assurance !== "known") {
     const row = await shippedProfile(db, defaultProfileFor(kind, assurance));
