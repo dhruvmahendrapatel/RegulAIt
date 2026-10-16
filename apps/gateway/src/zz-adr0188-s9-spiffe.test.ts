@@ -278,7 +278,9 @@ beforeAll(async () => {
   projectId = rows<{ id: string }>(await db.execute(sql`insert into projects (name) values (${`s9-proj-${RUN}`}) returning id`))[0]!.id;
   await db.execute(sql`insert into project_members (project_id, user_id, role) values (${projectId}, ${sponsorId}, 'contributor')`);
   const ic = await inject("GET", "/v1/interception/settings", AUTH);
-  const before = ic.json().settings as { mcpInterceptionEnabled: boolean; anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean };
+  // only the three writable fields: the GET also returns read-only ones (id, timestamps) the PUT refuses
+  const got = ic.json().settings as { mcpInterceptionEnabled: boolean; anthropicCompatEnabled: boolean; openaiCompatEnabled: boolean };
+  const before = { mcpInterceptionEnabled: got.mcpInterceptionEnabled, anthropicCompatEnabled: got.anthropicCompatEnabled, openaiCompatEnabled: got.openaiCompatEnabled };
   const put = await inject("PUT", "/v1/interception/settings", AUTH, { ...before, mcpInterceptionEnabled: true });
   expect(put.statusCode, put.body).toBe(200);
   restores.push(async () => {

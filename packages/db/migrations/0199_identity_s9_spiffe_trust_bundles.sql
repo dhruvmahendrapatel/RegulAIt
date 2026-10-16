@@ -70,10 +70,16 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 --> statement-breakpoint
 DROP TRIGGER IF EXISTS "spiffe_trust_bundles_guard" ON "spiffe_trust_bundles";
 --> statement-breakpoint
 CREATE TRIGGER "spiffe_trust_bundles_guard"
   BEFORE UPDATE OR DELETE ON "spiffe_trust_bundles"
   FOR EACH ROW EXECUTE FUNCTION "regulait_spiffe_trust_bundle_guard"();
+--> statement-breakpoint
+-- migration 0185's rule: a table that refuses row DELETE also refuses TRUNCATE (which fires no row trigger)
+DROP TRIGGER IF EXISTS "spiffe_trust_bundles_no_truncate" ON public."spiffe_trust_bundles";
+--> statement-breakpoint
+CREATE TRIGGER "spiffe_trust_bundles_no_truncate" BEFORE TRUNCATE ON public."spiffe_trust_bundles"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
