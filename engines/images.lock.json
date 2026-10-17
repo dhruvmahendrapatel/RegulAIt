@@ -1,0 +1,29 @@
+{
+  "schema": "regulait.engine-images-lock.v1",
+  "engines": {
+    "promptfoo": {
+      "repository": null,
+      "manifestDigest": null,
+      "imageId": null,
+      "publishGeneration": 0,
+      "sourceCommit": null,
+      "publishedAt": null
+    },
+    "modelscan": {
+      "repository": null,
+      "manifestDigest": null,
+      "imageId": null,
+      "publishGeneration": 0,
+      "sourceCommit": null,
+      "publishedAt": null
+    },
+    "garak": {
+      "repository": null,
+      "manifestDigest": null,
+      "imageId": null,
+      "publishGeneration": 0,
+      "sourceCommit": null,
+      "publishedAt": null
+    }
+  }
+}

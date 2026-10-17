@@ -53,7 +53,15 @@ function gate(publishApproved) {
   return readFileSync(out, "utf8").trim();
 }
 
-describe("release-ai-bom.mjs (ADR-0189 B7, R17 released)", () => {
+// Each case spawns fresh processes (node loading the built @regulait/shared,
+// or the workflow's gate shell). Alone a case takes 0.3-0.8 s, and the gate's
+// near-miss case, which runs the gate once per value, about 3 s (measured
+// 2026-10-17). Under CI's parallel `vitest run --dir scripts` sweep that is
+// too close to vitest's default 5 s, so the timeout is explicit (as in the
+// bom-* CLI tests): a hung spawn still fails.
+const CLI_TIMEOUT_MS = 60_000;
+
+describe("release-ai-bom.mjs (ADR-0189 B7, R17 released)", { timeout: CLI_TIMEOUT_MS }, () => {
   it("reports the code switch as on", () => {
     expect(execFileSync(process.execPath, [cli, "switch"], { encoding: "utf8" }).trim()).toBe("released=true");
   });
@@ -96,7 +104,7 @@ describe("release-ai-bom.mjs (ADR-0189 B7, R17 released)", () => {
   });
 });
 
-describe("release-ai-bom.yml publication gate (RELEASE_AI_BOM_PUBLISH_APPROVED, owner sign-off)", () => {
+describe("release-ai-bom.yml publication gate (RELEASE_AI_BOM_PUBLISH_APPROVED, owner sign-off)", { timeout: CLI_TIMEOUT_MS }, () => {
   it("negative control: the variable unset (the owner's chosen state) publishes nothing", () => {
     expect(gate(undefined)).toBe("released=false");
     expect(gate("")).toBe("released=false");

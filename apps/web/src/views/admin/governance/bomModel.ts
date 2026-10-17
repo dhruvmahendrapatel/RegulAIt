@@ -553,6 +553,47 @@ export function readPlacementReports(value: unknown): PlacementReportView[] {
   });
 }
 
+/**
+ * ADR-0190 owner decision C (A1): the relaxation row the signed facts name, from the read response (live, unsigned;
+ * `decisionExecutionRelaxationRecordSchema`, packages/shared/src/bom/contract-b4.ts, mirrored). Who set it, when, the
+ * audit row that set it, and whether it was cleared since.
+ */
+export interface RelaxationRecordView {
+  id: string;
+  scopeKind: "mcp_server" | "project";
+  scopeId: string;
+  setBy: string;
+  setAt: string;
+  clearedBy: string | null;
+  clearedAt: string | null;
+  /** the `execution-person-stdio-relaxed` audit row; null when it is no longer found (audit retention) */
+  setAuditId: string | null;
+}
+const RELAXATION_RECORD_KEYS = ["id", "scopeKind", "scopeId", "setBy", "setAt", "clearedBy", "clearedAt", "setAuditId"] as const;
+
+/**
+ * The read response's relaxation record, bound to the signed facts: it must be exactly the row they name (id and
+ * scope) and present exactly when they name one. `undefined` = a gateway before A1 did not report it.
+ */
+export function readRelaxationRecord(value: unknown, signed: ExecutionView["relaxation"]): RelaxationRecordView | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return signed === null ? null : unreadable("The Decision BOM");
+  const r = obj(value);
+  if (
+    !r || !signed || !exactKeys(r, RELAXATION_RECORD_KEYS) || !uuid(r.id) || !uuid(r.scopeId) || !uuid(r.setBy) || !time(r.setAt) ||
+    !nullOr(r.clearedBy, uuid) || !(r.clearedAt === null || time(r.clearedAt)) || (r.clearedBy === null) !== (r.clearedAt === null) || !nullOr(r.setAuditId, uuid) ||
+    // cleared after it was set, as the shared contract requires
+    (r.clearedAt !== null && Date.parse(r.clearedAt as string) < Date.parse(r.setAt as string)) ||
+    r.id !== signed.relaxationId || r.scopeKind !== signed.scopeKind || r.scopeId !== signed.scopeId
+  ) {
+    return unreadable("The Decision BOM");
+  }
+  return { id: r.id, scopeKind: signed.scopeKind, scopeId: r.scopeId, setBy: r.setBy, setAt: r.setAt, clearedBy: r.clearedBy as string | null, clearedAt: r.clearedAt as string | null, setAuditId: r.setAuditId };
+}
+
+/** the audit log filtered to one row: the target of an evidence link (`GET /v1/audit?id=`) */
+export const auditRowHref = (auditId: string) => `/admin/audit?id=${encodeURIComponent(auditId)}`;
+
 export interface DecisionBomView {
   auditId: string;
   /** the signed body's own version (v1 bodies frozen before ADR-0190 I8 have no execution section) */
@@ -561,6 +602,8 @@ export interface DecisionBomView {
   execution: ExecutionView | null;
   /** ADR-0190 I4: what happened to an offered placement afterwards (live, unsigned, from the read response) */
   placementReports: PlacementReportView[];
+  /** ADR-0190 owner decision C (A1): the relaxation row the signed facts name (live, unsigned); undefined = not reported */
+  relaxationRecord: RelaxationRecordView | null | undefined;
   bom: DecisionBomVersion & { reportedFinality: string; aiBomSnapshotId: string | null };
   versions: DecisionBomVersion[];
   renderings: string[];
@@ -646,6 +689,7 @@ export function readDecisionBom(value: unknown, auditId: string): DecisionBomVie
     bodyVersion: d.v,
     execution,
     placementReports: readPlacementReports(v.placementReports),
+    relaxationRecord: readRelaxationRecord(v.executionRelaxation, execution?.relaxation ?? null),
     body: b.body,
     bom: { ...bom, reportedFinality: b.reportedFinality, aiBomSnapshotId: b.aiBomSnapshotId as string | null },
     versions,

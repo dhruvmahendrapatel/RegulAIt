@@ -54,7 +54,7 @@ async function main(): Promise<void> {
     log: (m) => console.log(`modelscan runner: ${m}`),
   });
   void bridge.run(new AbortController().signal);
-  await runRunnerLoop(client, modelscanAdapter({ artifacts: client, executor }), {
+  await runRunnerLoop(client, modelscanAdapter({ executor }), {
     engineId: "modelscan",
     engineVersion,
     imageDigest,

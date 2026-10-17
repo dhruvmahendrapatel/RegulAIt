@@ -5,6 +5,9 @@
  * 0.8.8 actually wrote for these fixtures (modelscan-real.test.ts runs the engine itself, opt-in).
  * Each guard was shown red by breaking it (ADR-0187 decisions 104 onward).
  */
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ARTIFACT_FORMAT_PLANS,
@@ -17,8 +20,8 @@ import {
   modelscanArtifactName,
   type ArtifactFormat,
 } from "@regulait/shared";
-import type { ScanExecutor, ScanJob } from "./exchange.js";
-import type { ScanOutcome } from "./scan.js";
+import { modelscanAdapter } from "./adapter.js";
+import type { ScanExecutor, ScanJob, ScannerOutcome } from "./exchange.js";
 import {
   cleanPickle,
   legacyTorchFile,
@@ -31,7 +34,7 @@ import {
   torchZip,
   truncatedMaliciousPickle,
 } from "./fixtures.js";
-import { bufferReader, scanAndJudge } from "./harness.js";
+import { bufferReader, leaseFor, scanAndJudge } from "./harness.js";
 import { settingsScanExtension } from "./settings.js";
 
 const detect = async (b: Buffer) => (await detectArtifactFormat(bufferReader(b))).format;
@@ -54,24 +57,38 @@ function report(p: { scanned?: string[]; issues?: Array<{ module: string; operat
   };
 }
 
-/** an executor that answers like modelscan would, from a function of the job */
-function replay(answer: (job: ScanJob) => { exitCode: number | null; report?: unknown; timedOut?: boolean }): (root: string) => ScanExecutor & { jobs: ScanJob[] } {
+/**
+ * an executor that answers like modelscan would, from a function of the job. Like the real scanner (ENG-IMG), it
+ * reads the placed artifact's bytes to decide the format, and starts "modelscan" only for a format it scans.
+ */
+type ReplayedJob = ScanJob & { format: ArtifactFormat; scannedAs: string };
+function replay(answer: (job: ReplayedJob) => { exitCode: number | null; report?: unknown; timedOut?: boolean }): (root: string) => ScanExecutor & { jobs: ReplayedJob[] } {
   return () => {
-    const jobs: ScanJob[] = [];
+    const jobs: ReplayedJob[] = [];
+    const staged = new Map<string, string>();
     return {
       jobs,
-      async stage() {
-        const { mkdtemp } = await import("node:fs/promises");
-        const { tmpdir } = await import("node:os");
-        return mkdtemp(`${tmpdir()}/b5m-stage-`);
+      async stage(runId: string) {
+        const dir = await mkdtemp(`${tmpdir()}/b5m-stage-`);
+        staged.set(runId, dir);
+        return dir;
       },
-      async scan(job: ScanJob): Promise<ScanOutcome> {
-        jobs.push(job);
-        const a = answer(job);
+      async scan(job: ScanJob): Promise<ScannerOutcome> {
+        const placed = await readFile(path.join(staged.get(job.runId)!, job.artifactName));
+        const d = await detectArtifactFormat(bufferReader(placed));
+        const detection = { format: d.format, evidence: d.evidence };
+        const name = modelscanArtifactName(d.format);
+        if (!ARTIFACT_FORMAT_PLANS[d.format].scanAs || !name) return { detection, exitCode: null, timedOut: false, cancelled: false, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null };
+        const replayed = { ...job, format: d.format, scannedAs: name };
+        jobs.push(replayed);
+        const a = answer(replayed);
         const bytes = a.report === undefined ? null : Buffer.from(JSON.stringify(a.report));
-        return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? "0".repeat(64) : null, reportTooLarge: false, npy: null, npz: null };
+        return { detection, exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? "0".repeat(64) : null, reportTooLarge: false, npy: null, npz: null };
       },
-      async release() {},
+      async release(runId: string) {
+        const dir = staged.get(runId);
+        if (dir) await rm(dir, { recursive: true, force: true });
+      },
       async reconcile() {
         return [];
       },
@@ -260,7 +277,7 @@ describe("B5-M RED PROOFS (owner decision 1 strict default: executable formats n
     const exec = answer({ exitCode: 1, report: osSystem("artifact.pkl") })("");
     const r = await scanAndJudge(maliciousPickle(), () => exec);
     // the adapter handed modelscan the pickle as a pickle, whatever it was called on upload
-    expect(exec.jobs[0]).toMatchObject({ format: "pickle", artifactName: "artifact.pkl" });
+    expect(exec.jobs[0]).toMatchObject({ format: "pickle", artifactName: "artifact.bin", scannedAs: "artifact.pkl" });
     expect(r.judged.verdict).toBe("unsafe");
     expect(r.normalised.verdict).toBe("fail");
   });
@@ -268,7 +285,7 @@ describe("B5-M RED PROOFS (owner decision 1 strict default: executable formats n
   it("a legacy-layout .pt is scanned as a pickle stream: its third pickle's os.system is a finding", async () => {
     const exec = answer({ exitCode: 1, report: osSystem("artifact.pkl") })("");
     const r = await scanAndJudge(legacyTorchFile(), () => exec);
-    expect(exec.jobs[0]).toMatchObject({ format: "pytorch_legacy", artifactName: "artifact.pkl" });
+    expect(exec.jobs[0]).toMatchObject({ format: "pytorch_legacy", artifactName: "artifact.bin", scannedAs: "artifact.pkl" });
     expect(r.judged.verdict).toBe("unsafe");
   });
 
@@ -331,16 +348,41 @@ describe("B5-M RED PROOFS (owner decision 1 strict default: executable formats n
     }
   });
 
-  it("an artifact that does not arrive intact is never scanned (sha256 checked)", async () => {
-    // same length, one byte different: only the sha256 can tell
-    const swapped = Buffer.from(cleanPickle());
-    swapped[swapped.length - 2] = swapped[swapped.length - 2]! ^ 0x01;
-    const r = await scanAndJudge(cleanPickle(), NEVER, { fetchBytes: swapped });
-    expect(r.envelope.errorCode).toBe("artifact_fetch_failed");
-    expect(r.judged.verdict).toBe("unknown");
-    // and a longer body is cut off and refused
-    const longer = await scanAndJudge(cleanPickle(), NEVER, { fetchBytes: Buffer.concat([cleanPickle(), Buffer.from("x")]) });
-    expect(longer.envelope.errorCode).toBe("artifact_fetch_failed");
+  it("ENG-IMG: the runner fetches nothing; the job places the artifact and the scanner reads the format from the placed bytes", async () => {
+    const exec = answer({ exitCode: 1, report: osSystem("artifact.pkl") })("");
+    const staged: string[] = [];
+    const adapter = modelscanAdapter({
+      executor: {
+        ...exec,
+        stage: async (runId) => {
+          const dir = await exec.stage(runId);
+          staged.push(dir);
+          return dir;
+        },
+        scan: async (job, signal) => {
+          // the job dir holds only the place (empty: the gateway streams the bytes to the executor), then the bytes land
+          expect((await readFile(path.join(staged[0]!, job.artifactName))).length).toBe(0);
+          await writeFile(path.join(staged[0]!, job.artifactName), maliciousPickle());
+          return exec.scan(job, signal);
+        },
+      },
+    });
+    const lease = { ...leaseFor(maliciousPickle()) };
+    const body = await adapter(lease, { workDir: "/nonexistent", signal: new AbortController().signal, progress: () => undefined });
+    expect(exec.jobs[0]).toMatchObject({ artifactName: "artifact.bin", format: "pickle" });
+    expect(body.status).toBe("completed");
+  });
+
+  it("a scanner that read no format is failed (artifact_unread), never clean; one cut off at its limit is engine_timeout", async () => {
+    const none = (timedOut: boolean): ScanExecutor => ({
+      stage: async () => mkdtemp(`${tmpdir()}/b5m-stage-`),
+      scan: async () => ({ detection: null, exitCode: null, timedOut, cancelled: false, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null }),
+      release: async () => undefined,
+      reconcile: async () => [],
+    });
+    const ctx = { workDir: "/nonexistent", signal: new AbortController().signal, progress: () => undefined };
+    expect(await modelscanAdapter({ executor: none(false) })(leaseFor(cleanPickle()), ctx)).toMatchObject({ status: "failed", errorCode: "artifact_unread" });
+    expect(await modelscanAdapter({ executor: none(true) })(leaseFor(cleanPickle()), ctx)).toMatchObject({ status: "failed", errorCode: "engine_timeout" });
   });
 
   it("the gateway does not trust a runner's own consistency: a passing scan beside an error item is unknown", () => {

@@ -1716,6 +1716,145 @@ gateway, the executor's runtime backends or the engine code changed.
        Caddy image whose id is not pinned.
    - **Real gVisor** still waits on the `runsc` re-pin (I5 "Not verified").
 
+
+## As built: engine task images (ENG-IMG, 2026-10-17)
+
+What makes an engine runnable end to end in a stock install, apart from the gVisor re-pin (PR #385, untouched here). No
+migration; the gateway's only change is that its manifest reads the lock (below).
+
+1. **The images.** The three `engines/<engine>/Dockerfile`s are the task images (one image per engine: the runner
+   at `/app/dist/main.js`, the task at the manifest's `taskEntry`). Checked again and unchanged: every `FROM` is
+   pinned by digest, the runtime stage runs as uid 10001 with `HOME=/work`, nothing writes outside `/work` and
+   `/jobs` (read-only root friendly), garak's Hugging Face switches are offline and its assets are pre-seeded in a
+   `--network=none` stage, and no package installer runs at task time.
+2. **The modelscan artifact arrives through the executor's input volume** (resolves I5 open question 2). The runner
+   no longer downloads it:
+   - the job places the artifact at the fixed name `artifact.bin`, written empty in the runner's job directory. The
+     task bridge only PLACES it, the gateway streams it from its store to the executor, and the executor writes and
+     checks it (size and sha256) in the sandbox's read-only input (I5 point 5);
+   - so the format is now decided IN THE SANDBOX, from the bytes (G19 2). `scanPlacedArtifact`
+     (`packages/engine-modelscan/src/worker.ts`) detects it. A format modelscan does not scan is answered with its
+     detection alone, and modelscan never starts. A scannable one is handed to modelscan through a symlink named
+     for its extension, in the task's scratch space (the input is read-only, and a copy would double a large
+     artifact). modelscan 0.8.8 uses `Path.absolute()`, never `resolve()`, on the path (`modelscan/modelscan.py`
+     at tag v0.8.8, read 2026-10-17), so the report still names `artifact.<ext>`;
+   - `done.json` gains `detection` (`{format, evidence}` or null). The adapter maps a null detection to `failed`:
+     `artifact_unread`, or `engine_timeout` past the limit. It is never clean;
+   - the runner makes no request for a scan. **The runner artifact route (`GET /v1/engine-runner/artifacts/:id`) is
+     removed** (review fix, secure by default): nothing called it any more, so it is gone rather than kept behind a
+     setting. It is out of `ENGINE_RUNNER_ROUTES`, the OpenAPI registry and the runner client, and
+     `RunnerClient.artifact` with `downloadArtifact` (`packages/engine-runner/src/artifact.ts`) are deleted with it,
+     as is the refusal code `engine_artifact_not_leased`. `zz-b5-modelscan` now places the bytes from the gateway's
+     store and asserts the route is gone (no route registered; a human key gets 404, the runner's token its scope
+     refusal). The gateway's only artifact stream is the executor input (`engine-tasks.ts`, audited phase
+     `task_input`, proven in `zz-adr0190-i5-engines`).
+3. **The publish workflow** (`.github/workflows/engine-images.yml`):
+   - it runs on push to `main` (only when an engine's own files change) and on `workflow_dispatch`, never on
+     `pull_request`. The `publish` job carries `if: github.ref == 'refs/heads/main'` (as `security.yml`'s sign
+     job does), so a manual dispatch started on any other branch publishes nothing, and `record` is skipped with it;
+   - the workflow grants `contents: read`, and only the `publish` job gets `packages: write`, through `GITHUB_TOKEN`;
+   - every action is pinned by commit sha, and the build is the runner's Docker CLI with its buildx plugin
+     (`scripts/build-engine-image.sh`). It builds linux/amd64 with provenance and SBOM attestations off, so each
+     push is one single-platform image manifest, and it reads both digests from buildx's metadata file, not the
+     local store: `containerimage.digest` is the manifest digest and `containerimage.config.digest` is the image id;
+   - it pushes `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`, and the `record` job uploads
+     `engine-images-publish.json`. The workflow commits nothing.
+   - **Visibility.** A package scoped to a personal account is **private** when first published. A package linked to
+     a repository inherits the repository's access permissions but not its visibility (GitHub docs, "Configuring a
+     package's access control and visibility", read 2026-10-17). This repository is public, so the images carry no
+     `org.opencontainers.image.source` label: they are not linked and do not inherit the repository's read access.
+     Making them public is the owner's decision.
+   - **The pull_request check** is a separate workflow (`engine-images-build.yml`): it builds each image and pushes
+     nothing, with `contents: read` only and no registry login.
+4. **Signing: PENDING (skipped with its reason logged).** Two GitHub docs pages ("Artifact attestations" and "Using
+   artifact attestations", read 2026-10-17) settle it:
+   - Attestations from a **public** repository use the Sigstore public-good instance and are written to its
+     publicly readable transparency log.
+   - **Private** repositories use GitHub's own instance, which has no transparency log, but only on GitHub
+     Enterprise Cloud. On Free, Pro and Team plans, attestations work for public repositories only.
+   - This repository is **public** and owned by a personal account (checked 2026-10-17 through the GitHub API). So an
+     attestation would go to the public log, which the task forbids (public-good keyless signing is not approved).
+   - The `sign` step therefore signs nothing. It logs a `::notice` with the reason and writes it to the step summary.
+   - The existing gateway image workflow (`publish-image.yml`, ADR-0184) does sign keylessly through public-good
+     Sigstore. That workflow is unchanged here and is an open question for the owner (below).
+5. **Digest plumbing: the lock.** `engines/images.lock.json` (schema `regulait.engine-images-lock.v1`) holds, per
+   engine: `repository`, `manifestDigest`, `imageId`, `publishGeneration`, `sourceCommit` and `publishedAt`. Every
+   value is null (and the generation 0) until the first publish. `scripts/engine-images-lock.mjs`:
+   - `--apply <publish.json>` validates the workflow's output. The repository must be
+     `ghcr.io/<owner>/regulait-engine-<engine>` where `<owner>` is **pinned to this repository's owner**, read from
+     the root `package.json` `repository` URL and lowercased (`GHCR_OWNER`; `validateLock` applies it, so `--check`
+     refuses another namespace too). Both digests must be `sha256:<64 hex>` and not the zero digest.
+     It bumps an engine's `publishGeneration` only when the build changes, then regenerates the derived files;
+   - `--apply` also refuses a publish file whose `sourceCommit` is not reachable from `origin/main`
+     (`git merge-base --is-ancestor`, against the local clone, so `origin/main` must be fetched first; a commit the
+     clone does not have is refused too). **Limit:** the publish file is unsigned workflow output, so this proves the
+     named commit is on main, not that the digests were built from it. The workflow's main-only guard is what ties
+     the two; whoever runs `--apply` must take the file from a run on `main`;
+   - `--write` regenerates them, and `--check` fails when they are stale. `scripts/engine-images-lock.test.mjs`
+     runs in CI's `vitest --dir scripts` step and does the same check.
+   - The derived files are `packages/shared/src/engines/images-lock.ts` (generated), which the manifest reads, and
+     the compose defaults.
+   - **In the manifest,** `imageDigest` is the lock's `manifestDigest` (what a runner reports and the gateway
+     admits), `taskImage` is its `imageId`, and `generation` is the base plus `publishGeneration`, so it moves with
+     every recorded build (ADR-0187 decision 95). Pinned by `images-lock.test.ts`.
+   - **Deviation from the task text:** the task asked for `taskImage` as a digest-pinned reference. It stays the
+     bare content digest (`sha256:<hex>`), because the executor channel (`channel.ts`) and `dockerRunArgs` accept
+     only that and changing them is out of scope. The pull reference `repository@manifestDigest` is in the lock and
+     the compose defaults.
+   - **Compose.** The script writes the lock's repository and digest as the defaults of
+     `REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `REGULAIT_ENGINE_<ENGINE>_DIGEST`. With a publish recorded, a stock
+     install needs neither variable. The variable stays as an override (it existed already), and the gateway
+     refuses and audits a runner whose digest is not the manifest's (`engine-runner-register-obsolete-build`).
+     Without a publish the default stays the zero digest and placement keeps refusing (`policy_unresolved`).
+6. **Compose and the bundle.**
+   - The executor input volume (owner 10001, mode 0711) and the Caddy digest pins were already on main (I5
+     follow-up items 2 and 3), so nothing changed for them.
+   - `scripts/build-image-bundle.sh --with-engines` (opt-in) adds the three locked engine images. It refuses an
+     unpublished engine and pulls each image by `repository@manifestDigest` (the packages are private, so
+     `docker login ghcr.io` comes first). It checks the image id against the lock (`imageId` on the classic store,
+     `manifestDigest` on the containerd store) and saves the digest reference plus the fixed tag
+     `regulait/engine-<engine>:bundled`.
+   - `docker load` keeps the image id, which is the `taskImage` the executor runs by. The air-gapped install's
+     override runs the three runner services from the `:bundled` tags (`pull_policy: never`), because a digest
+     reference does not survive save/load on the classic store (as with Caddy). After loading a bundle, the installer
+     checks each present `:bundled` tag's id against that engine's lock entry, read as JSON with `node` (as
+     `build-image-bundle.sh` does, review fix replacing a `grep -A8` line read). Without `node` on the target the
+     check fails closed and the install stops; it applies only when the bundle carries engine images.
+7. **ADR-0176 (search first).** The digests come from BuildKit's own metadata file, and the pushes use the Docker CLI
+   with no new dependency. For the lock, the digest-update bots and pinning tools that were considered track
+   UPSTREAM images by tag. None records our own build's output and writes it into a TypeScript manifest and compose
+   defaults, so the about-150-line script is ours: it is a RegulAIt evidence format. Nothing is added to any
+   `THIRD_PARTY.md`.
+8. **Checked here:**
+   - the engine-modelscan unit tests: 88 passed, 7 skipped (the opt-in real-engine suite);
+   - the shared engine tests;
+   - `scripts/engine-images-lock.test.mjs`;
+   - the gateway file guards `zz-eng-img-engine-images.test.ts`, `zz-b7-compose-engine-images.test.ts` and
+     `zz-b5-compose.test.ts`;
+   - `node scripts/engine-images-lock.mjs --check`;
+   - `bash -n` on the three scripts;
+   - the full workspace build.
+   The installer's lock-block check was run against a lock generated by `--apply` from a synthetic publish: each
+   engine matched only its own ids.
+9. **Not verified (pending execution, M-041).** No Docker daemon or registry was available here.
+   - **Not run anywhere:** building any engine image (the PR's build-only workflow is the first real build, and its
+     result is in the PR); the publish workflow; a GHCR push and the package's actual visibility; buildx metadata
+     keys on GitHub's runners; `--apply` with a real publish; the bundle with `--with-engines` and its load round trip
+     on each image store; an engine task end to end.
+   - The DB suites changed here (`zz-b5-modelscan`, `zz-adr0190-i5-engines`) were typechecked only; CI runs them.
+   - On Docker's containerd image store, a pulled image's `.Id` is the manifest digest, not the config digest the
+     manifest's `taskImage` names. Whether `docker run sha256:<config digest>` resolves there is unverified, so run
+     executors on the classic store until it is checked.
+
+**Open questions for the owner.**
+1. **Signing.** Should the engine images be signed with a key the owner holds (cosign key pair, no transparency log
+   upload)? Or should the repository move to a plan with private attestations? Until then they are unsigned, and
+   ADR-0187 decision 55's "admission is the signature verification at deploy time" stays open.
+2. **The gateway image.** `publish-image.yml` signs keylessly through public-good Sigstore (ADR-0184), which is the
+   opposite of the rule given for the engine images. Should it change to match?
+3. **Who records a publish.** The workflow leaves `--apply` and its PR to a person, so it never holds
+   `contents: write`. Should a bot open that PR instead? That needs `pull-requests: write` in a separate job.
+
 ## As built: owner decisions C and D (2026-10-17)
 
 Migration **0201** (`0201_isolation_person_stdio_and_project_sensitivity.sql`, hand-written; journal idx 201, after
@@ -1949,6 +2088,78 @@ journal entry (idx 204) follows 0203. The number was 0206 as first written; the 
      (`tasksByRun`). Only the executor side of an engine task's session is multi-replica now.
    - No take-over: a session whose holder dies is lost, never resumed elsewhere. Resuming would need the MCP client's
      state, which lives only in the holder.
+
+## As built: slice A1, the relaxation in the Decision BOM (2026-10-17)
+
+Owner decision C asked that the Decision BOM panel show the relaxation and that vectors pin the API-key case. A1
+finishes that: the panel shows the relaxation's id, who set it, its scope, when, and a link to the audit row. No
+migration and no change to the placement code.
+
+1. **The signed facts are unchanged; no v3.** `regulait.decision-facts.v2`'s `execution.relaxation` already signs
+   which relaxation the requirement relied on (id, scope kind, scope id, subject kind). Who set it and when are
+   facts about the relaxation row, not about the decision. That row is never deleted, and its set fields never change
+   (migration 0201's guard). Adding them to v2 would have needed the placement resolution to read them, and two copies
+   of the same fact. They are therefore read live from the row and shown beside the signed body, as the I4 placement
+   reports are.
+2. **The read response** (`decisionBomReadResponseSchema`, contract-b4) gains an optional `executionRelaxation`
+   (`decisionExecutionRelaxationRecordSchema`):
+   - the fields are `id`, `scopeKind`, `scopeId`, `setBy`, `setAt`, `clearedBy`, `clearedAt` and `setAuditId`;
+   - it is present exactly when the signed facts name a relaxation, and it must be the row they name (id and scope);
+   - the schema refuses a mismatch, a clear without its actor, and a clear before the set;
+   - it is null when the facts name none, and absent from a gateway before A1.
+3. **The gateway** (`decisionExecutionRelaxationRecord`, bom-routes.ts) reads the row by the signed id.
+   - `setAuditId` is the `execution-person-stdio-relaxed` row that the set wrote in its own transaction (same actor,
+     `detail.relaxationId`). It is found through the `(user_id, at)` index within a minute of `created_at`. It is
+     null when that row is no longer there (audit retention) or is not exactly one row.
+   - A named row that does not exist refuses the read rather than show the facts without it.
+4. **The audit link.** `GET /v1/audit` takes `id` (one row by id), and the audit log page reads `?id=`. It shows "one
+   audit row" and a control to show every row. The panel links `/admin/audit?id=<setAuditId>`.
+5. **The panel.** Under the signed execution facts, "The isolation relaxation" shows:
+   - the relaxation id, the scope (MCP server or project, and its id), who set it (name and id), and when;
+   - the audit row link, or "Not found" when the row was pruned;
+   - "Today": still in force, or cleared when and by whom.
+   It says that this record is not part of the signed Decision BOM. A gateway that does not report it shows "Not
+   reported". A record that is not the row the facts name makes the whole BOM unreadable.
+6. **Vectors.**
+   - The request gains `personStdioRelaxationState` (`active` or `cleared`).
+   - Five new vectors: an API key on a relaxed project and a workload token stay at L3; the server scope relaxes an
+     interactive person; a cleared row at either scope stays at L3.
+   - Seven new corruption controls (149 vectors, 36 controls).
+   - The gateway runner treats only an `active` row as in scope, as the resolution reads `cleared_at IS NULL`.
+   - **There is no expiry:** a relaxation stops applying only when it is cleared, by an admin or by a program change.
+     So the checker refuses an `expired` state rather than pin one the model does not have.
+7. **Tests.**
+   - Shared: `contract-b4.test.ts`, the record's binding to the facts and its negative controls.
+   - Web: `bomExecution.test.tsx`. Each fixture passes the shared schema first. The tests cover the record, a pruned
+     audit row, a cleared relaxation, "not reported", and six mismatches that the shared schema also refuses.
+   - Gateway, on a database: `zz-adr0190-owner-cd.test.ts`, which covers the record after a real set and clear, the
+     `?id=` read, and the missing-row refusal.
+   - Mocked end to end: `decision-bom-person-stdio.mock.spec.ts`.
+     - The browser calls `POST /mcp/:serverId` with its session cookie and no `authorization` header. The mocked
+       gateway records an L2 placement naming the relaxation.
+     - The audit log opens that decision's BOM, which shows the record. Its link opens exactly the audit row that set
+       the relaxation.
+     - The same call with a bearer key is refused at L3, and its BOM names no relaxation. Axe runs on the panel.
+
+**Not verified.**
+- The database test typechecks but has not run in the session that wrote it (no Postgres there); CI's database
+  shards run it.
+- The end-to-end spec mocks the gateway. It pins what the console sends and shows, not the placement. A real run
+  (gateway, MCP proxy, executor, gVisor L2) is pending execution: it needs Docker and an L2 executor.
+- The new vectors were written by the builder, not independently.
+
+**A1 review fixes (2026-10-17).** The independent review of A1's PR asked for five changes:
+1. `contract-b4.test.ts` now builds a v2 body whose facts name a relaxation. It shows that the named row is accepted,
+   that null is refused, and that another id, scope kind or scope id is refused. The earlier case had a v1 body, so it
+   proved only "a record with no relaxation".
+2. The "invented expiry state" corruption control now edits `person-stdio-cleared-relaxation-stays-L3`. On the active
+   vector, the class check also rejected `expired`. On the cleared vector, only the `RELAXATION_STATES` check can, so
+   the control fails if that check is removed (tried during the fix).
+3. The web reader (`readRelaxationRecord`) refuses a record cleared before it was set, as the shared schema does. A
+   negative case was added to `bomExecution.test.tsx`.
+4. A named relaxation row that is missing is a `BomRouteError` 500 `{ error: "bom_relaxation_missing" }`, which the
+   read route sends as such, rather than an unhandled error.
+5. The mocked end-to-end spec registered the `/v1/users` route twice; the duplicate is gone.
 
 ## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
 

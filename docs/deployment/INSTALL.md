@@ -173,6 +173,14 @@ override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
                      --image-bundle /media/usb/regulait-images-0.1.0.tar
 ```
 
+**Engine images (opt-in).** Add `--with-engines` to also save the three engine images that
+`engines/images.lock.json` records (ADR-0190 "As built: engine task images"). The packages are private on GitHub
+Container Registry, so log in to `ghcr.io` first with a token that can read them. The bundle refuses an engine the lock
+has no published image for, pulls each image by its digest, checks its image id against the lock, and saves it under
+the digest reference and the tag `regulait/engine-<engine>:bundled`. The air-gapped install runs those tags (never
+pulled) and checks each loaded tag's id against the lock. **Pending execution (M-041):** no engine image has been
+published yet, and neither the bundle with `--with-engines` nor its `docker load` round trip has been run.
+
 If integrity across the gap matters (it should), ship the image tarball **inside a signed update
 bundle** rather than loose:
 
@@ -252,8 +260,10 @@ shred -u /root/first-admin-password
 
 The file must be a regular file (not a symbolic link) owned by you or root, with mode `0600` or
 stricter, holding one line: no control characters except one trailing newline, and no UTF-8
-byte-order mark. Anything else is refused before anything renders, and checked again just before
-use. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
+byte-order mark. Its directory must be owned by you or root, and no one else may write to it (so
+the file cannot be swapped between the check and the open). Anything else is refused before
+anything renders, and checked again just before use. The password file works on Linux only; on
+other systems run the installer interactively. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
 three. Without the file, a non-interactive install skips the step and says so.
 
 **The bootstrap door closes itself.** `REGULAIT_BOOTSTRAP_TOKEN` authenticates as an admin **with
@@ -621,10 +631,23 @@ own authenticated channel to the gateway. Before you register a stdio server:
 modelscan scanner) as engine tasks. Compose gives it the input volume they need (`regulait-executor-input`, mounted
 only on `sandbox-executor`; Docker Engine 26 or later for `volume-subpath`), and the `engine-images` profile builds
 the three engine images on the host (`engine-promptfoo-image`, `engine-modelscan-image`, `engine-garak-image`; see
-the comment above them in `docker-compose.yml`). An engine still places nothing until its image's content digest is
-recorded as the manifest's `taskImage` by a release, and under real gVisor it waits on the `runsc` re-pin (ADR-0190
-I5). **Pending execution (M-041):** none of this has been run on a Docker host yet; record what you find against
-ADR-0190 "I5 follow-up: engines in compose".
+the comment above them in `docker-compose.yml`) so you can check the Dockerfiles locally. What runs is the
+**published** image:
+- The `Engine images` workflow (`.github/workflows/engine-images.yml`, on push to `main` and by hand) pushes
+  `ghcr.io/<owner>/regulait-engine-<engine>` as a **private** package. Someone then records the publish with
+  `node scripts/engine-images-lock.mjs --apply engine-images-publish.json` (the workflow's artifact) in a PR.
+- The lock (`engines/images.lock.json`) sets the manifest's `imageDigest` and `taskImage`, and the defaults of
+  `REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `REGULAIT_ENGINE_<ENGINE>_DIGEST` in `docker-compose.yml`. Once it holds
+  a publish, a stock install needs neither variable: `docker login ghcr.io`, then start the `engines` profile. A
+  digest variable you set is only an override, and the gateway refuses (and audits) a runner whose digest is not the
+  lock's.
+- Until a publish is recorded the lock is null: an engine places nothing (`policy_unresolved`), as before.
+- The images are **not signed** yet (ADR-0190 "As built: engine task images" says why).
+- The modelscan runner no longer downloads the artifact: the gateway streams it to the executor's input volume.
+
+Under real gVisor an engine task still waits on the `runsc` re-pin (ADR-0190 I5). **Pending execution (M-041):**
+none of this has been run on a Docker host yet, and no publish has run; record what you find against ADR-0190 "As
+built: engine task images".
 
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always

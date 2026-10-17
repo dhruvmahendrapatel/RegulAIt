@@ -392,6 +392,31 @@ caddy_image_id_ok() {
   return 1
 }
 
+# ENG-IMG: an engine image a bundle carries (`build-image-bundle.sh --with-engines`) runs air-gapped as the fixed tag
+# regulait/engine-<engine>:bundled. Its id must be the one engines/images.lock.json records for that engine (the
+# config digest on the classic image store, the manifest digest on the containerd store). The lock is written one
+# field per line by scripts/engine-images-lock.mjs, so the engine's block is the 8 lines after its name.
+ENGINE_IDS="promptfoo modelscan garak"
+engine_bundled_id_ok() { # engine
+  local id entry
+  docker_up || return 1
+  id="$(docker image inspect --format '{{.Id}}' "regulait/engine-$1:bundled" 2>/dev/null)" || return 1
+  printf '%s' "$id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+  # the lock read as JSON (as build-image-bundle.sh does), never by line layout. No node: the check fails closed.
+  have node || { warn "node is needed to read engines/images.lock.json and check the bundled engine images"; return 1; }
+  # one line: <manifestDigest> <imageId>, or nothing when the engine was never published
+  entry="$(node -e '
+    const l = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    const e = l.engines[process.argv[2]];
+    if (e && e.manifestDigest && e.imageId) console.log(`${e.manifestDigest} ${e.imageId}`);
+  ' "$SCRIPT_DIR/../engines/images.lock.json" "$1" 2>/dev/null)" || return 1
+  [ -n "$entry" ] || return 1
+  case " $entry " in
+    *" $id "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ===========================================================================
 # 1. RESOLVE CONFIGURATION (flags > environment > existing .env > prompt)
 # ===========================================================================
@@ -633,6 +658,7 @@ fi
 . "$SCRIPT_DIR/lib/first-admin.sh"
 FIRST_ADMIN_USERNAME="$(printf '%s' "${FIRST_ADMIN_USERNAME:-admin}" | tr '[:upper:]' '[:lower:]')"
 if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
+  [ "$(uname -s)" = "Linux" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is supported on Linux only: run the installer interactively for the first admin."
   problem="$(fa_password_file_problem "$FIRST_ADMIN_PASSWORD_FILE")"
   [ -z "$problem" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE: $problem"
   [ -n "$FIRST_ADMIN_EMAIL" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is set but REGULAIT_FIRST_ADMIN_EMAIL is not: the first admin needs an email."
@@ -1015,6 +1041,17 @@ YML
   executor-front-ca:
     image: $CADDY_TAG
     pull_policy: never
+  # ENG-IMG: the engine runners (profile engines) run the bundle's fixed tags; the task images are the same images,
+  # which the executor starts by image id. Without a bundle that carries them (--with-engines), nothing is found.
+  engine-promptfoo:
+    image: regulait/engine-promptfoo:bundled
+    pull_policy: never
+  engine-modelscan:
+    image: regulait/engine-modelscan:bundled
+    pull_policy: never
+  engine-garak:
+    image: regulait/engine-garak:bundled
+    pull_policy: never
 YML
   fi
 }
@@ -1071,6 +1108,11 @@ if [ -n "$IMAGE_BUNDLE" ]; then
   if [ "$MODE" = "air_gapped" ]; then
     caddy_image_id_ok || die "the bundle's $CADDY_TAG is missing or is not the pinned image (allowed ids: $CADDY_IMAGE_IDS)"
     ok "$CADDY_TAG is the pinned image"
+    for engine in $ENGINE_IDS; do
+      image_present "regulait/engine-$engine:bundled" || continue
+      engine_bundled_id_ok "$engine" || die "the bundle's regulait/engine-$engine:bundled is not the image engines/images.lock.json records for $engine"
+      ok "regulait/engine-$engine:bundled is the locked image"
+    done
   fi
 fi
 
@@ -1174,11 +1216,13 @@ first_admin_exec() {
 }
 FIRST_ADMIN_STATE="skipped"   # created | exists | skipped | failed
 FIRST_ADMIN_NAME=""
+FIRST_ADMIN_DEMO_ONLY=0       # 1 when every admin is a demo seed persona (first-admin.js --status says so)
 FA_STATUS_RC=0
 FA_STATUS_LINE="$(first_admin_exec --status </dev/null 2>&1)" || FA_STATUS_RC=$?
 case "$FA_STATUS_RC" in
   3)
     ok "an active admin already exists — skipped, nothing changed"
+    case "$FA_STATUS_LINE" in *"only the demo seed's personas are admins"*) FIRST_ADMIN_DEMO_ONLY=1 ;; esac
     FIRST_ADMIN_STATE="exists" ;;
   0)
     if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
@@ -1268,7 +1312,7 @@ case "$FIRST_ADMIN_STATE" in
     if [ "$FIRST_ADMIN_STATE" = "created" ]; then
       FA_HEADLINE="Created: '$FIRST_ADMIN_NAME'. Sign in at the URL above with the password you chose.
     The first sign-in enrols an authenticator app (MFA is required for admins)."
-    elif [ "$SEED_DEMO" = "1" ]; then
+    elif [ "$SEED_DEMO" = "1" ] && [ "$FIRST_ADMIN_DEMO_ONLY" = "1" ]; then
       # --seed-demo: the demo seed made its personas first, so the demo admin IS the existing admin
       FA_HEADLINE="The demo dataset is loaded (--seed-demo), so its personas are the admins
     (admin@regulait.local) and you were not asked for one. Their one-time passwords are
@@ -1276,19 +1320,22 @@ case "$FIRST_ADMIN_STATE" in
     own account, sign in as the demo admin, create your admin under Admin -> Users, then
     deactivate the demo personas. With the token retired, the demo seed that re-runs at
     each gateway start can no longer act and logs a failure; the loaded data stays."
+    elif [ "$SEED_DEMO" = "1" ]; then
+      # a real admin existed, so the demo seed's guard (seed-demo-guard.ts) refused: nothing was loaded
+      FA_HEADLINE="An admin of your own already exists, so --seed-demo loaded nothing: the demo seed
+    never touches a database with a real admin (the refusal is in docker compose -p $PROJECT logs gateway).
+    This run did not change any account."
     else
       FA_HEADLINE="An admin already exists; this run did not change any account."
     fi
-    if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
-      FA_TOKEN_LINE="The bootstrap token is retired."
-      if [ "$TOKEN_RETIRED_NOW" = "1" ]; then
-        FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
-      fi
-    elif [ "$TOKEN_REOPENED" = "1" ]; then
+    # created|exists always retires the token above (or dies trying) unless --admin-token re-opened it
+    if [ "$TOKEN_REOPENED" = "1" ]; then
       FA_TOKEN_LINE="The bootstrap token is OPEN: you re-opened it with --admin-token. Re-run without
     --admin-token to retire it again."
+    elif [ "$TOKEN_RETIRED_NOW" = "1" ]; then
+      FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
     else
-      FA_TOKEN_LINE="The bootstrap token is still live: re-run this installer to retire it."
+      FA_TOKEN_LINE="The bootstrap token is retired."
     fi
     cat <<SUMMARY
 
