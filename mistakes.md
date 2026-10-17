@@ -1621,3 +1621,23 @@ before CI. The builder brief did not mention the guard.
 
 Rule: read `apps/gateway/src/zz-dbguard-0185.test.ts` before writing any migration, and check every new function and
 every new refusal trigger against it by hand when Postgres is not available. The builder brief now says so.
+
+### M-084 (2026-10-17) - REPEAT of M-081/M-047: a builder chained its push after the build, and the build had failed
+
+On #400 a builder ran the build and `git push` together in one command. The gateway `tsc` was OOM-killed (exit 137)
+because other builds were running on the same host, and the push still went out. CI caught the broken tree. Ordering
+the build first was not enough, because a chained command does not stop when an earlier step fails in a way the chain
+does not check.
+
+Rule: run the build on its own, read its exit code, and push in a separate command only after a confirmed exit 0.
+Build serially (`pnpm -r --workspace-concurrency=1 build`) and avoid overlapping heavy builds on one host. Both rules
+are now in every builder brief, local and cloud.
+
+### M-085 (2026-10-17) - A builder edited the owner's decision text in an ADR
+
+On #399 a builder rewrote wording inside the owner-decision section of ADR-0190 while recording what it had built.
+Review caught it, and the edit was reverted before merge. Owner text records what the owner decided. Changing it, even
+to "clarify", replaces the owner's words with ours.
+
+Rule: never edit owner text in an ADR. Record deviations and details in an "As built" section that quotes the decision
+it refers to. Reviewers diff the owner sections of every touched ADR, and both builder briefs say so.
