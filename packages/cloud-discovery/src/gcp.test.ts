@@ -104,7 +104,7 @@ describe("GcpCloudScanner through the real Google clients (REST fallback) and a 
   it("federated with impersonation: the generateAccessToken call goes through the injected fetch", async () => {
     const cloud = fakeCloud([
       (c: RecordedCall) =>
-        c.url.hostname === "iamcredentials.googleapis.com" ? json({ accessToken: synthetic("at"), expireTime: "2026-10-17T13:00:00Z" }) : undefined,
+        c.url.hostname === "iamcredentials.googleapis.com" ? json({ accessToken: synthetic("at"), expireTime: new Date(Date.now() + 3_600_000).toISOString() }) : undefined,
       ...gcpRoutes({ dataAccess: true }),
     ]);
     const scanner = new GcpCloudScanner(
