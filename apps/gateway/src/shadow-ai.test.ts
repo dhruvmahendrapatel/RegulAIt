@@ -470,7 +470,7 @@ describe("the inventory is actionable and states its own coverage", () => {
   it("reports severity-ordered findings and never claims completeness", async () => {
     const res = await get("/v1/shadow-ai/findings");
     const body = res.json();
-    expect(body.coverage.statement).toMatch(/ships no collector/);
+    expect(body.coverage.statement).toMatch(/No active discovery source is enabled, so nothing is scanned/);
     expect(body.coverage.statement).toMatch(/does not prove its absence/);
     expect(body.coverage.sourcesPossible).toBe(4);
     expect(body.posture).toMatch(/signal, not proof of misuse/);
