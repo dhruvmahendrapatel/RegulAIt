@@ -50,6 +50,7 @@ import { ACCESS_TOKEN_TYP, exactlyOneCnf, issuerKeyFor, verifyDpopBranch, type I
 import { databaseNow } from "../delegation.js";
 import { currentIssuerSigner, ISSUER_JWS_ALG, signingKeyAccepts } from "../identity-signing-keys.js";
 import { loadOrgSettings } from "../org-settings.js";
+import { endpointAgentContext } from "../endpoint-agent.js";
 
 /** the one control-plane resource a self token of `kind` names (an absolute URL under the issuer) */
 export function selfResource(issuer: string, kind: WorkloadSelfKind): string {
@@ -168,6 +169,8 @@ export async function storedSelfToken(
     .limit(1);
   if (revoked) return fail("credential_revoked");
   const [identity] = await db.select().from(workloadIdentities).where(eq(workloadIdentities.id, row.subjectIdentityId));
+  // ADR-0195 SD4b: a revoked endpoint agent identity is a revoked device (the agent stops, it never retries)
+  if (identity?.kind === "endpoint_agent" && identity.status === "revoked") return fail("device_revoked");
   if (!identity || identity.status !== "active") return fail("identity_not_active");
   if (identity.identifier !== claims.client_id) return fail("client_id_mismatch");
   const kind = identity.kind as string;
@@ -187,6 +190,8 @@ export async function storedSelfToken(
     if (r.revokedAt !== null) return fail("engine_runner_revoked");
     runner = { id: r.id, engineId: r.engineId };
   }
+  // ADR-0195 SD4b: the identity's device must still exist and not be revoked, read now
+  if (kind === "endpoint_agent" && !(await endpointAgentContext(db, identity.id)).ok) return fail("device_revoked");
   return { ok: true, subject: { identity, authCredentialId: row.authCredentialId, jti: row.jti, runner } };
 }
 

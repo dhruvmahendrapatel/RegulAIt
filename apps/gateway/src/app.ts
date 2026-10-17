@@ -513,6 +513,7 @@ import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
+import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -5489,6 +5490,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {
+    dataKey: opts.dataKey,
+    ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+  });
+  // ADR-0195 SD4b — the RegulAIt endpoint agent: ticket redemption and registration (authenticated in-route by the
+  // bulk token or the device ticket), the agent's own routes (its DPoP-bound self token only), and the admin's
+  // enrolment-token and device routes (admin-only by default). Nothing works until an endpoint agent source is enabled.
+  registerEndpointAgentRoutes(app, db, {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });

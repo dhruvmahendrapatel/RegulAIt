@@ -31,8 +31,8 @@
  *    mode and an `mcp_tool` entry with no `toolNames` covers no tool.
  */
 
-/** the identity kinds of S1's `WORKLOAD_IDENTITY_KINDS` (migration 0180 CHECK) */
-export type ActorIdentityKind = "agent" | "builder_agent" | "engine_runner" | "worker_runtime" | "pdp";
+/** the identity kinds of S1's `WORKLOAD_IDENTITY_KINDS` (migration 0180 CHECK, widened by 0207) */
+export type ActorIdentityKind = "agent" | "builder_agent" | "engine_runner" | "worker_runtime" | "pdp" | "endpoint_agent";
 
 /** the most hops a chain can have: a root grant (depth 0) plus 8 descendants (S1 `ACTOR_CHAIN_MAX_HOPS`) */
 export const ACTOR_CHAIN_MAX_HOPS = 9;

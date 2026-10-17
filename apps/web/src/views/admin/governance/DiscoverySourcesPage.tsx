@@ -24,6 +24,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea 
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import { EndpointImportCard } from "./EndpointImportCard";
+import { EndpointAgentCard } from "./EndpointAgentCard";
 import {
   couldNotRead,
   describeSchedule,
@@ -373,6 +374,8 @@ export default function DiscoverySourcesPage() {
           )}
 
           <EndpointImportCard sources={list} onDone={refetchAll} />
+
+          <EndpointAgentCard sources={list} />
 
           <Card title="Recent runs">
             <Table<DiscoveryRunView>

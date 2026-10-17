@@ -10,10 +10,16 @@
  */
 import type { Scanner } from "./discovery-scanners.js";
 
-const uploadFed = (kind: "endpoint_osquery" | "endpoint_inventory"): Scanner => ({
+const uploadFed = (kind: "endpoint_osquery" | "endpoint_inventory" | "endpoint_agent"): Scanner => ({
   kind,
   requiresCredential: false,
   run: async () => ({ observations: [] }),
 });
 
 export const ENDPOINT_IMPORT_SCANNERS: readonly Scanner[] = Object.freeze([uploadFed("endpoint_osquery"), uploadFed("endpoint_inventory")]);
+
+/**
+ * ADR-0195 SD4b: the RegulAIt endpoint agent's source kind. Also fed by upload: the agents send signed reports
+ * (endpoint-agent-routes.ts) and the ingest job commits them as runs of this source; a "run now" observes nothing.
+ */
+export const ENDPOINT_AGENT_SCANNER: Scanner = Object.freeze(uploadFed("endpoint_agent"));
