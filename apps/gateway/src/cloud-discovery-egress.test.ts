@@ -30,6 +30,22 @@ import {
 } from "@regulait/cloud-discovery";
 import { createGuardedFetch, type EgressAllowEntry, type EgressResolver } from "./egress-guard.js";
 
+/** the host a refused call was aimed at, parsed with URL (no substring checks) */
+function escapedHost(first: unknown): string {
+  try {
+    if (first instanceof URL) return first.hostname;
+    if (typeof first === "string") return new URL(first).hostname;
+    if (first instanceof Request) return new URL(first.url).hostname;
+  } catch {
+    return "?";
+  }
+  if (first && typeof first === "object") {
+    const o = first as { host?: unknown; hostname?: unknown };
+    return String(o.hostname ?? o.host ?? "?");
+  }
+  return "?";
+}
+
 const publicResolver: EgressResolver = async () => [{ address: "93.184.216.34", family: 4 }];
 const synthetic = (label: string) => `${label}-${randomBytes(12).toString("hex")}`;
 const ctx = (): CloudScanContext => ({
@@ -94,6 +110,7 @@ const networkReads = (r: CloudScanResult) => r.capabilities.filter((c) => c.stat
 
 describe("cloud discovery: the guarded fetch is the only network path (ADR-0195 decision 8)", () => {
   const escaped: string[] = [];
+  const escapedHosts: string[] = [];
   // every way out of the process a client could take without the guarded fetch
   const mods = { global: globalThis, http, https, net, tls, http2 } as unknown as Record<string, Record<string, unknown>>;
   const targets: Array<[string, string]> = [
@@ -106,11 +123,13 @@ describe("cloud discovery: the guarded fetch is the only network path (ADR-0195 
       mods[m]![k] = (...args: unknown[]) => {
         const a = args[0];
         escaped.push(`${m}.${k} ${a instanceof Request ? a.url : a instanceof URL ? a.href : typeof a === "string" ? a : String((a as { host?: unknown } | undefined)?.host)}`);
+        escapedHosts.push(escapedHost(a));
         throw new Error(`tripwire: ${m}.${k}`);
       };
     }
   });
   afterEach(() => {
+    escapedHosts.splice(0);
     expect(escaped.splice(0)).toEqual([]);
   });
   afterAll(() => {
@@ -120,7 +139,9 @@ describe("cloud discovery: the guarded fetch is the only network path (ADR-0195 
   it("tripwire positive control: an AWS client on its default handler is recorded", async () => {
     const client = new STSClient({ region: "us-east-1", credentials: { accessKeyId: synthetic("a"), secretAccessKey: synthetic("s") }, maxAttempts: 1 });
     await expect(client.send(new GetCallerIdentityCommand({}))).rejects.toThrow();
-    expect(escaped.splice(0).some((e) => e.includes("sts.us-east-1.amazonaws.com"))).toBe(true);
+    // exact hostname equality, never a substring check
+    expect(escapedHosts.splice(0)).toContain("sts.us-east-1.amazonaws.com");
+    escaped.splice(0);
   });
 
   for (const name of ["awsFederated", "awsStatic", "gcpFederated", "gcpStatic", "azureFederated", "azureStatic"] as const) {

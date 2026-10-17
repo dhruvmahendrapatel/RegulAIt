@@ -66,7 +66,23 @@ export function fakeCloud(routes: Route[]): { fetch: typeof fetch; calls: Record
  * request/get, net.connect/createConnection, tls.connect and http2.connect are replaced with recorders that refuse.
  * Returns the record and a restore function. A positive control (a client on its default handler) proves it trips.
  */
-export async function installNetworkTripwire(): Promise<{ escaped: string[]; restore: () => void }> {
+/** the host a refused call was aimed at: parsed with URL for a URL, string or Request; the options' host otherwise */
+export function escapedHost(first: unknown): string {
+  try {
+    if (first instanceof URL) return first.hostname;
+    if (typeof first === "string") return new URL(first).hostname;
+    if (first instanceof Request) return new URL(first.url).hostname;
+  } catch {
+    return "?";
+  }
+  if (first && typeof first === "object") {
+    const o = first as { host?: unknown; hostname?: unknown };
+    return String(o.hostname ?? o.host ?? "?");
+  }
+  return "?";
+}
+
+export async function installNetworkTripwire(): Promise<{ escaped: string[]; escapedHosts: string[]; restore: () => void }> {
   const mods: Record<string, Record<string, unknown>> = {
     http: (await import("node:http")).default as unknown as Record<string, unknown>,
     https: (await import("node:https")).default as unknown as Record<string, unknown>,
@@ -87,6 +103,7 @@ export async function installNetworkTripwire(): Promise<{ escaped: string[]; res
     ["http2", "connect"],
   ];
   const escaped: string[] = [];
+  const escapedHosts: string[] = [];
   const saved = targets.map(([m, k]) => [m, k, mods[m]![k]] as const);
   const describe = (first: unknown): string => {
     if (first instanceof URL) return first.href;
@@ -101,11 +118,13 @@ export async function installNetworkTripwire(): Promise<{ escaped: string[]; res
   for (const [m, k] of targets) {
     mods[m]![k] = (...args: unknown[]) => {
       escaped.push(`${m}.${k} ${describe(args[0])}`);
+      escapedHosts.push(escapedHost(args[0]));
       throw new Error(`network tripwire: ${m}.${k} called outside the injected fetch`);
     };
   }
   return {
     escaped,
+    escapedHosts,
     restore: () => {
       for (const [m, k, v] of saved) mods[m]![k] = v;
     },

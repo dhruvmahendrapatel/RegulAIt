@@ -71,7 +71,9 @@ describe("ambient endpoint configuration is ignored (finding 1)", () => {
     );
     await scanner.scan(ctx());
     const hosts = new Set(cloud.calls.map((c) => c.url.hostname));
-    expect([...hosts].filter((h) => h.includes(EVIL) || h.includes("fips") || h.includes(".api.aws"))).toEqual([]);
+    // exactly the region's public hosts (exact equality; no override, FIPS or dual-stack host)
+    const allowed = new Set(["sts", "account", "bedrock", "bedrock-agent", "api.sagemaker", "cloudtrail"].map((s) => `${s}.us-east-1.amazonaws.com`));
+    expect([...hosts].filter((h) => !allowed.has(h))).toEqual([]);
     expect(hosts.has("sts.us-east-1.amazonaws.com")).toBe(true);
     expect(hosts.has("bedrock.us-east-1.amazonaws.com")).toBe(true);
   });
@@ -93,7 +95,7 @@ describe("ambient endpoint configuration is ignored (finding 1)", () => {
       { fetch: cloud.fetch, credential: { mode: "azure_client_secret", tenantId: "00000000-0000-4000-8000-000000000001", clientId: "c", clientSecret: synthetic("cs") } },
     ).scan(ctx());
     const hosts = new Set(cloud.calls.map((c) => c.url.hostname));
-    expect([...hosts].filter((h) => h.includes(EVIL))).toEqual([]);
+    expect([...hosts].filter((h) => h !== "login.microsoftonline.com" && h !== "management.azure.com")).toEqual([]);
     expect(hosts.has("login.microsoftonline.com")).toBe(true);
   });
 });

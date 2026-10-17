@@ -20,7 +20,9 @@ describe("the network tripwire trips (positive control)", () => {
   it("an AWS client on its default handler is recorded", async () => {
     const client = new BedrockClient({ region: "us-east-1", credentials: { accessKeyId: synthetic("a"), secretAccessKey: synthetic("s") }, maxAttempts: 1 });
     await expect(client.send(new ListCustomModelsCommand({}))).rejects.toThrow();
-    expect(wire.escaped.splice(0).some((e) => e.includes("bedrock.us-east-1.amazonaws.com"))).toBe(true);
+    // exact hostname equality (CodeQL js/incomplete-url-substring-sanitization: no substring host checks)
+    expect(wire.escapedHosts.splice(0)).toContain("bedrock.us-east-1.amazonaws.com");
+    wire.escaped.splice(0);
   });
 
   it("an Azure client on its default HttpClient is recorded", async () => {
@@ -28,6 +30,7 @@ describe("the network tripwire trips (positive control)", () => {
     const client = new ResourceGraphClient(credential, { retryOptions: { maxRetries: 0 } });
     await expect(client.resources({ subscriptions: ["s"], query: "resources | take 1" })).rejects.toThrow();
     expect(wire.escaped.splice(0).length).toBeGreaterThan(0);
+    wire.escapedHosts.splice(0);
   });
 
   it("raw net, tls and http2 connects are recorded", () => {
@@ -35,5 +38,6 @@ describe("the network tripwire trips (positive control)", () => {
     expect(() => tls.connect({ host: "example.test", port: 443 })).toThrow(/tripwire/);
     expect(() => http2.connect("https://example.test")).toThrow(/tripwire/);
     expect(wire.escaped.splice(0)).toEqual(["net.connect example.test:443", "tls.connect example.test:443", "http2.connect https://example.test"]);
+    expect(wire.escapedHosts.splice(0)).toEqual(["example.test", "example.test", "example.test"]);
   });
 });
