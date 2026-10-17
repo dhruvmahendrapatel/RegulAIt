@@ -82,6 +82,7 @@ import {
   GRANT_PROPOSAL_MAX,
   GRANT_PROPOSAL_WINDOW_DAYS,
   IDENTITY_PICKER_MAX,
+  identityPickerTruncatedLists,
   IDENTITY_PICKER_TOOLS_PER_SERVER,
   IDENTITY_PICKER_TOOLS_TOTAL,
   revokeWorkloadIdentitySchema,
@@ -1149,11 +1150,26 @@ export async function identityPickerSources(db: Db, actorUserId: string = SYSTEM
     : [];
   const toolsTruncated = toolRows.length > IDENTITY_PICKER_TOOLS_TOTAL || toolRows.some((t) => Number(t.rn) > IDENTITY_PICKER_TOOLS_PER_SERVER);
   const keptTools = toolRows.slice(0, IDENTITY_PICKER_TOOLS_TOTAL).filter((t) => Number(t.rn) <= IDENTITY_PICKER_TOOLS_PER_SERVER);
-  const lists = [people, freeAgents, freeBuilders, freeRunners, envRows.rows, serverRows, agentRows, connectorRows, roleRows, workers];
-  const truncated = toolsTruncated || lists.some((l) => l.length > IDENTITY_PICKER_MAX);
+  const allEnvironments = [...new Set([resolveDeployMode(), ...envRows.rows.map((r) => r.env)])].sort();
+  // per list (each read up to one past the cap), so a form can say which list was cut
+  const truncatedLists = identityPickerTruncatedLists(
+    {
+      sponsors: people.length,
+      "subjects.agent": freeAgents.length,
+      "subjects.builder_agent": freeBuilders.length,
+      "subjects.engine_runner": freeRunners.length,
+      environments: allEnvironments.length,
+      servers: serverRows.length,
+      agents: agentRows.length,
+      connectors: connectorRows.length,
+      roles: roleRows.length,
+      workerIdentities: workers.length,
+    },
+    toolsTruncated,
+  );
   const top = <T>(l: T[]) => l.slice(0, IDENTITY_PICKER_MAX);
   const opt = (r: { id: string; name: string }) => ({ id: r.id, label: r.name });
-  const environments = [...new Set([resolveDeployMode(), ...envRows.rows.map((r) => r.env)])].sort().slice(0, IDENTITY_PICKER_MAX);
+  const environments = top(allEnvironments);
   const view: IdentityPickerSourcesView = {
     sponsors: top(people).map((p) => ({ id: p.id, label: p.displayName || p.email, email: p.email })),
     subjects: { agent: top(freeAgents).map(opt), builder_agent: top(freeBuilders).map(opt), engine_runner: top(freeRunners).map(opt) },
@@ -1163,7 +1179,8 @@ export async function identityPickerSources(db: Db, actorUserId: string = SYSTEM
     connectors: top(connectorRows).map(opt),
     roles: top(roleRows).map(opt),
     workerIdentities: top(workers).map((w) => ({ id: w.id, label: w.identifier })),
-    truncated,
+    truncated: truncatedLists.length > 0,
+    truncatedLists,
   };
   // the read lists people and their emails: audited like the other sensitive admin reads (security review Low 7)
   await db.insert(auditLog).values({
@@ -1173,7 +1190,8 @@ export async function identityPickerSources(db: Db, actorUserId: string = SYSTEM
     detail: {
       phase: "picker_sources_read",
       counts: { sponsors: view.sponsors.length, servers: view.servers.length, tools: keptTools.length, workerIdentities: view.workerIdentities.length },
-      truncated,
+      truncated: view.truncated,
+      truncatedLists,
     },
     effect: "allow",
     ruleId: "identity-picker-sources-read",

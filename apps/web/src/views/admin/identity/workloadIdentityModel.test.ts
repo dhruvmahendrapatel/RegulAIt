@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  PICKER_LIST_LABELS,
+  pickerTruncationNotice,
   CONNECTOR_GRANT_MODES,
   ENVIRONMENT_NAME_PATTERN,
   GRANTS_REVISION_CONFLICT,
@@ -296,5 +298,27 @@ describe("S6 review: proposal selection (least privilege)", () => {
     expect(out.revision).toBe(7);
     expect(base.agents[0]!.allowedModes).toEqual(["plan"]);
     expect(setWithProposals(base, [ran, neverRan], defaultProposalSelection([ran, neverRan])).agents[0]!.allowedModes).toEqual(["plan", "execute"]);
+  });
+});
+
+describe("picker sources: the notice names each list the gateway cut", () => {
+  it("names the cut lists; tools get their own sentence; nothing cut is no notice", () => {
+    expect(pickerTruncationNotice({ truncated: false, truncatedLists: [] })).toBeNull();
+    expect(pickerTruncationNotice({ truncated: true, truncatedLists: ["sponsors", "roles"] })).toBe("These lists show only their first 1,000 entries: stewards, roles.");
+    expect(pickerTruncationNotice({ truncated: true, truncatedLists: ["tools"] })).toBe("Some MCP servers show only part of their tool list.");
+    expect(pickerTruncationNotice({ truncated: true, truncatedLists: ["subjects.agent", "tools"] })).toBe(
+      "These lists show only their first 1,000 entries: agents without an identity. Some MCP servers show only part of their tool list.",
+    );
+  });
+  it("an older gateway that names no list still gets the general notice", () => {
+    expect(pickerTruncationNotice({ truncated: true })).toBe("Some lists were cut to their first 1,000 entries.");
+    expect(pickerTruncationNotice({ truncated: false })).toBeNull();
+  });
+  it("labels every list the shared contract can name", () => {
+    const src = readFileSync(new URL("../../../../../../packages/shared/src/identity/contract.ts", import.meta.url), "utf8");
+    const block = /export const IDENTITY_PICKER_LISTS = \[([^\]]*)\]/.exec(src)?.[1] ?? "";
+    const names = [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    expect(names.length).toBe(11);
+    expect(Object.keys(PICKER_LIST_LABELS).sort()).toEqual([...names].sort());
   });
 });

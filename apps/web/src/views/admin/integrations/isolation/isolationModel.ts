@@ -392,9 +392,9 @@ export const IDENTITY_PICKER_MAX = 1000;
  * executor may be registered against, as `{id, label}` (the label is the SPIFFE identifier). Null when the answer
  * cannot be read; a malformed option is dropped from the choices (it could not be sent anyway).
  *
- * `truncated` is per list here, though the gateway's flag is one for every list it returns: it is true only when
- * the gateway says something was cut AND this list is at the cap. A shorter list was not cut, whatever another list
- * did. (A per-list flag from the gateway would make this exact: a backend follow-up.)
+ * `truncated` is this list's own: the gateway names each list it cut (`truncatedLists`). An older gateway sends only
+ * the one flag for every list; then it is true only when something was cut AND this list is at the cap (a shorter
+ * list was not cut, whatever another list did).
  */
 export function parseWorkerIdentities(value: unknown): { options: Array<{ id: string; label: string }>; truncated: boolean } | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -403,6 +403,7 @@ export function parseWorkerIdentities(value: unknown): { options: Array<{ id: st
   const options = v.workerIdentities
     .filter((o): o is { id: string; label: string } => o !== null && typeof o === "object" && uuidOk(String((o as { id?: unknown }).id ?? "")) && str((o as { label?: unknown }).label))
     .map((o) => ({ id: o.id, label: o.label }));
+  if (Array.isArray(v.truncatedLists)) return { options, truncated: v.truncatedLists.includes("workerIdentities") };
   return { options, truncated: v.truncated === true && v.workerIdentities.length >= IDENTITY_PICKER_MAX };
 }
 

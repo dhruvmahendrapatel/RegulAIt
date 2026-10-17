@@ -93,6 +93,13 @@ describe("worker identities for registering an executor (ADR-0188 S6 picker sour
     expect(parseWorkerIdentities({ workerIdentities: full, truncated: true })?.truncated).toBe(true);
     expect(parseWorkerIdentities({ workerIdentities: full, truncated: false })?.truncated).toBe(false);
   });
+  it("the gateway's per-list flag decides exactly: this list is cut only when the gateway names it", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const one = [{ id, label: "spiffe://x/w" }];
+    expect(parseWorkerIdentities({ workerIdentities: one, truncated: true, truncatedLists: ["workerIdentities"] })?.truncated).toBe(true);
+    expect(parseWorkerIdentities({ workerIdentities: one, truncated: true, truncatedLists: ["roles"] })?.truncated).toBe(false);
+    expect(parseWorkerIdentities({ workerIdentities: one, truncated: false, truncatedLists: [] })?.truncated).toBe(false);
+  });
   it("the cap is the shared contract's", () => {
     const src = readFileSync(sharedFile("identity/contract.ts"), "utf8");
     expect(/export const IDENTITY_PICKER_MAX = (\d+);/.exec(src)?.[1]).toBe(String(IDENTITY_PICKER_MAX));

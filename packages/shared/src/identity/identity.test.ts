@@ -5,6 +5,8 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  IDENTITY_PICKER_LISTS,
+  identityPickerTruncatedLists,
   actClaimFromChain,
   actorChainDepthForGrantDepth,
   actorChainSchema,
@@ -350,5 +352,19 @@ describe("ADR-0188 decision 19: the audit v2 serialisation", () => {
       version: 3,
       fromSeq: 20,
     });
+  });
+});
+
+describe("picker sources: which lists were cut", () => {
+  const none = { sponsors: 0, "subjects.agent": 0, "subjects.builder_agent": 0, "subjects.engine_runner": 0, environments: 0, servers: 0, agents: 0, connectors: 0, roles: 0, workerIdentities: 0 } as const;
+  it("names a list only when it read past the cap; a list AT the cap was not cut", () => {
+    expect(identityPickerTruncatedLists(none, false, 3)).toEqual([]);
+    expect(identityPickerTruncatedLists({ ...none, roles: 3, sponsors: 3 }, false, 3)).toEqual([]);
+    expect(identityPickerTruncatedLists({ ...none, roles: 4, "subjects.agent": 4, workerIdentities: 2 }, false, 3)).toEqual(["subjects.agent", "roles"]);
+  });
+  it("tools carries its own verdict, and every list can be named, in response order", () => {
+    expect(identityPickerTruncatedLists(none, true, 3)).toEqual(["tools"]);
+    const all = Object.fromEntries(Object.keys(none).map((k) => [k, 4])) as Record<keyof typeof none, number>;
+    expect(identityPickerTruncatedLists(all, true, 3)).toEqual([...IDENTITY_PICKER_LISTS]);
   });
 });

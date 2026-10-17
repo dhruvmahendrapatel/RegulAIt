@@ -85,6 +85,7 @@ import {
   type GrantRow,
   type WorkloadIdentityDetailView,
   type WorkloadIdentityView,
+  pickerTruncationNotice,
 } from "./workloadIdentityModel";
 import { DelegationGrantDetail, IssuerSigningKeysCard } from "./IssuerSigningKeys";
 import { SpiffeTrustBundlesCard } from "./SpiffeTrustBundles";
@@ -1258,6 +1259,7 @@ function GrantProposals(props: { identity: WorkloadIdentityDetailView; busy: boo
 
 function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: CreateWorkloadIdentityBody, what: string) => void }) {
   const pickers = useQuery({ queryKey: workloadIdentityKeys.pickers, queryFn: getIdentityPickerSources });
+  const cutNotice = pickers.data ? pickerTruncationNotice(pickers.data) : null;
   const [kind, setKind] = useState<WorkloadIdentityKind>("worker_runtime");
   const [subjectId, setSubjectId] = useState("");
   const [identifier, setIdentifier] = useState("");
@@ -1295,7 +1297,7 @@ function CreateIdentityDialog(props: { onClose: () => void; onSave: (body: Creat
       <div className={s.stack}>
         {error && <p role="alert">{error}</p>}
         {pickers.isError && <ErrorState message="The choices for this form could not be read. Nothing can be created until they load." onRetry={() => void pickers.refetch()} />}
-        {pickers.data?.truncated && <p>Some lists were cut to their first 1,000 entries.</p>}
+        {cutNotice && <p>{cutNotice}</p>}
         <Field label="Kind">
           <Select
             value={kind}
