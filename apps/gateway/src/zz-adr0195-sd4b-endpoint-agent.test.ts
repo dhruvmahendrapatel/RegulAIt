@@ -69,6 +69,7 @@ process.env.REGULAIT_PUBLIC_URL = ORIGIN;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let memberKey: { authorization: string };
+let adminId: string;
 const restores: Array<() => Promise<void>> = [];
 const sourceIds: string[] = [];
 let signatureId: string;
@@ -203,7 +204,7 @@ async function agentSource(enabled: boolean) {
   const id = r.json().id as string;
   sourceIds.push(id);
   // enabling is SD0's step-up route (covered by SD0's suite); here the row is set directly
-  if (enabled) await db.update(discoverySources).set({ enabled: true, enabledAt: new Date() }).where(eq(discoverySources.id, id));
+  if (enabled) await db.update(discoverySources).set({ enabled: true, enabledAt: new Date(), enabledBy: adminId }).where(eq(discoverySources.id, id));
   return id;
 }
 
@@ -250,6 +251,10 @@ beforeAll(async () => {
   const u = await inject("POST", "/v1/users", AUTH, { email: `sd4b-member-${RUN}@example.com`, displayName: "sd4b member" });
   const k = await inject("POST", `/v1/users/${u.json().id}/keys`, AUTH, { name: "k" });
   memberKey = { authorization: `Bearer ${k.json().token}` };
+  const a = await inject("POST", "/v1/users", AUTH, { email: `sd4b-admin-${RUN}@example.com`, displayName: "sd4b admin" });
+  expect(a.statusCode, a.body).toBe(201);
+  adminId = a.json().id as string;
+  await db.update(users).set({ isAdmin: true }).where(eq(users.id, adminId));
   const [sig] = await db
     .insert(aiEndpointSignatures)
     .values({ provider: `sd4b-${RUN}`, kind: "desktop_app", value: BUNDLE, matchType: "identifier", provenance: "admin", enabled: true })
@@ -291,7 +296,7 @@ describe("ADR-0195 SD4b: enrolment", () => {
     expect((await inject("POST", `/v1/discovery/sources/${on}/enrolment-tokens`, AUTH, { label: "x", deviceCap: 1, expiresInDays: 31 })).statusCode).toBe(400);
     // a token of a source disabled after issue redeems nothing
     const { enrolFile } = await issueToken(on, 3);
-    await db.update(discoverySources).set({ enabled: false }).where(eq(discoverySources.id, on));
+    await db.update(discoverySources).set({ enabled: false, enabledAt: null, enabledBy: null }).where(eq(discoverySources.id, on));
     const t = await ticketReq(enrolFile.token);
     expect(t.statusCode).toBe(403);
     expect(t.json()).toEqual({ error: "enrolment_disabled" });
