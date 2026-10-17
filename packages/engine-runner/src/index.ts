@@ -7,7 +7,6 @@
 export * from "./egress.js";
 export * from "./runner.js";
 export * from "./loop.js";
-export * from "./artifact.js";
 export * from "./key.js";
 export * from "./task-bridge.js";
 export { fsyncDir } from "./durable.js";
