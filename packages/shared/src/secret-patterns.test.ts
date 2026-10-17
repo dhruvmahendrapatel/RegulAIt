@@ -19,6 +19,7 @@ import { evaluateTraceContent } from "./trace-evaluation.js";
 const body = (alphabet: string, n: number) => alphabet.repeat(Math.ceil(n / alphabet.length)).slice(0, n);
 const B64 = "aZ09_-Kq";
 const ALNUM = "aZ09Kq7x";
+const ALPHA = "aZqKxbYw";
 
 /** rule id -> [a real-shaped sample, ...] */
 const POSITIVE: Record<string, string[]> = {
@@ -44,6 +45,7 @@ const POSITIVE: Record<string, string[]> = {
   "dlp.secret.stripe_key": [`sk_live_${body(ALNUM, 24)}`, `rk_live_${body(ALNUM, 24)}`, `sk_test_${body(ALNUM, 24)}`],
   "dlp.secret.google_api_key": [`AIza${body("Sy09_-Kq", 35)}`],
   "dlp.secret.gitlab_pat": [`glpat-${body("aZ09_-Kq", 20)}`, `glpat-${body("aZ09_-Kq", 40)}.01abcdefg`],
+  "dlp.secret.huggingface_token": [`hf_${body(ALPHA, 34)}`, `api_org_${body(ALPHA, 34)}`],
 };
 
 /** near misses: the same prefixes, shapes that are NOT those credentials */
@@ -61,6 +63,10 @@ const NEGATIVE: string[] = [
   `AIza${body("Sy09_-Kq", 34)}`, // one short
   `AIza${body("Sy09_-Kq", 36)}`, // one long: not a Google key
   "glpat-short",
+  `hf_${body(ALPHA, 33)}`, // one short
+  `api_org_${body(ALPHA, 35)}`, // one long: not an organization token
+  `my_api_org_${body(ALPHA, 34)}`, // not at a word start
+  "the hf_transfer flag and api_org_settings are not credentials",
   "the gl-pat-plan and AIza-Rodriguez are not credentials",
   // bearer prose and short examples are not tokens
   "Bearer token missing from the request",
@@ -84,6 +90,8 @@ const UPSTREAM_BROADER = new Map<string, { rule: string; keep: string }>([
   [`rk_live_${"X".repeat(32)}`, { rule: "stripe_key", keep: "" }],
   [`sk_test_${"4eC39HqLyjWD" + "arjtT1zdp7dc"}`, { rule: "stripe_key", keep: "" }],
   [`sk_test_${"BQokikJOvBiI" + "2HlWgH4olfQ2"}`, { rule: "stripe_key", keep: "" }],
+  [`hf_${body(ALPHA, 35)}`, { rule: "hugging_face_token", keep: "" }],
+  [`hf_${body(ALNUM, 34)}`, { rule: "hugging_face_token", keep: "" }],
 ]);
 
 const ruleIdsMatching = (text: string): string[] =>
@@ -141,7 +149,7 @@ describe("near misses are left alone", () => {
 
 describe("linear time on pathological input (ReDoS)", () => {
   const N = 50_000;
-  const prefixes = ["sk-ant-api03-", "sk-ant-", "sk-proj-", "sk-", "github_pat_", "ghp_", "sk_live_", "rk_live_", "AIza", "glpat-", "eyJ", "xoxb-", "rgl_", "api_key=", "-----BEGIN ", "Bearer ", "Bearer\t"];
+  const prefixes = ["sk-ant-api03-", "sk-ant-", "sk-proj-", "sk-", "github_pat_", "ghp_", "sk_live_", "rk_live_", "AIza", "glpat-", "hf_", "api_org_", "eyJ", "xoxb-", "rgl_", "api_key=", "-----BEGIN ", "Bearer ", "Bearer\t"];
   const shapes: Array<[string, string]> = [];
   for (const p of prefixes) {
     shapes.push([`${p} repeated`, p.repeat(Math.ceil(N / p.length)).slice(0, N)]);

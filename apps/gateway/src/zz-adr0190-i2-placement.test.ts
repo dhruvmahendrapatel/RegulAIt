@@ -48,6 +48,7 @@ import { EXECUTION_PROFILE_SCHEMA, executionProfileDigest, SHIPPED_EXECUTION_PRO
 import { buildApp } from "./app.js";
 import { admitChildGrant, createRootGrant, DelegationRefusedError, governedActorFor, loadLiveChain } from "./delegation.js";
 import { decidePlacement } from "./execution-placement.js";
+import { offerLinkedPlacement } from "./executor-channel.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
@@ -664,5 +665,102 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
     expect((await inject("GET", `/v1/execution-placements/${randomUUID()}`, adminAuth)).statusCode).toBe(404);
     expect((await inject("GET", "/v1/execution-placements/not-a-uuid", adminAuth)).statusCode).toBe(400);
     expect((await inject("GET", "/v1/execution-placements?outcome=maybe", adminAuth)).statusCode).toBe(400);
+  });
+
+  it("N11: the (at, id) cursor walks rows that share one instant across a page boundary; `before` still answers", async () => {
+    // five refusals decided in ONE transaction share its `now()`: one created_at for all five
+    const ex = await newExecutor("l2-keyset", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
+    const { agentId } = await newAgent("keyset");
+    const projectId = await newProject("regulated");
+    const mine = await db.transaction(async (tx) => {
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const d = await decidePlacement(tx as unknown as Db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex] });
+        expect(d.kind).toBe("refused");
+        if (d.kind === "refused") ids.push(d.placementId!);
+      }
+      return ids;
+    });
+    const instants = rows<{ n: number }>(await db.execute(sql`select count(distinct created_at)::int as n from execution_placements where id = any(${`{${mine.join(",")}}`}::uuid[])`));
+    expect(instants[0]!.n).toBe(1);
+
+    // a page of two: some boundary falls inside the five
+    const walk = async (next: (page: { placements: Array<{ id: string; createdAt: string }>; nextCursor: string | null }) => string | null) => {
+      const seen: string[] = [];
+      let query: string | null = "";
+      // the five are the newest refusals: three pages of two reach past them
+      for (let pages = 0; query !== null && pages < 4; pages++) {
+        const r = await inject("GET", `/v1/execution-placements?outcome=refused&limit=2${query}`, adminAuth);
+        expect(r.statusCode, r.body).toBe(200);
+        const page = r.json();
+        seen.push(...page.placements.map((p: { id: string }) => p.id));
+        query = next(page);
+      }
+      return seen;
+    };
+    const keyset = await walk((page) => (page.nextCursor ? `&cursor=${encodeURIComponent(page.nextCursor)}` : null));
+    expect(new Set(keyset).size).toBe(keyset.length);
+    for (const id of mine) expect(keyset).toContain(id);
+    // the legacy instant cursor is still accepted (and is what skipped rows: it cannot name a row within an instant)
+    const legacy = await walk((page) => (page.placements.length === 2 ? `&before=${encodeURIComponent(page.placements[1]!.createdAt)}` : null));
+    expect(mine.some((id) => !legacy.includes(id))).toBe(true);
+
+    // a cursor continues only the list it names; a tampered one is refused rather than restarting the walk
+    const first = (await inject("GET", "/v1/execution-placements?outcome=refused&limit=2", adminAuth)).json();
+    const second = (await inject("GET", `/v1/execution-placements?outcome=refused&limit=2&cursor=${encodeURIComponent(first.nextCursor)}`, adminAuth)).json();
+    expect(second.refusalsWithoutPlacement).toEqual([]);
+    expect(second.refusalsNextCursor).toBeNull();
+    expect((await inject("GET", "/v1/execution-placements?cursor=not-a-cursor", adminAuth)).json()).toEqual({ error: "invalid_cursor" });
+    expect((await inject("GET", "/v1/execution-placements?refusalsCursor=not-a-cursor", adminAuth)).statusCode).toBe(400);
+  });
+
+  it("N11 fix round B2: a placement with several report rows is ONE row; limit=1 walks every placement once, its reports listed", async () => {
+    // two offered placements, each later carrying a `placed` report AND a `cancelled` row (0198 allows both)
+    const ex = await newExecutor("l2-reports", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
+    const mine: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      // the governed stdio path's linked placement (I4): an `offered` row; a ten-minute offer, so no expiry sweep
+      // writes its own end report while this test runs
+      const d = await db.transaction(async (tx) =>
+        offerLinkedPlacement(tx as unknown as Db, randomUUID(), { workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", profileDigest: RESTRICTED_DIGEST, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 600 }),
+      );
+      expect(d.kind).toBe("offered");
+      if (d.kind !== "offered") return;
+      await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, applied_class, report_sha256)
+        VALUES (${d.placementId}, ${d.offerId}, ${randomUUID()}, 'placed', 'user_space_kernel', ${"a".repeat(64)})`);
+      await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, end_code)
+        VALUES (${d.placementId}, ${d.offerId}, ${randomUUID()}, 'cancelled', 'later_gate')`);
+      mine.push(d.placementId);
+    }
+    type Listed = { id: string; outcome: string; reports: Array<{ outcome: string }> };
+    const seen: Listed[] = [];
+    let cursor: string | null = null;
+    for (let pages = 0; pages < 2000; pages++) {
+      const r = await inject("GET", `/v1/execution-placements?limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, adminAuth);
+      expect(r.statusCode, r.body).toBe(200);
+      const page = r.json() as { placements: Listed[]; nextCursor: string | null };
+      expect(page.placements.length).toBeLessThanOrEqual(1);
+      seen.push(...page.placements);
+      cursor = page.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull();
+    expect(new Set(seen.map((p) => p.id)).size).toBe(seen.length);
+    const total = rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from execution_placements`))[0]!.n;
+    expect(seen).toHaveLength(total);
+    for (const id of mine) {
+      const listed = seen.find((p) => p.id === id)!;
+      // the `placed` report is the effective one (a later cancellation never hides that the call ran); both are listed
+      expect(listed.outcome).toBe("placed");
+      expect(listed.reports.map((x) => x.outcome).sort()).toEqual(["cancelled", "placed"]);
+    }
+    // a filter on either report's outcome finds the placement, once
+    for (const outcome of ["placed", "cancelled"]) {
+      const found = (await inject("GET", `/v1/execution-placements?outcome=${outcome}&limit=200`, adminAuth)).json() as { placements: Listed[] };
+      for (const id of mine) expect(found.placements.filter((p) => p.id === id)).toHaveLength(1);
+    }
+    // the detail route lists them too
+    const one = (await inject("GET", `/v1/execution-placements/${mine[0]}`, adminAuth)).json() as Listed;
+    expect(one.reports).toHaveLength(2);
   });
 });

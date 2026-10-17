@@ -609,10 +609,16 @@ function parsePlacement(raw: unknown): Placement | null {
   };
 }
 
-/** `{placements, refusalsWithoutPlacement}`; null when the envelope is malformed */
-export function parsePlacements(
-  value: unknown,
-): { placements: Array<Placement | { unreadable: true; index: number }>; unrecorded: Array<UnrecordedRefusal | { unreadable: true; index: number }> } | null {
+/** N11: a keyset cursor the gateway emitted; anything else ends that list's paging */
+const cursorOf = (v: unknown): string | null => (typeof v === "string" && v.length > 0 && v.length <= 256 ? v : null);
+
+/** `{placements, refusalsWithoutPlacement}` and each list's next-page cursor; null when the envelope is malformed */
+export function parsePlacements(value: unknown): {
+  placements: Array<Placement | { unreadable: true; index: number }>;
+  unrecorded: Array<UnrecordedRefusal | { unreadable: true; index: number }>;
+  nextCursor: string | null;
+  refusalsNextCursor: string | null;
+} | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
   if (!Array.isArray(v.placements) || !Array.isArray(v.refusalsWithoutPlacement)) return null;
@@ -624,7 +630,17 @@ export function parsePlacements(
       if (!str(r.auditId) || at === null) return { unreadable: true as const, index };
       return { auditId: r.auditId, at, code: typeof r.code === "string" ? r.code : null, unresolvedFact: typeof r.unresolvedFact === "string" ? r.unresolvedFact : null };
     }),
+    nextCursor: cursorOf(v.nextCursor),
+    refusalsNextCursor: cursorOf(v.refusalsNextCursor),
   };
+}
+
+/** N11: the next page of `GET /v1/execution-placements` continues only the lists that have a cursor */
+export function placementsPageUrl(page: { cursor: string | null; refusalsCursor: string | null } | null): string {
+  const q = new URLSearchParams({ limit: "50" });
+  if (page?.cursor) q.set("cursor", page.cursor);
+  if (page?.refusalsCursor) q.set("refusalsCursor", page.refusalsCursor);
+  return `/v1/execution-placements?${q.toString()}`;
 }
 
 /**
