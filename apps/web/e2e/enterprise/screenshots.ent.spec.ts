@@ -21,7 +21,7 @@ test.describe("screenshot pack", () => {
       const slug = routeSlug(route.path);
       mkdirSync(path.join(OUT, slug), { recursive: true });
       await presetTheme(page, "light");
-      await mockApi(page);
+      await mockApi(page, { signedOut: route.public });
       await openRoute(page, route);
       const shots: string[] = [];
       for (const vp of VIEWPORTS) {

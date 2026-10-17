@@ -36,7 +36,7 @@ test.describe("bar 4: LCP and INP per screen", () => {
   for (const route of ROUTES) {
     test(`perf ${route.path}`, async ({ page }, testInfo) => {
       await page.addInitScript({ content: COLLECT });
-      await mockApi(page);
+      await mockApi(page, { signedOut: route.public });
       await openRoute(page, route);
       const heading = page.locator("main h1, h1").first();
       if (await heading.count()) await heading.click({ trial: false }).catch(() => undefined);

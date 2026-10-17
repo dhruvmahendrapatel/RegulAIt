@@ -26,3 +26,13 @@
 # check that stops counting an edge, needs the owner.
 /scripts/preflight-import-cycles.mjs              @dhruvmahendrapatel
 /scripts/import-cycles-gateway.baseline.txt       @dhruvmahendrapatel
+# ADR-0196 (PR #410 review F5): the enterprise UI harness. Its constants (GATED, TAGS, LCP_BUDGET_MS, VIEWPORTS),
+# the ratchet and its record mode, the baselines and the workflow decide what the four UI bars refuse; loosening any
+# of them, or raising a bundle ceiling, needs the owner.
+/apps/web/e2e/enterprise/                         @dhruvmahendrapatel
+/.github/workflows/ui-enterprise.yml              @dhruvmahendrapatel
+/apps/web/.size-limit.json                        @dhruvmahendrapatel
+/scripts/ui-enterprise-baseline.mjs               @dhruvmahendrapatel
+/scripts/ui-spa-routes.mjs                        @dhruvmahendrapatel
+/scripts/ui-tokens.baseline.json                  @dhruvmahendrapatel
+/scripts/preflight-ui-tokens.mjs                  @dhruvmahendrapatel

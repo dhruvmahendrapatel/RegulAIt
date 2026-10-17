@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { spaRoutes, routeSlug, PARAM_FIXTURE } from "./ui-spa-routes.mjs";
-import { growth, merge, readFindings, stale } from "./ui-enterprise-baseline.mjs";
+import { growth, merge, parseBytes, readFindings, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
 import { compare, cssDeclFindings, currentFindings, readBaseline, scanTs } from "./preflight-ui-tokens.mjs";
 import { readPack, renderIndex } from "./ui-screenshot-index.mjs";
 
@@ -27,9 +27,49 @@ describe("SPA route census (ADR-0196)", () => {
       </Routes></RequireAdmin>} />
       <Route path="*" element={<Navigate to="/" replace />} />`;
     expect(spaRoutes(src)).toEqual([
-      { path: "/login", url: "/login" },
-      { path: "/runs/:runId", url: `/runs/${PARAM_FIXTURE}` },
-      { path: "/admin/users", url: "/admin/users" },
+      { path: "/login", url: "/login", public: true },
+      { path: "/runs/:runId", url: `/runs/${PARAM_FIXTURE}`, public: true },
+      { path: "/admin/users", url: "/admin/users", public: true },
+    ]);
+  });
+
+  it("reads a path whatever the attribute order or the way it is written", () => {
+    const src = `<Routes>
+      <Route element={<A />} path="/a" />
+      <Route path={"/b"} element={<B />} />
+      <Route element={<C />} path={\`/c\`} />
+      <Route
+        element={<D />}
+        path={("/d")}
+      />
+    </Routes>`;
+    expect(spaRoutes(src).map((r) => r.path)).toEqual(["/a", "/b", "/c", "/d"]);
+  });
+
+  it("fails loudly on a path it cannot read instead of dropping the route", () => {
+    expect(() => spaRoutes("<Route path={base + '/x'} element={<X />} />")).toThrow(/not a literal/);
+    expect(() => spaRoutes("<Route {...props} />")).toThrow(/spread/);
+  });
+
+  it("marks screens under a signed-in layout, and resolves nested and descendant routes", () => {
+    const src = `<Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route element={<Protected />}>
+        <Route path="/" element={<Home />} />
+        <Route path="/admin/*" element={<RequireAdmin><Routes>
+          <Route element={<Users />} path="users" />
+        </Routes></RequireAdmin>} />
+      </Route>
+      <Route path="/docs" element={<Docs />}>
+        <Route path="intro" element={<Intro />} />
+      </Route>
+    </Routes>`;
+    expect(spaRoutes(src)).toEqual([
+      { path: "/login", url: "/login", public: true },
+      { path: "/", url: "/", public: false },
+      { path: "/admin/users", url: "/admin/users", public: false },
+      { path: "/docs", url: "/docs", public: true },
+      { path: "/docs/intro", url: "/docs/intro", public: true },
     ]);
   });
 
@@ -42,6 +82,8 @@ describe("SPA route census (ADR-0196)", () => {
     const paths = spaRoutes().map((r) => r.path);
     expect(paths).toEqual(expect.arrayContaining(["/", "/login", "/f/:token", "/admin/users", "/admin/approvals", "/admin/execution"]));
     expect(paths.some((p) => p.includes("*"))).toBe(false);
+    // the public screens are opened signed out; everything else needs the session
+    expect(spaRoutes().filter((r) => r.public).map((r) => r.path)).toEqual(["/login", "/f/:token"]);
   });
 
   it("slugs a route for a file name", () => {
@@ -77,6 +119,47 @@ describe("browser baselines (ADR-0196)", () => {
     ].join("\n"));
     expect(readFindings(d)).toEqual({ axe: { "/a|light": { x: 2 } } });
     expect(readFindings(join(d, "missing"))).toEqual({});
+  });
+});
+
+describe("bundle-size ceilings guard (ADR-0196)", () => {
+  const base = [
+    { name: "entry JS", path: "dist/assets/index-*.js", gzip: true, limit: "817 kB" },
+    { name: "lazy", path: ["dist/a-*.js", "dist/a-*.css"], gzip: true, limit: "79 kB" },
+  ];
+  const edit = (name, change) => base.map((c) => (c.name === name ? { ...c, ...change } : c));
+
+  it("reads limits the way size-limit does (B, kB, MB in 1000s; KiB in 1024s)", () => {
+    expect(parseBytes("817 kB")).toBe(817_000);
+    expect(parseBytes("1.02 MB")).toBe(1_020_000);
+    expect(parseBytes("10KB")).toBe(10_000);
+    expect(parseBytes("1 KiB")).toBe(1024);
+    expect(parseBytes("500 B")).toBe(500);
+    expect(parseBytes(1234)).toBe(1234);
+    expect(parseBytes("1 s")).toBeNull();
+  });
+
+  it("fails a raised limit, across units, and not a lowered or equal one", () => {
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "5 MB" }))).toEqual(['"entry JS": limit raised 817 kB -> 5 MB']);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "817001 B" }))).toEqual(['"entry JS": limit raised 817 kB -> 817001 B']);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "0.817 MB" }))).toEqual([]);
+    expect(sizeLimitLoosened(base, edit("entry JS", { limit: "800 kB" }))).toEqual([]);
+  });
+
+  it("fails a removed entry; a new entry is allowed", () => {
+    expect(sizeLimitLoosened(base, base.slice(1))).toEqual(['"entry JS": entry removed']);
+    expect(sizeLimitLoosened(base, [...base, { name: "new", path: "dist/x.js", limit: "1 kB" }])).toEqual([]);
+  });
+
+  it("fails a changed path or gzip; a path written as a one-item array is the same path", () => {
+    expect(sizeLimitLoosened(base, edit("entry JS", { path: "dist/assets/*.js" }))).toEqual(['"entry JS": path, gzip or another option changed']);
+    expect(sizeLimitLoosened(base, edit("lazy", { gzip: false }))).toEqual(['"lazy": path, gzip or another option changed']);
+    expect(sizeLimitLoosened(base, edit("entry JS", { path: ["dist/assets/index-*.js"] }))).toEqual([]);
+  });
+
+  it("refuses a doubled name and a limit that is not a size", () => {
+    expect(() => sizeLimitLoosened(base, [...base, base[0]])).toThrow(/twice/);
+    expect(sizeLimitLoosened(base, edit("lazy", { limit: "1 s" }))).toEqual(['"lazy": limit "1 s" is not a size']);
   });
 });
 

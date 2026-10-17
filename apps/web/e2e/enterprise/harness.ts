@@ -2,7 +2,7 @@
  * Shared steps of the enterprise UI harness (ADR-0196): the route list, the themes and viewports, and opening a
  * screen in a settled state.
  */
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { routeSlug, spaRoutes, type SpaRoute } from "../../../../scripts/ui-spa-routes.mjs";
 
 export { routeSlug, type SpaRoute };
@@ -46,7 +46,9 @@ export async function switchTheme(page: Page, theme: Theme) {
 
 /**
  * Open a screen and wait until it has settled: the network is idle (the mock's error answers, including the one
- * retry, have landed), fonts are loaded and no animation is running.
+ * retry, have landed), fonts are loaded and no animation is running. The screen must still be the one asked for: a
+ * redirect (a public screen opened signed in, a signed-in screen opened signed out) fails here rather than auditing
+ * another screen under this route's name. Open a `route.public` screen with `mockApi(page, { signedOut: true })`.
  */
 export async function openRoute(page: Page, route: SpaRoute, opts: { idle?: boolean } = {}) {
   await page.goto(`/ui${route.url}`, { waitUntil: "load" });
@@ -55,4 +57,5 @@ export async function openRoute(page: Page, route: SpaRoute, opts: { idle?: bool
     await document.fonts.ready;
     await Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined)));
   });
+  expect(new URL(page.url()).pathname, `${route.path} redirected instead of rendering`).toBe(`/ui${route.url}`);
 }

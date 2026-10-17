@@ -58,11 +58,11 @@ async function kitReference(page: Page) {
 test.describe("bar 3: loading and error states, table density", () => {
   for (const route of ROUTES) {
     test(`states ${route.path}`, async ({ page }, testInfo) => {
-      test.skip(route.path === "/login" || route.path === "/f/:token", "public screens: covered by the sign-in journey");
+      test.skip(route.public, "public screens: covered by the sign-in journey");
       const findings: Findings = {};
       const detail: string[] = [];
 
-      await mockApi(page, { mode: "loading" });
+      await mockApi(page, { mode: "loading", signedOut: route.public });
       await openRoute(page, route, { idle: false });
       const announced = await page
         .locator('main [role="status"], main [aria-busy="true"]')
@@ -74,7 +74,7 @@ test.describe("bar 3: loading and error states, table density", () => {
 
       const errors: string[] = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      await mockApi(page, { mode: "error" });
+      await mockApi(page, { mode: "error", signedOut: route.public });
       await openRoute(page, route);
       const alerts = await page.locator('main [role="alert"]').count();
       if (alerts === 0) bump(findings, "error-not-shown");

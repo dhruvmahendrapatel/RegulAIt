@@ -138,3 +138,35 @@ screens in the states check):
 
 The Firefox and WebKit baselines are written from their first CI run, because those browsers are not installed on
 the build container.
+
+### As built: review fixes (PR #410 independent review)
+
+These change what the Decision above says; where they differ, this section is what ships.
+
+1. **Bundle ceilings are a ratchet, not a reviewed diff.** `ui-enterprise-baseline.mjs --guard` also compares
+   `apps/web/.size-limit.json` with the base branch, entry by entry keyed by `name`. A raised `limit`, a removed entry,
+   or a changed `path`, `gzip` or other option fails the guard; a new entry is allowed. Limits are read the way
+   size-limit 14.2.0 reads them (B/kB/MB in powers of 1000, KiB/MiB in 1024; its `parseBytes` is not exported, so
+   the 10-line function is mirrored and pinned by tests). A ceiling may rise only through an exception recorded in
+   an ADR and landed by the owner (master decision, 2026-10-17).
+2. **Public screens are audited signed out.** The census marks each screen `public` when it is outside every
+   signed-in layout (`<Route element={<Protected />}>`); today that is `/login` and `/f/:token`. Every per-screen
+   spec opens them with `mockApi(page, { signedOut: true })`, so `/login` is audited instead of the shell it used to
+   redirect to. `openRoute` now asserts the final pathname is the route's own URL, so a future redirect fails
+   instead of auditing another screen under the route's name.
+3. **The census parses App.tsx with the TypeScript compiler API** (ADR-0176: `typescript` is already a dependency)
+   instead of a regex. Attribute order and `path="x"`, `path={"x"}` or a template literal all read the same; a
+   computed path, a spread on `<Route>` or an index route fails the census rather than dropping a screen. Relative
+   paths resolve against the enclosing route (the admin `<Routes>` under `/admin/*`), so the `/admin/` prefix is no
+   longer hard-coded. The real App.tsx gives the same list as before.
+4. **A focus cycle outside a dialog is a finding.** The Tab walk records its first stop; coming back to any other
+   stop before `<body>` or that first stop is `focus-trapped`. A repeat on the same control still counts toward
+   `focus-stuck`.
+5. **Record mode is refused in CI.** `ratchet.ts` throws when `CI` and `ENTERPRISE_RECORD` are both set, unless the
+   run is a manual `workflow_dispatch` with `ENTERPRISE_RECORD=update` (a run that rewrites the baselines). The
+   harness, its baselines, the census, the token ratchet, `.size-limit.json` and the workflow have CODEOWNERS
+   entries, so loosening a constant (`GATED`, `TAGS`, `LCP_BUDGET_MS`, `VIEWPORTS`) needs the owner.
+6. **CI and journey nits.** The screenshot job's index and upload steps run on failure (`!cancelled()`), so a
+   failing spec keeps the pack. The workflow header names the postcss scan, not stylelint. The settings step-up
+   journey reaches the Reason field and the submit button by Tab from the dialog's own focus (`tabTo` with
+   `fromStart: false`); either one not reachable is `dialog-control-unreachable`.

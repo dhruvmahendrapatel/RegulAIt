@@ -17,7 +17,7 @@ const GATED = new Set(["serious", "critical"]);
 test.describe("bar 1: axe on every screen, both themes", () => {
   for (const route of ROUTES) {
     test(`axe ${route.path}`, async ({ page }, testInfo) => {
-      await mockApi(page);
+      await mockApi(page, { signedOut: route.public });
       await openRoute(page, route);
       for (const theme of THEMES) {
         await switchTheme(page, theme);

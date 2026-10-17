@@ -15,6 +15,10 @@
  *   --guard <git-ref>   compare every baseline (the browser ones and scripts/ui-tokens.baseline.json) with the same
  *                       file at <git-ref>, and exit 1 if any count went UP or any entry was added: baselines only
  *                       shrink. A file missing at <git-ref> is skipped (the PR that introduces it).
+ *                       It also guards the bundle-size ceilings (apps/web/.size-limit.json), entry by entry keyed by
+ *                       `name`: a raised `limit`, a removed entry, or a changed `path`, `gzip` or other option fails.
+ *                       A new entry is allowed (it only adds a ceiling). A ceiling may rise only through an exception
+ *                       recorded in an ADR, landed by the owner (ADR-0196).
  *
  * Exit 0 clean, 1 on a guard failure, 2 if it could not run.
  */
@@ -27,6 +31,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const BASELINE_DIR = path.join(root, "apps", "web", "e2e", "enterprise", "baselines");
 export const CATEGORIES = ["axe", "keyboard", "responsive", "states", "density", "perf"];
 const TOKENS_BASELINE = "scripts/ui-tokens.baseline.json";
+export const SIZE_LIMIT_FILE = "apps/web/.size-limit.json";
 const DEFAULT_FINDINGS = path.join(root, "apps", "web", "test-results", "enterprise-findings");
 const ABOUT = {
   axe: "serious and critical axe violations (node counts) per screen|theme",
@@ -94,18 +99,65 @@ export function stale(baseline, run) {
   return out;
 }
 
+/**
+ * A size-limit `limit` in bytes, read exactly as size-limit 14.2.0 reads it (its bytes.js `parseBytes`: B, kB, MB…
+ * are powers of 1000, KiB, MiB… powers of 1024, case-insensitive; a bare number is bytes). size-limit does not export
+ * that function (only its CLI and `index.js`), so it is mirrored here; the test pins it against size-limit's own
+ * examples. Returns null for anything else (a time limit such as "1 s" is not a size).
+ */
+export function parseBytes(value) {
+  if (typeof value === "number") return value;
+  const match = /^([+-]?\d+(?:\.\d+)?) *(?:([kmgtpezy])?(i)?b)?$/i.exec(String(value));
+  if (!match) return null;
+  const [, number, prefix, iec] = match;
+  const power = prefix ? "kmgtpezy".indexOf(prefix.toLowerCase()) + 1 : 0;
+  return Math.floor(parseFloat(number) * (iec ? 1024 : 1000) ** power);
+}
+
+/** what loosened from the `before` .size-limit.json to `after`, as lines: raised limits, removed or changed entries */
+export function sizeLimitLoosened(before, after) {
+  const byName = (checks, side) => {
+    const out = new Map();
+    for (const c of checks) {
+      if (out.has(c.name)) throw new Error(`${SIZE_LIMIT_FILE} (${side}) names "${c.name}" twice`);
+      out.set(c.name, c);
+    }
+    return out;
+  };
+  const was = byName(before, "base");
+  const now = byName(after, "head");
+  const options = (c) => JSON.stringify(sortObj(Object.fromEntries(Object.entries({ ...c, path: [c.path].flat() }).filter(([k]) => k !== "name" && k !== "limit"))));
+  const out = [];
+  for (const [name, b] of was) {
+    const a = now.get(name);
+    if (!a) {
+      out.push(`"${name}": entry removed`);
+      continue;
+    }
+    const lb = parseBytes(b.limit);
+    const la = parseBytes(a.limit);
+    if (la === null) out.push(`"${name}": limit "${a.limit}" is not a size`);
+    else if (lb !== null && la > lb) out.push(`"${name}": limit raised ${b.limit} -> ${a.limit}`);
+    if (options(a) !== options(b)) out.push(`"${name}": path, gzip or another option changed`);
+  }
+  return out;
+}
+
 function writeBaseline(category, entries) {
   const file = path.join(BASELINE_DIR, `${category}.json`);
   writeFileSync(file, `${JSON.stringify({ _about: `ADR-0196: ${ABOUT[category]}. Counts may only shrink.`, entries }, null, 2)}\n`);
   return file;
 }
 
+/** the parsed JSON of `file` at `ref`, or null when it is not there */
 function atRef(ref, file) {
+  let text;
   try {
-    return JSON.parse(execFileSync("git", ["show", `${ref}:${file}`], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })).entries;
+    text = execFileSync("git", ["show", `${ref}:${file}`], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch {
     return null;
   }
+  return JSON.parse(text);
 }
 
 function main(argv) {
@@ -131,7 +183,7 @@ function main(argv) {
     const files = [...CATEGORIES.map((c) => relPath(path.join(BASELINE_DIR, `${c}.json`))), TOKENS_BASELINE];
     let failed = 0;
     for (const file of files) {
-      const before = atRef(arg, file);
+      const before = atRef(arg, file)?.entries ?? null;
       if (before === null) {
         console.log(`${file}: not on ${arg}; nothing to compare`);
         continue;
@@ -141,7 +193,18 @@ function main(argv) {
       for (const line of grew) console.log(`::error file=${file}::the baseline grew (fix the violation instead): ${line}`);
       failed += grew.length;
     }
-    console.log(failed ? `${failed} baseline entries grew` : "no baseline grew");
+    const limitsBefore = atRef(arg, SIZE_LIMIT_FILE);
+    if (limitsBefore === null) console.log(`${SIZE_LIMIT_FILE}: not on ${arg}; nothing to compare`);
+    else {
+      const file = path.join(root, SIZE_LIMIT_FILE);
+      const limitsAfter = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
+      const loosened = sizeLimitLoosened(limitsBefore, limitsAfter);
+      for (const line of loosened) {
+        console.log(`::error file=${SIZE_LIMIT_FILE}::a bundle ceiling loosened (a ceiling rises only through an ADR-recorded exception): ${line}`);
+      }
+      failed += loosened.length;
+    }
+    console.log(failed ? `${failed} baseline entries grew or ceilings loosened` : "no baseline grew and no ceiling loosened");
     return failed ? 1 : 0;
   }
   console.error("usage: ui-enterprise-baseline.mjs --update [findingsDir] | --stale [findingsDir] | --guard <git-ref>");

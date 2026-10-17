@@ -6,6 +6,8 @@
  *   focus-not-visible  a control reached by Tab draws no focus indicator (outline or box-shadow)
  *   focus-lost         Tab lands on <body> part-way through the page
  *   focus-stuck        three Tabs in a row leave focus on the same element (a trap outside a dialog)
+ *   focus-trapped      Tab cycles through several controls outside a dialog: the walk comes back to an earlier
+ *                      control, not the page's first stop (a real wrap-around) and not the control it is on
  *   positive-tabindex  a tabindex above 0 reorders the page
  *   order-*            a journey's controls are reached out of reading order
  *   dialog-*           a dialog opened from the keyboard does not take focus, lets Tab escape, ignores Escape,
@@ -86,6 +88,7 @@ async function auditSkipLink(page: Page, tab: string, f: Findings) {
 async function auditWalk(page: Page, tab: string, f: Findings, detail: string[]) {
   await focusStartOfPage(page);
   const seen = new Set<string>();
+  let first = "";
   let last = "";
   let repeats = 0;
   for (let i = 0; i < WALK; i += 1) {
@@ -102,8 +105,18 @@ async function auditWalk(page: Page, tab: string, f: Findings, detail: string[])
       detail.push(`focus stuck on <${now.tag}> "${now.name}"`);
       break;
     }
+    const previous = last;
     last = now.id;
-    if (seen.has(now.id)) break; // wrapped around
+    if (seen.has(now.id)) {
+      // back at the first stop is the normal wrap-around, and staying on the last stop is Tab leaving the page for
+      // the browser's own UI (the document keeps its active element); back at any other stop is a cycle
+      if (now.id !== first && now.id !== previous) {
+        bump(f, "focus-trapped");
+        detail.push(`focus cycles back to <${now.tag}> "${now.name}" without leaving the page`);
+      }
+      break;
+    }
+    if (!first) first = now.id;
     seen.add(now.id);
     if (!now.visible) {
       bump(f, "focus-not-visible");
@@ -113,10 +126,10 @@ async function auditWalk(page: Page, tab: string, f: Findings, detail: string[])
   }
 }
 
-/** Tab from the top to `target`; false when it is not in the tab order */
-async function tabTo(page: Page, tab: string, target: Locator) {
+/** Tab to `target` from the top of the page (or, with `fromStart: false`, from the current focus); false when it is not in the tab order */
+async function tabTo(page: Page, tab: string, target: Locator, opts: { fromStart?: boolean } = {}) {
   await expect(target).toBeVisible();
-  await focusStartOfPage(page);
+  if (opts.fromStart !== false) await focusStartOfPage(page);
   for (let i = 0; i < 200; i += 1) {
     if (await target.evaluate((el) => el === document.activeElement)) return true;
     await page.keyboard.press(tab);
@@ -255,10 +268,11 @@ test.describe("bar 1: keyboard journeys", () => {
     if (await tabTo(page, k.tab, resume)) {
       await page.keyboard.press("Enter");
       await expect(confirm).toBeVisible();
-      await confirm.getByLabel("Reason").focus();
+      // the Reason field and the submit button reached by Tab from where the dialog put focus, not by .focus()
+      if (!(await tabTo(page, k.tab, confirm.getByLabel("Reason"), { fromStart: false }))) bump(f, "dialog-control-unreachable");
       await page.keyboard.type("incident closed, verified safe to resume");
       const submit = confirm.getByRole("button", { name: "Resume" });
-      await submit.focus();
+      if (!(await tabTo(page, k.tab, submit, { fromStart: false }))) bump(f, "dialog-control-unreachable");
       await page.keyboard.press("Enter");
       const stepUp = page.getByRole("dialog", { name: "Confirm it's you" });
       const opened = await stepUp.waitFor({ state: "visible", timeout: 5_000 }).then(() => true, () => false);

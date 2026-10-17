@@ -3,9 +3,10 @@ name: UI enterprise harness
 # ADR-0196. The owner's four "enterprise grade" UI bars, as ratchets in the import-cycle job's model (#387): today's
 # violations are in committed baselines that may only shrink; a new violation fails here.
 #
-#   static       design tokens (scripts/preflight-ui-tokens.mjs, stylelint + a TSX scan), the baseline guard (no
-#                baseline file may grow against the base branch), and the JS/CSS bundle ceilings (size-limit,
-#                apps/web/.size-limit.json) on the production build.
+#   static       design tokens (scripts/preflight-ui-tokens.mjs, a postcss parse of the CSS + a TSX scan), the
+#                baseline guard (no baseline file may grow against the base branch, and no bundle ceiling in
+#                apps/web/.size-limit.json may rise, go or change its files), and the JS/CSS bundle ceilings
+#                themselves (size-limit) on the production build.
 #   browsers     apps/web/playwright.enterprise.config.ts, one job per browser. Chromium runs every check (axe on
 #                every screen in both themes, keyboard journeys, the five viewports, loading/error states, table
 #                density, LCP/INP); Firefox and WebKit run the keyboard journeys and the viewports. The browsers
@@ -148,9 +149,11 @@ jobs:
         run: pnpm --filter @regulait/web exec playwright test -c playwright.enterprise.config.ts --project=screenshots --reporter=list
 
       - name: Index page
+        if: ${{ !cancelled() }}
         run: node scripts/ui-screenshot-index.mjs
 
       - name: Upload the pack
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ui-screenshot-pack

@@ -16,7 +16,7 @@ test.describe("bar 2: every screen at every viewport", () => {
     test(`responsive ${route.path}`, async ({ page, browserName }, testInfo) => {
       const errors: string[] = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      await mockApi(page);
+      await mockApi(page, { signedOut: route.public });
       await openRoute(page, route);
       const findings: Findings = {};
       const detail: string[] = [];

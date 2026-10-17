@@ -9,7 +9,11 @@
  *
  * Every report is also written to the findings directory (ENTERPRISE_FINDINGS_DIR, default
  * apps/web/test-results/enterprise-findings), which `--update` reads. With ENTERPRISE_RECORD=1 nothing fails: the
- * run only records, which is how a baseline is first written.
+ * run only records, which is how a baseline is first written (locally, followed by `--update`).
+ *
+ * Record mode turns every browser check into record-only, and the baseline guard cannot see that, so in CI (the `CI`
+ * variable set) it is refused unless the run exists to rewrite the baselines: ENTERPRISE_RECORD=update on a manual
+ * (workflow_dispatch) run. A pull-request run can never record. See recordMode().
  */
 import { mkdirSync, readFileSync, appendFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -23,7 +27,19 @@ type Baseline = Record<string, Findings>;
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const BASELINE_DIR = path.join(here, "baselines");
 export const FINDINGS_DIR = process.env.ENTERPRISE_FINDINGS_DIR ?? path.resolve(here, "..", "..", "test-results", "enterprise-findings");
-const RECORD = process.env.ENTERPRISE_RECORD === "1";
+
+/** whether this run only records; throws when record mode is switched on in CI for anything but an --update run */
+export function recordMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  const record = env.ENTERPRISE_RECORD;
+  if (!record || record === "0") return false;
+  if (!env.CI) return true;
+  if (record === "update" && env.GITHUB_EVENT_NAME === "workflow_dispatch") return true;
+  throw new Error(
+    "ENTERPRISE_RECORD is set in CI: record mode would pass every browser check unseen by the baseline guard. " +
+      "It is allowed in CI only as ENTERPRISE_RECORD=update on a manual run that rewrites the baselines with --update (ADR-0196).",
+  );
+}
+const RECORD = recordMode();
 
 const cache = new Map<Category, Baseline>();
 function baseline(category: Category): Baseline {
