@@ -8,9 +8,10 @@
  *            bytes (magic numbers, the zip directory, a verified safetensors header), never the file
  *            name, which is kept for display only. The bytes go to the content-addressed store once
  *            (`sha256/<hex>`); the row and its audit commit together.
- *   stream   GET /v1/engine-runner/artifacts/:artifactId (runner self token) streams the artifact only to
- *            the runner holding a LIVE lease on a run that targets it (audited either way); the
- *            runner checks the sha256 and length against its lease.
+ *   stream   the gateway streams the artifact to the executor sandbox's read-only input (ADR-0190 I5,
+ *            `engine-tasks.ts`, audited `engine-run-artifact-streamed` phase `task_input`). The runner's own
+ *            route (`GET /v1/engine-runner/artifacts/:artifactId`) is REMOVED (ENG-IMG review, secure by
+ *            default): no runner fetches an artifact, so no credential may.
  *   record   every terminal write of an artifact run (result, cancel, timeout, not-run) writes one
  *            `artifact_scans` row in the same transaction, with the verdict the GATEWAY derives
  *            (`deriveArtifactScanVerdict`) from the format it detected at upload: an executable
@@ -47,7 +48,6 @@ import {
   desc,
   engineRuns,
   eq,
-  gt,
   inArray,
   lt,
   lte,
@@ -954,62 +954,5 @@ export function registerModelArtifactRoutes(app: FastifyInstance, db: Db, opts: 
         object: !done.objectQueued || (drained?.stillNamed ?? 0) > 0 ? "shared" : (drained?.deleted ?? 0) > 0 ? "deleted" : "queued",
       },
     });
-  });
-
-  // ---- GET /v1/engine-runner/artifacts/:artifactId (runner self token; the scope hook enforces it) ----
-  app.get("/v1/engine-runner/artifacts/:artifactId", async (req, reply) => {
-    const { artifactId } = artifactParam.parse(req.params);
-    const runnerId = req.authCtx.engineRunnerId!;
-    const now = new Date();
-    // only to the runner holding a LIVE lease on a run that targets this artifact
-    const [run] = await db
-      .select()
-      .from(engineRuns)
-      .where(
-        and(
-          eq(engineRuns.runnerId, runnerId),
-          eq(engineRuns.status, "leased"),
-          eq(engineRuns.targetArtifactId, artifactId),
-          gt(engineRuns.deadlineAt, now),
-          gt(engineRuns.leaseExpiresAt, now),
-        ),
-      )
-      .limit(1);
-    const [artifact] = run ? await db.select().from(modelArtifacts).where(eq(modelArtifacts.id, artifactId)) : [];
-    if (!run || !artifact || !store) {
-      await db.insert(auditLog).values({
-        userId: run?.runAsUserId ?? NO_IDENTITY,
-        objectType: "model_artifact",
-        objectId: artifactId,
-        detail: { phase: "stream", runnerId, refused: !store ? "artifact_store_unavailable" : "engine_artifact_not_leased" },
-        effect: "deny",
-        ruleId: "engine-run-artifact-refused",
-        ruleChain: [],
-        reason: `runner ${runnerId} asked for artifact ${artifactId} without a live lease on a run that targets it`,
-      });
-      if (!store) return reply.status(503).send({ error: "artifact_store_unavailable" });
-      return reply.status(409).send({ error: "engine_artifact_not_leased", detail: "this runner holds no live lease on a run that targets this artifact" });
-    }
-    const opened = await store.open(artifact.storageKey);
-    if (opened.size !== artifact.sizeBytes) {
-      opened.stream.destroy();
-      return reply.status(500).send({ error: "artifact_store_inconsistent" });
-    }
-    await db.insert(auditLog).values({
-      userId: run.runAsUserId ?? NO_IDENTITY,
-      objectType: "engine_run",
-      objectId: run.id,
-      detail: { phase: "artifact_stream", engineId: run.engineId, runnerId, artifactId, sha256: artifact.sha256, sizeBytes: artifact.sizeBytes },
-      effect: "allow",
-      ruleId: "engine-run-artifact-streamed",
-      ruleChain: [],
-      reason: `artifact ${artifactId} streamed to runner ${runnerId} for ${run.engineId} run ${run.id}`,
-    });
-    return reply
-      .header("content-type", "application/octet-stream")
-      .header("content-length", String(artifact.sizeBytes))
-      .header("x-regulait-artifact-sha256", artifact.sha256)
-      .header("cache-control", "no-store")
-      .send(opened.stream);
   });
 }

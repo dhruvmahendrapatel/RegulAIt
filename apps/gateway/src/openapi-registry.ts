@@ -444,7 +444,6 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/engine-runner/credentials": "internal",
   "POST /v1/engine-runner/self-test": "internal",
   "POST /v1/engine-runner/runs/:runId/heartbeat": "internal",
-  "GET /v1/engine-runner/artifacts/:artifactId": "internal",
   "POST /v1/engine-runner/runs/:runId/result": "internal",
   // ADR-0190 I5: the run's task in an executor's sandbox
   "POST /v1/engine-runner/runs/:runId/task/input": "internal",
@@ -1508,7 +1507,6 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/engine-runner/credentials": "engines",
   "POST /v1/engine-runner/self-test": "engines",
   "POST /v1/engine-runner/runs/:runId/heartbeat": "engines",
-  "GET /v1/engine-runner/artifacts/:artifactId": "engines",
   "POST /v1/engine-runner/runs/:runId/result": "engines",
   "POST /v1/engine-runner/runs/:runId/task/input": "engines",
   "GET /v1/engine-runner/runs/:runId/task/frames": "engines",

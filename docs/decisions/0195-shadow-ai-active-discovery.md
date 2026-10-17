@@ -460,6 +460,40 @@ kind as "not built yet" with the slice that builds it.
 read methods (SD1); `SHADOW_AI_CATALOG_V2` and seed rows for the artifact kinds (SD1/SD3); the endpoint-notice
 template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" state for cloud sources (SD2).
 
+### SD1 builder findings (decision 11, 2026-10-17)
+
+- **Dependency inventory.** syft was not adopted: it catalogues a checked-out filesystem or image, while the repo
+  scanner never clones (it reads a bounded set of files through the provider API and keeps no content), and it would
+  add a binary to the image. Manifests are parsed with `smol-toml` (BSD-3-Clause, already pinned in the repo) and
+  `fast-xml-parser` (MIT, entity processing off); npm, requirements.txt and go.mod reuse the ADR-0083 readers.
+  Gradle scripts and Gemfiles are programs and are read by a bounded literal line scan.
+- **Key detection.** The compiled gitleaks-derived `dlp.secret.*` rules are reused in JavaScript (they are compiled,
+  not data, and linear by construction); the gitleaks binary was not needed.
+- **Git provider clients.** No provider SDK is used: the existing adapters already call the four REST APIs through
+  an injected fetch, and the readers extend that pattern so every call stays on the guarded fetch.
+- **JSONC.** No maintained JSONC parser meets ADR-0176's maintenance window; a `.vscode/*.json` file with comments
+  is reported by its path and its contents are counted as unparsed.
+- **Catalogue v2.** 180 entries (v1's 81 unchanged first); coding-assistant entries were checked against vendor
+  documentation or the VS Code marketplace on 2026-10-17. One PatronAI extension id no longer resolves and was left
+  out. Seed rows for the artifact kinds use SD0's `identifier` match type.
+- **Repo scanners (SD1 Phase B).** `discovery-repo-scanner.ts` registers `repo_github`, `repo_gitlab`,
+  `repo_bitbucket` and `repo_azure_devops`. A source's target takes `namespace`, `baseUrl`, `history` and
+  `historyDepth`; history is scanned only when `history = true`, and because the target is bound to SD0's enable
+  step-up, turning history on for an enabled source is that step-up (decision 14). Requests go through `ctx.fetch`
+  after `ctx.throttle()`; 429 and 503 waits are `ctx.backoff`'s, and a limit still in force afterwards fails the run
+  as `rate_limited` (the next scheduled run retries). Commit authors go only to `ctx.pseudonymise("commit_author")`.
+  Every observation carries SD0's `location` (path, line, commit); `.env.example` variable names and a stdio MCP
+  server's command basename travel as `names` (names only, never values); `actorPseudonym` is the pseudonym of the
+  author of the commit the tree was read at (not a per-line blame). `ctx.catalogue.matches()` keeps a package, host
+  or extension id that only an admin-added row knows. Partial reads, empty repos and the repo-list cap are reported
+  as `readOutcomes`.
+- **Follow-up: federated git credentials.** The repo scanners accept only a static read-only token; a federated
+  credential is refused with `credential_unusable`. GitHub App installation tokens and OIDC federation (GitLab,
+  Azure DevOps workload identity) are later work.
+- **Save-time validation.** SD1 added an optional `validateTarget(target, scope)` to SD0's `Scanner`; the source
+  create and PATCH routes call it and refuse a malformed target or repo address with 400 `target_invalid` before
+  anything is written or a step-up grant is spent.
+
 ## Owner decisions (2026-10-17): endpoint agent and detection data
 
 Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-spike.md)). Nothing above is changed.

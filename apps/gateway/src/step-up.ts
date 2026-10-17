@@ -50,13 +50,20 @@
  *
  * POLICY: `org_settings.step_up_mode` (`required` strict; `off` is a relaxation
  * and itself needs a `settings_relax` step-up) and `step_up_actions` (every
- * kind in `STEP_UP_ACTION_KINDS` strict, eight today; removing one is a
+ * kind in `STEP_UP_ACTION_KINDS` strict, nine today; removing one is a
  * relaxation), read on every check.
+ *
+ * `key_management` (migration 0203): every signing-key operation, bound to
+ * `{op, keyId}` naming the exact act and key: `receipt_key_retire`
+ * (decision-receipts.ts), `signing_key_rotate` (the key rotated TO, resolved
+ * before the step-up) and `signing_key_revoke` (identity-routes.ts). A grant
+ * of another kind is never valid for one, nor a key_management grant for
+ * another op or key; neither is spent.
  *
  * `settings_relax` OUTSIDE PUT /v1/org/settings: a relaxation through its own
  * route binds `{values}` (requireRelaxStepUp) or `{op, ...}` naming the act.
  * The `op`s: `execution_profile_create`/`_version`/`_assign`,
- * `executor_reenable`, `executor_declared_class`, `receipt_key_retire`,
+ * `executor_reenable`, `executor_declared_class`,
  * `mcp_registry_create`/`_update` (enabling a registry or opening its private
  * ranges), `mcp_registry_import` (an import that inherits a registry's open
  * private ranges), `mcp_server_create`/`_update` (opening an MCP server's

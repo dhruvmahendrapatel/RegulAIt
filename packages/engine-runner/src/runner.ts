@@ -485,15 +485,6 @@ export class RunnerClient {
   }
 
   /**
-   * ADR-0187 B5-M, S7: `GET /v1/engine-runner/artifacts/:id` with the self token, the body STREAMED to
-   * the caller (`downloadArtifact` bounds it by the lease's size and the run's deadline).
-   */
-  async artifact(artifactId: string, signal: AbortSignal): Promise<Response> {
-    this.requireKey();
-    return this.authorizedResponse("lease", "GET", `/v1/engine-runner/artifacts/${encodeURIComponent(artifactId)}`, undefined, undefined, signal);
-  }
-
-  /**
    * ADR-0190 I5: start the run's TASK. The gateway decides the run's engine_worker placement on this request (the
    * run's entitlement decision); a 201 means an executor was offered the task. Any refusal is definitive for the run
    * (the gateway ended it `not_run`), except a 5xx, 408 or 429 (transient: thrown).
