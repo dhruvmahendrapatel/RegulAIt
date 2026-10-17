@@ -71,11 +71,15 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
     expect(compose.split("- executor-input:").length - 1).toBe(1);
     // no other service mounts it, in the short or the long form
     const services = block("services", "");
+    let checked = 0;
     for (const m of services.matchAll(/\n {2}([a-z0-9-]+):\n/g)) {
       if (m[1] === "sandbox-executor") continue;
       const svc = block(m[1]!);
       expect(svc, m[1]).not.toMatch(/executor-input|regulait-executor-input/);
+      checked += 1;
     }
+    // the loop cannot pass vacuously: the stack has well over five other services
+    expect(checked).toBeGreaterThan(5);
     const vols = block("volumes", "");
     expect(vols).toMatch(/\n {2}executor-input:\n {4}name: regulait-executor-input\n/);
     // the executor image owns the mount point, so a fresh named volume is writable by the executor
@@ -98,10 +102,12 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
       expect(text, name).toContain(`CADDY_TAG="${tag}"`);
       expect(text, name).not.toMatch(/caddy:2-alpine/);
     }
-    // the same pinned image ids in both scripts: two platform config digests (classic store) and the index digest
+    // the same pinned image ids in both scripts: two platform config digests (classic store), the index digest and
+    // the two platform manifest digests (containerd store)
     const ids = (text: string) => text.match(/\nCADDY_IMAGE_IDS="([^"]+)"\n/)?.[1]?.split(" ");
     expect(ids(bundle)).toEqual(ids(install));
-    expect(ids(install)).toHaveLength(3);
+    expect(ids(install)).toHaveLength(5);
+    expect(new Set(ids(install)).size).toBe(5);
     for (const id of ids(install)!) expect(id).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(ids(install)).toContain(ref.slice(ref.indexOf("@") + 1));
   });

@@ -1661,8 +1661,11 @@ gateway, the executor's runtime backends or the engine code changed.
        linux/arm64 `sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71` (manifest
        `sha256:84058f1a…`).
      - On the containerd image store, the id is expected to be the index digest
-       `sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`.
-     - Both scripts carry the same three ids, and the compose test pins them.
+       `sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`. It may instead be the platform
+       manifest digest when only one platform was pulled: linux/amd64
+       `sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229`, linux/arm64
+       `sha256:84058f1a0e5beb97664a9b79dcfd267b594c033d5bb88d8463cdfb59c0779197`. Both were read from the same index.
+     - Both scripts carry the same five ids, and the compose test pins them.
    - Checked here: `install.sh --check --mode air_gapped` rendered the override, and `docker compose config` with it
      shows `caddy:2.11.7-alpine` on all three Caddy services.
 4. **Repository hygiene.** The owner's development host names and addresses are replaced by neutral placeholders in
@@ -1698,5 +1701,9 @@ gateway, the executor's runtime backends or the engine code changed.
      - The id values were read from registry metadata, not from a Docker daemon. The containerd store's id being the
        index digest is an expectation, not an observation.
      - Run the round trip once on each store, on amd64 and arm64, and record the result here.
+     - **The cross-store case is unverified too:** a bundle built on the classic store and loaded on a containerd
+       target, or the other way round. Until it has run, build the bundle on a host with the same image store type
+       as the target (`docker info` on each host reports which store it uses). The installer still refuses any loaded
+       Caddy image whose id is not pinned.
    - **Real gVisor** still waits on the `runsc` re-pin (I5 "Not verified").
 

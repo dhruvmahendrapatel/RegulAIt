@@ -371,10 +371,12 @@ volume_exists() {
 # air-gapped override runs the tag, and the loaded image's id must be one of CADDY_IMAGE_IDS. The ids, read from the
 # Docker Hub registry API on 2026-10-17 for the index below: on the classic store an image's id is its platform's
 # config digest (linux/amd64 sha256:f77f856a..., linux/arm64 sha256:f6a22072...); on the containerd image store it
-# is the index digest (sha256:d8542f48...). Re-pin with docker-compose.yml and scripts/build-image-bundle.sh together.
+# is the index digest (sha256:d8542f48...), or the platform manifest digest when only one platform was pulled
+# (linux/amd64 sha256:173b2630..., linux/arm64 sha256:84058f1a...). Re-pin with docker-compose.yml and
+# scripts/build-image-bundle.sh together.
 CADDY_IMAGE="caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
 CADDY_TAG="caddy:2.11.7-alpine"
-CADDY_IMAGE_IDS="sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77 sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71 sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
+CADDY_IMAGE_IDS="sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77 sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71 sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229 sha256:84058f1a0e5beb97664a9b79dcfd267b594c033d5bb88d8463cdfb59c0779197"
 
 image_present() {
   docker_up || return 1
