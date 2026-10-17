@@ -3,6 +3,16 @@
   "entries": {
     "chromium|settings-step-up": {
       "dialog-focus-not-restored": 1
+    },
+    "webkit|approvals": {
+      "focus-not-visible": 7
+    },
+    "webkit|intake": {
+      "focus-not-visible": 1
+    },
+    "webkit|settings-step-up": {
+      "dialog-focus-not-restored": 1,
+      "focus-not-visible": 4
     }
   }
 }
