@@ -1690,6 +1690,41 @@ Open after the fix round (recheck follow-ups):
    the token endpoint's provider accepts only `private_key_jwt` and `tls_client_auth` (`clientAuthMethods` in
    `oauth/token-endpoint.ts`), so a JWT-SVID has no path to a token. No request carrying one was run for this note.
 
+### As built: SEC-DEFAULTS follow-ups (2026-10-17, branch `sec-defaults-1017`, no migration)
+
+- **Low 1, closed.** The bundle routes still look at the grant first (`spend: false`). The claim is now the upload's
+  and the revocation's **last** act inside the write's transaction: after the compare-and-set, the insert and the audit
+  row. A racing first upload raises its unique violation before the claim, so the loser's grant stays unspent
+  (`409 spiffe_bundle_conflict`, nothing written). Pinned by `zz-adr0188-s9-spiffe.test.ts` (L3 case), with a test
+  hook (`spiffeBundleWriteTestHooks.beforeInsert`) that commits the winner's row between the compare-and-set and the
+  insert.
+- **The second pooled connection, removed.** The claim used to run on the root handle while the write's transaction
+  held the bundle row lock. With N concurrent writers on a pool of N, each could wait for a second connection, a pool
+  deadlock. `SpendStepUp` now takes the transaction's connection. A refused claim throws and rolls the write back. Its
+  `step-up-grant-refused` row rolls back with it, so the route records it again on the root handle with a look that
+  spends nothing.
+- **The revoke-commits-first refusal, tested.** A revocation of the authenticating bundle that commits between the
+  token endpoint's certificate match and its issuing transaction is refused `spiffe_bundle_revoked`, and no grant is
+  made (the `afterCertificateMatch` hook). This closes the open item "a test that forces a revocation to commit
+  between…" above.
+- **`connector_policy_changed` after the decision, audited.** A refusal at execution (before or during the provider
+  call), at the trace commit, or at response release used to write only a trace span. Each now also writes one deny
+  audit row (`connector-policy-changed`, `receiptClass: "decision"`, `detail.phase` = `execution`, `trace-commit` or
+  `release`, with `externalRequests`, `mayHaveExecuted` and the decided policy epoch). The decision-commit refusal and
+  the billed-and-withheld output check already wrote their own rows. A per-call flag keeps it to one row per refusal.
+  Pinned in `connector-redaction.test.ts` (the execution and release cases, and one row for the mid-call change).
+- **`PATCH /v1/servers/:serverId` with an owner change: one conditional write.** The columns and the owner used to be
+  two writes, so a concurrent change between them could leave the columns written without the owner change. Now the
+  owner is part of the same `UPDATE`, with a compare-and-set on the owner the `owner_change` step-up was decided on
+  (`IS NOT DISTINCT FROM`), next to the existing posture compare-and-set. Both grants (the `settings_relax` one and the
+  `owner_change` one) are claimed in that transaction on its connection, after the write, and the owner audit row
+  (`mcp-server-owner-changed`, the same row `PUT …/owner` writes, now `auditOwnerChanged` in `ownership.ts`) is
+  written there too. A moved owner is `409 changed_concurrently` with nothing written and nothing spent. An owner
+  named but unchanged still goes through `changeOwner`, as before. ADR-0185 I9's "audited owner change" and ADR-0186
+  A's Class A rule are unchanged in substance.
+- **Unverified locally:** the DB integration tests (no Postgres in the build environment). They are typechecked here
+  and run first in CI.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of

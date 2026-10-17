@@ -52,6 +52,8 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
+import { DiscoverySightings } from "./DiscoverySightings";
+import type { SightingView } from "./discoverySourcesModel";
 import v from "../../views.module.css";
 
 interface Signature {
@@ -66,6 +68,12 @@ interface Signature {
   provenance: string;
   enabled: boolean;
   lastUpdatedAt: string;
+  /** ADR-0195 SD0: scope, tool id, note, confidence */
+  os?: string | null;
+  ecosystem?: string | null;
+  toolId?: string | null;
+  note?: string | null;
+  confidence?: "high" | "medium" | "low";
 }
 interface CatalogueResponse {
   signatures: Signature[];
@@ -89,6 +97,8 @@ interface Finding {
   replacementAgent: { id: string; name: string; provider: string; enabled: boolean } | null;
   replacementNote: string | null;
   dispositionStale: boolean;
+  /** ADR-0195: the bounded sightings (location, names, actor pseudonym) */
+  evidence?: SightingView[];
 }
 interface FindingsResponse {
   findings: Finding[];
@@ -460,6 +470,8 @@ export default function ShadowAiPage() {
                 { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
                 { key: "confidence", header: "Confidence", render: (r) => r.confidence },
                 { key: "observations", header: "Observations", render: (r) => r.observationCount },
+                // ADR-0195 SD0: where scanners saw it (path, line, commit), names seen, and who (as a pseudonym)
+                { key: "sightings", header: "Sightings", render: (r) => <DiscoverySightings evidence={r.evidence} /> },
                 { key: "last_seen", header: "Last seen", render: (r) => ago(r.lastSeenAt) },
                 {
                   key: "replacement",
@@ -1019,6 +1031,17 @@ export default function ShadowAiPage() {
               { key: "kind", header: "Kind", render: (r) => evidenceLabel(r.kind) },
               { key: "value", header: "Value", render: (r) => <code>{r.value}</code> },
               { key: "match", header: "Match", render: (r) => evidenceLabel(r.matchType) + (r.minLength ? ` (≥${r.minLength})` : "") },
+              {
+                key: "scope",
+                header: "Scope",
+                render: (r) => [r.os, r.ecosystem].filter(Boolean).join(" · ") || <span className={v.dim}>any</span>,
+              },
+              {
+                key: "confidence",
+                header: "Confidence",
+                render: (r) => <Badge tone={r.confidence === "low" ? "warn" : r.confidence === "medium" ? "info" : "ok"}>{r.confidence ?? "high"}</Badge>,
+              },
+              { key: "tool", header: "Tool / note", render: (r) => <span className={v.dim}>{[r.toolId, r.note].filter(Boolean).join(" — ") || "—"}</span> },
               { key: "provenance", header: "Provenance", render: (r) => r.provenance },
               { key: "updated", header: "Updated", render: (r) => ago(r.lastUpdatedAt) },
               { key: "enabled", header: "Enabled", render: (r) => <Badge tone={r.enabled ? "ok" : "neutral"}>{r.enabled ? "yes" : "no"}</Badge> },
@@ -1093,14 +1116,20 @@ function KpiFigure(props: { value: ReactNode; label: string }) {
 function AddSignatureForm(props: { onAdded: () => void }) {
   const act = useAction();
   const [provider, setProvider] = useState("");
-  const [kind, setKind] = useState<"hostname" | "sdk_package" | "api_key_prefix" | "web_app">("hostname");
+  const [kind, setKind] = useState<string>("hostname");
+  const [os, setOs] = useState("");
+  const [ecosystem, setEcosystem] = useState("");
+  const [toolId, setToolId] = useState("");
+  const [note, setNote] = useState("");
+  const [confidence, setConfidence] = useState<"high" | "medium" | "low">("high");
+  const isArtifact = ["cloud_ai_service", "desktop_app", "ide_extension", "browser_extension", "local_runtime", "assistant_config"].includes(kind);
   const [value, setValue] = useState("");
   const [hostMatch, setHostMatch] = useState<"exact_host" | "host_suffix">("host_suffix");
   const [minLength, setMinLength] = useState("20");
 
   // the one pairing the gateway will accept for this kind
   const matchType =
-    kind === "sdk_package" ? "package" : kind === "api_key_prefix" ? "key_prefix" : hostMatch;
+    kind === "sdk_package" ? "package" : kind === "api_key_prefix" ? "key_prefix" : isArtifact ? "identifier" : hostMatch;
 
   return (
     <form
@@ -1119,6 +1148,12 @@ function AddSignatureForm(props: { onAdded: () => void }) {
                 // that happens to start with it, so the gateway requires one.
                 ...(kind === "api_key_prefix" ? { minLength: Number(minLength) } : {}),
                 provenance: "admin",
+                // ADR-0195 SD0: optional OS / ecosystem scope, tool id, note and confidence
+                ...(os ? { os } : {}),
+                ...(ecosystem.trim() ? { ecosystem: ecosystem.trim().toLowerCase() } : {}),
+                ...(toolId.trim() ? { toolId: toolId.trim().toLowerCase() } : {}),
+                ...(note.trim() ? { note: note.trim() } : {}),
+                confidence,
               }),
             "Signature added",
           )
@@ -1140,9 +1175,39 @@ function AddSignatureForm(props: { onAdded: () => void }) {
           <option value="web_app">web app</option>
           <option value="sdk_package">SDK package</option>
           <option value="api_key_prefix">API key prefix</option>
+          <option value="cloud_ai_service">cloud AI service</option>
+          <option value="desktop_app">desktop app</option>
+          <option value="ide_extension">IDE extension</option>
+          <option value="browser_extension">browser extension</option>
+          <option value="local_runtime">local model runtime</option>
+          <option value="assistant_config">assistant config file</option>
         </Select>
       </Field>
-      <Field label={kind === "sdk_package" ? "Package name" : kind === "api_key_prefix" ? "Key prefix" : "Hostname"}>
+      <Field label="OS (optional)">
+        <Select value={os} onChange={(e) => setOs(e.target.value)}>
+          <option value="">any</option>
+          <option value="macos">macOS</option>
+          <option value="windows">Windows</option>
+          <option value="linux">Linux</option>
+        </Select>
+      </Field>
+      <Field label="Ecosystem (optional)">
+        <Input value={ecosystem} maxLength={64} onChange={(e) => setEcosystem(e.target.value)} placeholder="npm" />
+      </Field>
+      <Field label="Tool id (optional)">
+        <Input value={toolId} maxLength={128} onChange={(e) => setToolId(e.target.value)} />
+      </Field>
+      <Field label="Note (optional)">
+        <Input value={note} maxLength={500} onChange={(e) => setNote(e.target.value)} />
+      </Field>
+      <Field label="Confidence">
+        <Select value={confidence} onChange={(e) => setConfidence(e.target.value as typeof confidence)}>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </Select>
+      </Field>
+      <Field label={kind === "sdk_package" ? "Package name" : kind === "api_key_prefix" ? "Key prefix" : isArtifact ? "Identifier (exact)" : "Hostname"}>
         <Input
           required
           value={value}

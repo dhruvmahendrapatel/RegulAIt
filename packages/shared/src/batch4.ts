@@ -55,6 +55,9 @@ export const STEP_UP_ACTION_KINDS = [
   // ADR-0188 (migration 0180): creating, binding a key to, suspending or revoking a workload identity,
   // and every other identity administration write
   "identity_manage",
+  // ADR-0195 SD0 (migration 0202): revealing the name behind a discovery pseudonym (a device user, a commit author,
+  // a cloud principal). Not a settings relaxation: its own kind, so it can be required or audited on its own
+  "pseudonym_reveal",
 ] as const;
 export type StepUpActionKind = (typeof STEP_UP_ACTION_KINDS)[number];
 
@@ -385,8 +388,8 @@ export const BATCH4_SETTING_COPY: Readonly<Record<Batch4SettingKey, { label: str
   stepUpActions: {
     label: "Actions that need a step-up",
     strict:
-      "All seven: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
-      "changing an owner and managing agent identities.",
+      "All eight: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner, managing agent identities and revealing a person's name.",
     relaxed: "Each action removed from the list can be done with the session alone.",
   },
   toolApprovalSensitiveQuorum: {
