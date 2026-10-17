@@ -285,6 +285,14 @@ export function credentialTargetMatch(
     if (!want) return "unverifiable";
     return (config.roleArn.split(":")[4] ?? "") === want ? "match" : "mismatch";
   }
+  if (kind === "cloud_gcp" && config.serviceAccountEmail) {
+    // ADR-0195 SD2: the impersonated service account's home project (`name@<project>.iam.gserviceaccount.com`).
+    // A match is certain; a different project is NOT a mismatch, because a central project may hold the service
+    // account and the pool while it reads other projects. So: match, or unverifiable.
+    const want = t("projectId");
+    const home = config.serviceAccountEmail.toLowerCase().split("@")[1]?.split(".")[0] ?? "";
+    return want && home === want ? "match" : "unverifiable";
+  }
   if ((kind === "cloud_azure" || kind === "repo_azure_devops") && config.tenantId) {
     const want = t("tenantId");
     if (!want) return "unverifiable";

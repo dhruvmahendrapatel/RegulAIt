@@ -70,6 +70,7 @@ function ctxFor(over: Partial<ScanContext> & { fetch: typeof fetch }) {
     },
     heartbeat: async () => true,
     signal: new AbortController().signal,
+    catalogue: { matches: () => true, rows: () => [] },
     ...over,
   };
   return { ctx, calls };
@@ -93,6 +94,12 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
       ["cloud_inventory", "cloud_resource", "cloud_ai_service", "aws:bedrock"],
     ]);
     expect(JSON.stringify(res)).not.toContain("app-role");
+    // every read is reported to SD0 as a read outcome, problems first
+    const outcomes = res.readOutcomes ?? [];
+    expect(outcomes.some((o) => o.read === "aws.bedrock.custom_models@us-east-1" && o.status === "read")).toBe(true);
+    expect(outcomes.find((o) => o.read === "aws.cloudtrail.data_events")?.status).toBe("not_enabled");
+    const firstRead = outcomes.findIndex((o) => o.status === "read");
+    expect(outcomes.slice(firstRead).every((o) => o.status === "read")).toBe(true);
   });
 
   it("a federated credential fails with the pending-federation reason, before any request", async () => {

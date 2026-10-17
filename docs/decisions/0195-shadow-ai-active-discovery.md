@@ -255,10 +255,13 @@ Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 regis
   one target account; GCP `include` is projects (organisation level needs `assetScope`); Azure `include` is
   subscriptions (organisation level needs `managementGroupId`). The AWS static secret is a JSON object holding the key
   id too, because SD0 refuses key-shaped names in public config.
-- **What could not be read, at run level.** SD0's `ScanResult` has no field for per-read status. When no read
-  succeeds the run fails (`scanner_error`) with the per-read summary; when some do, the observations are returned and
-  the summary only reaches the raw-output digest. Open question for SD0: a run-level capabilities field (a schema
-  change SD0 owns).
+- **What could not be read, at run level.** Every read's status goes to SD0's `readOutcomes` (`<capability>@<scope>`,
+  problems first, at most 100). When no read succeeds at all the run also fails (`scanner_error`) with the summary.
+- **Credential fields follow SD0's allowlist** (`DISCOVERY_PUBLIC_CONFIG`): AWS federated `roleArn`; GCP federated
+  `projectNumber`, `workloadIdentityPool`, `workloadIdentityProvider` and `serviceAccountEmail`, from which the pool
+  provider audience is built; Azure `tenantId` and `clientId`. `credentialTargetMatch` gains GCP: the impersonated
+  service account's home project equal to the target `projectId` is a match; anything else is unverifiable, never a
+  mismatch, because a central project may hold the service account and pool.
 - **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated. A
   federated credential fails its run with an explicit reason until the ADR-0188 issuer has an RS256 federation key
   and a mint path for these audiences (key material and schema outside this slice); AWS `assume_role` needs

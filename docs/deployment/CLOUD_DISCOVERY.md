@@ -15,7 +15,9 @@ scanner needs and gives Terraform you apply in your own account. **RegulAIt neve
 > Source fields (one `key=value` per line on the Discovery sources page): AWS target `accountId`, optional
 > `stsRegion`, `trailBucket`, `trailBucketRegion`, `trailPrefix`; scope = regions. GCP target `projectId` or
 > `assetScope`; scope = projects. Azure target `tenantId`, optional `managementGroupId`, `logAnalyticsWorkspaceIds`
-> (comma-separated); scope = subscriptions; credential public config `clientId`. Static secrets: AWS a JSON object
+> (comma-separated); scope = subscriptions. Credential public config (only these keys are accepted): AWS federated
+> `roleArn` (RegulAIt generates the external id); GCP federated `projectNumber`, `workloadIdentityPool`,
+> `workloadIdentityProvider`, `serviceAccountEmail`; Azure `tenantId` and `clientId` in both modes. Static secrets: AWS a JSON object
 > `{"accessKeyId": ..., "secretAccessKey": ...}`, GCP the key file JSON, Azure the client secret. Treat every step below as pending execution.
 
 ## What every scanner does and does not do

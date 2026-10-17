@@ -84,6 +84,11 @@ describe("credential public config: an allowlist per kind and mode (review of #4
     expect(credentialTargetMatch("cloud_aws", { accountId: "111111111111" }, { roleArn: arn })).toBe("mismatch");
     expect(credentialTargetMatch("cloud_aws", {}, { roleArn: arn })).toBe("unverifiable");
     expect(credentialTargetMatch("repo_github", { org: "x" }, { appId: "1" })).toBe("unverifiable");
+    // GCP: the impersonated service account's home project matches, or the answer is unverifiable (never mismatch)
+    const sa = { serviceAccountEmail: "scanner@acme-ml.iam.gserviceaccount.com" };
+    expect(credentialTargetMatch("cloud_gcp", { projectId: "acme-ml" }, sa)).toBe("match");
+    expect(credentialTargetMatch("cloud_gcp", { projectId: "other-proj" }, sa)).toBe("unverifiable");
+    expect(credentialTargetMatch("cloud_gcp", {}, sa)).toBe("unverifiable");
   });
 });
 
