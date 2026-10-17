@@ -14,17 +14,30 @@
  * per-entry provenance, and matching is whole-name equality. No regex is taken
  * from data; the only patterns are the fixed shape checks here.
  *
- * NOT YET WIRED: the admin catalogue (`ai_endpoint_signatures`) closes its
- * `kind` CHECK over the migration 0202 kinds, so `env_name` and `cli` rows
- * cannot be stored yet and `AI_SIGNATURE_KINDS` does not list them. The
- * migration that widens it, and the wiring into `classifyObservation`, the
- * SD1 repo scanner and the SD3 endpoint importers, are follow-ups (ADR-0195,
- * "As built: lane A6").
+ * WIRING: SD1's repo analysis scans `.env.example`, Dockerfiles and CI YAML
+ * with `envNamePresenceInText`, and SD3's endpoint importers run `matchEnvNames`
+ * and `matchCliNames` over osquery and inventory rows. Both send on only
+ * signature ids (`Observation.presence`); `classifyObservation` resolves an id
+ * to the ENABLED admin-catalogue row that carries the same value, so an admin
+ * still turns detection off by disabling that row. Until the migration that
+ * adds the `env_name` and `cli` kinds, those rows are the `identifier` rows of
+ * `PRESENCE_BACKING_KINDS` (ADR-0195, "As built: lane A6").
  */
 
 /** the presence kinds (pending the admin-catalogue migration) */
 export const PRESENCE_SIGNATURE_KINDS = ["env_name", "cli"] as const;
 export type PresenceSignatureKind = (typeof PRESENCE_SIGNATURE_KINDS)[number];
+
+/**
+ * The admin-catalogue kinds an `identifier` row may have to back a presence
+ * match: SD3's seed stores an env name as an `assistant_config` or
+ * `local_runtime` row and a CLI binary as a `desktop_app` or `local_runtime`
+ * row. The kind migration adds `env_name` and `cli` here.
+ */
+export const PRESENCE_BACKING_KINDS: Readonly<Record<PresenceSignatureKind, readonly string[]>> = Object.freeze({
+  env_name: Object.freeze(["assistant_config", "local_runtime"]),
+  cli: Object.freeze(["desktop_app", "local_runtime"]),
+});
 
 /** the endpoint agent's environment-variable name shape: linear, one bounded class */
 export const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -54,6 +67,42 @@ export interface PresenceSignature {
   /** the source registry's tool id, for grouping and provenance */
   toolId: string;
   provenance: string;
+}
+
+const PRESENCE_CONFIDENCES: readonly string[] = ["high", "medium", "low"];
+
+/**
+ * Is this a well-formed catalogue row? The id fits `PRESENCE_SIGNATURE_ID_PATTERN`
+ * with the prefix of its kind, the value has its kind's name shape, the
+ * provider and tool id are short identifiers and the confidence is known.
+ */
+export function isPresenceSignature(row: unknown): row is PresenceSignature {
+  if (row === null || typeof row !== "object") return false;
+  const r = row as Record<string, unknown>;
+  if (typeof r.id !== "string" || !PRESENCE_SIGNATURE_ID_PATTERN.test(r.id)) return false;
+  if (typeof r.value !== "string" || typeof r.provider !== "string" || typeof r.toolId !== "string") return false;
+  if (typeof r.provenance !== "string" || r.provenance.length === 0 || r.provenance.length > 512) return false;
+  if (!/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(r.provider) || !/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(r.toolId)) return false;
+  if (typeof r.confidence !== "string" || !PRESENCE_CONFIDENCES.includes(r.confidence)) return false;
+  if (r.kind === "env_name") return r.id.startsWith("env.") && isEnvName(r.value);
+  if (r.kind === "cli") return r.id.startsWith("cli.") && CLI_NAME_PATTERN.test(r.value);
+  return false;
+}
+
+/** catalogues already checked (the frozen v1 and any admin list passed more than once) */
+const checkedCatalogues = new WeakSet<readonly PresenceSignature[]>();
+
+/** every row is well formed and every id unique; otherwise a TypeError, never a partial match */
+export function assertPresenceCatalogue(catalogue: readonly PresenceSignature[]): void {
+  if (checkedCatalogues.has(catalogue)) return;
+  if (!Array.isArray(catalogue)) throw new TypeError("the presence catalogue must be an array");
+  const ids = new Set<string>();
+  for (const [i, row] of catalogue.entries()) {
+    if (!isPresenceSignature(row)) throw new TypeError(`presence catalogue row ${i} is not a valid presence signature`);
+    if (ids.has(row.id)) throw new TypeError(`presence catalogue row ${i} repeats an id`);
+    ids.add(row.id);
+  }
+  checkedCatalogues.add(catalogue);
 }
 
 export interface PresenceMatch {
@@ -87,7 +136,7 @@ export const PRESENCE_SIGNATURES_V1: ReadonlyArray<PresenceSignature> = Object.f
   row("env.openai.api-key", "openai", "env_name", "OPENAI_API_KEY", "chatgpt"),
   row("env.openai.codex-api-key", "openai", "env_name", "CODEX_API_KEY", "codex-cli"),
   row("env.google.gemini-api-key", "google", "env_name", "GEMINI_API_KEY", "gemini-cli"),
-  // a Google Cloud API key serves many non-AI APIs too
+  // a generic cloud-platform key name serves many non-AI APIs too
   row("env.google.api-key", "google", "env_name", "GOOGLE_API_KEY", "gemini-cli", "low"),
   row("env.cursor.api-key", "cursor", "env_name", "CURSOR_API_KEY", "cursor"),
   row("env.perplexity.api-key", "perplexity", "env_name", "PERPLEXITY_API_KEY", "perplexity"),
@@ -101,6 +150,16 @@ export const PRESENCE_SIGNATURES_V1: ReadonlyArray<PresenceSignature> = Object.f
   row("cli.google.gemini", "google", "cli", "gemini", "gemini-cli", "medium"),
 ]);
 
+/** the catalogue row with this id, or null */
+export function presenceSignatureById(
+  id: string,
+  catalogue: readonly PresenceSignature[] = PRESENCE_SIGNATURES_V1,
+): PresenceSignature | null {
+  if (typeof id !== "string" || !PRESENCE_SIGNATURE_ID_PATTERN.test(id)) return null;
+  assertPresenceCatalogue(catalogue);
+  return catalogue.find((s) => s.id === id) ?? null;
+}
+
 const toMatch = (s: PresenceSignature): PresenceMatch => ({
   signatureId: s.id,
   provider: s.provider,
@@ -109,6 +168,7 @@ const toMatch = (s: PresenceSignature): PresenceMatch => ({
 });
 
 function collect(kind: PresenceSignatureKind, catalogue: readonly PresenceSignature[], hit: (value: string) => boolean) {
+  assertPresenceCatalogue(catalogue);
   const out: PresenceMatch[] = [];
   for (const s of catalogue) if (s.kind === kind && hit(s.value)) out.push(toMatch(s));
   return out.sort((a, b) => (a.signatureId < b.signatureId ? -1 : a.signatureId > b.signatureId ? 1 : 0));
@@ -247,6 +307,7 @@ export function envNamePresenceInText(
   if (typeof text !== "string") throw new TypeError("text must be a string");
   if (text.length > PRESENCE_TEXT_MAX) throw new RangeError(`at most ${PRESENCE_TEXT_MAX} characters per text`);
   if (!(ENV_TEXT_FORMATS as readonly string[]).includes(format)) throw new RangeError("unknown text format");
+  assertPresenceCatalogue(catalogue);
   const wanted = new Set(catalogue.filter((s) => s.kind === "env_name").map((s) => s.value));
   const seen = new Set<string>();
   let start = 0;

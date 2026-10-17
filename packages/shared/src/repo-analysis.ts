@@ -4,8 +4,9 @@
  * Input: a repo's file tree at one commit plus a file reader. Output:
  * observations — dependency names, source imports, provider hosts named in
  * code or config, AI assistant and MCP configuration files, IDE extension ids,
- * `.env.example` variable NAMES, and AI provider key SIGHTINGS — plus counts and
- * a SHA-256 digest of everything read.
+ * env-variable PRESENCE signature ids (lane A6: from `.env.example`, Dockerfiles
+ * and CI YAML; the names themselves are never returned), and AI provider key
+ * SIGHTINGS — plus counts and a SHA-256 digest of everything read.
  *
  * WHAT IT NEVER KEEPS (decision 6). No file content leaves this function: each
  * file is read, scanned and dropped; only the digest of all bytes read is
@@ -36,12 +37,12 @@ import {
   SHADOW_AI_CATALOG_V2,
   matchCatalogV2AssistantConfig,
   matchCatalogV2Endpoint,
-  matchCatalogV2EnvVar,
   matchCatalogV2Extension,
   matchCatalogV2Package,
   type ShadowCatalogV2Entry,
 } from "./shadow-catalog-v2.js";
 import { manifestKindForPath, readManifest, type RepoEcosystem } from "./repo-manifests.js";
+import { envNamePresenceInText } from "./discovery/presence-signatures.js";
 
 export interface RepoAnalysisLimits {
   /** tree entries considered at all */
@@ -86,7 +87,7 @@ export type RepoObservationKind =
   | "assistant_config"
   | "mcp_server"
   | "ide_extension"
-  | "env_var_name"
+  | "env_presence"
   | "ai_key";
 
 export interface RepoMcpServer {
@@ -113,7 +114,8 @@ export interface RepoObservation {
   ecosystem?: RepoEcosystem | "python" | "javascript" | "go" | "csharp" | "ruby" | "rust";
   packageName?: string;
   host?: string;
-  envVarName?: string;
+  /** ADR-0195 lane A6: the presence signature an env-variable name in the file matched; never the name */
+  presenceSignatureId?: string;
   extensionId?: string;
   mcpServer?: RepoMcpServer;
   key?: RepoKeySighting;
@@ -198,7 +200,23 @@ const CONFIG_EXT = new Set([".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", "
 
 const ENV_TEMPLATE_NAMES = new Set([".env.example", ".env.sample", ".env.template", ".env.dist", "example.env", "sample.env", ".env.defaults"]);
 
-type FileRole = "manifest" | "source" | "assistant_config" | "env_template" | "env_file" | "extensions_json" | "config";
+/** CI configs whose `env:`/`variables:` blocks name environment variables (lane A6) */
+const CI_YAML_PATHS = new Set([".gitlab-ci.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", ".circleci/config.yml"]);
+
+const isCiYaml = (path: string) => {
+  if (CI_YAML_PATHS.has(path)) return true;
+  if (!path.startsWith(".github/workflows/")) return false;
+  const rest = path.slice(".github/workflows/".length);
+  return !rest.includes("/") && (rest.endsWith(".yml") || rest.endsWith(".yaml"));
+};
+
+/** `Dockerfile`, `Containerfile`, `Dockerfile.<variant>` or `<name>.dockerfile` */
+const isDockerfile = (b: string) => {
+  const l = b.toLowerCase();
+  return l === "dockerfile" || l === "containerfile" || l.startsWith("dockerfile.") || l.endsWith(".dockerfile");
+};
+
+type FileRole = "manifest" | "source" | "assistant_config" | "env_template" | "env_file" | "extensions_json" | "dockerfile" | "ci_yaml" | "config";
 
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 const extOf = (b: string) => {
@@ -220,6 +238,8 @@ function roleOf(path: string, catalog: ReadonlyArray<ShadowCatalogV2Entry>): Fil
   if (path === ".vscode/extensions.json") return "extensions_json";
   if (ENV_TEMPLATE_NAMES.has(b.toLowerCase())) return "env_template";
   if (b === ".env" || b.startsWith(".env.")) return "env_file";
+  if (isDockerfile(b)) return "dockerfile";
+  if (isCiYaml(path)) return "ci_yaml";
   const ext = extOf(b);
   if (ext in SOURCE_EXT) return "source";
   if (CONFIG_EXT.has(ext)) return "config";
@@ -227,7 +247,7 @@ function roleOf(path: string, catalog: ReadonlyArray<ShadowCatalogV2Entry>): Fil
 }
 
 /** read priority: the files that carry the most signal per byte go first */
-const ROLE_ORDER: Readonly<Record<FileRole, number>> = { assistant_config: 0, manifest: 1, extensions_json: 2, env_template: 3, env_file: 4, config: 5, source: 6 };
+const ROLE_ORDER: Readonly<Record<FileRole, number>> = { assistant_config: 0, manifest: 1, extensions_json: 2, env_template: 3, env_file: 4, dockerfile: 5, ci_yaml: 5, config: 6, source: 7 };
 
 // ===========================================================================
 // SCANNERS — each takes text and emits through `emit`
@@ -462,7 +482,7 @@ export async function analyseRepo(input: RepoAnalysisInput): Promise<RepoAnalysi
   const digest = createHash("sha256");
 
   const emit: Emit = (o) => {
-    const key = [o.kind, o.path, o.line ?? "", o.packageName ?? "", o.host ?? "", o.envVarName ?? "", o.extensionId ?? "", o.mcpServer?.name ?? "", o.key?.ruleId ?? "", o.key?.fragment ?? ""].join("\u0000");
+    const key = [o.kind, o.path, o.line ?? "", o.packageName ?? "", o.host ?? "", o.presenceSignatureId ?? "", o.extensionId ?? "", o.mcpServer?.name ?? "", o.key?.ruleId ?? "", o.key?.fragment ?? ""].join("\u0000");
     if (seen.has(key)) return;
     seen.add(key);
     if (observations.length >= limits.maxObservations) {
@@ -610,21 +630,21 @@ export async function analyseRepo(input: RepoAnalysisInput): Promise<RepoAnalysi
         }
         break;
       }
-      case "env_template": {
-        const lines = content.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          let t = lines[i]!.trim();
-          if (!t || t.startsWith("#") || t.length > limits.maxLineLength) continue;
-          if (t.startsWith("export ")) t = t.slice(7).trim();
-          const eq = t.indexOf("=");
-          if (eq <= 0) continue;
-          const name = t.slice(0, eq).trim();
-          if (name.length > 128 || ![...name].every((ch) => (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") || ch === "_")) continue;
-          // the NAME only: the value after `=` is never looked at again
-          const hit = matchCatalogV2EnvVar(name, catalog);
-          if (hit || keep({ kind: "env_var_name", value: name })) {
-            emit({ kind: "env_var_name", path: c.path, line: i + 1, envVarName: name, catalogEntryId: hit?.id ?? null, provider: hit?.provider ?? null });
-          }
+      case "env_template":
+      case "dockerfile":
+      case "ci_yaml": {
+        // ADR-0195 lane A6: presence only. The matcher slices each line's candidate NAME, never a value, and
+        // returns signature ids; the names are not returned, kept or passed on (master decision, 2026-10-17)
+        const format = c.role === "env_template" ? "dotenv" : c.role === "dockerfile" ? "dockerfile" : "ci_yaml";
+        let matches: ReturnType<typeof envNamePresenceInText> = [];
+        try {
+          matches = envNamePresenceInText(content, format);
+        } catch {
+          stats.unparsedConfigs++;
+          break;
+        }
+        for (const m of matches) {
+          emit({ kind: "env_presence", path: c.path, line: null, presenceSignatureId: m.signatureId, catalogEntryId: null, provider: m.provider });
         }
         break;
       }

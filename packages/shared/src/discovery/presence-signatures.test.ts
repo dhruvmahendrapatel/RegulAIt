@@ -1,18 +1,21 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  assertPresenceCatalogue,
   CLI_NAME_PATTERN,
   cliBaseName,
   ENV_NAME_MAX,
   ENV_NAME_PATTERN,
   envNamePresenceInText,
   isEnvName,
+  isPresenceSignature,
   matchCliNames,
   matchEnvNames,
   PRESENCE_NAMES_MAX,
   PRESENCE_SIGNATURE_ID_PATTERN,
   PRESENCE_SIGNATURES_V1,
   PRESENCE_TEXT_MAX,
+  presenceSignatureById,
   type PresenceSignature,
 } from "./index.js";
 import { AI_SIGNATURE_KINDS } from "../shadow-ai.js";
@@ -178,5 +181,89 @@ describe("envNamePresenceInText", () => {
   it("refuses an over-long text and an unknown format", () => {
     expect(() => envNamePresenceInText("A".repeat(PRESENCE_TEXT_MAX + 1), "dotenv")).toThrow(RangeError);
     expect(() => envNamePresenceInText("A=1", "toml" as never)).toThrow(RangeError);
+  });
+});
+
+describe("review of #419: catalogue validation and the guards a mutation pass found untested", () => {
+  const good: PresenceSignature = { id: "env.acme.key", provider: "acme-ai", kind: "env_name", value: "ACME_AI_KEY", confidence: "high", toolId: "acme", provenance: "admin" };
+
+  it("isPresenceSignature accepts every v1 row and refuses malformed rows", () => {
+    for (const r of PRESENCE_SIGNATURES_V1) expect(isPresenceSignature(r), r.id).toBe(true);
+    expect(isPresenceSignature(good)).toBe(true);
+    for (const bad of [
+      { ...good, id: "cli.acme.key" }, // id prefix does not fit the kind
+      { ...good, id: "ENV.ACME" },
+      { ...good, value: "acme_ai_key" }, // env value not upper case
+      { ...good, value: "ACME AI KEY" },
+      { ...good, value: "A".repeat(129) },
+      { ...good, kind: "cli", id: "cli.acme.x", value: "ACME" }, // CLI value is lower case
+      { ...good, kind: "cli", id: "cli.acme.x", value: "x".repeat(65) },
+      { ...good, kind: "regex" },
+      { ...good, confidence: "certain" },
+      { ...good, provider: "Acme AI" },
+      { ...good, provenance: "" },
+      null,
+      "env.acme.key",
+    ]) {
+      expect(isPresenceSignature(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("every matcher refuses a malformed or duplicated catalogue instead of matching against it", () => {
+    const wrongShape = [{ ...good, value: "acme_ai_key" }] as PresenceSignature[];
+    const dup = [good, { ...good }];
+    for (const cat of [wrongShape, dup]) {
+      expect(() => matchEnvNames(["ACME_AI_KEY"], cat)).toThrow(TypeError);
+      expect(() => matchCliNames(["acme"], cat)).toThrow(TypeError);
+      expect(() => envNamePresenceInText("ACME_AI_KEY=1", "dotenv", cat)).toThrow(TypeError);
+      expect(() => assertPresenceCatalogue(cat)).toThrow(TypeError);
+    }
+    expect(() => assertPresenceCatalogue(PRESENCE_SIGNATURES_V1)).not.toThrow();
+  });
+
+  it("presenceSignatureById resolves known ids only", () => {
+    expect(presenceSignatureById("env.openai.api-key")?.value).toBe("OPENAI_API_KEY");
+    expect(presenceSignatureById("env.acme.key")).toBeNull();
+    expect(presenceSignatureById("env.acme.key", [good])?.provider).toBe("acme-ai");
+    expect(presenceSignatureById("OPENAI_API_KEY")).toBeNull();
+  });
+
+  it("cliBaseName refuses a blank, an over-long base name and an over-long input", () => {
+    expect(cliBaseName("a b")).toBeNull();
+    expect(cliBaseName("x".repeat(65))).toBeNull();
+    expect(cliBaseName("x".repeat(64))).toBe("x".repeat(64));
+    // the tail alone would be a match: the input bound is what refuses it
+    expect(cliBaseName(`${"a/".repeat(2_500)}claude`)).toBeNull();
+    expect(matchCliNames([`${"a/".repeat(2_500)}claude`])).toEqual([]);
+  });
+
+  it("dotenv needs `=` after the name", () => {
+    expect(envNamePresenceInText("OPENAI_API_KEY\n", "dotenv")).toEqual([]);
+    expect(envNamePresenceInText("OPENAI_API_KEY value\n", "dotenv")).toEqual([]);
+    expect(ids(envNamePresenceInText("OPENAI_API_KEY =\n", "dotenv"))).toEqual(["env.openai.api-key"]);
+  });
+
+  it("dockerfile needs the name to end at `=`, a blank or the end of the line", () => {
+    expect(envNamePresenceInText("ENV OPENAI_API_KEY:x\n", "dockerfile")).toEqual([]);
+    expect(envNamePresenceInText("ENV OPENAI_API_KEY#\n", "dockerfile")).toEqual([]);
+    expect(envNamePresenceInText("ENV OPENAI_API_KEY-x\n", "dockerfile")).toEqual([]);
+    expect(ids(envNamePresenceInText("ARG OPENAI_API_KEY\r\n", "dockerfile"))).toEqual(["env.openai.api-key"]);
+  });
+
+  it("ci_yaml needs `:` or `=` after a bare name", () => {
+    expect(envNamePresenceInText("OPENAI_API_KEY\n", "ci_yaml")).toEqual([]);
+    expect(envNamePresenceInText("- OPENAI_API_KEY\n", "ci_yaml")).toEqual([]);
+    expect(envNamePresenceInText("  OPENAI_API_KEY value\n", "ci_yaml")).toEqual([]);
+    expect(ids(envNamePresenceInText("- OPENAI_API_KEY=x\n", "ci_yaml"))).toEqual(["env.openai.api-key"]);
+  });
+
+  it("matches within its own kind only", () => {
+    const mixed: PresenceSignature[] = [
+      good,
+      { id: "cli.acme.tool", provider: "acme-ai", kind: "cli", value: "acme_ai_key", confidence: "medium", toolId: "acme", provenance: "admin" },
+    ];
+    expect(ids(matchEnvNames(["ACME_AI_KEY"], mixed))).toEqual(["env.acme.key"]);
+    expect(ids(matchCliNames(["ACME_AI_KEY"], mixed))).toEqual(["cli.acme.tool"]);
+    expect(ids(envNamePresenceInText("acme_ai_key=1\nACME_AI_KEY=1\n", "dotenv", mixed))).toEqual(["env.acme.key"]);
   });
 });
