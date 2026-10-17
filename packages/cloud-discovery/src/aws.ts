@@ -32,7 +32,7 @@ import { fromTemporaryCredentials, fromWebToken } from "@aws-sdk/credential-prov
 import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from "@smithy/types";
 import { awsCredentialSchema, type AwsCredentialInput, type OidcTokenSupplier } from "./credentials.js";
 import { lookbackStart, paginate, PrincipalAggregator, ScanCollector } from "./report.js";
-import { guardedAwsRequestHandler, type GuardedFetch } from "./transport.js";
+import { BodyTooLargeError, guardedAwsRequestHandler, readBodyCapped, type GuardedFetch } from "./transport.js";
 import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
 export const AWS_SERVICE_KEYS = { bedrock: "aws:bedrock", sagemaker: "aws:sagemaker" } as const;
@@ -383,9 +383,13 @@ export class AwsCloudScanner implements CloudScanner {
               await obj.Body?.transformToWebStream().cancel().catch(() => undefined);
               continue;
             }
-            const bytes = await obj.Body?.transformToByteArray();
-            if (!bytes) continue;
-            if (bytes.byteLength > AWS_TRAIL_OBJECT_MAX_BYTES) {
+            if (!obj.Body) continue;
+            let bytes: Uint8Array;
+            try {
+              // a running cap, whether or not the object declared its length (recheck finding 3)
+              bytes = await readBodyCapped(obj.Body.transformToWebStream() as ReadableStream<Uint8Array>, AWS_TRAIL_OBJECT_MAX_BYTES);
+            } catch (err) {
+              if (!(err instanceof BodyTooLargeError)) throw err;
               skippedObjects += 1;
               continue;
             }

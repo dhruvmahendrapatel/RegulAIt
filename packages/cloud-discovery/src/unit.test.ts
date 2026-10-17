@@ -11,7 +11,7 @@ import {
 import { classifyError, digestObservations, redact } from "./report.js";
 import { CLOUD_AI_SERVICE_SEED } from "./seed.js";
 import { fakeCloud } from "./test-cloud.js";
-import { GuardedAzureHttpClient, requestAwareFetch } from "./transport.js";
+import { BodyTooLargeError, GuardedAzureHttpClient, readBodyCapped, requestAwareFetch } from "./transport.js";
 import { createHttpHeaders, createPipelineRequest } from "@azure/core-rest-pipeline";
 
 describe("requestAwareFetch", () => {
@@ -22,6 +22,21 @@ describe("requestAwareFetch", () => {
     expect(cloud.calls[0]).toMatchObject({ method: "POST", body: "a=1" });
     expect(cloud.calls[0]!.headers.get("x-k")).toBe("v");
     expect(cloud.calls[0]!.url.href).toBe("https://api.example.test/x");
+  });
+});
+
+describe("readBodyCapped", () => {
+  it("returns a body under the cap and stops a body over it, whatever the headers say", async () => {
+    expect(new TextDecoder().decode(await readBodyCapped(new Response("hello").body, 10))).toBe("hello");
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled += 1;
+        c.enqueue(new Uint8Array(4));
+      },
+    });
+    await expect(readBodyCapped(endless, 10)).rejects.toBeInstanceOf(BodyTooLargeError);
+    expect(pulled).toBeLessThan(10);
   });
 });
 
@@ -100,6 +115,16 @@ describe("classifyError", () => {
     expect(out).toContain("region=us-east-1");
     expect(out).toContain("api_key=[redacted]&X-Amz-Signature=[redacted]&access_token=[redacted]");
     expect(redact("x".repeat(195) + `key=${k}`)).not.toContain(k.slice(0, 5));
+  });
+
+  it("redacts JSON- and YAML-style secrets too (recheck finding 4)", () => {
+    const k = `k${"2".repeat(20)}`;
+    const out = redact(`token exchange failed: {"access_token":"${k}","token_type":"Bearer"} client_secret: ${k} at https://login.example/x`);
+    expect(out).not.toContain(k);
+    expect(out).toContain('"access_token":"[redacted]"');
+    expect(out).toContain("client_secret: [redacted]");
+    expect(out).toContain("https://login.example/x");
+    expect(redact(`{"accessToken" : '${k}'}`)).not.toContain(k);
   });
 
   it("never echoes a bearer token", () => {

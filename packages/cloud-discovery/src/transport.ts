@@ -49,6 +49,46 @@ export function requestAwareFetch(guarded: GuardedFetch): GuardedFetch {
   return wrapped as GuardedFetch;
 }
 
+/** a body larger than its cap: the read stopped there and nothing past it was buffered */
+export class BodyTooLargeError extends Error {
+  constructor(readonly max: number) {
+    super(`response body exceeds the ${max}-byte cap; not read further`);
+    this.name = "BodyTooLargeError";
+  }
+}
+
+/**
+ * Read a body with a running byte cap (review of #404, recheck finding 3): chunks are counted as they arrive and the
+ * stream is cancelled the moment the total passes `max`, so a missing or false Content-Length cannot make a scanner
+ * buffer an unbounded body.
+ */
+export async function readBodyCapped(body: ReadableStream<Uint8Array> | null | undefined, max: number): Promise<Uint8Array> {
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      void reader.cancel().catch(() => undefined);
+      throw new BodyTooLargeError(max);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.byteLength;
+  }
+  return out;
+}
+
+/** an Azure management, Resource Graph or Log Analytics response is read up to this many bytes */
+export const AZURE_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+
 /** AWS SDK v3 `requestHandler` that sends through the guarded fetch */
 export function guardedAwsRequestHandler(fetchImpl: GuardedFetch, requestTimeoutMs = 30_000): FetchHttpHandler {
   return new FetchHttpHandler({ customFetch: requestAwareFetch(fetchImpl), requestTimeout: requestTimeoutMs });
@@ -87,7 +127,8 @@ export class GuardedAzureHttpClient implements HttpClient {
     const res = await this.#fetch(request.url, init);
     const responseHeaders = createHttpHeaders();
     res.headers.forEach((v, k) => responseHeaders.set(k, v));
-    return { request, status: res.status, headers: responseHeaders, bodyAsText: await res.text() };
+    const bytes = await readBodyCapped(res.body, AZURE_RESPONSE_MAX_BYTES);
+    return { request, status: res.status, headers: responseHeaders, bodyAsText: new TextDecoder().decode(bytes) };
   }
 }
 

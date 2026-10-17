@@ -167,12 +167,24 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
         if (c.url.searchParams.get("list-type") === "2" && p === prefix) return listXml("", `<CommonPrefixes><Prefix>${prefix}us-east-1/</Prefix></CommonPrefixes>`);
         if (c.url.searchParams.get("list-type") === "2" && p === `${prefix}us-east-1/${day}`) {
           const k = (key: string, size: number) => `<Contents><Key>${prefix}us-east-1/${day}${key}</Key><Size>${size}</Size></Contents>`;
-          return listXml(k("big.json.gz", AWS_TRAIL_OBJECT_MAX_BYTES + 1) + k("bomb.json.gz", bombBody.length) + k("ok.json.gz", okBody.length));
+          return listXml(k("big.json.gz", AWS_TRAIL_OBJECT_MAX_BYTES + 1) + k("bomb.json.gz", bombBody.length) + k("nolen.json.gz", 10) + k("ok.json.gz", okBody.length));
         }
         if (c.url.searchParams.get("list-type") === "2") return listXml("");
         got.push(c.url.pathname);
         if (c.url.pathname.endsWith("bomb.json.gz")) return new Response(bombBody, { headers: { "content-length": String(bombBody.length) } });
         if (c.url.pathname.endsWith("ok.json.gz")) return new Response(okBody, { headers: { "content-length": String(okBody.length) } });
+        if (c.url.pathname.endsWith("nolen.json.gz")) {
+          // listed as tiny, served with no Content-Length and far over the cap: the running cap must stop it
+          let sent = 0;
+          const chunk = new Uint8Array(1024 * 1024);
+          return new Response(new ReadableStream<Uint8Array>({
+            pull(ctrl) {
+              if (sent > AWS_TRAIL_OBJECT_MAX_BYTES * 2) return ctrl.close();
+              sent += chunk.byteLength;
+              ctrl.enqueue(chunk);
+            },
+          }));
+        }
         return undefined;
       },
       ...awsRoutes(),
@@ -187,7 +199,7 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     const cap = res.capabilities.find((x) => x.capability === "aws.cloudtrail.data_events");
     expect(cap?.status).toBe("read");
     expect(cap?.items).toBe(1);
-    expect(cap?.detail).toContain("2 object(s) skipped");
+    expect(cap?.detail).toContain("3 object(s) skipped");
   });
 
   it("assume-role mode sends the per-source external id", async () => {

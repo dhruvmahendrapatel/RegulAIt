@@ -53,18 +53,24 @@ export function redact(message: string): string {
   let out = "";
   let i = 0;
   while (i < text.length) {
-    const eq = text.indexOf("=", i);
-    if (eq < 0) {
+    // the next separator: `=` (query strings, form bodies) or `:` (JSON and YAML, `"access_token":"..."`)
+    let eq = i;
+    while (eq < text.length && text[eq] !== "=" && text[eq] !== ":") eq++;
+    if (eq >= text.length) {
       out += text.slice(i);
       break;
     }
-    // the parameter name: the run of letters, digits, `_`, `-` or `.` just before `=`
-    let start = eq;
+    // the name: optional whitespace and a closing quote, then the run of letters, digits, `_`, `-` or `.`
+    let end = eq;
+    while (end > i && text[end - 1] === " ") end--;
+    if (end > i && (text[end - 1] === '"' || text[end - 1] === "'")) end--;
+    let start = end;
     while (start > i && isNameChar(text.charCodeAt(start - 1))) start--;
-    const name = text.slice(start, eq).toLowerCase();
+    const name = text.slice(start, end).toLowerCase();
     out += text.slice(i, eq + 1);
     i = eq + 1;
-    if (SECRET_PARAMS.some((p) => name.endsWith(p))) {
+    if (name.length > 0 && SECRET_PARAMS.some((p) => name.endsWith(p))) {
+      while (i < text.length && text[i] === " ") out += text[i++];
       const quote = text[i] === '"' || text[i] === "'" ? text[i]! : null;
       if (quote) {
         // a quoted value runs to the matching quote
