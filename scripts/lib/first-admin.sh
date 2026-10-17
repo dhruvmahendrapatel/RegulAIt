@@ -68,6 +68,12 @@ fa_utf8_invalid() {
 # reads that open file (through /dev/fd, which on Linux re-opens the same file at offset 0, leaving the
 # caller's descriptor where it was), and the path must still name it. Checking the path and then opening
 # it again would leave a window in which the file can be swapped.
+#
+# The descriptor form relies on Linux `/dev/fd` semantics. Elsewhere (macOS, BSD) `/dev/fd/N` duplicates
+# the descriptor and shares its offset, so the checks would consume the password before the runner reads it;
+# first_admin_from_file (and install.sh, up front) refuse a password file there. A FIFO swapped in between the
+# path check and the open would block the open; it needs write access to the file's directory, which the
+# directory check refuses to anyone but the owner.
 fa_password_file_problem() {
   local f="$1" fd="${2:-}" src="$1" follow="" perm owner me size ctl tail2 bom at_path at_fd dir dperm downer
   [ -n "$f" ] || { echo "no file named"; return 0; }

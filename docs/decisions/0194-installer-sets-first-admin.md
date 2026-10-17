@@ -113,9 +113,8 @@ ADR-0180 (secure by default), and a known default administrator credential is a 
   On macOS and the BSDs it duplicates the descriptor and shares its offset, so the checks would consume the password.
   There `install.sh` refuses `REGULAIT_FIRST_ADMIN_PASSWORD_FILE` at the start and the interactive prompt is the way
   in. `INSTALL.md` says so.
-- **The swap test hooks the re-check, not the path check.** The review asked for a swap after the first, path-only
-  check. Descriptor 9 then opens the new file, which the path names and which is checked in full, so that swap is not a
-  race and cannot fail against the old code. The race the descriptor closes is after the open. The test swaps the
-  file just before the re-check (refused, and the runner is never called) and just after it (the runner receives the
-  checked content, not the file now at the path). Both fail against the old code, and against a version that keeps
-  the re-check but redirects the path again for the runner.
+- **Two race tests through `first_admin_from_file`.** One swaps a file the checks refuse (group-readable, or a symlink)
+  in after the path-only check: the re-check on descriptor 9 refuses it and the runner is never called. The other
+  swaps a valid file in just before the re-check (refused as changed while it was being opened) and just after it (the
+  runner receives the checked content, not the file now at the path). Both fail against the old check-then-redirect.
+  The second also fails against a version that keeps the re-check but redirects the path again for the runner.

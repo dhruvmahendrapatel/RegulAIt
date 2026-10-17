@@ -287,6 +287,41 @@ fa_password_file_problem() {
     expect(problem()).toBe("");
   });
 
+  it.runIf(posix && process.platform === "linux")("from a file: a bad file swapped in after the path check is refused by first_admin_from_file, nothing sent", () => {
+    // review L1: the race itself, through first_admin_from_file. The path-only check passes on the good file; the file
+    // is then swapped for one the checks refuse (group-readable, or a symlink to such a file) before it is opened.
+    // Re-checking what was opened refuses it; the old check-then-redirect sent the swapped content to the runner.
+    const race = [
+      `eval "$(declare -f fa_password_file_problem | sed '1s/fa_password_file_problem/fa_real_problem/')"`,
+      "fa_password_file_problem() {",
+      '  fa_real_problem "$@"',
+      '  if [ "$#" -lt 2 ]; then rm -f "$1"; if [ "$SWAP_KIND" = link ]; then ln -s "$SWAP_FROM" "$1"; else mv "$SWAP_FROM" "$1"; fi; fi',
+      "}",
+    ].join("\n");
+    for (const kind of ["group-readable", "link"] as const) {
+      const dir = freshDir(`pwrace-${kind}`);
+      const f = path.join(dir, "pw");
+      const swapped = path.join(dir, "swapped");
+      const pw = strong();
+      const intruder = `CANARY-intruder-${randomBytes(6).toString("hex")}`;
+      writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+      chmodSync(f, 0o600);
+      writeFileSync(swapped, `${intruder}\n`, { mode: 0o644 });
+      chmodSync(swapped, 0o644);
+      const stubDir = freshDir(`pwrace-${kind}-stub`);
+      const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\n${race}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc"\necho "OUT=$FA_OUTPUT"\n`;
+      const r = spawnSync("bash", ["-c", script, "x", f], {
+        encoding: "utf8",
+        env: { ...process.env, STUB_DIR: stubDir, SWAP_FROM: swapped, SWAP_KIND: kind === "link" ? "link" : "file" },
+      });
+      expect(r.stdout, `${kind}: ${r.stderr}`).toContain("RC=2");
+      expect(r.stdout, kind).toContain("OUT=password file refused:");
+      expect(existsSync(path.join(stubDir, "stdin.log")), `${kind}: the runner was called`).toBe(false);
+      expect(`${r.stdout}${r.stderr}`).not.toContain(intruder);
+      expect(`${r.stdout}${r.stderr}`).not.toContain(pw);
+    }
+  });
+
   it.runIf(posix && process.getuid?.() === 0)("the password file must be owned by the installing user or root", () => {
     const f = path.join(freshDir("pwowner"), "pw");
     writeFileSync(f, strong(), { mode: 0o600 });

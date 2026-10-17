@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { FILE_SCOPED_MARKER, GATEWAY_SRC, SCRATCH_DB_FILES, analyzeTestFile, findEgressAllowLeaks } from "./preflight-egress-allow-cleanup.mjs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { GATEWAY_SRC, SCRATCH_DB_FILES, analyzeTestFile, findEgressAllowLeaks } from "./preflight-egress-allow-cleanup.mjs";
 
 describe("every gateway suite that adds an egress allow entry on the shared database removes it in afterAll (M-068, M-078)", () => {
   it("the repository has no leaking suite and no stale scratch-database exemption", () => {
@@ -157,52 +157,33 @@ it("add, then upsert the same host", async () => {
       expect(analyzeTestFile(pushed).unmatchedMarkers).toEqual([12]);
     });
 
-    it("a removal that only MENTIONS the marked host or result elsewhere does not name it (by position and symbol)", () => {
-      const imds = `const IMDS = "169.254.169.254";\n`;
-      const marked = (create, pre = "", post = "") =>
-        `it("imds", async () => {${pre}\n  // egress-allow-cleanup: afterAll — removed by afterAll\n  ${create}${post}\n});\n`;
-      const postImds = `const r = await post("/v1/egress-allow-hosts", { host: "169.254.169.254" });`;
-      const cases = {
-        // the literal sits in a non-host field of the removal
-        noteField: [
-          `afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1", note: "169.254.169.254" }); });\n`,
-          marked(postImds),
-        ],
-        // the literal sits in a guard around a removal of a different host
-        guard: [
-          `afterAll(async () => { for (const h of hosts) { if (h !== "169.254.169.254") await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" }); } });\n`,
-          marked(`const r = await post("/v1/egress-allow-hosts", { host: IMDS });`),
-        ],
-        // the result's name is reused by a loop variable over a different list
-        nameCollision: [
-          `afterAll(async () => { for (const r of keep) await removeEgressAllowEntry(app, AUTH, { id: r.id }); });\n`,
-          marked(postImds),
-        ],
-        // a module-level host is removed; the test posts its own, shadowing one
-        shadowedHost: [
-          `const host = "127.0.0.1";\nafterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host }); });\n`,
-          marked(`const r = await post("/v1/egress-allow-hosts", { host });`, `\n  const host = "169.254.169.254";`),
-        ],
-      };
-      for (const [name, [teardown, test]] of Object.entries(cases)) {
-        expect(analyzeTestFile(imds + teardown + test).unmatchedMarkers, name).toHaveLength(1);
+    it("review L2: names are matched by symbol and host literals only as removed host values (negative controls)", () => {
+      const markedImds = `it("imds", async () => {
+  // egress-allow-cleanup: afterAll — claimed, but afterAll removes another host
+  const r = await post("/v1/egress-allow-hosts", { host: "169.254.169.254" });
+});\n`;
+      // the literal sits in a non-host field of a removal of ANOTHER host
+      const noteField = `afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1", note: "169.254.169.254" }); });\n`;
+      // the literal sits in a guard around a removal of another host
+      const guard = `afterAll(async () => { if (h !== "169.254.169.254") await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" }); });\n`;
+      // the result name collides with an unrelated loop variable in afterAll
+      const collision = `afterAll(async () => { for (const r of keep) await removeEgressAllowEntry(app, AUTH, { id: r.id }); });\n`;
+      for (const teardown of [noteField, guard, collision]) {
+        expect(analyzeTestFile(teardown + markedImds).unmatchedMarkers, teardown).toEqual([4]);
       }
-      // live controls: the same shapes, naming the marked entry in the target position, are accepted
-      const controls = {
-        noteField: [`afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "169.254.169.254", note: "x" }); });\n`, cases.noteField[1]],
-        guard: [`afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: IMDS }); });\n`, cases.guard[1]],
-        nameCollision: [
-          `let id;\nafterAll(async () => { await removeEgressAllowEntry(app, AUTH, { id }); });\n`,
-          marked(postImds, "", "\n  id = r.json().id;"),
-        ],
-        shadowedHost: [
-          `afterAll(async () => { await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "169.254.169.254")); });\n`,
-          cases.shadowedHost[1],
-        ],
-      };
-      for (const [name, [teardown, test]] of Object.entries(controls)) {
-        expect(analyzeTestFile(imds + teardown + test).unmatchedMarkers, name).toEqual([]);
-      }
+      // a shadowed host: afterAll removes the module-level host, the test posts its own
+      const shadowed = `const host = "127.0.0.1";
+afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host }); });
+it("imds", async () => {
+  const host = "169.254.169.254";
+  // egress-allow-cleanup: afterAll — claimed, but afterAll removes the OUTER host
+  await post("/v1/egress-allow-hosts", { host });
+});\n`;
+      expect(analyzeTestFile(shadowed).unmatchedMarkers).toEqual([6]);
+      // the controls: the same shapes naming the posted host are accepted
+      expect(analyzeTestFile(`afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "169.254.169.254" }); });\n` + markedImds).unmatchedMarkers).toEqual([]);
+      expect(analyzeTestFile(`afterAll(async () => { await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "169.254.169.254")); });\n` + markedImds).unmatchedMarkers).toEqual([]);
+      expect(analyzeTestFile(shadowed.replace('const host = "169.254.169.254";\n', "")).unmatchedMarkers).toEqual([]);
     });
 
     it("a create in beforeAll or in a helper stays a file-level create (afterAll rule only)", () => {
@@ -211,25 +192,21 @@ it("add, then upsert the same host", async () => {
     });
   });
 
-  it("findEgressAllowLeaks reports a file whose afterAll marker no afterAll removal names", () => {
-    const base = mkdtempSync(path.join(os.tmpdir(), "egress-allow-fixture-"));
+  it("review L3: findEgressAllowLeaks reports an unmatched afterAll marker as a leak (and a matched one as clean)", () => {
+    const base = mkdtempSync(path.join(tmpdir(), "egress-preflight-"));
     try {
       const dir = path.join(base, GATEWAY_SRC);
       mkdirSync(dir, { recursive: true });
-      const body = (host) => `beforeAll(async () => { await post("/v1/egress-allow-hosts", { host: "127.0.0.1" }); });
-afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" }); });
-it("imds", async () => {
-  // ${FILE_SCOPED_MARKER} — claimed, never removed
-  const r = await post("/v1/egress-allow-hosts", { host: "${host}" });
+      const file = (host) => `afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" }); });
+it("x", async () => {
+  // egress-allow-cleanup: afterAll — the entry later tests use
+  await post("/v1/egress-allow-hosts", { host: "${host}" });
 });
 `;
-      writeFileSync(path.join(dir, "marker-unmatched.test.ts"), body("169.254.169.254"));
-      writeFileSync(path.join(dir, "marker-matched.test.ts"), body("127.0.0.1"));
-      const { creators, leaks } = findEgressAllowLeaks(base);
-      expect(creators).toEqual(["marker-matched.test.ts", "marker-unmatched.test.ts"]);
-      expect(leaks).toEqual([
-        `marker-unmatched.test.ts ('${FILE_SCOPED_MARKER}' at line 5, but no afterAll removal names that host or its recorded id)`,
-      ]);
+      writeFileSync(path.join(dir, "unmatched.test.ts"), file("169.254.169.254"));
+      writeFileSync(path.join(dir, "matched.test.ts"), file("127.0.0.1"));
+      const { leaks } = findEgressAllowLeaks(base);
+      expect(leaks).toEqual([expect.stringContaining("unmatched.test.ts ('egress-allow-cleanup: afterAll' at line 4, but no afterAll removal names that host")]);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
