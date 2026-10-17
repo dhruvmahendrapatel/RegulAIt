@@ -691,7 +691,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     const out = await db.transaction(async (tx): Promise<Refusal | true> => {
       const t = tx as unknown as Db;
       const [row] = await t.select().from(discoverySettings).where(eq(discoverySettings.id, 1)).for("update");
-      if (!row) return refusal(500, "settings_missing", "the discovery settings row is missing (migration 0203 inserts it)");
+      if (!row) return refusal(500, "settings_missing", "the discovery settings row is missing (migration 0202 inserts it)");
       if (row.version !== body.version) {
         return refusal(409, "version_conflict", "the discovery settings changed since you loaded them; reload and repeat the change", { currentVersion: row.version });
       }

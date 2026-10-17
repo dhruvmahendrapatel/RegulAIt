@@ -1,4 +1,4 @@
--- Migration 0203. ADR-0195 slice SD0: shadow-AI ACTIVE discovery, the foundation. Hand-authored (never drizzle-kit generate).
+-- Migration 0202. ADR-0195 slice SD0: shadow-AI ACTIVE discovery, the foundation. Hand-authored (never drizzle-kit generate).
 -- Re-runnable: every statement is idempotent.
 --
 -- ADR-0195 supersedes ADR-0055's and ADR-0083's "evidence only, no collectors" stance: RegulAIt may now call

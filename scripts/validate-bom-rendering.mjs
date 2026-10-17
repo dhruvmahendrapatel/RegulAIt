@@ -66,7 +66,8 @@ for (const f of files) {
   }
   const spec = format.slice("cyclonedx-".length);
   // the bundled CycloneDX schemas do not pin `specVersion` to their own version, so a 1.7 document passes the 1.6
-  // schema; the stated format must match what the document says it is
+  // schema; the stated format must match what the document says it is. shared.validateCycloneDx also refuses a
+  // specVersion mismatch; this check stays for its own message and the bomFormat check
   if (format !== "spdx-3.0.1" && (doc?.bomFormat !== "CycloneDX" || doc?.specVersion !== spec)) {
     process.stdout.write(`[invalid] ${f}: not a CycloneDX ${spec} document (bomFormat and specVersion)\n`);
     failed = true;

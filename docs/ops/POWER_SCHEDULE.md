@@ -76,9 +76,9 @@ issued on the next start. This stack's hostname is `<dashed-public-ip>.sslip.io`
 nightly power cycle would change the URL every morning and invalidate the
 certificate.
 
-It has already happened once: state drifted to `98.86.163.252` while
+It has already happened once: state drifted to `<second-address>` while
 `infra/caddy/Caddyfile`, the README and STATE.md all still said
-`3.237.199.248`.
+`<first-address>`.
 
 Cost: ~$0.005/hr for any public IPv4, idle or in use. So the EIP is free while
 the box runs and costs ~$2.35/month for the stopped hours — against ~$9.76/month

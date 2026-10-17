@@ -289,12 +289,13 @@ describe("the scorer URL is a typed destination under the full egress guard", ()
   });
 
   it("refuses an IMDS baseUrl outright, allow-listed or not", async () => {
-    const listed = await app.inject({
+    // ADR-0034 owner amendment 2026-10-16: adding any entry is a stepped-up relaxation; this suite is about the guard
+    const listed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       url: "/v1/egress-allow-hosts",
       headers: AUTH,
       payload: { host: perTest.trackHost("169.254.169.254"), note: "deliberate SSRF attempt for the test" },
-    });
+    }));
     expect(listed.statusCode).toBe(201);
     const res = await app.inject({
       method: "POST",

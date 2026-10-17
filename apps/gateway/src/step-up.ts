@@ -60,8 +60,9 @@
  * `mcp_registry_create`/`_update` (enabling a registry or opening its private
  * ranges), `mcp_registry_import` (an import that inherits a registry's open
  * private ranges), `mcp_server_create`/`_update` (opening an MCP server's
- * private ranges), `egress_allow_host` (turning an allow entry's private-range
- * or plaintext opt-in on), `agent_expected_served_model` and
+ * private ranges), `egress_allow_host` (adding an allow entry, `values.added`,
+ * or turning an entry's private-range or plaintext opt-in on; ADR-0034 owner
+ * amendment 2026-10-16), `agent_expected_served_model` and
  * `agent_create_expected_served_model` (relaxing the served-model drift check).
  *
  * METHODS: `passkey` (an enrolled, unrevoked passkey and a configured

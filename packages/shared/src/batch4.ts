@@ -55,7 +55,7 @@ export const STEP_UP_ACTION_KINDS = [
   // ADR-0188 (migration 0180): creating, binding a key to, suspending or revoking a workload identity,
   // and every other identity administration write
   "identity_manage",
-  // ADR-0195 SD0 (migration 0203): revealing the name behind a discovery pseudonym (a device user, a commit author,
+  // ADR-0195 SD0 (migration 0202): revealing the name behind a discovery pseudonym (a device user, a commit author,
   // a cloud principal). Not a settings relaxation: its own kind, so it can be required or audited on its own
   "pseudonym_reveal",
 ] as const;
