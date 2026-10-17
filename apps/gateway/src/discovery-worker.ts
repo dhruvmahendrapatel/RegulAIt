@@ -66,7 +66,9 @@ import {
   SIGNATURE_OSES,
   UPLOAD_FED_SOURCE_KINDS,
   isArtifactSignatureKind,
+  isEnvName,
   keyMatchesSignature,
+  presenceSignatureById,
   redactKeyFragment,
   scrubAuditText,
   scrubSecrets,
@@ -456,8 +458,14 @@ export function checkObservations(
     let names: string[] | null = null;
     if (o.names !== undefined) {
       if (!Array.isArray(o.names) || o.names.length > NAMES_MAX) throw new ObservationRefused(`observation ${i}: at most ${NAMES_MAX} names`);
-      names = o.names.map((n) => {
-        if (typeof n !== "string" || !NAME_PATTERN.test(n)) throw new ObservationRefused(`observation ${i}: '${String(n).slice(0, 40)}' is not a name (names only, never values)`);
+      names = o.names.map((n, j) => {
+        // the refusal never echoes the entry: a `NAME=value` or a key would put part of a value into the run outcome
+        if (typeof n !== "string" || !NAME_PATTERN.test(n)) throw new ObservationRefused(`observation ${i}: names[${j}] is not a name (names only, never values)`);
+        // ADR-0195 lane A6 (master decision): an environment-variable name is never stored as evidence; a scanner
+        // reports its presence as a signature id (`presence`)
+        if (isEnvName(n)) {
+          throw new ObservationRefused(`observation ${i}: names[${j}] is shaped like an environment-variable name, which is never stored; report it as a presence signature id`);
+        }
         // a "name" that is a key (matches an enabled api_key_prefix row, or a credential shape) is a value: refused
         if (keyRows.some((sig) => keyMatchesSignature(n, n.length, sig))) {
           throw new ObservationRefused(`observation ${i}: a name matches an API key signature; names only, never values (refused, not stored)`);
@@ -466,11 +474,23 @@ export function checkObservations(
         return n;
       });
     }
+    let presence: string[] | null = null;
+    if (o.presence !== undefined) {
+      if (!Array.isArray(o.presence) || o.presence.length > NAMES_MAX) throw new ObservationRefused(`observation ${i}: at most ${NAMES_MAX} presence signature ids`);
+      presence = [
+        ...new Set(
+          o.presence.map((id, j) => {
+            if (typeof id !== "string" || !presenceSignatureById(id)) throw new ObservationRefused(`observation ${i}: presence[${j}] is not a known presence signature id`);
+            return id;
+          }),
+        ),
+      ].sort();
+    }
     if (o.os !== undefined && (typeof o.os !== "string" || !(SIGNATURE_OSES as readonly string[]).includes(o.os))) {
       throw new ObservationRefused(`observation ${i}: os must be macos, windows or linux`);
     }
     if (o.ecosystem !== undefined && (typeof o.ecosystem !== "string" || !SIGNATURE_ECOSYSTEM_PATTERN.test(o.ecosystem.trim().toLowerCase()))) {
-      throw new ObservationRefused(`observation ${i}: '${String(o.ecosystem).slice(0, 40)}' is not an ecosystem name`);
+      throw new ObservationRefused(`observation ${i}: the ecosystem is not an ecosystem name`);
     }
     if (o.actorPseudonym !== undefined && (typeof o.actorPseudonym !== "string" || !DISCOVERY_PSEUDONYM_PATTERN.test(o.actorPseudonym))) {
       throw new ObservationRefused(`observation ${i}: actorPseudonym must be a pseudonym (psn:…) from ctx.pseudonymise`);
@@ -490,6 +510,7 @@ export function checkObservations(
       artifact,
       location,
       names,
+      presence,
       actorPseudonym: o.actorPseudonym ?? null,
       os: o.os ?? null,
       ecosystem: o.ecosystem ? o.ecosystem.trim().toLowerCase() : null,

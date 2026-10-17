@@ -8,8 +8,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DISCOVERY_SCANNERS } from "./discovery-scanners.js";
-import { checkObservations } from "./discovery-worker.js";
-import { repoScanner, repoTargetProblem, type RepoScanContext } from "./discovery-repo-scanner.js";
+import { checkObservations, ObservationRefused } from "./discovery-worker.js";
+import { repoScanner, repoTargetProblem, toScanObservations, type RepoScanContext } from "./discovery-repo-scanner.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const OLD = "89abcdef0123456789abcdef0123456789abcdef";
@@ -137,8 +137,11 @@ describe("ADR-0195 SD1 repo scanners", () => {
     }
     expect(res.observations.find((o) => o.packageName === "@anthropic-ai/sdk")!.location).toEqual({ path: "package.json", line: 3, commit: SHA });
     expect(res.observations.find((o) => o.keyFragment)!.location).toEqual({ path: "src/a.py", line: 3, commit: SHA });
-    // NAMES only: the .env.example variable names and the stdio MCP command basename
-    expect(res.observations.find((o) => o.location?.path === ".env.example")!.names).toEqual(["OPENAI_API_KEY"]);
+    // ADR-0195 lane A6: the .env.example names become presence signature ids; NAMES only for the MCP command basename
+    const envSighting = res.observations.find((o) => o.location?.path === ".env.example")!;
+    expect(envSighting.presence).toEqual(["env.openai.api-key"]);
+    expect(envSighting.names).toBeUndefined();
+    expect(res.observations.flatMap((o) => o.names ?? [])).toEqual(["uvx"]);
     expect(res.observations.find((o) => o.names?.includes("uvx"))!.artifact).toEqual({ kind: "assistant_config", value: ".mcp.json" });
     expect(res.observations.find((o) => o.artifact?.kind === "assistant_config")!.artifact!.value).toBe(".github/copilot-instructions.md");
     // the author only through SD0's hook, and nothing raw in the result
@@ -196,6 +199,20 @@ describe("ADR-0195 SD1 repo scanners", () => {
     const res = await repoScanner("repo_github").run(ctx(githubFake().fetchImpl).c);
     const checked = checkObservations("repo_github", res.observations, "2026-10-17T00:00:00.000Z");
     expect(checked.some((o) => o.location !== null && o.names !== null)).toBe(true);
+    expect(checked.some((o) => o.presence?.includes("env.openai.api-key"))).toBe(true);
+  });
+
+  it("ADR-0195 lane A6: the worker refuses an env-variable name a repo scanner sends as a name", () => {
+    const analysis = {
+      commitSha: SHA,
+      observations: [{ kind: "mcp_server", path: ".mcp.json", line: null, commitSha: SHA, mcpServer: { name: "s", transport: "stdio", command: "OPENAI_API_KEY", host: null }, catalogEntryId: null, provider: null }],
+    } as unknown as Parameters<typeof toScanObservations>[1];
+    // the scanner itself never forwards an env-shaped command basename as a name
+    const obs = toScanObservations("github:acme/app", analysis, null);
+    expect(obs.flatMap((o) => o.names ?? [])).toEqual([]);
+    // and if a scanner did, SD0 refuses the run's observations rather than store the name
+    const forged = [{ evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject: "github:acme/app", names: ["OPENAI_API_KEY"] }];
+    expect(() => checkObservations("repo_github", forged, "2026-10-17T00:00:00.000Z")).toThrow(ObservationRefused);
   });
 
   it("shape-checks the source target and fails the run on a bad one before any request", async () => {

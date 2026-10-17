@@ -33,6 +33,8 @@ export const TIMING_FILES = [
   "src/isolation/isolation-redos-timing.test.ts",
   // ADR-0188 S7 (review of #380): REGULAIT_PUBLIC_URL's trailing-slash trim on a 200k-slash input (CodeQL js/polynomial-redos)
   "src/public-url-redos-timing.test.ts",
+  // ADR-0195 A6: the env-name line scanner on a hostile 1.5M-character input
+  "src/discovery/presence-signatures-timing.test.ts",
   // ADR-0195 SD1 (review of #402): 9000-dependency manifests located in one pass, bounded at 1 s
   "src/repo-manifests-timing.test.ts",
 ];

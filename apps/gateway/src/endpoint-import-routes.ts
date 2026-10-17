@@ -283,7 +283,8 @@ export function registerEndpointImportRoutes(
           subject: await pseudonymOf(DEVICE_PSEUDONYM_KIND, m.device),
           ...(m.observedAt ? { observedAt: m.observedAt } : {}),
           count: m.count,
-          artifact: { kind: m.kind, value: m.value },
+          // ADR-0195 lane A6: an env-variable or CLI name travels as its presence signature id, never the name
+          ...(m.presenceSignatureId ? { presence: [m.presenceSignatureId] } : { artifact: { kind: m.kind, value: m.value } }),
           ...(m.os ? { os: m.os } : {}),
           ...(m.ecosystem ? { ecosystem: m.ecosystem } : {}),
           ...(m.user ? { actorPseudonym: await pseudonymOf("device_user", m.user) } : {}),

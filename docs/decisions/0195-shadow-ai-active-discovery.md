@@ -547,6 +547,97 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
 
+## As built: lane A6, environment-variable-name and CLI presence signatures (2026-10-17)
+
+**Status: shared matcher, catalogue data, tests and the SD1/SD3 wiring built on branch `sd-env-name-signatures`
+(review fix round, 2026-10-17). The admin-catalogue `env_name` and `cli` kinds are BLOCKED on a migration number
+(below).** Nothing above is changed.
+
+1. **Master decision (data minimisation).** A presence match records only that a signature matched and the
+   signature's id. The variable names themselves and any values are never stored as evidence. Values are never read
+   beyond what matching needs: `envNamePresenceInText` slices only the candidate name on each line (before its `=` or
+   `:`) and moves to the next line with `indexOf`, so no value substring is ever created. `matchEnvNames`,
+   `matchCliNames` and `envNamePresenceInText` return `{signatureId, provider, kind, confidence}` and nothing else.
+2. **Kinds.** `PRESENCE_SIGNATURE_KINDS = ["env_name", "cli"]` (`packages/shared/src/discovery/presence-signatures.ts`).
+   Decision 18 lists AI CLIs and the names (never values) of AI-related environment variables among the endpoint
+   facts, and decision 14 lists `.env.example` names among the repo facts. No SD0 kind fits either (`local_runtime` is
+   a model runtime), so both are added.
+3. **Name shape.** An env name must match the endpoint agent's pattern `^[A-Z][A-Z0-9_]*$` and be at most 128
+   characters. Anything else is skipped and never matched. Matching is whole-name, case-sensitive equality. A CLI
+   name is the base name of a path (`/` or `\`), lower-cased, without `.exe`, checked against
+   `^[a-z0-9][a-z0-9._-]{0,63}$`, then compared whole. No regex comes from data. Inputs are bounded: at most 5,000 names
+   per call and 2,000,000 characters per text. Going over the bound throws an error; the input is never silently cut.
+4. **Text formats.** `dotenv` (`[export] NAME=`), `dockerfile` (`ENV`/`ARG NAME`, `NAME=` or `NAME value`) and
+   `ci_yaml` (`NAME:`, `- NAME=`, `- NAME:`, `name: NAME`). Stated limits: one name per line, so `ENV A=1 B=2` yields
+   only `A`; continuation lines and YAML flow mappings are not parsed; commented-out lines do not match.
+5. **Catalogue data (`PRESENCE_SIGNATURES_V1`, 16 rows, pinned by count and SHA-256 in the test).** There are 13
+   env names and 3 CLI names. All are taken from the `env_vars` and `cli.binaries` fields of the Apache-2.0 registry
+   that the open-source evaluation above names, at commit `12b7bbf733032d7822b2fb16e88b0f7a1399d1da`. Its LICENSE and
+   NOTICE are kept in `src/discovery/vendor/shadow-ai-guard/`, and `THIRD_PARTY.md` lists the registry. Each row cites
+   the commit. A generic cloud-platform key name is low confidence. The three short CLI names are medium confidence,
+   because other programs may share them. Open source first: the registry is the data source; no maintained library
+   matches env-name presence with these minimisation rules, so the matcher is ours.
+6. **BLOCKED: migration needed.** Migration 0202 closes `ai_endpoint_signatures_kind_ck` and
+   `ai_endpoint_signatures_kind_match_ck`, so `env_name` and `cli` rows cannot be stored, and `AI_SIGNATURE_KINDS`
+   does not list them. A test asserts that they are not listed. The SQL the follow-up needs is below. It is not
+   written as a migration, and it is pending execution:
+   ```sql
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_ck" CHECK ("kind" IN (
+     'hostname', 'sdk_package', 'api_key_prefix', 'web_app',
+     'cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime', 'assistant_config',
+     'env_name', 'cli'));
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_match_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_match_ck" CHECK (
+     ("kind" = 'sdk_package') = ("match_type" = 'package')
+     AND ("kind" = 'api_key_prefix') = ("match_type" = 'key_prefix')
+     AND ("kind" IN ('cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime',
+                     'assistant_config', 'env_name', 'cli')) = ("match_type" = 'identifier')
+   );
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_presence_value_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_presence_value_ck" CHECK (
+     ("kind" <> 'env_name' OR ("value" ~ '^[A-Z][A-Z0-9_]*$' AND char_length("value") <= 128))
+     AND ("kind" <> 'cli' OR "value" ~ '^[a-z0-9][a-z0-9._-]{0,63}$')
+   );
+   ```
+   The statements create no function and no trigger, so the 0185 guard has nothing new to check. `schema.ts` would
+   declare the new value CHECK for parity, as SD0 did.
+7. **Wiring (built in the review fix round of #419).**
+   - **SD1.** `analyseRepo` reads `.env.example`-style templates, Dockerfiles (`Dockerfile`, `Containerfile`,
+     `Dockerfile.*`, `*.dockerfile`) and CI YAML (`.github/workflows/*.yml|yaml`, `.gitlab-ci.yml`,
+     `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `.circleci/config.yml`) with `envNamePresenceInText`, and emits
+     `env_presence` observations that carry a signature id only. The repo scanner sends one observation per file with
+     `presence: [ids]`. It no longer sends env names in `names`; `names` keeps only an MCP server's command basename,
+     and an env-shaped basename is not sent.
+   - **SD3.** `reduceEndpointObservations` runs `matchEnvNames` over a row's env-variable keys and `matchCliNames` over
+     its CLI binaries before the artifact match. A match becomes a sighting whose value is the signature id, sent as
+     `presence`. An env-variable name is never an artifact candidate and never a catalogue-gap sample. A CLI binary
+     the presence catalogue does not know (for example a local runtime) is still matched as an artifact.
+   - **SD0.** `ScanObservation.presence` and `Observation.presence` carry ids, checked against the presence
+     catalogue (an unknown id is refused). `checkObservations` refuses a `names` entry shaped like an env name
+     (`^[A-Z][A-Z0-9_]*$`), and its refusal messages no longer echo the refused text. `classifyObservation` has a
+     presence step: an id counts only when an ENABLED `identifier` row of a backing kind carries the same value
+     (`PRESENCE_BACKING_KINDS`: `assistant_config`/`local_runtime` for env names, `desktop_app`/`local_runtime` for
+     CLI names, the kinds SD3's seed stores them as). Disabling that row turns the detection off. The finding's
+     `matchedValue` is the id, its evidence keeps `presence: [ids]`, and the confidence is the lower of the two rows'.
+     The web view shows the ids as "presence signatures".
+   - **Catalogue validation.** `isPresenceSignature` and `assertPresenceCatalogue` check every row (id pattern and
+     kind prefix, value shape, provider, tool id, confidence, unique ids) once per catalogue. Every matcher refuses a
+     malformed catalogue rather than match against it. The migration follow-up reuses them for admin rows.
+
+   **Still missing (follow-ups):** (a) the kind migration above; (b) adding `env_name` and `cli` to
+   `AI_SIGNATURE_KINDS`, `catalogueSignatureSchema` and `PRESENCE_BACKING_KINDS`, with seed rows from
+   `PRESENCE_SIGNATURES_V1` carrying `tool_id` and `confidence`; (c) SD4's agent rows calling the same matchers.
+   Coverage note: the SD1 repo path now detects only the env names in `PRESENCE_SIGNATURES_V1` (the same 13 that
+   SD3's seed carries); an admin-added env name cannot be matched until (b), because the scanner no longer handles
+   names.
+8. **Decision recorded (was an open question).** The master decision answers it: environment-variable names are
+   never stored as evidence, from any scanner. SD0 addition 12 (`ScanObservation.names` into
+   `FindingEvidence.names`) is limited to non-env identifiers (an MCP command basename). Env-name presence is reported
+   only as A6 signature ids. No stored evidence on main depended on env names in `names`: the SD1 env-name
+   observation carried no matchable value, so it never reached a finding. SD3's env-variable findings stored the
+   catalogue's env name as `matchedValue`; they now store the signature id.
+
 ## SD3 build notes (2026-10-17)
 
 - The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
