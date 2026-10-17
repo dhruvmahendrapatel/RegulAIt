@@ -219,9 +219,12 @@ ceilings to the new sizes. No ceiling was raised and no harness constant or gate
   screen chunk is 86.7 kB (AI Governance). A single-screen area (home, chat, models, spend, account, the two
   single-file admin areas) imports its file directly.
 - **Loading fallback.** `apps/web/src/shell/RouteFallback.tsx` renders only on a first load. It sits in the same box as
-  the auth probe's skeleton in `Protected`, so nothing moves when one hands over to the other. It is one polite
-  `role="status"` region with the text "Loading page", and its skeleton bars are hidden from assistive technology. It
-  takes no focus. Signed-in screens suspend inside `AppShell` (a boundary around `<Outlet />`), so the shell and the
+  the auth probe's skeleton in `Protected`, so nothing moves when one hands over to the other. It announces "Loading
+  page" through a polite `aria-live` region, and its skeleton bars are hidden from assistive technology. It
+  deliberately has no `role="status"` and no `aria-busy`. Those are what the states check reads as the screen
+  announcing its own data loading. A first run with a `role="status"` fallback cleared 21 of the 22 `loading-not-announced`
+  findings that the screens had not fixed, because the fallback was in `<main>` while the chunk loaded. That would
+  have loosened the gate. It takes no focus. Signed-in screens suspend inside `AppShell` (a boundary around `<Outlet />`), so the shell and the
   skip link stay mounted. The screens outside the shell (sign-in, the public feedback link, the forced gates) suspend
   to a boundary around the router element.
 - **Logos are files, not script.** `vite.config.ts` sets `assetsInlineLimit` so `.svg` files are never inlined. The
