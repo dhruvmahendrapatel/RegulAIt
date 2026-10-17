@@ -8,7 +8,10 @@
  *     sign-off) and its rule, audited once; the instance rests at the plan stage.
  *  3. A workflow started but never linked is reported back by the plan (the screen's retry survives a reload).
  *  4. A pseudonymised subject never reaches the body; repo evidence paths do.
- *  5. Relaxing is the audited template retirement, and a retired default is never re-installed.
+ *  5. Relaxing is the audited template retirement, which also deletes the default's rule (so the admin's own
+ *     assignment then decides alone), and a retired default is never re-installed.
+ *  6. The default is never installed over an admin's rule for the change type, nor by a start that is refused.
+ *  7. The default's sign-off is decided by an admin other than the initiator, never by the initiator.
  *
  * Shares one DB with the other gateway suites; everything here is prefixed a4-, and the default template and rule
  * are removed in afterAll so the deployment ends as it started.
@@ -18,12 +21,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   and,
+  approvals,
   auditLog,
   createDb,
   eq,
   inArray,
   runMigrations,
   shadowAiFindings,
+  users,
   workflowAssignmentRules,
   workflowInstances,
   workflowTemplates,
@@ -52,19 +57,32 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreGates: () => Promise<void> = async () => {};
 let userAuth: { authorization: string };
+let adminA: { auth: { authorization: string }; id: string };
+let adminB: { auth: { authorization: string }; id: string };
 let repoFindingId: string;
 let deviceFindingId: string;
 let otherTemplateId: string;
+const adminTemplateIds: string[] = [];
 
 const get = (url: string, headers = AUTH) => app.inject({ method: "GET", url, headers });
 const post = (url: string, payload: unknown, headers = AUTH) =>
   app.inject({ method: "POST", url, headers, payload: payload as object });
 
-async function makeUser(email: string) {
-  const user = await post("/v1/users", { email, displayName: email.split("@")[0] });
+async function makeUser(email: string, isAdmin = false) {
+  const user = await post("/v1/users", { email, displayName: email.split("@")[0], ...(isAdmin ? { isAdmin } : {}) });
   expect(user.statusCode).toBe(201);
   const key = await post(`/v1/users/${user.json().id}/keys`, { name: "test" });
-  return { authorization: `Bearer ${key.json().token}` };
+  return { auth: { authorization: `Bearer ${key.json().token}` }, id: user.json().id as string };
+}
+
+/** an admin's own template assigned to the change type */
+async function adminAssignment(name: string) {
+  const tpl = await post("/v1/workflows/templates", { name, definition: { workflow: name, stages: [{ id: "intake", type: "trigger" }] } });
+  expect(tpl.statusCode).toBe(201);
+  adminTemplateIds.push(tpl.json().id);
+  const rule = await post("/v1/workflows/assignment-rules", { templateId: tpl.json().id, changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE });
+  expect(rule.statusCode).toBe(201);
+  return { templateId: tpl.json().id as string, ruleId: rule.json().id as string };
 }
 
 async function removeDefault() {
@@ -87,7 +105,9 @@ beforeAll(async () => {
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
   await removeDefault();
   await db.delete(auditLog).where(eq(auditLog.ruleId, SHADOW_AI_REMEDIATION_DEFAULT_INSTALLED));
-  userAuth = await makeUser("a4-remediator@example.com");
+  userAuth = (await makeUser("a4-remediator@example.com")).auth;
+  adminA = await makeUser("a4-admin-a@example.com", true);
+  adminB = await makeUser("a4-admin-b@example.com", true);
 
   // an admin has given `a4-staging` a meaning: a rule for an unrelated change type names it
   const tpl = await post("/v1/workflows/templates", {
@@ -142,7 +162,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await db.delete(shadowAiFindings).where(inArray(shadowAiFindings.id, [repoFindingId, deviceFindingId]));
   await removeDefault();
-  await db.delete(workflowTemplates).where(eq(workflowTemplates.id, otherTemplateId));
+  await db.delete(workflowTemplates).where(inArray(workflowTemplates.id, [otherTemplateId, ...adminTemplateIds]));
+  // the two admins this file made leave the shared deployment as non-admins (other suites count admins)
+  await db.update(users).set({ isAdmin: false, disabledAt: new Date() }).where(inArray(users.id, [adminA.id, adminB.id]));
   await db.delete(auditLog).where(eq(auditLog.ruleId, SHADOW_AI_REMEDIATION_DEFAULT_INSTALLED));
   await restoreGates();
   await app.close();
@@ -175,6 +197,47 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
     }
   });
 
+  it("the start route applies the same allow-list: a made-up or differently cased environment is refused", async () => {
+    const plan = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan?environment=${ENV}`);
+    const body = plan.json().workflowRequest.body;
+    for (const [environment, error] of [
+      ["UNSTATED", "environment_unstated"],
+      ["Unstated", "environment_unstated"],
+      ["a4-made-up", "environment_not_allowed"],
+      ["A4-STAGING", "environment_not_allowed"],
+    ] as const) {
+      const start = await post("/v1/workflows/instances", { ...body, change: { ...body.change, environment } }, userAuth);
+      expect(start.statusCode).toBe(422);
+      expect(start.json().error).toBe(error);
+    }
+    expect(await installAudits()).toHaveLength(0);
+  });
+
+  it("a start refused for its project installs nothing", async () => {
+    const plan = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan?environment=${ENV}`);
+    const start = await post(
+      "/v1/workflows/instances",
+      { ...plan.json().workflowRequest.body, projectId: "00000000-0000-4000-8000-0000000000a4" },
+      userAuth,
+    );
+    expect(start.statusCode).toBeGreaterThanOrEqual(400);
+    expect(await installAudits()).toHaveLength(0);
+    expect(await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, SHADOW_AI_REMEDIATION_TEMPLATE_NAME))).toHaveLength(0);
+  });
+
+  it("an admin's own rule for the change type decides alone: the default is not installed over it", async () => {
+    const own = await adminAssignment("a4-admin-first");
+    const plan = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan?environment=${ENV}`);
+    const start = await post("/v1/workflows/instances", plan.json().workflowRequest.body, userAuth);
+    expect(start.statusCode).toBe(201);
+    const [instance] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, start.json().id));
+    expect(instance!.templateIds).toEqual([own.templateId]);
+    expect(await installAudits()).toHaveLength(0);
+    expect(await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, SHADOW_AI_REMEDIATION_TEMPLATE_NAME))).toHaveLength(0);
+    // the admin withdraws it again, so the cases below see an unassigned change type
+    await db.delete(workflowAssignmentRules).where(eq(workflowAssignmentRules.id, own.ruleId));
+  });
+
   it("with a stated environment, the body starts the strict default workflow as it stands", async () => {
     const plan = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan?environment=${ENV}`);
     expect(plan.statusCode).toBe(200);
@@ -201,17 +264,22 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
     expect(await installAudits()).toHaveLength(1);
 
     // a second start installs nothing more
-    const again = await post("/v1/workflows/instances", body, userAuth);
+    const again = await post("/v1/workflows/instances", body, adminA.auth);
     expect(again.statusCode).toBe(201);
     expect(await installAudits()).toHaveLength(1);
 
-    // the plan now reports a started-but-unlinked workflow (the newest), and stops once it is linked
-    const pending = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`);
+    // the plan reports the VIEWER's own started-but-unlinked workflow (the newest), never another user's, and stops
+    // once it is linked
+    const pending = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`, adminA.auth);
     expect(pending.json().assignment).toMatchObject({ ruleConfigured: true, defaultTemplate: { state: "active" } });
     expect(pending.json().pendingLink?.instanceId).toBe(again.json().id);
+    const otherViewer = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`, adminB.auth);
+    expect(otherViewer.json().pendingLink).toBeNull();
+    const bootstrapViewer = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`);
+    expect(bootstrapViewer.json().pendingLink).toBeNull();
     const linked = await post(`/v1/shadow-ai/findings/${repoFindingId}/remediate`, { instanceId: again.json().id });
     expect(linked.statusCode).toBe(200);
-    const after = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`);
+    const after = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`, adminA.auth);
     expect(after.json().pendingLink).toBeNull();
   });
 
@@ -228,8 +296,49 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
     expect(start.statusCode).toBe(201);
   });
 
-  it("relaxing is the audited retirement, and a retired default is never re-installed", async () => {
+  it("an aborted workflow is never offered as the one to link", async () => {
+    const plan = await get(`/v1/shadow-ai/findings/${deviceFindingId}/remediation-plan?environment=${ENV}`, adminA.auth);
+    const start = await post("/v1/workflows/instances", plan.json().workflowRequest.body, adminA.auth);
+    expect(start.statusCode).toBe(201);
+    const before = await get(`/v1/shadow-ai/findings/${deviceFindingId}/remediation-plan`, adminA.auth);
+    expect(before.json().pendingLink?.instanceId).toBe(start.json().id);
+    const aborted = await post(`/v1/workflows/instances/${start.json().id}/abort`, {}, adminA.auth);
+    expect(aborted.json().status).toBe("aborted");
+    const after = await get(`/v1/shadow-ai/findings/${deviceFindingId}/remediation-plan`, adminA.auth);
+    expect(after.json().pendingLink).toBeNull();
+  });
+
+  it("the sign-off goes to admins other than the initiator, and the initiator can never decide it", async () => {
+    const plan = await get(`/v1/shadow-ai/findings/${deviceFindingId}/remediation-plan?environment=${ENV}`, adminA.auth);
+    const start = await post("/v1/workflows/instances", plan.json().workflowRequest.body, adminA.auth);
+    expect(start.statusCode).toBe(201);
+    const instanceId = start.json().id as string;
+    const left = await post(`/v1/workflows/instances/${instanceId}/advance`, { stageId: "plan" }, adminA.auth);
+    expect(left.json().status).toBe("blocked_on_artifact");
+    const art = await post(`/v1/workflows/instances/${instanceId}/artifacts`, { stageId: "remediation_plan", content: "# a4 plan" }, adminA.auth);
+    expect(art.json().status).toBe("blocked_on_approval");
+
+    const rows = await db.select().from(approvals).where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending")));
+    const approverIds = rows.map((r) => r.approverUserId);
+    expect(approverIds).toContain(adminB.id);
+    expect(approverIds).not.toContain(adminA.id);
+    const rowB = rows.find((r) => r.approverUserId === adminB.id)!;
+
+    // the initiator is an admin, but no route lets them decide their own remediation's sign-off
+    const self = await post(`/v1/approvals/${rowB.id}/decide`, { decision: "approved", reason: "a4: override attempt" }, adminA.auth);
+    expect(self.statusCode).toBe(403);
+    expect(self.json().error).toBe("initiator_cannot_sign_off");
+
+    const other = await post(`/v1/approvals/${rowB.id}/decide`, { decision: "approved" }, adminB.auth);
+    expect(other.statusCode).toBe(200);
+    const [instance] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, instanceId));
+    expect(instance!.status).not.toBe("blocked_on_approval");
+  });
+
+  it("relaxing is the audited retirement: it deletes the default's rule, and the admin's own template then decides alone", async () => {
     const [tpl] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, SHADOW_AI_REMEDIATION_TEMPLATE_NAME));
+    const [defaultRule] = await db.select().from(workflowAssignmentRules).where(eq(workflowAssignmentRules.templateId, tpl!.id));
+    expect(defaultRule).toBeDefined();
     const retired = await post(`/v1/workflows/templates/${tpl!.id}/retire`, { reason: "a4: our own remediation workflow replaces it" });
     expect(retired.statusCode).toBe(200);
     const audits = await db
@@ -237,16 +346,28 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
       .from(auditLog)
       .where(and(eq(auditLog.objectId, tpl!.id), eq(auditLog.ruleId, "workflow-template-retired")));
     expect(audits).toHaveLength(1);
+    expect(audits[0]!.detail).toMatchObject({ ruleId: defaultRule!.id, ruleIds: [defaultRule!.id] });
+    expect(await db.select().from(workflowAssignmentRules).where(eq(workflowAssignmentRules.templateId, tpl!.id))).toHaveLength(0);
 
+    // nothing is assigned now: the plan says so, and a start is refused rather than re-installing the default
     const plan = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan?environment=${ENV}`);
-    expect(plan.json().assignment.defaultTemplate.state).toBe("retired");
-    const start = await post("/v1/workflows/instances", plan.json().workflowRequest.body, userAuth);
-    // the rule still names the retired default: the start refuses rather than silently re-installing it
-    expect(start.statusCode).toBe(422);
-    expect(start.json().error).toBe("template_retired");
+    expect(plan.json().assignment).toMatchObject({ ruleConfigured: false, defaultTemplate: { state: "retired" } });
+    const body = plan.json().workflowRequest.body;
+    const refused = await post("/v1/workflows/instances", body, userAuth);
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().error).toBe("no_workflow_matches_change");
     const rows = await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, SHADOW_AI_REMEDIATION_TEMPLATE_NAME));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.retiredAt).not.toBeNull();
     expect(await installAudits()).toHaveLength(1);
+
+    // the admin assigns their own: the plan counts it, and a start runs it alone
+    const own = await adminAssignment("a4-admin-after-retire");
+    const replan = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan?environment=${ENV}`);
+    expect(replan.json().assignment.ruleConfigured).toBe(true);
+    const start = await post("/v1/workflows/instances", body, userAuth);
+    expect(start.statusCode).toBe(201);
+    const [instance] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, start.json().id));
+    expect(instance!.templateIds).toEqual([own.templateId]);
   });
 });

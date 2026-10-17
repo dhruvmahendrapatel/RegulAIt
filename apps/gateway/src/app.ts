@@ -544,7 +544,8 @@ import {
   exportBundleMaxCsvRows,
   resolveExportSigningKey,
 } from "./export-bundle.js";
-import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
+import { MergeConflictError, WorkflowStateError, type WorkflowDefinition } from "@regulait/workflow-kernel";
+import { stageExcludesInitiator } from "./workflow-approvers.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -4397,6 +4398,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         pmMirror = await mirrorApprovalDecision(db, opts.dataKey, decided.finalized, deciderUserId);
       }
       return { ok: true as const, body: { ...decided.body, ...(pmMirror ? { pmMirror } : {}) } };
+    }
+    // ADR-0195 A4: a stage owed to an admin OTHER than the initiator (`admin_not_initiator`) is never decided by
+    // the initiator, by any route: as a named approver, a delegate or an admin override. Keyed on the DECIDER.
+    if (row.objectType === "workflow" && row.instanceId) {
+      const [owner] = await db
+        .select({ initiatorUserId: workflowInstances.initiatorUserId, definition: workflowInstances.definition })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, row.instanceId));
+      if (
+        owner &&
+        stageExcludesInitiator(owner.definition as WorkflowDefinition, row.stageId) &&
+        (deciderUserId === owner.initiatorUserId || deciderUserId === row.userId)
+      ) {
+        return fail(403, {
+          error: "initiator_cannot_sign_off",
+          detail: "this sign-off must be decided by an admin other than the person who started the workflow",
+        });
+      }
     }
     // Only the rule's named approver may decide (§3) — with two sanctioned
     // widenings: (a) ADR-0022 delegation — an ACTIVE delegation window from

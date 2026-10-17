@@ -78,13 +78,16 @@ import {
   desc,
   eq,
   inArray,
+  isNull,
   modelCredentials,
+  ne,
   shadowAiFindings,
   shadowAiImports,
   sql,
   userModelCredentials,
   workflowAssignmentRules,
   workflowInstances,
+  workflowTemplates,
   type Db,
   mcpServers,
 } from "@regulait/db";
@@ -276,6 +279,11 @@ function subjectIsPseudonymised(row: { subject: string; subjectKind: string }): 
 /** text that may ride a workflow body: no pseudonym, and nothing the audit scrubber would change (a credential) */
 const bodySafe = (v: string): boolean => !v.includes("psn:") && scrubAuditText(v) === v;
 
+/** a repo-relative evidence path: never one that climbs out, nor an absolute, home or drive path (it names a person) */
+export function repoRelativePath(path: string): boolean {
+  return !path.includes("..") && !/^[/\\~]/.test(path) && !/^[A-Za-z]:/.test(path);
+}
+
 /**
  * The `POST /v1/workflows/instances` body for a finding's remediation, shaped to `startInstanceSchema` (pure;
  * pinned by tests that parse it with that schema and post it to the route). ADR-0195 A4:
@@ -300,7 +308,7 @@ export function remediationStartBody(
     for (const e of row.evidence ?? []) {
       const loc = e.location as { path?: unknown } | undefined;
       const path = typeof loc?.path === "string" ? loc.path.trim() : "";
-      if (path && path.length <= 500 && !path.includes("..") && bodySafe(path) && !paths.includes(path)) paths.push(path);
+      if (path && path.length <= 500 && repoRelativePath(path) && bodySafe(path) && !paths.includes(path)) paths.push(path);
       if (paths.length >= REMEDIATION_PATHS_MAX) break;
     }
   }
@@ -1381,21 +1389,27 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       ? await db.select().from(agents).where(eq(agents.id, row.replacementAgentId))
       : [];
 
+    // a rule counts only while its template is active: a rule on a retired template refuses every start
     const [rule] = await db
       .select({ id: workflowAssignmentRules.id })
       .from(workflowAssignmentRules)
-      .where(eq(workflowAssignmentRules.changeType, SHADOW_AI_REMEDIATION_CHANGE_TYPE))
+      .innerJoin(workflowTemplates, eq(workflowTemplates.id, workflowAssignmentRules.templateId))
+      .where(and(eq(workflowAssignmentRules.changeType, SHADOW_AI_REMEDIATION_CHANGE_TYPE), isNull(workflowTemplates.retiredAt)))
       .limit(1);
     const assignmentRuleExists = rule !== undefined;
     const defaultTemplate = await shadowAiRemediationDefaultState(db);
-    // a workflow started for this finding whose link never landed (the screen retries the LINK, never a second start)
-    const [pendingLink] = row.remediationInstanceId
+    // a workflow THE VIEWER started for this finding whose link never landed (the screen retries the LINK, never a
+    // second start). Never another user's (they control its description), never an aborted one
+    const viewerId = req.authCtx.userId;
+    const [pendingLink] = row.remediationInstanceId || !viewerId
       ? []
       : await db
           .select({ id: workflowInstances.id, createdAt: workflowInstances.createdAt })
           .from(workflowInstances)
           .where(
             and(
+              eq(workflowInstances.initiatorUserId, viewerId),
+              ne(workflowInstances.status, "aborted"),
               sql`${workflowInstances.change}->>'changeType' = ${SHADOW_AI_REMEDIATION_CHANGE_TYPE}`,
               sql`strpos(${workflowInstances.change}->>'description', ${remediationReference(row.id)}) > 0`,
               sql`not exists (select 1 from ${shadowAiFindings} f where f.remediation_instance_id = ${workflowInstances.id})`,

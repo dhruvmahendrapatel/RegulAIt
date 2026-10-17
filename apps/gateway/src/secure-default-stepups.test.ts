@@ -10,7 +10,9 @@ import { describe, expect, it } from "vitest";
 import { changeDescriptorSchema, createModelCardSchema, scrubAuditText, startInstanceSchema, updateModelCardSchema } from "@regulait/shared";
 import { privateRangesRelaxation, registryCreateRelaxations, registryUpdateRelaxations } from "./mcp-registry.js";
 import { cardFieldsWithScrubMarker } from "./mrm.js";
-import { remediationStartBody, SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai.js";
+import { remediationStartBody, repoRelativePath, SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai.js";
+import { shadowAiRemediationDefinition } from "./shadow-ai-remediation.js";
+import { APPROVER_ADMIN_NOT_INITIATOR, stageExcludesInitiator } from "./workflow-approvers.js";
 import { isStepUpPrompt } from "./step-up.js";
 
 describe("MCP registry relaxations", () => {
@@ -149,6 +151,41 @@ describe("shadow-AI remediation plan body", () => {
       expect(body.change.description).toContain(finding.id);
       expect(startInstanceSchema.safeParse(body).success).toBe(true);
     }
+  });
+
+  it("absolute, home and drive paths never ride along (they name a person)", () => {
+    for (const p of ["/home/alice/.config/x.json", "\\server\\share\\a.ts", "~/notes.txt", "C:\\Users\\bob\\a.ts", "c:/Users/bob/a.ts", "a/../../b.ts"]) {
+      expect(repoRelativePath(p)).toBe(false);
+    }
+    for (const p of ["src/llm.ts", "packages/x/index.ts", "a~b/c.ts"]) expect(repoRelativePath(p)).toBe(true);
+    const evidence = ["/home/alice/.config/x.json", "~/notes.txt", "C:\\Users\\bob\\a.ts", "\\srv\\a.ts", "src/ok.ts"].map((path) => ({ location: { path } }));
+    const body = remediationStartBody({ ...finding, evidence });
+    expect(body.change.paths).toEqual(["acme/billing", "src/ok.ts"]);
+    expect(JSON.stringify(body)).not.toMatch(/alice|bob/);
+  });
+
+  it("a device subject that is not pseudonym-shaped is still never named (the kind decides)", () => {
+    const body = remediationStartBody({ ...finding, subjectKind: "device", subject: "alice-macbook" });
+    expect(JSON.stringify(body)).not.toContain("alice");
+    expect(body.change).not.toHaveProperty("targetSystem");
+    expect(body.change.description).toContain("a device (pseudonymised)");
+  });
+
+  it("a credential-shaped subject is never copied into the body", () => {
+    const secret = "sk-" + "b".repeat(40);
+    const body = remediationStartBody({ ...finding, subject: `acme/${secret}` });
+    expect(JSON.stringify(body)).not.toContain(secret);
+    expect(body.change.paths).toEqual([]);
+    expect(body.change).not.toHaveProperty("targetSystem");
+  });
+
+  it("the default's sign-off is owed to an admin other than the initiator, and one is enough", () => {
+    const def = shadowAiRemediationDefinition();
+    const signoff = def.stages.find((s) => s.type === "human_approval")!;
+    expect(signoff.approvers).toEqual([APPROVER_ADMIN_NOT_INITIATOR]);
+    expect(signoff.quorum).toBe("any");
+    expect(stageExcludesInitiator(def, signoff.id)).toBe(true);
+    expect(stageExcludesInitiator(def, "plan")).toBe(false);
   });
 
   it("the negative control: the old body shape does not validate", () => {

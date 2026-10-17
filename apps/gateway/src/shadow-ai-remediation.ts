@@ -8,12 +8,17 @@
  * the first time it is needed (the ADR-0080 "minted on first use" pattern, so no migration):
  *  - an ACTIVE default stays as it is: an admin who deletes its rule gets 422 again (stricter, never looser);
  *  - an admin RELAXES it by retiring the template (`POST /v1/workflows/templates/:id/retire`, audited as
- *    `workflow-template-retired`) and assigning their own. A retired default is never re-installed, so the
- *    retirement stands.
+ *    `workflow-template-retired`): the retirement deletes the default's change-type rule in the same transaction
+ *    (the rule ids ride the audit row), so the admin's own assignment then decides alone. A retired default is never
+ *    re-installed, so the retirement stands;
+ *  - it is never installed over an admin's decision: once any rule names the change type, nothing is installed;
+ *  - its sign-off is by an admin OTHER than the initiator (`admin_not_initiator`, quorum any). An admin who wants
+ *    the initiator to sign off authors their own template through the audited template path.
  *
  * This module imports no route module, so the workflow start route can call it without an import cycle.
  */
 import { auditLog, deployTargets, eq, isNotNull, workflowAssignmentRules, workflowTemplates, type Db } from "@regulait/db";
+import { APPROVER_ADMIN_NOT_INITIATOR } from "./workflow-approvers.js";
 import { validateDefinition, type WorkflowDefinition } from "@regulait/workflow-kernel";
 
 /** the change type a shadow-AI remediation workflow is started under */
@@ -37,7 +42,8 @@ export function remediationReference(findingId: string): string {
   return `shadow-AI finding ${findingId}`;
 }
 
-/** the strict default: intake → forced plan-only → the remediation plan as an artifact → a human sign-off */
+/** the strict default: intake → forced plan-only → the remediation plan as an artifact → a sign-off by an admin
+ * other than the initiator (one is enough) */
 export function shadowAiRemediationDefinition(): WorkflowDefinition {
   return validateDefinition({
     workflow: SHADOW_AI_REMEDIATION_TEMPLATE_NAME,
@@ -45,7 +51,7 @@ export function shadowAiRemediationDefinition(): WorkflowDefinition {
       { id: "intake", type: "trigger" },
       { id: "plan", type: "planning" },
       { id: "remediation_plan", type: "artifact_generation", output: "shadow_ai_remediation_plan" },
-      { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+      { id: "signoff", type: "human_approval", approvers: [APPROVER_ADMIN_NOT_INITIATOR], quorum: "any" },
     ],
   });
 }
@@ -65,12 +71,19 @@ export async function shadowAiRemediationDefaultState(db: Db): Promise<Remediati
 /**
  * Installs the default template and its change-type rule the first time a remediation workflow is started.
  * Idempotent and race-safe (the template name is unique): only the caller whose insert wins writes the rule and
- * the audit row. Once the name exists, active or retired, nothing is changed.
+ * the audit row. Once the name exists, active or retired, nothing is changed; nor when an admin's rule already names
+ * the change type (their assignment decides, and the default's stages are never unioned into it).
  */
 export async function ensureShadowAiRemediationDefault(db: Db, actorUserId: string | null): Promise<{ installed: boolean }> {
   if ((await shadowAiRemediationDefaultState(db)) !== "not_installed") return { installed: false };
   const definition = shadowAiRemediationDefinition();
   return db.transaction(async (tx) => {
+    const [adminRule] = await tx
+      .select({ id: workflowAssignmentRules.id })
+      .from(workflowAssignmentRules)
+      .where(eq(workflowAssignmentRules.changeType, SHADOW_AI_REMEDIATION_CHANGE_TYPE))
+      .limit(1);
+    if (adminRule) return { installed: false };
     const [template] = await tx
       .insert(workflowTemplates)
       .values({ name: SHADOW_AI_REMEDIATION_TEMPLATE_NAME, definition })
@@ -97,10 +110,24 @@ export async function ensureShadowAiRemediationDefault(db: Db, actorUserId: stri
       ruleChain: [],
       reason:
         `the shipped default workflow for change type '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}' was installed ` +
-        "(plan-only and a human sign-off); an admin relaxes it by retiring the template",
+        "(plan-only and a sign-off by an admin other than the initiator); an admin relaxes it by retiring the template",
     });
     return { installed: true };
   });
+}
+
+/**
+ * Retiring the shipped default also deletes its rules, in the retire route's transaction, so an admin's own
+ * assignment decides alone afterwards (a rule left on a retired template refuses every start). Returns the deleted
+ * rule ids for the retirement's audit row; any other template is untouched (an empty list).
+ */
+export async function deleteRulesOfRetiredDefault(tx: Db, template: { id: string; name: string }): Promise<string[]> {
+  if (template.name !== SHADOW_AI_REMEDIATION_TEMPLATE_NAME) return [];
+  const deleted = await tx
+    .delete(workflowAssignmentRules)
+    .where(eq(workflowAssignmentRules.templateId, template.id))
+    .returning({ id: workflowAssignmentRules.id });
+  return deleted.map((r) => r.id).sort();
 }
 
 /**
