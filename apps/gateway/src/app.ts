@@ -89,7 +89,7 @@ import {
   resolveRateLimitConfig,
   type RateLimitConfig,
 } from "./rate-limit.js";
-import { requestLogFields } from "./gateway-logger.js";
+import { parserRefusal, parserRefusalLogFields, requestLogFields, unhandledErrorLogFields } from "./gateway-logger.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -913,25 +913,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // They used to fall through to the 500 below, which reported a client
     // fault as a server fault, discarded the reason, and made the two import
     // routes' honest "payloads are bounded at N bytes" messages unreachable.
-    // Scoped to the FST_ERR_ prefix on purpose: a third-party error that
-    // happens to carry a statusCode (an undici or provider error) must not
-    // have its message echoed to the caller by this branch.
-    const fastifyErr = err as { code?: unknown; statusCode?: unknown };
-    if (
-      typeof fastifyErr.code === "string" &&
-      fastifyErr.code.startsWith("FST_ERR_") &&
-      typeof fastifyErr.statusCode === "number" &&
-      fastifyErr.statusCode >= 400 &&
-      fastifyErr.statusCode < 500
-    ) {
-      const detail = err instanceof Error ? err.message : String(err);
-      req.log.warn({ code: fastifyErr.code, status: fastifyErr.statusCode }, detail);
-      return reply.status(fastifyErr.statusCode).send({
-        error: fastifyErr.code.replace(/^FST_ERR_(CTP_)?/, "").toLowerCase(),
-        detail,
-      });
+    // N8 (2026-10-17): neither the line nor the response carries the parser's
+    // message, which can quote the uploaded body — a fixed sentence per code
+    // to the caller, the code, route and status (and pino's reqId) to the log.
+    const refusal = parserRefusal(err);
+    if (refusal) {
+      req.log.warn(parserRefusalLogFields(req, refusal), "request body refused");
+      return reply.status(refusal.status).send(refusal.body);
     }
-    req.log.error({ err, method: req.method, url: req.url }, "unhandled error");
+    req.log.error(unhandledErrorLogFields(req, err), "unhandled error");
     // DEBUG_ERRORS=1 additionally prints the stack to stderr even when the
     // logger is off — documented in docs/deployment/INSTALL.md.
     if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);

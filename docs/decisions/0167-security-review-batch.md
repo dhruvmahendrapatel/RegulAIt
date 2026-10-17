@@ -396,3 +396,42 @@ suite 3367 passed on the implementer's run, and the dispatcher's full gate on th
 - A hard crash after a `202 deferred_to_running_executor` still waits out the claim TTL before the
   stage is re-taken.
 - An `applyEvent` precondition-write hazard was noted in review; safe with today's callers.
+
+## As built 2026-10-17 — no request body in a log line or a refusal (N8, branch `sec-logleak-spiffe-1017`)
+
+Decisions 7 and 9 left one path open. The error handler logged a parser refusal's message and returned it as
+`detail`, and its 500 branch logged the whole error with `req.url`, query string included. A content-type parser that
+passed Node's `SyntaxError` through (the SCIM parser did, so a malformed SCIM body was a 500) put a snippet of the
+body in that message, and an unmapped database failure logged drizzle's `DrizzleQueryError`, whose message and
+`params` carry every bound value, many taken from the body. What changed (all in `apps/gateway`):
+
+1. **Parser and validation refusals** (`parserRefusal`, `parserRefusalLogFields` in `gateway-logger.ts`). The same
+   `FST_ERR_*` 4xx scope and the same snake-case `error` names as decision 7. The caller gets a fixed sentence per code
+   (never the parser's message); the `warn` line carries only the code, the method, the route template and the status,
+   with pino's `reqId` binding. Zod validation refusals were already not logged by the handler (the refusal line from
+   decision 9 names the route and status only); their `issues` carry no input values under zod 4, but an
+   `unrecognized_keys` issue names the extra keys the caller sent.
+2. **The SCIM parser** raises Fastify's own `FST_ERR_CTP_INVALID_JSON_BODY`, so a malformed SCIM body is a 400 like
+   any other JSON body.
+3. **The 500 line** (`unhandledErrorLogFields`) logs the path without its query string. A `SyntaxError` keeps its stack
+   frames, not its message. A failed query keeps its SQL text (as `sql`), the SQLSTATE and the constraint, table and
+   column names, and withholds the message, the parameters (their count only) and Postgres's `detail`. Any other error
+   is logged whole, as before, so an operator still sees its reason.
+4. **pino's own redaction** (ADR-0176: its `redact` paths, not a scrubber) now also masks `body`, `query`,
+   `req.body`, `req.query`, `err.body`, `headers["x-api-key"]` and `proxy-authorization` wherever a call site logs
+   them. The line scrubber at `streamWrite` (decision 9's D4A-05 hook, for values inside strings, which `redact`
+   cannot match) now also replaces credential-named query parameters (`code`, `state`, `token`, `access_token`,
+   `sig`, …), keeping the names.
+5. **Sweep.** The other log sites in the gateway are the refusal hook (route, path without query, credential kind),
+   two boot timers (`{ err }` from internal jobs, no request input), and one AI BOM integrity line (ids only). Fastify's
+   per-request lines stay disabled (decision 9). No other site logs a body, a credential header or a query string.
+6. **Tests.** `log-leak.test.ts` (offline: the serving logger config into a memory sink; malformed JSON and SCIM JSON,
+   over-limit, unknown media type, a handler `SyntaxError`, a drizzle-shaped failure with a token in the query, the
+   redact paths, the query scrubber, and a negative control that an ordinary error keeps its message). One negative
+   control was run: with the `SyntaxError` branch disabled, the handler-parse test fails. `zz-n8-log-leak.test.ts`
+   (Postgres, runs in CI) drives the real app: malformed, empty, over-limit and unknown-type bodies on `/v1/users`, a
+   malformed SCIM body on `/scim/v2/Users`, a schema-invalid JSON body, a `text/plain` body, and a form-encoded SAML ACS
+   post, each with a synthetic marker that must appear in neither the captured lines nor the response.
+
+Open: the refusal line's `path` still carries path parameters. Only the feedback link (decision 9) is known to put a
+credential in a path; whether any route puts personal data in one was not swept in this follow-up.

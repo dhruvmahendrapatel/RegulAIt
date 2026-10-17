@@ -1650,6 +1650,46 @@ Open after the fix round (recheck follow-ups):
   revocation or upload for that domain waits on it. Under heavy issue load for one domain, an admin write may wait a
   request's duration. No pool sizing was changed.
 
+### S9 follow-ups (2026-10-17, branch `sec-logleak-spiffe-1017`, no migration)
+
+1. **(a) The bundle fetch and the egress guard.** There is no fetch to move: on `main` the only source of a trust bundle
+   is the stepped-up, audited upload (item 3), and no gateway module that handles SPIFFE material makes an outbound
+   call. Building a fetch now would mean a new admin route and a new UI control, which this follow-up's surface does
+   not include. What is built is the rule for when one is: `oauth/spiffe-egress.test.ts` scans every gateway module
+   that names SPIFFE and refuses a bare `fetch(`, `globalThis.fetch`, `node:http(s)`, `undici` or a connecting
+   `net`/`tls`/`dgram` import; the guarded form (`guardConnectionCall(...)` then its `fetchImpl`) passes. Negative
+   controls for each form are in the test. The design for the fetch slice, when it is scheduled:
+   - a bundle endpoint URL per trust domain, set by an admin with the same `identity_manage` step-up and audit as an
+     upload, and checked against the egress allow-list when it is set (ADR-0034 owner amendment 2026-10-16: an allow
+     entry for it needs its own step-up);
+   - every fetch through `guardConnectionCall` (surface `connector`, audited allow or refusal), `redirect: "manual"`,
+     a timeout and a size cap equal to the upload's 256 KB;
+   - what is fetched passes the same validation as an upload (item 5) and is written as a new bundle row through the
+     same compare-and-set, so a fetched bundle is superseded, revoked and backstopped exactly like an uploaded one;
+   - `spiffe_refresh_hint` bounded by a floor and a ceiling, and a failed fetch keeps the active bundle (it never
+     clears trust), with the failure audited;
+   - air-gapped installs keep upload only (the fetch setting is off by default, ADR-0180).
+2. **(b) JWT-SVID client authentication: sized as large, not built.** What it would take:
+   - **Storage (a migration).** `spiffe_trust_bundles` stores X.509 authorities only, and its CHECKs and write-once
+     trigger are built around that. JWT authorities need a column (public JWKs, `kid` unique per bundle), the CHECK
+     and trigger extended, and a decision on the digest (today it covers X.509 thumbprints only, so a JWT-key change
+     would read as `spiffe_bundle_unchanged`). This follow-up reserves no migration number.
+   - **Token endpoint.** The token endpoint is built on `oidc-provider`, which knows `private_key_jwt` and the RFC 8705
+     methods but not `draft-ietf-oauth-spiffe-client-auth`'s JWT-SVID assertion type. It would be a new
+     authentication path in the pre-claim hook: `sub` is the SPIFFE ID, `aud` the token endpoint, a short `exp`,
+     `jti` claimed through `claimReplay` (namespace `client_assertion`), the signature checked with `jose` against the
+     domain's active JWT authorities, and the issuing transaction's bundle locking and `spiffeIssueAllowed` (fix round
+     item 6) applied to the authenticating bundle.
+   - **Sender constraint (decision 5).** An X.509-SVID binds the token to the certificate. A JWT-SVID is a bearer
+     credential, so the issued token must be DPoP-bound, and a JWT-SVID request without a DPoP proof refused.
+   - **Revocation.** Item 8's cascade and item 9's backstop key on `spiffe_id` credentials and the domain, so they
+     carry over, but each needs a JWT-SVID case in its tests.
+   - **UI and tests.** The bundle card shows JWT authorities instead of a count, a real SPIRE JWT-SVID fixture is added
+     beside `testing/spire-1.13.3/`, and the DB suite gets the six refusals for the new path.
+   It is its own slice, about the size of S9's X.509 half. Until then, `jwt-svid` keys stay counted and not stored, and
+   the token endpoint's provider accepts only `private_key_jwt` and `tls_client_auth` (`clientAuthMethods` in
+   `oauth/token-endpoint.ts`), so a JWT-SVID has no path to a token. No request carrying one was run for this note.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of

@@ -53,7 +53,7 @@
  * duplicate account.
  */
 import { randomBytes } from "node:crypto";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { errorCodes, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import {
   and,
   asc,
@@ -650,8 +650,10 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
         if (body.length === 0) return done(null, undefined);
         try {
           done(null, JSON.parse(body));
-        } catch (err) {
-          done(err as Error);
+        } catch {
+          // N8: Node's SyntaxError quotes a snippet of the body; Fastify's own
+          // refusal carries a fixed message and maps to a 400 (SEC-03)
+          done(new errorCodes.FST_ERR_CTP_INVALID_JSON_BODY());
         }
       },
     );
