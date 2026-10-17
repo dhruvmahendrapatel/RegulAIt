@@ -53,10 +53,12 @@ function gate(publishApproved) {
   return readFileSync(out, "utf8").trim();
 }
 
-// Each case spawns a fresh node that loads the built @regulait/shared (schemas
-// compiled at import). Alone that is about a second; under CI's parallel
-// `vitest run --dir scripts` sweep the default 5 s per-test budget was too
-// tight, so the timeout is explicit (as in the bom-* CLI tests).
+// Each case spawns fresh processes (node loading the built @regulait/shared,
+// or the workflow's gate shell). Alone a case takes 0.3-0.8 s, and the gate's
+// near-miss case, which runs the gate once per value, about 3 s (measured
+// 2026-10-17). Under CI's parallel `vitest run --dir scripts` sweep that is
+// too close to vitest's default 5 s, so the timeout is explicit (as in the
+// bom-* CLI tests): a hung spawn still fails.
 const CLI_TIMEOUT_MS = 60_000;
 
 describe("release-ai-bom.mjs (ADR-0189 B7, R17 released)", { timeout: CLI_TIMEOUT_MS }, () => {

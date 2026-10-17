@@ -33,6 +33,11 @@
  *    statement carries the marker comment `egress-allow-cleanup: afterAll`
  *    (a file-scoped entry the file's afterAll removes) or
  *    `egress-allow-cleanup: refused` (a POST the test expects to be refused).
+ *    The afterAll marker is not taken on trust: a removal statement reachable
+ *    from afterAll must name what the marked statement created, by its host
+ *    (the same string literal, or the same identifier, as the create's `host`)
+ *    or by its result (the variable the statement declares, or a variable or
+ *    list that result is assigned or pushed into, such as the recorded id).
  *  - A file that creates its entries only on a scratch database it drops is
  *    listed in SCRATCH_DB_FILES with a reason. The listing is checked too: an
  *    exempt file must still create an entry and still drop a scratch database
@@ -155,16 +160,19 @@ const statementOf = (node) => {
 function createContext(node, sf) {
   let inTestBody = false;
   let inFinally = false;
+  let test;
   for (let p = node.parent; p; p = p.parent) {
     if (p.parent && ts.isTryStatement(p.parent) && p.parent.finallyBlock === p) inFinally = true;
     if (isTestCall(p)) {
       inTestBody = true;
+      test = p;
       break;
     }
   }
   const stmt = statementOf(node);
   let tracked = false;
   let marked = false;
+  let markedAfterAll = false;
   if (stmt) {
     const scan = (n) => {
       if (ts.isCallExpression(n) && calleeName(n) === TRACKER_ADD) tracked = true;
@@ -172,9 +180,114 @@ function createContext(node, sf) {
     };
     scan(stmt);
     const leading = stmt.getFullText(sf).slice(0, stmt.getStart(sf) - stmt.getFullStart());
-    marked = leading.includes(FILE_SCOPED_MARKER) || leading.includes(REFUSED_MARKER);
+    markedAfterAll = leading.includes(FILE_SCOPED_MARKER);
+    marked = markedAfterAll || leading.includes(REFUSED_MARKER);
   }
-  return { inTestBody, inFinally, tracked, marked };
+  return { inTestBody, inFinally, tracked, marked, markedAfterAll, stmt, test };
+}
+
+/** names bound by a declaration's name: `x`, `[row]`, `{ id }` */
+function boundNames(name, out = []) {
+  if (ts.isIdentifier(name)) out.push(name.text);
+  else if (ts.isArrayBindingPattern(name) || ts.isObjectBindingPattern(name)) {
+    for (const el of name.elements) if (ts.isBindingElement(el)) boundNames(el.name, out);
+  }
+  return out;
+}
+
+/** the variables an expression reads (`host`, `${host.toUpperCase()}.` → host), not property names */
+function identifiersIn(node, out = []) {
+  if (ts.isIdentifier(node)) {
+    if (!(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)) out.push(node.text);
+  } else ts.forEachChild(node, (c) => identifiersIn(c, out));
+  return out;
+}
+
+/**
+ * what a create statement makes: its `host` values (literal or identifier) and the names it declares. A payload
+ * passed by name (`const payload = { host }; post(url, payload)`) is read through its object-literal declaration.
+ */
+function createdBy(stmt, objectInits = new Map()) {
+  const hostLiterals = [];
+  const hostIdentifiers = [];
+  const followed = new Set();
+  const scan = (n) => {
+    if (ts.isIdentifier(n) && objectInits.has(n.text) && !followed.has(n.text)) {
+      followed.add(n.text);
+      for (const o of objectInits.get(n.text)) scan(o);
+    }
+    if (ts.isPropertyAssignment(n) && n.name.getText() === "host") {
+      const v = stringValue(n.initializer);
+      if (v !== undefined) hostLiterals.push(v);
+      else hostIdentifiers.push(...identifiersIn(n.initializer));
+    }
+    if (ts.isShorthandPropertyAssignment(n) && n.name.text === "host") hostIdentifiers.push("host");
+    ts.forEachChild(n, scan);
+  };
+  scan(stmt);
+  const results = ts.isVariableStatement(stmt) ? stmt.declarationList.declarations.flatMap((d) => boundNames(d.name)) : [];
+  return { hostLiterals, hostIdentifiers, results };
+}
+
+const mentions = (node, names) => {
+  let hit = false;
+  const scan = (n) => {
+    if (hit) return;
+    if (ts.isIdentifier(n) && names.has(n.text)) hit = true;
+    else ts.forEachChild(n, scan);
+  };
+  scan(node);
+  return hit;
+};
+
+/**
+ * the expressions a created result flows into: `x = <uses result>`, `const x = <uses result>`,
+ * `xs.push(<uses result>)`, followed transitively (`const post = …; const first = await post(); id = first.json().id`)
+ */
+function carriersOf(sf, results) {
+  const names = new Set(results);
+  const out = new Set();
+  if (names.size === 0) return out;
+  const add = (t) => {
+    if (out.has(t) || names.has(t)) return;
+    out.add(t);
+    if (/^[\w$]+$/.test(t)) {
+      names.add(t);
+      grew = true;
+    }
+  };
+  let grew = true;
+  const visit = (n) => {
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && mentions(n.right, names)) add(n.left.getText(sf));
+    if (ts.isVariableDeclaration(n) && n.initializer && mentions(n.initializer, names)) for (const b of boundNames(n.name)) add(b);
+    if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      n.expression.name.text === "push" &&
+      n.arguments.some((a) => mentions(a, names))
+    ) {
+      add(n.expression.expression.getText(sf));
+    }
+    ts.forEachChild(n, visit);
+  };
+  while (grew) {
+    grew = false;
+    visit(sf);
+  }
+  return out;
+}
+
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** does any afterAll removal statement name what the marked create made? */
+function removalNamesCreate(sf, stmt, removalTexts, objectInits) {
+  const { hostLiterals, hostIdentifiers, results } = createdBy(stmt, objectInits);
+  const words = [...hostIdentifiers, ...results, ...carriersOf(sf, results)];
+  return removalTexts.some(
+    (text) =>
+      hostLiterals.some((h) => ['"', "'", "`"].some((q) => text.includes(`${q}${h}${q}`))) ||
+      words.some((w) => new RegExp(`(^|[^\\w$.])${escapeRe(w)}(?![\\w$])`).test(text)),
+  );
 }
 
 /** analyse one test file's source */
@@ -188,6 +301,8 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
   /** name → function-like nodes declared under that name anywhere in the file */
   const functions = new Map();
   const declare = (name, fn) => functions.set(name, [...(functions.get(name) ?? []), fn]);
+  /** name → object literals declared under that name (a payload passed to a create by name) */
+  const objectInits = new Map();
 
   const line = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const visit = (node) => {
@@ -208,6 +323,9 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
       for (const a of node.arguments) if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) into.push(a);
     }
     if (ts.isFunctionDeclaration(node) && node.name) declare(node.name.text, node);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
+      objectInits.set(node.name.text, [...(objectInits.get(node.name.text) ?? []), node.initializer]);
+    }
     if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
@@ -227,12 +345,22 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
     const work = [...bodies];
     let removes = false;
     let dropsScratchDb = false;
+    /** the whole top-level statement of its function around each removal (a loop over recorded ids included) */
+    const removalTexts = [];
     while (work.length > 0) {
       const fn = work.pop();
       if (seen.has(fn)) continue;
       seen.add(fn);
+      const topOf = (node) => {
+        let n = node;
+        while (n.parent && n.parent !== fn && n.parent !== fn.body) n = n.parent;
+        return n;
+      };
       const scan = (node) => {
-        if (isRemoval(node)) removes = true;
+        if (isRemoval(node)) {
+          removes = true;
+          removalTexts.push(topOf(node).getText(sf));
+        }
         // a scratch database dropped by the shared helper or by its own DROP DATABASE statement
         if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node)) && /\bDROP DATABASE\b/i.test(node.text)) dropsScratchDb = true;
         if (ts.isCallExpression(node)) {
@@ -248,19 +376,34 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
       };
       scan(fn);
     }
-    return { removes, dropsScratchDb };
+    return { removes, dropsScratchDb, removalTexts };
   };
   const afterAllReach = reach(afterAllBodies);
   const cleansInAfterEach = reach(afterEachBodies).removes;
   const untrackedTestCreates = testCreates
     .filter((c) => !c.inFinally && !c.marked && !(c.tracked && cleansInAfterEach))
     .map((c) => c.line);
+  // an afterAll marker whose create no afterAll removal names (by host or by recorded result). A marked
+  // upsert of a host another create in the SAME test records (same host literal or variable) is covered by it.
+  const named = testCreates.filter((c) => c.stmt && removalNamesCreate(sf, c.stmt, afterAllReach.removalTexts, objectInits));
+  const hostKeys = (c) => {
+    const { hostLiterals, hostIdentifiers } = createdBy(c.stmt, objectInits);
+    return [...hostLiterals.map((h) => `"${h}`), ...hostIdentifiers];
+  };
+  const coveredBySibling = (c) => {
+    const keys = hostKeys(c);
+    return named.some((d) => d.test === c.test && hostKeys(d).some((k) => keys.includes(k)));
+  };
+  const unmatchedMarkers = [
+    ...new Set(testCreates.filter((c) => !c.inFinally && c.markedAfterAll && !named.includes(c) && !coveredBySibling(c)).map((c) => c.line)),
+  ];
   return {
     creates: createLines.length > 0,
     createLines,
     cleansInAfterAll: afterAllReach.removes,
     cleansInAfterEach,
     untrackedTestCreates,
+    unmatchedMarkers,
     dropsScratchDb: afterAllReach.dropsScratchDb,
   };
 }
@@ -287,7 +430,7 @@ export function findEgressAllowLeaks(base = root) {
     const a =
       source.includes(ROUTE) || source.includes(TABLE)
         ? analyzeTestFile(source, rel)
-        : { creates: false, createLines: [], cleansInAfterAll: false, cleansInAfterEach: false, untrackedTestCreates: [], dropsScratchDb: false };
+        : { creates: false, createLines: [], cleansInAfterAll: false, cleansInAfterEach: false, untrackedTestCreates: [], unmatchedMarkers: [], dropsScratchDb: false };
     if (a.creates) creators.push(rel);
     if (exempt) {
       if (!a.creates) stale.push(`${rel}: listed in SCRATCH_DB_FILES but creates no allow entry`);
@@ -297,6 +440,8 @@ export function findEgressAllowLeaks(base = root) {
     if (a.creates && !a.cleansInAfterAll) leaks.push(`${rel} (creates at line ${a.createLines.join(", ")})`);
     else if (a.untrackedTestCreates.length > 0) {
       leaks.push(`${rel} (a test creates an entry with no per-entry cleanup at line ${a.untrackedTestCreates.join(", ")})`);
+    } else if (a.unmatchedMarkers.length > 0) {
+      leaks.push(`${rel} ('${FILE_SCOPED_MARKER}' at line ${a.unmatchedMarkers.join(", ")}, but no afterAll removal names that host or its recorded id)`);
     }
   }
   for (const rel of SCRATCH_DB_FILES.keys()) if (!files.includes(rel)) stale.push(`${rel}: listed in SCRATCH_DB_FILES but no longer exists`);

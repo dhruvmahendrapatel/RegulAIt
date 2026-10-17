@@ -117,6 +117,43 @@ afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.
       expect(analyzeTestFile(fileLevel + misplaced).untrackedTestCreates).toHaveLength(1);
     });
 
+    it("the afterAll marker is matched to what afterAll removes: by host, or by the recorded result", () => {
+      const marked = (host) => `it("shared", async () => {
+  // egress-allow-cleanup: afterAll — the entry later tests use
+  const r = await post("/v1/egress-allow-hosts", { host: ${host} });
+});\n`;
+      // fileLevel's afterAll removes "127.0.0.1" by host
+      expect(analyzeTestFile(fileLevel + marked(`"127.0.0.1"`)).unmatchedMarkers).toEqual([]);
+      // negative control: a marker on a host afterAll never removes
+      expect(analyzeTestFile(fileLevel + marked(`"169.254.169.254"`)).unmatchedMarkers).toEqual([5]);
+      // by recorded id, through a function and an intermediate result (transitive)
+      const byId = `let allowId;
+afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { id: allowId }); });
+it("upsert", async () => {
+  // egress-allow-cleanup: afterAll — the first POST's id is recorded in allowId
+  const send = (note) => post("/v1/egress-allow-hosts", { host: H, note });
+  const first = await send("a");
+  allowId = first.json().id;
+});\n`;
+      expect(analyzeTestFile(byId).unmatchedMarkers).toEqual([]);
+      expect(analyzeTestFile(byId.replace("allowId = first.json().id;", "")).unmatchedMarkers).toEqual([5]);
+      // pushed into a list the afterAll loop removes, with the payload passed by name
+      const pushed = `const created = { allowHosts: [] };
+afterAll(async () => { for (const id of created.allowHosts) await removeEgressAllowEntry(app, AUTH, { id }); });
+it("add, then upsert the same host", async () => {
+  const host = "a.example.test";
+  const payload = { host, note: "n" };
+  // egress-allow-cleanup: afterAll — the id lands in created.allowHosts
+  const added = await post("/v1/egress-allow-hosts", payload);
+  created.allowHosts.push(added.json().id);
+  // egress-allow-cleanup: afterAll — the same host (an upsert)
+  const again = await post("/v1/egress-allow-hosts", { host, note: "edited" });
+  // egress-allow-cleanup: afterAll — a DIFFERENT host is not covered by the sibling
+  const stray = await post("/v1/egress-allow-hosts", { host: otherHost });
+});\n`;
+      expect(analyzeTestFile(pushed).unmatchedMarkers).toEqual([12]);
+    });
+
     it("a create in beforeAll or in a helper stays a file-level create (afterAll rule only)", () => {
       const helper = `async function allow(h) { await post("/v1/egress-allow-hosts", { host: h }); }\nit("x", async () => { await allow("a"); });\n`;
       expect(analyzeTestFile(fileLevel + helper).untrackedTestCreates).toEqual([]);
