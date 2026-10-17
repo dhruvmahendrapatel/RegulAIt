@@ -95,7 +95,11 @@ async function placedOffer(executorId: string, ageSeconds = 0): Promise<string> 
                 now() - make_interval(secs => ${ageSeconds}), now() + interval '1 hour') returning id`,
   );
   await db.execute(sql`update execution_offers set status = 'accepted', accepted_at = now() where id = ${o.id}`);
-  await db.execute(sql`update execution_offers set status = 'placed', reported_at = now() where id = ${o.id}`);
+  const placement = await one<{ id: string }>(
+    sql`insert into execution_placements (audit_id, workload_kind, required_class, required_by, enforcement, profile_digest, executor_id, applied_class, report_sha256, outcome)
+        values (${randomUUID()}, 'mcp_stdio', 'user_space_kernel', 'workload_kind', 'enforce', ${DIGEST}, ${executorId}, 'user_space_kernel', ${"f".repeat(64)}, 'placed') returning id`,
+  );
+  await db.execute(sql`update execution_offers set status = 'placed', reported_at = now(), placement_id = ${placement.id} where id = ${o.id}`);
   return o.id;
 }
 
