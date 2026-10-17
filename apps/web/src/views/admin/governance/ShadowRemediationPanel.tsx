@@ -4,6 +4,11 @@
  * assignment rules and the compliance cascade still apply) and link the
  * finding to it, or link a workflow that already exists. Linking marks the
  * finding confirmed, so it is confirmed first.
+ *
+ * ADR-0195 A4: a workflow that started but whose link failed is held by the
+ * SERVER (the plan's `pendingLink`), not the browser, so after a reload the
+ * screen still offers only to link that workflow: starting another and linking
+ * a different one both stay disabled until it is linked.
  */
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -17,6 +22,7 @@ import {
   SHADOW_REMEDIATION_REFUSALS,
   startFormFrom,
   startInstanceBody,
+  startWillMatch,
   type RemediationPlan,
   type StartForm,
   type StartInstanceBody,
@@ -52,7 +58,7 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
   );
 }
 
-function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
+export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
   const p = props.plan;
   const projects = useProjects();
   const act = useAction();
@@ -61,8 +67,9 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [linked, setLinked] = useState<string | null>(null);
-  // a workflow that started but whose link failed: a retry links THIS one and never starts another
-  const [startedUnlinked, setStartedUnlinked] = useState<string | null>(null);
+  // a workflow that started but whose link failed: a retry links THIS one and never starts or links another.
+  // Seeded from the server, so it survives a reload
+  const [startedUnlinked, setStartedUnlinked] = useState<string | null>(p.pendingLink?.instanceId ?? null);
   const ids = { note: useId(), env: useId(), problem: useId() };
   const instances = useQuery({
     queryKey: ["admin", "shadow-ai-link-instances"],
@@ -128,14 +135,20 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
       <p className={v.faint} id={ids.note}>
         {p.note}
       </p>
-      {p.assignment && !p.assignment.ruleConfigured ? (
+      {p.assignment && !startWillMatch(p) ? (
         <p role="note" data-testid="shadow-no-assignment-rule">
           <Badge tone="warn">no workflow assigned</Badge>{" "}
           <span className={v.dim}>
-            No workflow is assigned to the change type <code>{p.assignment.changeType}</code>, and none is by default. An admin must add an
+            No workflow is assigned to the change type <code>{p.assignment.changeType}</code>
+            {p.assignment.defaultTemplate?.state === "retired" ? ", and its default workflow was retired" : ""}. An admin must add an
             assignment rule for it under Workflow templates before a remediation workflow can start; until then, link a workflow started
             another way.
           </span>
+        </p>
+      ) : null}
+      {p.assignment?.defaultTemplate?.state === "not_installed" && !p.assignment.ruleConfigured ? (
+        <p className={v.faint} data-testid="shadow-default-workflow">
+          The default remediation workflow (a plan-only stage, then a human sign-off) is set up when the first one starts.
         </p>
       ) : null}
 
@@ -191,11 +204,16 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
             setProblem("Choose the workflow to link.");
             return;
           }
+          if (startedUnlinked !== null) return;
           setPending({ kind: "link", instanceId: existing });
         }}
       >
         <Field label="Or link an existing workflow" grow>
-          <Select value={existing} onChange={(e) => { setProblem(null); setExisting(e.target.value); }}>
+          <Select
+            value={existing}
+            disabled={startedUnlinked !== null}
+            onChange={(e) => { setProblem(null); setExisting(e.target.value); }}
+          >
             {optionEls(
               (instances.data?.instances ?? []).map((i) => ({
                 v: i.id,
@@ -205,7 +223,7 @@ function PlanBody(props: { plan: RemediationPlan; onLinked: () => void }) {
             )}
           </Select>
         </Field>
-        <Button type="submit" disabled={act.busy}>
+        <Button type="submit" disabled={act.busy || startedUnlinked !== null}>
           Link workflow…
         </Button>
       </form>
