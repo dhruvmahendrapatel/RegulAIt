@@ -388,7 +388,7 @@ test.describe("ADR-0189 B6: BOM posture", () => {
     await expect(table.getByRole("alert")).toHaveText("That is the only active key, so it was not retired. A replacement is recorded when it first signs.");
 
     // retried: the gateway asks to confirm it's you, the same POST is resent once, and the key reads as retired
-    const su = await requireStepUpOn(page, { method: "POST", path: "/v1/receipts/keys/receipt-2026/retire", kind: "settings_relax", facts: () => ({ op: "receipt_key_retire", keyId: "receipt-2026" }) });
+    const su = await requireStepUpOn(page, { method: "POST", path: "/v1/receipts/keys/receipt-2026/retire", kind: "key_management", facts: () => ({ op: "receipt_key_retire", keyId: "receipt-2026" }) });
     await table.getByRole("button", { name: "Retire receipt signing key receipt-2026" }).click();
     dialog = page.getByRole("dialog", { name: "Retire receipt signing key receipt-2026?" });
     await dialog.getByRole("button", { name: "Retire key" }).click();

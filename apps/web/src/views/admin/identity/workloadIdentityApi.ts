@@ -184,7 +184,7 @@ export function revokeDelegationGrant(grantId: string): Promise<unknown> {
   return withStepUp((h) => stepUpApi.post(path, {}, h));
 }
 
-// ---- ADR-0188: the issuer's signing keys, and one delegation grant -----------
+// ---- ADR-0188: the issuer's signing keys (a `key_management` step-up, migration 0203), and one delegation grant
 
 export const signingKeyKeys = { list: ["admin", "workload-identities", "signing-keys"] as const };
 
