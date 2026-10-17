@@ -196,8 +196,12 @@ export const executorStdioPostResponseSchema = z
 export const EXECUTOR_STDIO_REFUSALS = [
   /** the offer is not this executor's, or not placed */
   "offer_unavailable",
-  /** no gateway replica process here holds the session (see the I4 as-built note on replicas) */
+  /** no longer answered (the multi-replica relay, migration 0204, answers `session_lost`); kept so an older peer reads it */
   "stdio_session_unknown",
+  /** the session's holder is gone (its lease lapsed, or it never wrote its row): final, the sandbox stops */
+  "session_lost",
+  /** the offer is new and its holder has not written the session's row yet: come back (not final) */
+  "stdio_session_pending",
   /** a frame's sequence number is not the next one */
   "stdio_sequence",
   /** another window of this session is open (one at a time, review M6) */
