@@ -25,7 +25,7 @@ copy-paste. Read the box at the top before you type anything.
 > somewhere safe BEFORE you do anything else:**
 >
 > ```bash
-> aws ssm start-session --target i-013c62adc887c76bb --region us-east-1 --profile regulait-admin
+> aws ssm start-session --target <instance-id> --region us-east-1 --profile regulait-admin
 > sudo grep REGULAIT_DATA_KEY /opt/app/docker-compose.override.yml
 > ```
 >
@@ -106,12 +106,12 @@ From the box (one command, prints everything):
 
 ```bash
 aws ssm send-command --region us-east-1 --profile regulait-admin \
-  --instance-ids i-013c62adc887c76bb --document-name AWS-RunShellScript \
+  --instance-ids <instance-id> --document-name AWS-RunShellScript \
   --parameters 'commands=["/usr/local/sbin/regulait-pg-backup.sh --check"]' \
   --query 'Command.CommandId' --output text
 # then, with the id it printed:
 aws ssm get-command-invocation --region us-east-1 --profile regulait-admin \
-  --command-id <ID> --instance-id i-013c62adc887c76bb \
+  --command-id <ID> --instance-id <instance-id> \
   --query StandardOutputContent --output text
 ```
 
@@ -128,7 +128,7 @@ look at it, and only then swap. Every command below does that.
 Open a session:
 
 ```bash
-aws ssm start-session --target i-013c62adc887c76bb --region us-east-1 --profile regulait-admin
+aws ssm start-session --target <instance-id> --region us-east-1 --profile regulait-admin
 sudo -i
 ```
 
@@ -373,7 +373,7 @@ Verify:
 
 ```bash
 aws ssm send-command --region us-east-1 --profile regulait-admin \
-  --instance-ids i-013c62adc887c76bb --document-name AWS-RunShellScript \
+  --instance-ids <instance-id> --document-name AWS-RunShellScript \
   --parameters 'commands=["systemctl list-timers regulait-pg-backup.timer --all --no-pager","/usr/local/sbin/regulait-pg-backup.sh --run"]'
 ```
 
@@ -392,7 +392,7 @@ database.
 
 ```bash
 aws ssm send-command --region us-east-1 --profile regulait-admin \
-  --instance-ids i-013c62adc887c76bb --document-name AWS-RunShellScript \
+  --instance-ids <instance-id> --document-name AWS-RunShellScript \
   --parameters 'commands=["/usr/local/sbin/regulait-pg-backup.sh --verify-restore"]' \
   --query 'Command.CommandId' --output text
 ```

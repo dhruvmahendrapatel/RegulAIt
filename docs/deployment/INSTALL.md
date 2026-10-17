@@ -159,7 +159,7 @@ cannot build; it can only run images loaded from a file.** That is why the air-g
 sha256sum regulait-images-0.1.0.tar        # record this; the tar is not self-verifying
 ```
 
-It builds `regulait/gateway:0.1.0` and saves it together with `postgres:16` and `caddy:2-alpine`.
+It builds `regulait/gateway:0.1.0` and saves it together with `postgres:16` and Caddy (`caddy:2.11.7-alpine`, pinned by digest: the `x-caddy-image` reference in `docker-compose.yml`). Caddy is saved under both the digest reference and the plain tag; the air-gapped install runs the tag and refuses it unless its image id is one of the pinned ids in `scripts/install.sh` (the round trip is pending execution, ADR-0190 "I5 follow-up: engines in compose").
 The tag and the `--version` you pass to the installer must be the **same string** — the generated
 override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
 
@@ -616,6 +616,15 @@ own authenticated channel to the gateway. Before you register a stdio server:
   upstream credential is not supported yet (ADR-0190 decision 5).
 - **Pin the image, not a tag.** A tag is refused at registration (`mcp_stdio_image_unpinned`). Changing the image,
   the entry point or the arguments resets the server's admission to `unscanned`.
+
+**Engine tasks on the executor (ADR-0190 slice I5).** The same executor runs the engine workers (promptfoo, garak, the
+modelscan scanner) as engine tasks. Compose gives it the input volume they need (`regulait-executor-input`, mounted
+only on `sandbox-executor`; Docker Engine 26 or later for `volume-subpath`), and the `engine-images` profile builds
+the three engine images on the host (`engine-promptfoo-image`, `engine-modelscan-image`, `engine-garak-image`; see
+the comment above them in `docker-compose.yml`). An engine still places nothing until its image's content digest is
+recorded as the manifest's `taskImage` by a release, and under real gVisor it waits on the `runsc` re-pin (ADR-0190
+I5). **Pending execution (M-041):** none of this has been run on a Docker host yet; record what you find against
+ADR-0190 "I5 follow-up: engines in compose".
 
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always
