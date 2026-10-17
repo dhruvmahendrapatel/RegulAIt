@@ -386,12 +386,6 @@ export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = proce
   return { ...key, activatedAt: row.activatedAt! };
 }
 
-/**
- * Rotate: make the configured key `kid` (or the single unrecorded configured
- * key) the signer and retire the current one, in one transaction, audited.
- * A recorded key (retired, revoked, or the current signer) is never
- * re-activated: a key is used for one stretch only.
- */
 /** the configured key a rotation activates: `kid`, or the single configured key never recorded */
 function pickRotationTarget(configured: readonly ConfiguredSigningKey[], recorded: ReadonlySet<string>, kid: string | undefined): ConfiguredSigningKey {
   if (kid !== undefined) {
@@ -436,6 +430,12 @@ export const signingKeyRotateStepUp = (kid: string) => ({ kind: "key_management"
 /** migration 0203: an issuer-key revocation is a `key_management` step-up bound to the key revoked */
 export const signingKeyRevokeStepUp = (kid: string) => ({ kind: "key_management" as const, facts: { op: "signing_key_revoke", keyId: kid } });
 
+/**
+ * Rotate: make the configured key `kid` (or the single unrecorded configured
+ * key) the signer and retire the current one, in one transaction, audited.
+ * A recorded key (retired, revoked, or the current signer) is never
+ * re-activated: a key is used for one stretch only.
+ */
 export async function rotateIdentitySigningKey(
   db: Db,
   opts: { kid?: string | undefined; actorUserId: string; env?: NodeJS.ProcessEnv; stepUp?: string },

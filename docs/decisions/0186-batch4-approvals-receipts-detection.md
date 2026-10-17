@@ -902,12 +902,12 @@ facts would therefore have been valid for a key operation. Both now ask for the 
   `identity-signing-key-revoke`) and the receipt retire's deny row carry `stepUpKind: "key_management"` beside the
   method.
 - **Web.** The dialog reads "You're changing a signing key"; the org setting lists "Managing signing keys"; the
-  client's cap on step-ups per request is now the number of kinds it has copy for, not a literal.
+  client's cap on step-ups per request was already derived from the copy table, so the new kind raised it.
 - **Not moved:** binding a key to a workload identity stays `identity_manage` (ADR-0188 decision 2 names it). The
   data-key custody attestation (`POST /v1/security/data-key/attestations`) records where the key is held and changes
   no key, so it has no step-up today; adding one is a separate decision. No route rotates the data key or an export
   key: both are deploy-time secrets, rotated by redeploying.
-- **Migration journal:** renumbered 0203 to 0203 when the branch took in `main` after SD0 (#403, migration 0202, which
+- **Migration journal:** renumbered 0207 to 0203 when the branch took in `main` after SD0 (#403, migration 0202, which
   rewrote the same three CHECKs for `pseudonym_reveal`). 0203 is hand-written, journaled as idx 203, and its CHECKs and
   column default list all nine kinds, `pseudonym_reveal` included, so neither kind is dropped.
 
