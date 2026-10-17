@@ -42,19 +42,24 @@ and "in review" lists of the 2026-10-17 paragraph below; its owner decisions sta
   - 19:54 #414, N5-N9 ops tail (B8 tail, installer lows, isolation test gaps, e2e reduced motion), merged by the owner's
     instruction.
 - **Last migration on main: 0203.** The ADR index ends at 0196 (191 files, 191 rows).
-- **Open, all HOLD:**
-  - #413, N8 request-body log leak + N1 SPIFFE follow-ups;
+- **Released to the merge loop (reviewed; merge on green CI):**
+  - #411, ADR-0195 SD4a Go endpoint agent (recheck APPROVE; the no-TPM fallback verified on the real Windows runner);
   - #416, N4 Hugging Face DLP rule + N11 lease DB clock and placements keyset cursor;
-  - #417, N2 multi-replica stdio sessions, migration **0206** (journal entry not added);
+  - #424, cloud-discovery fixtures: credential expiries relative to now (they were hard-coded to 2026-10-17T13:00Z and
+    turned `build-and-test` red on main and every PR after that time).
+- **Open, all HOLD:**
+  - #413, N8 request-body log leak + N1 SPIFFE follow-ups (fix round 2: remaining raw error text, a source-scan guard);
+  - #417, N2 multi-replica stdio sessions, migration **0204** (journal entry present, after 0203); review APPROVE, fix
+    round for the relay lease blast radius, NUL bytes and sealing frames at rest (master decision, ADR-0180);
   - #418, N12 owner-change grant claimed after the compare-and-set + N13(b) builder runtime on the DB clock;
-  - #419, ADR-0195 A6 env-name and CLI presence signatures (BLOCKED: its catalogue rows need a migration number);
-  - #420, ADR-0195 SD2b federation signer, migration **0205** (journal entry not added);
-  - #421, ADR-0195 A4 remediation plan body starts a workflow;
-  - #411, ADR-0195 SD4a Go endpoint agent;
+  - #419, ADR-0195 A6 env-name and CLI presence signatures: env-var names are never stored as evidence (master
+    decision); its fix round also stops SD1 on main storing `.env.example` names; recheck running;
+  - #420, ADR-0195 SD2b federation signer, migration **0205** (journal entry added once 0204 merges);
+  - #421, ADR-0195 A4 remediation plan body starts a workflow (first review running);
+  - #423, U1 accessibility and keyboard defects (ADR-0196 baselines shrink); U2 responsive is building;
   - #385, the gVisor CI job (waits on an upstream runsc release; check on 2026-10-20).
-- **Migration numbering needs the master:** #420's body says 0204 belongs to #417, but #417 ships 0206, and 0204 is not
-  on main (#408 merged without it). Settle the order before adding journal entries (0204 unused or reassigned, then
-  0205 #420, 0206 #417, and a number for #419).
+- **Migration order (master):** 0204 #417, then 0205 #420; #419's catalogue rows take the next free number when it
+  needs one. Journal entries are added only in that order, so `idx` stays contiguous.
 - **Owner items from #414:**
   - confirm that under reduced motion real users now get no transitions or animations at all (`global.css`);
   - two builders were dispatched on the same #414 review round; both sets of fixes were merged together, but the
