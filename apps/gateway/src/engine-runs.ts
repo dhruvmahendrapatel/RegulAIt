@@ -757,7 +757,8 @@ export async function endRunsHeldByRevokedRunnersTx(tx: Tx, engineId: EngineId, 
     )
     .orderBy(asc(engineRuns.id))
     .for("update");
-  const now = new Date();
+  // M-075: the database wall clock, read once the rows are locked (finished_at feeds the SQL-clock retention purge)
+  const now = await databaseWallNow(tx);
   const ended: EngineRunRow[] = [];
   for (const run of held) {
     ended.push(
@@ -787,7 +788,8 @@ export async function endActiveRunsOfEngineTx(tx: Tx, engineId: EngineId, reason
     .where(and(eq(engineRuns.engineId, engineId), inArray(engineRuns.status, ["queued", "awaiting_approval", "leased"])))
     .orderBy(asc(engineRuns.id))
     .for("update");
-  const now = new Date();
+  // M-075: the database wall clock, read once the rows are locked
+  const now = await databaseWallNow(tx);
   const ended: EngineRunRow[] = [];
   for (const run of waiting) {
     ended.push(
@@ -1529,7 +1531,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const out = await db.transaction(async (tx) => {
       const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
       if (!locked || !["awaiting_approval", "queued", "leased"].includes(locked.status)) return { kind: "finished" as const, status: locked?.status ?? "unknown" };
-      const now = new Date();
+      // M-075: the database wall clock, read under the row lock
+      const now = await databaseWallNow(tx);
       await tx
         .update(engineRuns)
         .set({ cancelRequestedAt: locked.cancelRequestedAt ?? now, cancelRequestedByUserId: locked.cancelRequestedByUserId ?? req.authCtx.userId })
