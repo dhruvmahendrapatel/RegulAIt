@@ -245,9 +245,26 @@ Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 regis
 - **Not supported:** instance-metadata credentials (AWS default chain, Azure managed identity, GCP metadata server).
   The guard refuses the metadata address unconditionally and a source must name its principal. Decision 3's
   "managed identity" is therefore not offered.
-- **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated; minting
-  the federation token from the ADR-0188 issuer, organisation-level AWS account enumeration, and the scanner
-  registration with SD0 are Phase B.
+- **Phase B: registered with SD0.** `apps/gateway/src/discovery-cloud-scanners.ts` adds `cloud_aws`, `cloud_gcp` and
+  `cloud_azure` to `DISCOVERY_SCANNERS`. It maps a source's target, scope and credential onto the adapters (fields
+  listed in that file and in `docs/deployment/CLOUD_DISCOVERY.md`), wraps `ctx.fetch` so every request awaits
+  `ctx.throttle()`, a 429 or 503 is retried only when `ctx.backoff()` agrees, and every body goes to `ctx.recordRaw()`,
+  pseudonymises principals as `cloud_principal`, calls `ctx.heartbeat()` between regions, projects and subscriptions,
+  and returns observations with `artifact: { kind: "cloud_ai_service", value: <service key> }` (matched by
+  `identifier`). AWS scope `include` is regions and an organisation-level AWS scope means every enabled region of the
+  one target account; GCP `include` is projects (organisation level needs `assetScope`); Azure `include` is
+  subscriptions (organisation level needs `managementGroupId`). The AWS static secret is a JSON object holding the key
+  id too, because SD0 refuses key-shaped names in public config.
+- **What could not be read, at run level.** SD0's `ScanResult` has no field for per-read status. When no read
+  succeeds the run fails (`scanner_error`) with the per-read summary; when some do, the observations are returned and
+  the summary only reaches the raw-output digest. Open question for SD0: a run-level capabilities field (a schema
+  change SD0 owns).
+- **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated. A
+  federated credential fails its run with an explicit reason until the ADR-0188 issuer has an RS256 federation key
+  and a mint path for these audiences (key material and schema outside this slice); AWS `assume_role` needs
+  RegulAIt's own AWS principal and fails the same way. Organisation-level AWS account enumeration is not built. The
+  `cloud_ai_service` seed rows (`CLOUD_AI_SERVICE_SEED`) are exported but not yet installed by the catalogue seed
+  route, which lives in the shadow-AI module.
 
 ## As built: SD0 foundation (2026-10-17, migration 0202)
 

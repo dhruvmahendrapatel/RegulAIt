@@ -21,7 +21,7 @@ import { LogsQueryClient } from "@azure/monitor-query-logs";
 import { AZURE_FEDERATED_AUDIENCE, azureCredentialSchema, type AzureCredentialInput, type OidcTokenSupplier } from "./credentials.js";
 import { lookbackStart, PrincipalAggregator, ScanCollector, take } from "./report.js";
 import { GuardedAzureHttpClient, type GuardedFetch } from "./transport.js";
-import { MAX_AUDIT_LOOKBACK_DAYS, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
+import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
 export const AZURE_SERVICE_KEYS = {
   openai: "azure:cognitive-services:OpenAI",
@@ -179,7 +179,7 @@ export class AzureCloudScanner implements CloudScanner {
     });
 
     for (const subscriptionId of this.target.subscriptionIds) {
-      if (ctx.signal?.aborted) break;
+      if (await shouldStop(ctx)) break;
       await this.#activityLog(c, ctx, subscriptionId);
     }
     await this.#diagnostics(c, ctx);

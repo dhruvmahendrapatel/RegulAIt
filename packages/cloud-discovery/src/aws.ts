@@ -33,7 +33,7 @@ import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from "@smit
 import { awsCredentialSchema, type AwsCredentialInput, type OidcTokenSupplier } from "./credentials.js";
 import { lookbackStart, paginate, PrincipalAggregator, ScanCollector } from "./report.js";
 import { guardedAwsRequestHandler, type GuardedFetch } from "./transport.js";
-import { MAX_AUDIT_LOOKBACK_DAYS, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
+import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
 export const AWS_SERVICE_KEYS = { bedrock: "aws:bedrock", sagemaker: "aws:sagemaker" } as const;
 
@@ -169,7 +169,7 @@ export class AwsCloudScanner implements CloudScanner {
     const c = new ScanCollector("aws", ctx);
     const regions = await this.#regions(c, ctx);
     for (const region of regions) {
-      if (ctx.signal?.aborted) break;
+      if (await shouldStop(ctx)) break;
       await this.#inventory(c, ctx, region);
       await this.#lookupEvents(c, ctx, region);
     }

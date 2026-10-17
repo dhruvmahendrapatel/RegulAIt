@@ -135,6 +135,20 @@ describe("cloud discovery: the guarded fetch is the only network path (ADR-0195 
     expect(new Set(gcp.calls)).toEqual(new Set(["serviceusage.googleapis.com"]));
     expect(g.capabilities.find((c) => c.capability === "gcp.service_usage.ai_services")?.status).toBe("read");
 
+    // token exchanges are guarded one hop at a time: Google STS allowed, IAM Credentials (impersonation) not
+    const imp = willingSpy();
+    const impScanner = new GcpCloudScanner(
+      { projectIds: ["p"] },
+      {
+        fetch: guarded(allow("sts.googleapis.com"), imp.spy),
+        credential: { mode: "gcp_workload_identity", audience: "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/a/providers/b", serviceAccountEmail: "scanner@p.iam.gserviceaccount.com" },
+        oidcToken: async () => synthetic("oidc"),
+      },
+    );
+    const i = await impScanner.scan(ctx());
+    expect(new Set(imp.calls)).toEqual(new Set(["sts.googleapis.com"]));
+    expect(i.capabilities.filter((c) => c.status === "read")).toEqual([]);
+
     const az = willingSpy();
     const z = await scanners(guarded(allow("login.microsoftonline.com", "management.azure.com"), az.spy)).azureStatic.scan(ctx());
     expect(new Set(az.calls)).toEqual(new Set(["login.microsoftonline.com", "management.azure.com"]));

@@ -1,12 +1,11 @@
 /**
  * ADR-0195 rule 5: seed rows for the admin catalogue (`ai_endpoint_signatures`) of signature kind
  * `cloud_ai_service`. A cloud observation becomes a finding only when an ENABLED row of this kind has a `value`
- * EQUAL to the observation's `serviceKey`; nothing here is a pattern and nothing is evaluated as a regex.
+ * equal (case-insensitively) to the observation's `serviceKey`; nothing here is a pattern and nothing is evaluated as a regex.
  *
  * These rows are this slice's own seed file. They are not part of the compiled shadow-AI catalogue (v1 stays
- * byte-identical; SD1 owns v2). SD0 owns the signature-kind and match-type enums; `matchType: "service_key"` is
- * the value this slice proposes for exact equality and is reconciled with SD0's enum when the scanners are
- * registered (Phase B).
+ * byte-identical; SD1 owns v2). SD0 owns the signature-kind and match-type enums; artifact kinds match by
+ * `identifier` (whole value, case-insensitive, same kind only: `artifactMatchesSignature` in `@regulait/shared`).
  *
  * Provenance follows the existing seed convention ("regulait-seed"); an admin edit flips a row to "admin" and the
  * seeder leaves it alone from then on.
@@ -20,7 +19,7 @@ export interface CloudAiServiceSeedRow {
   kind: "cloud_ai_service";
   /** the exact `serviceKey` an observation carries */
   value: string;
-  matchType: "service_key";
+  matchType: "identifier";
   provenance: "regulait-seed";
   enabled: true;
   /** where the service is documented, for the per-row staleness disclosure */
@@ -33,7 +32,7 @@ const row = (provider: string, value: string, reference: string): CloudAiService
     provider,
     kind: "cloud_ai_service",
     value,
-    matchType: "service_key",
+    matchType: "identifier",
     provenance: "regulait-seed",
     enabled: true,
     reference,

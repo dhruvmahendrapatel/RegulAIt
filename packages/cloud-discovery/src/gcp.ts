@@ -32,7 +32,7 @@ import {
 } from "./credentials.js";
 import { lookbackStart, PrincipalAggregator, ScanCollector } from "./report.js";
 import { guardedGaxios, type GuardedFetch } from "./transport.js";
-import { MAX_AUDIT_LOOKBACK_DAYS, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
+import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
 export const GCP_AI_SERVICES = ["aiplatform.googleapis.com", "generativelanguage.googleapis.com"] as const;
 export const GCP_SERVICE_KEYS = {
@@ -151,7 +151,7 @@ export class GcpCloudScanner implements CloudScanner {
   async scan(ctx: CloudScanContext): Promise<CloudScanResult> {
     const c = new ScanCollector("gcp", ctx);
     for (const projectId of this.target.projectIds) {
-      if (ctx.signal?.aborted) break;
+      if (await shouldStop(ctx)) break;
       await this.#enabledServices(c, projectId);
       if (!this.target.assetScope) await this.#assets(c, ctx, `projects/${projectId}`);
       const dataAccess = await this.#dataAccessConfigured(c, projectId);

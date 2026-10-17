@@ -99,7 +99,7 @@ describe("seed and digest", () => {
   it("seed rows are exact service keys, unique and enabled", () => {
     const values = CLOUD_AI_SERVICE_SEED.map((r) => r.value);
     expect(new Set(values).size).toBe(values.length);
-    expect(CLOUD_AI_SERVICE_SEED.every((r) => r.kind === "cloud_ai_service" && r.matchType === "service_key" && r.enabled)).toBe(true);
+    expect(CLOUD_AI_SERVICE_SEED.every((r) => r.kind === "cloud_ai_service" && r.matchType === "identifier" && r.enabled)).toBe(true);
   });
   it("digest is stable under key order", () => {
     const a = digestObservations([{ provider: "aws", subjectKind: "cloud_resource", subject: "s", serviceKey: "k", signalSource: "cloud_inventory", resourceType: "t", location: null, container: "c" }]);

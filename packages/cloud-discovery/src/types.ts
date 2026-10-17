@@ -106,6 +106,15 @@ export interface CloudScanContext {
   /** an upper bound on pages per list call, so one huge account cannot stall a run */
   maxPagesPerCall: number;
   signal?: AbortSignal;
+  /** extends the caller's lease between units of work; false means stop (another worker owns the run) */
+  heartbeat?: () => Promise<boolean>;
+}
+
+/** true when the scan should stop before the next unit of work */
+export async function shouldStop(ctx: CloudScanContext): Promise<boolean> {
+  if (ctx.signal?.aborted) return true;
+  if (ctx.heartbeat && !(await ctx.heartbeat())) return true;
+  return false;
 }
 
 export interface CloudScanner {
