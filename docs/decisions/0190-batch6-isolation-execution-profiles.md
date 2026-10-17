@@ -2197,3 +2197,44 @@ the committed report.
 
 **Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
 database shards run it.
+
+## As built: first engine image publish recorded (ENG-IMG follow-up, 2026-10-17)
+
+The merge of PR #405 (`5bb229e`) was a push to `main` that touched engine paths, so it ran the `Engine images`
+workflow (run 39025547605, attempt 1):
+- all three `publish` jobs and the `record` job succeeded;
+- each publish job's `Sign (skipped, with the reason)` step ran, so nothing was signed.
+
+The `engine-images-publish` artifact was recorded with `node scripts/engine-images-lock.mjs --apply` and checked with
+`--check`. `--apply` accepted it: the repositories are this repository's owner namespace, and the source commit is on
+`main`. The lock now names, per engine (repository, manifest digest, image id):
+
+| Engine | Repository | Manifest digest (pull, runner report) | Image id (`taskImage`) |
+|---|---|---|---|
+| promptfoo | `ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo` | `sha256:e973eab40486832b9b3c858acc43fa5f4d732bc47aea24ede2d89c576f36a577` | `sha256:f6592409f684252fe36952deb42b9369dbeeb9ac85f33ac8093d1505a94a454f` |
+| modelscan | `ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan` | `sha256:d9e3bd1e364fec7ce6beec86716548965b4651e065b52570ebbb6ae8647e9413` | `sha256:a3057ca433c3fcf4f226cebcb12e876521c1e543ca359a4eef3b4dc93e9990bd` |
+| garak | `ghcr.io/dhruvmahendrapatel/regulait-engine-garak` | `sha256:8fe7d51851bcaff2fdf562c9db1b5f2b0423966e034954ee3976ae8754d6da6c` | `sha256:c0749c4f4c6707a011767cef76d9105b6dc002ed687986f4b6dca5217893bfde` |
+
+Each entry's `publishGeneration` is 1, so each manifest generation moves up by one (ADR-0187 decision 95). The compose
+defaults now name these references, so a stock install no longer needs `REGULAIT_ENGINE_<ENGINE>_DIGEST`.
+
+**What this changes, and what it does not.**
+- An engine can now pass the runner self-test's image check, and its task can now be placed. Every other gate stays:
+  - an engine is disabled until an admin enables it after a passing self-test;
+  - the worker switches need a fresh executor attestation;
+  - placement needs an attested executor at the engine-worker floor.
+- **The images are unsigned.** ADR-0187 decision 55's "admission is the signature verification at deploy time" is
+  still open (signing, open question 1 above). Recording the digests pins exactly which build runs. It does not
+  attest who built it beyond this repository's `main` and the run named here.
+- Tests that meant "an engine with no image" now say so explicitly (`imageDigest: null` overrides) instead of relying
+  on the shipped lock being null:
+  - `zz-b5-engines` (modelscan) and `engines.test.ts`;
+  - the promptfoo and garak manifest tests, which now compare with the lock;
+  - the lock script's apply tests, which start from a blank lock;
+  - `zz-b5-compose`, which derives each runner's reference defaults from the lock.
+
+**Not verified (pending execution, M-041).**
+- No image has been pulled from GHCR or run on a Docker host.
+- The packages' visibility is unconfirmed: GitHub's docs say it is private on first publish.
+- The pulled image's `.Id` has not been compared with the recorded image id.
+- No engine has been enabled, and no engine task has run end to end. Real gVisor still waits on the `runsc` re-pin.
