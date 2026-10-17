@@ -5,6 +5,7 @@ package agent
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -61,15 +62,17 @@ func TestWindowsFileACLs(t *testing.T) {
 			t.Errorf("%s access %d: unsafe=%v, want %v (%v)", c.sddl, c.access, got, c.unsafe, err)
 		}
 	}
-	// a system file must not be owned by an ordinary user: the runner's file is owned by its user or Administrators
+	// a system file must not be owned by an ordinary user: make the runner's user the owner explicitly (an elevated
+	// runner would otherwise leave Administrators as the owner and the case would never run)
 	setDACL(t, path, own)
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	sid, err := windows.StringToSid(user)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o, _, _ := sd.Owner(); o != nil && o.String() == user {
-		if _, err := readChecked(path, -1, WorldRead); !errors.Is(err, ErrUnsafeFile) {
-			t.Fatalf("a user-owned system file was accepted: %v", err)
-		}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+		t.Fatalf("set the owner to %s: %v", user, err)
+	}
+	if _, err := readChecked(path, -1, WorldRead); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by") {
+		t.Fatalf("a user-owned system file was accepted: %v", err)
 	}
 }

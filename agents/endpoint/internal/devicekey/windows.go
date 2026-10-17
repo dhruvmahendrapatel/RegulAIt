@@ -75,7 +75,7 @@ func openProvider() (uintptr, error) {
 	}
 	var h uintptr
 	r, _, _ := procNCryptOpenStorageProvider.Call(uintptr(unsafe.Pointer(&h)), uintptr(unsafe.Pointer(utf16(platformProvider))), 0)
-	if err := classifyProviderOpen(uint32(r), tbsReportsNoTPM); err != nil {
+	if err := classifyProviderOpen(uint32(r), tbsTPMPresent); err != nil {
 		// only "no TPM" statuses wrap ErrNoHardware (ncrypt_status.go); anything else is refused, never a fallback
 		return 0, err
 	}
@@ -85,18 +85,17 @@ func openProvider() (uintptr, error) {
 var (
 	tbs                   = windows.NewLazySystemDLL("tbs.dll")
 	procTbsiGetDeviceInfo = tbs.NewProc("Tbsi_GetDeviceInfo")
-	tbsErrTPMNotFound     = uint32(0x8028400F) // TBS_E_TPM_NOT_FOUND
 )
 
-// tbsReportsNoTPM is true only when TBS answers TBS_E_TPM_NOT_FOUND. A missing tbs.dll, success or any other
-// status means a TPM may exist, so it is false and the caller refuses rather than falls back.
-func tbsReportsNoTPM() bool {
-	if procTbsiGetDeviceInfo.Find() != nil {
-		return false
+// tbsTPMPresent asks TBS whether a TPM exists (tbsAnswer in ncrypt_status.go). A missing tbs.dll is an error, so the
+// caller refuses rather than falls back.
+func tbsTPMPresent() (bool, error) {
+	if err := procTbsiGetDeviceInfo.Find(); err != nil {
+		return false, fmt.Errorf("tbs.dll is not available: %v", err)
 	}
 	var info [16]byte // TBS_DEVICE_INFO: four UINT32 members
 	r, _, _ := procTbsiGetDeviceInfo.Call(uintptr(len(info)), uintptr(unsafe.Pointer(&info[0])))
-	return uint32(r) == tbsErrTPMNotFound
+	return tbsAnswer(uint32(r))
 }
 
 func freeObject(h uintptr) { procNCryptFreeObject.Call(h) }

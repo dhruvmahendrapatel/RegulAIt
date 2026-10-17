@@ -20,18 +20,20 @@ const (
 	fileWriteData       = 0x00000002
 	fileAppendData      = 0x00000004
 	fileWriteEA         = 0x00000010
+	fileExecute         = 0x00000020 // an execute mapping of a file can be read on x64, so it counts as a read
 	fileWriteAttributes = 0x00000100
 	accessDelete        = 0x00010000
 	accessWriteDAC      = 0x00040000
 	accessWriteOwner    = 0x00080000
 	accessMaximum       = 0x02000000
+	genericExecute      = 0x20000000
 	genericAll          = 0x10000000
 	genericWrite        = 0x40000000
 	genericRead         = 0x80000000
 
 	maskWrites = fileWriteData | fileAppendData | fileWriteEA | fileWriteAttributes | accessDelete | accessWriteDAC |
 		accessWriteOwner | accessMaximum | genericAll | genericWrite
-	maskReads = fileReadData | genericRead | genericAll | accessMaximum
+	maskReads = fileReadData | fileExecute | genericRead | genericExecute | genericAll | accessMaximum
 )
 
 // ACE types and flags (winnt.h).

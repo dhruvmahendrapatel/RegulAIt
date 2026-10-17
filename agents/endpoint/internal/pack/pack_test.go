@@ -149,6 +149,7 @@ func TestCollectionRefusals(t *testing.T) {
 		`{"os":"linux","root":"home","path":"/etc/shadow"}`,
 		`{"os":"windows","root":"appdata","path":"C:/Windows/System32/config/SAM"}`,
 		`{"os":"windows","root":"localappdata","path":"d:x"}`,
+		`{"os":"windows","root":"appdata","path":"\\Windows\\x"}`, // \Windows\x: rooted on the current drive
 	} {
 		t.Run("absolute "+l, func(t *testing.T) {
 			e := `{"signatureId":"a","kind":"assistant_config","provider":"p","files":[` + l + `]}`

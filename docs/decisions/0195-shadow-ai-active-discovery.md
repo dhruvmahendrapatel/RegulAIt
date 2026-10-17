@@ -515,8 +515,11 @@ or web code is touched, and there is no migration.
     failing provider DLL) is an error and the agent refuses, never falling back to DPAPI (security review M2;
     `classifyProviderOpen`, unit-tested on every OS). One exception, observed on the CI Windows runner: a machine
     with no TPM answers `NTE_DEVICE_NOT_READY` (0x80090030), the same status as a TPM that is present but not
-    ready. That status counts as "no hardware" only when TBS (`Tbsi_GetDeviceInfo`) answers `TBS_E_TPM_NOT_FOUND`
-    (0x8028400F); any other TBS answer, or no `tbs.dll`, keeps it a refusal.
+    ready. That status, and `TBS_E_TPM_NOT_FOUND` (0x8028400F) if the provider passes it through, counts as "no
+    hardware" only when TBS (`Tbsi_GetDeviceInfo`) itself answers `TBS_E_TPM_NOT_FOUND`; a TPM that TBS reports
+    present, any other TBS error, or no `tbs.dll` keeps it a refusal. The TBS answer is injected into
+    `classifyProviderOpen` (`tpmPresent func() (bool, error)`), so every combination, including the runner's
+    observed 0x80090030 with no TPM, is a unit-test row on every OS.
   - macOS: **refuses to create a key.** The Secure Enclave store needs the cgo build on the macOS runner (SD4j), and
     falling back to software on hardware every supported Mac has would break decision d.
 - **Tokens and upload** (ADR-0188 S7 reused; `internal/auth`, `internal/transport`): `client_credentials` with an
@@ -584,6 +587,17 @@ be listed: `scripts/check-licences.sh` fails CI otherwise.
   `token_file_unsafe`, a bulk token or ticket written to the log (`TestSecretsNeverReachLogsOrErrors`), the NCrypt
   status classifier, the Windows DACL write check, and removing `environment: release` or the pull-request guard
   from a signing job.
+- Recheck round (2026-10-17), each probe made its test fail: dropping any single bit from the Windows write mask
+  (`GENERIC_WRITE`, `MAXIMUM_ALLOWED`, `FILE_WRITE_EA`, `FILE_WRITE_ATTRIBUTES`, `DELETE`, `WRITE_OWNER`) or read mask
+  (`GENERIC_READ`, `FILE_EXECUTE`, `GENERIC_EXECUTE`; execute rights count as reads, because an execute mapping can be
+  read), trusting INTERACTIVE for writes, the Unix uid check without root (`readChecked` against another uid on a
+  file this user owns), the leading-backslash clause of the absolute-locator refusal (`\Windows\x`), and, in the
+  workflow guard, a `pull_request_target` trigger, a workflow-level `env` of `toJSON(secrets)`, `secrets['X']` or
+  `toJSON(secrets)` in a non-signing job, and a job that calls a reusable workflow (with or without `secrets:
+  inherit`). The guard now matches any mention of the `secrets` context outside whole-line comments and checks the
+  triggers are exactly `pull_request`, `push` and `workflow_dispatch`. The Windows file-ACL test sets the file's
+  owner to the runner's user explicitly, so the user-owned system-file case always runs, and the CI Windows job
+  runs `internal/agent` verbosely so its Windows tests are visible in the log.
 - `node scripts/check-secret-rules.mjs`: 12 rules and 20 vectors agree with `packages/shared`.
 - `scripts/build.sh`: all six targets (7.3 to 8.2 MiB each, stripped). `scripts/package-linux.sh`: `.deb` and `.rpm`
   for amd64 and arm64.

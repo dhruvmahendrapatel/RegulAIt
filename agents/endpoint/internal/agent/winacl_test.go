@@ -5,7 +5,10 @@ import (
 	"testing"
 )
 
-const testUserSID = "S-1-5-21-1000-2000-3000-1001"
+const (
+	testUserSID = "S-1-5-21-1000-2000-3000-1001"
+	sidUsers    = "S-1-5-32-545" // BUILTIN\Users
+)
 
 func allow(sid string, mask uint32) winACE {
 	return winACE{Type: aceAccessAllowed, Mask: mask, SID: sid}
@@ -39,6 +42,22 @@ func TestJudgeWindowsFile(t *testing.T) {
 		{"Users read the config", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow("S-1-5-32-545", fileGenericRead))}, "", WorldRead, ""},
 		{"a deny entry only narrows", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(winACE{Type: aceAccessDenied, Mask: fullAccess, SID: "S-1-1-0"})}, "", OwnerOnly, ""},
 		{"inherit-only entry", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(winACE{Type: aceAccessAllowed, Flags: aceInheritOnly, Mask: fullAccess, SID: "S-1-1-0"})}, "", OwnerOnly, ""},
+		// one row per mask bit, so dropping any bit from maskWrites, maskReads or the trusted set fails a row
+		{"Users GENERIC_WRITE", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, genericWrite))}, "", WorldRead, "may write"},
+		{"Users MAXIMUM_ALLOWED", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, accessMaximum))}, "", WorldRead, "may write"},
+		{"Users FILE_WRITE_DATA", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, fileWriteData))}, "", WorldRead, "may write"},
+		{"Users FILE_WRITE_EA", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, fileWriteEA))}, "", WorldRead, "may write"},
+		{"Users FILE_WRITE_ATTRIBUTES", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, fileWriteAttributes))}, "", WorldRead, "may write"},
+		{"Users DELETE", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, accessDelete))}, "", WorldRead, "may write"},
+		{"Users WRITE_OWNER", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, accessWriteOwner))}, "", WorldRead, "may write"},
+		{"Users FILE_READ_DATA", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, fileReadData))}, "", OwnerOnly, "may read"},
+		{"Users GENERIC_READ", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, genericRead))}, "", OwnerOnly, "may read"},
+		{"Users FILE_EXECUTE", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, fileExecute))}, "", OwnerOnly, "may read"},
+		{"Users GENERIC_EXECUTE", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidUsers, genericExecute))}, "", OwnerOnly, "may read"},
+		{"INTERACTIVE may not write the ticket", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidInteractive, fileGenericWrite))}, "", GroupRead, "may write"},
+		{"OWNER RIGHTS is trusted", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidOwnerRights, fullAccess))}, "", OwnerOnly, ""},
+		{"TrustedInstaller is trusted", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow(sidTrustedInstaller, fullAccess))}, "", OwnerOnly, ""},
+		{"CREATOR OWNER is not trusted", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(allow("S-1-3-0", fullAccess))}, "", OwnerOnly, "may write"},
 		{"unknown entry type", winFileSecurity{Owner: sidSystem, DACLPresent: true, ACEs: with(winACE{Type: 5, Mask: fullAccess})}, "", WorldRead, "type 5"},
 	}
 	for _, c := range cases {

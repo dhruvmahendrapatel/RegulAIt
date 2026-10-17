@@ -55,6 +55,11 @@ function stepRun(jobLines, id) {
   return body.map((l) => l.slice(strip)).join("\n");
 }
 
+/** the lines that are not whole-line comments (a trailing comment is kept, so nothing can hide behind a `#`) */
+const code = (lines) => lines.filter((l) => !l.trimStart().startsWith("#"));
+/** any mention of the secrets context: `secrets.X`, `secrets['X']`, `toJSON(secrets)`, `secrets: inherit` */
+const SECRETS = /\bsecrets\b/;
+
 /** the env names the step maps from secrets */
 function secretEnvNames(jobLines) {
   return jobLines.map((l) => /^\s+([A-Z0-9_]+): \$\{\{ secrets\.[A-Z0-9_]+ \}\}\s*$/.exec(l)).filter(Boolean).map((m) => m[1]);
@@ -65,6 +70,25 @@ describe("endpoint-agent.yml signing jobs (ADR-0195 owner decision 1)", () => {
 
   it("still runs on pull requests, so the job-level guard is what keeps secrets out of them", () => {
     expect(yaml).toMatch(/^on:\n {2}pull_request:/m);
+  });
+
+  it("is triggered by exactly pull_request, push and workflow_dispatch (no pull_request_target or workflow_run)", () => {
+    const lines = yaml.split("\n");
+    const at = lines.indexOf("on:");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const keys = [];
+    for (const l of lines.slice(at + 1)) {
+      if (l.trim() !== "" && !l.startsWith(" ")) break;
+      const m = /^ {2}([A-Za-z_]+):/.exec(l);
+      if (m) keys.push(m[1]);
+    }
+    expect(keys.sort()).toEqual(["pull_request", "push", "workflow_dispatch"]);
+  });
+
+  it("calls no reusable workflow (a `uses:` job could be handed secrets: inherit)", () => {
+    for (const [id, lines] of all) {
+      expect(code(lines).filter((l) => /^ {4}uses:/.test(l) || /uses:\s*(\.\/|\S*\.github\/workflows\/)/.test(l)), id).toEqual([]);
+    }
   });
 
   it("has the three signing jobs, each a release job in the protected environment", () => {
@@ -78,11 +102,11 @@ describe("endpoint-agent.yml signing jobs (ADR-0195 owner decision 1)", () => {
   });
 
   it("lets no other job read a secret", () => {
-    const readers = [...all].filter(([, lines]) => lines.some((l) => l.includes("secrets."))).map(([id]) => id);
+    const readers = [...all].filter(([, lines]) => code(lines).some((l) => SECRETS.test(l))).map(([id]) => id);
     expect(readers.sort()).toEqual([...SIGNING_JOBS].sort());
     // and nothing outside a job (workflow-level env) does either
     const beforeJobs = yaml.slice(0, yaml.indexOf("\njobs:\n"));
-    expect(beforeJobs.split("\n").filter((l) => !l.trimStart().startsWith("#") && l.includes("secrets."))).toEqual([]);
+    expect(code(beforeJobs.split("\n")).filter((l) => SECRETS.test(l))).toEqual([]);
   });
 
   for (const id of SIGNING_JOBS) {

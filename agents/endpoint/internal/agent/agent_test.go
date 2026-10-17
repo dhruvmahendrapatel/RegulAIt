@@ -503,6 +503,21 @@ func TestLocalDisabledKindsNarrowCollection(t *testing.T) {
 	}
 }
 
+// Without root: a file this user owns, checked against another uid, is an unsafe file (the uid check runs in CI).
+func TestReadCheckedRefusesAnotherOwnerUID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readChecked(path, os.Getuid(), OwnerOnly); err != nil {
+		t.Fatalf("own file: %v", err)
+	}
+	other := os.Getuid() + 1
+	if _, err := readChecked(path, other, OwnerOnly); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid") {
+		t.Fatalf("checked against uid %d: %v", other, err)
+	}
+}
+
 // A system file owned by another uid is an unsafe file, and a bulk token file so owned is never used.
 func TestFileOwnedByAnotherUIDIsUnsafe(t *testing.T) {
 	if os.Getuid() != 0 {
