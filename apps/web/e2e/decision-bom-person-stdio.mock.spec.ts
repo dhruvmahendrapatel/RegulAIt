@@ -35,8 +35,8 @@ const SERVER = U(1);
 const PROJECT = U(2);
 const RELAXATION = U(3);
 const SET_AUDIT = U(4);
-const SESSION_DECISION = U(5);
-const API_KEY_DECISION = U(6);
+const RELAXED_DECISION = U(5);
+const REFUSED_DECISION = U(6);
 // the admin who set the relaxation: installBuilderMock's signed-in "Avery Admin"
 const SETTER = ME;
 
@@ -103,18 +103,18 @@ async function setup(page: Page): Promise<Proxy> {
     const via = authorization === null && cookie?.includes("regulait_session=") ? "session" : "api_key";
     px.calls.push({ via, authorization, cookie });
     if (via === "session") {
-      px.decisions.set(SESSION_DECISION, decisionRead(SESSION_DECISION, PLACED_L2, { id: RELAXATION, scopeKind: "project", scopeId: PROJECT, setBy: SETTER, setAt: SET_AT, clearedBy: null, clearedAt: null, setAuditId: SET_AUDIT }));
+      px.decisions.set(RELAXED_DECISION, decisionRead(RELAXED_DECISION, PLACED_L2, { id: RELAXATION, scopeKind: "project", scopeId: PROJECT, setBy: SETTER, setAt: SET_AT, clearedBy: null, clearedAt: null, setAuditId: SET_AUDIT }));
       return json(route, { jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ok" }] } });
     }
-    px.decisions.set(API_KEY_DECISION, decisionRead(API_KEY_DECISION, REFUSED_L3, null));
+    px.decisions.set(REFUSED_DECISION, decisionRead(REFUSED_DECISION, REFUSED_L3, null));
     return json(route, { error: "execution_profile_unavailable", ruleId: "execution-profile", reason: "class_below_required" }, 409);
   });
   await page.route(/\/v1\/audit(\?|$)/, async (route) => {
     const q = new URL(route.request().url()).searchParams;
     px.auditQueries.push(q.toString());
     const all = [
-      ...(px.decisions.has(SESSION_DECISION) ? [decisionRow(SESSION_DECISION, "allow")] : []),
-      ...(px.decisions.has(API_KEY_DECISION) ? [decisionRow(API_KEY_DECISION, "deny")] : []),
+      ...(px.decisions.has(RELAXED_DECISION) ? [decisionRow(RELAXED_DECISION, "allow")] : []),
+      ...(px.decisions.has(REFUSED_DECISION) ? [decisionRow(REFUSED_DECISION, "deny")] : []),
       relaxed,
     ];
     const id = q.get("id");
@@ -165,7 +165,7 @@ test("a person's own call from an interactive session runs at L2; the BOM shows 
   expect(px.calls).toHaveLength(1);
   expect(px.calls[0]).toMatchObject({ via: "session", authorization: null });
 
-  await openBom(page, SESSION_DECISION);
+  await openBom(page, RELAXED_DECISION);
   const facts = page.getByTestId("decision-bom-execution");
   await expect(facts.getByText("L3 lowered to L2 by an admin for this project", { exact: false })).toBeVisible();
   await expect(facts.getByRole("cell", { name: "Placed on an executor", exact: false })).toBeVisible();
@@ -185,11 +185,11 @@ test("a person's own call from an interactive session runs at L2; the BOM shows 
   await expect(page).toHaveURL(new RegExp(`/ui/admin/audit\\?id=${SET_AUDIT}$`));
   await expect(page.getByTestId("audit-only-row")).toContainText(SET_AUDIT);
   await expect(page.getByRole("row").filter({ hasText: "may now run at L2 instead of L3" })).toHaveCount(1);
-  await expect(page.getByRole("button", { name: `Decision BOM for audit row ${SESSION_DECISION}`, exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: `Decision BOM for audit row ${RELAXED_DECISION}`, exact: true })).toHaveCount(0);
   expect(px.auditQueries).toContain(`id=${SET_AUDIT}`);
   // and back to every row
   await page.getByRole("button", { name: "Show every row", exact: true }).click();
-  await expect(page.getByRole("button", { name: `Decision BOM for audit row ${SESSION_DECISION}`, exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: `Decision BOM for audit row ${RELAXED_DECISION}`, exact: true })).toBeVisible();
 });
 
 test("NEGATIVE CONTROL: the same call with an API key stays at L3 and its BOM names no relaxation", async ({ page }) => {
@@ -199,7 +199,7 @@ test("NEGATIVE CONTROL: the same call with an API key stays at L3 and its BOM na
   expect(await callFromBrowser(page, { authorization: "Bearer test-only-api-key" })).toBe(409);
   expect(px.calls[0]).toMatchObject({ via: "api_key" });
 
-  await openBom(page, API_KEY_DECISION);
+  await openBom(page, REFUSED_DECISION);
   const facts = page.getByTestId("decision-bom-execution");
   await expect(facts).toContainText("L3");
   await expect(facts).toContainText("class_below_required");
