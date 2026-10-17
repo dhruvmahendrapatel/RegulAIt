@@ -1517,7 +1517,9 @@ settle what the decisions above leave open:
 12. **A result needs a placed task** (review HIGH-1). In the result transaction, on the locked run, any status but
     `not_run` is accepted only when `task_placement_id` is set and that placement's linked report is `placed`.
     Otherwise the run ends `not_run` (`isolation_unavailable`, cause `engine_task_not_placed`) and the route answers
-    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested.
+    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested. A `not_run` envelope
+    of an unplaced task is accepted as the run's end but its content is dropped too (no items, raw report or scan
+    record; recheck L1, `engine-runs.ts`).
 13. **First enable** (review; was open question 1). The manifest names each engine's `workerAttestedSwitches`
     (promptfoo `REGULAIT_PROMPTFOO_WORKER_ISOLATED`, modelscan `REGULAIT_MODELSCAN_SCANNER_ISOLATED`, garak its
     worker switches and `REGULAIT_GARAK_WORKER_SELFTEST`). The runner's report meets them, or a fresh, passing
@@ -1525,7 +1527,9 @@ settle what the decisions above leave open:
     (the org floor raised to the profile's `minClass`; a customer plane through the admin's mapping), found by
     `engine-worker-attestation.ts`. Without one they fail `executor_attestation_missing:<switch>` (fail closed). The
     basis is recorded whole in the self-test verdict and its audit row (`executorAttestation`), on the admin
-    self-test, the registration and the runner's report; the lease admission reads it again in its transaction.
+    self-test, the registration and the runner's report. The lease reads it ONCE per poll, before its transaction
+    (recheck L4), records it on the lease's audit row and names it on every refusal; the admission inside the
+    transaction uses that one reading, it does not read the basis again.
     An executor never self-tests, so never attests, a profile its backend cannot serve on this host (runsc without
     an input volume for `engine-worker`); no offer of it ever reaches that executor.
 14. **The engine-worker floor setting** (review LOW-1). For an agent-null engine run whose configured profile is the
@@ -1546,8 +1550,10 @@ settle what the decisions above leave open:
     executor's attestation of the profile, which does not read the task's environment. The real control is the
     sandbox's network denial (`--network=none`, the gateway channel only), as decision 19 of ADR-0187 already says.
 18. **Review round 1, the rest.** The task start re-runs the lease's own checks (the run-as person; an agent run's
-    entitlement and project attribution; an artifact scan's artifact access) and ends the run `not_run` with the
-    lease's code. A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
+    entitlement to the target and judge, a judge that is gone, the manifest's required judge (`judge_required`),
+    an agent with no provider model (`agent_not_dispatchable`) and project attribution; an artifact scan's artifact
+    access) and ends the run `not_run` with the lease's code. (The two dispatch checks were added on 2026-10-17;
+    until then this point overstated them.) A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
     than rotating the key the sandbox holds. One gateway process holds at most 512 MiB of unacknowledged task output
     across every task (`output_overflow` past it). A `not_run` envelope of an unplaced task is dropped too (no items,
     raw report or scan record). The result route also refuses on a task refusal held in memory before the watchdog
@@ -1957,3 +1963,26 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
   executor switch) is added only if a customer needs it.
 - **Follow-ups after #385 verifies L2:** apply the outside `HostConfig` check to the gVisor backend too, and pass
   `--cgroupns private` on the gVisor line.
+
+## I5 follow-up: refusal ordering (2026-10-17)
+
+No migration. CI gateway shard 4 (run 38991262736) saw "an executor that reports another input digest" read the
+task's refusal as `session_lost` instead of `execution_profile_mismatch`. The mismatch, the offer's `mismatch`
+status and its report row commit in one transaction, before the quarantine. The stdio watchdog then sees the offer
+ended and calls `lose()` on the session, and the task's end hook stamped `session_lost` in memory before any read of
+the committed report.
+
+1. **A lost session is no longer a refusal by itself.** The task records only that its session was lost
+   (`sessionLost`). Reading the task's state resolves the refusal in order: a refusal already held, then the
+   placement's linked report (`mismatch` reads `execution_profile_mismatch`; a `session_lost` row reads
+   `session_lost`), then the offer's own end (`offer_<status>`), and only then the lost session. The result route's
+   in-memory check (`engineTaskRefusalOf`) still refuses a lost session before it is resolved (fail closed).
+2. **Point 18's dispatch checks** (`judge_required`, `agent_not_dispatchable`, a judge that is gone) now run at the
+   task start, as at the lease (pinned in `zz-adr0190-i5-engines.test.ts`).
+3. **Points 12 and 13** were corrected above: the dropped `not_run` envelope of an unplaced task, and the attestation
+   basis read once per poll, outside the lease transaction.
+4. The "a refusal holds no task of its own" test now asks about its own run (`engineTaskHeldFor(runId)`) rather than
+   comparing the process-wide task count, which other tests' tasks could change.
+
+**Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
+database shards run it.

@@ -99,6 +99,7 @@ import { buildExportBundle, resolveExportSigningKey } from "./export-bundle.js";
 import { resolveLicense } from "./licensing.js";
 import { packControlsSection } from "./compliance-packs.js";
 import { resolveSchedulerConfig } from "./scheduler.js";
+import { databaseNow } from "./db-clock.js";
 
 /** the audit row's actor when the caller is the identity-less bootstrap token */
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -404,7 +405,8 @@ export async function generateReport(
     now?: Date;
   },
 ): Promise<GenerateResult | GenerateRefusal> {
-  const now = args.now ?? new Date();
+  // M-075: the period is compared with audit_log.at and usage rows (database clock)
+  const now = args.now ?? (await databaseNow(db));
   const def = args.definition;
   const scopeProjectIds = await resolveScopeProjectIds(db, def);
   const decision = evaluateReportAccess({
@@ -568,7 +570,8 @@ export async function runDueReportSchedules(
   generated: Array<{ scheduleId: string; runId: string; definition: string }>;
   skipped: Array<{ scheduleId: string; reason: string }>;
 }> {
-  const now = opts.now ?? new Date();
+  // M-075: schedules are due by the database clock, as the rows they read are stamped
+  const now = opts.now ?? (await databaseNow(db));
   const isAdmin = opts.isAdmin ?? true;
   const due = await db.select().from(reportSchedules).where(eq(reportSchedules.enabled, true));
   const generated: Array<{ scheduleId: string; runId: string; definition: string }> = [];

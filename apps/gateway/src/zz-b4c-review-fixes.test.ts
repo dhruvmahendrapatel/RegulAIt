@@ -51,6 +51,7 @@ import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { totpCode, totpStep } from "./totp.js";
+import { awaitTotpHeadroom } from "./testing/totp-window.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -450,6 +451,7 @@ describe("F6: step-up ceremonies ride the strict auth-tier rate limit", () => {
     const enrolled = await as(u.s, "POST", "/auth/totp/enroll");
     expect(enrolled.statusCode, enrolled.body).toBe(200);
     const secret = enrolled.json().secret as string;
+    await awaitTotpHeadroom();
     expect((await as(u.s, "POST", "/auth/totp/activate", { code: totpCode(secret, totpStep() - 1) })).statusCode).toBe(200);
     return { ...u, secret };
   }

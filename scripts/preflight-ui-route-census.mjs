@@ -224,6 +224,21 @@ export function validatePattern(key) {
 /** where the scheduler job names a SUPERSEDED `job` must appear live */
 const SCHEDULER_JOBS_FILE = "apps/gateway/src/scheduler-jobs.ts";
 
+/**
+ * The job names `SCHEDULER_JOB_NAMES` defines in scheduler-jobs.ts: its `key: "name"` entries, read with comments
+ * removed. A real match, not a substring search: a name only in a comment, or in a string outside the constant, is
+ * not a job. Null when the file or the constant is missing (every superseded `job` is then stale).
+ */
+export function schedulerJobNames(text) {
+  if (typeof text !== "string") return null;
+  const block = /export const SCHEDULER_JOB_NAMES = \{([\s\S]*?)\n\} as const;/.exec(text);
+  if (!block) return null;
+  const body = block[1].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const names = new Set();
+  for (const m of body.matchAll(/^\s*[A-Za-z_$][\w$]*\s*:\s*"([^"\n]+)"\s*,?\s*$/gm)) names.add(m[1]);
+  return names;
+}
+
 /** is a MACHINE_ONLY key a prefix pattern (rather than one exact route)? */
 const isPattern = (key) => key.endsWith("/*");
 
@@ -346,7 +361,7 @@ export function census({
       const { replacement, job } = superseded.get(key);
       if (!all.has(replacement)) fail("stale", key, `superseded by ${replacement}, which the gateway does not serve`);
       else if (!reached.has(replacement)) fail("stale", key, `superseded by ${replacement}, which the UI does not call either`);
-      if (job !== undefined && !(fileText(SCHEDULER_JOBS_FILE) ?? "").includes(`"${job}"`)) {
+      if (job !== undefined && !(schedulerJobNames(fileText(SCHEDULER_JOBS_FILE))?.has(job) ?? false)) {
         fail("stale", key, `superseded by scheduler job '${job}', which ${SCHEDULER_JOBS_FILE} no longer names`);
       }
       continue;
