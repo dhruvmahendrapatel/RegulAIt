@@ -58,8 +58,11 @@ const DIGEST = executionProfileDigest(SHIPPED_EXECUTION_PROFILES.restricted);
 let db: Db;
 const rows = <R>(r: unknown) => (r as { rows: R[] }).rows;
 const one = async <T>(stmt: ReturnType<typeof sql>) => rows<T>(await db.execute(stmt))[0]!;
+// the database's refusal text is on the driver error drizzle attaches as `cause`, not on its "Failed query" wrapper
 const refusedWith = async (stmt: ReturnType<typeof sql>, re: RegExp) => {
-  await expect(db.execute(stmt)).rejects.toThrow(re);
+  const err = await db.execute(stmt).then(() => null, (e: unknown) => e);
+  expect(err, "the statement was refused").not.toBeNull();
+  expect(String((err as Error)?.message ?? "") + String((err as { cause?: Error })?.cause?.message ?? "")).toMatch(re);
 };
 const until = async (cond: () => boolean | Promise<boolean>, ms = 5_000) => {
   const end = Date.now() + ms;
