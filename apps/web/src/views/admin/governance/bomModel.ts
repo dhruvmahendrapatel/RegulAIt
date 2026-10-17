@@ -436,6 +436,8 @@ export interface ExecutionView {
   offerId: string | null;
   imageDigest: string | null;
   runtimeFlagsSha256: string | null;
+  /** ADR-0190 owner decision C: the person's own stdio relaxation the requirement relied on (null when none) */
+  relaxation: { relaxationId: string; scopeKind: "mcp_server" | "project"; scopeId: string } | null;
 }
 /** ADR-0190 I4: one linked report of an offered placement (live, unsigned: shown beside the signed body) */
 export interface PlacementReportView {
@@ -461,7 +463,27 @@ export function readExecution(value: unknown): ExecutionView | null {
   const base = ["workloadKind", "placement", "placementId", "requiredClass", "requiredBy", "appliedClass", "refusalCode", "profile", "executor", "attestation"];
   // ADR-0190 I4: three keys a capture from I4 on writes (absent from earlier v2 facts): never any other key
   const i4 = ["offerId", "imageDigest", "runtimeFlagsSha256"];
-  if (!e || !base.every((k) => k in e) || !Object.keys(e).every((k) => base.includes(k) || i4.includes(k))) return bad();
+  // ADR-0190 owner decision C: written only when a relaxation was used
+  const optional = [...i4, "relaxation"];
+  if (!e || !base.every((k) => k in e) || !Object.keys(e).every((k) => base.includes(k) || optional.includes(k))) return bad();
+  let relaxation: ExecutionView["relaxation"] = null;
+  if (e.relaxation !== undefined && e.relaxation !== null) {
+    const r = obj(e.relaxation);
+    if (
+      !r ||
+      !exactKeys(r, ["kind", "subjectKind", "relaxationId", "scopeKind", "scopeId"]) ||
+      r.kind !== "person_stdio_l2" ||
+      r.subjectKind !== "interactive_person" ||
+      !isUuid(r.relaxationId) ||
+      (r.scopeKind !== "mcp_server" && r.scopeKind !== "project") ||
+      !isUuid(r.scopeId) ||
+      e.workloadKind !== "mcp_stdio" ||
+      e.requiredClass === null
+    ) {
+      return bad();
+    }
+    relaxation = { relaxationId: r.relaxationId, scopeKind: r.scopeKind, scopeId: r.scopeId };
+  }
   const offerId = e.offerId ?? null;
   const imageDigest = e.imageDigest ?? null;
   const runtimeFlagsSha256 = e.runtimeFlagsSha256 ?? null;
@@ -510,6 +532,7 @@ export function readExecution(value: unknown): ExecutionView | null {
     offerId,
     imageDigest: imageDigest as string | null,
     runtimeFlagsSha256,
+    relaxation,
   };
 }
 

@@ -18,7 +18,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
-import { Badge, Button, Card, EmptyState, Field, Input, Modal, Select, Table } from "../../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, Select, Table } from "../../../../ui/kit";
 import { useAction } from "../../adminKit";
 import {
   assignableProfiles,
@@ -46,6 +46,16 @@ import {
   REFUSAL_TEXT,
   refusalText,
   REQUIRED_BY_TEXT,
+  adminFieldRaises,
+  parsePersonStdioRelaxations,
+  parseProjectSensitivities,
+  projectSensitivityBody,
+  relaxationFor,
+  SENSITIVITIES,
+  SENSITIVITY_LABEL,
+  subjectRefusal,
+  type PersonStdioScope,
+  type ProjectSensitivity,
   type AssignmentTargetKind,
   type Availability,
   type Backend,
@@ -64,6 +74,8 @@ const isolationKeys = {
   executors: ["admin", "isolation", "executors"] as const,
   placements: ["admin", "isolation", "execution-placements"] as const,
   assignment: (kind: string, id: string) => ["admin", "isolation", "assignment", kind, id] as const,
+  relaxations: ["admin", "isolation", "person-stdio-relaxations"] as const,
+  projectSensitivities: ["admin", "isolation", "project-sensitivities"] as const,
 };
 
 function unavailableText(what: string, a: Availability): string {
@@ -77,6 +89,7 @@ export function IsolationPanel() {
     <>
       <ProfilesCard />
       <ExecutorsCard />
+      <ProjectIsolationCard />
       <PlacementsCard />
     </>
   );
@@ -870,6 +883,218 @@ export function ExecutionProfileSelector(props: { context: string; targetKind: A
         </div>
       )}
       {act.error && <p role="alert">{act.error}</p>}
+    </div>
+  );
+}
+
+/** a refusal the owner decision C and D routes name, in words; anything else unchanged */
+async function subjectWrite<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    const text = subjectRefusal(e);
+    throw text ? new Error(text) : e;
+  }
+}
+
+/**
+ * ADR-0190 owner decision C: "a person's own stdio call" for one stdio MCP server or one project. By default a call
+ * with no agent runs at L3 (microVM). An admin may allow L2 for a PERSON in an INTERACTIVE session only (never an
+ * API key, an agent or an engine): `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId`. Allowing it
+ * asks for a step-up and is audited; restoring L3 needs no step-up and is audited. The gateway enforces it when it
+ * decides each call; this control only records the choice.
+ */
+export function PersonStdioRelaxationControl(props: { scopeKind: PersonStdioScope; scopeId: string; context: string }) {
+  const act = useAction();
+  const reasonId = useId();
+  const [confirming, setConfirming] = useState(false);
+  const q = useQuery({ queryKey: isolationKeys.relaxations, retry: false, queryFn: () => api.get<unknown>("/v1/execution-person-stdio-relaxations") });
+  const list = q.data === undefined ? null : parsePersonStdioRelaxations(q.data);
+  const current = q.isPending ? undefined : relaxationFor(list, props.scopeKind, props.scopeId);
+  const blocked = q.isError
+    ? unavailableText("the person's own call relaxations", availabilityOf(q.error))
+    : !q.isPending && current === undefined
+      ? "The gateway's answer could not be read, so the setting is not shown and cannot be changed."
+      : null;
+  const url = `/v1/execution-person-stdio-relaxations/${props.scopeKind}/${encodeURIComponent(props.scopeId)}`;
+  const allow = async () => {
+    setConfirming(false);
+    if (await act.run(() => subjectWrite(() => withStepUp((h) => stepUpApi.put(url, { relaxed: true }, h))), "L2 allowed for a person's own calls (audited)")) await q.refetch();
+  };
+  const restore = async () => {
+    if (await act.run(() => subjectWrite(() => api.put(url, { relaxed: false })), "L3 restored for a person's own calls")) await q.refetch();
+  };
+  const scopeText = props.scopeKind === "mcp_server" ? "this server" : "this project";
+  return (
+    <div className={v.stackTight} data-testid="person-stdio-relaxation">
+      <p>
+        <strong>A person&apos;s own calls · {props.context}:</strong>{" "}
+        {current === undefined ? (
+          <Badge tone="neutral">Not reported</Badge>
+        ) : current === null ? (
+          <Badge tone="ok">L3 · MicroVM sandbox (strict default)</Badge>
+        ) : (
+          <Badge tone="warn">L2 allowed · audited</Badge>
+        )}
+      </p>
+      <p className={v.dim} id={reasonId}>
+        {blocked ??
+          (q.isPending
+            ? "Loading the setting in force…"
+            : `A local MCP call made with no agent runs at L3 by default. Allowing L2 applies only to a person signed in to the console, never to an API key, an agent or an engine, and only for ${scopeText}. A stricter project, compliance tag or server profile still wins. Allowing it asks you to confirm it is you; both changes are audited.`)}
+      </p>
+      {current !== undefined && current !== null && (
+        <p className={v.faint}>
+          Allowed {ago(new Date(current.createdAt).toISOString())}. A saved setting is policy; it does not show that any call ran under it.
+        </p>
+      )}
+      <div>
+        {current === null && (
+          <Button size="sm" disabled={act.busy || blocked !== null} aria-describedby={reasonId} onClick={() => setConfirming(true)}>
+            Allow L2 for a person&apos;s own calls
+          </Button>
+        )}
+        {current && (
+          <Button size="sm" variant="ghost" disabled={act.busy || blocked !== null} onClick={() => void restore()}>
+            Restore the L3 default
+          </Button>
+        )}
+      </div>
+      {act.error && <p role="alert">{act.error}</p>}
+      <ConfirmModal
+        open={confirming}
+        title="Allow L2 for a person's own calls?"
+        confirmLabel="Allow L2 (audited)"
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => void allow()}
+        body={
+          <div className={v.stackTight}>
+            <p>
+              Local MCP calls that a person makes from a console session, with no agent, on {scopeText} ({props.context}) will be allowed to run
+              in an L2 user-space kernel sandbox instead of an L3 microVM.
+            </p>
+            <p>API keys, agents and engines keep the L3 floor. The gateway asks you to confirm it is you and records the change in its audit log.</p>
+          </div>
+        }
+      />
+    </div>
+  );
+}
+
+/**
+ * ADR-0190 owner decisions C and D, per project: the sensitivity isolation uses is the strictest of the project's AI
+ * use cases, raised by an admin-set field (`PUT /v1/execution-project-sensitivities/:projectId`, step-up, audited).
+ * The field can never lower it. A project with neither cannot run isolable calls (refused, policy unresolved).
+ */
+function ProjectIsolationCard() {
+  const q = useQuery({ queryKey: isolationKeys.projectSensitivities, retry: false, queryFn: () => api.get<unknown>("/v1/execution-project-sensitivities") });
+  const parsed = q.data === undefined ? null : parseProjectSensitivities(q.data);
+  const failed = q.isError || (!q.isPending && parsed === null);
+  const [open, setOpen] = useState<string | null>(null);
+  const selected = parsed?.find((p) => p.projectId === open) ?? null;
+  return (
+    <Card
+      title="Project isolation"
+      actions={
+        <Button size="sm" variant="ghost" disabled={q.isFetching} onClick={() => void q.refetch()}>
+          Check again
+        </Button>
+      }
+    >
+      <div className={v.stack}>
+        <p className={v.dim}>
+          A project&apos;s sensitivity for isolation is the strictest of its AI use cases. An admin may raise it, never lower it; each change asks
+          you to confirm it is you and is audited. A project with no use case and no sensitivity set cannot run isolable calls: they are refused
+          as policy unresolved.
+        </p>
+        {failed ? (
+          <ReadFailure what="project isolation settings" q={q} parsed={parsed} />
+        ) : (
+          <Table<ProjectSensitivity>
+            rows={parsed ?? []}
+            rowKey={(r) => r.projectId}
+            loading={q.isPending}
+            columns={[
+              { key: "name", header: "Project", render: (r) => r.name },
+              {
+                key: "useCases",
+                header: "From use cases",
+                render: (r) => (r.useCaseCount === 0 ? "No use case" : r.useCaseSensitivity ? SENSITIVITY_LABEL[r.useCaseSensitivity] : "Unreadable"),
+              },
+              { key: "admin", header: "Set by an admin", render: (r) => (r.adminSensitivity ? SENSITIVITY_LABEL[r.adminSensitivity] : "Not set") },
+              {
+                key: "effective",
+                header: "In force",
+                render: (r) => (r.effectiveSensitivity ? SENSITIVITY_LABEL[r.effectiveSensitivity] : <Badge tone="warn">Unresolved · calls refused</Badge>),
+              },
+              { key: "person", header: "A person's own calls", render: (r) => (r.personStdioRelaxationId ? <Badge tone="warn">L2 allowed</Badge> : "L3 (default)") },
+              {
+                key: "manage",
+                header: "Manage",
+                align: "right",
+                render: (r) => (
+                  <Button size="sm" variant="ghost" aria-label={`Manage isolation for project ${r.name}`} aria-pressed={open === r.projectId} onClick={() => setOpen(open === r.projectId ? null : r.projectId)}>
+                    Manage
+                  </Button>
+                ),
+              },
+            ]}
+            empty={<EmptyState title="No projects yet" body="Create a project first; its isolation settings appear here." />}
+          />
+        )}
+        {selected && <ProjectIsolationEditor key={selected.projectId} project={selected} onSaved={() => void q.refetch()} />}
+      </div>
+    </Card>
+  );
+}
+
+function ProjectIsolationEditor(props: { project: ProjectSensitivity; onSaved: () => void }) {
+  const { project } = props;
+  const act = useAction();
+  const [draft, setDraft] = useState<string>(project.adminSensitivity ?? "");
+  const changed = draft !== (project.adminSensitivity ?? "");
+  const preview = projectSensitivityBody(draft);
+  const save = async () => {
+    if (!preview) return act.setError("Choose a sensitivity from the list.");
+    const ok = await act.run(
+      () => subjectWrite(() => withStepUp((h) => stepUpApi.put(`/v1/execution-project-sensitivities/${encodeURIComponent(project.projectId)}`, preview, h))),
+      "Project sensitivity saved (audited)",
+    );
+    if (ok) props.onSaved();
+  };
+  const raisesAfter = preview ? adminFieldRaises({ useCaseSensitivity: project.useCaseSensitivity, adminSensitivity: preview.sensitivity }) : false;
+  return (
+    <div className={v.stack} data-testid="project-isolation-editor">
+      <h3>{project.name}</h3>
+      <Field label="Sensitivity set by an admin">
+        <Select value={draft} disabled={act.busy} onChange={(e) => setDraft(e.target.value)}>
+          <option value="">Not set (use cases only)</option>
+          {SENSITIVITIES.map((s) => (
+            <option key={s} value={s}>
+              {SENSITIVITY_LABEL[s]}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <p className={v.dim}>
+        {project.useCaseCount === 0
+          ? "This project has no AI use case, so this field alone sets its sensitivity. Cleared, the project's isolable calls are refused."
+          : project.useCaseSensitivity === null
+            ? "A use case of this project has a sensitivity that cannot be read, so the project's sensitivity does not resolve whatever this field says: its isolable calls stay refused until the use case is fixed."
+            : `Its use cases give ${SENSITIVITY_LABEL[project.useCaseSensitivity]}. ${
+                draft === "" ? "With the field cleared, that is what applies." : raisesAfter ? "This raises it." : "This is not above the use cases, so it has no effect."
+              }`}{" "}
+        Saving any change asks you to confirm it is you and is audited.
+      </p>
+      {changed && (
+        <div>
+          <Button size="sm" variant="primary" disabled={act.busy} onClick={() => void save()}>
+            Save project sensitivity
+          </Button>
+        </div>
+      )}
+      {act.error && <p role="alert">{act.error}</p>}
+      <PersonStdioRelaxationControl scopeKind="project" scopeId={project.projectId} context={project.name} />
     </div>
   );
 }
