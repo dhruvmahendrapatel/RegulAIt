@@ -410,6 +410,24 @@ describe("repo readers (ADR-0195 SD1)", () => {
       expect((await readCapped(res(b.stream), 2_500)).text).toBe("a".repeat(2_000));
     });
 
+    it("an empty scope list is unverified, never read_only (Bitbucket empty header, GitLab {} and {scopes: []})", async () => {
+      upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "" } });
+      expect((await reader("bitbucket").inspectCredential()).status).toBe("unverified");
+      for (const body of [{}, { scopes: [] }]) {
+        upstream.reset();
+        upstream.route("GET", "/api/v4/personal_access_tokens/self", { status: 200, body });
+        expect((await reader("gitlab").inspectCredential()).status, JSON.stringify(body)).toBe("unverified");
+      }
+    });
+
+    it("GitLab token scopes and Azure DevOps JSON are read under the metadata cap", async () => {
+      const over = { "content-length": String(REPO_READ_DEFAULTS.maxMetadataBytes + 1) };
+      upstream.route("GET", "/api/v4/personal_access_tokens/self", { status: 200, body: { scopes: ["read_api"] }, headers: over });
+      await expect(reader("gitlab").inspectCredential()).rejects.toThrow(/metadata cap/);
+      upstream.route("GET", "/org/_apis/git/repositories?api-version=7.1", { status: 200, body: { value: [] }, headers: over });
+      await expect(reader("azure_devops", { baseUrl: `${upstream.baseUrl}/org` }).listRepos()).rejects.toThrow(/metadata cap/);
+    });
+
     it("refuses a metadata body over the metadata cap with a bounded error", async () => {
       upstream.route("GET", "/repos/acme/huge", { status: 200, body: {}, headers: { "content-length": String(REPO_READ_DEFAULTS.maxMetadataBytes + 1) } });
       await expect(reader("github").getTree("acme/huge")).rejects.toThrow(/metadata cap/);

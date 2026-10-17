@@ -175,9 +175,10 @@ export class GitLabRepoReader implements RepoReader {
     const body = await this.http.metadataJson<{ scopes?: unknown }>(res);
     const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s): s is string => typeof s === "string") : [];
     const write = scopes.filter((s) => !GITLAB_READ_ONLY_SCOPES.has(s));
-    return write.length > 0
-      ? { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` }
-      : { status: "read_only", scopes, detail: "token scopes are read-only" };
+    if (write.length > 0) return { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` };
+    // no scopes array, or an empty one, proves nothing: it must not clear the "write scope unverified" posture row
+    if (scopes.length === 0) return { status: "unverified", scopes, detail: "GitLab reported no scopes for this token; write scope unverified" };
+    return { status: "read_only", scopes, detail: "token scopes are read-only" };
   }
 
   async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {

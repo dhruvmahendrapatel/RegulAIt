@@ -165,9 +165,10 @@ export class BitbucketRepoReader implements RepoReader {
     }
     const scopes = raw.split(",").map((s) => s.trim()).filter(Boolean);
     const write = scopes.filter((s) => !bitbucketScopeReadOnly(s));
-    return write.length > 0
-      ? { status: "write_scope", scopes, detail: `the credential grants write scope(s): ${write.join(", ")}` }
-      : { status: "read_only", scopes, detail: "credential scopes are read-only" };
+    if (write.length > 0) return { status: "write_scope", scopes, detail: `the credential grants write scope(s): ${write.join(", ")}` };
+    // an empty scope list proves nothing: it must not clear the "write scope unverified" posture row
+    if (scopes.length === 0) return { status: "unverified", scopes, detail: "Bitbucket reported no scopes for this credential; write scope unverified" };
+    return { status: "read_only", scopes, detail: "credential scopes are read-only" };
   }
 
   async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {
