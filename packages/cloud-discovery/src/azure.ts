@@ -65,6 +65,22 @@ export function parentAiResource(resourceId: string): string | null {
 
 export const AZURE_PUBLIC_AUTHORITY_HOST = "https://login.microsoftonline.com";
 
+/**
+ * A sovereign-cloud or private authority host must be a plain https origin (secure by default, review of #404
+ * recheck 6): no plaintext, no credentials, no path beyond `/`, no query or fragment for a token to ride on.
+ */
+export function assertHttpsAuthority(value: string): void {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    throw new Error("cloud-discovery: authorityHost must be an https URL");
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || (u.pathname !== "/" && u.pathname !== "")) {
+    throw new Error("cloud-discovery: authorityHost must be a plain https origin (no credentials, path, query or fragment)");
+  }
+}
+
 export interface AzureScanTarget {
   subscriptionIds: string[];
   /** optional management group scope for Resource Graph (organisation-level scope) */
@@ -99,6 +115,7 @@ interface GraphRow {
 /** build the Entra credential for one source, on the guarded HttpClient */
 export function azureCredential(deps: AzureScannerDeps, authorityHost?: string): TokenCredential {
   const cred = azureCredentialSchema.parse(deps.credential);
+  if (authorityHost !== undefined) assertHttpsAuthority(authorityHost);
   // finding 1: always name the authority host, so AZURE_AUTHORITY_HOST in the process environment cannot move the
   // token request (and the client assertion or secret it carries) to another host. @azure/identity also reads
   // AZURE_REGIONAL_AUTHORITY_NAME with no option to override it; that only selects a regional Microsoft host

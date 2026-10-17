@@ -10,6 +10,7 @@ import {
 } from "./credentials.js";
 import { classifyError, digestObservations, redact } from "./report.js";
 import { CLOUD_AI_SERVICE_SEED } from "./seed.js";
+import { assertHttpsAuthority } from "./azure.js";
 import { fakeCloud } from "./test-cloud.js";
 import { BodyTooLargeError, GuardedAzureHttpClient, readBodyCapped, requestAwareFetch } from "./transport.js";
 import { createHttpHeaders, createPipelineRequest } from "@azure/core-rest-pipeline";
@@ -22,6 +23,15 @@ describe("requestAwareFetch", () => {
     expect(cloud.calls[0]).toMatchObject({ method: "POST", body: "a=1" });
     expect(cloud.calls[0]!.headers.get("x-k")).toBe("v");
     expect(cloud.calls[0]!.url.href).toBe("https://api.example.test/x");
+  });
+});
+
+describe("Azure authorityHost", () => {
+  it("accepts only a plain https origin", () => {
+    expect(() => assertHttpsAuthority("https://login.microsoftonline.us")).not.toThrow();
+    for (const bad of ["http://login.example", "https://u:p@login.example", "https://login.example/x", "https://login.example/?a=1", "not a url"]) {
+      expect(() => assertHttpsAuthority(bad)).toThrow();
+    }
   });
 });
 
