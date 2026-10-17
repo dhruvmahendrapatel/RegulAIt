@@ -194,7 +194,7 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(k.statusCode).toBe(200);
     const kinds = k.json().kinds as Array<{ kind: string; built: boolean }>;
     expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab"]);
-    const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "cloud_aws", target: { accountId: "x" }, scope: { orgLevel: true, include: [] } }, bare);
+    const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "cloud_aws", target: { accountId: "123456789012" }, scope: { orgLevel: true, include: [] } }, bare);
     expect(c.statusCode).toBe(409);
     expect(c.json().error).toBe("scanner_not_built");
   });
@@ -230,7 +230,9 @@ describe("ADR-0195 SD0 discovery foundation", () => {
 
   it("is admin-only", async () => {
     expect((await inject("GET", "/v1/discovery/sources", memberKey)).statusCode).toBe(403);
-    expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { org: "x" }, scope: { orgLevel: true, include: [] } })).statusCode).toBe(403);
+    // a body valid under every check (SD1's repo target schema too), so only the admin gate can refuse it
+    expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { namespace: "x" }, scope: { orgLevel: true, include: [] } })).statusCode).toBe(403);
+    expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { namespace: "x" }, scope: { orgLevel: true, include: [] } }, bare)).statusCode).toBe(403);
   });
 
   it("a new source is disabled; enabling needs the step-up bound to kind, target and scope", async () => {
