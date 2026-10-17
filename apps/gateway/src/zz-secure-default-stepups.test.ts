@@ -316,14 +316,19 @@ describe("MCP server: opening private ranges is a relaxation", () => {
 describe("egress allow entries: adding one, and turning an opt-in on, are relaxations", () => {
   it("adding a plain entry needs a step-up bound to the host (ADR-0034 owner amendment 2026-10-16); a note edit and removal need nothing", async () => {
     const host = `sds-add-${RUN}.example.test`;
-    const before = (await db.select({ id: egressAllowHosts.id }).from(egressAllowHosts).where(eq(egressAllowHosts.host, host))).length;
+    const payload = { host, note: "sds: plain entry" };
+    const rows = async () => (await db.select({ id: egressAllowHosts.id }).from(egressAllowHosts).where(eq(egressAllowHosts.host, host))).length;
+    // egress-allow-cleanup: refused — an API key can never step up, so nothing is written
+    const byKey = await viaKey("POST", "/v1/egress-allow-hosts", payload);
+    expect(byKey.statusCode, byKey.body).toBe(403);
+    expect(byKey.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", methods: [] });
+    // egress-allow-cleanup: refused — a person without a grant is prompted, and nothing is written
+    const ungranted = await asAdmin("POST", "/v1/egress-allow-hosts", payload);
+    expect(ungranted.statusCode, ungranted.body).toBe(403);
+    expect(ungranted.json().action).toEqual({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true } } });
+    expect(await rows()).toBe(0);
     // egress-allow-cleanup: afterAll — the id lands in created.allowHosts, which afterAll removes
-    const added = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, note: "sds: plain entry" }, {
-      op: "egress_allow_host",
-      host,
-      values: { added: true },
-    });
-    expect(before).toBe(0); // nothing was written by the refused attempts
+    const added = await asAdmin("POST", "/v1/egress-allow-hosts", payload, { [STEP_UP_HEADER]: await grantFor(ungranted.json().action) });
     expect(added.statusCode, added.body).toBe(201);
     created.allowHosts.push(added.json().id);
     expect(added.json()).toMatchObject({ host, allowPrivateRanges: false, allowPlaintextHttp: false });
@@ -622,6 +627,40 @@ describe("recheck: spellings, fail-closed import, concurrency and url binding", 
     }
     const [row] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host));
     expect(row!.allowPrivateRanges).toBe(false);
+  });
+
+  it("two writers adding the same new host: the second waits on the per-host lock and is refused 409, its grant unspent", async () => {
+    const host = `sds-addrace-${RUN}.example.test`;
+    const action = { kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true } } };
+    const token = await grantFor(action);
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    // the other writer: holds the same per-host lock the route takes and adds the host, not yet committed
+    const other = await db.$client.connect();
+    try {
+      await other.query("begin");
+      await other.query("select pg_advisory_xact_lock(hashtext($1))", [`egress_allow_host:${host}`]);
+      await other.query("insert into egress_allow_hosts (host, allow_private_ranges, allow_plaintext_http, note) values ($1, false, false, $2)", [host, "the other writer"]);
+      // egress-allow-cleanup: refused — the row the other writer committed is removed below
+      const pending = asAdmin("POST", "/v1/egress-allow-hosts", { host, note: "mine" }, { [STEP_UP_HEADER]: token });
+      for (let i = 0; i < 100; i += 1) {
+        const r = await db.execute(sql`select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock' and query ilike '%pg_advisory_xact_lock%'`);
+        if ((r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n > 0) break;
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      await other.query("commit");
+      const res = await pending;
+      // decided "added" before the lock; under it the host exists, so nothing is overwritten and nothing is spent
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("changed_concurrently");
+    } finally {
+      await other.query("rollback").catch(() => undefined);
+      other.release();
+    }
+    const [row] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host));
+    expect(row).toMatchObject({ note: "the other writer", allowPrivateRanges: false });
+    created.allowHosts.push(row!.id);
+    const [grant] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, tokenHash));
+    expect(grant!.usedAt).toBeNull();
   });
 
   it("importRegistryEntry with no step-up check refuses an import that opens private ranges", async () => {

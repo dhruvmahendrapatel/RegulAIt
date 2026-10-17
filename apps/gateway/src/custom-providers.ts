@@ -30,6 +30,7 @@ import {
   customModelProviders,
   egressAllowHosts,
   eq,
+  sql,
   type CustomModelProviderRow,
   type Db,
 } from "@regulait/db";
@@ -326,6 +327,11 @@ export function registerCustomProviderRoutes(
     const out = await db.transaction(async (tx): Promise<Out> => {
       // ALWAYS locked and re-decided, relaxing or not: a write decided as "no relaxation" (a note edit re-sending
       // opt-ins that were on) must not turn an opt-in back on that a concurrent admin just turned off
+      // FOR UPDATE cannot lock a row that does not exist yet: two writers adding the same new host would both
+      // decide "added", and the second would spend its grant and overwrite the first. Every write of this host
+      // first takes a per-host transaction lock, so a concurrent addition commits before this one re-decides
+      // (and is then refused 409 below, its grant unspent).
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`egress_allow_host:${host}`}))`);
       const [now] = await tx.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host)).for("update");
       if (JSON.stringify(relaxationsAgainst(now)) !== JSON.stringify(relaxed)) {
         return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
@@ -337,11 +343,14 @@ export function registerCustomProviderRoutes(
         if (!su.ok) return { refused: { status: su.status, body: su.body } };
         stepUp = su.method;
       }
-      const [written] = await tx
-        .insert(egressAllowHosts)
-        .values(values)
-        .onConflictDoUpdate({ target: egressAllowHosts.host, set: values })
-        .returning();
+      // an addition never overwrites: a row that appeared anyway (a writer outside this route) is a 409, not an
+      // upsert the audit row would wrongly call "added"
+      const [written] = now
+        ? await tx.insert(egressAllowHosts).values(values).onConflictDoUpdate({ target: egressAllowHosts.host, set: values }).returning()
+        : await tx.insert(egressAllowHosts).values(values).onConflictDoNothing({ target: egressAllowHosts.host }).returning();
+      if (!written) {
+        return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
+      }
       // AUDITED: widening what the gateway may connect to is a governance act,
       // and opting a host into private ranges or plaintext doubly so.
       await tx.insert(auditLog).values({

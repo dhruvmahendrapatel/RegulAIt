@@ -1673,14 +1673,28 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
  * added by the bootstrap credential any more: it is reported, not forced, and an admin adds it in the UI.
  */
 async function seedDemoEgressAllow(): Promise<void> {
+  const skipped: string[] = [];
   const addEntry = async (payload: Json): Promise<void> => {
     const res = await app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload });
-    if (res.statusCode === 403 && (res.json() as Json).error === "step_up_required") {
-      console.log(
-        `  egress allow entry '${payload.host}' not added: an admin can step up now, so the bootstrap credential no ` +
-          "longer passes the step-up (B4S-06). Add it as an admin under Custom LLM providers > Egress allow-list.",
-      );
-      return;
+    // ONLY the bootstrap credential's own refusal once an admin can step up (step-up.ts, B4S-06) is skipped;
+    // every other refusal — a prompt, an API key's, a validation error — still fails the seed
+    if (res.statusCode === 403) {
+      let body: Json = {};
+      try {
+        body = res.json() as Json;
+      } catch {
+        /* not JSON: not the refusal we expect */
+      }
+      if (
+        body.error === "step_up_required" &&
+        body.actionKind === "settings_relax" &&
+        body.credential === "bootstrap" &&
+        Array.isArray(body.methods) &&
+        body.methods.length === 0
+      ) {
+        skipped.push(String(payload.host));
+        return;
+      }
     }
     if (res.statusCode >= 400) throw new Error(`POST /v1/egress-allow-hosts -> ${res.statusCode}: ${res.body}`);
   };
@@ -1708,6 +1722,12 @@ async function seedDemoEgressAllow(): Promise<void> {
       host: "generativelanguage.googleapis.com",
       note: "demo: the seeded gemini-pro agent's compiled endpoint (strict compiled-egress posture, ADR-0181)",
     });
+  }
+  if (skipped.length > 0) {
+    console.log(
+      `  egress allow entries NOT added (${skipped.join(", ")}): an admin can step up now, so the bootstrap ` +
+        "credential no longer passes the step-up (B4S-06). Add them as an admin under Custom LLM providers > Egress allow-list.",
+    );
   }
 }
 

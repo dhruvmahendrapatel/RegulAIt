@@ -899,22 +899,35 @@ Branch `b7-relax-stepups`. No migration.
 - **Audit.** `egress-allow-host-set` records `relaxation: true`, `relaxed` (including `added`) and the step-up method.
   The reason says `added` or `updated`. Removal (`DELETE`) needs no step-up and stays audited as
   `egress-allow-host-removed`.
-- **Concurrency.** The write still locks the row and re-decides. A host decided as new, which a concurrent write adds
-  first, is refused with 409 `changed_concurrently`, and the grant is not spent.
+- **Concurrency.** `FOR UPDATE` cannot lock a row that does not exist yet. So every write of a host first takes a
+  per-host transaction lock (`pg_advisory_xact_lock(hashtext('egress_allow_host:<host>'))`), then locks the row and
+  re-decides.
+  - A second writer adding the same new host waits for the first to commit. It then sees the host stored and is
+    refused 409 `changed_concurrently` before its grant is spent.
+  - An addition inserts with `ON CONFLICT DO NOTHING`, so it never overwrites a row. A row that appears anyway
+    (written outside this route) is also a 409, never an upsert that the audit row would call "added".
+  - `zz-secure-default-stepups.test.ts` pins this: a writer holding the lock adds the host uncommitted, and the
+    granted POST waits, gets 409, leaves the other writer's row unchanged, and its grant stays unused.
 - **Web UI.** The Custom LLM providers page already sent this POST through `withStepUp`, so the existing prompt now
   also appears for a plain addition. Only the code comment changed.
 - **Demo seeder.** `seedDemoEgressAllow` (`apps/gateway/src/seed.ts`) still runs before Ada enrols her
   authenticator. During first-admin setup the bootstrap credential passes the step-up (B4S-06), so the plain Gemini
   entry is added the same way as the loopback ones. No flag or seed-only path skips the guard.
   - **Re-seed after enrolment.** On a re-seed after Ada has enrolled, a host that is missing can no longer be added
-    by the bootstrap credential. The seeder prints that the host was not added, and why, and continues; an admin
-    adds it in the UI. Before this change, a missing loopback host made the seeder throw.
+    by the bootstrap credential. The seeder skips only that exact refusal: 403 `step_up_required`,
+    `actionKind: settings_relax`, `credential: "bootstrap"`, no methods. It prints one summary line naming the
+    skipped hosts, and an admin adds them in the UI. Any other refusal still fails the seed. Before this change, a
+    missing loopback host made the seeder throw.
+  - Not done: a `demo:check` beat asserting that the demo allow entries exist. CI pins `demo:check` at 19/19 beats,
+    and `zz-c11-demo-check.test.ts` requires that no beat FAILs on a database it does not seed through `seed.ts`.
+    A new beat needs its own small slice.
 - **Tests.** `zz-secure-default-stepups.test.ts` covers:
-  - a plain addition: refused to an API key; a prompt bound to `{added: true}`; refused with a grant for other facts;
-    written with the bound grant; audited;
+  - a plain addition: refused to an API key; a prompt bound to `{added: true}`, with no row written by either
+    refusal; written with the bound grant; audited;
   - a note-edit upsert with no step-up;
   - removal with no step-up;
   - a new entry with both opt-ins under one grant;
+  - two writers adding the same new host (above);
   - the spelling and concurrency cases, updated to carry `added`.
 
   Suites that add an entry only as setup wrap that call in `relaxStepUpAround`. This applies to `connection-egress`,
