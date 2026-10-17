@@ -93,7 +93,7 @@ describe("the batch-4, batch-5 and identity rows mirror @regulait/shared", () =>
 
   it("the step-up action copy counts every action kind", () => {
     const count = BATCH4_SPECS.stepUpActions!.control.kind === "set" ? BATCH4_SPECS.stepUpActions!.control.options.length : 0;
-    expect(count).toBe(8);
+    expect(count).toBe(9);
     expect(BATCH4_SPECS.stepUpActions!.strict.startsWith("All nine:")).toBe(true);
   });
 
