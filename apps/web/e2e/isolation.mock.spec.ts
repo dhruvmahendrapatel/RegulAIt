@@ -154,7 +154,7 @@ async function setup(page: Page, init: Partial<IsolationMock> = {}): Promise<Iso
       return json(route, { name: pv.name, versions: [{ ...pv, body: { schema: "regulait.execution-profile.v1", name: pv.name, minClass: pv.minClass, secrets: "none" } }] });
     }
     if (p === "/v1/execution-placements/pl-1") {
-      return json(route, { ...PLACEMENTS.placements[0], auditId: "a-pl-1", reportSha256: null, audit: { id: "a-pl-1", at: AT, ruleId: "execution-refused", effect: "deny", reason: "placement refused (class_below_required)", detail: {} } });
+      return json(route, { ...PLACEMENTS.placements[0], auditId: "a-pl-1", reportSha256: null, attestationStrength: "software_attested", audit: { id: "a-pl-1", at: AT, ruleId: "execution-refused", effect: "deny", reason: "placement refused (class_below_required)", detail: {} } });
     }
     if (p === "/v1/execution-profiles") {
       if (m.profilesStatus !== 200) return json(route, { error: "forbidden" }, m.profilesStatus);
@@ -488,14 +488,25 @@ test("Engines: a new profile starts from a live version, renamed, at the chosen 
   expect(m.profileCreates).toEqual([{ body: { schema: "regulait.execution-profile.v1", name: "team-new", minClass: "microvm", secrets: "none" } }]);
 });
 
-test("Engines: a custom profile gets a new version or is retired; shipped ones offer neither; a placement shows its evidence", async ({ page }) => {
+test("Engines: a custom profile gets a new version or is retired; the shipped references offer neither, engine-worker only a new version; a placement shows its evidence", async ({ page }) => {
   const m = await setup(page);
   await openEngines(page);
   await expect(page.getByRole("button", { name: "New version of restricted", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Retire team-old", exact: true })).toHaveCount(0);
+  // ADR-0190 I5 follow-up: engine-worker is versioned like a custom profile, and never retired
+  await expect(page.getByRole("button", { name: "New version of engine-worker", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Retire engine-worker", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "New version of team-loose", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "New version of team-loose" });
-  await dialog.getByLabel("Minimum isolation class", { exact: true }).selectOption("microvm");
+  // no class is preselected, and the current class is refused here rather than sent for a 409 "unchanged"
+  const minClass = dialog.getByLabel("Minimum isolation class", { exact: true });
+  await expect(minClass).toHaveValue("");
+  const current = PROFILES.find((p) => p.name === "team-loose")!.minClass;
+  await minClass.selectOption(current);
+  await dialog.getByRole("button", { name: "Create version", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Choose a different class");
+  expect(m.profileVersions).toEqual([]);
+  await minClass.selectOption("microvm");
   await dialog.getByRole("button", { name: "Create version", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect(m.profileVersions).toEqual([{ name: "team-loose", body: { body: { schema: "regulait.execution-profile.v1", name: "team-loose", minClass: "microvm", secrets: "none" } } }]);
@@ -512,5 +523,6 @@ test("Engines: a custom profile gets a new version or is retired; shipped ones o
   await expect(evidence).toContainText("a-pl-1");
   await expect(evidence).toContainText("placement refused (class_below_required)");
   await expect(evidence).toContainText("None (nothing was started)");
+  await expect(evidence).toContainText("software-attested");
   await axe(page);
 });
