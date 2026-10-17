@@ -1,0 +1,1 @@
+{"publicJwk":{"crv":"P-256","kty":"EC","x":"AAAA","y":"BBBB"},"keyProtection":"software","keyProvider":"file","keyFallbackReason":"no key hardware reachable: /dev/tpmrm0 does not exist","agentVersion":"0.1.0","os":"linux","arch":"amd64","deviceUser":"device-user"}

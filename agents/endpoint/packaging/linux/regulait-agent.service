@@ -1,0 +1,15 @@
+# systemd user unit: the agent runs as each logged-in user, unprivileged (R15 §2.1, call 1).
+[Unit]
+Description=RegulAIt endpoint agent (read-only)
+After=default.target
+
+[Service]
+ExecStart=/usr/bin/regulait-agent run
+Restart=on-failure
+RestartSec=300
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=default.target
