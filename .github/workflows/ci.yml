@@ -278,6 +278,17 @@ jobs:
           node scripts/coordination.mjs lint
           pnpm exec vitest run --dir scripts
 
+      # The engine image lock may only change as `--apply` changes it (#425
+      # review): every published sourceCommit is on main, and an engine whose
+      # image changed moved its publishGeneration to exactly main's + 1. A
+      # hand edit passes the derived-file check, so it is checked against
+      # main's copy here. The checkout is shallow, so main's history is fetched.
+      - name: Engine image lock — every published build is of main, one generation per new image
+        if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}
+        run: |
+          git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main
+          node scripts/engine-images-lock.mjs --check --base origin/main
+
   gateway-tests:
     name: gateway shard ${{ matrix.shard }}
     runs-on: ubuntu-latest

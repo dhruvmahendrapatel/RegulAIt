@@ -15,6 +15,7 @@
  * (`policy_unresolved`), exactly as before the lock existed (secure by default, ADR-0180).
  *
  *   node scripts/engine-images-lock.mjs --check                   exit 1 when a derived file is stale
+ *   node scripts/engine-images-lock.mjs --check --base origin/main   also: the lock changed only as --apply changes it
  *   node scripts/engine-images-lock.mjs --write                   rewrite the derived files from the lock
  *   node scripts/engine-images-lock.mjs --apply <publish.json>    record a publish (the workflow's artifact)
  *
@@ -97,6 +98,33 @@ export function validateLock(lock) {
     if (e.publishGeneration < 1) throw new LockError(`${id}: a published entry has publishGeneration 1 or more`);
   }
   return lock;
+}
+
+/**
+ * The lock against the base's copy (#425 review, medium): the main-only and generation rules must hold however the
+ * lock was changed, not only through `--apply`. Every published entry's sourceCommit is on main (`onMain`, default
+ * `assertCommitOnMain`), an engine whose image changed moves its `publishGeneration` to exactly the base's + 1, and an
+ * engine whose image did not change keeps its whole entry. `base` is the lock on the base ref (origin/main).
+ */
+export function checkLockTransition(base, lock, { onMain = (c) => assertCommitOnMain(c) } = {}) {
+  validateLock(base);
+  validateLock(lock);
+  for (const id of ENGINE_IDS) {
+    const b = base.engines[id];
+    const e = lock.engines[id];
+    if (e.sourceCommit !== null) onMain(e.sourceCommit);
+    const changed = b.manifestDigest !== e.manifestDigest || b.imageId !== e.imageId || b.repository !== e.repository;
+    if (changed && e.publishGeneration !== b.publishGeneration + 1) {
+      throw new LockError(`${id}: a new image moves publishGeneration to exactly ${b.publishGeneration + 1} (the base's + 1), not ${e.publishGeneration}`);
+    }
+    if (!changed && JSON.stringify(e) !== JSON.stringify(b)) throw new LockError(`${id}: an engine whose image did not change keeps its whole entry`);
+  }
+  return lock;
+}
+
+/** the lock as committed on `ref` (git is injectable for tests) */
+export function readLockAt(ref, { git = (args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8" }) } = {}) {
+  return validateLock(JSON.parse(git(["show", `${ref}:${path.relative(ROOT, PATHS.lock).split(path.sep).join("/")}`])));
 }
 
 /** record a publish into the lock (pure): only engines named in the publish change */
@@ -184,6 +212,13 @@ function main(argv) {
   const [mode, arg] = argv;
   if (mode === "--check") {
     const lock = readLock();
+    // `--check --base <ref>`: the lock may only have changed as `--apply` would change it (CI, after fetching main)
+    if (arg === "--base") {
+      const ref = argv[2];
+      if (!ref) throw new LockError("--check --base needs the base ref (origin/main)");
+      checkLockTransition(readLockAt(ref), lock, { onMain: (c) => assertCommitOnMain(c, { ref }) });
+      console.log(`engine image lock: every published build is of ${ref}, and each changed image moved its generation once`);
+    } else if (arg !== undefined) throw new LockError(`unknown --check option: ${arg}`);
     const stale = [];
     if (readFileSync(PATHS.ts, "utf8") !== renderTs(lock)) stale.push(path.relative(ROOT, PATHS.ts));
     const compose = readFileSync(PATHS.compose, "utf8");
@@ -209,7 +244,7 @@ function main(argv) {
     console.log(`engine image lock: wrote ${mode === "--apply" ? "the lock, " : ""}the generated module and the compose defaults`);
     return 0;
   }
-  console.error("usage: engine-images-lock.mjs --check | --write | --apply <publish.json>");
+  console.error("usage: engine-images-lock.mjs --check [--base <ref>] | --write | --apply <publish.json>");
   return 2;
 }
 
