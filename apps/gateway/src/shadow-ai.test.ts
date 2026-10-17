@@ -51,7 +51,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { changeDescriptorSchema, DEFAULT_AI_SIGNATURES, EVIDENCE_MAX_ROWS, startInstanceSchema } from "@regulait/shared";
-import { SHADOW_AI_RULE_IDS } from "./shadow-ai.js";
+import { SHADOW_AI_RULE_IDS, SHIPPED_SIGNATURE_SEED } from "./shadow-ai.js";
 
 const { buildApp } = await import("./app.js");
 
@@ -123,7 +123,10 @@ describe("the signature catalogue is data, not code", () => {
     const list = await get("/v1/shadow-ai/catalogue");
     expect(list.statusCode).toBe(200);
     const body = list.json();
-    expect(body.total).toBe(DEFAULT_AI_SIGNATURES.length);
+    // the default signatures plus the discovery slices' artifact seed rows (ADR-0195 SD2: cloud_ai_service)
+    expect(body.total).toBe(SHIPPED_SIGNATURE_SEED.length);
+    expect(SHIPPED_SIGNATURE_SEED.length).toBeGreaterThan(DEFAULT_AI_SIGNATURES.length);
+    expect(body.signatures.filter((s: { kind: string }) => s.kind === "cloud_ai_service").length).toBe(SHIPPED_SIGNATURE_SEED.length - DEFAULT_AI_SIGNATURES.length);
     expect(body.oldestEntryAt).toBeTruthy();
     expect(body.posture).toMatch(/never a release/);
   });

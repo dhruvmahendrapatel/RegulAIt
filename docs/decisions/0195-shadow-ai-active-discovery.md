@@ -262,9 +262,15 @@ Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 regis
 - **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated. A
   federated credential fails its run with an explicit reason until the ADR-0188 issuer has an RS256 federation key
   and a mint path for these audiences (key material and schema outside this slice); AWS `assume_role` needs
-  RegulAIt's own AWS principal and fails the same way. Organisation-level AWS account enumeration is not built. The
-  `cloud_ai_service` seed rows (`CLOUD_AI_SERVICE_SEED`) are exported but not yet installed by the catalogue seed
-  route, which lives in the shadow-AI module.
+  RegulAIt's own AWS principal and fails the same way. Organisation-level AWS account enumeration is not built.
+- **Seed.** The catalogue seed route installs `CLOUD_AI_SERVICE_SEED` with the default signatures
+  (`SHIPPED_SIGNATURE_SEED` in `shadow-ai.ts`; SD1 and SD3 add theirs the same way); admin-edited rows stay untouched.
+- **Review of #404 (fixed).** Endpoints are pinned against ambient SDK configuration (AWS endpoint URLs, shared-config
+  profiles, FIPS and dual-stack; `GOOGLE_CLOUD_UNIVERSE_DOMAIN`; `AZURE_AUTHORITY_HOST`), with an env-poisoning test.
+  `@azure/identity` also reads `AZURE_REGIONAL_AUTHORITY_NAME` with no override; it only selects a regional Microsoft
+  host, which still needs an allow entry. Trail-bucket objects are capped (8 MB read, 64 MB inflated) and response
+  digests at 4 MB; token-exchange responses go through an undigested credential fetch; Azure audit evidence is
+  attributed only to discovered AI resources; error details redact `key=`/`token=`-style values.
 
 ## As built: SD0 foundation (2026-10-17, migration 0202)
 

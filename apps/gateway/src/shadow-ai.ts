@@ -127,6 +127,25 @@ import { defaultBaseUrlFor } from "@regulait/model-provider";
 import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { activeDiscoverySources, activeDiscoveryStatement } from "./discovery-posture.js";
+import { CLOUD_AI_SERVICE_SEED } from "@regulait/cloud-discovery";
+
+/**
+ * Everything the shipped seed installs: the default signatures, plus each discovery slice's own artifact seed rows
+ * (ADR-0195 SD2: `cloud_ai_service`, matched by `identifier`). SD1 and SD3 add theirs here the same way.
+ */
+export const SHIPPED_SIGNATURE_SEED: ReadonlyArray<Omit<AiSignature, "lastUpdatedAt">> = Object.freeze([
+  ...DEFAULT_AI_SIGNATURES,
+  ...CLOUD_AI_SERVICE_SEED.map((r) => ({
+    provider: r.provider,
+    kind: r.kind,
+    value: r.value,
+    matchType: r.matchType,
+    minLength: null,
+    replacementNote: r.replacementNote,
+    provenance: r.provenance,
+    enabled: r.enabled,
+  })),
+]);
 
 const isImportKind = (k: string): k is EvidenceKind => (EVIDENCE_KINDS as readonly string[]).includes(k);
 
@@ -389,7 +408,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     const before = await db.select({ n: sql<number>`count(*)::int` }).from(aiEndpointSignatures);
     let inserted = 0;
     let refreshed = 0;
-    for (const s of DEFAULT_AI_SIGNATURES) {
+    for (const s of SHIPPED_SIGNATURE_SEED) {
       const [existing] = await db
         .select()
         .from(aiEndpointSignatures)
@@ -423,7 +442,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     await audit(req.authCtx.userId, "ai_endpoint_signature", null, SHADOW_AI_RULE_IDS.catalogueSeeded, "allow",
       `shipped signature seed installed: ${inserted} added, ${refreshed} refreshed (admin-edited rows untouched)`,
       { inserted, refreshed, before: before[0]?.n ?? 0 });
-    return { inserted, refreshed, total: DEFAULT_AI_SIGNATURES.length };
+    return { inserted, refreshed, total: SHIPPED_SIGNATURE_SEED.length };
   });
 
   app.post("/v1/shadow-ai/catalogue", async (req, reply) => {
