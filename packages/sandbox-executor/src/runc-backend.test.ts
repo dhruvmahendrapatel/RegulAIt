@@ -121,6 +121,8 @@ const goodHostConfig = (): ContainerHostConfig => ({
   UTSMode: "",
   CgroupnsMode: "private",
   Devices: [],
+  DeviceRequests: null,
+  DeviceCgroupRules: null,
   Binds: null,
   Mounts: [{ Type: "volume", Source: "regulait-init", Target: "/.regulait-init", ReadOnly: true }],
 });
@@ -216,6 +218,10 @@ describe("the outside view decides: each HostConfig property made untrue fails t
     ["the host UTS namespace", (h) => (h.UTSMode = "host"), "runtime_identity", "host_uts_shared"],
     ["the host cgroup namespace", (h) => (h.CgroupnsMode = "host"), "runtime_identity", "host_cgroupns"],
     ["no cgroup namespace reported", (h) => delete h.CgroupnsMode, "runtime_identity", "host_cgroupns"],
+    ["systempaths unconfined", (h) => (h.SecurityOpt = ["no-new-privileges=true", "systempaths=unconfined"]), "runtime_identity", "host_systempaths_unconfined"],
+    ["the SELinux label disabled", (h) => (h.SecurityOpt = ["no-new-privileges=true", "label=disable"]), "runtime_identity", "host_label_disabled"],
+    ["a device request (GPU)", (h) => (h.DeviceRequests = [{ Driver: "nvidia", Count: -1, Capabilities: [["gpu"]] }]), "runtime_identity", "host_device_requests"],
+    ["a device cgroup rule", (h) => (h.DeviceCgroupRules = ["c 1:3 mr"]), "runtime_identity", "host_device_cgroup_rules"],
     ["a host device", (h) => (h.Devices = [{ PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm", CgroupPermissions: "rwm" }]), "runtime_identity", "host_devices"],
   ];
   it.each(cases)("%s fails", (_n, mutate, probe, code) => {

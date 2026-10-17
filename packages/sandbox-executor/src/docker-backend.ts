@@ -115,6 +115,8 @@ export interface ContainerHostConfig {
   UTSMode?: unknown;
   CgroupnsMode?: unknown;
   Devices?: unknown;
+  DeviceRequests?: unknown;
+  DeviceCgroupRules?: unknown;
   Binds?: unknown;
   Mounts?: unknown;
 }

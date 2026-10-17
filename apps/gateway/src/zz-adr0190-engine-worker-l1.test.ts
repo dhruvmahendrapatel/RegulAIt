@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { aiUseCases, and, auditLog, createDb, desc, eq, executionProfiles, orgSettings, ORG_SETTINGS_ID, runMigrations, sql, type Db } from "@regulait/db";
+import { aiUseCases, and, auditLog, createDb, desc, eq, executionProfiles, mcpServers, orgSettings, ORG_SETTINGS_ID, runMigrations, sql, type Db } from "@regulait/db";
 import { EXECUTION_PROFILE_SCHEMA, executionProfileDigest, SHIPPED_EXECUTION_PROFILES, type ExecutionProfileBody } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { decidePlacement } from "./execution-placement.js";
@@ -191,5 +191,53 @@ describe("the revert: back to the exact shipped body, free, audited, and engines
     expect(back.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
     const live = await db.select({ version: executionProfiles.version }).from(executionProfiles).where(and(eq(executionProfiles.name, name), sql`${executionProfiles.retiredAt} is null`));
     expect(live.map((x) => x.version).sort()).toEqual([1, 2]);
+
+    // with the step-up given (off for this scratch database): reverted, audited as a relaxation too, and a stdio
+    // server pinned to the withdrawn v2 is counted (it now refuses profile_retired), as a retirement counts it
+    const sName = `ewl1-stdio-${RUN}`;
+    await db.insert(mcpServers).values({ name: sName, url: `stdio:${sName}`, transport: "stdio", stdioCommand: "/opt/mcp/bin/x", stdioArgs: [], stdioCommandDigest: "0".repeat(64), executionProfileId: v2.json().id });
+    const restore = await relaxStepUpForTest(db);
+    try {
+      const done = await inject("POST", `/v1/execution-profiles/${name}/versions`, adminAuth, { body: v1Body });
+      expect(done.statusCode, done.body).toBe(200);
+      expect(done.json()).toMatchObject({ version: 1, withdrawnVersions: [2], assignmentsNowRefused: 1 });
+    } finally {
+      await restore();
+    }
+    const [reverted] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-profile-reverted"), eq(auditLog.objectId, v1.json().id)));
+    expect(reverted?.detail).toMatchObject({ assignmentsNowRefused: 1, relaxations: ["resources"] });
+    const [relaxed] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-profile-relaxed"), eq(auditLog.objectId, v1.json().id)));
+    expect(relaxed?.detail).toMatchObject({ name, version: 1, revert: true, relaxedAgainstPrevious: ["resources"] });
+  });
+});
+
+describe("review of #397: a new version and a revert cannot interleave", () => {
+  it("a version judged against v2 refuses changed_concurrently when a revert withdraws v2 before its insert", async () => {
+    const name = `ewl1-race-${RUN}`;
+    const v1Body: ExecutionProfileBody = { ...structuredClone(SHIPPED_EXECUTION_PROFILES.restricted), schema: EXECUTION_PROFILE_SCHEMA, name, minClass: "microvm" };
+    expect((await inject("POST", "/v1/execution-profiles", adminAuth, { body: v1Body })).statusCode).toBe(201);
+    expect((await inject("POST", `/v1/execution-profiles/${name}/versions`, adminAuth, { body: { ...v1Body, resources: { ...v1Body.resources, cpuMillis: 500 } } })).statusCode).toBe(201);
+    let pending: ReturnType<typeof inject> | undefined;
+    await db.transaction(async (tx) => {
+      // hold the per-name lock the route takes before its insert
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`execution_profiles:${name}`}))`);
+      pending = inject("POST", `/v1/execution-profiles/${name}/versions`, adminAuth, { body: { ...v1Body, resources: { ...v1Body.resources, cpuMillis: 400 } } });
+      // wait until the request has read the state and is blocked on the lock (an ungranted advisory lock here)
+      let waiting = 0;
+      for (let i = 0; i < 400 && waiting === 0; i++) {
+        waiting = rows<{ n: number }>(
+          await db.execute(sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`),
+        )[0]!.n;
+        if (waiting === 0) await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(waiting).toBeGreaterThan(0);
+      // a revert lands first: v2 withdrawn (what revertTo writes under the same lock)
+      await tx.update(executionProfiles).set({ retiredAt: sql`now()` }).where(and(eq(executionProfiles.name, name), eq(executionProfiles.version, 2)));
+    });
+    const r = await pending!;
+    expect(r.statusCode, r.body).toBe(409);
+    expect(r.json()).toMatchObject({ error: "changed_concurrently" });
+    const versions = await db.select({ version: executionProfiles.version }).from(executionProfiles).where(eq(executionProfiles.name, name));
+    expect(versions.map((x) => x.version).sort()).toEqual([1, 2]);
   });
 });

@@ -1623,8 +1623,9 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      no opt-out in this release, because the gateway could not audit an executor-side switch (ADR-0180).
    - After the container starts, its own `HostConfig` (`docker inspect`) must show: the runtime it was asked for;
      not privileged; `CapDrop: [ALL]` and no `CapAdd`; `no-new-privileges`; no `seccomp=unconfined` and no
-     `apparmor=unconfined`; a read-only root; network `none`; IPC `none`; `CgroupnsMode: private`; no shared PID or
-     UTS namespace and no host user namespace; no device; no bind mount; and only read-only volume mounts.
+     `apparmor=unconfined`, `systempaths=unconfined` or `label=disable`; a read-only root; network `none`; IPC
+     `none`; `CgroupnsMode: private`; no shared PID or UTS namespace and no host user namespace; no device, device
+     request or device cgroup rule; no bind mount; and only read-only volume mounts.
    - Each contradiction makes its probe `not run` with a `host_*` code (or `container_runtime_mismatch`), so the
      report fails whatever the init printed.
 4. **A read-side backstop for every placement path.** `freshAttestation` is the one predicate behind the broker,
@@ -1650,9 +1651,17 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      SHA-256 of the body and unique (`execution_profiles_digest_uq`), and placements and attestations reference it.
      A revert is judged like a new version, against the strict reference and the version in force. Going back to a
      stricter version (an L1 engine-worker back to its exact shipped body) needs no step-up; going back to a looser
-     one needs the `settings_relax` step-up. It is audited `execution-profile-reverted` (a new
-     `ISOLATION_AUDIT_ACTIONS` entry) and is a compare-and-set under the per-name lock the guard takes. A withdrawn
-     version is never reinstated. "The version in force" is now the newest LIVE version, wherever the newest version
+     one needs the `settings_relax` step-up and is also audited `execution-profile-relaxed`, as a looser version is.
+     It is audited `execution-profile-reverted` (a new `ISOLATION_AUDIT_ACTIONS` entry). Like a retirement, it counts
+     the agent and stdio-server assignments pinned to a withdrawn version, which now refuse `profile_retired`, and
+     reports them as `assignmentsNowRefused` in the audit row and the response. It is a compare-and-set under the
+     per-name lock the guard takes. A withdrawn version is never reinstated. The panel labels a withdrawn row
+     "Withdrawn", not "Retired", numbers a new version after the newest version, and says "reverted" when the route
+     reverted.
+   - **A new version is a compare-and-set too** (review of #397). Its insert and audit rows run in one transaction
+     holding the same per-name advisory lock, and re-check that the newest version and the version in force are
+     still the ones it was judged against. A revert or another version in between refuses 409
+     `changed_concurrently`. "The version in force" is now the newest LIVE version, wherever the newest version
      was read before: the version route, the placement default, and the panel's "New version".
 6. **L1 for engines stays off by default and needs every relaxation.** Decision 11 lets an admin relax the
    engine_worker floor to L1 (owner decision 4: audited, step-up), so the L1 path exists, and it is strict by
@@ -1677,7 +1686,9 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
    - **Gateway, on a scratch database** (created and dropped by the file): `zz-adr0190-engine-worker-l1.test.ts`.
      An engine task is offered at L1 only once all three relaxations and a fresh L1 attestation exist. A version
      equal to the shipped body then reverts without a step-up and engines require L2 again. A looser revert needs the
-     step-up, and a withdrawn version is not reinstated. Versioning after a revert is expected to succeed once 0202 is
+     step-up, emits `execution-profile-relaxed` and counts a pinned assignment, and a withdrawn version is not
+     reinstated. A new version blocked on the per-name lock while a revert withdraws the version it was judged
+     against refuses `changed_concurrently`. Versioning after a revert is expected to succeed once 0202 is
      in the journal, and 409 `execution_profile_retired` until then.
    - **Web:** the panel's actions (`profileActions`, mirrored from the shared list) and one mocked e2e assertion.
 

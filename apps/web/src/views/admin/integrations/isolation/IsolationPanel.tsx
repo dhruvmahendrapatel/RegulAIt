@@ -39,7 +39,10 @@ import {
   parsePlacementDetail,
   parsePlacements,
   parseProfiles,
+  isWithdrawn,
+  nextVersionOf,
   profileActions,
+  versionOutcomeText,
   profileText,
   registerBody,
   REFUSAL_REASONS,
@@ -130,7 +133,7 @@ function ProfilesCard() {
           </p>
         )}
         {creating && rows && <NewProfileDialog profiles={assignableProfiles(rows)} onClose={() => setCreating(false)} />}
-        {versioning && <NewVersionDialog profile={versioning} onClose={() => setVersioning(null)} />}
+        {versioning && <NewVersionDialog profile={versioning} nextVersion={nextVersionOf(versioning.name, rows ?? [])} onClose={() => setVersioning(null)} />}
         {retiring && <RetireProfileDialog profile={retiring} onClose={() => setRetiring(null)} />}
         {failed ? (
           <ReadFailure what="execution profiles" q={q} parsed={rows} />
@@ -157,7 +160,15 @@ function ProfilesCard() {
                 key: "status",
                 header: "Status",
                 render: (r) =>
-                  isUnreadable(r) ? <Badge tone="neutral">Unmeasured</Badge> : r.retiredAt !== null ? <Badge tone="danger">Retired</Badge> : <Badge tone="ok">Live</Badge>,
+                  isUnreadable(r) ? (
+                    <Badge tone="neutral">Unmeasured</Badge>
+                  ) : isWithdrawn(r, rows ?? []) ? (
+                    <Badge tone="neutral">Withdrawn</Badge>
+                  ) : r.retiredAt !== null ? (
+                    <Badge tone="danger">Retired</Badge>
+                  ) : (
+                    <Badge tone="ok">Live</Badge>
+                  ),
               },
               {
                 key: "relaxed",
@@ -289,7 +300,7 @@ const isLatestVersion = (p: ProfileVersion, rows: ProfileRow[]) =>
  * body, at a chosen class. Looser than the version it replaces (or than its strict reference: `restricted`, or the
  * shipped engine-worker body) is a relaxation: step-up, audited.
  */
-function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void }) {
+function NewVersionDialog(props: { profile: ProfileVersion; nextVersion: number; onClose: () => void }) {
   const act = useAction();
   const formId = useId();
   const [minClass, setMinClass] = useState<string>(props.profile.minClass);
@@ -302,8 +313,9 @@ function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void 
       const detail = await api.get<unknown>(`/v1/execution-profiles/${encodeURIComponent(name)}`);
       const body = newProfileBody(versionBody(detail, props.profile.id), name, minClass);
       if (!body) throw new Error("The profile's current body could not be read. Nothing was created.");
-      return withStepUp((h) => stepUpApi.post(`/v1/execution-profiles/${encodeURIComponent(name)}/versions`, { body }, h));
-    }, `Execution profile ${name} versioned`);
+      // a body equal to an earlier live version is a revert: the toast says which happened
+      return versionOutcomeText(name, await withStepUp((h) => stepUpApi.post(`/v1/execution-profiles/${encodeURIComponent(name)}/versions`, { body }, h)));
+    });
     if (ok) props.onClose();
   };
   return (
@@ -329,8 +341,9 @@ function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void 
         }}
       >
         <p className={v.dim}>
-          Version {props.profile.version + 1} copies every control of version {props.profile.version}. Running workloads keep the version they
-          started with. A lower class is an audited relaxation and needs a step-up.
+          Version {props.nextVersion} copies every control of version {props.profile.version}. Running workloads keep the version they
+          started with. A lower class is an audited relaxation and needs a step-up. If the result equals an earlier live version, that version
+          is reverted to instead and the versions above it are withdrawn.
         </p>
         <Field label="Minimum isolation class">
           <Select value={minClass} onChange={(e) => setMinClass(e.target.value)}>

@@ -462,6 +462,27 @@ export function profileActions(p: Pick<ProfileVersion, "name" | "shipped">): { v
   return { version: !p.shipped || versionedShipped, retire: !p.shipped && !versionedShipped };
 }
 
+type VersionRow = Pick<ProfileVersion, "name" | "version" | "retiredAt">;
+const readable = (rows: readonly unknown[]): VersionRow[] =>
+  rows.filter((r): r is VersionRow => r !== null && typeof r === "object" && !("unreadable" in r) && "version" in r);
+
+/** the number a new version of `name` gets: the newest version + 1 (a withdrawn version keeps its number) */
+export function nextVersionOf(name: string, rows: readonly unknown[]): number {
+  return Math.max(0, ...readable(rows).filter((r) => r.name === name).map((r) => r.version)) + 1;
+}
+
+/** retired while another version of the same profile is live: withdrawn by a revert, not a retired profile */
+export function isWithdrawn(p: VersionRow, rows: readonly unknown[]): boolean {
+  return p.retiredAt !== null && readable(rows).some((r) => r.name === p.name && r.retiredAt === null);
+}
+
+/** what the version route answered, in words: a body equal to an earlier live version is a REVERT (200, `revertedFrom`) */
+export function versionOutcomeText(name: string, out: unknown): string {
+  const o = out !== null && typeof out === "object" ? (out as { version?: unknown; revertedFrom?: unknown }) : {};
+  const v = typeof o.version === "number" ? ` v${o.version}` : "";
+  return o.revertedFrom !== undefined && o.revertedFrom !== null ? `Execution profile ${name} reverted to${v}` : `Execution profile ${name} versioned${v ? ` as${v}` : ""}`;
+}
+
 /** `{profiles: [...]}`; null when the envelope is malformed; a malformed row is kept as `unreadable`, never dropped */
 export function parseProfiles(value: unknown): Array<ProfileVersion | { unreadable: true; index: number }> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "profiles")) return null;
