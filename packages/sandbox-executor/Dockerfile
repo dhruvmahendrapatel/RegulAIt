@@ -40,6 +40,10 @@ COPY --from=build /out /app
 COPY --chmod=0444 packages/sandbox-executor/sandbox-init/sandbox-init.mjs /app/sandbox-init/sandbox-init.mjs
 # the init volume's mount point, owned by the executor's uid (compose mounts the named volume here)
 RUN mkdir -p /regulait-init && chown 10001:10001 /regulait-init
+# ADR-0190 I5: the input volume's mount point, owned by the executor's uid (a fresh named volume copies this owner and
+# mode). 0711: the executor writes task inputs here; nobody else can list them. The runtime reaches a sandbox's own
+# read-only sub-directory by its path (`volume-subpath`), so other users need only traverse.
+RUN mkdir -p /executor-input && chown 10001:10001 /executor-input && chmod 0711 /executor-input
 # the executor's own state volume: its key (0600, written by the executor itself) survives a restart
 RUN mkdir -p /state && chown 10001:10001 /state && chmod 0700 /state
 ENV NODE_ENV=production \
