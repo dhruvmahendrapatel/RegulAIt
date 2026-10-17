@@ -75,7 +75,7 @@ export class AzureDevOpsRepoReader implements RepoReader {
   private async json<T>(path: string): Promise<{ body: T; res: ReadResponse }> {
     const res = await this.http.getOk(path, hint);
     if (res.status === 203) throw new GitProviderError("azure_devops GET failed (HTTP 203: sign-in page)" + hint(401), 401);
-    return { body: (await res.json()) as T, res };
+    return { body: await this.http.metadataJson<T>(res), res };
   }
 
   private repoPath(repo: string): string {

@@ -172,7 +172,7 @@ export class GitLabRepoReader implements RepoReader {
       return { status: "unverified", scopes: [], detail: "this GitLab version or token type cannot report its scopes; write scope unverified" };
     }
     if (res.status >= 400) await this.http.fail(res, hint);
-    const body = (await res.json()) as { scopes?: unknown };
+    const body = await this.http.metadataJson<{ scopes?: unknown }>(res);
     const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s): s is string => typeof s === "string") : [];
     const write = scopes.filter((s) => !GITLAB_READ_ONLY_SCOPES.has(s));
     return write.length > 0

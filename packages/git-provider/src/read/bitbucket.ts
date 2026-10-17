@@ -39,9 +39,11 @@ const hint = (status: number): string =>
  * ALLOW-LIST (secure by default, ADR-0180): Bitbucket scopes known to be
  * read-only — the bare OAuth scopes (`repository`, `account`, ...) and API-token
  * scopes that start with `read:`. Anything else (`*:write`, `*:admin`,
- * `webhook`, `pipeline:variable`, an unknown future scope) counts as write.
+ * `webhook`, `pipeline:variable`, `pullrequest`, `issue`, `wiki`, an unknown
+ * future scope) counts as write.
  */
-const BITBUCKET_READ_ONLY_SCOPES = new Set(["account", "email", "repository", "project", "pullrequest", "issue", "wiki", "snippet", "team", "pipeline", "runner"]);
+// `pullrequest` (comment, approve), `issue` (create, comment) and `wiki` (always editable) grant writes and are NOT here
+const BITBUCKET_READ_ONLY_SCOPES = new Set(["account", "email", "repository", "project", "snippet", "team", "pipeline", "runner"]);
 const bitbucketScopeReadOnly = (s: string): boolean => BITBUCKET_READ_ONLY_SCOPES.has(s) || (s.startsWith("read:") && !s.includes("write") && !s.includes("admin") && !s.includes("delete"));
 
 /** how deep the recursive `src` listing goes; deeper trees are reported truncated */

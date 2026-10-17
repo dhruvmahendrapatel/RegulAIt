@@ -116,7 +116,8 @@ describe("ADR-0195 SD1 repo scanners", () => {
     const fake = githubFake();
     const t = ctx(fake.fetchImpl);
     const res = await repoScanner("repo_github").run(t.c);
-    expect(res.credentialWriteScope).toBe("read_only");
+    // a non-classic token with an allow-listed scope header proves nothing: the reader says unverified
+    expect(res.credentialWriteScope).toBe("unverified");
     // the worker's own check accepts every observation
     const checked = checkObservations("repo_github", res.observations, "2026-10-17T00:00:00.000Z");
     expect(checked.length).toBe(res.observations.length);
@@ -166,6 +167,14 @@ describe("ADR-0195 SD1 repo scanners", () => {
     const oldSighting = res2.observations.find((o) => o.location?.path === "old.txt");
     expect(oldSighting).toBeUndefined(); // old.txt holds nothing AI-related: history adds only real sightings
     expect(t.counts().heartbeats).toBe(2);
+  });
+
+  it("passes the reader's verdict through: read_only for a classic read-only token, unverified with no scope header", async () => {
+    const classic = ["gh", "p_", "D".repeat(36)].join("");
+    const asClassic = { credential: { mode: "static" as const, publicConfig: {}, secret: classic } };
+    expect((await repoScanner("repo_github").run(ctx(githubFake().fetchImpl, asClassic).c)).credentialWriteScope).toBe("read_only");
+    const noHeader = githubFake((u) => (u.pathname === "/user" ? json({}) : undefined));
+    expect((await repoScanner("repo_github").run(ctx(noHeader.fetchImpl, asClassic).c)).credentialWriteScope).toBe("unverified");
   });
 
   it("refuses a write-scoped token before reading any repo", async () => {

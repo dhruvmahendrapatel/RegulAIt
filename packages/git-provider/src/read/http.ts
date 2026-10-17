@@ -83,21 +83,21 @@ export function encodeRepo(repo: string, minSegments = 2, maxSegments = 2): stri
   return repoSegments(repo, minSegments, maxSegments).map(encodeURIComponent).join("/");
 }
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
 /**
  * A reader's API base: https with no credentials, query or fragment. Plain
- * http is accepted only for a loopback host (the package's own fake-upstream
- * tests); the gateway's guarded fetch refuses loopback in production anyway.
+ * http is accepted only when the caller passes the test-only
+ * `allowInsecureHttpForTests` option, which the gateway never sets. (The
+ * egress guard is not relied on here: it can reach loopback and private
+ * addresses under `allowPrivateRanges` or the private-LAN posture.)
  */
-export function assertApiBase(label: string, baseUrl: string): URL {
+export function assertApiBase(label: string, baseUrl: string, allowInsecureHttpForTests = false): URL {
   let u: URL;
   try {
     u = new URL(baseUrl);
   } catch {
     throw new GitProviderError(`${label}: baseUrl is not a URL`, 400);
   }
-  const httpsOk = u.protocol === "https:" || (u.protocol === "http:" && LOOPBACK_HOSTS.has(u.hostname));
+  const httpsOk = u.protocol === "https:" || (u.protocol === "http:" && allowInsecureHttpForTests);
   if (!httpsOk || u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "") {
     throw new GitProviderError(`${label}: baseUrl must be an https URL with no credentials, query or fragment`, 400);
   }
@@ -157,9 +157,12 @@ export class ReadClient {
       throw new GitProviderError(`${init.label} reader requires an injected guarded fetch`);
     }
     this.base = trimTrailingSlashes(init.baseUrl);
-    this.origin = assertApiBase(init.label, this.base).origin;
-    // the token and every auth header value derived from it (Basic base64 forms) are scrubbed from errors
-    this.secrets = [init.token, ...Object.values(init.authHeaders).flatMap((v) => [v, v.slice(v.indexOf(" ") + 1)])].filter((x) => x.length >= 8);
+    this.origin = assertApiBase(init.label, this.base, init.opts.allowInsecureHttpForTests === true).origin;
+    // the token and the credential-bearing header values derived from it (Bearer/Basic forms) are scrubbed from errors
+    const credentialHeaders = ["authorization", "private-token"]
+      .map((h) => init.authHeaders[h])
+      .filter((v): v is string => typeof v === "string");
+    this.secrets = [init.token, ...credentialHeaders.flatMap((v) => [v, v.slice(v.indexOf(" ") + 1)])].filter((x) => x.length >= 8);
     this.fetchImpl = init.opts.fetchImpl;
     // 0 is meaningful: the caller (SD0's ctx.backoff) does the waiting itself
     const retries = init.opts.maxRetries;
@@ -242,7 +245,19 @@ export class ReadClient {
 
   async getJson<T>(pathOrUrl: string, hint: (status: number) => string, extraHeaders?: Record<string, string>): Promise<{ body: T; res: ReadResponse }> {
     const res = await this.getOk(pathOrUrl, hint, extraHeaders);
-    return { body: (await res.json()) as T, res };
+    return { body: await this.metadataJson<T>(res), res };
+  }
+
+  /** parse a metadata JSON body under `maxMetadataBytes`; a larger one is a bounded error, never fully read */
+  async metadataJson<T>(res: ReadResponse): Promise<T> {
+    const capped = await readJsonCapped<T>(res, REPO_READ_DEFAULTS.maxMetadataBytes);
+    if (capped.tooLarge || capped.body === null) {
+      throw new GitProviderError(
+        `${this.init.label}: response larger than the ${REPO_READ_DEFAULTS.maxMetadataBytes / (1024 * 1024)} MB metadata cap; narrow the scope`,
+        502,
+      );
+    }
+    return capped.body;
   }
 
   header(res: ReadResponse, name: string): string | null {

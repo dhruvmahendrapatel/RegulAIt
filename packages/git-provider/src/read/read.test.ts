@@ -6,7 +6,9 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FakeUpstream } from "../testkit.js";
 import { GitProviderError } from "../types.js";
+import { readCapped } from "./http.js";
 import {
+  REPO_READ_DEFAULTS,
   GitProviderRateLimitError,
   HistoryScanDisabledError,
   nextLinkFromHeader,
@@ -33,11 +35,16 @@ describe("repo readers (ADR-0195 SD1)", () => {
     sleeps.length = 0;
   });
 
-  const reader = (kind: RepoReaderKind, extra: { allowHistory?: boolean; maxRetries?: number; maxWaitMs?: number; baseUrl?: string } = {}): RepoReader =>
+  const reader = (
+    kind: RepoReaderKind,
+    extra: { allowHistory?: boolean; maxRetries?: number; maxWaitMs?: number; baseUrl?: string; token?: string; insecureHttp?: boolean } = {},
+  ): RepoReader =>
     resolveRepoReader(kind, {
-      token,
+      token: extra.token ?? token,
       baseUrl: extra.baseUrl ?? upstream.baseUrl,
       fetchImpl,
+      // the fake upstream is plain http on loopback: only the explicit test seam accepts it
+      allowInsecureHttpForTests: extra.insecureHttp ?? true,
       sleep: async (ms) => {
         sleeps.push(ms);
       },
@@ -201,11 +208,20 @@ describe("repo readers (ADR-0195 SD1)", () => {
     });
 
     it("reports a classic token with write scopes, and an unreported scope as unverified", async () => {
+      // a classic-prefixed token, assembled at runtime (no secret-shaped literal)
+      const classic = ["gh", "p_", "C".repeat(36)].join("");
       upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "repo, read:org" } });
       expect((await reader("github").inspectCredential()).status).toBe("write_scope");
       upstream.reset();
       upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "read:org, read:user" } });
-      expect((await reader("github").inspectCredential()).status).toBe("read_only");
+      expect((await reader("github", { token: classic }).inspectCredential()).status).toBe("read_only");
+      // the same allow-listed header on a token without a classic prefix proves nothing
+      expect((await reader("github").inspectCredential()).status).toBe("unverified");
+      // an EMPTY header: unverified for a non-classic token, and for a classic one
+      upstream.reset();
+      upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "" } });
+      expect((await reader("github").inspectCredential()).status).toBe("unverified");
+      expect((await reader("github", { token: classic }).inspectCredential()).status).toBe("unverified");
       for (const scope of ["gist", "user", "project", "write:discussion", "admin:gpg_key", "codespace", "delete:packages", "brand:new"]) {
         upstream.reset();
         upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": `read:org, ${scope}` } });
@@ -325,7 +341,7 @@ describe("repo readers (ADR-0195 SD1)", () => {
       expect((await reader("bitbucket").readFile("ws/app", "big.txt", { commitSha: SHA, maxBytes: 1_000 })).status).toBe("too_large");
       upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "repository, account" } });
       expect((await reader("bitbucket").inspectCredential()).status).toBe("read_only");
-      for (const scope of ["webhook", "pipeline:variable", "repository:write", "new-thing"]) {
+      for (const scope of ["webhook", "pipeline:variable", "repository:write", "pullrequest", "issue", "wiki", "new-thing"]) {
         upstream.reset();
         upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": `repository, ${scope}` } });
         expect((await reader("bitbucket").inspectCredential()).status, scope).toBe("write_scope");
@@ -335,11 +351,68 @@ describe("repo readers (ADR-0195 SD1)", () => {
   });
 
   describe("API base", () => {
-    it("must be https with no credentials, query or fragment (http only on loopback for tests)", () => {
+    it("must be https with no credentials, query or fragment; plain http only through the explicit test seam", () => {
       for (const baseUrl of ["http://git.example.test", "https://u:p@git.example.test", "https://git.example.test/?a=1", "https://git.example.test/#x", "not a url"]) {
-        expect(() => reader("github", { baseUrl }), baseUrl).toThrow(/baseUrl/);
+        expect(() => reader("github", { baseUrl, insecureHttp: false }), baseUrl).toThrow(/baseUrl/);
       }
-      expect(() => reader("github", { baseUrl: "https://ghe.example.test/api/v3" })).not.toThrow();
+      // loopback is NOT special: without the seam, http on 127.0.0.1 is refused too
+      expect(() => reader("github", { baseUrl: upstream.baseUrl, insecureHttp: false })).toThrow(/baseUrl/);
+      expect(() => reader("github", { baseUrl: "https://ghe.example.test/api/v3", insecureHttp: false })).not.toThrow();
+    });
+  });
+
+  describe("byte caps", () => {
+    /** a body that hands out `chunks` chunks of `size` bytes and counts how many were pulled */
+    function countingBody(chunks: number, size: number) {
+      let pulled = 0;
+      let cancelled = false;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulled >= chunks) return controller.close();
+          pulled++;
+          controller.enqueue(new Uint8Array(size).fill(0x61));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }, { highWaterMark: 0 });
+      return { stream, pulled: () => pulled, cancelled: () => cancelled };
+    }
+    const res = (body: ReadableStream<Uint8Array>, headers: Record<string, string> = {}) => ({
+      status: 200,
+      headers: { get: (n: string) => headers[n.toLowerCase()] ?? null },
+      body,
+      json: async () => {
+        throw new Error("json() must not be called");
+      },
+      text: async () => {
+        throw new Error("text() must not be called");
+      },
+    });
+
+    it("cancels the stream at the first chunk past the cap", async () => {
+      const b = countingBody(100, 1_000);
+      const out = await readCapped(res(b.stream), 2_500);
+      expect(out.text).toBeNull();
+      expect(b.pulled()).toBe(3); // 1000 + 1000 + 1000 > 2500: stopped on the third chunk
+      expect(b.cancelled()).toBe(true);
+    });
+
+    it("reads no chunk when Content-Length is already over the cap", async () => {
+      const b = countingBody(100, 1_000);
+      const out = await readCapped(res(b.stream, { "content-length": "100000" }), 2_500);
+      expect(out).toEqual({ text: null, bytes: 100_000 });
+      expect(b.pulled()).toBe(0);
+    });
+
+    it("returns the text when the body fits", async () => {
+      const b = countingBody(2, 1_000);
+      expect((await readCapped(res(b.stream), 2_500)).text).toBe("a".repeat(2_000));
+    });
+
+    it("refuses a metadata body over the metadata cap with a bounded error", async () => {
+      upstream.route("GET", "/repos/acme/huge", { status: 200, body: {}, headers: { "content-length": String(REPO_READ_DEFAULTS.maxMetadataBytes + 1) } });
+      await expect(reader("github").getTree("acme/huge")).rejects.toThrow(/metadata cap/);
     });
   });
 

@@ -147,6 +147,11 @@ export interface RepoReaderOptions {
   now?: () => number;
   /** hard cap on pages followed by any one listing */
   maxPages?: number;
+  /**
+   * TEST SEAM ONLY: accept a plain-http API base (the package's fake upstream).
+   * The gateway never sets it; without it a base that is not https is refused.
+   */
+  allowInsecureHttpForTests?: boolean;
 }
 
 export const REPO_READ_DEFAULTS = Object.freeze({
@@ -158,6 +163,8 @@ export const REPO_READ_DEFAULTS = Object.freeze({
   /** no caller can raise a single read above this */
   maxFileBytesCeiling: 2 * 1024 * 1024,
   maxCommits: 500,
+  /** cap on any metadata (listing, tree, ref) JSON body; past it the read fails with a bounded error */
+  maxMetadataBytes: 16 * 1024 * 1024,
   maxRetries: 4,
   maxWaitMs: 60_000,
   baseBackoffMs: 1_000,

@@ -72,9 +72,12 @@ export class GitHubRepoReader implements RepoReader {
   readonly kind = "github" as const;
   readonly historyEnabled: boolean;
   private readonly http: ReadClient;
+  /** only whether the token has a classic prefix is kept, never the token */
+  private readonly classicToken: boolean;
 
   constructor(opts: RepoReaderOptions) {
     this.historyEnabled = opts.allowHistory === true;
+    this.classicToken = opts.token.startsWith("ghp_") || opts.token.startsWith("gho_");
     this.http = new ReadClient({
       label: "github",
       baseUrl: opts.baseUrl ?? "https://api.github.com",
@@ -164,18 +167,17 @@ export class GitHubRepoReader implements RepoReader {
   async inspectCredential(): Promise<CredentialScopeReport> {
     const res = await this.http.getOk("/user", hint);
     const raw = this.http.header(res, "x-oauth-scopes");
-    if (raw === null) {
-      return {
-        status: "unverified",
-        scopes: [],
-        detail: "fine-grained tokens and app tokens do not report scopes; write scope unverified",
-      };
-    }
-    const scopes = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    const scopes = (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     const write = scopes.filter((s) => !GITHUB_READ_ONLY_SCOPES.has(s));
-    return write.length > 0
-      ? { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` }
-      : { status: "read_only", scopes, detail: "classic token with read-only scopes" };
+    if (write.length > 0) return { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` };
+    // read_only only when GitHub reported a non-empty, fully allow-listed scope set for a classic token;
+    // an empty or absent header (fine-grained or app tokens) proves nothing
+    if (this.classicToken && scopes.length > 0) return { status: "read_only", scopes, detail: "classic token with read-only scopes" };
+    return {
+      status: "unverified",
+      scopes,
+      detail: "GitHub did not report a read-only scope set for this token (fine-grained and app tokens report none); write scope unverified",
+    };
   }
 
   async listCommits(repo: string, opts: ListCommitsOptions = {}): Promise<CommitSummary[]> {

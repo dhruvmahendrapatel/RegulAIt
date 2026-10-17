@@ -104,13 +104,10 @@ export const shadowCatalogV2EntrySchema = z
   })
   .strict()
   .refine((e) => (e.pattern.match(/\*/g) ?? []).length <= (e.pattern.startsWith("**/") ? 2 : 1), {
-    message: "a pattern carries at most one wildcard (plus a leading **/ for assistant_config)",
+    message: "a pattern carries at most one wildcard; a leading **/ (assistant_config) allows none after it",
   })
   .refine((e) => e.kind === "assistant_config" || !e.pattern.startsWith("**/"), {
     message: "only assistant_config patterns may use the any-depth **/ form",
-  })
-  .refine((e) => !e.pattern.startsWith("**/") || !e.pattern.slice(3).includes("*"), {
-    message: "an any-depth **/ pattern names a literal file: no further wildcard",
   });
 
 const deepFreeze = <T extends object>(o: T): T => {
