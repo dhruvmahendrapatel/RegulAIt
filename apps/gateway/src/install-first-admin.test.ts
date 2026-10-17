@@ -176,6 +176,54 @@ describe("scripts/lib/first-admin.sh — the interactive prompt loop", () => {
     for (const out of [problem(), problem(link)]) expect(out).not.toContain(pw);
   });
 
+  it.runIf(posix)("the password file must be valid UTF-8", () => {
+    const dir = freshDir("pwutf8");
+    const f = path.join(dir, "pw");
+    const problem = () =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" }).trim();
+    const put = (content: Buffer) => {
+      rmSync(f, { force: true });
+      writeFileSync(f, content, { mode: 0o600 });
+      chmodSync(f, 0o600);
+    };
+    const pw = Buffer.from(strong());
+    put(Buffer.concat([pw, Buffer.from("-pässwörd-\u{1F600}\n")]));
+    expect(problem()).toBe("");
+    for (const bad of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xe2, 0x82], [0x80]]) {
+      put(Buffer.concat([pw, Buffer.from(bad)]));
+      const out = problem();
+      expect(out, bad.join(",")).toContain("not valid UTF-8");
+      expect(out).not.toContain(pw.toString());
+    }
+  });
+
+  it.runIf(posix && process.platform === "linux")("from a file: opened once, re-checked on that descriptor, and the runner reads that same descriptor", () => {
+    const dir = freshDir("pwfd");
+    const f = path.join(dir, "pw");
+    const pw = strong();
+    writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+    chmodSync(f, 0o600);
+    // the descriptor's file is no longer the one at the path: refused, whatever the path now holds
+    const swapped = path.join(dir, "swapped");
+    writeFileSync(swapped, strong(), { mode: 0o600 });
+    const swapCheck = execFileSync(
+      "bash",
+      ["-c", `. "${LIB}"; exec 9<"$1"; mv "$2" "$1"; fa_password_file_problem "$1" 9`, "x", f, swapped],
+      { encoding: "utf8" },
+    ).trim();
+    expect(swapCheck).toContain("changed while it was being opened");
+    expect(swapCheck).not.toContain(pw);
+    // a good file: the stub runner receives exactly its content, on stdin, once
+    writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+    chmodSync(f, 0o600);
+    const stubDir = freshDir("pwfd-stub");
+    const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc"\n`;
+    const r = spawnSync("bash", ["-c", script, "x", f], { encoding: "utf8", env: { ...process.env, STUB_DIR: stubDir } });
+    expect(r.stdout.trim(), r.stderr).toBe("RC=0");
+    expect(readFileSync(path.join(stubDir, "stdin.log"), "utf8")).toBe(`${pw}\n`);
+    expect(`${r.stdout}${r.stderr}`).not.toContain(pw);
+  });
+
   it.runIf(posix && process.getuid?.() === 0)("the password file must be owned by the installing user or root", () => {
     const f = path.join(freshDir("pwowner"), "pw");
     writeFileSync(f, strong(), { mode: 0o600 });
@@ -204,7 +252,10 @@ esac
 case "$*" in
   *receipt-key-init.js*) echo "receipt signing key: install-generated install-ed25519-fake"; exit 0 ;;
   *first-admin.js*--status*)
-    if [ -f "$FAKE_DOCKER_DIR/admin-exists" ]; then echo "first admin: an active admin already exists — nothing to do"; exit 3; fi
+    if [ -f "$FAKE_DOCKER_DIR/admin-exists" ]; then
+      if [ "$(cat "$FAKE_DOCKER_DIR/admin-exists")" = "demo" ]; then echo "first admin: only the demo seed's personas are admins — nothing to do"; exit 3; fi
+      echo "first admin: an active admin already exists — nothing to do"; exit 3
+    fi
     echo "first admin: none yet"; exit 0 ;;
   *first-admin.js*)
     pw="$(cat)"
@@ -415,12 +466,25 @@ describe("scripts/install.sh — the first-admin step and token retirement (fake
   it.runIf(hasOpenssl && posix)("--seed-demo: the summary says the demo personas are the admins and how to replace them", () => {
     const dir = freshDir("seed-demo");
     const fakes = setupFakes();
-    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    writeFileSync(path.join(fakes.state, "admin-exists"), "demo");
     const r = install(dir, fakes, {}, ["--seed-demo"]);
     expect(r.status, r.out.slice(-3000)).toBe(0);
     expect(r.out).toContain("its personas are the admins");
     expect(r.out).toContain("admin@regulait.local");
     expect(r.out).toContain("create your admin under Admin -> Users");
+    expect(r.out).toContain("The bootstrap token is retired: removed from");
+  });
+
+  it.runIf(hasOpenssl && posix)("--seed-demo with a real admin already there: the summary says the seed loaded nothing, not that the demo admin is the admin", () => {
+    const dir = freshDir("seed-demo-real");
+    const fakes = setupFakes();
+    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    const r = install(dir, fakes, {}, ["--seed-demo"]);
+    expect(r.status, r.out.slice(-3000)).toBe(0);
+    expect(r.out).toContain("An admin of your own already exists, so --seed-demo loaded nothing");
+    expect(r.out).not.toContain("its personas are the admins");
+    expect(r.out).not.toContain("admin@regulait.local");
+    expect(r.out).not.toContain("still live");
   });
 });
 

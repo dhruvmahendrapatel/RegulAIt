@@ -53,7 +53,13 @@ function gate(publishApproved) {
   return readFileSync(out, "utf8").trim();
 }
 
-describe("release-ai-bom.mjs (ADR-0189 B7, R17 released)", () => {
+// Each case spawns a fresh node that loads the built @regulait/shared (schemas
+// compiled at import). Alone that is about a second; under CI's parallel
+// `vitest run --dir scripts` sweep the default 5 s per-test budget was too
+// tight, so the timeout is explicit (as in the bom-* CLI tests).
+const CLI_TIMEOUT_MS = 60_000;
+
+describe("release-ai-bom.mjs (ADR-0189 B7, R17 released)", { timeout: CLI_TIMEOUT_MS }, () => {
   it("reports the code switch as on", () => {
     expect(execFileSync(process.execPath, [cli, "switch"], { encoding: "utf8" }).trim()).toBe("released=true");
   });
@@ -96,7 +102,7 @@ describe("release-ai-bom.mjs (ADR-0189 B7, R17 released)", () => {
   });
 });
 
-describe("release-ai-bom.yml publication gate (RELEASE_AI_BOM_PUBLISH_APPROVED, owner sign-off)", () => {
+describe("release-ai-bom.yml publication gate (RELEASE_AI_BOM_PUBLISH_APPROVED, owner sign-off)", { timeout: CLI_TIMEOUT_MS }, () => {
   it("negative control: the variable unset (the owner's chosen state) publishes nothing", () => {
     expect(gate(undefined)).toBe("released=false");
     expect(gate("")).toBe("released=false");
