@@ -77,7 +77,8 @@ scan reports `not_enabled` for them. Terraform: [`cloud-discovery/aws.tf`](cloud
 
 ## GCP
 
-**Hosts to allow-list:** `sts.googleapis.com`, `iamcredentials.googleapis.com` (only with impersonation),
+**Hosts to allow-list:** `sts.googleapis.com` (federation), `iamcredentials.googleapis.com` (only with
+impersonation), `oauth2.googleapis.com` (only with the static service-account key relaxation: the key's token grant),
 `serviceusage.googleapis.com`, `cloudasset.googleapis.com`, `cloudresourcemanager.googleapis.com`,
 `logging.googleapis.com`.
 
