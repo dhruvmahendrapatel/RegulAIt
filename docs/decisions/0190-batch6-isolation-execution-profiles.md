@@ -315,6 +315,8 @@ Then:
 | `isolation_enforcement` | `enforce` | none: `enforce` is the only value (owner decision A, 2026-10-11). To run where a class is unavailable, an admin lowers the requirement itself through the floor relaxations below | not relaxable; a request to set any other value is refused 400 |
 | Sensitivity floors | public/internal/confidential L2, regulated L3 | down to L1 per sensitivity, never below | audited, step-up |
 | `mcp_stdio` floor | L2 | L1 | audited, step-up |
+| Unknown-agent floor for `mcp_stdio`, "a person's own call" (owner decision C) | L3 | L2, only for a call with no agent from a person in an interactive session, per stdio server or project, never org-wide | setting audited, step-up; clearing audited, no step-up (built 2026-10-17, migration 0201) |
+| Project sensitivity (owner decision D) | the strictest use case; neither = `policy_unresolved` | an admin field that can only raise it | every change audited, step-up (built 2026-10-17, migration 0201) |
 | `engine_worker` floor | L2 | L1 (OWNER DECISION 4) | audited, step-up |
 | `executor_attestation_max_age` | 2 h | up to 24 h | audited |
 | Profile `network` | `gateway_only` | `allow_list` entries, each exact host:port and on the egress allow-list | each entry audited |
@@ -687,6 +689,9 @@ admin relaxation to L2 for interactive persons), master session, 2026-10-15, ans
   engines. The other floors (sensitivity, compliance tags) still apply.
 - **Build:** a slice after I5 (it touches the same placement code). The Decision BOM panel and the settings UI show the
   relaxation; vectors pin the API-key case as L3.
+- **Built 2026-10-17** (migration 0201): see "As built: owner decisions C and D". The settings UI shows the relaxation;
+  the Decision BOM panel does not yet (the decision-facts `execution` section is unchanged), and the API-key case is
+  pinned by gateway tests rather than a new conformance vector.
 
 ## Owner decision D: the source of a project's sensitivity (accepted 2026-10-16)
 
@@ -706,6 +711,9 @@ open question in the I2 as-built section, item 1.
   audit action name, and the exact facts the step-up is bound to. The build slice records these in an as-built
   section.
 - **Build:** a slice adding the admin project-sensitivity field (queued in `STATE.md`).
+- **Built 2026-10-17** (migration 0201): `projects.isolation_sensitivity`, `PUT /v1/execution-project-sensitivities/:projectId`
+  (`settings_relax` step-up bound to the project, the old and the new value), audit action
+  `execution-project-sensitivity-set`. See "As built: owner decisions C and D".
 
 ## Owner decision E: the I7 OpenShell backend is deferred (accepted 2026-10-16)
 
@@ -1590,3 +1598,83 @@ settle what the decisions above leave open:
    wasteful for large artifacts.
 3. **Streaming model answers** through the gateway channel are not supported. If an engine needs them, the channel
    needs chunked answer frames.
+
+## As built: owner decisions C and D (2026-10-17)
+
+Migration **0201** (`0201_isolation_person_stdio_and_project_sensitivity.sql`, hand-written; journal idx 201, after
+0200) adds the relaxation table and the project column. Its one new function pins
+`search_path = pg_catalog, public, pg_temp`, and the table it guards refuses TRUNCATE (migration 0185's invariants).
+These points settle the build-time choices both decisions left open.
+
+**Owner decision C: a person's own stdio call.**
+1. **Storage.** An `execution_person_stdio_relaxations` row, with `scope_kind` (`mcp_server` or `project`, no org
+   scope), `scope_id`, who set it and when, and who cleared it and when. A partial unique index allows one active row
+   per scope. A guard trigger refuses DELETE and lets an UPDATE only set the clearing, once. A cleared row keeps its
+   id, so a decision that relied on it still names it. `scope_id` has no foreign key: the row is evidence and must
+   not block, or vanish with, its server or project. No row exists by default.
+2. **Enforced in the resolution.** `resolveRequirement` (execution-placement.ts) reads the active row for the call's
+   server, then its project. It reads one only for an `mcp_stdio` call with `agent: null`, no parent grant and
+   `interactivePerson: true`. The unknown-agent floor is then L2 (`unknownAgentFloor`, shared), and the call is
+   placed under its configured profile (the server's, else the shipped `restricted`) instead of
+   `restricted-microvm`. The pure function checks the kind and the `unknown` assurance again. A low-assurance agent
+   (`no_identity`, `observed_autonomy_above_declared`), an engine and any other kind stay at L3. The floor is still
+   one term of the MAX, so a regulated project, a compliance tag, the server's own `minClass` and a parent grant
+   still win. It never goes below L2, even when the `mcp_stdio` and sensitivity floors are relaxed to L1.
+3. **Who is an interactive person.** `interactivePersonCaller` is the one predicate. It needs a session whose origin
+   is a person's sign-in (`password`, `oidc`, `saml`; the shared `INTERACTIVE_SESSION_ORIGINS`, held equal to the
+   gateway's `HUMAN_SESSION_ORIGINS` by a test) and no delegation grant. The origin comes from the session row, through
+   `abacPrincipalFromRequest`. An API key, a session exchanged from one (`api_key`), the bootstrap identity, a workload
+   token and a worker loop that supplies no principal are never interactive. The MCP proxy route, the governed tool
+   call and the governed protocol call pass the request's principal to `stdioPlacementContext`. The builder runtime,
+   orchestration and the node tool manifest pass none, so they stay at L3.
+4. **Recorded.** The requirement carries `relaxation` (`kind: person_stdio_l2`, `subjectKind: interactive_person`,
+   `relaxationId`, `scopeKind`, `scopeId`). A governed stdio decision writes it in its audit row's
+   `detail.execution.relaxation`, beside the placement it keys. An unlinked placement's refusal row carries it in its
+   audit detail too. The `regulait.decision-facts.v2` `execution` section is unchanged: it still records the placement
+   (required class and the floor that set it), not the relaxation id. Adding that is a follow-up that changes the
+   evidence format.
+5. **Routes** (admin, in `ISOLATION_ROUTES`):
+   - `GET /v1/execution-person-stdio-relaxations` lists the active rows.
+   - `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId` takes `{relaxed}`. Setting needs a
+     `settings_relax` step-up bound to the scope, and is audited `execution-person-stdio-relaxed`. Clearing needs no
+     step-up and is audited `execution-person-stdio-relaxation-cleared`. Both are compare-and-set: a racing set
+     fails on the unique index, and a clear updates only the row it read. Either answers `409 changed_concurrently`.
+   - A remote server answers 409 `not_a_stdio_server`, a scope kind other than the two answers 400, and a missing
+     scope answers 404.
+
+**Owner decision D: the project's sensitivity.**
+6. **Storage and rule.** The column is `projects.isolation_sensitivity` (nullable, CHECKed to the four values).
+   `projectSensitivity` returns MAX(the use cases' strictest, the field), through the shared
+   `projectIsolationSensitivity`. Having neither, a missing project, or any value outside the vocabulary does not
+   resolve: `policy_unresolved`, as before. A field below the use cases has no effect on the MAX.
+7. **Routes.**
+   - `GET /v1/execution-project-sensitivities` lists every project with its use-case sensitivity, the field, the
+     result and its project-scope relaxation.
+   - `PUT /v1/execution-project-sensitivities/:projectId` takes `{sensitivity}` (null clears). Every change, a
+     clear included, needs a `settings_relax` step-up bound to the project, the old value and the new one. It is
+     audited `execution-project-sensitivity-set` with the old and new field and the result before and after. It is
+     compare-and-set on the value read. An unchanged value is a no-op with no step-up.
+
+**Console** (apps/web isolation views).
+8. The Engines page gains a "Project isolation" card. It lists each project's sensitivity from its use cases, the
+   admin field and the one in force; a project with neither shows "Unresolved · calls refused". A Manage panel sets
+   the field through `withStepUp` and says when a value has no effect. Each stdio server's execution card on the MCP
+   servers page, and each project's Manage panel, has the person's own call control: "L3 (strict default)" or "L2
+   allowed · audited". Allowing is confirmed in a dialog, then stepped up; restoring L3 asks for none. An unreadable
+   answer shows "Not reported" and offers no control. `KNOWN_UI_GAPS` stays 0.
+
+**Tests.**
+- Pure: `adr0190-owner-cd.test.ts` (gateway). It shows `unknownAgentFloor` must fail when the kind and assurance
+  checks are removed.
+- On a database: `zz-adr0190-owner-cd.test.ts`. It covers the migration's guard, the resolution with and without
+  each scope, the API-key negative control, a low-assurance agent, a regulated project, an L2 offer, the refusal
+  audit, both routes' step-up, and D's resolve, raise and no-lower cases.
+- Web: `ownerDecisionsCD.test.ts` and the mocked `isolation-owner-cd.mock.spec.ts`.
+
+**Not verified.**
+- The database tests typecheck, but have not run in the session that wrote them (no Postgres there). CI's database
+  shards run them.
+- No end-to-end test drives a real browser session through the MCP proxy to an L2 placement. The wiring from the
+  request's principal to the resolution is covered in parts: the predicate, `stdioPlacementContext` and the
+  resolution.
+- L2 itself (gVisor) stays unverified, as recorded above.
