@@ -547,131 +547,10 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
 
-## As built: SD2b federation signer (2026-10-17, migration 0205)
-
-**Status: built on branch `sd2b-federation-signer`.** Migration `0205_federation_signing_keys.sql` is hand-written;
-its journal entry is NOT in this branch (0204 merges first; the master adds
-`{"idx": 205, "version": "7", "when": 1785140000000, "tag": "0205_federation_signing_keys", "breakpoints": true}`).
-Until then the database tests that need the table fail in CI.
-
-Why a separate table. The RS256 key is generated in the product and its private half kept under the data key. The
-Ed25519 issuer store (`identity_signing_keys`) CHECKs `algorithm = 'Ed25519'` and an `OKP` JWK, has one global
-"one active key" index, has no private-key column (ADR-0188 decision 5) and no `id` for the re-encryption sweep.
-Loosening it would weaken the delegated-token verifier's invariants, so `federation_signing_keys` stands alone.
-
-1. **Migration 0205** (`federation_signing_keys`): `id` (the data-key re-encryption walk updates by it), `kid`
-   (RFC 7638 thumbprint, unique), `algorithm` = RS256, a public-only RSA JWK (e = AQAB, 2048 to 4096 bits, no
-   private member; CHECK), `private_key_ciphertext` (PKCS#8 under the data key, in `CIPHERTEXT_COLUMNS`), lifecycle
-   stamps. A live key holds its private half and a retired or revoked key never does (CHECK); at most one active
-   key (partial unique index); never deleted, each stamp written once, a destroyed private half never returns
-   (trigger, `search_path` pinned); TRUNCATE refused (0185 rules).
-2. **A separate issuer (deviation from the plan above).** The plan published the RS256 keys beside the Ed25519 keys in
-   `/.well-known/jwks.json`. As built, federation has its own issuer `<REGULAIT_PUBLIC_URL>/federation`, with its own
-   OIDC discovery document (`/federation/.well-known/openid-configuration`, which AWS IAM and Entra require) and its
-   own JWKS (`/federation/.well-known/jwks.json`, RS256 only). Reasons: AWS, GCP and Entra parse every key of the
-   JWKS they are given, and an `OKP` entry is not one they all accept; and with a different `iss` and different keys
-   a federation token never verifies at RegulAIt's own delegated-token verifier, nor an issuer token at a cloud. The
-   Ed25519 JWKS is unchanged. Both new routes are public (auth-exempt, `NON_ADMIN_ROUTES`), public data only.
-3. **Lifecycle** (`federation-signing-keys.ts`, routes in `federation-routes.ts`, admin-only, every change audited
-   as `federation_signing_key`):
-   - `POST /v1/discovery/federation/keys` generates a PENDING key (RSA 2048, Node `crypto`; free, it signs nothing
-     and is not published; at most one pending key).
-   - `POST …/keys/:kid/activate` with no active key TURNS FEDERATION ON: `settings_relax` step-up
-     `{op: "federation_enable", keyId}`. With an active key it ROTATES: `key_management` step-up
-     `{op: "federation_key_rotate", keyId}`; the previous key is retired, its private half destroyed, and it stays
-     published for 600 s (token life plus skew).
-   - `POST …/keys/:kid/revoke`: `key_management` step-up `{op: "federation_key_revoke", keyId}`; the key leaves the
-     JWKS at once (revoking the active key turns federation off).
-   - `POST /v1/discovery/federation/disable`: free (a tightening); the active key is retired.
-   The step-up is decided on an unlocked read and re-checked under the table lock; if the active key moved, nothing
-   is written (409 `changed_concurrently`, ADR-0186 A). A refused act spends no grant.
-4. **Tokens**: RS256, `iss` the federation issuer, `sub` `regulait:discovery-source:<sourceId>` (or
-   `regulait:aws-principal`), `aud` exactly one per target (AWS `sts.amazonaws.com`, Entra
-   `api://AzureADTokenExchange`, GCP `https://iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`
-   from the credential), `iat` = `nbf`, `exp` 300 s later, random `jti`. `federationTokenMinter` refuses any
-   audience the credential does not name before reading the database. Minting refuses while federation is off,
-   while `REGULAIT_PUBLIC_URL` is unset, or when the data key cannot open the key.
-5. **Scanner wiring**: the worker gives a FEDERATED credential's run `ctx.federation` (source token bound to the
-   source and its audiences; RegulAIt's own AWS principal when configured). The token exchanges stay the SD2 SDK
-   paths (`fromWebToken`, `fromTemporaryCredentials`, `IdentityPoolClient`, `ClientAssertionCredential`), every
-   call on the guarded fetch; minted tokens are registered for scrubbing and exchange bodies are never digested.
-6. **RegulAIt's own AWS principal**: `REGULAIT_AWS_PRINCIPAL_ROLE_ARN` names an IAM role that trusts the federation
-   issuer for `sub = regulait:aws-principal`. A `cloud_aws` target `federation=principal` reaches that role by web
-   identity and then `AssumeRole`s into the customer's role with the source's SD0-generated external id;
-   `federation=oidc` (the default) is AssumeRoleWithWebIdentity straight into the customer's role. No long-lived
-   key and no default credential chain anywhere.
-7. **AWS Organizations**: a `cloud_aws` target `organizationAccounts=true` calls Organizations `ListAccounts`
-   (paginated, page cap per call, read-only; `@aws-sdk/client-organizations` 3.1152.0, Apache-2.0, added to
-   `THIRD_PARTY.md`) from the source's account. With `memberRoleName` each ACTIVE member (at most 50 per run) is
-   scanned by the SD2 AWS scanner through `AssumeRole` into that role with the external id (federated credentials
-   only), reads reported as `<account>:<scope>`; without it the accounts are listed and reported as not scanned.
-8. **Web**: a "Cloud federation" card on Discovery sources (generate, turn on, rotate, revoke, turn off; issuer,
-   subject and audiences to put in a trust policy). Both UI preflights pass with `KNOWN_UI_GAPS` 0.
-9. **Tests**: `federation-signing-keys.test.ts` (signer/JWKS round trip, audience and expiry binding, refusals,
-   publication overlap; no database), `discovery-cloud-scanners.test.ts` (federated AWS, principal, Organizations
-   pagination and member scan, egress refusal, malformed targets), `zz-adr0195-sd2b-federation.test.ts` (database:
-   CHECKs, guard and TRUNCATE, off by default, each step-up with negative controls that are not spent, round trip
-   against the JWKS route, rotate, revoke, disable).
-
-Open source first: key generation is Node `crypto`, the thumbprint and JWS are `jose` 6.2.12, the token exchanges
-are the cloud SDKs already pinned; the one new dependency is the Organizations client. Not built: an
-end-to-end run against a real cloud account (pending execution, needs a customer trust policy), and federated
-git-provider credentials (SD1 follow-up).
-
-## Owner decisions (2026-10-17): endpoint agent and detection data
-
-Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-spike.md)). Nothing above is changed.
-
-**Owner decisions (2026-10-17).**
-
-1. **Apple signing.** A company Apple Developer account. The Developer ID signing identity is kept in a protected CI
-   secret store that only release jobs can use.
-2. **Windows signing.** An OV code-signing certificate, with its key in a cloud HSM-backed key service called from CI.
-3. **Enrolment.** A per-org bulk enrolment token, delivered by MDM, capped, expiring and revocable. Each device then
-   creates its own key and identity (ADR-0188 S7 pattern, new workload kind `endpoint_agent`).
-4. **Device keys.** Hardware-bound by default: Secure Enclave P-256 on macOS, TPM on Windows and Linux. The OS-keystore
-   fallback is used only where no such hardware exists, and posture flags it. A macOS build runner is needed.
-5. **Product names in detection data.** AI products, including ones RegulAIt competes with, may appear as detection
-   catalogue data (names, domains, bundle ids, extension ids, package names) and in the findings it produces, because
-   customers need to see them. They never appear in marketing, docs prose, ADR prose, comparisons or UI copy.
-
-**Technical calls recorded with them (master, 2026-10-17).**
-
-- **The agent runs only as the logged-in user.** There is no root/SYSTEM component in v1. The package's one-time
-  install step, which runs as root under MDM, redeems the bulk token for a per-device enrolment ticket (only when the
-  device holds no valid one, and never failing an MDM install because redemption failed). The fleet token is never
-  readable by ordinary users. The ticket file is readable only by the agent's group, and every registration is
-  audited against the ticket id. A leaked ticket is usable from any machine until it expires; hardware-binding it is
-  a later slice.
-- **Endpoint findings record key presence only.** A finding carries the provider, the file or variable, and the key
-  name. It carries no 8-character prefix: decision 18's "names (never values)" governs endpoints.
-- **Key patterns are compiled into the agent** from the gitleaks-derived `dlp.secret.*` set (Go RE2). The collection
-  manifest carries only paths, globs and names.
-- **Pseudonyms are applied on the server.** Device user names and device hostnames are keyed-hashed server-side, and
-  their display names are stored encrypted. Revealing one needs a `pseudonym_reveal` step-up and is audited. A device
-  user name is self-reported, and the reveal UI says so. Endpoint evidence keeps the 90-day default retention of
-  decision 20.
-- **Three separate signing keys.** Agent releases are signed in the ADR-0041 manifest format under their own key id,
-  separate from the ADR-0041 control-plane release key. Decision 18's query pack and collection manifest use the same
-  format under a further key id of their own. A customer-side verify step ships with every pack, and the gateway
-  verifies the pack manifest when it serves or accepts it. SD3's signer hook calls the same signing stage.
-  `infra/release-keys/` is not reused. MDM is the only install channel. In v1, self-update (a relaxation, off by
-  default) only downloads, verifies and notifies the user and the admin. A privileged install helper is out of
-  scope, because it would bring back a resident root component.
-- **Bulk token defaults.** The admin must set the device cap (there is no unlimited default). Expiry defaults to 30
-  days, and lengthening it is a relaxation. The admin is alerted as the cap is approached. Rotation is by MDM
-  re-push.
-- **ADR-0176 build-tool exceptions.** WiX (MS-RL) and `rcodesign` (MPL-2.0) are accepted as written exceptions, with
-  the unmet requirement stated in R15 §4.4: no permissively licensed tool builds an MSI, or signs and notarises Mach-O
-  from Linux. Both are build tools only; their output is not covered by their licences and nothing of them is
-  shipped.
-- **Linux TPM.** The agent uses the TPM only where `/dev/tpmrm0` is already reachable by the user. Adding console
-  users to the `tss` group is an audited admin opt-in (a relaxation), because it grants raw TPM access. Otherwise the
-  software fallback applies and posture flags it.
-- **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
-  for darwin.
-
 ## As built: SD2b federation signer (2026-10-17): BLOCKED on a migration
+
+**Superseded (2026-10-17):** migration 0205 was assigned and SD2b was built; see "As built: SD2b federation signer" below. This
+section is kept as the record of the plan that the as-built section deviates from.
 
 **Status: not built. Blocked on a migration number from the master.** Branch `sd2b-federation-signer`.
 
@@ -786,3 +665,108 @@ CREATE TRIGGER "federation_signing_keys_no_truncate" BEFORE TRUNCATE ON public."
 Nothing above has been run (no Postgres in the build environment). It follows the 0185 guard rules (pinned
 `search_path`, TRUNCATE refused beside the row guard), and the code side adds the `CIPHERTEXT_COLUMNS` entry and the
 `schema.ts` declaration with the same CHECKs.
+
+## As built: SD2b federation signer (2026-10-17, migration 0205)
+
+**Status: built on branch `sd2b-federation-signer`.** Migration `0205_federation_signing_keys.sql` is hand-written;
+its journal entry is NOT in this branch (0204 merges first; the master adds
+`{"idx": 205, "version": "7", "when": 1785140000000, "tag": "0205_federation_signing_keys", "breakpoints": true}`).
+Until then the database tests that need the table fail in CI.
+
+Why a separate table. The RS256 key is generated in the product and its private half kept under the data key. The
+Ed25519 issuer store (`identity_signing_keys`) CHECKs `algorithm = 'Ed25519'` and an `OKP` JWK, has one global
+"one active key" index, has no private-key column (ADR-0188 decision 5) and no `id` for the re-encryption sweep.
+Loosening it would weaken the delegated-token verifier's invariants, so `federation_signing_keys` stands alone.
+
+1. **Migration 0205** (`federation_signing_keys`): `id` (the data-key re-encryption walk updates by it), `kid`
+   (RFC 7638 thumbprint, unique), `algorithm` = RS256, a public-only RSA JWK (e = AQAB, 2048 to 4096 bits, no
+   private member; CHECK), `private_key_ciphertext` (PKCS#8 under the data key, in `CIPHERTEXT_COLUMNS`), lifecycle
+   stamps. A live key holds its private half and a retired or revoked key never does (CHECK); at most one active
+   key (partial unique index); never deleted, each stamp written once, a destroyed private half never returns
+   (trigger, `search_path` pinned); TRUNCATE refused (0185 rules).
+2. **A separate issuer (deviation from the plan above).** The plan published the RS256 keys beside the Ed25519 keys in
+   `/.well-known/jwks.json`. As built, federation has its own issuer `<REGULAIT_PUBLIC_URL>/federation`, with its own
+   OIDC discovery document (`/federation/.well-known/openid-configuration`, which AWS IAM and Entra require) and its
+   own JWKS (`/federation/.well-known/jwks.json`, RS256 only). Reasons: AWS, GCP and Entra parse every key of the
+   JWKS they are given, and an `OKP` entry is not one they all accept; and with a different `iss` and different keys
+   a federation token never verifies at RegulAIt's own delegated-token verifier, nor an issuer token at a cloud. The
+   Ed25519 JWKS is unchanged. Both new routes are public (auth-exempt, `NON_ADMIN_ROUTES`), public data only.
+3. **Lifecycle** (`federation-signing-keys.ts`, routes in `federation-routes.ts`, admin-only, every change audited
+   as `federation_signing_key`):
+   - `POST /v1/discovery/federation/keys` generates a PENDING key (RSA 2048, Node `crypto`; free, it signs nothing
+     and is not published; at most one pending key).
+   - `POST …/keys/:kid/activate` with no active key TURNS FEDERATION ON: `settings_relax` step-up
+     `{op: "federation_enable", keyId}`. With an active key it ROTATES: `key_management` step-up
+     `{op: "federation_key_rotate", keyId}`; the previous key is retired, its private half destroyed, and it stays
+     published for 600 s (token life plus skew).
+   - `POST …/keys/:kid/revoke`: `key_management` step-up `{op: "federation_key_revoke", keyId}`; the key leaves the
+     JWKS at once (revoking the active key turns federation off).
+   - `POST /v1/discovery/federation/disable`: free (a tightening); the active key is retired.
+   The step-up is decided on an unlocked read and re-checked under the table lock; if the active key moved, nothing
+   is written (409 `changed_concurrently`, ADR-0186 A). A refused act spends no grant.
+4. **Tokens**: RS256, `iss` the federation issuer, `sub` `regulait:discovery-source:<sourceId>` (or
+   `regulait:aws-principal`), `aud` exactly one per target (AWS `sts.amazonaws.com`, Entra
+   `api://AzureADTokenExchange`, GCP `https://iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`
+   from the credential), `iat` = `nbf`, `exp` 300 s later, random `jti`. `federationTokenMinter` refuses any
+   audience the credential does not name before reading the database. Minting refuses while federation is off,
+   while `REGULAIT_PUBLIC_URL` is unset, or when the data key cannot open the key.
+5. **Scanner wiring**: the worker gives a FEDERATED credential's run `ctx.federation` (source token bound to the
+   source and its audiences; RegulAIt's own AWS principal when configured). The token exchanges stay the SD2 SDK
+   paths (`fromWebToken`, `fromTemporaryCredentials`, `IdentityPoolClient`, `ClientAssertionCredential`), every
+   call on the guarded fetch; minted tokens are registered for scrubbing and exchange bodies are never digested.
+6. **RegulAIt's own AWS principal**: `REGULAIT_AWS_PRINCIPAL_ROLE_ARN` names an IAM role that trusts the federation
+   issuer for `sub = regulait:aws-principal`. A `cloud_aws` target `federation=principal` reaches that role by web
+   identity and then `AssumeRole`s into the customer's role with the source's SD0-generated external id;
+   `federation=oidc` (the default) is AssumeRoleWithWebIdentity straight into the customer's role. No long-lived
+   key and no default credential chain anywhere.
+7. **AWS Organizations**: a `cloud_aws` target `organizationAccounts=true` calls Organizations `ListAccounts`
+   (paginated, page cap per call, read-only; `@aws-sdk/client-organizations` 3.1152.0, Apache-2.0, added to
+   `THIRD_PARTY.md`) from the source's account. With `memberRoleName` each ACTIVE member (at most 50 per run) is
+   scanned by the SD2 AWS scanner through `AssumeRole` into that role with the external id (federated credentials
+   only), reads reported as `<account>:<scope>`; without it the accounts are listed and reported as not scanned.
+8. **Web**: a "Cloud federation" card on Discovery sources (generate, turn on, rotate, revoke, turn off; issuer,
+   subject and audiences to put in a trust policy). Both UI preflights pass with `KNOWN_UI_GAPS` 0.
+9. **Tests**: `federation-signing-keys.test.ts` (signer/JWKS round trip, audience and expiry binding, refusals,
+   publication overlap; no database), `discovery-cloud-scanners.test.ts` (federated AWS, principal, Organizations
+   pagination and member scan, egress refusal, malformed targets), `zz-adr0195-sd2b-federation.test.ts` (database:
+   CHECKs, guard and TRUNCATE, off by default, each step-up with negative controls that are not spent, round trip
+   against the JWKS route, rotate, revoke, disable).
+
+Open source first: key generation is Node `crypto`, the thumbprint and JWS are `jose` 6.2.12, the token exchanges
+are the cloud SDKs already pinned; the one new dependency is the Organizations client. Not built: an
+end-to-end run against a real cloud account (pending execution, needs a customer trust policy), and federated
+git-provider credentials (SD1 follow-up).
+
+## SD3 build notes (2026-10-17)
+
+- The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
+  device filters to what the catalogue can match instead of shipping its whole software inventory; each query's
+  definition also carries the importer's column allowlist. `scripts/endpoint-pack-build.mjs` writes
+  `endpoint-discovery/osquery/`, and the shared suite fails on drift. Execution under osquery is pending (M-041).
+- Endpoint match types are exact, case-insensitive comparisons (`app_name`, `bundle_id`, `executable_name`,
+  `cli_binary`, `npm_package`, `process_name`, `ide_extension_id`, `browser_extension_id`, `env_var_name`), a
+  home-relative `config_path`, a decimal `listening_port`, and a `trait_set` over a closed trait vocabulary
+  (`listen_all_interfaces`, `user_writable_path`, `hidden_path`, `background_agent`). SD0 aligns its matcher columns
+  to these.
+- Seed: 90 rows derived from the pinned registry (commit `12b7bbf7`), 12 written by us (local runtime names and default
+  ports, AI CLI npm packages, three hidden-assistant trait rows). Rows for a general-purpose desktop app are imported
+  disabled: its presence is not AI use. The two LAN-listener trait rows stay enabled and are marked low confidence
+  (coordinator, 2026-10-17).
+- Importers bound each file at 5,000,000 bytes and 20,000 rows (one osquery line at 262,144 characters, one cell at
+  512); every row not imported is refused with its line and counted. A row with a value, command-line or contents
+  column is refused. Decorations are discarded. Device names are pseudonymised as well as device users, because host
+  names often carry a person's name. There is no default pseudonym hook; a missing hook refuses the import.
+- The pack is unsigned until SD4; the manifest carries its SHA-256 and a signer seam.
+- Phase B (wired into SD0): `endpoint_osquery` and `endpoint_inventory` are registered as upload-fed scanners (a
+  scheduled run observes nothing). `POST /v1/discovery/sources/:sourceId/endpoint-imports` parses the file with a
+  request-local keyed hash, matches it against the enabled catalogue, opens a run on the source holding its lease, and
+  commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only the devices
+  and device users of committed sightings get SD0 pseudonyms; the user travels as `actorPseudonym`. `POST /v1/discovery/endpoint-signatures/seed` installs the
+  seed as `identifier` rows (ports as `port:<n>`, trait sets as `trait:<sorted set>`). Endpoint retention is SD0's.
+- With SD0's follow-up columns (migration 0202): device names use the `device` pseudonym kind and device users
+  `device_user` (sent as `actorPseudonym`); seed rows carry `os` (one OS, or any when SD3 scoped a row to two),
+  `ecosystem` (`vscode`, `jetbrains`, `firefox`, `safari`, and `chromium` for Chrome and Edge), `tool_id`, `note` and
+  `confidence` (`high`, and `low` on the two LAN-listener trait rows); upload-fed sources are never scheduled. An
+  OS-scoped row matches only a sighting whose OS is known and equal, so an inventory export without an OS column
+  matches only the OS-neutral rows.
+

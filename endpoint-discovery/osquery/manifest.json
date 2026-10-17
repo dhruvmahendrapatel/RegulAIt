@@ -1,0 +1,165 @@
+{
+  "schema": "regulait.endpoint-pack-manifest.v1",
+  "pack": "RegulAIt AI discovery query pack",
+  "packName": "regulait_ai_discovery",
+  "file": "regulait-ai-discovery.conf",
+  "sha256": "6cf008260ce4b77039635e719d89c6d02b288cd737c817411249d0be00204d83",
+  "bytes": 14481,
+  "seedSha256": "b744aed899f46e7a60140782834e3703b40cbff3ca236ea7afb8faae7bd4b8f9",
+  "queries": [
+    {
+      "name": "ai_apps_macos",
+      "platform": "darwin",
+      "tables": [
+        "apps"
+      ]
+    },
+    {
+      "name": "ai_programs_windows",
+      "platform": "windows",
+      "tables": [
+        "programs"
+      ]
+    },
+    {
+      "name": "ai_deb_packages_linux",
+      "platform": "linux",
+      "tables": [
+        "deb_packages"
+      ]
+    },
+    {
+      "name": "ai_rpm_packages_linux",
+      "platform": "linux",
+      "tables": [
+        "rpm_packages"
+      ]
+    },
+    {
+      "name": "ai_running_processes",
+      "platform": "all",
+      "tables": [
+        "processes"
+      ]
+    },
+    {
+      "name": "ai_ide_extensions_vscode",
+      "platform": "all",
+      "tables": [
+        "users",
+        "vscode_extensions"
+      ]
+    },
+    {
+      "name": "ai_ide_extensions_jetbrains",
+      "platform": "all",
+      "tables": [
+        "users",
+        "jetbrains_plugins"
+      ]
+    },
+    {
+      "name": "ai_browser_extensions_chromium",
+      "platform": "all",
+      "tables": [
+        "users",
+        "chrome_extensions"
+      ]
+    },
+    {
+      "name": "ai_local_runtime_listeners",
+      "platform": "all",
+      "tables": [
+        "listening_ports",
+        "processes"
+      ]
+    },
+    {
+      "name": "ai_cli_npm_global",
+      "platform": "all",
+      "tables": [
+        "npm_packages"
+      ]
+    },
+    {
+      "name": "ai_cli_binaries_macos",
+      "platform": "darwin",
+      "tables": [
+        "file"
+      ]
+    },
+    {
+      "name": "ai_cli_binaries_linux",
+      "platform": "linux",
+      "tables": [
+        "file"
+      ]
+    },
+    {
+      "name": "ai_cli_binaries_windows",
+      "platform": "windows",
+      "tables": [
+        "file"
+      ]
+    },
+    {
+      "name": "ai_env_var_names_posix",
+      "platform": "posix",
+      "tables": [
+        "process_envs",
+        "processes"
+      ]
+    },
+    {
+      "name": "ai_env_var_names_windows",
+      "platform": "windows",
+      "tables": [
+        "registry"
+      ]
+    },
+    {
+      "name": "ai_config_files_macos",
+      "platform": "darwin",
+      "tables": [
+        "file"
+      ]
+    },
+    {
+      "name": "ai_config_files_linux",
+      "platform": "linux",
+      "tables": [
+        "file"
+      ]
+    },
+    {
+      "name": "ai_config_files_windows",
+      "platform": "windows",
+      "tables": [
+        "file"
+      ]
+    },
+    {
+      "name": "hidden_assistant_lan_listeners",
+      "platform": "all",
+      "tables": [
+        "listening_ports",
+        "processes"
+      ]
+    },
+    {
+      "name": "hidden_assistant_background_apps_macos",
+      "platform": "darwin",
+      "tables": [
+        "apps"
+      ]
+    }
+  ],
+  "osquery": {
+    "shipped": false,
+    "note": "RegulAIt ships queries only. osquery is installed and run by the customer through their MDM or EDR."
+  },
+  "signature": {
+    "status": "unsigned",
+    "reason": "Pack signing is pending the ADR-0195 SD4 spike. Verify the file's SHA-256 against this manifest, obtained from your RegulAIt release, before deploying it."
+  }
+}

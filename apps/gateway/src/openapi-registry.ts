@@ -776,6 +776,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/discovery/federation/keys/:kid/activate": "internal",
   "POST /v1/discovery/federation/keys/:kid/revoke": "internal",
   "POST /v1/discovery/federation/disable": "internal",
+  // ADR-0195 SD3: endpoint evidence imports and the endpoint signature seed
+  "POST /v1/discovery/sources/:sourceId/endpoint-imports": "internal",
+  "POST /v1/discovery/endpoint-signatures/seed": "internal",
   "GET /v1/spend/anomalies": "public-beta",
   "PATCH /v1/spend/anomalies/:id": "internal",
   "POST /v1/spend/anomalies/evaluate": "internal",
@@ -1777,6 +1780,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/discovery/federation/keys/:kid/activate": "shadow-ai",
   "POST /v1/discovery/federation/keys/:kid/revoke": "shadow-ai",
   "POST /v1/discovery/federation/disable": "shadow-ai",
+  "POST /v1/discovery/sources/:sourceId/endpoint-imports": "shadow-ai",
+  "POST /v1/discovery/endpoint-signatures/seed": "shadow-ai",
   "GET /v1/spend/anomalies": "spend",
   "PATCH /v1/spend/anomalies/:id": "spend",
   "POST /v1/spend/anomalies/evaluate": "spend",

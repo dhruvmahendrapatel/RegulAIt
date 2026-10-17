@@ -4,7 +4,7 @@
  *
  * Honesty rules this page keeps:
  *  - A source kind is selectable only when its scanner is built. SD0 builds
- *    none, so every kind shows "not built yet" with the slice that builds it,
+ *    only SD3's two upload-fed endpoint kinds; every other kind shows "not built yet" with the slice that builds it,
  *    and the add form says so instead of offering a submit that would fail.
  *  - Every source starts disabled. Enabling one, widening an enabled one's
  *    target or scope, storing a static secret, lengthening the warning age or
@@ -24,6 +24,7 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea 
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
+import { EndpointImportCard } from "./EndpointImportCard";
 import {
   couldNotRead,
   describeSchedule,
@@ -371,6 +372,8 @@ export default function DiscoverySourcesPage() {
               </div>
             </Card>
           )}
+
+          <EndpointImportCard sources={list} onDone={refetchAll} />
 
           <Card title="Recent runs">
             <Table<DiscoveryRunView>

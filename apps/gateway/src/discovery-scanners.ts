@@ -41,6 +41,7 @@ import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind
 import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome } from "@regulait/shared";
 import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
+import { ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
 
 /** the source as a scanner sees it */
 export interface ScanSource {
@@ -201,6 +202,8 @@ export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   ...REPO_SCANNERS,
   // SD2: cloud_aws, cloud_gcp, cloud_azure
   ...cloudDiscoveryScanners(),
+  // SD3: endpoint_osquery, endpoint_inventory, the no-agent endpoint kinds fed by upload (endpoint-import-routes.ts)
+  ...ENDPOINT_IMPORT_SCANNERS,
 ]);
 
 /**
