@@ -1622,12 +1622,13 @@ before CI. The builder brief did not mention the guard.
 Rule: read `apps/gateway/src/zz-dbguard-0185.test.ts` before writing any migration, and check every new function and
 every new refusal trigger against it by hand when Postgres is not available. The builder brief now says so.
 
-### M-084 (2026-10-17) - REPEAT of M-081/M-047: a builder chained its push after the build, and the build had failed
+### M-084 (2026-10-17) - REPEAT of M-081/M-058: a builder chained its push after the build, and the build had failed
 
-On #400 a builder ran the build and `git push` together in one command. The gateway `tsc` was OOM-killed (exit 137)
-because other builds were running on the same host, and the push still went out. CI caught the broken tree. Ordering
-the build first was not enough, because a chained command does not stop when an earlier step fails in a way the chain
-does not check.
+On #400 a builder ran the build, the tests and `git push` in one command. The gateway `tsc` was killed (out of memory
+or a timeout) because other builds were running on the same host. The later steps did not gate the push, and the push
+still went out. CI then failed on a check the local run never finished (`basename-collisions.test.mjs`, from the spike
+files). Ordering the build first was not enough, because a chained command does not stop when an earlier step fails in
+a way the chain does not check.
 
 Rule: run the build on its own, read its exit code, and push in a separate command only after a confirmed exit 0.
 Build serially (`pnpm -r --workspace-concurrency=1 build`) and avoid overlapping heavy builds on one host. Both rules

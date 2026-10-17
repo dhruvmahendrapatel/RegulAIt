@@ -34,15 +34,16 @@ paragraph supersedes the 2026-10-16 one below.
     - detection is data;
     - federated credentials are the default, and static keys are an audited relaxation;
     - pseudonymity for people and devices;
-  - #400: the R15 endpoint-agent design spike (SD4).
-- **Last migration on main:** 0200. Queued, in order:
-  - 0201: #399, ADR-0190 owner decisions C and D (reviewed, released, CI finishing);
-  - 0202: #397, runc L1 backend and a versioned engine-worker profile (reviewed; journal entry added after #399);
+  - #400: the R15 endpoint-agent design spike (SD4);
+  - #399: ADR-0190 owner decisions C and D (migration 0201), merged at 05:21Z.
+- **Last migration on main:** 0201. Queued, in order:
+  - 0202: #397, runc L1 backend and a versioned engine-worker profile (reviewed; journal entry added at b52ed33 after
+    #399 merged; back on HOLD for a CI failure in the 0183 retirement invariant, fix in progress);
   - 0203: #403, SD0 discovery foundation (approved with conditions; final fixes in).
 - **ADR-0195 slices in review, all HOLD:**
   - SD0 #403;
-  - SD1 repo scanners #402 (third recheck running);
-  - SD2 cloud scanners #404 (second recheck running);
+  - SD1 repo scanners #402 (approved, final head e44523f);
+  - SD2 cloud scanners #404 (third recheck running at 0f66701);
   - SD3 endpoint discovery without an agent #401 (approved).
 
   SD1 to SD3 merge after SD0. Federated cloud credentials fail with an explicit reason until the RS256 signer slice lands
@@ -57,16 +58,19 @@ paragraph supersedes the 2026-10-16 one below.
   - the google-auth-library STS transporter bug (still present in 11.3.1 and on its main branch) is not reported
     upstream; our workaround stays, and it is re-checked on every upgrade.
 - **Cloud builder wave (HOLD, held by branch until reviewed):**
-  - engine image publishing (`eng-task-images`);
-  - the SD4a endpoint agent;
-  - UI lows;
-  - server secure-by-default gaps (0204 reserved);
-  - reliability and test hygiene (0205 reserved);
-  - the enterprise UI test harness.
+  - engine image publishing (#405);
+  - the SD4a endpoint agent (#411);
+  - UI lows (#406, reviewed and released);
+  - server secure-by-default gaps (#408, 0204 reserved);
+  - reliability and test hygiene (#407, 0205 reserved);
+  - the enterprise UI test harness (#410, with a new ADR);
+  - decision-facts relaxation evidence (0208 reserved);
+  - the gateway log-leak fix with SPIFFE follow-ups.
 - **Still open:**
   - #385, the gVisor CI job, which waits on an upstream runsc release (check on 2026-10-20). L2 stays UNVERIFIED.
 - **Dev-host scrub:** concrete developer host names, addresses and instance ids in this file are replaced with
-  `<dev-host>`, `<dev-host-ip>` and `<dev-instance>`.
+  `<dev-host>`, `<dev-host-ip>`, `<dev-instance>`
+  and `<dev-volume>`, and the AWS account ids with `<mgmt-account>` and `<workload-account>`.
 
 **2026-10-16 - SPIFFE trust bundles audited, engines under execution profiles, an internal TLS front for the
 executor, and the B8 runbooks.** Full record: [sessions/2026-10-16-session-01.md](sessions/2026-10-16-session-01.md).
@@ -3568,8 +3572,8 @@ row and leaves every credential undecryptable). Both are tracked in
 
 The infrastructure bootstrap phase (EPIC-01) is **complete**. The private GitHub repo
 [dhruvmahendrapatel/RegulAIt](https://github.com/dhruvmahendrapatel/RegulAIt) is live with the
-full scaffold. AWS is a two-account Organization (Management `913436627353` / Workload
-`regulait-dev` `517506432475`), IAM Identity Center only (no long-lived keys), and the full
+full scaffold. AWS is a two-account Organization (Management `<mgmt-account>` / Workload
+`regulait-dev` `<workload-account>`), IAM Identity Center only (no long-lived keys), and the full
 security baseline — org-wide CloudTrail, GuardDuty, Security Hub (FSBP + CIS standards), AWS
 Config with a cross-account aggregator, account-level S3 Block Public Access, a $5/month Budget,
 3 SCPs, and all three permission sets (`Admin-BreakGlass`, `Deploy-Builder`, `ReadOnly-Audit`) —
@@ -4821,11 +4825,11 @@ the legacy UI, and get HTTPS live. All are done or in flight, and the route ther
 real defects that had been latent precisely because nothing was exercising them.
 
 **Infra applied (#84's plan, verified `0 add / 2 change / 0 destroy`).** Ports 80/443 opened, the
-`:3000` ingress removed. No instance replacement, so the Postgres volume (`vol-0573958930d696417`)
+`:3000` ingress removed. No instance replacement, so the Postgres volume (`<dev-volume>`)
 survived — that was the whole point of the #84 landmine fix. **But the apply changed `user_data`,
 which the EC2 provider applies by STOPPING AND STARTING the instance**, which released the
-auto-assigned public IPv4. The address moved `<dev-host-ip>` → `<dev-host-ip>`, and later again to
-`<dev-host-ip>` on Elastic-IP attachment. Worth internalising: *any* `user_data` edit is an
+auto-assigned public IPv4. The address moved `<dev-host-ip-1>` → `<dev-host-ip-2>`, and later again to
+`<dev-host-ip-3>` on Elastic-IP attachment. Worth internalising: *any* `user_data` edit is an
 address change on a box whose hostname is derived from its address.
 
 **Defect 1 — the `tls` profile had never once started.** It shipped in #77 and was never exercised
