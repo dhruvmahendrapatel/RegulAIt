@@ -190,15 +190,15 @@ afterAll(async () => {
 });
 
 describe("ADR-0195 SD0 discovery foundation", () => {
-  it("the production registry holds only the built scanners (SD1 repos, SD2 clouds, SD3 upload-fed endpoint kinds); any other kind cannot be created", async () => {
+  it("the production registry holds only the built scanners (SD1 repos, SD2 clouds, SD3 upload-fed endpoint kinds, SD4b the endpoint agent); any other kind cannot be created", async () => {
     const k = await inject("GET", "/v1/discovery/scanners", AUTH, undefined, bare);
     expect(k.statusCode).toBe(200);
     const kinds = k.json().kinds as Array<{ kind: string; built: boolean }>;
-    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_inventory", "endpoint_osquery", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab"]);
-    // the endpoint agent (SD4) has no scanner yet
-    const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "endpoint_agent", target: { fleet: "x" }, scope: { orgLevel: true, include: [] } }, bare);
-    expect(c.statusCode).toBe(409);
-    expect(c.json().error).toBe("scanner_not_built");
+    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_agent", "endpoint_inventory", "endpoint_osquery", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab"]);
+    // SD4b built the last kind: every kind has a scanner, and a kind outside the closed set is refused before any write
+    expect(kinds.filter((x) => !x.built)).toEqual([]);
+    const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "endpoint_unknown", target: { fleet: "x" }, scope: { orgLevel: true, include: [] } }, bare);
+    expect(c.statusCode).toBe(400);
   });
 
   it("SD1: create and PATCH refuse a repo target the scanner rejects (400 target_invalid) before writing", async () => {
