@@ -143,6 +143,7 @@ import { projectPiiMode } from "./projects.js";
 import { verifyTeamsBotToken } from "./teams-bot-auth.js";
 // ADR-0182 S5 (PF-14): the alert-SLA sweep posts through this file's courier
 import { registerAlertSlaCourier } from "./alert-ownership.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -183,7 +184,7 @@ function mailPublicUrl(): { ok: true; url: string } | { ok: false; status: 422; 
   try {
     url = resolvePublicUrl();
   } catch (err) {
-    why = err instanceof Error ? err.message : String(err);
+    why = safeErrorMessage(err);
   }
   if (url) return { ok: true, url };
   return {
@@ -1013,7 +1014,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
               }),
             );
     } catch (err) {
-      posted = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+      posted = { ok: false, status: 502, body: { error: safeErrorMessage(err) } };
     }
     await audit(
       actorUserId,
@@ -1452,7 +1453,7 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
             cardUpdate = String(res.body.error ?? "post_failed");
           }
         } catch (err) {
-          cardUpdate = err instanceof Error ? err.message : String(err);
+          cardUpdate = safeErrorMessage(err);
         }
       }
 

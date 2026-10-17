@@ -89,15 +89,7 @@ import {
   resolveRateLimitConfig,
   type RateLimitConfig,
 } from "./rate-limit.js";
-import {
-  framesOnly,
-  parserRefusal,
-  parserRefusalLogFields,
-  redactLogText,
-  requestLogFields,
-  safeErrorText,
-  unhandledErrorLogFields,
-} from "./gateway-logger.js";
+import { framesOnly, parserRefusal, parserRefusalLogFields, redactLogText, requestLogFields, safeErrorMessage, safeErrorText, unhandledErrorLogFields } from "./gateway-logger.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -4197,7 +4189,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ruleId: "builder-tool-step-resume-failed",
           ruleChain: [],
           reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-            err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+            safeErrorMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err)
           }`
             .replace(/\s+/g, " ")
             .slice(0, 1000),
@@ -4920,7 +4912,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         const w = extra && typeof extra === "object" ? (extra as { executionWarning?: Record<string, unknown> }).executionWarning : undefined;
         if (w) executionWarning = { ...(executionWarning ?? {}), ...w };
       } catch (err) {
-        executionError ??= err instanceof Error ? err.message : String(err);
+        executionError ??= safeErrorMessage(err);
       }
     }
     // ADR-0189 R25 items 5 and 7: the owed AI BOM snapshots, after commit; a failure

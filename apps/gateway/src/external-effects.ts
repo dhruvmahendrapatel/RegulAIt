@@ -1,5 +1,6 @@
 import { auditLog, type Db } from "@regulait/db";
 import { loadExecutionMode } from "./execution-posture.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 /** Every external provider mutation outside the AI/MCP dispatch kernel. */
 export const EXTERNAL_WRITE_OPERATIONS = [
@@ -68,7 +69,7 @@ export async function runExternalWrite<T>(
   try {
     result = await call();
   } catch (err) {
-    await record("failed", { error: err instanceof Error ? err.message : String(err) });
+    await record("failed", { error: safeErrorMessage(err) });
     throw err;
   }
   await record("performed", audit.summarize ? audit.summarize(result) : {});

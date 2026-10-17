@@ -36,7 +36,7 @@
  * `verifyDataKeyOnBoot`. Constructing an app is not putting a deployment into
  * service, and ~103 test files construct apps.
  */
-import { safeErrorText } from "./gateway-logger.js";
+import { framesOnly, safeErrorText } from "./gateway-logger.js";
 import { runAuditV2Cutover } from "@regulait/db";
 import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { ensureInternalIdentities } from "./in-process-delegation.js";
@@ -159,7 +159,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     const ensured = await ensureInternalIdentities(db);
     if (ensured.created > 0) log(`[regulait] created ${ensured.created} internal workload identit${ensured.created === 1 ? "y" : "ies"} (no grants; an admin grants them)`);
   } catch (err) {
-    log(`[regulait] internal workload identities not ensured at boot: ${err instanceof Error ? err.message : String(err)}`);
+    log(`[regulait] internal workload identities not ensured at boot: ${safeErrorText(err)}`);
   }
 
   // ADR-0176 (migration 0145): the one-time re-pin of stored MCP manifest
@@ -213,7 +213,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     try {
       otlpBackfill = await backfillOtlpHeaderCiphertext(db, appOpts.dataKey);
     } catch (err) {
-      log(`[regulait] OTLP header envelope backfill failed: ${err instanceof Error ? err.message : String(err)}`);
+      log(`[regulait] OTLP header envelope backfill failed: ${safeErrorText(err)}`);
     }
   }
 
@@ -228,7 +228,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
         `${by("drifted")} drifted, ${by("unverifiable")} unverifiable`,
     );
   } catch (err) {
-    log(`[regulait] built-in eval dataset seeding failed: ${err instanceof Error ? err.message : String(err)}`);
+    log(`[regulait] built-in eval dataset seeding failed: ${safeErrorText(err)}`);
   }
 
   // ADR-0064 — the scheduler's shutdown hook MUST be registered BEFORE listen.
@@ -554,12 +554,12 @@ export function installShutdownHandlers(
       try {
         await started.app.close();
       } catch (err) {
-        log(`[regulait] app.close failed during drain: ${err instanceof Error ? err.message : String(err)}`);
+        log(`[regulait] app.close failed during drain: ${safeErrorText(err)}`);
       }
       try {
         await (db as unknown as { $client: { end: () => Promise<void> } }).$client.end();
       } catch (err) {
-        log(`[regulait] pool.end failed during drain: ${err instanceof Error ? err.message : String(err)}`);
+        log(`[regulait] pool.end failed during drain: ${safeErrorText(err)}`);
       }
       clearTimeout(deadline);
       log(`[regulait] stopped (exit ${code})`);
@@ -580,12 +580,12 @@ export function installShutdownHandlers(
   }
   proc.on("unhandledRejection", (reason: unknown) => {
     const err = reason instanceof Error ? reason : new Error(String(reason));
-    log(`[regulait] unhandled promise rejection: ${err.stack ?? err.message}`);
+    log(`[regulait] unhandled promise rejection: ${safeErrorText(err)}\n${framesOnly(err)}`);
     void shutdown("unhandled promise rejection", 1);
   });
   proc.on("uncaughtException", (reason: unknown) => {
     const err = reason instanceof Error ? reason : new Error(String(reason));
-    log(`[regulait] uncaught exception: ${err.stack ?? err.message}`);
+    log(`[regulait] uncaught exception: ${safeErrorText(err)}\n${framesOnly(err)}`);
     void shutdown("uncaught exception", 1);
   });
 

@@ -148,6 +148,7 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { ensureLineageEdge, ensureLineageNode } from "./lineage.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 /** the audit actor when the caller is the identity-less bootstrap token — the
  * same sentinel every other admin surface in this gateway uses */
@@ -689,7 +690,7 @@ export async function runTrainingJob(
     if (err instanceof TrainingBackendError && err.code === "credential_required") {
       return finishRefused(db, job, err.code, err.message);
     }
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeErrorMessage(err);
     const code = err instanceof TrainingBackendError ? err.code : "upstream_error";
     if (err instanceof TrainingBackendError && (code === "method_unsupported" || code === "backend_disabled")) {
       return finishRefused(db, job, code, message);
@@ -732,7 +733,7 @@ export async function pollTrainingJob(
     if (err instanceof TrainingBackendError && err.code === "credential_required") {
       return finishRefused(db, job, err.code, err.message);
     }
-    return finishFailed(db, job, err instanceof Error ? err.message : String(err));
+    return finishFailed(db, job, safeErrorMessage(err));
   }
 
   if (report.status === "running") {
@@ -751,7 +752,7 @@ export async function pollTrainingJob(
   try {
     payload = await resolution.backend.fetchArtifact(handle);
   } catch (err) {
-    return finishFailed(db, job, err instanceof Error ? err.message : String(err));
+    return finishFailed(db, job, safeErrorMessage(err));
   }
 
   const finishedAt = new Date();
@@ -926,7 +927,7 @@ export async function runTrainingJobPollSweep(
       const result = await pollTrainingJob(db, job, opts);
       polled.push({ jobId: job.id, status: result.job.status });
     } catch (err) {
-      skipped.push({ jobId: job.id, reason: err instanceof Error ? err.message : String(err) });
+      skipped.push({ jobId: job.id, reason: safeErrorMessage(err) });
     }
   }
   return { polled, skipped };

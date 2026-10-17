@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { safeErrorText, safeLogObject } from "./gateway-logger.js";
+import { safeErrorMessage, safeErrorText, safeLogObject } from "./gateway-logger.js";
 import type { FastifyInstance } from "fastify";
 // ADR-0187: loaded lazily where used (engine-runs.ts reaches back into this module)
 import type { EngineCheckOutcome } from "./engine-runs.js";
@@ -1171,7 +1171,7 @@ async function runStageEvalChecks(
         },
       });
     } catch (e) {
-      fail(`eval '${binding.dataset}' errored: ${(e as Error).message}`);
+      fail(`eval '${binding.dataset}' errored: ${safeErrorMessage(e)}`);
     }
   }
   return out;
@@ -1690,7 +1690,7 @@ async function runGitExecutions(
         }
       } catch (err) {
         executionControlRefused = err instanceof ExternalEffectBlockedError;
-        deployErr = err instanceof Error ? err.message : String(err);
+        deployErr = safeErrorMessage(err);
       }
       releaseStageClaim(context);
       if (deployErr === null) delete context.lastError;
@@ -1792,7 +1792,7 @@ async function runGitExecutions(
               : { ...res, target: target.name };
         }
       } catch (err) {
-        rbErr = err instanceof Error ? err.message : String(err);
+        rbErr = safeErrorMessage(err);
       }
       releaseStageClaim(context);
       if (rbErr === null) delete context.lastError;
@@ -2009,7 +2009,7 @@ ${latestArtifact.content}`
         context.mergeSha = result.sha;
       }
     } catch (err) {
-      executionError = err instanceof Error ? err.message : String(err);
+      executionError = safeErrorMessage(err);
     }
 
     // Release the claim; record outcome. The kernel event application sits

@@ -101,7 +101,9 @@ export async function recordSchedulerFailure(
   err: unknown,
   now: Date = new Date(),
 ): Promise<void> {
-  const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  // R1: computed once with the withheld form — the console line, `lastError`
+  // and the durable audit row all carry it
+  const message = safeErrorText(err);
 
   const row = slot(name);
   row.runs++;

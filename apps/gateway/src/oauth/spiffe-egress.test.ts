@@ -10,7 +10,7 @@
  * module that handles SPIFFE material may reach the network only through the
  * egress guard (`guardConnectionCall(...)`, whose `fetchImpl` is the guarded
  * fetch). A bare `fetch` (called or aliased), `globalThis.fetch`,
- * node:http/https/http2, undici or a raw socket, imported statically, through
+ * node:http/https/http2, undici, a raw socket or a child process (curl), imported statically, through
  * `import()` or through `require()`, fails this test.
  *
  * The scan covers every gateway module that names SPIFFE, every module under
@@ -56,11 +56,15 @@ const RAW_EGRESS: ReadonlyArray<readonly [string, RegExp]> = [
   // called or aliased (`const f = fetch`); an object key `fetch:` and `.fetchImpl` are not the global
   ["bare fetch", /(?<![.\w$])fetch\b(?!\s*:)/],
   ["globalThis.fetch", /\bglobalThis\s*\.\s*fetch\b/],
+  // R4: a destructured global (`const { fetch: f } = globalThis`)
+  ["destructured fetch", /\{[^}]*\bfetch\b[^}]*\}\s*=\s*(?:globalThis|global|self)\b/],
   // a value import (or re-export); `import type` is not egress
-  ["node:http(s)", /^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s+["'](?:node:)?(?:https?|http2)["']/m],
+  ["node:http(s)", /^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s+["'](?:node:)?(?:https?|http2|child_process)["']/m],
   ["undici", /^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s+["']undici["']/m],
   // a dynamic import or a require of any network module
-  ["dynamic network import", /\b(?:import|require)\s*\(\s*["'](?:node:)?(?:https?|http2|undici|net|tls|dgram)["']\s*\)/],
+  ["dynamic network import", /\b(?:import|require)\s*\(\s*["'](?:node:)?(?:https?|http2|undici|net|tls|dgram|child_process)["']\s*\)/],
+  // R4: an `import()` whose specifier is not a literal cannot be checked, so it is refused
+  ["dynamic import of a variable", /\bimport\s*\(\s*(?!["'`])/],
   // a whole-module import, or a connecting name; `BlockList`/`isIP` and type-only imports are not egress
   ["raw socket", /import\s+(?:\*\s+as\s+)?\w+\s+from\s+["'](?:node:)?(?:net|tls|dgram)["']|import\s+\{[^}]*\b(?:connect|createConnection|Socket|createSocket)\b[^}]*\}\s*from\s+["'](?:node:)?(?:net|tls|dgram)["']/],
 ];
@@ -99,6 +103,11 @@ describe("SPIFFE modules reach the network only through the egress guard", () =>
     expect(violations("const http2 = await import('http2');")).toEqual(["dynamic network import"]);
     expect(violations('const { request } = require("undici");')).toEqual(["dynamic network import"]);
     expect(violations('const h = require("node:http");')).toEqual(["dynamic network import"]);
+    // R4
+    expect(violations("const { fetch: f } = globalThis; await f(u);")).toEqual(["destructured fetch"]);
+    expect(violations('const cp = await import("node:child_process");')).toEqual(["dynamic network import"]);
+    expect(violations('import { execFile } from "node:child_process";')).toEqual(["node:http(s)"]);
+    expect(violations("const m = await import(moduleName);")).toEqual(["dynamic import of a variable"]);
     expect(violations("const deps = { fetch: g.fetchImpl };")).toEqual([]);
     expect(violations('import type { IncomingMessage } from "node:http";')).toEqual([]);
     expect(violations('import { request } from "undici";')).toEqual(["undici"]);

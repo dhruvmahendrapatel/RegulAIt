@@ -626,7 +626,8 @@ export async function runSchedulerJob(
       detail,
     };
   } catch (err) {
-    const message = (err instanceof Error ? `${err.name}: ${err.message}` : String(err)).slice(0, 2000);
+    // R1: the persisted job error carries the same withheld form as the line
+    const message = safeErrorText(err).slice(0, 2000);
     // The console line ALWAYS happens and happens first — it is the signal most
     // likely to survive whatever broke (see scheduler-health.ts for the same
     // ordering argument).
@@ -777,7 +778,7 @@ export class Scheduler {
       } catch (err) {
         // runSchedulerJob does not throw. If it somehow did — a database that
         // refuses the claim transaction, say — the tick still continues.
-        const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        const message = safeErrorText(err);
         console.error(`[regulait] scheduler tick could not attempt '${def.name}': ${safeErrorText(err)}`);
         recordJobRun(def.name, "failed");
         results.push({

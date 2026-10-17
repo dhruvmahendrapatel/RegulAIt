@@ -21,6 +21,7 @@ import {
   redactLogText,
   requestLogFields,
   resolveGatewayLogger,
+  safeErrorMessage,
   safeErrorText,
   safeLogObject,
   UNMATCHED_PATH_MAX,
@@ -169,6 +170,17 @@ describe("the 500 line withholds what can quote request input", () => {
     expect(viaSyntax).toMatchObject({ causeType: "SyntaxError", errMessage: expect.stringContaining("withheld") });
   });
 
+  it("a bare driver error is withheld on the 500 line, keeping SQLSTATE and names (R5)", () => {
+    const pg = Object.assign(new Error(`invalid input syntax for type uuid: "${MARKER}"`), {
+      code: "22P02",
+      severity: "ERROR",
+      table: "ai_use_cases",
+    });
+    const fields = unhandledErrorLogFields({ method: "GET", url: "/v1/x?q=1", routeOptions: { url: "/v1/x" } } as never, pg);
+    expect(JSON.stringify(fields)).not.toContain(MARKER);
+    expect(fields).toMatchObject({ pgCode: "22P02", pgTable: "ai_use_cases", errMessage: "[withheld: may quote request input]" });
+  });
+
   it("a cyclic cause chain terminates and falls through to the ordinary line", () => {
     const a = new Error("a") as Error & { cause?: unknown };
     a.cause = a;
@@ -236,10 +248,30 @@ describe("pino's own redaction and the line scrubber", () => {
     expect(out).not.toContain(MARKER);
   });
 
+  it("masks every credential header under err.<client>.headers (R2)", () => {
+    out = "";
+    app.log.error(
+      {
+        err: {
+          config: { headers: { cookie: MARKER, "x-api-key": MARKER, "proxy-authorization": MARKER, authorization: MARKER } },
+          request: { headers: { cookie: MARKER } },
+        },
+      },
+      "err nested probe",
+    );
+    expect(out).toContain("err nested probe");
+    expect(out).not.toContain(MARKER);
+  });
+
   it("replaces credential-shaped query values in any line, keeping the names", () => {
     expect(redactLogText("/cb?code=abc&state=def&page=2")).toBe("/cb?code=[redacted]&state=[redacted]&page=2");
     expect(redactLogText("/x?access_token=a1#f")).toBe("/x?access_token=[redacted]#f");
     expect(redactLogText("/x?page=2&sort=asc")).toBe("/x?page=2&sort=asc");
+  });
+
+  it("replaces credential values in a fragment too (R3)", () => {
+    expect(redactLogText("/cb#access_token=SECRET&state=z")).toBe("/cb#access_token=[redacted]&state=[redacted]");
+    expect(redactLogText("/cb#section=2")).toBe("/cb#section=2");
   });
 
   it.each(["client_secret", "code_verifier", "X-Amz-Signature", "X-Amz-Credential", "X-Goog-Signature"])(
@@ -289,6 +321,26 @@ describe("console-bound error text (F1)", () => {
   it("withholds a SyntaxError anywhere in the cause chain", () => {
     expect(safeErrorText(new SyntaxError(MARKER))).not.toContain(MARKER);
     expect(safeErrorText(new Error("outer", { cause: new SyntaxError(MARKER) }))).toMatch(/^Error \(cause SyntaxError\)/);
+  });
+
+  it("withholds a bare driver error: SQLSTATE plus severity/detail (R5)", () => {
+    const pg = Object.assign(new Error(`invalid input syntax for type uuid: "${MARKER}"`), {
+      code: "22P02",
+      severity: "ERROR",
+    });
+    pg.name = "DatabaseError";
+    expect(safeErrorText(pg)).toBe("DatabaseError [SQLSTATE 22P02]: [withheld: may quote request input]");
+    expect(safeErrorMessage(pg)).not.toContain(MARKER);
+    expect(safeErrorText(new Error("outer", { cause: pg }))).not.toContain(MARKER);
+    // a Node system error's code is not a SQLSTATE: still an ordinary message
+    expect(safeErrorText(Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }))).toBe("Error: connect refused");
+  });
+
+  it("safeErrorMessage: the message without the name, withheld where the line withholds (R1)", () => {
+    expect(safeErrorMessage(new Error("pool exhausted"))).toBe("pool exhausted");
+    expect(safeErrorMessage(new Error("GET /cb?code=abc failed"))).toBe("GET /cb?code=[redacted] failed");
+    expect(safeErrorMessage(new SyntaxError(MARKER))).not.toContain(MARKER);
+    expect(safeErrorMessage(42)).toBe("42");
   });
 
   it("keeps an ordinary message, with credential query values scrubbed", () => {

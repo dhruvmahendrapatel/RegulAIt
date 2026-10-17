@@ -132,6 +132,7 @@ import {
   type PiiMode,
 } from "./projects.js";
 import { z } from "zod";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -859,7 +860,7 @@ async function executeGovernedToolCallInner(
     if (classifyUpstreamError(err).why === "our_own_refusal") return;
     await recordUpstreamFailure(db, serverRow, redactActive
       ? "MCP upstream failed during PII-redacted dispatch"
-      : err instanceof Error ? err.message : String(err));
+      : safeErrorMessage(err));
   };
 
   try {
@@ -2000,7 +2001,7 @@ export async function resolveNodeToolContext(
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         if (classifyUpstreamError(err).why !== "our_own_refusal") {
-          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+          await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
         }
         throw err;
       }
@@ -2407,7 +2408,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
             throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
           }
           if (classifyUpstreamError(err).why !== "our_own_refusal") {
-            await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+            await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
           }
           throw err;
         });

@@ -66,6 +66,7 @@ import {
   stepUpCallerOf,
   WEBAUTHN_PROMPT_TIMEOUT_MS,
 } from "./step-up.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -259,7 +260,7 @@ export function registerPasskeyRoutes(app: FastifyInstance, db: Db): void {
     } catch (err) {
       await audit(db, caller.userId, caller.userId, "passkey-registration-failed", "deny",
         "passkey registration failed verification",
-        { error: err instanceof Error ? err.message.slice(0, 200) : "unknown" });
+        { error: safeErrorMessage(err).slice(0, 200) });
       return reply.status(422).send({ error: "passkey_signature_invalid", detail: "the passkey response could not be verified — try again" });
     }
     if (!verified.verified || verified.registrationInfo.fmt !== "none" || !verified.registrationInfo.userVerified) {

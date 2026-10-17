@@ -44,9 +44,10 @@ const URL_CREDENTIALS: ReadonlyArray<readonly [RegExp, string]> = [
  * N8 (2026-10-17) — a credential-shaped query parameter. A token in a query
  * string (an OAuth `code`/`state`, a signed link's `sig`, an `access_token`)
  * reaches a log line through any `url` field; the value is replaced, the name
- * stays so the line still says what was sent.
+ * stays so the line still says what was sent. R3: a fragment (`#access_token=`,
+ * an implicit-flow redirect) is matched as well as a query.
  */
-const QUERY_CREDENTIAL = /([?&](?:access_token|id_token|refresh_token|token|code|state|key|api_key|apikey|secret|password|sig|signature|client_assertion|assertion|session|client_secret|code_verifier|X-Amz-Signature|X-Amz-Credential|X-Goog-Signature)=)[^&#\s"'\\]*/gi;
+const QUERY_CREDENTIAL = /([?&#](?:access_token|id_token|refresh_token|token|code|state|key|api_key|apikey|secret|password|sig|signature|client_assertion|assertion|session|client_secret|code_verifier|X-Amz-Signature|X-Amz-Credential|X-Goog-Signature)=)[^&#\s"'\\]*/gi;
 
 /** a log line (or field) with every URL credential replaced */
 export function redactLogText(s: string): string {
@@ -80,6 +81,12 @@ export const LOG_REDACT_PATHS = [
   '*.headers["x-api-key"]',
   '*.headers["proxy-authorization"]',
   "err.*.headers.authorization",
+  // R2: the other credential headers at the same depth. Deeper shapes
+  // (`err.response.config.headers.*`, a non-`err` key two levels down) belong
+  // with the gateway `err` serializer slice (ADR-0167, Open)
+  "err.*.headers.cookie",
+  'err.*.headers["x-api-key"]',
+  'err.*.headers["proxy-authorization"]',
 ] as const;
 
 /**
@@ -243,6 +250,22 @@ export function unhandledErrorLogFields(req: FastifyRequest, err: unknown): Reco
   if (link instanceof SyntaxError) {
     return { ...base, errType: top.name, ...causeType, errMessage: WITHHELD, errStack: framesOnly(top) };
   }
+  if (!isFailedQuery(link)) {
+    // R5: a driver error with no drizzle wrapper: no SQL text or params to show
+    const d = link as Error & { code?: unknown; constraint?: unknown; table?: unknown; column?: unknown };
+    const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    return {
+      ...base,
+      errType: top.name,
+      ...causeType,
+      errMessage: WITHHELD,
+      pgCode: str(d.code),
+      pgConstraint: str(d.constraint),
+      pgTable: str(d.table),
+      pgColumn: str(d.column),
+      errStack: framesOnly(top),
+    };
+  }
   const q = link as Error & { query: string; params: unknown[]; cause?: unknown };
   const pg = (q.cause ?? {}) as { code?: unknown; constraint?: unknown; table?: unknown; column?: unknown };
   const name = (v: unknown) => (typeof v === "string" ? v : undefined);
@@ -268,6 +291,21 @@ function isFailedQuery(e: unknown): boolean {
 }
 
 /**
+ * R5: a bare database driver error (node-postgres `DatabaseError`): a five-character
+ * SQLSTATE plus the server's `severity` or `detail`. Its message and `detail`
+ * quote values (`invalid input syntax for type uuid: "…"`).
+ */
+function isDriverError(e: unknown): boolean {
+  const d = e as { code?: unknown; severity?: unknown; detail?: unknown } | null;
+  return (
+    e instanceof Error &&
+    typeof d?.code === "string" &&
+    /^[0-9A-Z]{5}$/.test(d.code) &&
+    (typeof d.severity === "string" || typeof d.detail === "string")
+  );
+}
+
+/**
  * The first link of an error's `cause` chain (the error itself included) whose
  * message can quote request input, or null. Bounded and cycle-safe: a cause
  * chain is caller-shaped data too.
@@ -277,7 +315,7 @@ function withheldLink(err: unknown): Error | null {
   let cur: unknown = err;
   for (let depth = 0; depth < 10 && cur && typeof cur === "object" && !seen.has(cur); depth++) {
     seen.add(cur);
-    if (cur instanceof SyntaxError || isFailedQuery(cur)) return cur as Error;
+    if (cur instanceof SyntaxError || isFailedQuery(cur) || isDriverError(cur)) return cur as Error;
     cur = (cur as { cause?: unknown }).cause;
   }
   return null;
@@ -295,12 +333,26 @@ export function safeErrorText(err: unknown): string {
   const link = withheldLink(err);
   if (link) {
     const top = err as Error;
-    const pgCode = (link as { cause?: { code?: unknown } }).cause?.code;
+    const pgCode = isDriverError(link)
+      ? (link as { code?: unknown }).code
+      : (link as { cause?: { code?: unknown } }).cause?.code;
     const via = link === err ? "" : ` (cause ${link.name})`;
     const code = typeof pgCode === "string" ? ` [SQLSTATE ${pgCode}]` : "";
     return `${top.name}${via}${code}: ${WITHHELD}`;
   }
   if (err instanceof Error) return redactLogText(`${err.name}: ${err.message}`);
+  return redactLogText(String(err));
+}
+
+/**
+ * R1 — the same rules as `safeErrorText`, without the `Name: ` prefix, for a
+ * site that stores or reports an error's message (a job's `error`, an audit
+ * row's `detail`, a refusal's `detail`): an ordinary error keeps its message
+ * (through `redactLogText`); a withheld shape gives the withheld text.
+ */
+export function safeErrorMessage(err: unknown): string {
+  if (withheldLink(err)) return safeErrorText(err);
+  if (err instanceof Error) return redactLogText(err.message);
   return redactLogText(String(err));
 }
 

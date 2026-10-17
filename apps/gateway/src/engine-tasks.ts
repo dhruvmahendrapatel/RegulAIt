@@ -85,6 +85,7 @@ import { holdStdioSession, liveStdioSessions, StdioSession, watchHeldStdioSessio
 import { buildAgentDecider } from "./evals.js";
 import { artifactAccessible, type ArtifactStore } from "./model-artifacts.js";
 import { assertProjectAttribution } from "./projects.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -691,7 +692,7 @@ export function registerEngineTaskRoutes(app: FastifyInstance, db: Db, deps: Eng
     try {
       for (const line of body.data.frames) task.session.push(line);
     } catch (e) {
-      return reply.status(409).send({ error: "engine_task_closed", detail: (e as Error).message });
+      return reply.status(409).send({ error: "engine_task_closed", detail: safeErrorMessage(e) });
     }
     if (body.data.close) task.session.close();
     return reply.status(204).send();

@@ -477,3 +477,39 @@ with every bound value. `DEBUG_ERRORS` printed the whole error object. What chan
 timers) still go through pino's standard error serializer, which folds a cause's message in. No such line is known to
 carry a failed query today; a gateway `err` serializer that applies the same withholding would close it, and needs
 `pino` as a direct dependency of the gateway (it is only Fastify's today).
+
+### As built 2026-10-17 — N8 fix round 2 (independent recheck R1–R5)
+
+**Correction to the fix round's item 1.** Its last sentence ("a grep … now finds only CLI scripts") was wrong. The grep
+looked for `.message` on the same line as a `console.*` or `log.warn/error`, so it missed a message that reached stderr
+through an injected `log` function (`condition-metrics.ts`, `review-policy.ts`, `boot.ts`), and a message stored before
+it was printed: the main `scheduled … pass FAILED` line in `scheduler-health.ts` and the `audit_log` row and `lastError`
+it writes, the job `error` that `scheduler.ts` persists and its tick result's `error`. What changed:
+
+1. **A second helper, `safeErrorMessage(err)`** (`gateway-logger.ts`): the same withholding as `safeErrorText`, without
+   the `Name: ` prefix, for a site that stores or reports a message. `scheduler-health.ts` computes the message once with
+   `safeErrorText`, so the console line, `lastError` and the audit row's `detail.error` and `reason` all carry the
+   withheld form. The unhandled-rejection and uncaught-exception lines in `boot.ts` print `safeErrorText` plus the
+   stack frames (a stack's first line is the message).
+2. **The whole gateway, not a list.** Every generic form (`x instanceof Error ? x.message : String(x)`,
+   `(x as Error).message`, the `Name: message` variant and the cause-preferring variant) in a non-CLI gateway module now
+   goes through `safeErrorMessage` or `safeErrorText`: 46 modules, including the job, audit-chain, upstream-failure,
+   PM-mirror and provider-error fields that are stored or returned. An ordinary error keeps its message (through
+   `redactLogText`); only a withheld shape changes. A typed error whose message we wrote (`err.code` refusals) is left
+   as it is.
+3. **A source scan pins it** (`log-error-text.test.ts`). In every non-CLI gateway module it refuses the generic forms
+   anywhere, `err.stack ?? err.message`, `const m = err.message`, and, inside a `console.*(…)`, `log(…)` or
+   `*.log.<level>(…)` call, an error's `.message`/`.stack`, `String(err)`, `${err}` or a raw error argument. A
+   `// log-safe: <why>` comment exempts one line (used once, for a constraint-name match that is never logged).
+   Negative controls cover each form; reverting a converted site turns it red.
+4. **Nested headers (R2).** `err.*.headers.cookie`, `err.*.headers["x-api-key"]` and `err.*.headers["proxy-authorization"]`
+   are added. Deeper shapes (`err.response.config.headers.*`, a non-`err` key two levels down) belong to the `err`
+   serializer slice in the Open note above.
+5. **Fragments (R3).** The query-credential scrubber also matches after `#`, so an implicit-flow redirect
+   (`#access_token=…`) is scrubbed. The pattern stays a literal alternation with no nested quantifier (M-074).
+6. **Bare driver errors (R5).** A link with a five-character SQLSTATE `code` plus `severity` or `detail` (node-postgres
+   `DatabaseError`) is withheld like a failed query; the 500 line keeps its SQLSTATE and constraint, table and column.
+7. **SPIFFE tripwire (R4, ADR-0188).** The egress scan also refuses `child_process` (static, dynamic or `require`), a
+   destructured `globalThis.fetch` and an `import()` of a non-literal specifier.
+
+The Open note above (pino's generic `{ err }` serializer) stands.
