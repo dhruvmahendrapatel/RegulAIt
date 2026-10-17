@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { activeDiscoveryPosture, DISCOVERY_KIND_SPECS, DISCOVERY_SOURCE_KINDS, scopeWidens } from "./index.js";
+import {
+  activeDiscoveryPosture,
+  credentialTargetMatch,
+  DISCOVERY_KIND_SPECS,
+  DISCOVERY_SOURCE_KINDS,
+  publicConfigProblem,
+  scopeWidens,
+} from "./index.js";
 import {
   artifactMatchesSignature,
   catalogueSignatureSchema,
@@ -46,6 +53,33 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
     expect(s).toMatch(/1 enabled source/);
     expect(s).toMatch(/Main org \(GitHub repositories\)/);
     expect(coverageScorecard([], [{ name: "Prod", kind: "cloud_aws" }]).statement).toMatch(/Prod \(AWS\)/);
+  });
+});
+
+describe("credential public config: an allowlist per kind and mode (review of #403)", () => {
+  it("accepts exactly the allowlisted identifiers, well-formed", () => {
+    expect(publicConfigProblem("repo_github", "federated", { appId: "1", installationId: "2" })).toBeNull();
+    expect(publicConfigProblem("cloud_aws", "federated", { roleArn: "arn:aws:iam::000000000000:role/reader" })).toBeNull();
+    expect(publicConfigProblem("cloud_azure", "static", { tenantId: "00000000-0000-0000-0000-000000000000", clientId: "00000000-0000-0000-0000-000000000001" })).toBeNull();
+    expect(publicConfigProblem("repo_gitlab", "static", {})).toBeNull();
+  });
+  it("refuses any other key, a malformed value, a missing field, and the generated externalId in any spelling", () => {
+    expect(publicConfigProblem("repo_github", "federated", { appId: "1", installationId: "2", sk: "x" })).toMatch(/not a public config field/);
+    expect(publicConfigProblem("repo_github", "static", { serviceAccountJson: "{}" })).toMatch(/not a public config field/);
+    expect(publicConfigProblem("repo_github", "federated", { appId: "abc", installationId: "2" })).toMatch(/not a valid/);
+    expect(publicConfigProblem("repo_github", "federated", { appId: "1" })).toMatch(/required/);
+    for (const k of ["externalId", "ExternalId", "external_id", "EXTERNALID"]) {
+      expect(publicConfigProblem("cloud_aws", "federated", { roleArn: "arn:aws:iam::000000000000:role/r", [k]: "x" })).not.toBeNull();
+    }
+    expect(publicConfigProblem("repo_gitlab", "federated", { audience: "https://a.example.test/?token=x" })).toMatch(/not a valid/);
+    expect(publicConfigProblem("repo_gitlab", "federated", { audience: "http://a.example.test/" })).toMatch(/not a valid/);
+  });
+  it("matches a credential's account or tenant to the target", () => {
+    const arn = "arn:aws:iam::000000000000:role/reader";
+    expect(credentialTargetMatch("cloud_aws", { accountId: "000000000000" }, { roleArn: arn })).toBe("match");
+    expect(credentialTargetMatch("cloud_aws", { accountId: "111111111111" }, { roleArn: arn })).toBe("mismatch");
+    expect(credentialTargetMatch("cloud_aws", {}, { roleArn: arn })).toBe("unverifiable");
+    expect(credentialTargetMatch("repo_github", { org: "x" }, { appId: "1" })).toBe("unverifiable");
   });
 });
 

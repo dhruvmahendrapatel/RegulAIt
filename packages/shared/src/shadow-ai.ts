@@ -449,6 +449,12 @@ export interface Observation {
   keyLength?: number | null;
   /** ADR-0195: an artifact a discovery scanner saw (matched only by an `identifier` signature of the same kind) */
   artifact?: { kind: ArtifactSignatureKind; value: string } | null;
+  /** ADR-0195 decision 6: where it was found (a repo path, line and commit; or a device's config file). Never contents */
+  location?: SightingLocation | null;
+  /** ADR-0195 decision 6: NAMES only (e.g. `.env.example` variable names, an MCP command basename), never values */
+  names?: string[] | null;
+  /** ADR-0195 decision 20: the person behind the sighting, as a pseudonym (`psn:` + 24 hex), never a name */
+  actorPseudonym?: string | null;
   declaredProvider?: string | null;
   detail?: Record<string, unknown>;
 }
@@ -641,6 +647,24 @@ export function classifyObservation(obs: Observation, catalogue: readonly AiSign
 // 7. CORRELATION — one real usage, however many signals saw it
 // ===========================================================================
 
+/** where one sighting was found (ADR-0195 decision 6) */
+export type SightingLocation = {
+  path: string;
+  line?: number;
+  commit?: string;
+};
+
+/** one sighting kept on a finding: a lead, bounded; key fragments redacted, no contents, people as pseudonyms */
+export type FindingEvidence = {
+  source: FindingSignalSource;
+  matchedValue: string;
+  reason: string;
+  observedAt: string;
+  location?: SightingLocation;
+  names?: string[];
+  actor?: string;
+};
+
 export interface CorrelatedFinding {
   subjectKind: ShadowAiSubjectKind;
   subject: string;
@@ -654,7 +678,7 @@ export interface CorrelatedFinding {
   confidence: ShadowAiConfidence;
   replacementAgentId: string | null;
   replacementNote: string | null;
-  evidence: Array<{ source: FindingSignalSource; matchedValue: string; reason: string; observedAt: string }>;
+  evidence: FindingEvidence[];
 }
 
 /**
@@ -683,11 +707,14 @@ export function correlateObservations(
     const key = correlationKey(o.subjectKind, o.subject, c.provider);
     const at = o.observedAt;
     const existing = byKey.get(key);
-    const evidenceItem = {
+    const evidenceItem: FindingEvidence = {
       source: o.signalSource,
       matchedValue: c.matchedValue ?? "",
       reason: c.reason,
       observedAt: at,
+      ...(o.location ? { location: o.location } : {}),
+      ...(o.names && o.names.length > 0 ? { names: o.names } : {}),
+      ...(o.actorPseudonym ? { actor: o.actorPseudonym } : {}),
     };
     if (!existing) {
       byKey.set(key, {

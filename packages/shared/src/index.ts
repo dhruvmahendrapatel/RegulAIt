@@ -3021,6 +3021,8 @@ export {
   type EvidenceKind,
   type EvidenceScreenFinding,
   type FindingSignalSource,
+  type FindingEvidence,
+  type SightingLocation,
   type Observation,
   type ShadowAiConfidence,
   type ShadowAiDisposition,

@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { describeSchedule, describeScope, formatKeyValues, parseIncludeList, parseKeyValueLines, scopeWidens } from "./discoverySourcesModel";
+import {
+  couldNotRead,
+  describeSchedule,
+  describeScope,
+  editablePublicConfig,
+  formatKeyValues,
+  parseIncludeList,
+  parseKeyValueLines,
+  scopeWidens,
+  sightingLines,
+} from "./discoverySourcesModel";
 
 describe("discovery sources model (ADR-0195 SD0)", () => {
   it("parses key=value lines and refuses malformed ones", () => {
@@ -22,6 +32,25 @@ describe("discovery sources model (ADR-0195 SD0)", () => {
     expect(scopeWidens(list, { orgLevel: true, include: [] })).toBe(true);
     expect(scopeWidens({ orgLevel: true, include: [] }, list)).toBe(false);
     expect(scopeWidens(list, { orgLevel: false, include: ["B", "a"] })).toBe(false);
+  });
+
+  it("leaves server-generated keys out of a replacement's pre-fill", () => {
+    expect(editablePublicConfig({ roleArn: "arn:aws:iam::000000000000:role/r", externalId: "regulait-x" })).toEqual({ roleArn: "arn:aws:iam::000000000000:role/r" });
+  });
+
+  it("says what could not be read, or nothing when everything was", () => {
+    expect(couldNotRead([{ read: "repos", status: "read" }])).toBeNull();
+    expect(couldNotRead([{ read: "trail", status: "not_enabled" }, { read: "logs", status: "denied", detail: "403" }])).toBe(
+      "could not read: trail (not enabled); logs (denied: 403)",
+    );
+  });
+
+  it("renders sightings: location, names, actor; skips bare ones", () => {
+    const psn = `psn:${"ab".repeat(12)}`;
+    expect(sightingLines([{ source: "egress_log" }])).toEqual([]);
+    expect(
+      sightingLines([{ source: "repo_scan", location: { path: "src/a.ts", line: 3, commit: "0123456789abcdef" }, names: ["OPENAI_API_KEY"], actor: psn }]),
+    ).toEqual([{ text: "src/a.ts:3 @01234567 · names: OPENAI_API_KEY", actor: psn }]);
   });
 
   it("describes scope and schedule", () => {

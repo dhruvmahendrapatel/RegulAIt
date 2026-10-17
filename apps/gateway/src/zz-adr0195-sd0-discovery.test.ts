@@ -54,7 +54,7 @@ import {
 } from "@regulait/db";
 import { DISCOVERY_STEP_UP_KEYS, stepUpActionDigest } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { enableStepUpArgs, staticCredentialStepUpArgs } from "./discovery-routes.js";
+import { enableStepUpArgs, pseudonymRevealStepUpArgs, staticCredentialStepUpArgs } from "./discovery-routes.js";
 import { noopTestScanner, scannerRegistry, type ScanObservation } from "./discovery-scanners.js";
 import { claimDiscoveryRun, pseudonymise, runDiscoveryPass, runEndpointRetention } from "./discovery-worker.js";
 import type { StepUpCheckArgs } from "./step-up.js";
@@ -78,7 +78,7 @@ const UNMATCHED_PKG = `sd0-unmatched-${RUN}`;
 const REPO = `acme/sd0-${RUN}`;
 
 const OBSERVATIONS: ScanObservation[] = [
-  { evidenceKind: "repo_scan", subjectKind: "repo", subject: REPO, packageName: PKG },
+  { evidenceKind: "repo_scan", subjectKind: "repo", subject: REPO, packageName: PKG, location: { path: "./package.json", line: 3, commit: "0123abcd" }, names: ["OPENAI_API_KEY"] },
   { evidenceKind: "repo_scan", subjectKind: "repo", subject: REPO, packageName: UNMATCHED_PKG },
 ];
 const REGISTRY = scannerRegistry([noopTestScanner("repo_github", OBSERVATIONS, { requiresCredential: true }), noopTestScanner("endpoint_agent")]);
@@ -203,7 +203,7 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const s = await createSource("enable");
     expect((await sourceRow(s.id)).enabled).toBe(false);
     // credential first (federated: free)
-    const c = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig: { appId: "123" }, replacesCredentialId: null });
+    const c = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig: { appId: "123", installationId: "456" }, replacesCredentialId: null });
     expect(c.statusCode, c.body).toBe(200);
 
     // NEGATIVE CONTROL 1: a session with no step-up
@@ -246,6 +246,13 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(wide.statusCode).toBe(403);
     expect((await sourceRow(s.id)).scope).toEqual({ orgLevel: false, include: ["a"] });
 
+    // replacing the credential of an ENABLED source whose account cannot be matched to the target is the enable
+    // step-up (review of #403): refused for the key, nothing replaced
+    const live = (await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id)))[0]!;
+    const swap = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, adminKey, { mode: "federated", publicConfig: { appId: "999", installationId: "1" }, replacesCredentialId: live.id });
+    expect(swap.statusCode).toBe(403);
+    expect((await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.id, live.id)))[0]!.revokedAt).toBeNull();
+
     // disabling is free
     const d = await inject("POST", `/v1/discovery/sources/${s.id}/disable`, adminKey, {});
     expect(d.statusCode, d.body).toBe(200);
@@ -258,9 +265,20 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const r1 = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, adminKey, { mode: "static", secret: SECRET, replacesCredentialId: null });
     expect(r1.statusCode).toBe(403);
     expect((await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id))).length).toBe(0);
-    // a secret-shaped public config key is refused
-    const r0 = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig: { clientSecret: "x" }, replacesCredentialId: null });
-    expect(r0.statusCode).toBe(400);
+    // review of #403: no secret can be smuggled in as "public" config: only the kind's allowlisted identifier fields
+    for (const publicConfig of [
+      { clientSecret: "x" },
+      { sk: SECRET },
+      { serviceAccountJson: "{}" },
+      { key: SECRET },
+      { appId: "123", installationId: "456", token: SECRET },
+      { appId: SECRET, installationId: "456" },
+    ]) {
+      const r0 = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig, replacesCredentialId: null });
+      expect(r0.statusCode, JSON.stringify(publicConfig)).toBe(400);
+      expect(r0.json().error).toMatch(/public_config_refused|invalid_request/);
+    }
+    expect((await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id))).length).toBe(0);
 
     const ok = await session(staticCredentialStepUpArgs(s.id, s.kind, null));
     const r2 = await ok.send("PUT", `/v1/discovery/sources/${s.id}/credential`, { mode: "static", secret: SECRET, replacesCredentialId: null });
@@ -297,8 +315,16 @@ describe("ADR-0195 SD0 discovery foundation", () => {
       const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `aws-${RUN}`, kind: "cloud_aws", target: { accountId: "000000000000" }, scope: { orgLevel: true, include: [] } }, a2);
       expect(c.statusCode, c.body).toBe(201);
       createdIds.push(c.json().id);
-      const chosen = await inject("PUT", `/v1/discovery/sources/${c.json().id}/credential`, AUTH, { mode: "federated", publicConfig: { externalId: "mine" }, replacesCredentialId: null }, a2);
-      expect(chosen.statusCode).toBe(400);
+      for (const extra of [{ externalId: "mine" }, { ExternalID: "mine" }, { external_id: "mine" }]) {
+        const chosen = await inject("PUT", `/v1/discovery/sources/${c.json().id}/credential`, AUTH,
+          { mode: "federated", publicConfig: { roleArn: "arn:aws:iam::000000000000:role/reader", ...extra }, replacesCredentialId: null }, a2);
+        expect(chosen.statusCode, JSON.stringify(extra)).toBe(400);
+      }
+      // a role in ANOTHER account than the target is refused
+      const other = await inject("PUT", `/v1/discovery/sources/${c.json().id}/credential`, AUTH,
+        { mode: "federated", publicConfig: { roleArn: "arn:aws:iam::111111111111:role/reader" }, replacesCredentialId: null }, a2);
+      expect(other.statusCode).toBe(400);
+      expect(other.json().error).toBe("credential_target_mismatch");
       const put = await inject("PUT", `/v1/discovery/sources/${c.json().id}/credential`, AUTH, { mode: "federated", publicConfig: { roleArn: "arn:aws:iam::000000000000:role/reader" }, replacesCredentialId: null }, a2);
       expect(put.statusCode, put.body).toBe(200);
       expect(put.json().publicConfig.externalId).toMatch(/^regulait-/);
@@ -309,7 +335,7 @@ describe("ADR-0195 SD0 discovery foundation", () => {
 
   it("the worker: findings through the import path, merge on a second run, catalogue gaps, posture names the source", async () => {
     const s = await createSource("worker");
-    expect((await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig: { appId: "1" }, replacesCredentialId: null })).statusCode).toBe(200);
+    expect((await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig: { appId: "123", installationId: "456" }, replacesCredentialId: null })).statusCode).toBe(200);
     const ok = await session(enableStepUpArgs(s.id, s.kind, s.target, s.scope));
     expect((await ok.send("POST", `/v1/discovery/sources/${s.id}/enable`, { version: s.version })).statusCode).toBe(200);
     // enabling queues nothing by itself; the pass enqueues the due source (next_run_at = now)
@@ -327,6 +353,8 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(finding!.subjectKind).toBe("repo");
     expect(finding!.signalSources).toContain("repo_scan");
     expect(finding!.lastImportId).toBe(imp!.id);
+    // the sighting keeps where it was found and the names seen (never contents, never values)
+    expect(finding!.evidence[0]).toMatchObject({ source: "repo_scan", location: { path: "package.json", line: 3, commit: "0123abcd" }, names: ["OPENAI_API_KEY"] });
     // nothing became a finding without a catalogue row
     expect((await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.subject, REPO))).length).toBe(1);
 
@@ -375,6 +403,59 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(failed!.errorCode).toBe("lease_expired");
   });
 
+  it("a long scan is not re-taken while its worker renews the lease, even when the scanner never heartbeats", async () => {
+    const s = await createSource("long", "endpoint_agent");
+    await db.update(discoverySources).set({ enabled: true, enabledAt: new Date(), enabledBy: adminId, nextRunAt: null }).where(eq(discoverySources.id, s.id));
+    const [q] = await db.insert(discoveryRuns).values({ sourceId: s.id, trigger: "manual", sourceVersion: 1, kind: "endpoint_agent" }).returning();
+    let rivalClaim: string | null | undefined;
+    const slow = scannerRegistry([
+      {
+        kind: "endpoint_agent",
+        requiresCredential: false,
+        // runs for 3 lease periods of 1 s without calling heartbeat; a rival worker tries to claim it half-way
+        run: async () => {
+          await new Promise((r) => setTimeout(r, 1500));
+          rivalClaim = (await claimDiscoveryRun(db, `sd0-rival-${RUN}`, 1))?.id ?? null;
+          await new Promise((r) => setTimeout(r, 1500));
+          return { observations: [] };
+        },
+      },
+    ]);
+    await runDiscoveryPass(db, { registry: slow, dataKey: DATA_KEY, owner: `sd0-long-${RUN}`, leaseSeconds: 1, limit: 20 });
+    expect(rivalClaim).not.toBe(q!.id);
+    const [r] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, q!.id));
+    expect(r!.status).toBe("succeeded");
+    expect(r!.attempt).toBe(1);
+    expect((await db.select().from(auditLog).where(and(eq(auditLog.objectId, q!.id), eq(auditLog.ruleId, "discovery-run-lease-retaken")))).length).toBe(0);
+  }, 30_000);
+
+  it("scanners get a read-only view of the enabled catalogue; detection still happens in the worker", async () => {
+    let seen: { matched: boolean; unmatched: boolean; rows: number } | null = null;
+    const reg = scannerRegistry([
+      {
+        kind: "endpoint_osquery",
+        requiresCredential: false,
+        run: async (ctx) => {
+          const dev = `psn:${"ef".repeat(12)}`;
+          seen = {
+            matched: ctx.catalogue.matches({ evidenceKind: "endpoint_osquery", subjectKind: "device", subject: dev, packageName: PKG }),
+            unmatched: ctx.catalogue.matches({ evidenceKind: "endpoint_osquery", subjectKind: "device", subject: dev, packageName: UNMATCHED_PKG }),
+            rows: ctx.catalogue.rows(["sdk_package"]).filter((r) => r.value === PKG).length,
+          };
+          return { observations: [] };
+        },
+      },
+    ]);
+    const [src] = await db
+      .insert(discoverySources)
+      .values({ name: `cat-${RUN}`, kind: "endpoint_osquery", target: { fleet: "x" }, scope: { orgLevel: true, include: [] }, createdBy: adminId, enabled: true, enabledAt: new Date(), enabledBy: adminId, nextRunAt: null })
+      .returning();
+    createdIds.push(src!.id);
+    await db.insert(discoveryRuns).values({ sourceId: src!.id, trigger: "manual", sourceVersion: 1, kind: "endpoint_osquery" });
+    await runDiscoveryPass(db, { registry: reg, dataKey: DATA_KEY, owner: `sd0-cat-${RUN}`, limit: 20 });
+    expect(seen).toEqual({ matched: true, unmatched: false, rows: 1 });
+  });
+
   it("a credential reporting write scope fails the run", async () => {
     const s = await createSource("write");
     await db.insert(discoveryCredentials).values({ sourceId: s.id, credentialMode: "federated", publicConfig: {}, createdBy: adminId });
@@ -385,6 +466,100 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const [r] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, q!.id));
     expect(r!.status).toBe("failed");
     expect(r!.errorCode).toBe("credential_has_write_scope");
+    // the credential is recorded refused (audited) and blocks run-now until it is replaced
+    const [c] = await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id));
+    expect(c!.writeScope).toBe("refused");
+    expect((await db.select().from(auditLog).where(and(eq(auditLog.objectId, s.id), eq(auditLog.ruleId, "discovery-credential-refused")))).length).toBe(1);
+    const again = await inject("POST", `/v1/discovery/sources/${s.id}/runs`, adminKey, {});
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toBe("credential_refused");
+  });
+
+  it("scanner error text and read outcomes are scrubbed of the secret and URL query strings before they are stored", async () => {
+    const reg = scannerRegistry([
+      {
+        kind: "repo_gitlab",
+        requiresCredential: true,
+        run: async (ctx) => {
+          throw new Error(`upstream said 401 for ${ctx.credential!.secret} at https://git.example.test/api?private_token=${ctx.credential!.secret}&x=1`);
+        },
+      },
+      {
+        kind: "repo_bitbucket",
+        requiresCredential: true,
+        run: async (ctx) => ({
+          observations: [],
+          readOutcomes: [
+            { read: "repos", status: "read" },
+            { read: "audit log", status: "denied", detail: `403 with header ${ctx.credential!.secret} via https://bb.example.test/x?sig=abc` },
+          ],
+        }),
+      },
+    ]);
+    const mk = async (kind: string) => {
+      const [src] = await db
+        .insert(discoverySources)
+        .values({ name: `scrub-${kind}-${RUN}`, kind: kind as "repo_gitlab", target: { org: "x" }, scope: { orgLevel: true, include: [] }, createdBy: adminId, enabled: true, enabledAt: new Date(), enabledBy: adminId, nextRunAt: null })
+        .returning();
+      createdIds.push(src!.id);
+      const { encryptSecret } = await import("./secrets.js");
+      await db.insert(discoveryCredentials).values({ sourceId: src!.id, credentialMode: "static", publicConfig: {}, secretCiphertext: encryptSecret(DATA_KEY, SECRET), createdBy: adminId });
+      const [run] = await db.insert(discoveryRuns).values({ sourceId: src!.id, trigger: "manual", sourceVersion: 1, kind: kind as "repo_gitlab" }).returning();
+      return run!;
+    };
+    const failing = await mk("repo_gitlab");
+    const reading = await mk("repo_bitbucket");
+    await runDiscoveryPass(db, { registry: reg, dataKey: DATA_KEY, owner: `sd0-scrub-${RUN}`, limit: 20 });
+    const [f] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, failing.id));
+    expect(f!.status).toBe("failed");
+    expect(f!.errorCode).toBe("scanner_error");
+    expect(f!.errorDetail).not.toContain(SECRET);
+    expect(f!.errorDetail).not.toContain("private_token");
+    const audits = await db.select().from(auditLog).where(eq(auditLog.objectId, failing.id));
+    expect(JSON.stringify(audits)).not.toContain(SECRET);
+    const [ok] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, reading.id));
+    expect(ok!.status).toBe("succeeded");
+    expect(ok!.readOutcomes.map((o) => o.status)).toEqual(["read", "denied"]);
+    expect(JSON.stringify(ok!.readOutcomes)).not.toContain(SECRET);
+    expect(JSON.stringify(ok!.readOutcomes)).not.toContain("sig=abc");
+    const listed = await inject("GET", "/v1/discovery/runs", AUTH);
+    expect(listed.body).not.toContain(SECRET);
+  });
+
+  it("decision 8: a scanner's call to a host that is not allow-listed never reaches the network, and the run fails egress_blocked", async () => {
+    let calls = 0;
+    const spy: typeof fetch = async () => {
+      calls += 1;
+      return new Response("ok");
+    };
+    const reg = scannerRegistry([
+      {
+        kind: "endpoint_inventory",
+        requiresCredential: false,
+        run: async (ctx) => {
+          await ctx.fetch(`https://sd0-not-allowed-${RUN}.example.test/inventory`);
+          return { observations: [] };
+        },
+      },
+    ]);
+    const [src] = await db
+      .insert(discoverySources)
+      .values({ name: `egress-${RUN}`, kind: "endpoint_inventory", target: { fleet: "x" }, scope: { orgLevel: true, include: [] }, createdBy: adminId, enabled: true, enabledAt: new Date(), enabledBy: adminId, nextRunAt: null })
+      .returning();
+    createdIds.push(src!.id);
+    const [run] = await db.insert(discoveryRuns).values({ sourceId: src!.id, trigger: "manual", sourceVersion: 1, kind: "endpoint_inventory" }).returning();
+    await runDiscoveryPass(db, {
+      registry: reg,
+      dataKey: DATA_KEY,
+      owner: `sd0-egress-${RUN}`,
+      limit: 20,
+      fetchImpl: spy,
+      resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+    });
+    const [r] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, run!.id));
+    expect(calls).toBe(0);
+    expect(r!.status).toBe("failed");
+    expect(r!.errorCode).toBe("egress_blocked");
   });
 
   it("pseudonyms: the name is enveloped, revealing it needs the step-up and the audit never holds the name", async () => {
@@ -398,7 +573,13 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const r1 = await inject("POST", `/v1/discovery/pseudonyms/${psn}/reveal`, adminKey, {});
     expect(r1.statusCode).toBe(403);
     expect(r1.body).not.toContain(name);
-    const ok = await session({ kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.reveal]: { pseudonym: psn } } } });
+    // NEGATIVE CONTROL: a settings_relax grant is not a reveal grant
+    const relax = await session({ kind: "settings_relax", facts: { values: { discoveryPseudonymReveal: { pseudonym: psn } } } });
+    const r0 = await relax.send("POST", `/v1/discovery/pseudonyms/${psn}/reveal`, {});
+    expect(r0.statusCode).toBe(403);
+    expect(r0.body).not.toContain(name);
+    expect(await relax.grantUsed()).toBe(false);
+    const ok = await session(pseudonymRevealStepUpArgs(psn));
     const r2 = await ok.send("POST", `/v1/discovery/pseudonyms/${psn}/reveal`, {});
     expect(r2.statusCode, r2.body).toBe(200);
     expect(r2.json().displayName).toBe(name);
