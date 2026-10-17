@@ -248,3 +248,103 @@ Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 regis
 - **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated; minting
   the federation token from the ADR-0188 issuer, organisation-level AWS account enumeration, and the scanner
   registration with SD0 are Phase B.
+
+## As built: SD0 foundation (2026-10-17, migration 0202)
+
+**Status: built on branch `sd0-discovery-foundation`; the migration journal entry waits for 0201 to merge.** No
+scanner ships: the production registry is empty, so no source can be created yet and the admin page shows every
+kind as "not built yet" with the slice that builds it.
+
+1. **Migration 0202** (hand-written; no function and no trigger, so the 0185 guard has nothing new to check):
+   - `discovery_sources`: `kind` (the ten kinds), `target` (a JSON object), `scope` (`{orgLevel, include[]}`, CHECKed),
+     `enabled` default false, `schedule_interval_seconds` (3600 to 30 days, default daily), `version` for
+     compare-and-set, `next_run_at`/`last_run_at`, who enabled and disabled it. Unique by `lower(name)`.
+   - `discovery_credentials`: `credential_mode` federated or static, `public_config` (non-secret identifiers),
+     `secret_ciphertext` (a data-key envelope, listed in `CIPHERTEXT_COLUMNS`), `write_scope` (`unverified` or
+     `read_only`), `created_at` for the age warning. One live credential per source (partial unique index); a
+     revoked row has its ciphertext destroyed (CHECK).
+   - `discovery_runs`: leased with expiry (`lease_owner`, `lease_expires_at`, `attempt` at most 3), one live run per
+     source (partial unique index), counts, `catalogue_gaps` (at most 50), `raw_output_sha256`, `error_code` and
+     `error_detail`. CHECKs tie status to lease, finish time and error code.
+   - `discovery_settings` (one row): `credential_warning_age_days` 90 and `endpoint_retention_days` 90.
+   - `discovery_pseudonym_keys` (one row, a data-key envelope of 32 random bytes, made on first use) and
+     `discovery_pseudonyms` (`kind`, `pseudonym` = `psn:` + 24 hex of HMAC-SHA256(key, kind + name), the display name
+     as a data-key envelope, first and last seen). The key is stored, not derived from the data key, so a data-key
+     rotation (which re-encrypts it) does not change anyone's pseudonym.
+   - Widened, never loosened: `ai_endpoint_signatures` kinds gain the six artifact kinds, matched only by the new
+     `identifier` match type (CHECKed both ways); `shadow_ai_imports.kind` gains the six scanner evidence kinds and a
+     `discovery_run_id`; `shadow_ai_findings.subject_kind` gains `device`, `cloud_resource`, `cloud_principal`.
+2. **Detection stays data (decision 5).** `classifyObservation` gains an artifact step: whole-identifier,
+   case-insensitive equality against an enabled signature of the same artifact kind (medium severity; `assistant_config`
+   low). No regex from data. The worker classifies every observation against the enabled admin catalogue; an
+   unmatched one is recorded in the run's `catalogue_gaps` (artifact, host or package; never a key fragment).
+3. **One import path (decision 5a).** A run writes one `shadow_ai_imports` row per evidence kind it reported (mode
+   apply, `discovery_run_id` set, `payload_sha256` = the raw-output digest) and calls the existing `upsertFindings`,
+   in the same transaction as the run's completion, which is fenced on the lease. The upload routes still accept only
+   the four import kinds.
+4. **Posture sentences (decision 5b).** `activeDiscoveryPosture()` (shared) names each enabled source, or says "No
+   active discovery source is enabled, so nothing is scanned". It is appended to the adapter, first-party discovery and
+   MCP-discovery postures and is the coverage scorecard's statement. The three constants no longer claim "ships no
+   collector" or "nothing is scanned" globally; they now describe their own classifier (ADR-0071 and ADR-0122 were
+   amended in the ADR branch).
+5. **Routes** (`discovery-routes.ts`, admin-only, every write audited):
+   `GET /v1/discovery/scanners`, `GET|POST /v1/discovery/sources`, `PATCH|DELETE /v1/discovery/sources/:sourceId`,
+   `POST …/enable`, `POST …/disable`, `PUT|DELETE …/credential`, `POST …/runs`, `GET /v1/discovery/runs`,
+   `GET|PUT /v1/discovery/settings`, `POST /v1/discovery/pseudonyms/:pseudonym/reveal`.
+   - Enable: `settings_relax` step-up with facts `{values: {discoverySourceEnabled: {sourceId, kind, target, scope}}}`,
+     spent only after the row lock and the `version` compare-and-set. A PATCH that changes the target or widens the
+     scope (`scopeWidens`: org-level, or a new name) of an ENABLED source needs the same step-up with the new values;
+     narrowing, editing a disabled source, and disabling are free. Disabling needs no `version` and fails queued runs.
+   - Credential: federated is free; static is a `settings_relax` step-up (`discoveryStaticCredential: {sourceId, kind,
+     replacesCredentialId}`), CAS on `replacesCredentialId`. Public config keys that look like secrets are refused; for
+     `cloud_aws` federated, RegulAIt generates `externalId` (`regulait-<uuid>`, kept across replacements) and refuses
+     one sent by the admin. Revoking is free and destroys the secret. No view selects the ciphertext.
+   - Settings: lengthening the warning age or the endpoint retention is a `settings_relax` step-up; shortening is free.
+   - Reveal: a `settings_relax` step-up (`discoveryPseudonymReveal: {pseudonym}`); the audit names the pseudonym, never
+     the name.
+6. **The scanner interface** (`discovery-scanners.ts`), for SD1 to SD4:
+   ```ts
+   interface Scanner { kind: DiscoverySourceKind; requiresCredential: boolean; run(ctx: ScanContext): Promise<ScanResult> }
+   interface ScanContext {
+     source: { id; name; kind; target: Record<string,string>; scope: { orgLevel; include } };
+     credential: { mode; publicConfig; secret: string | null } | null;   // decrypted for this run only
+     fetch: typeof fetch;            // the ONLY network access: the egress-guarded fetch (allow list, DNS pinning, no redirects)
+     throttle(): Promise<void>;      // the per-source rate-limit hook, before every request
+     backoff(res): Promise<boolean>; // 429/503: waits the bounded Retry-After (at most 60 s, 5 times); false = give up
+     recordRaw(chunk): void;         // digested (SHA-256), never kept
+     pseudonymise(kind, displayName): Promise<string>;  // device_user | commit_author | cloud_principal -> psn:…
+     heartbeat(): Promise<boolean>;  // extends the lease; false = lost, stop
+     signal: AbortSignal;            // the lease deadline
+   }
+   interface ScanResult { observations: ScanObservation[]; credentialWriteScope?: "read_only" | "write" | "unverified" }
+   // ScanObservation: { evidenceKind, subjectKind, subject, observedAt?, count?, host?, packageName?, keyFragment?, keyLength?, artifact?: { kind, value } }
+   ```
+   A scanner returns observations, never findings, severities or verdicts. The worker refuses the run when an
+   observation names an evidence or subject kind its source kind does not report (`DISCOVERY_KIND_SPECS`), exceeds the
+   bounds, or exceeds `EVIDENCE_MAX_ROWS`; it cuts every key fragment to 8 characters whatever the scanner sent.
+   `credentialWriteScope: "write"` fails the run (`credential_has_write_scope`); `read_only` clears the posture row. A
+   scanner must never test a key it finds (decision 6). A new scanner is one line in `DISCOVERY_SCANNERS`. Cloud SDK
+   transports that delegate to `ctx.fetch` are SD2's.
+7. **The worker** (`discovery-worker.ts`, scheduler job `discovery-scan-sweep`, every 60 s): enqueue due enabled sources
+   (one `INSERT … ON CONFLICT` against the live-run index, `next_run_at` moved on in the same statement); fail runs whose
+   lease lapsed on attempt 3 (`lease_expired`); claim with `FOR UPDATE SKIP LOCKED` a queued run or a lapsed lease with
+   attempts left (re-take audited `discovery-run-lease-retaken`); run it (15-minute lease); delete device findings and
+   device-user pseudonyms not seen within the endpoint retention (audited). All lease times use the database clock.
+   The default rate limiter spaces one source's requests 100 ms apart in this process. Open source first: the
+   maintained candidates were concurrency limiters (`p-limit`), not per-key spacing, and `bottleneck` has had no
+   release since 2019; none was adopted.
+8. **Posture rows**: `GET /v1/org/posture` gains `discovery` (reported, never a control): sources enabled, static
+   credentials in use, static credentials older than the warning age, credentials whose write scope is unverified, and
+   the posture sentence. The Enforcement posture page shows them; so does the Discovery sources page.
+9. **Web**: `/admin/shadow-ai/discovery-sources` (nav: Governance, after Shadow-AI discovery). Kinds without a built
+   scanner are listed as "not built yet (SDn)" and are not selectable; with none built, the add form is an empty state,
+   not a disabled submit. Enable, widen, static credential, settings relaxation and reveal go through `withStepUp`.
+   `KNOWN_UI_GAPS` stays 0; both UI preflights pass.
+10. **Tests**: `zz-adr0195-sd0-discovery.test.ts` (database; typechecked locally, run in CI) with negative controls for
+    every step-up (no grant, an API key, a grant for another scope that is not spent) and for the secret never being
+    returned (every read route's body checked for the secret and its ciphertext); `discovery-scanners.test.ts`
+    (contract, no database); shared `discovery/discovery.test.ts` (scope widening, posture sentence, artifact matching).
+
+**Not built in SD0 (left to the slices):** any scanner; cloud SDK transports over `ctx.fetch` (SD2); the git-provider
+read methods (SD1); `SHADOW_AI_CATALOG_V2` and seed rows for the artifact kinds (SD1/SD3); the endpoint-notice
+template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" state for cloud sources (SD2).
