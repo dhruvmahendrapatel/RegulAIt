@@ -81,7 +81,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { resolveRequirement } from "./execution-placement.js";
-import { engineTaskInputDigestFor, liveEngineTasks, setEngineTaskPlacementAffinityForTest, startEngineTask } from "./engine-tasks.js";
+import { engineTaskHeldFor, engineTaskInputDigestFor, setEngineTaskPlacementAffinityForTest, startEngineTask } from "./engine-tasks.js";
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -525,8 +525,6 @@ describe("recheck L6: the watchdog ends a run whose offer is refused while nobod
 
 describe("the task start is the decision; fail closed, no fallback", () => {
   it("no project: refused policy_unresolved WITH a refused placement row keyed to the decision; the run ends not_run", async () => {
-    // earlier tests may still hold a task their watchdog has not closed yet: a refusal holds none of its own
-    const held = liveEngineTasks();
     const art = await uploadedAs(alice, maliciousPickle());
     const runId = await startScan(art.id, null);
     const lease = await client.lease(MS_BUILD);
@@ -538,7 +536,8 @@ describe("the task start is the decision; fail closed, no fallback", () => {
     const p = await placementOf(d!.id);
     expect(p).toMatchObject({ workloadKind: "engine_worker", outcome: "refused", refusalCode: "policy_unresolved", requiredClass: null, executorId: null, imageDigest: TASK_IMAGE });
     expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable", taskPlacementId: null });
-    expect(liveEngineTasks()).toBeLessThanOrEqual(held);
+    // a refusal holds no task of its own (asked of THIS run: earlier tests may still hold theirs)
+    expect(engineTaskHeldFor(runId)).toBe(false);
   });
 
   it("no executor that can take it: refused no_executor with the L2 requirement; the run ends not_run; a second start is refused", async () => {
@@ -706,5 +705,35 @@ describe("I8: an agent run's task start is an entitlement decision whose facts n
     } finally {
       setEngineTaskPlacementAffinityForTest(null);
     }
+  }, 60_000);
+});
+
+describe("I5 point 18: the task start re-runs the lease's dispatch checks", () => {
+  it("a target agent that lost its provider model since the lease is refused agent_not_dispatchable at the task start; the run ends not_run", async () => {
+    const ag = await inject("POST", "/v1/agents", AUTH, { name: `i5-nodispatch-${RUN}`, provider: "mock", tier: 1, costPerMTokIn: 1, costPerMTokOut: 2, model: "mock-i5" });
+    expect(ag.statusCode, ag.body).toBe(201);
+    const agentId = ag.json().id as string;
+    const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId });
+    expect(g.statusCode, g.body).toBeLessThan(300);
+    const runId = rows<{ id: string }>(
+      await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
+        values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
+    )[0]!.id;
+    // after the lease: the agent's provider model is gone
+    await db.update(agents).set({ model: null }).where(eq(agents.id, agentId));
+    const r = await startEngineTask(
+      db,
+      { manifest: () => MANIFEST, artifactStore: () => null, endRunTx: async () => null, notifyEnded: async () => undefined },
+      runnerId,
+      runId,
+      { files: [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }], artifact: null, secret: `run-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}` },
+    );
+    expect(r, JSON.stringify(r)).toMatchObject({ kind: "not_entitled", code: "agent_not_dispatchable" });
+    expect(engineTaskHeldFor(runId)).toBe(false);
+    const d = await taskDecision(runId);
+    expect(d).toMatchObject({ objectType: "agent", objectId: agentId, effect: "deny" });
+    expect((d!.detail as { code: string }).code).toBe("agent_not_dispatchable");
+    await endRun(runId);
+    await db.delete(agents).where(eq(agents.id, agentId)).catch(() => undefined);
   }, 60_000);
 });

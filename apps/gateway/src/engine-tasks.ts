@@ -68,6 +68,7 @@ import {
   engineTaskInFrameSchema,
   engineTaskInputDigest,
   engineTaskInputUploadSchema,
+  engineRunNeedsJudge,
   stdioLineBytes,
   type EngineId,
   type EngineManifestEntry,
@@ -126,6 +127,13 @@ export class EngineTask {
   eof = false;
   /** why the task cannot (or can no longer) run: a decision 7 code, a mismatch, or a session failure */
   refusal: string | null = null;
+  /**
+   * The session's executor side was lost. Not a refusal by itself: the loss is usually the CONSEQUENCE of a refusal
+   * the database already holds (the stdio watchdog ends the session once the offer reads `mismatch`), so the
+   * placement's linked report is read first and `session_lost` is the refusal only when that report names none
+   * (CI run 38991262736: the loss was stamped before the committed mismatch was read).
+   */
+  sessionLost = false;
   /** review MEDIUM-2: the refusal has ended the run (once) */
   runEnded = false;
   private released = false;
@@ -145,7 +153,7 @@ export class EngineTask {
     session.attached = true;
     session.onLine = (line) => this.take(line);
     session.onEnd = () => {
-      if (session.lostReason !== null && this.refusal === null) this.refusal = "session_lost";
+      if (session.lostReason !== null) this.sessionLost = true;
       this.eof = true;
       this.wake();
     };
@@ -247,12 +255,14 @@ export function engineTaskInputDigestFor(offerId: string): string | null {
 
 /** recheck L3: the refusal this process holds for a run's task (null: none, or no task held here) */
 export function engineTaskRefusalOf(runId: string): string | null {
-  return tasksByRun.get(runId)?.refusal ?? null;
+  const t = tasksByRun.get(runId);
+  if (!t) return null;
+  return t.refusal ?? (t.sessionLost ? "session_lost" : null);
 }
 
-/** tests only: how many engine tasks this process holds */
-export function liveEngineTasks(): number {
-  return tasksByRun.size;
+/** tests only: whether this process holds a task for the run */
+export function engineTaskHeldFor(runId: string): boolean {
+  return tasksByRun.has(runId);
 }
 
 /**
@@ -378,6 +388,7 @@ async function startEngineTaskTx(
       const [target] = run.targetAgentId ? await tx.select().from(agents).where(eq(agents.id, run.targetAgentId)) : [];
       const [judge] = run.judgeAgentId ? await tx.select().from(agents).where(eq(agents.id, run.judgeAgentId)) : [];
       if (!target) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the target agent is gone", code: "run_as_not_entitled" };
+      else if (run.judgeAgentId && !judge) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the judge agent is gone", code: "run_as_not_entitled" };
       else {
         const decide = await buildAgentDecider(txDb, person.id);
         for (const a of [target, ...(judge ? [judge] : [])]) {
@@ -387,6 +398,14 @@ async function startEngineTaskTx(
             break;
           }
         }
+      }
+      // as the lease: the manifest's required judge (a judge deleted since the lease nulls `judge_agent_id`), and an
+      // agent with no provider model is never dispatched
+      if (!deny && engineRunNeedsJudge(m, run.config.sets) && !run.judgeAgentId) {
+        deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run needs a judge agent and has none", code: "judge_required" };
+      }
+      if (!deny && (!target!.model || (judge && !judge.model))) {
+        deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the target or judge agent has no provider model", code: "agent_not_dispatchable" };
       }
       if (!deny && !run.projectId) deny = { ruleId: "engine-run-entitlement", ruleChain: [], reason: "the run's project is gone", code: "project_gone" };
       if (!deny) {
@@ -513,7 +532,7 @@ async function readTaskState(db: Db, task: EngineTask): Promise<{ state: EngineT
   const rows = await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, task.placementId));
   const r = pickLinkedReport(rows);
   if (r && r.outcome !== "placed") {
-    task.refusal = r.outcome === "mismatch" ? "execution_profile_mismatch" : (r.refusalCode ?? r.endCode ?? r.outcome);
+    task.refusal = r.outcome === "mismatch" ? "execution_profile_mismatch" : r.outcome === "session_lost" ? "session_lost" : (r.refusalCode ?? r.endCode ?? r.outcome);
     return { state: "refused", refusal: task.refusal };
   }
   if (!r) {
@@ -522,8 +541,13 @@ async function readTaskState(db: Db, task: EngineTask): Promise<{ state: EngineT
       task.refusal = `offer_${o.status}`;
       return { state: "refused", refusal: task.refusal };
     }
-    return { state: "awaiting_placement", refusal: null };
   }
+  // only now, with no refusal on record, is a lost session the refusal
+  if (task.sessionLost) {
+    task.refusal = "session_lost";
+    return { state: "refused", refusal: task.refusal };
+  }
+  if (!r) return { state: "awaiting_placement", refusal: null };
   return { state: task.eof ? "ended" : "running", refusal: null };
 }
 
