@@ -106,3 +106,16 @@ ADR-0180 (secure by default), and a known default administrator credential is a 
   admin present, the seed refuses, and the summary now says it loaded nothing.
 - **The unreachable "bootstrap token is still live" summary line is removed.** When an admin exists, the installer
   always retires the token (or stops on failure), unless `--admin-token` re-opened it.
+- **The password file's directory is checked too (independent review, Info).** The directory must be owned by the
+  installing user or root, and no one else may write to it. Otherwise another user could swap the file, or put a FIFO
+  in its place, between the path check and the open; a FIFO would block the installer.
+- **The password file is Linux only.** The re-check relies on Linux's `/dev/fd`, which re-opens the file at offset 0.
+  On macOS and the BSDs it duplicates the descriptor and shares its offset, so the checks would consume the password.
+  There `install.sh` refuses `REGULAIT_FIRST_ADMIN_PASSWORD_FILE` at the start and the interactive prompt is the way
+  in. `INSTALL.md` says so.
+- **The swap test hooks the re-check, not the path check.** The review asked for a swap after the first, path-only
+  check. Descriptor 9 then opens the new file, which the path names and which is checked in full, so that swap is not a
+  race and cannot fail against the old code. The race the descriptor closes is after the open. The test swaps the
+  file just before the re-check (refused, and the runner is never called) and just after it (the runner receives the
+  checked content, not the file now at the path). Both fail against the old code, and against a version that keeps
+  the re-check but redirects the path again for the runner.

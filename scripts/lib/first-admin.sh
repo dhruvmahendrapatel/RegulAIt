@@ -57,8 +57,10 @@ fa_utf8_invalid() {
 }
 
 # Why the file named by REGULAIT_FIRST_ADMIN_PASSWORD_FILE cannot be used, or nothing. Never reads it into
-# a variable and never prints its content. Refuses: a symbolic link (the target can be swapped), a file
-# owned by anyone but this user or root, group/other access, an empty password, a leading UTF-8 byte-order
+# a variable and never prints its content. Refuses: a symbolic link (the target can be swapped), a parent
+# directory that is not owned by this user or root or that anyone else can write to (the file, or a FIFO in
+# its place, could be swapped in between the checks and the open), a file owned by anyone but this user or
+# root, group/other access, an empty password, a leading UTF-8 byte-order
 # mark, bytes that are not valid UTF-8, and any control character other than ONE trailing newline (\n or
 # \r\n), which the gateway strips.
 #
@@ -67,9 +69,21 @@ fa_utf8_invalid() {
 # caller's descriptor where it was), and the path must still name it. Checking the path and then opening
 # it again would leave a window in which the file can be swapped.
 fa_password_file_problem() {
-  local f="$1" fd="${2:-}" src="$1" follow="" perm owner me size ctl tail2 bom at_path at_fd
+  local f="$1" fd="${2:-}" src="$1" follow="" perm owner me size ctl tail2 bom at_path at_fd dir dperm downer
   [ -n "$f" ] || { echo "no file named"; return 0; }
   [ ! -L "$f" ] || { echo "$f is a symbolic link: name the file itself"; return 0; }
+  dir="$(dirname -- "$f")"
+  dperm="$(stat -L -c '%a' "$dir" 2>/dev/null || stat -L -f '%Lp' "$dir" 2>/dev/null || true)"
+  downer="$(stat -L -c '%u' "$dir" 2>/dev/null || stat -L -f '%u' "$dir" 2>/dev/null || true)"
+  if [ -z "$dperm" ] || [ -z "$downer" ]; then echo "the mode or owner of the directory $dir could not be read"; return 0; fi
+  if [ "$downer" != "$(id -u)" ] && [ "$downer" != "0" ]; then
+    echo "the directory $dir is owned by uid $downer: it must be owned by you (uid $(id -u)) or root"
+    return 0
+  fi
+  if (( (8#$dperm & 8#022) != 0 )); then
+    echo "the directory $dir has mode $dperm: no one but its owner may write to it (the file could be swapped) — chmod go-w $dir"
+    return 0
+  fi
   if [ -n "$fd" ]; then
     src="/dev/fd/$fd"
     follow="-L"
@@ -209,8 +223,16 @@ first_admin_interactive() {
 # The file is opened ONCE, on descriptor 9, re-checked through that descriptor, and that same descriptor is
 # the runner's stdin, so what was checked is what is sent (no check-then-reopen race). The first, path-only
 # check gives the friendly refusals (missing, mode, owner) before anything is opened.
+#
+# Linux only: the re-check depends on /dev/fd re-opening the file at offset 0. Elsewhere (macOS, BSD)
+# /dev/fd duplicates the descriptor and shares its offset, so the checks would consume the password before
+# the runner reads it. There the password file is refused and the interactive prompt is the way in.
 first_admin_from_file() {
   local f="$1" rc=0 problem
+  if [ "$(uname -s)" != "Linux" ]; then
+    FA_OUTPUT="password file refused: a password file is supported on Linux only; run the installer interactively"
+    return 2
+  fi
   problem="$(fa_password_file_problem "$f")"
   if [ -n "$problem" ]; then FA_OUTPUT="password file refused: $problem"; return 2; fi
   if ! { exec 9<"$f"; } 2>/dev/null; then FA_OUTPUT="password file refused: $f could not be opened"; return 2; fi

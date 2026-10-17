@@ -633,6 +633,7 @@ fi
 . "$SCRIPT_DIR/lib/first-admin.sh"
 FIRST_ADMIN_USERNAME="$(printf '%s' "${FIRST_ADMIN_USERNAME:-admin}" | tr '[:upper:]' '[:lower:]')"
 if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
+  [ "$(uname -s)" = "Linux" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is supported on Linux only: run the installer interactively for the first admin."
   problem="$(fa_password_file_problem "$FIRST_ADMIN_PASSWORD_FILE")"
   [ -z "$problem" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE: $problem"
   [ -n "$FIRST_ADMIN_EMAIL" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is set but REGULAIT_FIRST_ADMIN_EMAIL is not: the first admin needs an email."

@@ -224,6 +224,69 @@ describe("scripts/lib/first-admin.sh — the interactive prompt loop", () => {
     expect(`${r.stdout}${r.stderr}`).not.toContain(pw);
   });
 
+  // A swap BEFORE the open is not a race: descriptor 9 then opens the new file, which the path names and which is
+  // checked in full. The window the descriptor closes is the one after the open, so the hook is the re-check on fd 9.
+  it.runIf(posix && process.platform === "linux")("from a file: a swap after the open is refused, or never reaches the runner", () => {
+    const run = (when: "before" | "after") => {
+      const dir = freshDir(`pwrace-${when}`);
+      const f = path.join(dir, "pw");
+      const pw = strong();
+      writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+      chmodSync(f, 0o600);
+      const swapped = path.join(dir, "swapped");
+      const other = strong();
+      writeFileSync(swapped, `${other}\n`, { mode: 0o600 });
+      chmodSync(swapped, 0o600);
+      const stubDir = freshDir(`pwrace-${when}-stub`);
+      // the file at the path is replaced just before, or just after, the re-check of the open descriptor
+      const wrap = String.raw`
+eval "fa_real_problem() $(declare -f fa_password_file_problem | tail -n +2)"
+fa_password_file_problem() {
+  if [ "$#" -eq 2 ] && [ "$SWAP_WHEN" = before ]; then mv "$SWAPPED" "$1"; fi
+  fa_real_problem "$@"
+  if [ "$#" -eq 2 ] && [ "$SWAP_WHEN" = after ]; then mv "$SWAPPED" "$1"; fi
+}
+`;
+      const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\n${wrap}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc OUT=$FA_OUTPUT"\n`;
+      const r = spawnSync("bash", ["-c", script, "x", f], {
+        encoding: "utf8",
+        env: { ...process.env, STUB_DIR: stubDir, SWAPPED: swapped, SWAP_WHEN: when },
+      });
+      const log = path.join(stubDir, "stdin.log");
+      return { r, pw, other, swapped, stdinLog: existsSync(log) ? readFileSync(log, "utf8") : null };
+    };
+    const before = run("before");
+    expect(before.r.stdout, before.r.stderr).toContain("RC=2 ");
+    expect(before.r.stdout).toContain("changed while it was being opened");
+    expect(before.stdinLog).toBeNull();
+    expect(existsSync(before.swapped)).toBe(false); // the swap really happened
+    const after = run("after");
+    expect(after.r.stdout.trim(), after.r.stderr).toBe("RC=0 OUT=first admin created: (stub)");
+    expect(after.stdinLog).toBe(`${after.pw}\n`); // what was checked, not what the path now holds
+    expect(existsSync(after.swapped)).toBe(false);
+    for (const x of [before, after]) {
+      expect(`${x.r.stdout}${x.r.stderr}`).not.toContain(x.pw);
+      expect(`${x.r.stdout}${x.r.stderr}`).not.toContain(x.other);
+    }
+  });
+
+  it.runIf(posix)("the password file's directory must not be writable by anyone but its owner", () => {
+    const dir = freshDir("pwdir");
+    const f = path.join(dir, "pw");
+    writeFileSync(f, strong(), { mode: 0o600 });
+    chmodSync(f, 0o600);
+    const problem = () =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" }).trim();
+    chmodSync(dir, 0o700);
+    expect(problem()).toBe("");
+    for (const mode of [0o770, 0o707, 0o1777, 0o722]) {
+      chmodSync(dir, mode);
+      expect(problem(), mode.toString(8)).toContain("no one but its owner may write to it");
+    }
+    chmodSync(dir, 0o755);
+    expect(problem()).toBe("");
+  });
+
   it.runIf(posix && process.getuid?.() === 0)("the password file must be owned by the installing user or root", () => {
     const f = path.join(freshDir("pwowner"), "pw");
     writeFileSync(f, strong(), { mode: 0o600 });
