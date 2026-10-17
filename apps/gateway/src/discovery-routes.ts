@@ -17,11 +17,13 @@
  *   GET    /v1/discovery/runs                             recent runs, optionally for one source
  *   GET    /v1/discovery/settings                         the warning age and the endpoint retention
  *   PUT    /v1/discovery/settings                         lengthening either is a `settings_relax` step-up (CAS)
- *   POST   /v1/discovery/pseudonyms/:pseudonym/reveal     a `settings_relax` step-up, audited
+ *   POST   /v1/discovery/pseudonyms/:pseudonym/reveal     a `pseudonym_reveal` step-up, audited
  *
- * THE SECRET NEVER LEAVES. No view below selects `secret_ciphertext`; a
- * credential is described by its mode, its non-secret public config, whether
- * it holds a secret, its age and its write-scope state.
+ * THE SECRET NEVER LEAVES. No view below returns `secret_ciphertext` or the
+ * secret; a credential is described by its mode, its public config (an
+ * allowlist of identifier fields per kind and mode, each shape-checked, so no
+ * secret can be smuggled in as "public"), whether it holds a secret, its age
+ * and its write-scope state.
  *
  * Step-ups follow the ADR-0186 A pattern: the row is locked, the
  * compare-and-set is checked, and only then is the grant spent, so a stale
@@ -61,6 +63,8 @@ import {
   DISCOVERY_SCHEDULE_MIN_SECONDS,
   DISCOVERY_SOURCE_KINDS,
   DISCOVERY_STEP_UP_KEYS,
+  credentialTargetMatch,
+  publicConfigProblem,
   scopeWidens,
 } from "@regulait/shared";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
@@ -108,13 +112,12 @@ const patchSchema = z
   })
   .strict();
 const versionSchema = z.object({ version: z.number().int().min(1) }).strict();
-/** public config keys that look like they name a secret are refused: a secret belongs in `secret` */
-const SECRET_SHAPED_KEY = ["secret", "password", "passwd", "token", "privatekey", "apikey", "accesskey", "credential"];
 const credentialSchema = z
   .object({
     mode: z.enum(DISCOVERY_CREDENTIAL_MODES),
+    // checked against the kind's allowlist (DISCOVERY_PUBLIC_CONFIG) in the route
     publicConfig: z
-      .record(configKey, z.string().trim().min(1).max(2048))
+      .record(z.string().min(1).max(64), z.string().trim().min(1).max(1024))
       .refine((c) => Object.keys(c).length <= 20, { message: "at most 20 public config fields" })
       .default({}),
     secret: z.string().min(1).max(16384).optional(),
@@ -148,10 +151,12 @@ export interface DiscoveryCredentialView {
   ageWarning: boolean;
 }
 
-const ageDaysOf = (createdAt: Date, now = Date.now()) => Math.max(0, Math.floor((now - createdAt.getTime()) / 86_400_000));
+/** M-075: a credential's age in whole days on the database clock */
+const ageDaysSql = sql<number>`floor(extract(epoch from (now() - ${discoveryCredentials.createdAt})) / 86400)::int`;
+type CredentialWithAge = DiscoveryCredentialRow & { ageDays: number };
 
-function credentialView(c: DiscoveryCredentialRow, warningAgeDays: number): DiscoveryCredentialView {
-  const ageDays = ageDaysOf(c.createdAt);
+function credentialView(c: CredentialWithAge, warningAgeDays: number): DiscoveryCredentialView {
+  const ageDays = Math.max(0, Number(c.ageDays));
   return {
     id: c.id,
     mode: c.credentialMode,
@@ -182,6 +187,7 @@ export function runView(r: DiscoveryRunRow) {
     findingsCreated: r.findingsCreated,
     findingsUpdated: r.findingsUpdated,
     catalogueGaps: r.catalogueGaps,
+    readOutcomes: r.readOutcomes,
     rawOutputSha256: r.rawOutputSha256,
     errorCode: r.errorCode,
     errorDetail: r.errorDetail,
@@ -189,7 +195,7 @@ export function runView(r: DiscoveryRunRow) {
   };
 }
 
-function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: DiscoveryCredentialRow | undefined, lastRun: DiscoveryRunRow | undefined, warningAgeDays: number) {
+function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: CredentialWithAge | undefined, lastRun: DiscoveryRunRow | undefined, warningAgeDays: number) {
   return {
     id: s.id,
     name: s.name,
@@ -217,6 +223,14 @@ function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: Disc
 /** enabling a source, or widening an enabled one: bound to its kind, target and scope */
 export function enableStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown): StepUpCheckArgs {
   return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope } } } };
+}
+/** storing a credential on an ENABLED source whose account cannot be matched to the target: the enable step-up, with the config */
+export function credentialOnEnabledStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown, mode: string, publicConfig: Record<string, string>): StepUpCheckArgs {
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credential: { mode, publicConfig } } } } };
+}
+/** revealing the name behind one pseudonym: its own step-up kind (not a settings relaxation), bound to the pseudonym */
+export function pseudonymRevealStepUpArgs(pseudonym: string): StepUpCheckArgs {
+  return { kind: "pseudonym_reveal", facts: { op: "pseudonym_reveal", pseudonym } };
 }
 export function staticCredentialStepUpArgs(sourceId: string, kind: string, replacesCredentialId: string | null): StepUpCheckArgs {
   return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.staticCredential]: { sourceId, kind, replacesCredentialId } } } };
@@ -281,8 +295,13 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
 
   const lockSource = async (t: Db, sourceId: string) =>
     (await t.select().from(discoverySources).where(eq(discoverySources.id, sourceId)).for("update"))[0];
-  const liveCredential = async (t: Db, sourceId: string) =>
-    (await t.select().from(discoveryCredentials).where(and(eq(discoveryCredentials.sourceId, sourceId), isNull(discoveryCredentials.revokedAt))))[0];
+  const liveCredential = async (t: Db, sourceId: string): Promise<CredentialWithAge | undefined> =>
+    (
+      await t
+        .select({ cred: discoveryCredentials, ageDays: ageDaysSql })
+        .from(discoveryCredentials)
+        .where(and(eq(discoveryCredentials.sourceId, sourceId), isNull(discoveryCredentials.revokedAt)))
+    ).map((r) => ({ ...r.cred, ageDays: r.ageDays }))[0];
 
   const versionConflict = (current: number) =>
     refusal(409, "version_conflict", "this source changed since you loaded it, so nothing was written: reload it and repeat the change", { currentVersion: current });
@@ -297,6 +316,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         label: spec.label,
         family: spec.family,
         slice: spec.slice,
+        uploadFed: spec.uploadFed === true,
         evidenceKinds: spec.evidenceKinds,
         subjectKinds: spec.subjectKinds,
         built: scanner !== undefined,
@@ -309,8 +329,13 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     const settings = await loadDiscoverySettings(db);
     const sources = await db.select().from(discoverySources).orderBy(discoverySources.name);
     const ids = sources.map((s) => s.id);
-    const creds = ids.length
-      ? await db.select().from(discoveryCredentials).where(and(inArray(discoveryCredentials.sourceId, ids), isNull(discoveryCredentials.revokedAt)))
+    const creds: CredentialWithAge[] = ids.length
+      ? (
+          await db
+            .select({ cred: discoveryCredentials, ageDays: ageDaysSql })
+            .from(discoveryCredentials)
+            .where(and(inArray(discoveryCredentials.sourceId, ids), isNull(discoveryCredentials.revokedAt)))
+        ).map((r) => ({ ...r.cred, ageDays: r.ageDays }))
       : [];
     const lastRuns = ids.length
       ? await db
@@ -379,6 +404,14 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         const scope = body.scope ?? s.scope;
         const targetChanged = body.target !== undefined && JSON.stringify(body.target) !== JSON.stringify(s.target);
         const widened = body.scope !== undefined && scopeWidens(s.scope, body.scope);
+        // a duplicate name is refused BEFORE any grant is spent (review of #403)
+        if (body.name !== undefined && body.name.toLowerCase() !== s.name.toLowerCase()) {
+          const [dup] = await t
+            .select({ id: discoverySources.id })
+            .from(discoverySources)
+            .where(sql`lower(${discoverySources.name}) = lower(${body.name}) AND ${discoverySources.id} <> ${s.id}`);
+          if (dup) return refusal(409, "name_taken", "another discovery source already has that name");
+        }
         // decision 1: widening an ENABLED source (a new target, more items, an org-level scope) is the enable step-up
         if (s.enabled && (targetChanged || widened)) {
           const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, target, scope), s.id);
@@ -423,14 +456,19 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (s.enabled) return refusal(409, "already_enabled", "this source is already enabled");
       const scanner = registry.get(s.kind);
       if (!scanner) return refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[s.kind].slice})`);
-      if (scanner.requiresCredential && !(await liveCredential(t, s.id))) {
+      const enableCred = await liveCredential(t, s.id);
+      if (scanner.requiresCredential && !enableCred) {
         return refusal(409, "credential_missing", "store a credential for this source before enabling it");
+      }
+      if (enableCred?.writeScope === "refused") {
+        return refusal(409, "credential_refused", "this source's credential grants write access and is refused; replace it with a read-only credential first");
       }
       const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, s.target, s.scope), s.id);
       if (r) return r;
       const [row] = await t
         .update(discoverySources)
-        .set({ enabled: true, enabledAt: sql`now()`, enabledBy: actor(req), nextRunAt: sql`now()`, version: s.version + 1, updatedAt: sql`now()` })
+        // an upload-fed kind (osquery results, MDM/EDR exports) has no schedule: it is never queued by time
+        .set({ enabled: true, enabledAt: sql`now()`, enabledBy: actor(req), nextRunAt: DISCOVERY_KIND_SPECS[s.kind].uploadFed ? null : sql`now()`, version: s.version + 1, updatedAt: sql`now()` })
         .where(eq(discoverySources.id, s.id))
         .returning();
       await audit(t, req, "discovery_source", s.id, "discovery-source-enabled", "allow",
@@ -495,10 +533,6 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     const parsed = credentialSchema.safeParse(req.body ?? {});
     if (!parsed.success) return badRequest(reply, parsed.error);
     const body = parsed.data;
-    const secretShaped = Object.keys(body.publicConfig).filter((k) => SECRET_SHAPED_KEY.some((w) => k.toLowerCase().includes(w)));
-    if (secretShaped.length > 0) {
-      return send(reply, refusal(400, "public_config_secret_shaped", `public config fields are returned to admins; '${secretShaped.join("', '")}' looks like a secret: send it as the static credential's secret instead`));
-    }
     if (body.mode === "federated" && body.secret !== undefined) {
       return send(reply, refusal(400, "federated_has_no_secret", "a federated credential is short-lived and has no stored secret; use static mode for a stored secret (a relaxation)"));
     }
@@ -506,22 +540,36 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (body.mode === "static" && !opts.dataKey) {
       return send(reply, refusal(503, "data_key_unavailable", "the data key is not configured, so a secret cannot be stored encrypted"));
     }
-    if ("externalId" in body.publicConfig) {
-      return send(reply, refusal(400, "external_id_generated", "RegulAIt generates the AWS external ID per source (ADR-0195 decision 3); do not send one"));
-    }
     const out = await db.transaction(async (tx): Promise<Refusal | DiscoveryCredentialRow> => {
       const t = tx as unknown as Db;
       const s = await lockSource(t, p.data.sourceId);
       if (!s) return refusal(404, "not_found", "no such discovery source");
+      // review of #403: an ALLOWLIST of identifier fields per kind and mode, each shape-checked; anything else
+      // (a key, a token, a service-account file, the server-generated externalId in any spelling) is refused
+      const configProblem = publicConfigProblem(s.kind, body.mode, body.publicConfig);
+      if (configProblem) return refusal(400, "public_config_refused", configProblem);
+      const targetMatch = credentialTargetMatch(s.kind, s.target, body.publicConfig);
+      if (targetMatch === "mismatch") {
+        return refusal(400, "credential_target_mismatch", "the credential names a different account or tenant than the source's target");
+      }
       const live = await liveCredential(t, s.id);
       if ((live?.id ?? null) !== body.replacesCredentialId) {
         return refusal(409, "credential_conflict", live
           ? `this source already has a credential (${live.id}); name it in replacesCredentialId to replace it`
           : "this source has no credential; replacesCredentialId must be null");
       }
-      // decision 3: a stored static secret is a relaxation; a federated credential is the default and free
-      if (body.mode === "static") {
-        const r = await spendStepUp(req, staticCredentialStepUpArgs(s.id, s.kind, body.replacesCredentialId), s.id);
+      // decision 3: a stored static secret is a relaxation; a federated credential is the default and free.
+      // Review of #403: on an ENABLED source, a credential whose account cannot be checked against the target could
+      // point the scan somewhere else, so storing it is the enable step-up, bound to the source AND the new config
+      const steps: StepUpCheckArgs[] = [];
+      if (body.mode === "static") steps.push(staticCredentialStepUpArgs(s.id, s.kind, body.replacesCredentialId));
+      if (s.enabled && targetMatch !== "match") steps.push(credentialOnEnabledStepUpArgs(s.id, s.kind, s.target, s.scope, body.mode, body.publicConfig));
+      for (const args of steps) {
+        const pre = await checkStepUp(db, req, args, { spend: false });
+        if (!pre.ok) return { status: pre.status, body: pre.body };
+      }
+      for (const args of steps) {
+        const r = await spendStepUp(req, args, s.id);
         if (r) return r;
       }
       if (live) {
@@ -553,7 +601,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     });
     if (isRefusal(out)) return send(reply, out);
     const settings = await loadDiscoverySettings(db);
-    return credentialView(out, settings.credentialWarningAgeDays);
+    return credentialView({ ...out, ageDays: 0 }, settings.credentialWarningAgeDays);
   });
 
   app.delete("/v1/discovery/sources/:sourceId/credential", async (req, reply) => {
@@ -585,8 +633,12 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!s.enabled) return send(reply, refusal(409, "source_disabled", "enable this source before running it"));
     const scanner = registry.get(s.kind);
     if (!scanner) return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${s.kind} yet`));
-    if (scanner.requiresCredential && !(await liveCredential(db, s.id))) {
+    const runCred = await liveCredential(db, s.id);
+    if (scanner.requiresCredential && !runCred) {
       return send(reply, refusal(409, "credential_missing", "store a credential for this source first"));
+    }
+    if (runCred?.writeScope === "refused") {
+      return send(reply, refusal(409, "credential_refused", "this source's credential grants write access and is refused; replace it first"));
     }
     const [run] = await db
       .insert(discoveryRuns)
@@ -625,7 +677,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     const out = await db.transaction(async (tx): Promise<Refusal | true> => {
       const t = tx as unknown as Db;
       const [row] = await t.select().from(discoverySettings).where(eq(discoverySettings.id, 1)).for("update");
-      if (!row) return refusal(500, "settings_missing", "the discovery settings row is missing (migration 0202 inserts it)");
+      if (!row) return refusal(500, "settings_missing", "the discovery settings row is missing (migration 0203 inserts it)");
       if (row.version !== body.version) {
         return refusal(409, "version_conflict", "the discovery settings changed since you loaded them; reload and repeat the change", { currentVersion: row.version });
       }
@@ -664,21 +716,28 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     const p = pseudonymParam.safeParse(req.params);
     if (!p.success) return badRequest(reply, p.error);
     if (!opts.dataKey) return send(reply, refusal(503, "data_key_unavailable", "the data key is not configured, so no display name can be read"));
-    const [row] = await db.select().from(discoveryPseudonyms).where(eq(discoveryPseudonyms.pseudonym, p.data.pseudonym));
-    if (!row) return send(reply, refusal(404, "not_found", "no such pseudonym (it may have passed its retention)"));
-    const r = await spendStepUp(req, { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.reveal]: { pseudonym: row.pseudonym } } } }, null);
-    if (r) return send(reply, r);
-    let displayName: string;
-    try {
-      displayName = decryptSecret(opts.dataKey, row.displayNameCiphertext);
-    } catch {
-      return send(reply, refusal(500, "unreadable", "this display name does not decrypt under the current data key"));
-    }
-    // the audit names WHICH pseudonym was revealed and by whom, never the name itself
-    await audit(db, req, "discovery_pseudonym", row.id, "discovery-pseudonym-revealed", "allow", `pseudonym ${row.pseudonym} (${row.kind}) revealed by an admin`, {
-      pseudonym: row.pseudonym,
-      kind: row.kind,
+    const dataKey = opts.dataKey;
+    // under the row lock: decrypt FIRST, and spend the grant only when there is a name to give (review of #403)
+    const out = await db.transaction(async (tx): Promise<Refusal | { pseudonym: string; kind: string; displayName: string }> => {
+      const t = tx as unknown as Db;
+      const [row] = await t.select().from(discoveryPseudonyms).where(eq(discoveryPseudonyms.pseudonym, p.data.pseudonym)).for("update");
+      if (!row) return refusal(404, "not_found", "no such pseudonym (it may have passed its retention)");
+      let displayName: string;
+      try {
+        displayName = decryptSecret(dataKey, row.displayNameCiphertext);
+      } catch {
+        return refusal(500, "unreadable", "this display name does not decrypt under the current data key");
+      }
+      const r = await spendStepUp(req, pseudonymRevealStepUpArgs(row.pseudonym), null);
+      if (r) return r;
+      // the audit names WHICH pseudonym was revealed and by whom, never the name itself
+      await audit(t, req, "discovery_pseudonym", row.id, "discovery-pseudonym-revealed", "allow", `pseudonym ${row.pseudonym} (${row.kind}) revealed by an admin`, {
+        pseudonym: row.pseudonym,
+        kind: row.kind,
+      });
+      return { pseudonym: row.pseudonym, kind: row.kind, displayName };
     });
-    return { pseudonym: row.pseudonym, kind: row.kind, displayName };
+    if (isRefusal(out)) return send(reply, out);
+    return out;
   });
 }

@@ -13,7 +13,7 @@
  * path as evidence imports, under one of the evidence kinds below.
  */
 
-/** every kind of discovery source (migration 0202 `discovery_sources_kind_check`) */
+/** every kind of discovery source (migration 0203 `discovery_sources_kind_check`) */
 export const DISCOVERY_SOURCE_KINDS = [
   "repo_github",
   "repo_gitlab",
@@ -51,6 +51,8 @@ export interface DiscoveryKindSpec {
   /** the slice that builds its scanner (ADR-0195 "Slices") */
   slice: "SD1" | "SD2" | "SD3" | "SD4";
   label: string;
+  /** fed by uploads, not by a schedule: the worker never queues a scheduled run for it, and the UI asks no schedule */
+  uploadFed?: boolean;
 }
 
 const REPO: Pick<DiscoveryKindSpec, "family" | "evidenceKinds" | "subjectKinds" | "slice"> = {
@@ -74,8 +76,8 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   cloud_aws: { ...CLOUD, label: "AWS" },
   cloud_gcp: { ...CLOUD, label: "GCP" },
   cloud_azure: { ...CLOUD, label: "Azure" },
-  endpoint_osquery: { family: "endpoint", evidenceKinds: ["endpoint_osquery"], subjectKinds: ["device"], slice: "SD3", label: "osquery results (no agent)" },
-  endpoint_inventory: { family: "endpoint", evidenceKinds: ["endpoint_inventory"], subjectKinds: ["device"], slice: "SD3", label: "MDM or EDR inventory (no agent)" },
+  endpoint_osquery: { family: "endpoint", evidenceKinds: ["endpoint_osquery"], subjectKinds: ["device"], slice: "SD3", label: "osquery results (no agent)", uploadFed: true },
+  endpoint_inventory: { family: "endpoint", evidenceKinds: ["endpoint_inventory"], subjectKinds: ["device"], slice: "SD3", label: "MDM or EDR inventory (no agent)", uploadFed: true },
   endpoint_agent: { family: "endpoint", evidenceKinds: ["endpoint_agent"], subjectKinds: ["device"], slice: "SD4", label: "RegulAIt endpoint agent" },
 });
 
@@ -83,8 +85,11 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
 export const DISCOVERY_CREDENTIAL_MODES = ["federated", "static"] as const;
 export type DiscoveryCredentialMode = (typeof DISCOVERY_CREDENTIAL_MODES)[number];
 
-/** the write-scope state of a source's credential (ADR-0195 decision 7); a credential WITH write scope is refused */
-export const DISCOVERY_WRITE_SCOPE_STATES = ["unverified", "read_only"] as const;
+/**
+ * The write-scope state of a source's credential (ADR-0195 decision 7). `refused`: a scanner found it grants write
+ * access; it is never used again, and the source cannot be enabled or run until the credential is replaced.
+ */
+export const DISCOVERY_WRITE_SCOPE_STATES = ["unverified", "read_only", "refused"] as const;
 export type DiscoveryWriteScopeState = (typeof DISCOVERY_WRITE_SCOPE_STATES)[number];
 
 export const DISCOVERY_RUN_STATUSES = ["queued", "running", "succeeded", "failed"] as const;
@@ -112,7 +117,7 @@ export const DISCOVERY_ENDPOINT_RETENTION_MAX_DAYS = 3650;
 export const DISCOVERY_RUN_MAX_ATTEMPTS = 3;
 
 /** the pseudonymised kinds of person a scanner may name (ADR-0195 decision 20) */
-export const DISCOVERY_PSEUDONYM_KINDS = ["device_user", "commit_author", "cloud_principal"] as const;
+export const DISCOVERY_PSEUDONYM_KINDS = ["device_user", "commit_author", "cloud_principal", "device"] as const;
 export type DiscoveryPseudonymKind = (typeof DISCOVERY_PSEUDONYM_KINDS)[number];
 /** a pseudonym as shown in findings: `psn:` + 24 hex characters of the per-tenant HMAC */
 export const DISCOVERY_PSEUDONYM_PREFIX = "psn:";
@@ -127,9 +132,8 @@ export const DISCOVERY_STEP_UP_KEYS = Object.freeze({
   warningAge: "discoveryCredentialWarningAgeDays",
   /** lengthening the endpoint evidence retention */
   retention: "discoveryEndpointRetentionDays",
-  /** revealing a pseudonymised display name */
-  reveal: "discoveryPseudonymReveal",
 });
+// revealing a pseudonymised name is NOT a settings relaxation: it is the `pseudonym_reveal` step-up kind
 
 /**
  * A source's scope (ADR-0195 decision 1): an organisation-level scope (everything
@@ -173,3 +177,134 @@ export function activeDiscoveryPosture(active: readonly ActiveDiscoverySource[])
     "Nothing outside those sources is scanned."
   );
 }
+
+// ---------------------------------------------------------------------------
+// credential public config: a per-kind, per-mode ALLOWLIST (review of #403)
+// ---------------------------------------------------------------------------
+
+/**
+ * The shape of one public config value. Each is a short, linear check (no
+ * nested quantifier, bounded classes): public config is returned to admins, so
+ * only identifiers of a known form are accepted, and anything that could carry
+ * a secret is refused.
+ */
+export type PublicConfigShape = "numeric_id" | "guid" | "aws_role_arn" | "gcp_id" | "gcp_sa_email" | "https_url";
+
+const SHAPE_PATTERNS: Readonly<Record<Exclude<PublicConfigShape, "https_url">, RegExp>> = {
+  numeric_id: /^[0-9]{1,20}$/,
+  guid: /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/,
+  aws_role_arn: /^arn:aws[a-z-]{0,20}:iam::[0-9]{12}:role\/[A-Za-z0-9+=,.@_/-]{1,512}$/,
+  gcp_id: /^[a-z][a-z0-9-]{3,62}$/,
+  gcp_sa_email: /^[a-z][a-z0-9-]{4,29}@[a-z][a-z0-9-]{4,29}\.iam\.gserviceaccount\.com$/,
+};
+
+export function publicConfigShapeOk(shape: PublicConfigShape, value: string): boolean {
+  if (value.length === 0 || value.length > 1024) return false;
+  if (shape !== "https_url") return SHAPE_PATTERNS[shape].test(value);
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  // an audience: https, no credentials, no query or fragment (where a token could ride)
+  return u.protocol === "https:" && u.username === "" && u.password === "" && u.search === "" && u.hash === "";
+}
+
+export interface PublicConfigField {
+  shape: PublicConfigShape;
+  required: boolean;
+}
+type ConfigSpec = Readonly<Record<string, PublicConfigField>>;
+
+/**
+ * Which public config keys each kind accepts, per credential mode. Everything
+ * else is refused. A static credential's secret goes in `secret` only. The AWS
+ * `externalId` is generated by RegulAIt and is never accepted from a request.
+ */
+export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Readonly<Record<DiscoveryCredentialMode, ConfigSpec>>>> = Object.freeze({
+  repo_github: {
+    federated: { appId: { shape: "numeric_id", required: true }, installationId: { shape: "numeric_id", required: true } },
+    static: {},
+  },
+  repo_gitlab: { federated: { audience: { shape: "https_url", required: true } }, static: {} },
+  repo_bitbucket: { federated: { audience: { shape: "https_url", required: true } }, static: {} },
+  repo_azure_devops: {
+    federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+    static: {},
+  },
+  cloud_aws: { federated: { roleArn: { shape: "aws_role_arn", required: true } }, static: {} },
+  cloud_gcp: {
+    federated: {
+      projectNumber: { shape: "numeric_id", required: true },
+      workloadIdentityPool: { shape: "gcp_id", required: true },
+      workloadIdentityProvider: { shape: "gcp_id", required: true },
+      serviceAccountEmail: { shape: "gcp_sa_email", required: true },
+    },
+    static: {},
+  },
+  cloud_azure: {
+    federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+    static: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
+  },
+  endpoint_osquery: { federated: {}, static: {} },
+  endpoint_inventory: { federated: {}, static: {} },
+  endpoint_agent: { federated: {}, static: {} },
+});
+
+/** null when `config` is exactly an allowed, well-formed public config for this kind and mode; else the problem */
+export function publicConfigProblem(kind: DiscoverySourceKind, mode: DiscoveryCredentialMode, config: Readonly<Record<string, string>>): string | null {
+  const spec = DISCOVERY_PUBLIC_CONFIG[kind][mode];
+  for (const key of Object.keys(config)) {
+    const field = spec[key];
+    if (!field) {
+      const allowed = Object.keys(spec);
+      return `'${key.slice(0, 40)}' is not a public config field of a ${mode} ${kind} credential (allowed: ${allowed.length ? allowed.join(", ") : "none"}); a secret belongs in the static credential's secret`;
+    }
+    if (!publicConfigShapeOk(field.shape, config[key]!)) return `'${key}' is not a valid ${field.shape}`;
+  }
+  for (const [key, field] of Object.entries(spec)) {
+    if (field.required && !(key in config)) return `'${key}' is required for a ${mode} ${kind} credential`;
+  }
+  return null;
+}
+
+/**
+ * Does a credential's own account or tenant match the source's target?
+ * `match`/`mismatch` when both sides name it; `unverifiable` otherwise (then
+ * storing or replacing a credential on an ENABLED source is the enable step-up).
+ */
+export function credentialTargetMatch(
+  kind: DiscoverySourceKind,
+  target: Readonly<Record<string, unknown>>,
+  config: Readonly<Record<string, string>>,
+): "match" | "mismatch" | "unverifiable" {
+  const t = (k: string) => (typeof target[k] === "string" ? (target[k] as string).trim().toLowerCase() : null);
+  if (kind === "cloud_aws" && config.roleArn) {
+    const want = t("accountId");
+    if (!want) return "unverifiable";
+    return (config.roleArn.split(":")[4] ?? "") === want ? "match" : "mismatch";
+  }
+  if ((kind === "cloud_azure" || kind === "repo_azure_devops") && config.tenantId) {
+    const want = t("tenantId");
+    if (!want) return "unverifiable";
+    return config.tenantId.toLowerCase() === want ? "match" : "mismatch";
+  }
+  return "unverifiable";
+}
+
+/** a subject that names a person (or a device) must be a pseudonym (ADR-0195 decision 20) */
+export const DISCOVERY_PSEUDONYM_PATTERN = /^psn:[0-9a-f]{24}$/;
+/** the source kinds fed by uploads (no schedule) */
+export const UPLOAD_FED_SOURCE_KINDS: readonly DiscoverySourceKind[] = DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed === true);
+export const PSEUDONYMISED_SUBJECT_KINDS: readonly DiscoverySubjectKind[] = ["cloud_principal", "device"];
+
+/** one read a scanner attempted (SD2: which logs or APIs it could read), shown per run */
+export const DISCOVERY_READ_STATUSES = ["read", "denied", "not_enabled", "unreachable", "skipped", "error"] as const;
+export type DiscoveryReadStatus = (typeof DISCOVERY_READ_STATUSES)[number];
+export interface DiscoveryReadOutcome {
+  read: string;
+  status: DiscoveryReadStatus;
+  detail?: string;
+}
+export const DISCOVERY_READ_OUTCOMES_MAX = 100;

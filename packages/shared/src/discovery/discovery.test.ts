@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { activeDiscoveryPosture, DISCOVERY_KIND_SPECS, DISCOVERY_SOURCE_KINDS, scopeWidens } from "./index.js";
+import {
+  activeDiscoveryPosture,
+  credentialTargetMatch,
+  DISCOVERY_KIND_SPECS,
+  DISCOVERY_SOURCE_KINDS,
+  publicConfigProblem,
+  scopeWidens,
+} from "./index.js";
 import {
   artifactMatchesSignature,
   catalogueSignatureSchema,
@@ -25,6 +32,10 @@ const obs = (o: Partial<Observation>): Observation => ({
 });
 
 describe("ADR-0195 SD0 discovery vocabulary", () => {
+  it("upload-fed kinds are exactly the two no-agent endpoint importers", () => {
+    expect(DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed)).toEqual(["endpoint_osquery", "endpoint_inventory"]);
+  });
+
   it("every source kind has a spec whose evidence and subject kinds are non-empty", () => {
     for (const k of DISCOVERY_SOURCE_KINDS) {
       expect(DISCOVERY_KIND_SPECS[k].evidenceKinds.length).toBeGreaterThan(0);
@@ -49,6 +60,33 @@ describe("ADR-0195 SD0 discovery vocabulary", () => {
   });
 });
 
+describe("credential public config: an allowlist per kind and mode (review of #403)", () => {
+  it("accepts exactly the allowlisted identifiers, well-formed", () => {
+    expect(publicConfigProblem("repo_github", "federated", { appId: "1", installationId: "2" })).toBeNull();
+    expect(publicConfigProblem("cloud_aws", "federated", { roleArn: "arn:aws:iam::000000000000:role/reader" })).toBeNull();
+    expect(publicConfigProblem("cloud_azure", "static", { tenantId: "00000000-0000-0000-0000-000000000000", clientId: "00000000-0000-0000-0000-000000000001" })).toBeNull();
+    expect(publicConfigProblem("repo_gitlab", "static", {})).toBeNull();
+  });
+  it("refuses any other key, a malformed value, a missing field, and the generated externalId in any spelling", () => {
+    expect(publicConfigProblem("repo_github", "federated", { appId: "1", installationId: "2", sk: "x" })).toMatch(/not a public config field/);
+    expect(publicConfigProblem("repo_github", "static", { serviceAccountJson: "{}" })).toMatch(/not a public config field/);
+    expect(publicConfigProblem("repo_github", "federated", { appId: "abc", installationId: "2" })).toMatch(/not a valid/);
+    expect(publicConfigProblem("repo_github", "federated", { appId: "1" })).toMatch(/required/);
+    for (const k of ["externalId", "ExternalId", "external_id", "EXTERNALID"]) {
+      expect(publicConfigProblem("cloud_aws", "federated", { roleArn: "arn:aws:iam::000000000000:role/r", [k]: "x" })).not.toBeNull();
+    }
+    expect(publicConfigProblem("repo_gitlab", "federated", { audience: "https://a.example.test/?token=x" })).toMatch(/not a valid/);
+    expect(publicConfigProblem("repo_gitlab", "federated", { audience: "http://a.example.test/" })).toMatch(/not a valid/);
+  });
+  it("matches a credential's account or tenant to the target", () => {
+    const arn = "arn:aws:iam::000000000000:role/reader";
+    expect(credentialTargetMatch("cloud_aws", { accountId: "000000000000" }, { roleArn: arn })).toBe("match");
+    expect(credentialTargetMatch("cloud_aws", { accountId: "111111111111" }, { roleArn: arn })).toBe("mismatch");
+    expect(credentialTargetMatch("cloud_aws", {}, { roleArn: arn })).toBe("unverifiable");
+    expect(credentialTargetMatch("repo_github", { org: "x" }, { appId: "1" })).toBe("unverifiable");
+  });
+});
+
 describe("ADR-0195 artifact signatures (detection is data)", () => {
   const ide = sig({ kind: "ide_extension", value: "Acme.Assistant", matchType: "identifier" });
 
@@ -64,6 +102,28 @@ describe("ADR-0195 artifact signatures (detection is data)", () => {
     expect(classifyObservation(o, [ide]).severity).toBe("medium");
     expect(classifyObservation(o, [{ ...ide, enabled: false }]).matched).toBe(false);
     expect(classifyObservation(o, []).matched).toBe(false);
+  });
+
+  it("a row scoped to an OS or an ecosystem matches only observations from it; a low-confidence match says so", () => {
+    const mac = { ...ide, os: "macos" as const, confidence: "low" as const };
+    const art = { artifact: { kind: "ide_extension" as const, value: "acme.assistant" } };
+    expect(classifyObservation(obs({ ...art, os: "macos" }), [mac]).matched).toBe(true);
+    expect(classifyObservation(obs({ ...art, os: "macos" }), [mac]).signatureConfidence).toBe("low");
+    expect(classifyObservation(obs({ ...art, os: "windows" }), [mac]).matched).toBe(false);
+    expect(classifyObservation(obs(art), [mac]).matched).toBe(false);
+    const npm = sig({ kind: "sdk_package", value: "acme-ai", matchType: "package", ecosystem: "npm" });
+    expect(classifyObservation(obs({ subjectKind: "repo", subject: "r", packageName: "acme-ai", ecosystem: "NPM" }), [npm]).matched).toBe(true);
+    expect(classifyObservation(obs({ subjectKind: "repo", subject: "r", packageName: "acme-ai", ecosystem: "pypi" }), [npm]).matched).toBe(false);
+    expect(classifyObservation(obs({ ...art, os: "macos" }), [ide]).signatureConfidence).toBeUndefined();
+  });
+
+  it("the catalogue schema accepts bounded scope fields and refuses malformed ones", () => {
+    const base = { provider: "p", kind: "desktop_app", value: "x", matchType: "identifier" };
+    expect(catalogueSignatureSchema.parse({ ...base, os: "linux", ecosystem: "npm", toolId: "acme.tool", note: "n" }).confidence).toBe("high");
+    expect(catalogueSignatureSchema.safeParse({ ...base, os: "beos" }).success).toBe(false);
+    expect(catalogueSignatureSchema.safeParse({ ...base, ecosystem: "NPM Registry" }).success).toBe(false);
+    expect(catalogueSignatureSchema.safeParse({ ...base, note: "x".repeat(501) }).success).toBe(false);
+    expect(catalogueSignatureSchema.safeParse({ ...base, confidence: "certain" }).success).toBe(false);
   });
 
   it("the catalogue schema binds artifact kinds to the identifier match type", () => {

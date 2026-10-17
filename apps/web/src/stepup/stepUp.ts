@@ -99,7 +99,7 @@ export function stepUpRefusalOf(err: unknown): { action: StepUpAction; methods: 
   return { action, methods };
 }
 
-/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, seven today) */
+/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, eight today) */
 const MAX_STEP_UPS = 7;
 
 /**
@@ -193,6 +193,7 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   passkey_manage: "changing your passkeys",
   owner_change: "changing who owns this",
   identity_manage: "changing an agent identity",
+  pseudonym_reveal: "revealing a person's name",
 };
 
 export const STEP_UP_METHOD_COPY: Readonly<Record<string, string>> = {

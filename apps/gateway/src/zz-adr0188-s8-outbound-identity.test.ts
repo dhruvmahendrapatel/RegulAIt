@@ -227,7 +227,7 @@ beforeAll(async () => {
   await db.update(orgSettings).set({ mcpProtocolMethods: ["resources/read"] as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
   // the strict step-up values (the defaults; the #378 suite writes the same): a relaxation needs a fresh step-up
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required',
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
 
   keyDir = mkdtempSync(path.join(os.tmpdir(), "s8-issuer-"));

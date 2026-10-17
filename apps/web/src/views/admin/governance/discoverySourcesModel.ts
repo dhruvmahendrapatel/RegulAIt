@@ -9,6 +9,8 @@ export interface ScannerKindView {
   label: string;
   family: "repo" | "cloud" | "endpoint";
   slice: string;
+  /** fed by uploads: no schedule */
+  uploadFed?: boolean;
   evidenceKinds: string[];
   subjectKinds: string[];
   built: boolean;
@@ -20,7 +22,7 @@ export interface DiscoveryCredentialView {
   mode: "federated" | "static";
   publicConfig: Record<string, string>;
   hasSecret: boolean;
-  writeScope: "unverified" | "read_only";
+  writeScope: "unverified" | "read_only" | "refused";
   createdAt: string;
   ageDays: number;
   ageWarning: boolean;
@@ -40,6 +42,7 @@ export interface DiscoveryRunView {
   findingsCreated: number;
   findingsUpdated: number;
   catalogueGaps: Array<{ kind: string; value: string }>;
+  readOutcomes?: Array<{ read: string; status: string; detail?: string }>;
   rawOutputSha256: string | null;
   errorCode: string | null;
   errorDetail: string | null;
@@ -79,6 +82,7 @@ export interface DiscoveryPostureView {
   staticCredentials: Array<SourceRef & { ageDays: number }>;
   staleCredentials: Array<SourceRef & { ageDays: number }>;
   writeScopeUnverified: SourceRef[];
+  credentialsRefused?: SourceRef[];
   credentialWarningAgeDays: number;
   endpointRetentionDays: number;
   statement: string;
@@ -125,6 +129,21 @@ export const formatKeyValues = (o: Record<string, string>) =>
     .map(([k, v]) => `${k}=${v}`)
     .join("\n");
 
+/** public config keys RegulAIt generates (never sent back: the gateway refuses them) */
+export const SERVER_GENERATED_CONFIG_KEYS: readonly string[] = ["externalId"];
+
+/** the public config a "replace credential" form starts from: the live one without the server-generated keys */
+export function editablePublicConfig(o: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(o).filter(([k]) => !SERVER_GENERATED_CONFIG_KEYS.includes(k)));
+}
+
+/** "could not read: …" for every read that did not succeed, or null when all were read */
+export function couldNotRead(outcomes: ReadonlyArray<{ read: string; status: string; detail?: string }> | undefined): string | null {
+  const missed = (outcomes ?? []).filter((o) => o.status !== "read");
+  if (missed.length === 0) return null;
+  return "could not read: " + missed.map((o) => `${o.read} (${o.status.replace("_", " ")}${o.detail ? `: ${o.detail}` : ""})`).join("; ");
+}
+
 /** the scope in words */
 export function describeScope(scope: DiscoveryScope): string {
   if (scope.orgLevel) return "organisation-level (everything the target holds)";
@@ -158,6 +177,36 @@ export const DISCOVERY_REFUSAL_TEXT: Readonly<Record<string, string>> = {
   run_already_queued: "A scan of this source is already queued or running.",
   source_disabled: "Enable the source before running it.",
   name_taken: "Another source already has that name.",
-  public_config_secret_shaped: "A public config field looks like a secret. Put secrets in the secret field (static mode).",
+  public_config_refused: "That public config field is not allowed for this kind, or is not well-formed. Secrets go in the secret field (static mode).",
+  credential_target_mismatch: "The credential names a different account or tenant than the source's target.",
+  credential_refused: "This source's credential grants write access and is refused. Replace it with a read-only one.",
   data_key_unavailable: "The data key is not configured, so secrets cannot be stored or read.",
 };
+
+/** one sighting on a finding, as the findings API returns it */
+export interface SightingView {
+  source: string;
+  observedAt?: string;
+  location?: { path: string; line?: number; commit?: string };
+  names?: string[];
+  actor?: string;
+  signatureConfidence?: "high" | "medium" | "low";
+}
+
+/** the sightings in words: at most `max`, only those with a location, names or an actor */
+export function sightingLines(evidence: readonly SightingView[] | undefined, max = 3): Array<{ text: string; actor: string | null }> {
+  const out: Array<{ text: string; actor: string | null }> = [];
+  for (const e of evidence ?? []) {
+    const lowConfidence = e.signatureConfidence === "low" || e.signatureConfidence === "medium";
+    if (!e.location && !(e.names && e.names.length) && !e.actor && !lowConfidence) continue;
+    const parts: string[] = [];
+    if (lowConfidence) parts.push(`${e.signatureConfidence}-confidence signature`);
+    if (e.location) {
+      parts.push(`${e.location.path}${e.location.line ? `:${e.location.line}` : ""}${e.location.commit ? ` @${e.location.commit.slice(0, 8)}` : ""}`);
+    }
+    if (e.names && e.names.length) parts.push(`names: ${e.names.slice(0, 10).join(", ")}${e.names.length > 10 ? ", …" : ""}`);
+    out.push({ text: parts.join(" · ") || e.source, actor: e.actor ?? null });
+    if (out.length >= max) break;
+  }
+  return out;
+}
