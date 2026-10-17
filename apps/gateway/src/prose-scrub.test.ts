@@ -468,6 +468,7 @@ describe("5. ONE detector, shared with the audit path", () => {
       "dlp.secret.stripe_key": `sk_live_${"aZ09Kq7x".repeat(3)}`,
       "dlp.secret.google_api_key": `AIza${"Sy09_-Kq".repeat(5).slice(0, 35)}`,
       "dlp.secret.gitlab_pat": `glpat-${"aZ09_-Kq".repeat(3)}`,
+      "dlp.secret.huggingface_token": `hf_${"aZqKxbYw".repeat(5).slice(0, 34)}`,
     };
     // every shipped rule has a sample here — a NEW rule added to
     // `guardrails.ts` fails this line until it is exercised on this path too
