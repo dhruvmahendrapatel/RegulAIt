@@ -2207,12 +2207,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // writer) and both step-ups are looked at (not spent) before anything is written; then the columns AND the owner
     // are written in ONE conditional update (a compare-and-set on the posture and the owner the step-ups were decided
     // on), and both grants are spent in that transaction, on its connection, after the write.
-    const ownerChanges = body.ownerUserId !== undefined && body.ownerUserId !== before.ownerUserId;
+    // The comparison, the step-up look and the claim all use the owner id as the database returns it (`ownerTarget`,
+    // lowercased by Postgres): an uppercase spelling of the current owner is no change, and the look's facts match
+    // the claim's.
+    let ownerChanges = false;
     let ownerTarget: string | null = null;
-    if (ownerChanges) {
+    if (body.ownerUserId !== undefined && body.ownerUserId !== before.ownerUserId) {
       const target = await checkOwnerTarget(db, body.ownerUserId ?? null);
-      if (target.ok) ownerTarget = target.ownerUserId;
-      else {
+      if (target.ok) {
+        ownerTarget = target.ownerUserId;
+        ownerChanges = ownerTarget !== before.ownerUserId;
+      } else {
         const refused = await changeOwner(db, {
           kind: "mcp_server",
           id: serverId,
@@ -2229,7 +2234,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
     if (ownerChanges) {
-      const look = await checkStepUp(db, req, ownerChangeStepUpArgs("mcp_server", serverId, body.ownerUserId ?? null), { spend: false });
+      const look = await checkStepUp(db, req, ownerChangeStepUpArgs("mcp_server", serverId, ownerTarget), { spend: false });
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
     const ownerStepUpArgs = ownerChanges ? ownerChangeStepUpArgs("mcp_server", serverId, ownerTarget) : null;
@@ -2400,7 +2405,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const owned = await changeOwner(db, {
         kind: "mcp_server",
         id: serverId,
-        ownerUserId: body.ownerUserId,
+        // the current owner, as stored (the body may spell it in another case)
+        ownerUserId: before.ownerUserId,
         actorUserId: req.authCtx.userId,
         gate: ownerChangeGate(db, req, "mcp_server", serverId), // ADR-0186 A: owner_change step-up
       });

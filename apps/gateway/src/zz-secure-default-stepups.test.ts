@@ -817,6 +817,37 @@ describe("PATCH /v1/servers/:serverId: the columns and the owner are one conditi
   });
 });
 
+describe("PATCH /v1/servers/:serverId: an owner id in another case is the same owner", () => {
+  it("an uppercase owner id asks for and accepts the grant of the stored (lowercase) id; restating it is no change", async () => {
+    const srv = await asAdmin("POST", "/v1/servers", { name: `sds-srv-case-${RUN}`, url: `${REGISTRY_URL}case`, ownerUserId: null });
+    expect(srv.statusCode, srv.body).toBe(201);
+    const serverId = srv.json().id as string;
+    created.servers.push(serverId);
+    const upper = admin.id.toUpperCase();
+    expect(upper).not.toBe(admin.id);
+    // the prompt's facts name the id as the database returns it, so a grant for them is the one the claim accepts
+    const asked = await asAdmin("PATCH", `/v1/servers/${serverId}`, { ownerUserId: upper });
+    expect(asked.statusCode, asked.body).toBe(403);
+    expect(asked.json()).toMatchObject({ error: "step_up_required" });
+    expect(asked.json().action).toEqual({ kind: "owner_change", body: { objectType: "mcp_server", objectId: serverId, ownerUserId: admin.id } });
+    const token = await grantFor(asked.json().action);
+    const ok = await asAdmin("PATCH", `/v1/servers/${serverId}`, { ownerUserId: upper }, { [STEP_UP_HEADER]: token });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({ ownerUserId: admin.id });
+    expect((await lastAudit("mcp-server-owner-changed", serverId))!.detail).toMatchObject({ transitions: { ownerUserId: { from: null, to: admin.id } } });
+    const [spent] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(token).digest("hex")));
+    expect(spent!.usedAt).not.toBeNull();
+    // the current owner in uppercase: no change, so no step-up is asked and the owner stays as stored
+    const again = await asAdmin("PATCH", `/v1/servers/${serverId}`, { ownerUserId: upper });
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json()).toMatchObject({ ownerUserId: admin.id });
+    const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    expect(row!.ownerUserId).toBe(admin.id);
+    // the restatement names the stored id on both sides (the same row an exact spelling writes), never a case change
+    expect((await lastAudit("mcp-server-owner-changed", serverId))!.detail).toMatchObject({ transitions: { ownerUserId: { from: admin.id, to: admin.id } } });
+  });
+});
+
 describe("a duplicate name is refused before a grant is asked for", () => {
   it("relaxing creates of an agent, a registry and a server answer 409, not a step-up prompt", async () => {
     const reg = await asAdmin("POST", "/v1/mcp-registries", { name: `sds-plain-${RUN}`, url: REGISTRY_URL, enabled: true });
