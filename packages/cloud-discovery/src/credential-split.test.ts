@@ -2,20 +2,20 @@
  * Review of #404, finding 3: token-exchange responses carry credentials, so they go through `credentialFetch` (which
  * the gateway does not digest) and never through the scan `fetch` (which it does). API calls go the other way.
  */
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { AwsCloudScanner } from "./aws.js";
 import { AzureCloudScanner } from "./azure.js";
-import { GcpCloudScanner } from "./gcp.js";
-import { fakeCloud, json, synthetic, testPseudonymise, xml, type RecordedCall } from "./test-cloud.js";
+import { GcpCloudScanner, gcpTransportFetch } from "./gcp.js";
+import { awsSts, fakeCloud, json, synthetic, testPseudonymise, type RecordedCall } from "./test-cloud.js";
 import type { CloudScanContext } from "./types.js";
 
 const ctx = (): CloudScanContext => ({ now: new Date("2026-10-17T12:00:00Z"), auditLookbackDays: 7, pseudonymise: testPseudonymise, maxPagesPerCall: 2 });
 
 function routes(c: RecordedCall): Response {
   const h = c.url.hostname;
-  if (h.startsWith("sts.") && h.endsWith("amazonaws.com")) {
-    return xml(`<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials><AccessKeyId>${synthetic("a")}</AccessKeyId><SecretAccessKey>${synthetic("s")}</SecretAccessKey><SessionToken>${synthetic("t")}</SessionToken><Expiration>2026-10-17T13:00:00Z</Expiration></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>`);
-  }
+  const sts = awsSts(c);
+  if (sts) return sts;
   if (h.startsWith("account.")) return json({ Regions: [{ RegionName: "us-east-1", RegionOptStatus: "ENABLED_BY_DEFAULT" }] });
   if (h === "sts.googleapis.com") return json({ access_token: synthetic("at"), issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: 3600 });
   if (h === "iamcredentials.googleapis.com") return json({ accessToken: synthetic("at"), expireTime: "2026-10-17T13:00:00Z" });
@@ -75,5 +75,62 @@ describe("credential exchanges use credentialFetch, API calls use fetch (finding
     ).scan(ctx());
     expect(s.credHosts()).toEqual(["login.microsoftonline.com"]);
     expect(s.scanHosts()).toEqual(["management.azure.com"]);
+  });
+
+  it("GCP static key: no token exchange (a self-signed JWT), so nothing on credentialFetch and no credential host on fetch", async () => {
+    const s = split();
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const keyJson = JSON.stringify({ type: "service_account", client_email: "s@p.iam.gserviceaccount.com", private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString() });
+    await new GcpCloudScanner({ projectIds: ["p"] }, { fetch: s.scan.fetch, credentialFetch: s.cred.fetch, credential: { mode: "gcp_service_account_key", keyJson } }).scan(ctx());
+    expect(s.credHosts()).toEqual([]);
+    expect(s.scanHosts().filter(isCredentialHost)).toEqual([]);
+    expect(s.scanHosts()).toContain("serviceusage.googleapis.com");
+  });
+
+  it("the GCP transport routes every credential host, oauth2 included, to credentialFetch (recheck finding 1)", async () => {
+    const s = split();
+    const f = gcpTransportFetch({ fetch: s.scan.fetch, credentialFetch: s.cred.fetch });
+    for (const h of ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) await f(`https://${h}/token`, { method: "POST" });
+    await f("https://serviceusage.googleapis.com/v1/x");
+    expect(s.credHosts()).toEqual(["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"]);
+    expect(s.scanHosts()).toEqual(["serviceusage.googleapis.com"]);
+  });
+});
+
+describe("every short-lived credential is registered with onSecret", () => {
+  it("GCP federation: the OIDC assertion, the STS token and the impersonated token", async () => {
+    const seen: string[] = [];
+    const s = split();
+    const oidc = synthetic("oidc");
+    await new GcpCloudScanner(
+      { projectIds: ["p"] },
+      {
+        fetch: s.scan.fetch,
+        credentialFetch: s.cred.fetch,
+        onSecret: (v) => seen.push(v),
+        credential: { mode: "gcp_workload_identity", audience: "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/a/providers/b", serviceAccountEmail: "s@p.iam.gserviceaccount.com" },
+        oidcToken: async () => oidc,
+      },
+    ).scan(ctx());
+    expect(seen).toContain(oidc);
+    // two exchanges (STS, then IAM Credentials), each returning one token, both registered; and the bearer token
+    // actually sent on the API calls is among them
+    expect(s.cred.calls.length).toBe(2);
+    expect(seen.filter((v) => v.startsWith("at-")).length).toBeGreaterThanOrEqual(2);
+    const sent = s.scan.calls.map((c) => (c.headers.get("authorization") ?? "").slice(7));
+    expect(sent.length).toBeGreaterThan(0);
+    for (const t of sent) expect(seen).toContain(t);
+  });
+
+  it("Azure: the Entra access token returned and sent", async () => {
+    const seen: string[] = [];
+    const s = split();
+    await new AzureCloudScanner(
+      { subscriptionIds: ["00000000-0000-4000-8000-0000000000aa"] },
+      { fetch: s.scan.fetch, credentialFetch: s.cred.fetch, onSecret: (v) => seen.push(v), credential: { mode: "azure_client_secret", tenantId: "00000000-0000-4000-8000-000000000001", clientId: "c", clientSecret: synthetic("cs") } },
+    ).scan(ctx());
+    const sent = [...new Set(s.scan.calls.map((c) => (c.headers.get("authorization") ?? "").slice(7)))];
+    expect(sent.length).toBe(1);
+    expect(seen).toContain(sent[0]);
   });
 });

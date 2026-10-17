@@ -24,6 +24,9 @@ function fakeAws(opts: { throttleOnce?: boolean } = {}) {
       throttled = true;
       return json({ message: "slow down" }, 429);
     }
+    if (url.hostname.startsWith("sts.")) {
+      return new Response(`<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::${ACCOUNT}:user/u</Arn><UserId>U</UserId><Account>${ACCOUNT}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`, { headers: { "content-type": "text/xml" } });
+    }
     if (url.hostname.startsWith("account.")) return json({ Regions: [{ RegionName: "us-east-1", RegionOptStatus: "ENABLED_BY_DEFAULT" }] });
     if (url.hostname.startsWith("bedrock.") && url.pathname === "/custom-models") {
       return json({ modelSummaries: [{ modelArn: `arn:aws:bedrock:us-east-1:${ACCOUNT}:custom-model/m1`, modelName: "m1", creationTime: "2026-09-01T00:00:00Z" }] });
@@ -50,7 +53,7 @@ function fakeAws(opts: { throttleOnce?: boolean } = {}) {
 }
 
 function ctxFor(over: Partial<ScanContext> & { fetch: typeof fetch }) {
-  const calls = { throttle: 0, backoff: 0, raw: 0, pseudonymise: [] as string[] };
+  const calls = { throttle: 0, backoff: 0, raw: 0, pseudonymise: [] as string[], secrets: [] as string[], chunks: [] as string[] };
   const ctx: ScanContext = {
     source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT }, scope: { orgLevel: false, include: ["us-east-1"] } },
     credential: { mode: "static", publicConfig: {}, secret: JSON.stringify({ accessKeyId: synthetic("akid"), secretAccessKey: synthetic("sk") }) },
@@ -61,8 +64,12 @@ function ctxFor(over: Partial<ScanContext> & { fetch: typeof fetch }) {
       calls.backoff += 1;
       return res.status === 429 && calls.backoff <= 1;
     },
-    recordRaw: () => {
+    recordRaw: (chunk) => {
       calls.raw += 1;
+      calls.chunks.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+    },
+    registerSecret: (v) => {
+      calls.secrets.push(v);
     },
     pseudonymise: async (kind, name) => {
       calls.pseudonymise.push(kind);
@@ -84,7 +91,11 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
 
     expect(calls.throttle).toBe(cloud.hosts.length); // one throttle per request, retries included
     expect(calls.backoff).toBe(1); // the 429 was retried once through ctx.backoff
-    expect(calls.raw).toBe(cloud.hosts.length); // every body but the retried 429 digested, plus the capability summary
+    // every body digested except the retried 429 and the STS identity check (credential fetch), plus the summary
+    expect(calls.raw).toBe(cloud.hosts.length - 1);
+    // the static key's parts were registered for scrubbing
+    const secret = JSON.parse(ctx.credential!.secret!) as { accessKeyId: string; secretAccessKey: string };
+    expect(calls.secrets).toEqual(expect.arrayContaining([secret.accessKeyId, secret.secretAccessKey]));
     expect(calls.pseudonymise).toEqual(["cloud_principal"]);
 
     const checked = checkObservations("cloud_aws", res.observations, "2026-10-17T00:00:00.000Z");
@@ -159,6 +170,51 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
     );
     await f("https://sts.us-east-1.amazonaws.com/");
     expect({ raw, throttled }).toEqual({ raw: 0, throttled: 1 });
+  });
+
+  it("GCP federation and Azure static: token-exchange bodies never reach recordRaw, and the tokens are registered (recheck finding 1)", async () => {
+    const markers: string[] = [];
+    const token = (label: string) => {
+      const t = synthetic(`tok-${label}`);
+      markers.push(t);
+      return t;
+    };
+    const cloud = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const h = url.hostname;
+      if (h === "sts.googleapis.com") return json({ access_token: token("gsts"), issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: 3600 });
+      if (h === "iamcredentials.googleapis.com") return json({ accessToken: token("gimp"), expireTime: "2026-10-17T13:00:00Z" });
+      if (h === "login.microsoftonline.com") {
+        const tenant = url.pathname.split("/")[1];
+        const base = `https://login.microsoftonline.com/${tenant}`;
+        if (url.pathname.endsWith("/discovery/instance")) return json({ tenant_discovery_endpoint: `${base}/v2.0/.well-known/openid-configuration`, metadata: [] });
+        if (url.pathname.endsWith("/openid-configuration")) return json({ token_endpoint: `${base}/oauth2/v2.0/token`, authorization_endpoint: `${base}/oauth2/v2.0/authorize`, issuer: `${base}/v2.0` });
+        return json({ token_type: "Bearer", expires_in: 3600, access_token: token("entra") });
+      }
+      return json({ totalRecords: 0, count: 0, resultTruncated: "false", data: [], value: [] });
+    }) as typeof fetch;
+
+    const gcp = ctxFor({
+      fetch: cloud,
+      source: { id: "g", name: "gcp", kind: "cloud_gcp", target: { projectId: "acme-ml" }, scope: { orgLevel: false, include: ["acme-ml"] } },
+      credential: { mode: "federated", publicConfig: { projectNumber: "123", workloadIdentityPool: "regulait", workloadIdentityProvider: "regulait-oidc", serviceAccountEmail: "scanner@acme-ml.iam.gserviceaccount.com" }, secret: null },
+    });
+    const oidc = synthetic("oidc");
+    await cloudScanner("cloud_gcp", { oidcToken: async () => oidc }).run(gcp.ctx);
+
+    const az = ctxFor({
+      fetch: cloud,
+      source: { id: "a", name: "az", kind: "cloud_azure", target: { tenantId: "00000000-0000-4000-8000-000000000001" }, scope: { orgLevel: false, include: ["00000000-0000-4000-8000-0000000000aa"] } },
+      credential: { mode: "static", publicConfig: { tenantId: "00000000-0000-4000-8000-000000000001", clientId: "00000000-0000-4000-8000-000000000002" }, secret: synthetic("cs") },
+    });
+    await cloudScanner("cloud_azure").run(az.ctx);
+
+    expect(markers.length).toBeGreaterThanOrEqual(3); // GCP STS, IAM Credentials, Entra
+    const digested = [...gcp.calls.chunks, ...az.calls.chunks].join("\n");
+    for (const m of markers) expect(digested).not.toContain(m);
+    const registered = [...gcp.calls.secrets, ...az.calls.secrets];
+    for (const m of markers) expect(registered).toContain(m);
+    expect(registered).toContain(oidc);
   });
 
   it("capabilitySummary lists only reads that did not succeed", () => {

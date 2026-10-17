@@ -61,6 +61,9 @@ function willingSpy() {
       }
       return json({ token_type: "Bearer", expires_in: 3600, access_token: synthetic("at") });
     }
+    if (url.hostname === "sts.us-east-1.amazonaws.com") {
+      return new Response("<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::111122223333:user/u</Arn><UserId>U</UserId><Account>111122223333</Account></GetCallerIdentityResult></GetCallerIdentityResponse>", { headers: { "content-type": "text/xml" } });
+    }
     if (url.hostname === "management.azure.com") return json({ totalRecords: 0, count: 0, resultTruncated: "false", data: [], value: [] });
     return json({});
   }) as typeof fetch;
@@ -134,8 +137,9 @@ describe("cloud discovery: the guarded fetch is the only network path (ADR-0195 
 
   it("positive control: allow-listed hosts are reached through the guard, and only those", async () => {
     const aws = willingSpy();
-    const a = await scanners(guarded(allow("bedrock.us-east-1.amazonaws.com"), aws.spy)).awsStatic.scan(ctx());
-    expect(new Set(aws.calls)).toEqual(new Set(["bedrock.us-east-1.amazonaws.com"]));
+    const a = await scanners(guarded(allow("sts.us-east-1.amazonaws.com", "bedrock.us-east-1.amazonaws.com"), aws.spy)).awsStatic.scan(ctx());
+    expect(new Set(aws.calls)).toEqual(new Set(["sts.us-east-1.amazonaws.com", "bedrock.us-east-1.amazonaws.com"]));
+    expect(a.capabilities.find((c) => c.capability === "aws.sts.caller_identity")?.status).toBe("read");
     expect(a.capabilities.find((c) => c.capability === "aws.bedrock.custom_models")?.status).toBe("read");
     expect(a.capabilities.find((c) => c.capability === "aws.sagemaker.endpoints")?.status).toBe("unreachable");
 

@@ -86,6 +86,65 @@ export async function readBodyCapped(body: ReadableStream<Uint8Array> | null | u
   return out;
 }
 
+/** called with every short-lived credential an adapter obtains or sends, so the caller can scrub it (SD0 registerSecret) */
+export type SecretSink = (value: string) => void;
+
+const TOKEN_KEYS = ["access_token", "accessToken", "id_token", "refresh_token", "token"] as const;
+/** a token-exchange response body is parsed for tokens up to this size */
+const TOKEN_RESPONSE_MAX_BYTES = 256 * 1024;
+
+/**
+ * Wraps a fetch so every bearer credential it SENDS is handed to `sink` before the request leaves: the token in
+ * `Authorization: Bearer ...` (Google and Azure access tokens, Google's self-signed JWT) and an AWS session token
+ * in `x-amz-security-token`.
+ */
+export function captureSentSecrets(fetchImpl: GuardedFetch, sink: SecretSink): GuardedFetch {
+  const wrapped = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const auth = headers.get("authorization");
+    if (auth && auth.slice(0, 7).toLowerCase() === "bearer ") sink(auth.slice(7).trim());
+    const session = headers.get("x-amz-security-token");
+    if (session) sink(session);
+    return fetchImpl(input, init);
+  };
+  return wrapped as GuardedFetch;
+}
+
+/**
+ * Wraps the CREDENTIAL fetch so every token a token exchange RETURNS (OAuth `access_token`, IAM Credentials
+ * `accessToken`, ...) is handed to `sink` before the caller sees the response.
+ */
+export function captureReturnedTokens(fetchImpl: GuardedFetch, sink: SecretSink): GuardedFetch {
+  const wrapped = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const res = await fetchImpl(input, init);
+    if ((res.headers.get("content-type") ?? "").includes("json")) {
+      try {
+        const body: unknown = JSON.parse(new TextDecoder().decode(await readBodyCapped(res.clone().body, TOKEN_RESPONSE_MAX_BYTES)));
+        if (body && typeof body === "object") {
+          for (const k of TOKEN_KEYS) {
+            const v = (body as Record<string, unknown>)[k];
+            if (typeof v === "string" && v.length > 0) sink(v);
+          }
+        }
+      } catch {
+        // not JSON, or over the cap: nothing to register from the body
+      }
+    }
+    return res;
+  };
+  return wrapped as GuardedFetch;
+}
+
+/** an OIDC supplier whose every minted token is registered before it is presented */
+export function captureSupplied<T extends (audience: string) => Promise<string>>(supplier: T | undefined, sink: SecretSink | undefined): T | undefined {
+  if (!supplier || !sink) return supplier;
+  return (async (audience: string) => {
+    const token = await supplier(audience);
+    sink(token);
+    return token;
+  }) as T;
+}
+
 /** an Azure management, Resource Graph or Log Analytics response is read up to this many bytes */
 export const AZURE_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 

@@ -60,12 +60,15 @@ principal it runs as.
 
 ## AWS
 
-**Hosts to allow-list** (per enabled region `<r>`): `sts.<sts region>.amazonaws.com`, `account.us-east-1.amazonaws.com`,
+**Hosts to allow-list** (per enabled region `<r>`): `sts.<sts region>.amazonaws.com` (in every mode, static keys
+included: before reading anything the scanner checks the credential's account with `sts:GetCallerIdentity`),
+`account.us-east-1.amazonaws.com`,
 `bedrock.<r>.amazonaws.com`, `bedrock-agent.<r>.amazonaws.com`, `api.sagemaker.<r>.amazonaws.com`,
 `cloudtrail.<r>.amazonaws.com`, and for the optional trail bucket `<bucket>.s3.<bucket region>.amazonaws.com`.
 
 | Permission | Why |
 |---|---|
+| `sts:GetCallerIdentity` (needs no IAM permission; no policy statement required) | confirm the credential belongs to the source's `accountId`; on a mismatch nothing else is read |
 | `account:ListRegions` | enumerate enabled regions |
 | `bedrock:ListCustomModels`, `bedrock:ListImportedModels`, `bedrock:ListProvisionedModelThroughputs`, `bedrock:ListGuardrails`, `bedrock:GetModelInvocationLoggingConfiguration` | Bedrock inventory and whether invocation logging is on |
 | `bedrock:ListAgents`, `bedrock:ListKnowledgeBases` | Bedrock agents and knowledge bases |

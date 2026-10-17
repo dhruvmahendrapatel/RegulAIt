@@ -31,7 +31,7 @@ import {
   type OidcTokenSupplier,
 } from "./credentials.js";
 import { lookbackStart, PrincipalAggregator, ScanCollector } from "./report.js";
-import { guardedGaxios, type GuardedFetch } from "./transport.js";
+import { captureReturnedTokens, captureSentSecrets, captureSupplied, guardedGaxios, type GuardedFetch, type SecretSink } from "./transport.js";
 import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
 export const GCP_AI_SERVICES = ["aiplatform.googleapis.com", "generativelanguage.googleapis.com"] as const;
@@ -84,28 +84,44 @@ export interface GcpScannerDeps {
    * Defaults to `fetch`. A caller that digests `fetch` responses passes an undigested one here.
    */
   credentialFetch?: GuardedFetch;
+  /**
+   * Called with every short-lived credential the adapter obtains or sends (exchanged tokens, STS session
+   * credentials, OAuth access tokens, the OIDC assertion), before it is used, so the caller can scrub it from
+   * anything it stores (SD0 `ctx.registerSecret`).
+   */
+  onSecret?: SecretSink;
   credential: GcpCredentialInput;
   oidcToken?: OidcTokenSupplier;
 }
 
 /** build the google-auth-library client for one source, on the guarded transporter */
+/**
+ * The one fetch behind the Google auth client's transporter. It carries both the token exchanges and (through
+ * google-gax) every API call, so it routes by host: credential hosts to the credential fetch (review finding 3),
+ * everything else to the scan fetch. With a secret sink, tokens the credential hosts return and every bearer token
+ * sent are registered first.
+ */
+export function gcpTransportFetch(deps: Pick<GcpScannerDeps, "fetch" | "credentialFetch" | "onSecret">): GuardedFetch {
+  const sink = deps.onSecret;
+  const credBase = deps.credentialFetch ?? deps.fetch;
+  const cred = sink ? captureReturnedTokens(captureSentSecrets(credBase, sink), sink) : credBase;
+  const scan = sink ? captureSentSecrets(deps.fetch, sink) : deps.fetch;
+  return ((input: string | URL | Request, init?: RequestInit) => {
+    const host = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).hostname;
+    return GCP_CREDENTIAL_HOSTS.has(host) ? cred(input, init) : scan(input, init);
+  }) as GuardedFetch;
+}
+
 export function gcpAuthClient(deps: GcpScannerDeps): AuthClient {
   const cred = gcpCredentialSchema.parse(deps.credential);
   // One transporter carries both the token exchanges and (through google-gax) every API call, so it routes by
   // host: the credential hosts go to the credential fetch (finding 3), everything else to the scan fetch.
-  const credentialFetch = deps.credentialFetch;
-  const routed = credentialFetch
-    ? (((input: string | URL | Request, init?: RequestInit) => {
-        const host = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).hostname;
-        return GCP_CREDENTIAL_HOSTS.has(host) ? credentialFetch(input, init) : deps.fetch(input, init);
-      }) as GuardedFetch)
-    : deps.fetch;
-  const transporter = guardedGaxios(routed);
+  const transporter = guardedGaxios(gcpTransportFetch(deps));
   if (cred.mode === "gcp_service_account_key") {
     const key = parseServiceAccountKey(cred.keyJson);
     return new JWT({ email: key.clientEmail, key: key.privateKey, scopes: [GCP_READ_ONLY_SCOPE], transporter, universeDomain: GCP_UNIVERSE_DOMAIN });
   }
-  const supplier = deps.oidcToken;
+  const supplier = captureSupplied(deps.oidcToken, deps.onSecret);
   if (!supplier) throw new Error("cloud-discovery: gcp_workload_identity needs an OIDC token supplier");
   // GCP accepts, by default, the provider's full resource name with an https: prefix as the token audience.
   const tokenAudience = `https:${cred.audience}`;

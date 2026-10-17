@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AwsCloudScanner } from "./aws.js";
 import { AzureCloudScanner } from "./azure.js";
 import { GcpCloudScanner } from "./gcp.js";
-import { fakeCloud, json, synthetic, testPseudonymise, type RecordedCall } from "./test-cloud.js";
+import { awsSts, fakeCloud, json, synthetic, testPseudonymise, type RecordedCall } from "./test-cloud.js";
 import type { CloudScanContext } from "./types.js";
 
 const EVIL = "evil.example";
@@ -61,7 +61,7 @@ describe("ambient endpoint configuration is ignored (finding 1)", () => {
 
   it("AWS: every call, the STS exchange included, goes to the region's public host", async () => {
     const cloud = fakeCloud([
-      (c) => (c.url.hostname.startsWith("sts.") ? new Response(`<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials><AccessKeyId>${synthetic("a")}</AccessKeyId><SecretAccessKey>${synthetic("s")}</SecretAccessKey><SessionToken>${synthetic("t")}</SessionToken><Expiration>2026-10-17T13:00:00Z</Expiration></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>`, { headers: { "content-type": "text/xml" } }) : undefined),
+      (c) => awsSts(c),
       (c) => (c.url.hostname.startsWith("account.") ? json({ Regions: [{ RegionName: "us-east-1", RegionOptStatus: "ENABLED_BY_DEFAULT" }] }) : undefined),
       () => json({}),
     ]);

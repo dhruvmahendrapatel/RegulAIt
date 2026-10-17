@@ -20,7 +20,7 @@ import { ClientAssertionCredential, ClientSecretCredential } from "@azure/identi
 import { LogsQueryClient } from "@azure/monitor-query-logs";
 import { AZURE_FEDERATED_AUDIENCE, azureCredentialSchema, type AzureCredentialInput, type OidcTokenSupplier } from "./credentials.js";
 import { lookbackStart, PrincipalAggregator, redact, ScanCollector, take } from "./report.js";
-import { GuardedAzureHttpClient, type GuardedFetch } from "./transport.js";
+import { captureReturnedTokens, captureSentSecrets, captureSupplied, GuardedAzureHttpClient, type GuardedFetch, type SecretSink } from "./transport.js";
 import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
 export const AZURE_SERVICE_KEYS = {
@@ -98,6 +98,12 @@ export interface AzureScannerDeps {
    * Defaults to `fetch`. A caller that digests `fetch` responses passes an undigested one here.
    */
   credentialFetch?: GuardedFetch;
+  /**
+   * Called with every short-lived credential the adapter obtains or sends (exchanged tokens, STS session
+   * credentials, OAuth access tokens, the OIDC assertion), before it is used, so the caller can scrub it from
+   * anything it stores (SD0 `ctx.registerSecret`).
+   */
+  onSecret?: SecretSink;
   credential: AzureCredentialInput;
   oidcToken?: OidcTokenSupplier;
 }
@@ -120,9 +126,10 @@ export function azureCredential(deps: AzureScannerDeps, authorityHost?: string):
   // token request (and the client assertion or secret it carries) to another host. @azure/identity also reads
   // AZURE_REGIONAL_AUTHORITY_NAME with no option to override it; that only selects a regional Microsoft host
   // (`<region>.login.microsoft.com`), which still has to be on the egress allow list.
-  const options = { httpClient: new GuardedAzureHttpClient(deps.credentialFetch ?? deps.fetch), authorityHost: authorityHost ?? AZURE_PUBLIC_AUTHORITY_HOST };
+  const credFetch = deps.credentialFetch ?? deps.fetch;
+  const options = { httpClient: new GuardedAzureHttpClient(deps.onSecret ? captureReturnedTokens(credFetch, deps.onSecret) : credFetch), authorityHost: authorityHost ?? AZURE_PUBLIC_AUTHORITY_HOST };
   if (cred.mode === "azure_client_secret") return new ClientSecretCredential(cred.tenantId, cred.clientId, cred.clientSecret, options);
-  const supplier = deps.oidcToken;
+  const supplier = captureSupplied(deps.oidcToken, deps.onSecret);
   if (!supplier) throw new Error("cloud-discovery: azure_federated needs an OIDC token supplier");
   return new ClientAssertionCredential(cred.tenantId, cred.clientId, () => supplier(AZURE_FEDERATED_AUDIENCE), options);
 }
@@ -145,7 +152,7 @@ export class AzureCloudScanner implements CloudScanner {
   readonly #httpClient: GuardedAzureHttpClient;
 
   constructor(readonly target: AzureScanTarget, deps: AzureScannerDeps) {
-    this.#httpClient = new GuardedAzureHttpClient(deps.fetch);
+    this.#httpClient = new GuardedAzureHttpClient(deps.onSecret ? captureSentSecrets(deps.fetch, deps.onSecret) : deps.fetch);
     this.#credential = azureCredential(deps, target.authorityHost);
   }
 

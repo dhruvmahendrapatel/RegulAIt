@@ -183,7 +183,8 @@ const list = (v: string | undefined): string[] => (v ?? "").split(",").map((x) =
 
 /** build the adapter for one run; exported for tests */
 export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, fetchImpl: typeof fetch, opts: CloudScannerOptions, credentialFetch?: typeof fetch): CloudScanner {
-  const credFetch = credentialFetch ? { credentialFetch } : {};
+  // every short-lived credential the adapter obtains or sends is registered for scrubbing (SD0 registerSecret)
+  const credFetch = { ...(credentialFetch ? { credentialFetch } : {}), onSecret: (v: string) => ctx.registerSecret(v) };
   const t = ctx.source.target;
   const scope = ctx.source.scope;
   const oidc = opts.oidcToken ? { oidcToken: opts.oidcToken } : {};

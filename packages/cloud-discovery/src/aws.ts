@@ -32,7 +32,8 @@ import { fromTemporaryCredentials, fromWebToken } from "@aws-sdk/credential-prov
 import type { AwsCredentialIdentity, AwsCredentialIdentityProvider } from "@smithy/types";
 import { awsCredentialSchema, type AwsCredentialInput, type OidcTokenSupplier } from "./credentials.js";
 import { lookbackStart, paginate, PrincipalAggregator, ScanCollector } from "./report.js";
-import { BodyTooLargeError, guardedAwsRequestHandler, readBodyCapped, type GuardedFetch } from "./transport.js";
+import { BodyTooLargeError, captureSentSecrets, captureSupplied, guardedAwsRequestHandler, readBodyCapped, type GuardedFetch, type SecretSink } from "./transport.js";
+import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
 export const AWS_SERVICE_KEYS = { bedrock: "aws:bedrock", sagemaker: "aws:sagemaker" } as const;
@@ -73,6 +74,12 @@ export interface AwsScannerDeps {
    * Defaults to `fetch`. A caller that digests `fetch` responses passes an undigested one here.
    */
   credentialFetch?: GuardedFetch;
+  /**
+   * Called with every short-lived credential the adapter obtains or sends (exchanged tokens, STS session
+   * credentials, OAuth access tokens, the OIDC assertion), before it is used, so the caller can scrub it from
+   * anything it stores (SD0 `ctx.registerSecret`).
+   */
+  onSecret?: SecretSink;
   credential: AwsCredentialInput;
   /** federated mode: mints the OIDC token RegulAIt presents to AssumeRoleWithWebIdentity */
   oidcToken?: OidcTokenSupplier;
@@ -82,6 +89,16 @@ export interface AwsScannerDeps {
 }
 
 const DEFAULT_SESSION_NAME = "regulait-discovery";
+
+/** exactly 12 digits (a character check, no regex) */
+export function isAwsAccountId(v: string): boolean {
+  if (v.length !== 12) return false;
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i);
+    if (c < 48 || c > 57) return false;
+  }
+  return true;
+}
 
 /**
  * Pinned endpoint resolution (review of #404, finding 1). The AWS SDK otherwise honours ambient configuration that
@@ -117,6 +134,20 @@ function memoizeCredentials(provider: AwsCredentialIdentityProvider): AwsCredent
 
 /** build the credential provider for one source; every STS call goes through the guarded handler */
 export function awsCredentialProvider(deps: AwsScannerDeps, stsRegion: string): AwsCredentialIdentityProvider {
+  const inner = awsCredentialProviderInner(deps, stsRegion);
+  const sink = deps.onSecret;
+  if (!sink) return inner;
+  // every credential set, static or exchanged, is registered before an SDK client signs with it
+  return async () => {
+    const c = await inner();
+    sink(c.accessKeyId);
+    sink(c.secretAccessKey);
+    if (c.sessionToken) sink(c.sessionToken);
+    return c;
+  };
+}
+
+function awsCredentialProviderInner(deps: AwsScannerDeps, stsRegion: string): AwsCredentialIdentityProvider {
   const cred = awsCredentialSchema.parse(deps.credential);
   const clientConfig = { region: stsRegion, requestHandler: guardedAwsRequestHandler(deps.credentialFetch ?? deps.fetch), ...AWS_PINNED_ENDPOINT_CONFIG };
   const sessionName = deps.roleSessionName ?? DEFAULT_SESSION_NAME;
@@ -130,7 +161,7 @@ export function awsCredentialProvider(deps: AwsScannerDeps, stsRegion: string): 
       return async () => identity;
     }
     case "aws_web_identity": {
-      const supplier = deps.oidcToken;
+      const supplier = captureSupplied(deps.oidcToken, deps.onSecret);
       if (!supplier) throw new Error("cloud-discovery: aws_web_identity needs an OIDC token supplier");
       return memoizeCredentials(async () =>
         fromWebToken({
@@ -178,9 +209,14 @@ export class AwsCloudScanner implements CloudScanner {
   readonly provider = "aws" as const;
   readonly #credentials: AwsCredentialIdentityProvider;
   readonly #fetch: GuardedFetch;
+  readonly #stsFetch: GuardedFetch;
 
   constructor(readonly target: AwsScanTarget, deps: AwsScannerDeps) {
-    this.#fetch = deps.fetch;
+    // SD0 requires a 12-digit account id; the scanner checks the credential belongs to it before reading anything
+    if (!isAwsAccountId(target.accountId)) throw new Error("cloud-discovery: accountId must be a 12-digit AWS account id");
+    this.#fetch = deps.onSecret ? captureSentSecrets(deps.fetch, deps.onSecret) : deps.fetch;
+    // STS calls (the identity check included) use the credential fetch, like the exchanges
+    this.#stsFetch = deps.credentialFetch ?? this.#fetch;
     this.#credentials = awsCredentialProvider(deps, target.stsRegion ?? FALLBACK_REGION);
   }
 
@@ -190,6 +226,7 @@ export class AwsCloudScanner implements CloudScanner {
 
   async scan(ctx: CloudScanContext): Promise<CloudScanResult> {
     const c = new ScanCollector("aws", ctx);
+    if (!(await this.#verifyAccount(c))) return c.finish();
     const regions = await this.#regions(c, ctx);
     for (const region of regions) {
       if (await shouldStop(ctx)) break;
@@ -198,6 +235,28 @@ export class AwsCloudScanner implements CloudScanner {
     }
     await this.#trailBucket(c, ctx);
     return c.finish();
+  }
+
+  /**
+   * The credential must belong to the target account (SD0 binds the source to `target.accountId`). STS
+   * `GetCallerIdentity` needs no IAM permission and returns the caller's account and ARN: for a federated source
+   * that is the assumed-role ARN, for a static key the key's user or role. Nothing else is read unless it matches.
+   */
+  async #verifyAccount(c: ScanCollector): Promise<boolean> {
+    const sts = new STSClient({ ...this.#config(this.target.stsRegion ?? FALLBACK_REGION), requestHandler: guardedAwsRequestHandler(this.#stsFetch) });
+    try {
+      const who = await sts.send(new GetCallerIdentityCommand({}));
+      const account = who.Account ?? (who.Arn ? who.Arn.split(":")[4] : undefined);
+      if (account !== this.target.accountId) {
+        c.report("aws.sts.caller_identity", null, "error", `the credential belongs to account ${account ?? "(unknown)"}, not the source's account ${this.target.accountId}; nothing was read`);
+        return false;
+      }
+      c.ok("aws.sts.caller_identity", null, 1, `credential verified for account ${account}`);
+      return true;
+    } catch (err) {
+      c.failed("aws.sts.caller_identity", null, err);
+      return false;
+    }
   }
 
   async #regions(c: ScanCollector, ctx: CloudScanContext): Promise<string[]> {

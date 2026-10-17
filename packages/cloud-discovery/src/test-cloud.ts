@@ -22,6 +22,21 @@ export function xml(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/xml" } });
 }
 
+/**
+ * A fake AWS STS: AssumeRole / AssumeRoleWithWebIdentity return synthetic session credentials, GetCallerIdentity
+ * returns `account` (default the test account). Undefined for any other host.
+ */
+export function awsSts(call: RecordedCall, account = "111122223333"): Response | undefined {
+  if (!(call.url.hostname.startsWith("sts.") && call.url.hostname.endsWith(".amazonaws.com"))) return undefined;
+  const action = new URLSearchParams(call.body).get("Action") ?? "";
+  const ns = 'xmlns="https://sts.amazonaws.com/doc/2011-06-15/"';
+  if (action === "GetCallerIdentity") {
+    return xml(`<GetCallerIdentityResponse ${ns}><GetCallerIdentityResult><Arn>arn:aws:sts::${account}:assumed-role/regulait-discovery/s</Arn><UserId>AROA:s</UserId><Account>${account}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`);
+  }
+  const creds = `<Credentials><AccessKeyId>${synthetic("akid")}</AccessKeyId><SecretAccessKey>${synthetic("sk")}</SecretAccessKey><SessionToken>${synthetic("st")}</SessionToken><Expiration>2026-10-17T13:00:00Z</Expiration></Credentials>`;
+  return xml(`<${action}Response ${ns}><${action}Result>${creds}</${action}Result></${action}Response>`);
+}
+
 /** synthetic, runtime-derived secret-shaped values (gitleaks: no literals) */
 export const synthetic = (label: string): string => `${label}-${randomBytes(12).toString("hex")}`;
 

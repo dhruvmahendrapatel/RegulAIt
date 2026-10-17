@@ -19,6 +19,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@aws-sdk/client-cloudtrail` | `3.1152.0` | Apache-2.0 | `LookupEvents` for Bedrock invocation events. |
 | `@aws-sdk/client-s3` | `3.1152.0` | Apache-2.0 | Optional read of the customer's CloudTrail bucket for Bedrock data events. |
 | `@aws-sdk/client-sagemaker` | `3.1152.0` | Apache-2.0 | SageMaker endpoints and models. |
+| `@aws-sdk/client-sts` | `3.1152.0` | Apache-2.0 | `GetCallerIdentity`: the credential's account must equal the source's `accountId` before anything is read. |
 | `@aws-sdk/credential-providers` | `3.1152.0` | Apache-2.0 | `fromWebToken` (AssumeRoleWithWebIdentity) and `fromTemporaryCredentials` (AssumeRole with external id), each given the guarded request handler. |
 | `@smithy/fetch-http-handler` (github.com/smithy-lang/smithy-typescript) | `5.8.0` | Apache-2.0 | The AWS SDK's own fetch handler; its `customFetch` option is how every AWS call goes through the guarded fetch. |
 | `@smithy/types` | `4.19.0` | Apache-2.0 | AWS credential identity types. |

@@ -90,6 +90,7 @@ data "aws_iam_policy_document" "trust" {
 data "aws_iam_policy_document" "read" {
   statement {
     sid = "AiInventory"
+    # sts:GetCallerIdentity is also called (the account check before any read); it needs no IAM permission.
     actions = [
       "account:ListRegions",
       "bedrock:ListCustomModels",

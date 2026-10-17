@@ -266,6 +266,11 @@ Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 regis
   federated credential fails its run with an explicit reason until the ADR-0188 issuer has an RS256 federation key
   and a mint path for these audiences (key material and schema outside this slice); AWS `assume_role` needs
   RegulAIt's own AWS principal and fails the same way. Organisation-level AWS account enumeration is not built.
+- **Scrubbing and account binding (SD0 final push).** Every short-lived credential an adapter obtains or sends is
+  passed to `ctx.registerSecret` before use: the OIDC assertion, AWS STS session credentials (and a static key's
+  parts), Google STS and IAM Credentials tokens, the Entra access token, and any bearer token on an API call. The AWS
+  scanner calls `sts:GetCallerIdentity` (no IAM permission needed) in every mode and reads nothing unless the
+  credential's account equals `target.accountId`.
 - **Seed.** The catalogue seed route installs `CLOUD_AI_SERVICE_SEED` with the default signatures
   (`SHIPPED_SIGNATURE_SEED` in `shadow-ai.ts`; SD1 and SD3 add theirs the same way); admin-edited rows stay untouched.
 - **Review of #404 (fixed).** Endpoints are pinned against ambient SDK configuration (AWS endpoint URLs, shared-config

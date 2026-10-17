@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { gzipSync } from "node:zlib";
 import { AWS_TRAIL_OBJECT_MAX_BYTES, AWS_TRAIL_OBJECT_MAX_INFLATED_BYTES, AwsCloudScanner } from "./aws.js";
-import { fakeCloud, installNetworkTripwire, json, synthetic, testPseudonymise, xml, type RecordedCall } from "./test-cloud.js";
+import { awsSts, fakeCloud, installNetworkTripwire, json, synthetic, testPseudonymise, xml, type RecordedCall } from "./test-cloud.js";
 import type { CloudScanContext } from "./types.js";
 
 const ACCOUNT = "111122223333";
@@ -18,13 +18,9 @@ const ctx = (over: Partial<CloudScanContext> = {}): CloudScanContext => ({
 
 const target = (call: RecordedCall) => call.headers.get("x-amz-target") ?? "";
 
-function stsRoute(call: RecordedCall): Response | undefined {
-  if (!call.url.hostname.startsWith("sts.")) return undefined;
-  const params = new URLSearchParams(call.body);
-  const action = params.get("Action");
-  const result = `<Credentials><AccessKeyId>${synthetic("akid")}</AccessKeyId><SecretAccessKey>${synthetic("sk")}</SecretAccessKey><SessionToken>${synthetic("st")}</SessionToken><Expiration>2026-10-17T13:00:00Z</Expiration></Credentials>`;
-  return xml(`<${action}Response xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><${action}Result>${result}</${action}Result></${action}Response>`);
-}
+const stsRoute = (call: RecordedCall): Response | undefined => awsSts(call, ACCOUNT);
+const stsActions = (calls: RecordedCall[]) =>
+  calls.filter((c) => c.url.hostname.startsWith("sts.")).map((c) => new URLSearchParams(c.body).get("Action"));
 
 const trailEvent = (eventName: string, roleArn: string, modelId: string) => ({
   EventId: synthetic("ev"),
@@ -107,10 +103,8 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     const res = await scanner.scan(ctx());
     expect(cloud.unrouted.map((c) => `${c.method} ${c.url.href}`)).toEqual([]);
 
-    // one exchange, shared by every regional client
-    const sts = cloud.calls.filter((c) => c.url.hostname.startsWith("sts."));
-    expect(sts).toHaveLength(1);
-    expect(new URLSearchParams(sts[0]!.body).get("Action")).toBe("AssumeRoleWithWebIdentity");
+    // one exchange, shared by every regional client, then the account check
+    expect(stsActions(cloud.calls)).toEqual(["AssumeRoleWithWebIdentity", "GetCallerIdentity"]);
     expect(audiences).toEqual(["sts.amazonaws.com"]);
 
     const resources = res.observations.filter((o) => o.subjectKind === "cloud_resource");
@@ -147,8 +141,40 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     const agents = res.capabilities.find((x) => x.capability === "aws.bedrock.agents");
     expect(agents?.status).toBe("denied");
     expect(res.observations.some((o) => o.resourceType === "bedrock.agent")).toBe(false);
-    // static mode makes no STS call
-    expect(cloud.calls.some((c) => c.url.hostname.startsWith("sts."))).toBe(false);
+    // static mode makes no exchange, only the account check
+    expect(stsActions(cloud.calls)).toEqual(["GetCallerIdentity"]);
+  });
+
+  it("a credential for another account reads nothing (target.accountId is verified first)", async () => {
+    const cloud = fakeCloud([(c) => awsSts(c, "999999999999"), ...awsRoutes()]);
+    const res = await new AwsCloudScanner(
+      { accountId: ACCOUNT, regions: ["us-east-1"] },
+      { fetch: cloud.fetch, credential: { mode: "aws_static", accessKeyId: synthetic("akid"), secretAccessKey: synthetic("sk") } },
+    ).scan(ctx());
+    expect(res.capabilities).toHaveLength(1);
+    expect(res.capabilities[0]).toMatchObject({ capability: "aws.sts.caller_identity", status: "error" });
+    expect(res.capabilities[0]!.detail).toContain("999999999999");
+    expect(cloud.calls.filter((c) => !c.url.hostname.startsWith("sts."))).toEqual([]);
+    expect(res.observations).toEqual([]);
+  });
+
+  it("refuses an account id that is not 12 digits", () => {
+    expect(() => new AwsCloudScanner({ accountId: "12345" }, { fetch: fakeCloud([]).fetch, credential: { mode: "aws_static", accessKeyId: synthetic("a"), secretAccessKey: synthetic("s") } })).toThrow(/12-digit/);
+  });
+
+  it("registers every credential it obtains or sends with onSecret", async () => {
+    const seen: string[] = [];
+    const cloud = fakeCloud(awsRoutes());
+    const oidc = synthetic("oidc");
+    await new AwsCloudScanner(
+      { accountId: ACCOUNT, regions: ["us-east-1"] },
+      { fetch: cloud.fetch, credential: { mode: "aws_web_identity", roleArn: ROLE }, oidcToken: async () => oidc, onSecret: (v) => seen.push(v) },
+    ).scan(ctx());
+    expect(seen).toContain(oidc);
+    // the STS session credentials: key id, secret and session token
+    expect(seen.some((v) => v.startsWith("akid-"))).toBe(true);
+    expect(seen.some((v) => v.startsWith("sk-"))).toBe(true);
+    expect(seen.some((v) => v.startsWith("st-"))).toBe(true);
   });
 
   it("trail bucket: skips objects over the size cap and gzip bombs, still reads the rest (review finding 2)", async () => {
