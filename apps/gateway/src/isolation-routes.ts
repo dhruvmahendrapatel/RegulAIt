@@ -11,6 +11,8 @@
  *   /v1/executors[...]              register, list, inspect, attestations, quarantine,
  *                                   re-enable, revoke, the customer_declared mapping (I3: BUILT)
  *   /v1/execution-placements[...]   placement decisions and refusals (I2: BUILT)
+ *   /v1/execution-person-stdio-relaxations[...], /v1/execution-project-sensitivities[...]
+ *                                   owner decisions C and D (`isolation-subject-routes.ts`)
  *
  * The executor's own channel (ADR-0188 credentials, the outbound stream, its
  * reports) is `executor-channel.ts` (I3).
@@ -93,6 +95,7 @@ import { auditExecutor, freshAttestation, quarantineExecutor, executorView } fro
 import { databaseNow } from "./delegation.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
+import { registerIsolationSubjectRoutes } from "./isolation-subject-routes.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ executorId: z.string().uuid() });
@@ -165,6 +168,8 @@ async function adminExecutorView(db: Db, row: ExecutorRow) {
 }
 
 export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
+  // owner decisions C and D: the person's own stdio relaxation and the admin-set project sensitivity
+  registerIsolationSubjectRoutes(app, db);
   const actor = (req: FastifyRequest) => req.authCtx?.userId ?? NO_IDENTITY;
   const byId = async (req: FastifyRequest, reply: FastifyReply): Promise<ExecutorRow | null> => {
     const p = idParam.safeParse(req.params);
