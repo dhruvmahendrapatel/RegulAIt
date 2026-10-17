@@ -41,8 +41,9 @@ issuer (ADR-0188) to your cloud's token exchange, so RegulAIt holds no long-live
 Every federation token RegulAIt mints for a source has the subject `regulait:discovery-source:<source id>`. Bind your
 trust policy to that exact subject so a token for one source cannot be used for another.
 
+Federation tokens are signed with RS256, the one algorithm all three clouds accept (Entra supports only RS256).
 Your cloud must be able to reach RegulAIt's issuer discovery document and keys (AWS and Azure fetch them over the
-internet; GCP can also take an uploaded key set). An air-gapped install has no reachable issuer: use the static
+internet; GCP can also take an uploaded key set of up to 8 keys). An air-gapped install has no reachable issuer: use the static
 relaxation through your private endpoints, or leave cloud discovery off (ADR-0195 decision 10).
 
 Instance-metadata credentials (the AWS default chain, Azure managed identity, the GCP metadata server) are not

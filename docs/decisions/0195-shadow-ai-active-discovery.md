@@ -235,6 +235,13 @@ Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 regis
 - **Retries against a refusal.** google-gax reports a fetch that failed before any response, an egress refusal
   included, as UNAVAILABLE and retries it for up to a minute. Calls pass `maxRetries: 2`. MSAL replaces any transport
   failure with `network_error`; both are reported as `unreachable`.
+- **Federation signing algorithm (decision 3 check, 2026-10-17).** AWS IAM OIDC providers accept RS256, RS384,
+  RS512, ES256, ES384 and ES512 (IAM user guide, "Create an OpenID Connect (OIDC) identity provider"). GCP workload
+  identity federation accepts tokens "signed using the RS256 or ES256 algorithm" (IAM docs, "Configure Workload
+  Identity Federation with other identity providers"; an uploaded JWKS holds at most 8 keys). Microsoft Entra
+  supports only issuers whose tokens are signed with RS256; other algorithms "may work, but haven't been tested"
+  (Entra Workload ID, "Important considerations and restrictions for federated identity credentials"). The one
+  algorithm all three accept is **RS256**, so the federation key beside the issuer's Ed25519 keys is RS256.
 - **Not supported:** instance-metadata credentials (AWS default chain, Azure managed identity, GCP metadata server).
   The guard refuses the metadata address unconditionally and a source must name its principal. Decision 3's
   "managed identity" is therefore not offered.
