@@ -11,6 +11,26 @@ image-level scan (OS layer, vulnerabilities, licences) has not run, and 11 npm p
 the ADR-0176 list (below), which need an owner decision. The shipped manifest carries no digest, so the engine cannot be
 enabled (ADR-0187 decision 3).
 
+**Advisories with no patched release, re-checked 2026-10-16 for Dependabot alerts #80 and #81, accepted until
+2026-11-16** (ADR-0187 decisions 177 and 225). Read from the npm registry, OSV and `npm audit` on 2026-10-16:
+- node-forge GHSA-86w9-cpqp-85rv (high; OSV aliases CVE-2026-85393, CVE-2026-33894 and GHSA-ppp5-5v6c-4jwp; an incomplete fix of CVE-2026-33894): RSA PKCS#1 v1.5
+  verification accepts extra nested DigestAlgorithm elements. OSV marks 1.4.0 `last_affected`, and 1.4.0 (2026-03-24)
+  is the latest release, so there is no version to move to. It is reached only through `jks-js` 1.1.7 (its latest,
+  still `node-forge ^1.4.0`), an optional dependency of promptfoo 0.124.1 (the latest release).
+- braces GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, high): stack exhaustion on deeply nested patterns. 3.0.3 (2024-05-21) is
+  both the latest release and `last_affected`. It is reached only through chokidar 3.6.0, the optional peer of
+  nunjucks 3.2.4 (its latest, still `chokidar ^3.3.0`). promptfoo's own chokidar is 5.0.0, which has no glob or braces
+  dependency. No newer micromatch or fast-glob path applies: neither is in this lockfile's chain to braces.
+- Neither ships: both are `optional` in the lockfile and the image installs with `npm ci --omit=optional`.
+  `npm audit --omit=optional --package-lock-only` reports 0 vulnerabilities; `npm audit --omit=dev` reports these 6
+  high (braces, chokidar, nunjucks; node-forge, jks-js, promptfoo), and its only offer is promptfoo 0.116.7, a downgrade
+  that is not taken. `packages/engine-promptfoo/src/image.test.ts` fails if any of them stops being optional. Even if
+  braces were installed, it would see only promptfoo's own globs from our generated config, never a run's input, and
+  since ADR-0190 I5 the engine runs in a sandboxed task, so a crash ends only that task.
+- Not done: no override forcing nunjucks' peer to chokidar 5 (outside nunjucks' declared range, for a package that is
+  never installed) and no fork of node-forge. Re-check at each promptfoo, jks-js, nunjucks, node-forge or braces
+  release, and by 2026-11-16 at the latest.
+
 | Component | Version | Licence | Used for, and why |
 |---|---|---|---|
 | `promptfoo` (npm, github.com/promptfoo/promptfoo, © Promptfoo 2025) | `0.124.1` (released 2026-10-08; release tag `0.124.1` = commit `421e7959642c5d4cc1c983259a268de1c6f847b9`, read from the upstream tag because this release publishes no `gitHead`; the same release as the vendored OWASP tables in `packages/shared`, whose file is byte-identical to 0.123.1's; upgraded from 0.123.1 in B5-P2, ADR-0187 decisions 176 and 177) | MIT | The engine (ADR-0187 B5-P): `promptfoo redteam generate` and `promptfoo eval`, driven by the generated config; every model call goes to the gateway's compat route on the run's virtual key. Remote generation, sharing, telemetry, update checks, moderation and the cache are switched off (`PROMPTFOO_USAGE_DATA_ENV`); only the plugins and strategies the shared catalogue admits are run. One local patch (`patches/telemetry-disabled-sends-nothing.mjs`, one statement per copy of `sendEvent`) stops the disabled-telemetry path from attempting a request; it is listed on the image label `org.regulait.patches`; re-checked on 0.124.1 (four copies, the same code; measured: unpatched, each run connects to the vendor's event collector, patched none). Runs only in the worker container (B5-P2), which holds the run's virtual key and never the runner's key. Its optional dependencies (425 lockfile entries at 0.124.1) (browser automation, cloud SDKs, image and ML runtimes) are NOT installed. |

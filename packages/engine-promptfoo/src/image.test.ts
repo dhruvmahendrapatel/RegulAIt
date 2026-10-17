@@ -84,10 +84,35 @@ describe("the promptfoo image's inputs", () => {
     // Each is an OPTIONAL package here, so `npm ci --omit=optional` (the Dockerfile) never installs
     // it, and `npm audit --omit=optional` (the installed closure) reports 0. If one becomes a
     // required dependency, this fails and the advisory must be dealt with before the image ships.
-    for (const name of ["braces", "fill-range", "chokidar", "picomatch", "jks-js", "node-forge"]) {
-      const entry = lock.packages[`node_modules/${name}`];
-      if (entry) expect(entry.optional, name).toBe(true);
-    }
+    // Every copy counts, hoisted or nested (any key ending in `node_modules/<name>`), and each name the
+    // advisories reach through must be present: a renamed or re-nested entry cannot make this pass vacuously.
+    // chokidar is matched only at 3.x (the braces path); promptfoo's own chokidar 5 has no braces dependency.
+    const advisoryPath: Array<{ name: string; version?: RegExp }> = [
+      { name: "braces" },
+      { name: "fill-range" },
+      { name: "picomatch" },
+      { name: "chokidar", version: /^3\./ },
+      { name: "jks-js" },
+      { name: "node-forge" },
+    ];
+    const notOptional = (packages: typeof lock.packages): string[] => {
+      const problems: string[] = [];
+      for (const { name, version } of advisoryPath) {
+        const keys = Object.keys(packages).filter((k) => k.endsWith(`node_modules/${name}`) && (!version || version.test(packages[k]!.version ?? "")));
+        if (keys.length === 0) problems.push(`${name}: not in the lockfile (re-check the advisory path)`);
+        for (const k of keys) if (packages[k]!.optional !== true) problems.push(`${k}@${packages[k]!.version}: not optional`);
+      }
+      return problems;
+    };
+    expect(notOptional(lock.packages)).toEqual([]);
+    // red: dropping the optional flag from either advisory package, or losing it from the lock, is caught
+    const forge = Object.keys(lock.packages).find((k) => k.endsWith("node_modules/node-forge"))!;
+    const { optional: _flag, ...forgeRequired } = lock.packages[forge]!;
+    expect(notOptional({ ...lock.packages, [forge]: forgeRequired })).toEqual([`${forge}@${lock.packages[forge]!.version}: not optional`]);
+    const nested = { ...lock.packages, "node_modules/some-dep/node_modules/braces": { version: "3.0.3" } };
+    expect(notOptional(nested)).toEqual(["node_modules/some-dep/node_modules/braces@3.0.3: not optional"]);
+    const { [forge]: _dropped, ...withoutForge } = lock.packages;
+    expect(notOptional(withoutForge)).toEqual(["node-forge: not in the lockfile (re-check the advisory path)"]);
     // the moderate advisory (smol-toml via an optional peer) is gone from the 0.124.1 closure
     expect(lock.packages["node_modules/smol-toml"]).toBeUndefined();
   });

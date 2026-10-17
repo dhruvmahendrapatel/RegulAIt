@@ -833,7 +833,8 @@ recorded. A refusal nobody can answer is recorded under the body's own code (`st
 
 PR #378 review follow-ups:
 - **Further relaxations.** `egress_allow_host` (an allow entry's private-range or plaintext opt-in turned on; a plain
-  entry needs nothing, ADR-0034 As built 2026-10-12) and `mcp_registry_import` (an import that inherits a registry's
+  entry needs nothing, ADR-0034 As built 2026-10-12; *superseded 2026-10-16/17: adding any entry needs the step-up,
+  `values.added`, ADR-0034 owner amendment and As built 2026-10-17*) and `mcp_registry_import` (an import that inherits a registry's
   open private ranges, ADR-0101).
 - **A duplicate name never burns a grant.** The relaxing creates (`POST /v1/agents`, `/v1/mcp-registries`,
   `/v1/servers`) check the name before spending the grant and answer 409 `conflict`.
@@ -862,3 +863,12 @@ PR #378 recheck:
   off for that one call and puts the policy back as found. They no longer depend on no admin on the shared database
   having a step-up method.
 
+## Note — 2026-10-17: the #369 review's three relaxations are enforced server side
+
+The #369 review listed three relaxations that only confirmed in the UI: enabling an MCP registry, allowing a
+registry private ranges, and setting an agent's expected served model. All three were rechecked on main on
+2026-10-17 (branch `b7-relax-stepups`), and each needs a server-side `settings_relax` step-up and an audited
+relaxation since PR #378 (As built 2026-10-12 above; ADR-0101 As built 2026-10-12 for registries). Tightening needs
+nothing. `zz-secure-default-stepups.test.ts` covers them. The web views (`McpRegistriesPanel`,
+`ExpectedServedModelCard`) send these writes through `withStepUp`. No demo seeder creates a registry or sets an
+expected served model, so the demo seed needs no change for them. Nothing further was built for this item.
