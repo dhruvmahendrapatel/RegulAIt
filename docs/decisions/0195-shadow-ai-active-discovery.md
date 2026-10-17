@@ -287,16 +287,21 @@ or web code is touched, and there is no migration.
   read is capped at 256 KiB (4 MiB for `extensions.json`). Collector failures become fixed gap codes, never error
   strings, because an OS error carries the absolute path.
 - **Key presence only** (call 2). Values are checked on the device against patterns compiled from the shared
-  `dlp.secret.*` set (`internal/secrets`, Go RE2) and dropped. A fact carries `{keyName, ruleId, present}`; a key
-  under a name that is not a plain identifier is reported as `(unnamed)`. The three shared rules that use lookaround
+  `dlp.secret.*` set (`internal/secrets`, Go RE2) and dropped. A fact carries `{keyName, ruleId, present}`. A
+  manifest-listed name is reported in the manifest's own spelling; any other name only when it is an
+  environment-variable-style identifier (`^[A-Z][A-Z0-9_]*$`, at most 128 characters), and otherwise as `(unnamed)`,
+  so a lower-case, dotted or free-text name (a login such as `alice.smith`, a JSON key) never leaves the device
+  (security review L3, 2026-10-17). The three shared rules that use lookaround
   (`jwt`, `stripe_key`, `google_api_key`) are an RE2 match plus a check in code. `testdata/vectors.json` runs the
   same inputs through the Go table and through the shared JavaScript rules (`scripts/check-secret-rules.mjs`, CI job
   `secret-rules`), which also fails when a shared rule is added, removed or changed.
 - **The collection manifest** (`internal/pack`): `regulait.endpoint-collection/1` inside a pack in the ADR-0041
   manifest format (`schema regulait.update-bundle/1`, `product regulait-endpoint-pack`), Ed25519 over the exact
   manifest bytes. Refused: no signature, an unknown key id, a bad signature, a modified, missing or unlisted file, a
-  downgrade below the last accepted version, an unknown kind or member, a field of another kind, and any name or path
-  with a pattern character (`^ $ | \ [ ] { } ( ) +`, globs in names, `**`, `..`, absolute paths). A braced GUID is the
+  downgrade below the last accepted version or below the build's compiled minimum (`pack.MinimumVersion`, 1.0.0, so
+  a new user or lost state cannot accept an older signed pack; security review L2), an unknown kind or member, a field of another kind, and any name or path
+  with a pattern character (`^ $ | \ [ ] { } ( ) +`, globs in names, `**`, `..`, absolute paths, including
+  drive-letter and backslash roots). A braced GUID is the
   one allowed use of braces (Firefox add-on ids). The compiled pack keyring is **empty** until the pack key exists,
   so every pack is refused today: the strict default. The `cli` and `env_name` kinds are accepted; SD0/SD3 decide
   whether the catalogue adopts them.
@@ -325,6 +330,10 @@ or web code is touched, and there is no migration.
     TPM-wrapped blob is stored, `0600`), used only where the user can already open the device; otherwise a `0600`
     PKCS#8 file, created exclusively, never opened through a symlink, in a `0700` directory.
   - Windows: the Platform Crypto Provider (NCrypt), per-user and non-exportable; otherwise a DPAPI-protected file.
+    Only `NTE_DEVICE_NOT_FOUND` (0x80090035), `NTE_PROV_DLL_NOT_FOUND` (0x8009001E) or a missing `ncrypt.dll` count
+    as "no hardware"; every other status from opening the provider (access denied, a TPM present but not ready, a
+    failing provider DLL) is an error and the agent refuses, never falling back to DPAPI (security review M2;
+    `classifyProviderOpen`, unit-tested on every OS).
   - macOS: **refuses to create a key.** The Secure Enclave store needs the cgo build on the macOS runner (SD4j), and
     falling back to software on hardware every supported Mac has would break decision d.
 - **Tokens and upload** (ADR-0188 S7 reused; `internal/auth`, `internal/transport`): `client_credentials` with an
@@ -386,6 +395,12 @@ be listed: `scripts/check-licences.sh` fails CI otherwise.
 - Non-vacuity probes: disabling the pseudonymity guard, the hardware fail-closed rule, the pack signature check, the
   token-file mode check, the JWT RE2 rewrite, the `(unnamed)` key-name rule and the issuer-only transport each made
   its test fail.
+- Security-review round (2026-10-17), each probe made its test fail: the local `disabledKinds` narrowing, the Unix
+  file-owner check with another uid (run as root), `cleanVersion`, the not-regular-file guard in `readBounded`, the
+  absolute-locator refusal, the compiled pack minimum, the env-style key-name rule, the `ELOOP` mapping to
+  `token_file_unsafe`, a bulk token or ticket written to the log (`TestSecretsNeverReachLogsOrErrors`), the NCrypt
+  status classifier, the Windows DACL write check, and removing `environment: release` or the pull-request guard
+  from a signing job.
 - `node scripts/check-secret-rules.mjs`: 12 rules and 20 vectors agree with `packages/shared`.
 - `scripts/build.sh`: all six targets (7.3 to 8.2 MiB each, stripped). `scripts/package-linux.sh`: `.deb` and `.rpm`
   for amd64 and arm64.
@@ -409,11 +424,28 @@ be listed: `scripts/check-licences.sh` fails CI otherwise.
   Service fallback are not built; the Linux fallback is the `0600` file.
 - **Signing**: Developer ID signing and notarisation, OV Authenticode through the cloud HSM, and Linux package
   signing are CI jobs that skip with their reason because the accounts, certificate and keys do not exist (owner
-  decisions a and b). Pending execution. The pack and agent-release keys do not exist either: the compiled pack
+  decisions 1 and 2). Pending execution. Owner decision 1 says the identity is kept in "a protected CI secret store
+  that only release jobs can use": the three jobs never run for a pull request (`if: github.event_name !=
+  'pull_request' && github.ref == 'refs/heads/main'`) and read their secrets from the `release` environment, not from
+  repository secrets (security review M1; `scripts/endpoint-agent-workflow.test.mjs` fails if any other job reads a
+  secret). **Pending (owner):** the `release` environment's protection (required reviewers, deployment branch `main`)
+  is a repository setting that is not in code and has not been configured; GitHub creates the environment unprotected
+  on first use. The pack and agent-release keys do not exist either: the compiled pack
   keyring is empty, and no release manifest is verified (self-update is SD4i).
 - **No Windows installer.** The MSI needs WiX, whose licence terms R15 asks SD4h to confirm before pinning; the
-  per-user logon task and the ticket ACL (SYSTEM full, INTERACTIVE read) are therefore not built, and on Windows the
-  agent checks file type but not ACLs.
+  per-user logon task is therefore not built, and nothing places the bulk token file's ACL on Windows yet.
+- **Windows file check (deviation from the first SD4a build, security review M3).** The first build checked only the
+  file type on Windows, so any regular file under `%ProgramData%` was trusted and `token_file_unsafe` could not
+  occur there. The agent now fails closed: it reads the owner and DACL of the handle it then reads from, and accepts
+  a system file only when it is owned by SYSTEM or Administrators, and the user's state only when owned by that user,
+  SYSTEM or Administrators. No other SID may hold any right that writes, appends, deletes or re-permissions the file;
+  nobody else may read the bulk token or the user's state; only INTERACTIVE may also read the ticket (R15 §3.2's
+  planned ACL); a NULL DACL or an entry type the check does not evaluate is refused. Reparse points and Unix symlinks
+  (`ELOOP`) are unsafe files too. Files the agent writes get a protected DACL at creation (SYSTEM, Administrators and
+  the writer in full; INTERACTIVE read for the ticket, Users read for the status file). Not covered: the parent
+  directory's ACL (a user with delete-child rights on the directory could still swap the file), which the MSI (SD4h)
+  must set. The judgement (`judgeWindowsFile`) is unit-tested on every OS; reading real DACLs runs only on the CI
+  Windows runner (`TestWindowsFileACLs`), not on a Windows host (pending execution, SD4j).
 - **No offline buffer** (SD4f): undelivered snapshots are counted, not kept. `launchctl getenv` for manifest-listed
   names is not read.
 - **Windows sees more than Linux and macOS**: the Toolhelp snapshot names other users' processes, so a listener of
