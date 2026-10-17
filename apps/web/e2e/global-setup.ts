@@ -8,7 +8,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync, createWriteStream } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,5 +166,8 @@ export default async function globalSetup() {
     JSON.stringify({ pid: child.pid, passwords, settledPasswords: generateSettledPasswords(), baseUrl: `http://127.0.0.1:${PORT}` }, null, 2),
     { mode: 0o600 },
   );
+  // `mode` applies only when the file is created: a state file left by an earlier
+  // run keeps its old mode, so tighten it explicitly (it holds the run's passwords)
+  chmodSync(STATE_FILE, 0o600);
   process.env.E2E_BASE_URL = `http://127.0.0.1:${PORT}`;
 }
