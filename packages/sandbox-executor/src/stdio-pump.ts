@@ -46,7 +46,7 @@ export interface StdioPumpOptions {
 export type StdioPumpEnd = "completed" | "gateway_closed" | "refused" | "no_start" | "sequence" | "mac_invalid";
 
 /** the session's refusals that end it (anything else is transient and the window is re-opened) */
-const FINAL = new Set(["offer_unavailable", "stdio_session_unknown", "stdio_sequence", "stdio_unkeyed", "invalid_body"]);
+const FINAL = new Set(["offer_unavailable", "stdio_session_unknown", "session_lost", "stdio_sequence", "stdio_unkeyed", "invalid_body"]);
 
 export async function pumpStdio(opts: StdioPumpOptions): Promise<StdioPumpEnd> {
   const { client, offerId, handle } = opts;

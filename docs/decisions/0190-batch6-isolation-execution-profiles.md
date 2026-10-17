@@ -969,6 +969,8 @@ Open questions I4 leaves (for the owner or the master):
    **Answered 2026-10-15: Owner decision C** (L3 by default; an admin may lower it to L2 for interactive sessions).
 2. **Multi-replica stdio sessions** (item 9): sticky routing of `/v1/executor-channel/offers/*/stdio`, or a frames
    table (a migration).
+   **Built 2026-10-17 as a frames table** (migration 0206): see "I4 follow-up: stdio sessions on a multi-replica
+   gateway" below.
 3. **A gVisor CI job**: GitHub-hosted runners have Docker and sudo, so a job could install the pinned tarball,
    register `runsc` and run the integration suite. It was not added because it has never been run (M-041).
 4. **Engines (I5)** inherit the runsc backend for `engine_worker`; they need the input volume and task-scoped
@@ -1831,3 +1833,114 @@ Both were built 2026-10-17 in migration 0201.
   API-key case. Both are now built; the vectors are builder-written rather than independent (a deviation recorded
   here, not in the owner's section).
 - L2 itself (gVisor) stays unverified, as recorded above.
+
+## I4 follow-up: stdio sessions on a multi-replica gateway (2026-10-17)
+
+This closes I4 open question 2 and the item 9 caveat ("a multi-replica gateway needs the stdio routes to reach the
+placing replica, or a frames table"). Migration **0206** (`0206_isolation_stdio_relay.sql`) is hand-written; its
+journal entry (idx 206) is NOT in this change: the master adds it once 0202 to 0205 are on main.
+
+1. **The choice: (b) a frames table, not (a) ownership plus forwarding.**
+   - **(a) An ownership table plus forwarding to the owning replica over the internal TLS front: rejected.**
+     - A replica that received the executor's request would have to call the holder. That is a new replica-to-replica
+       endpoint, which needs its own authentication: the executor's proof is one-use and bound to its own request
+       (`htu`, `bh`, `jti`), so it cannot be passed on.
+     - The front (`executor-front`) knows one upstream, `gateway:3000`. Compose replicas have no per-replica address,
+       so forwarding would also need replica addressing (a registry of replica URLs and their certificates).
+   - **(b) A frames table any replica appends to and reads: chosen.** The database already connects every replica.
+     The executor's routes stay exactly as they were, behind the same proof, so there is **no new endpoint of any
+     kind**. The holder is found by a row, not by an address.
+   - **Searched (ADR-0176), not used:**
+     - Caddy's sticky load balancing (`lb_policy` `uri_hash`, `header`, `cookie`) on the front. The holder is the
+       replica the CALL reached through the public front, not the one a hash of the offer id picks, and a hash moves
+       whenever the replica set changes. Stickiness would route to the wrong replica.
+     - Redis Streams and NATS JetStream (BSD-3-Clause and Apache-2.0). Both fit the shape, but each adds a stateful
+       service to every deploy mode, the image bundle and the backup plan (pillar 3), for traffic that Postgres
+       carries at this size.
+     - Job queues on Postgres (pg-boss, graphile-worker). They carry jobs, not ordered byte streams with
+       acknowledgement, so the sequencing below would still be ours.
+     - Postgres `LISTEN`/`NOTIFY` (no new dependency) to replace polling. Deferred: it needs one dedicated
+       connection per replica outside the pool. Polling at 100 ms bounds the added latency; see follow-ups.
+2. **What is stored** (`stdio_relay_sessions`, `stdio_relay_frames`):
+   - One session row per placed stdio session (engine task sessions too: they use the same routes). It holds:
+     - the holder (`owner_replica`, a random id per process, so a restarted replica holds nothing) and its lease;
+     - the sealed `start` line;
+     - the counters (`in_next_seq`, `in_acked_to`, `out_next_seq`, `out_buffered_bytes`);
+     - one window token at a time, with an expiry if its replica dies;
+     - `closed_at`, `eof_at`, `ended_at` and an `end_code` limited by a CHECK to `ended`, `sequence`, `lease_expired`
+       or `buffer_full`. There is no free-text column, so the ADR-0102 prose-scrub registry is unaffected.
+   - A frame row is one stdin or stdout line (at most 768 KiB). Stdin frames are deleted once the executor's `from`
+     acknowledges them. Stdout frames are deleted once the holder takes them. All of a session's frames go when it
+     ends.
+   - The `start` line can carry an engine task's secret (I5). It is sealed with AES-256-GCM under a key derived from
+     the same root as the session MAC key (HKDF of the data key, label `regulait/adr0190/stdio-start-seal/v1`), with
+     the offer id as associated data. So a replica with the shared data key opens it, and one without cannot: that
+     replica refuses the window `stdio_unkeyed`, as it would fail the MAC. A sealed line copied into another row
+     does not open there. The row drops the line as soon as the sandbox posts its first stdout, as the in-process
+     session already dropped the secret.
+3. **Who reads what.**
+   - Every route query names both the offer in the path AND the executor that the request's proof names. So an
+     executor sees only its own offers' rows and frames (another executor's request is `offer_unavailable`), and no
+     request reads a session other than its own.
+   - Holder calls name `owner_replica`, so a replica never takes, ends or renews another replica's session.
+   - A trigger refuses any change to a row's offer, executor or holder, and any change to an ended row's end. There is
+     no takeover. A second trigger refuses any UPDATE of a frame. Both functions pin `search_path`, and both tables
+     refuse TRUNCATE (the migration 0185 rules).
+   - Offers carry no tenant column: a deployment is one organisation's control plane. The executor that owns the
+     offer is the boundary, as on one replica.
+4. **The holder's relay** (`executor-stdio.ts`, `relayOnce`) runs every `STDIO_RELAY_POLL_MS` (100 ms), and at once
+   when this process has news (a pushed frame, a close, an end, a posted stdout). It:
+   - writes each new session's row with its lease. The row is written only for a committed offer of that executor,
+     so an engine task held before its transaction commits is written on the first tick after the commit;
+   - appends pushed stdin frames, and marks a local close;
+   - applies the executor's acknowledgements and takes stdout frames, in order and once (one step at a time per
+     session), handing them to the MCP transport;
+   - ends the session on eof once its output is delivered;
+   - renews every lease it holds every 5 s (the lease is 15 s, so one missed beat is not a loss);
+   - deletes ended rows after 5 minutes, and any row whose lease lapsed an hour ago (its frames go with it).
+   - Once the placement is accepted, the relay also watches the offer, as the I4 watchdog did:
+     - the offer `ended` (the executor's `/end`, on any replica) ends the call normally once the output is in;
+     - an offer withdrawn, expired or gone under a live call is a loss (`lose`, recorded `where: holder`).
+   - The `/end` route on the holding replica takes the remaining output first and then ends the session there.
+5. **Fail closed when the holder is gone** (`stdioRouteDecision`, one rule for both routes):
+   - an offer that is not this executor's, or not placed: `offer_unavailable`;
+   - an ended row: `offer_unavailable`;
+   - a lapsed lease: the row is ended `lease_expired` by one conditional UPDATE (of two replicas, only one moves it).
+     The loss is recorded as before (one `execution-session-lost` audit row and, for a governed placement, one
+     `session_lost` report row), and the route answers **409 `session_lost`**;
+   - no row for an offer older than one lease: its holder never wrote it, so the session is lost the same way;
+   - no row for a younger offer: a window gets 409 `stdio_session_pending` (the holder writes the row within a tick).
+     That code is not final, so the executor re-opens with back-off. A stdout POST never waits, because it can only
+     follow a `start`;
+   - an open window whose lease lapses under it ends the row the same way and closes. The executor's next window is
+     `offer_unavailable`.
+   - `session_lost` joins the executor's final refusals (`stdio-pump.ts`), so the sandbox is stopped. A holder that
+     comes back finds its row ended and fails its call as lost: each pending request gets the gateway's own refusal,
+     never the server's failure (review M3).
+   - `stdio_session_unknown` is no longer answered. It stays in the vocabulary and in the executor's final set, so an
+     older peer still reads it.
+6. **Bounds.**
+   - Stdin: 4 MiB unacknowledged per session (the holder's existing bound).
+   - Stdout: 4 MiB buffered per session (`out_buffered_bytes`, a CHECK). A POST past it ends the session
+     `buffer_full`, a loss: the holder is not draining it. On one replica this output was delivered at once and had
+     no bound.
+   - So one live session holds at most 8 MiB of frames, and one replica holds at most 256 live sessions (unchanged).
+   - The routes and the holder poll at 100 ms, so a call on another replica waits up to about that per hop.
+     Same-replica traffic is woken in process and does not wait for the poll.
+7. **What was and was not run (M-041).**
+   - Run here: the gateway and executor builds; the routing-rule and sealing unit tests
+     (`adr0190-i4-stdio-relay.test.ts`); the executor's stdio pump tests with `session_lost` final and
+     `stdio_session_pending` retried; the gateway typecheck of the database suite.
+   - Not run here (no Postgres in the build environment): the database suite `zz-adr0190-i4-stdio-relay.test.ts`
+     (ownership, isolation, the lease, loss, bounds, retention, the 0185 guards) and the existing I4 and I5 suites
+     against the relay. They run in CI once the journal entry for 0206 is added; until then they fail on the missing
+     tables.
+   - **Pending execution:** a real multi-replica deployment (two or more gateway processes behind the front, a placed
+     stdio call whose window and stdout reach a replica other than the holder, and a holder stopped mid-call). The
+     database suite plays the second replica with rows written under another holder id.
+8. **Follow-ups this leaves:**
+   - `LISTEN`/`NOTIFY` to wake windows and holders on other replicas, instead of polling.
+   - An engine run's runner routes (`/v1/engine-runner/...`) still find their task in the process that started it
+     (`tasksByRun`). Only the executor side of an engine task's session is multi-replica now.
+   - No take-over: a session whose holder dies is lost, never resumed elsewhere. Resuming would need the MCP client's
+     state, which lives only in the holder.
