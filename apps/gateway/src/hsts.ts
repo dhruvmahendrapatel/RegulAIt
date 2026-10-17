@@ -66,7 +66,7 @@
  * Where it is needed is a host whose name can change hands. The dev stack is
  * the example: ADR-0032 attached an Elastic IP, so `<dashed-ip>.sslip.io` is
  * stable across the nightly power cycle, but `terraform destroy` releases the
- * EIP, and a re-created one is a *different* address, so `3.229.246.126` can
+ * EIP, and a re-created one is a *different* address, so `<eip-address>` can
  * return to the AWS pool and land with an unrelated customer, who would
  * inherit our hostname *and* our pin. Such a host sets
  * `REGULAIT_HSTS=max-age=86400` (one day) or `off`; the boot log prints the
@@ -74,7 +74,7 @@
  *
  * `includeSubDomains` is off by default because we serve no subdomains — it
  * buys this deployment exactly nothing — and because sslip.io resolves *any*
- * label prefix (`anything.3-229-246-126.sslip.io` -> 3.229.246.126), so the
+ * label prefix (`anything.<dashed-eip-address>.sslip.io` -> <eip-address>), so the
  * flag claims a whole namespace that follows the IP to its next owner. Note
  * what it does NOT do, since ADR-0029 overstated this: HSTS is scoped to the
  * exact host, so `includeSubDomains` here covers subdomains *of this name* and
