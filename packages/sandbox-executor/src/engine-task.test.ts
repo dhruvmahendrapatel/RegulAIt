@@ -35,7 +35,8 @@ import {
   type SignedExecutorReport,
 } from "@regulait/shared";
 import { RUNSC_RELEASES } from "./init-pin.js";
-import { RunscDockerBackend, type DockerChild } from "./runsc-backend.js";
+import type { DockerChild } from "./docker-backend.js";
+import { RunscDockerBackend } from "./runsc-backend.js";
 import { removeTaskInput, TaskInputError, writeTaskInput, type SandboxTaskInput } from "./task-input.js";
 import { FakeSandboxBackend } from "./fake-backend.js";
 import { handleOffer, type OfferContext } from "./offers.js";

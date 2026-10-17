@@ -462,6 +462,31 @@ test.describe("U3: edit forms send only what was edited", () => {
     expect(sent(m, "PATCH", `/v1/reports/schedules/${U(56)}`)).toEqual([{ cadence: "weekly", recipientUserIds: [BOB] }]);
   });
 
+  test("report schedule: a stored recipient the list does not show has its own box, and unticking it removes it", async ({ page }) => {
+    const gone = U(77);
+    const m = await mockApi(page, {
+      "GET /v1/users": USERS,
+      "GET /v1/reports/overview": {
+        definitions: [{ id: U(55), name: "Exec summary", kind: "exec_summary", scopeKind: "org", scopeId: null, period: "current_month", format: "json", entitlementScope: "org", description: null, lastGeneratedAt: null, runCount: 0, schedules: [{ id: U(56), definitionId: U(55), cadence: "monthly", enabled: true, recipientUserIds: [BOB, gone], lastGeneratedAt: null, lastRunId: null }] }],
+        schedulerPresent: false,
+        note: "",
+      },
+      [`PATCH /v1/reports/schedules/${U(56)}`]: (b: Json) => ({ schedule: { id: U(56), ...b } }),
+    });
+    await page.goto("/ui/admin/reports");
+    await page.getByRole("button", { name: "Edit schedule for Exec summary" }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit the monthly schedule for Exec summary" });
+    const unlisted = dialog.getByLabel(`${gone} (not in this list)`);
+    await expect(unlisted).toBeChecked();
+    await expect(dialog.getByText(/A stored entry is not in the list above and shown by id/)).toBeVisible();
+    await unlisted.uncheck();
+    // still on screen, so it can be ticked again
+    await expect(unlisted).not.toBeChecked();
+    await dialog.getByRole("button", { name: "Save changes" }).click();
+    await expect(dialog).toBeHidden();
+    expect(sent(m, "PATCH", `/v1/reports/schedules/${U(56)}`)).toEqual([{ recipientUserIds: [BOB] }]);
+  });
+
   test("scope rule: set a surface back to inherit sends null", async ({ page }) => {
     const m = await mockApi(page, {
       "GET /v1/interception/settings": { settings: { anthropicCompatEnabled: false, openaiCompatEnabled: false, resolutionMode: "require_agent" } },
