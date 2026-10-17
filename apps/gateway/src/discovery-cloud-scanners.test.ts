@@ -6,7 +6,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { cloudScanner, capabilitySummary, digestBounded } from "./discovery-cloud-scanners.js";
+import { cloudScanner, capabilitySummary, digestBounded, scannerFetch } from "./discovery-cloud-scanners.js";
 import type { ScanContext } from "./discovery-scanners.js";
 import { checkObservations } from "./discovery-worker.js";
 
@@ -141,6 +141,17 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
     chunks.length = 0;
     await digestBounded(new Response("small"), (c) => chunks.push(c), 100);
     expect(Buffer.concat(chunks.map((c) => Buffer.from(c as Uint8Array))).toString()).toBe("small");
+  });
+
+  it("the credential fetch throttles and backs off like the scan fetch but never digests (finding 3)", async () => {
+    let raw = 0;
+    let throttled = 0;
+    const f = scannerFetch(
+      { fetch: (async () => new Response(`{"access_token":"${synthetic("at")}"}`)) as typeof fetch, throttle: async () => void (throttled += 1), backoff: async () => false, recordRaw: () => void (raw += 1) },
+      { digest: false },
+    );
+    await f("https://sts.us-east-1.amazonaws.com/");
+    expect({ raw, throttled }).toEqual({ raw: 0, throttled: 1 });
   });
 
   it("capabilitySummary lists only reads that did not succeed", () => {

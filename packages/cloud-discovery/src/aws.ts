@@ -68,6 +68,11 @@ export interface AwsScanTarget {
 
 export interface AwsScannerDeps {
   fetch: GuardedFetch;
+  /**
+   * The guarded fetch for credential exchanges, whose responses carry credentials (review of #404, finding 3).
+   * Defaults to `fetch`. A caller that digests `fetch` responses passes an undigested one here.
+   */
+  credentialFetch?: GuardedFetch;
   credential: AwsCredentialInput;
   /** federated mode: mints the OIDC token RegulAIt presents to AssumeRoleWithWebIdentity */
   oidcToken?: OidcTokenSupplier;
@@ -113,7 +118,7 @@ function memoizeCredentials(provider: AwsCredentialIdentityProvider): AwsCredent
 /** build the credential provider for one source; every STS call goes through the guarded handler */
 export function awsCredentialProvider(deps: AwsScannerDeps, stsRegion: string): AwsCredentialIdentityProvider {
   const cred = awsCredentialSchema.parse(deps.credential);
-  const clientConfig = { region: stsRegion, requestHandler: guardedAwsRequestHandler(deps.fetch), ...AWS_PINNED_ENDPOINT_CONFIG };
+  const clientConfig = { region: stsRegion, requestHandler: guardedAwsRequestHandler(deps.credentialFetch ?? deps.fetch), ...AWS_PINNED_ENDPOINT_CONFIG };
   const sessionName = deps.roleSessionName ?? DEFAULT_SESSION_NAME;
   switch (cred.mode) {
     case "aws_static": {

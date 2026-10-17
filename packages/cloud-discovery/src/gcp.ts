@@ -65,6 +65,9 @@ const CALL_OPTIONS = { maxRetries: 2 } as const;
  */
 export const GCP_UNIVERSE_DOMAIN = "googleapis.com";
 
+/** the hosts whose responses carry Google credentials (token exchange, impersonation, the JWT grant) */
+export const GCP_CREDENTIAL_HOSTS: ReadonlySet<string> = new Set(["sts.googleapis.com", "iamcredentials.googleapis.com", "oauth2.googleapis.com"]);
+
 const LOGGING_ENTRIES_URL = "https://logging.googleapis.com/v2/entries:list";
 
 export interface GcpScanTarget {
@@ -76,6 +79,11 @@ export interface GcpScanTarget {
 
 export interface GcpScannerDeps {
   fetch: GuardedFetch;
+  /**
+   * The guarded fetch for credential exchanges, whose responses carry credentials (review of #404, finding 3).
+   * Defaults to `fetch`. A caller that digests `fetch` responses passes an undigested one here.
+   */
+  credentialFetch?: GuardedFetch;
   credential: GcpCredentialInput;
   oidcToken?: OidcTokenSupplier;
 }
@@ -83,7 +91,16 @@ export interface GcpScannerDeps {
 /** build the google-auth-library client for one source, on the guarded transporter */
 export function gcpAuthClient(deps: GcpScannerDeps): AuthClient {
   const cred = gcpCredentialSchema.parse(deps.credential);
-  const transporter = guardedGaxios(deps.fetch);
+  // One transporter carries both the token exchanges and (through google-gax) every API call, so it routes by
+  // host: the credential hosts go to the credential fetch (finding 3), everything else to the scan fetch.
+  const credentialFetch = deps.credentialFetch;
+  const routed = credentialFetch
+    ? (((input: string | URL | Request, init?: RequestInit) => {
+        const host = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).hostname;
+        return GCP_CREDENTIAL_HOSTS.has(host) ? credentialFetch(input, init) : deps.fetch(input, init);
+      }) as GuardedFetch)
+    : deps.fetch;
+  const transporter = guardedGaxios(routed);
   if (cred.mode === "gcp_service_account_key") {
     const key = parseServiceAccountKey(cred.keyJson);
     return new JWT({ email: key.clientEmail, key: key.privateKey, scopes: [GCP_READ_ONLY_SCOPE], transporter, universeDomain: GCP_UNIVERSE_DOMAIN });

@@ -87,14 +87,19 @@ function parseJsonSecret(secret: string | null, what: string): Record<string, un
   throw new CloudSourceConfigError(`${what}: the static secret must be a JSON object`);
 }
 
-/** the worker's hooks around `ctx.fetch`: throttle first, honour backoff, digest every body */
-export function scannerFetch(ctx: Pick<ScanContext, "fetch" | "throttle" | "backoff" | "recordRaw">): typeof fetch {
+/**
+ * The worker's hooks around `ctx.fetch`: throttle first, honour backoff, and (for the scan fetch only) digest every
+ * body. `digest: false` builds the credential fetch: token-exchange responses carry credentials and are never fed to
+ * the digest (review of #404, finding 3).
+ */
+export function scannerFetch(ctx: Pick<ScanContext, "fetch" | "throttle" | "backoff" | "recordRaw">, opts: { digest?: boolean } = {}): typeof fetch {
+  const digest = opts.digest ?? true;
   const wrapped = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     for (;;) {
       await ctx.throttle();
       const res = await ctx.fetch(input, init);
       if ((res.status === 429 || res.status === 503) && (await ctx.backoff(res))) continue;
-      await digestBounded(res, ctx.recordRaw);
+      if (digest) await digestBounded(res, ctx.recordRaw);
       return res;
     }
   };
@@ -176,7 +181,8 @@ function azureCredential(ctx: ScanContext, opts: CloudScannerOptions): AzureCred
 const list = (v: string | undefined): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
 /** build the adapter for one run; exported for tests */
-export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, fetchImpl: typeof fetch, opts: CloudScannerOptions): CloudScanner {
+export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, fetchImpl: typeof fetch, opts: CloudScannerOptions, credentialFetch?: typeof fetch): CloudScanner {
+  const credFetch = credentialFetch ? { credentialFetch } : {};
   const t = ctx.source.target;
   const scope = ctx.source.scope;
   const oidc = opts.oidcToken ? { oidcToken: opts.oidcToken } : {};
@@ -193,7 +199,7 @@ export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, f
           ...(t.stsRegion ? { stsRegion: t.stsRegion } : {}),
           ...trailBucket,
         },
-        { fetch: fetchImpl, credential, ...oidc },
+        { fetch: fetchImpl, ...credFetch, credential, ...oidc },
       );
     }
     case "cloud_gcp": {
@@ -201,7 +207,7 @@ export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, f
       if (scope.orgLevel && !t.assetScope) throw new CloudSourceConfigError("cloud_gcp: an organisation-level scope needs 'assetScope' (organizations/N or folders/N)");
       const projectIds = scope.include.length ? [...scope.include] : t.projectId ? [t.projectId] : [];
       if (!projectIds.length && !scope.orgLevel) throw new CloudSourceConfigError("cloud_gcp: name at least one project");
-      return new GcpCloudScanner({ projectIds, ...(scope.orgLevel && t.assetScope ? { assetScope: t.assetScope } : {}) }, { fetch: fetchImpl, credential, ...oidc });
+      return new GcpCloudScanner({ projectIds, ...(scope.orgLevel && t.assetScope ? { assetScope: t.assetScope } : {}) }, { fetch: fetchImpl, ...credFetch, credential, ...oidc });
     }
     case "cloud_azure": {
       const credential = azureCredential(ctx, opts);
@@ -214,7 +220,7 @@ export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, f
           ...(workspaces.length ? { logAnalyticsWorkspaceIds: workspaces } : {}),
           ...(t.authorityHost ? { authorityHost: t.authorityHost } : {}),
         },
-        { fetch: fetchImpl, credential, ...oidc },
+        { fetch: fetchImpl, ...credFetch, credential, ...oidc },
       );
     }
     default:
@@ -248,7 +254,7 @@ export function cloudScanner(kind: "cloud_aws" | "cloud_gcp" | "cloud_azure", op
     kind,
     requiresCredential: true,
     run: async (ctx) => {
-      const adapter = buildCloudScanner(kind, ctx, scannerFetch(ctx), opts);
+      const adapter = buildCloudScanner(kind, ctx, scannerFetch(ctx), opts, scannerFetch(ctx, { digest: false }));
       const res = await adapter.scan({
         now: new Date(),
         auditLookbackDays: DEFAULT_AUDIT_LOOKBACK_DAYS,

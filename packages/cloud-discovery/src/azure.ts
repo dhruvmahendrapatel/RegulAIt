@@ -64,6 +64,11 @@ export interface AzureScanTarget {
 
 export interface AzureScannerDeps {
   fetch: GuardedFetch;
+  /**
+   * The guarded fetch for credential exchanges, whose responses carry credentials (review of #404, finding 3).
+   * Defaults to `fetch`. A caller that digests `fetch` responses passes an undigested one here.
+   */
+  credentialFetch?: GuardedFetch;
   credential: AzureCredentialInput;
   oidcToken?: OidcTokenSupplier;
 }
@@ -85,7 +90,7 @@ export function azureCredential(deps: AzureScannerDeps, authorityHost?: string):
   // token request (and the client assertion or secret it carries) to another host. @azure/identity also reads
   // AZURE_REGIONAL_AUTHORITY_NAME with no option to override it; that only selects a regional Microsoft host
   // (`<region>.login.microsoft.com`), which still has to be on the egress allow list.
-  const options = { httpClient: new GuardedAzureHttpClient(deps.fetch), authorityHost: authorityHost ?? AZURE_PUBLIC_AUTHORITY_HOST };
+  const options = { httpClient: new GuardedAzureHttpClient(deps.credentialFetch ?? deps.fetch), authorityHost: authorityHost ?? AZURE_PUBLIC_AUTHORITY_HOST };
   if (cred.mode === "azure_client_secret") return new ClientSecretCredential(cred.tenantId, cred.clientId, cred.clientSecret, options);
   const supplier = deps.oidcToken;
   if (!supplier) throw new Error("cloud-discovery: azure_federated needs an OIDC token supplier");
