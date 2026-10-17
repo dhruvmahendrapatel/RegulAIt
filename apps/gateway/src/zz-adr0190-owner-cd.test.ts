@@ -42,6 +42,7 @@ import { executionProfileDigest, SHIPPED_EXECUTION_PROFILES } from "@regulait/sh
 import { buildApp } from "./app.js";
 import { decidePlacement, resolveRequirement } from "./execution-placement.js";
 import { stdioPlacementContext } from "./executor-stdio.js";
+import { loadOrgSettings } from "./org-settings.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
@@ -315,6 +316,58 @@ describe("ADR-0190 owner decision C: the routes", () => {
     expect(await personCall(server, project, true)).toMatchObject({ requiredClass: "microvm", relaxation: null });
     const twice = await inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: false });
     expect(twice.json()).toEqual({ relaxation: null, changed: false });
+  });
+
+  it("review LOW: an active relaxation whose server was deleted can still be cleared; nothing can be set on it", async () => {
+    const server = await newStdioServer("gone");
+    const set = await relaxWithStepUpOff("mcp_server", server);
+    await db.delete(mcpServers).where(eq(mcpServers.id, server));
+    const cleared = await inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: false });
+    expect(cleared.statusCode, cleared.body).toBe(200);
+    expect(cleared.json()).toEqual({ relaxation: null, changed: true });
+    const [row] = await db.select().from(executionPersonStdioRelaxations).where(eq(executionPersonStdioRelaxations.id, set.relaxation.id));
+    expect(row!.clearedByUserId).toBe(adminId);
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-person-stdio-relaxation-cleared"), eq(auditLog.objectId, server)));
+    expect(audit!.detail).toMatchObject({ relaxationId: set.relaxation.id });
+    // nothing active and no scope: 404 for a clear and a set alike
+    expect((await inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: false })).statusCode).toBe(404);
+    expect((await inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: true })).statusCode).toBe(404);
+  });
+
+  it("review MEDIUM: a stdio program change clears the server's relaxation in the same write (audited); a rename keeps it", async () => {
+    const prev = (await loadOrgSettings(db)).mcpUpstreamTransports;
+    const restore = await relaxStepUpForTest(db);
+    try {
+      const t = await inject("PUT", "/v1/org/settings", adminAuth, { mcpUpstreamTransports: ["streamable_http", "stdio"] });
+      expect(t.statusCode, t.body).toBe(200);
+      const image = `sha256:${"a".repeat(64)}`;
+      const created = await app.inject({ method: "POST", url: "/v1/servers", headers: adminAuth, payload: { name: `ocd-prog-${RUN}`, transport: "stdio", stdio: { image, command: "/srv/mcp/ocd.js", args: ["--a"] } } });
+      expect(created.statusCode, created.body).toBe(201);
+      const server = created.json().id as string;
+      serverIds.push(server);
+      const set = await inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: true });
+      expect(set.statusCode, set.body).toBe(200);
+      const relaxationId = set.json().relaxation.id as string;
+      const active = async () => (await db.select().from(executionPersonStdioRelaxations).where(and(eq(executionPersonStdioRelaxations.id, relaxationId), isNull(executionPersonStdioRelaxations.clearedAt)))).length;
+
+      // a rename and an unchanged program keep it
+      expect((await app.inject({ method: "PATCH", url: `/v1/servers/${server}`, headers: adminAuth, payload: { name: `ocd-prog2-${RUN}` } })).statusCode).toBe(200);
+      expect((await app.inject({ method: "PATCH", url: `/v1/servers/${server}`, headers: adminAuth, payload: { stdio: { image, command: "/srv/mcp/ocd.js", args: ["--a"] } } })).statusCode).toBe(200);
+      expect(await active()).toBe(1);
+
+      // a different program: cleared by the actor, audited, in the same write
+      const changed = await app.inject({ method: "PATCH", url: `/v1/servers/${server}`, headers: adminAuth, payload: { stdio: { image: `sha256:${"b".repeat(64)}`, command: "/srv/mcp/ocd.js", args: ["--a"] } } });
+      expect(changed.statusCode, changed.body).toBe(200);
+      expect(await active()).toBe(0);
+      const [row] = await db.select().from(executionPersonStdioRelaxations).where(eq(executionPersonStdioRelaxations.id, relaxationId));
+      expect(row!.clearedByUserId).toBe(adminId);
+      const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-person-stdio-relaxation-cleared"), eq(auditLog.objectId, server)));
+      expect(audit!.detail).toMatchObject({ relaxationId, cause: "stdio_program_changed", from: "user_space_kernel", to: "microvm" });
+      expect(await personCall(server, await newProject("public"), true)).toMatchObject({ requiredClass: "microvm", relaxation: null });
+    } finally {
+      await app.inject({ method: "PUT", url: "/v1/org/settings", headers: adminAuth, payload: { mcpUpstreamTransports: prev } });
+      await restore();
+    }
   });
 
   it("refuses a remote server, an org-wide or unknown scope, a missing scope and a malformed body", async () => {

@@ -251,6 +251,9 @@ function factsOf(q: Record<string, unknown>): RequirementFacts {
     agentAssurance: q.agentAssurance,
     configuredProfileFloor: has(q, "ownProfileFloor") ? toClass(q.ownProfileFloor) : undefined,
     parentRequiredClass: has(q, "parentRequiredClass") ? toClass(q.parentRequiredClass) : undefined,
+    // owner decision C: the gateway finds a relaxation only for an interactive person's call (`interactivePersonCaller`
+    // and `personStdioRelaxation`); an API key or a workload token never reaches the pure function as relaxed
+    personStdioRelaxed: q.caller === "interactive_person" && (q.personStdioRelaxation === "mcp_server" || q.personStdioRelaxation === "project"),
   };
   // a named lookup that did not resolve (owner decision B's vector)
   const lookup = q.unresolvedPolicyLookup;
@@ -271,7 +274,7 @@ describe("ADR-0190 placement vectors I2 owns, against the product", () => {
 
   it("covers the families I2 owns", () => {
     const ids = requirementVectors.map((v) => v.id);
-    for (const prefix of ["floor-", "compliance-", "autonomyFloor-", "ownProfileFloor-", "parentRequiredClass-", "assurance-", "unknown-", "refusal-policy_unresolved"])
+    for (const prefix of ["floor-", "compliance-", "autonomyFloor-", "ownProfileFloor-", "parentRequiredClass-", "assurance-", "unknown-", "refusal-policy_unresolved", "person-stdio-"])
       expect(ids.some((id) => id.startsWith(prefix)), prefix).toBe(true);
     expect(requirementVectors.length).toBeGreaterThanOrEqual(60);
   });

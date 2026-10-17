@@ -689,9 +689,6 @@ admin relaxation to L2 for interactive persons), master session, 2026-10-15, ans
   engines. The other floors (sensitivity, compliance tags) still apply.
 - **Build:** a slice after I5 (it touches the same placement code). The Decision BOM panel and the settings UI show the
   relaxation; vectors pin the API-key case as L3.
-- **Built 2026-10-17** (migration 0201): see "As built: owner decisions C and D". The settings UI shows the relaxation;
-  the Decision BOM panel does not yet (the decision-facts `execution` section is unchanged), and the API-key case is
-  pinned by gateway tests rather than a new conformance vector.
 
 ## Owner decision D: the source of a project's sensitivity (accepted 2026-10-16)
 
@@ -711,9 +708,6 @@ open question in the I2 as-built section, item 1.
   audit action name, and the exact facts the step-up is bound to. The build slice records these in an as-built
   section.
 - **Build:** a slice adding the admin project-sensitivity field (queued in `STATE.md`).
-- **Built 2026-10-17** (migration 0201): `projects.isolation_sensitivity`, `PUT /v1/execution-project-sensitivities/:projectId`
-  (`settings_relax` step-up bound to the project, the old and the new value), audit action
-  `execution-project-sensitivity-set`. See "As built: owner decisions C and D".
 
 ## Owner decision E: the I7 OpenShell backend is deferred (accepted 2026-10-16)
 
@@ -1630,9 +1624,19 @@ These points settle the build-time choices both decisions left open.
 4. **Recorded.** The requirement carries `relaxation` (`kind: person_stdio_l2`, `subjectKind: interactive_person`,
    `relaxationId`, `scopeKind`, `scopeId`). A governed stdio decision writes it in its audit row's
    `detail.execution.relaxation`, beside the placement it keys. An unlinked placement's refusal row carries it in its
-   audit detail too. The `regulait.decision-facts.v2` `execution` section is unchanged: it still records the placement
-   (required class and the floor that set it), not the relaxation id. Adding that is a follow-up that changes the
-   evidence format.
+   audit detail too.
+   - **In the decision's facts** (review fix): `regulait.decision-facts.v2`'s `execution` section gains an optional
+     `relaxation` with the same five fields, as I4 added `offerId`, `imageDigest` and `runtimeFlagsSha256`. The
+     capture writes it only when a relaxation was used, so facts without one stay byte-identical and every stored v2
+     document still parses and verifies. The contract allows it only on a resolved `mcp_stdio` requirement, never on
+     `in_gateway` or `external`. A malformed one on the decision row fails the capture (fail closed), never dropped.
+   - The Decision BOM panel shows it as "Isolation relaxation" with the relaxation id. A malformed one makes the
+     whole BOM unreadable.
+   - **Vectors** (review fix): the placement corpus gains four `person-stdio-*` vectors. The request gains `caller`
+     and `personStdioRelaxation`. They pin the API-key case at L3 even where the server is relaxed, the relaxed
+     interactive case at L2, the default at L3, and a low-assurance agent at L3. The checker computes the floor and
+     rejects four new corruptions. The product test runs the vectors through `computeRequiredClass`. These vectors
+     were written by the builder, not independently (the corpus README says so).
 5. **Routes** (admin, in `ISOLATION_ROUTES`):
    - `GET /v1/execution-person-stdio-relaxations` lists the active rows.
    - `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId` takes `{relaxed}`. Setting needs a
@@ -1641,6 +1645,13 @@ These points settle the build-time choices both decisions left open.
      fails on the unique index, and a clear updates only the row it read. Either answers `409 changed_concurrently`.
    - A remote server answers 409 `not_a_stdio_server`, a scope kind other than the two answers 400, and a missing
      scope answers 404.
+   - Review fix: an active relaxation whose server or project was deleted can still be cleared. The active row is
+     looked up by scope kind and id without the scope existing. Setting needs a live scope.
+   - **A program change clears it** (review fix). When a stdio server's command, args or closure digest changes
+     (`PATCH /v1/servers/:id`), its active server-scope relaxation is cleared in the same transaction, with
+     `cleared_by` = the actor. It is audited `execution-person-stdio-relaxation-cleared` with
+     `cause: stdio_program_changed`. This follows ADR-0188 S8, where an identity opt-in does not follow a url move.
+     A rename or an unchanged program keeps it. A project-scope relaxation is untouched.
 
 **Owner decision D: the project's sensitivity.**
 6. **Storage and rule.** The column is `projects.isolation_sensitivity` (nullable, CHECKed to the four values).
@@ -1658,7 +1669,8 @@ These points settle the build-time choices both decisions left open.
 **Console** (apps/web isolation views).
 8. The Engines page gains a "Project isolation" card. It lists each project's sensitivity from its use cases, the
    admin field and the one in force; a project with neither shows "Unresolved · calls refused". A Manage panel sets
-   the field through `withStepUp` and says when a value has no effect. Each stdio server's execution card on the MCP
+   the field through `withStepUp`. It says when a value has no effect, and when a use case is unreadable it says that
+   the field cannot resolve the project (review fix). Each stdio server's execution card on the MCP
    servers page, and each project's Manage panel, has the person's own call control: "L3 (strict default)" or "L2
    allowed · audited". Allowing is confirmed in a dialog, then stepped up; restoring L3 asks for none. An unreadable
    answer shows "Not reported" and offers no control. `KNOWN_UI_GAPS` stays 0.
@@ -1669,12 +1681,22 @@ These points settle the build-time choices both decisions left open.
 - On a database: `zz-adr0190-owner-cd.test.ts`. It covers the migration's guard, the resolution with and without
   each scope, the API-key negative control, a low-assurance agent, a regulated project, an L2 offer, the refusal
   audit, both routes' step-up, and D's resolve, raise and no-lower cases.
-- Web: `ownerDecisionsCD.test.ts` and the mocked `isolation-owner-cd.mock.spec.ts`.
+- Web: `ownerDecisionsCD.test.ts`, `bomExecution.test.tsx` (the BOM row) and the mocked
+  `isolation-owner-cd.mock.spec.ts`.
+- Review fixes:
+  - `i8-execution.test.ts` covers the facts capture and the contract.
+  - In `zz-adr0190-i4-stdio-move.test.ts`, a governed tool call with a person's session facts records the
+    relaxation on its decision row and in its facts; the API-key control does not.
+  - In `zz-adr0190-owner-cd.test.ts`, the program-change clear and the orphan clear.
+  - The `person-stdio-*` vectors.
 
 **Not verified.**
 - The database tests typecheck, but have not run in the session that wrote them (no Postgres there). CI's database
   shards run them.
-- No end-to-end test drives a real browser session through the MCP proxy to an L2 placement. The wiring from the
-  request's principal to the resolution is covered in parts: the predicate, `stdioPlacementContext` and the
-  resolution.
+- No test drives a real browser session through the HTTP MCP proxy route to an L2 placement. The governed tool call
+  is tested with the session facts the route derives; the route's own `abacPrincipalFromRequest` is tested in pure
+  tests.
+- Owner decision C asked that the Decision BOM panel and the settings UI show the relaxation, and that vectors pin the
+  API-key case. Both are now built; the vectors are builder-written rather than independent (a deviation recorded
+  here, not in the owner's section).
 - L2 itself (gVisor) stays unverified, as recorded above.

@@ -36,6 +36,8 @@ async function setup(page: Page): Promise<Mock> {
     projects: [
       { projectId: "p-claims", name: "Claims", useCaseCount: 1, useCaseSensitivity: "internal", adminSensitivity: null, effectiveSensitivity: "internal", personStdioRelaxationId: null },
       { projectId: "p-sandbox", name: "Sandbox", useCaseCount: 0, useCaseSensitivity: null, adminSensitivity: null, effectiveSensitivity: null, personStdioRelaxationId: null },
+      // a use case whose sensitivity the gateway could not read: the field cannot resolve it
+      { projectId: "p-broken", name: "Broken", useCaseCount: 1, useCaseSensitivity: null, adminSensitivity: null, effectiveSensitivity: null, personStdioRelaxationId: null },
     ],
     relaxations: [],
     sensitivityWrites: [],
@@ -117,6 +119,13 @@ test("D: each project's sensitivity is shown honestly; raising it is resent once
   expect(su.attempts[0]!.body).toEqual({ sensitivity: "regulated" });
   expect(m.sensitivityWrites).toEqual([{ path: "/v1/execution-project-sensitivities/p-claims", body: { sensitivity: "regulated" } }]);
   await expect(projectRow(page, "Claims").getByRole("cell", { name: "Regulated", exact: true }).first()).toBeVisible();
+
+  // an unreadable use case: the field is never said to raise (or resolve) it
+  await page.getByRole("button", { name: "Manage isolation for project Broken", exact: true }).click();
+  const broken = page.getByTestId("project-isolation-editor");
+  await broken.getByLabel("Sensitivity set by an admin", { exact: true }).selectOption("regulated");
+  await expect(broken.getByText(/does not resolve whatever this field says/)).toBeVisible();
+  await expect(broken.getByText(/This raises it\./)).toHaveCount(0);
 });
 
 test("C: a project's person's own calls are L3 by default; allowing L2 is confirmed and stepped up, restoring L3 is not", async ({ page }) => {

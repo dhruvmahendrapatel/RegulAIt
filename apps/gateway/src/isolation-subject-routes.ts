@@ -83,6 +83,41 @@ async function activeRelaxation(db: Db, scopeKind: PersonStdioRelaxationScope, s
   return row ?? null;
 }
 
+/**
+ * Owner decision C, review fix: a server-scope relaxation is about ONE program. When a stdio server's command, args
+ * or closure digest changes, its active relaxation is cleared in the caller's transaction (`cleared_by` = the actor)
+ * and audited, as an ADR-0188 S8 identity opt-in is turned off when the url moves. Returns the cleared row's id, or
+ * null when none was active. A project-scope relaxation is not touched: it is about the project, not the program.
+ */
+export async function clearServerRelaxationOnProgramChange(tx: Db, input: { serverId: string; actorUserId: string | null; label: string }): Promise<string | null> {
+  const actorId = input.actorUserId ?? NO_IDENTITY;
+  const [cleared] = await tx
+    .update(executionPersonStdioRelaxations)
+    .set({ clearedAt: sql`now()`, clearedByUserId: actorId })
+    .where(and(eq(executionPersonStdioRelaxations.scopeKind, "mcp_server"), eq(executionPersonStdioRelaxations.scopeId, input.serverId), isNull(executionPersonStdioRelaxations.clearedAt)))
+    .returning({ id: executionPersonStdioRelaxations.id });
+  if (!cleared) return null;
+  await auditExecutor(tx, {
+    userId: actorId,
+    objectType: "mcp_server",
+    objectId: input.serverId,
+    ruleId: "execution-person-stdio-relaxation-cleared",
+    detail: {
+      relaxationId: cleared.id,
+      kind: PERSON_STDIO_RELAXATION_KIND,
+      subjectKind: PERSON_STDIO_SUBJECT_KIND,
+      scopeKind: "mcp_server",
+      scopeId: input.serverId,
+      from: PERSON_STDIO_RELAXED_FLOOR,
+      to: UNKNOWN_AGENT_FLOOR,
+      relaxation: false,
+      cause: "stdio_program_changed",
+    },
+    reason: `${input.label}: its stdio program changed, so the person's own call relaxation set for the old program is cleared; calls are back at L3 (ADR-0190 owner decision C)`,
+  });
+  return cleared.id;
+}
+
 export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): void {
   const actor = (req: FastifyRequest) => req.authCtx?.userId ?? NO_IDENTITY;
 
@@ -126,11 +161,22 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
   });
 
   app.put("/v1/execution-person-stdio-relaxations/:scopeKind/:scopeId", async (req, reply) => {
-    const scope = await loadScope(req, reply);
-    if (!scope) return reply;
+    const params = scopeParam.safeParse(req.params);
     const b = setPersonStdioRelaxationSchema.safeParse(req.body ?? {});
+    // review LOW: an active relaxation whose server or project was deleted can still be cleared (clearing tightens and
+    // needs no live scope); setting one, or a clear with nothing active, needs the scope to exist
+    const orphan =
+      params.success && b.success && !b.data.relaxed ? await activeRelaxation(db, params.data.scopeKind, params.data.scopeId) : null;
+    const scopeNameOf = async (kind: PersonStdioRelaxationScope, id: string): Promise<string | null> =>
+      kind === "mcp_server"
+        ? ((await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, id)))[0]?.name ?? null)
+        : ((await db.select({ name: projects.name }).from(projects).where(eq(projects.id, id)))[0]?.name ?? null);
+    const scope = orphan
+      ? { kind: orphan.scopeKind, id: orphan.scopeId, name: (await scopeNameOf(orphan.scopeKind, orphan.scopeId)) ?? `${orphan.scopeId} (deleted)` }
+      : await loadScope(req, reply);
+    if (!scope) return reply;
     if (!b.success) return reply.status(400).send({ error: "invalid_body", issues: b.error.issues });
-    const current = await activeRelaxation(db, scope.kind, scope.id);
+    const current = orphan ?? (await activeRelaxation(db, scope.kind, scope.id));
     if (b.data.relaxed) {
       if (current) return reply.send({ relaxation: relaxationView(current, scope.name), changed: false });
       // the relaxation: a fresh step-up bound to this scope (ADR-0180; owner decision C)

@@ -1063,9 +1063,11 @@ function ProjectIsolationEditor(props: { project: ProjectSensitivity; onSaved: (
       <p className={v.dim}>
         {project.useCaseCount === 0
           ? "This project has no AI use case, so this field alone sets its sensitivity. Cleared, the project's isolable calls are refused."
-          : `Its use cases give ${project.useCaseSensitivity ? SENSITIVITY_LABEL[project.useCaseSensitivity] : "an unreadable value"}. ${
-              draft === "" ? "With the field cleared, that is what applies." : raisesAfter ? "This raises it." : "This is not above the use cases, so it has no effect."
-            }`}{" "}
+          : project.useCaseSensitivity === null
+            ? "A use case of this project has a sensitivity that cannot be read, so the project's sensitivity does not resolve whatever this field says: its isolable calls stay refused until the use case is fixed."
+            : `Its use cases give ${SENSITIVITY_LABEL[project.useCaseSensitivity]}. ${
+                draft === "" ? "With the field cleared, that is what applies." : raisesAfter ? "This raises it." : "This is not above the use cases, so it has no effect."
+              }`}{" "}
         Saving any change asks you to confirm it is you and is audited.
       </p>
       {changed && (

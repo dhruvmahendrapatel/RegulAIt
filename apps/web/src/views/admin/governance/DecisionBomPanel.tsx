@@ -49,6 +49,19 @@ export function ExecutionFacts({ execution: e }: { execution: ExecutionView }) {
   if (e.requiredClass) rows.push({ key: "required", label: "Required isolation", value: `${isolationClassLabel(e.requiredClass)}${e.requiredBy ? `, set by ${requiredByLabel(e.requiredBy)}` : ""}` });
   // a mismatch's class is what the placement report claimed, which the gateway refused: the call never ran under it (decision 6)
   if (e.placement !== "refused") rows.push({ key: "applied", label: e.placement === "mismatch" ? "Reported class (disputed)" : "Applied isolation", value: isolationClassLabel(e.appliedClass) });
+  // ADR-0190 owner decision C: the unknown-agent floor was lowered to L2 for an interactive person's own call
+  if (e.relaxation) {
+    rows.push({
+      key: "relaxation",
+      label: "Isolation relaxation",
+      value: (
+        <>
+          A person&apos;s own call, L3 lowered to L2 by an admin for this {e.relaxation.scopeKind === "mcp_server" ? "MCP server" : "project"} · relaxation{" "}
+          <code className={v.mono}>{e.relaxation.relaxationId}</code>
+        </>
+      ),
+    });
+  }
   if (e.refusalCode) rows.push({ key: "refusal", label: "Refusal", value: <code className={v.mono}>{e.refusalCode}</code> });
   if (e.profile) rows.push({ key: "profile", label: "Execution profile", value: <>{e.profile.name} version {e.profile.version} · <Digest value={e.profile.digest} /></> });
   if (e.executor) {
