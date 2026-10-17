@@ -546,3 +546,37 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   software fallback applies and posture flags it.
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
+
+## SD3 build notes (2026-10-17)
+
+- The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
+  device filters to what the catalogue can match instead of shipping its whole software inventory; each query's
+  definition also carries the importer's column allowlist. `scripts/endpoint-pack-build.mjs` writes
+  `endpoint-discovery/osquery/`, and the shared suite fails on drift. Execution under osquery is pending (M-041).
+- Endpoint match types are exact, case-insensitive comparisons (`app_name`, `bundle_id`, `executable_name`,
+  `cli_binary`, `npm_package`, `process_name`, `ide_extension_id`, `browser_extension_id`, `env_var_name`), a
+  home-relative `config_path`, a decimal `listening_port`, and a `trait_set` over a closed trait vocabulary
+  (`listen_all_interfaces`, `user_writable_path`, `hidden_path`, `background_agent`). SD0 aligns its matcher columns
+  to these.
+- Seed: 90 rows derived from the pinned registry (commit `12b7bbf7`), 12 written by us (local runtime names and default
+  ports, AI CLI npm packages, three hidden-assistant trait rows). Rows for a general-purpose desktop app are imported
+  disabled: its presence is not AI use. The two LAN-listener trait rows stay enabled and are marked low confidence
+  (coordinator, 2026-10-17).
+- Importers bound each file at 5,000,000 bytes and 20,000 rows (one osquery line at 262,144 characters, one cell at
+  512); every row not imported is refused with its line and counted. A row with a value, command-line or contents
+  column is refused. Decorations are discarded. Device names are pseudonymised as well as device users, because host
+  names often carry a person's name. There is no default pseudonym hook; a missing hook refuses the import.
+- The pack is unsigned until SD4; the manifest carries its SHA-256 and a signer seam.
+- Phase B (wired into SD0): `endpoint_osquery` and `endpoint_inventory` are registered as upload-fed scanners (a
+  scheduled run observes nothing). `POST /v1/discovery/sources/:sourceId/endpoint-imports` parses the file with a
+  request-local keyed hash, matches it against the enabled catalogue, opens a run on the source holding its lease, and
+  commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only the devices
+  and device users of committed sightings get SD0 pseudonyms; the user travels as `actorPseudonym`. `POST /v1/discovery/endpoint-signatures/seed` installs the
+  seed as `identifier` rows (ports as `port:<n>`, trait sets as `trait:<sorted set>`). Endpoint retention is SD0's.
+- With SD0's follow-up columns (migration 0202): device names use the `device` pseudonym kind and device users
+  `device_user` (sent as `actorPseudonym`); seed rows carry `os` (one OS, or any when SD3 scoped a row to two),
+  `ecosystem` (`vscode`, `jetbrains`, `firefox`, `safari`, and `chromium` for Chrome and Edge), `tool_id`, `note` and
+  `confidence` (`high`, and `low` on the two LAN-listener trait rows); upload-fed sources are never scheduled. An
+  OS-scoped row matches only a sighting whose OS is known and equal, so an inventory export without an OS column
+  matches only the OS-neutral rows.
+

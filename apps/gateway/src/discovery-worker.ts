@@ -331,7 +331,7 @@ async function renewLease(db: Db, runId: string, owner: string, leaseSeconds: nu
 }
 
 /** fail a run this owner holds (fenced); false when the lease was lost */
-async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code: string, rawDetail: string, extra: Record<string, unknown> = {}, secrets: readonly string[] = []): Promise<boolean> {
+export async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code: string, rawDetail: string, extra: Record<string, unknown> = {}, secrets: readonly string[] = []): Promise<boolean> {
   const detail = scrubRunText(rawDetail, secrets);
   const res = await db.execute(sql`
     UPDATE discovery_runs
@@ -370,15 +370,35 @@ async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
 
 /** the pseudonym of one person; stores the display name enveloped (first sight) and stamps last seen */
 export async function pseudonymise(db: Db, dataKey: string, kind: DiscoveryPseudonymKind, displayName: string): Promise<string> {
+  const derived = await derivePseudonym(db, dataKey, kind, displayName);
+  await recordPseudonyms(db, dataKey, [derived]);
+  return derived.pseudonym;
+}
+
+/** a pseudonym computed but not yet stored (SD3: stored only in the transaction that commits its findings) */
+export interface DerivedPseudonym {
+  kind: DiscoveryPseudonymKind;
+  pseudonym: string;
+  name: string;
+}
+
+/** compute one person's (or device's) pseudonym without storing its display name */
+export async function derivePseudonym(db: Db, dataKey: string, kind: DiscoveryPseudonymKind, displayName: string): Promise<DerivedPseudonym> {
   const name = displayName.trim().slice(0, DISPLAY_NAME_MAX);
   if (!name) throw new Error("a pseudonym needs a display name");
   const key = await pseudonymKey(db, dataKey);
   const pseudonym = DISCOVERY_PSEUDONYM_PREFIX + createHmac("sha256", key).update(`${kind}\u0000${name}`).digest("hex").slice(0, 24);
-  await db
-    .insert(discoveryPseudonyms)
-    .values({ kind, pseudonym, displayNameCiphertext: encryptSecret(dataKey, name) })
-    .onConflictDoUpdate({ target: discoveryPseudonyms.pseudonym, set: { lastSeenAt: sql`now()` } });
-  return pseudonym;
+  return { kind, pseudonym, name };
+}
+
+/** store derived pseudonyms (display name enveloped on first sight; last seen stamped) */
+export async function recordPseudonyms(db: Db, dataKey: string, items: readonly DerivedPseudonym[]): Promise<void> {
+  for (const d of items) {
+    await db
+      .insert(discoveryPseudonyms)
+      .values({ kind: d.kind, pseudonym: d.pseudonym, displayNameCiphertext: encryptSecret(dataKey, d.name) })
+      .onConflictDoUpdate({ target: discoveryPseudonyms.pseudonym, set: { lastSeenAt: sql`now()` } });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +524,7 @@ function gapOf(o: Observation): { kind: string; value: string } | null {
   return null;
 }
 
-const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
+export const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
   (await db.select().from(aiEndpointSignatures).where(eq(aiEndpointSignatures.enabled, true))).map((r) => ({
     provider: r.provider,
     kind: r.kind,
@@ -526,7 +546,7 @@ const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
 // one run
 // ---------------------------------------------------------------------------
 
-type RunVerdict = "succeeded" | "failed" | "lease_lost";
+export type RunVerdict = "succeeded" | "failed" | "lease_lost";
 
 async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Required<Pick<DiscoveryWorkerOptions, "registry" | "rateLimiter" | "leaseSeconds">> & DiscoveryWorkerOptions): Promise<RunVerdict> {
   const secrets: string[] = [];
@@ -686,6 +706,27 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     throw err;
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes);
+}
+
+/**
+ * ADR-0195: classify a run's CHECKED observations against the enabled admin
+ * catalogue and commit the findings with the run's completion, fenced on the
+ * run's lease. Shared by the scan worker and by SD3's endpoint upload route
+ * (which holds the lease of the run it opened for the upload).
+ */
+export async function applyDiscoveryRunObservations(
+  db: Db,
+  run: DiscoveryRunRow,
+  owner: string,
+  source: DiscoverySourceRow,
+  observations: Observation[],
+  digest: string,
+  classifyCatalogue: readonly AiSignature[],
+  readOutcomes: DiscoveryReadOutcome[] = [],
+  /** SD3: writes that must commit with the findings (and not happen without them), run inside the fenced transaction */
+  inCommit?: (t: Db) => Promise<void>,
+): Promise<RunVerdict> {
   const pairs = observations.map((observation) => ({ observation, classification: classifyObservation(observation, classifyCatalogue) }));
   const matched = pairs.filter((p) => p.classification.matched);
   const gapKeys = new Set<string>();
@@ -713,6 +754,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     const fence = await t.execute(sql`
       SELECT id FROM discovery_runs WHERE id = ${run.id} AND status = 'running' AND lease_owner = ${owner} FOR UPDATE`);
     if (fence.rows.length !== 1) return null;
+    if (inCommit) await inCommit(t);
     for (const [kind, group] of byEvidence) {
       const findings = correlateObservations(group);
       const [imp] = await t
