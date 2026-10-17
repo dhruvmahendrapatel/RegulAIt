@@ -4669,3 +4669,7 @@ export * from "./receipts/verify.js";
 export * from "./eval-datasets/cyberseceval.js";
 // ADR-0188 S7: REGULAIT_PUBLIC_URL parsed one way, by the gateway and by engine runners
 export * from "./public-url.js";
+// ADR-0195 SD1: the v2 shadow-AI catalogue (v1 frozen inside it), seed rows, and the pure repo analyser
+export * from "./shadow-catalog-v2.js";
+export * from "./repo-manifests.js";
+export * from "./repo-analysis.js";
