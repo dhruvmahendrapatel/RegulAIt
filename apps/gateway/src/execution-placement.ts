@@ -183,13 +183,13 @@ function profileView(row: ExecutionProfileRow, source: ResolvedProfile["source"]
 }
 
 /**
- * The version of a shipped profile in force (the default a kind runs under when nothing is assigned): the newest LIVE
- * version (after a revert, the versions above its target are withdrawn), else the newest one, whose retirement then
- * refuses `profile_retired` (no fallback).
+ * The latest version of a shipped profile (the default a kind runs under when nothing is assigned). A revert is a new
+ * version too (I5 follow-up), so the newest version is always the one in force; a retired one refuses
+ * `profile_retired` (no fallback).
  */
 async function shippedProfile(db: Db, name: string): Promise<ExecutionProfileRow | null> {
-  const rows = (await db.select().from(executionProfiles).where(eq(executionProfiles.name, name))).sort((a, b) => b.version - a.version);
-  return rows.find((r) => r.retiredAt === null) ?? rows[0] ?? null;
+  const rows = await db.select().from(executionProfiles).where(eq(executionProfiles.name, name));
+  return rows.sort((a, b) => b.version - a.version)[0] ?? null;
 }
 
 /**

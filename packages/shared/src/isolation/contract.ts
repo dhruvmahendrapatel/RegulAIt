@@ -500,6 +500,20 @@ export const executionProfileBodySchema = z
         perPlacement: z.literal(true),
       })
       .strict(),
+    /**
+     * ADR-0190 I5 follow-up (review of #397): set ONLY by the gateway on a REVERT, a new version whose controls equal
+     * an earlier version's. It names that version and the one it replaced, so the new version's canonical body (and
+     * digest, unique per row) differs from the earlier one while every control is the same. No control reads it, and
+     * the gateway strips any value a client sends. Absent on every other body (existing digests are unchanged).
+     */
+    revertOf: z
+      .object({
+        version: z.number().int().min(1),
+        digest: z.string().regex(/^[0-9a-f]{64}$/),
+        replacing: z.number().int().min(1),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((b, ctx) => {

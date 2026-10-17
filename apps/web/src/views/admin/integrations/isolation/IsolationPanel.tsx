@@ -39,7 +39,6 @@ import {
   parsePlacementDetail,
   parsePlacements,
   parseProfiles,
-  isWithdrawn,
   nextVersionOf,
   profileActions,
   versionOutcomeText,
@@ -175,8 +174,6 @@ function ProfilesCard() {
                 render: (r) =>
                   isUnreadable(r) ? (
                     <Badge tone="neutral">Unmeasured</Badge>
-                  ) : isWithdrawn(r, rows ?? []) ? (
-                    <Badge tone="neutral">Withdrawn</Badge>
                   ) : r.retiredAt !== null ? (
                     <Badge tone="danger">Retired</Badge>
                   ) : (
@@ -304,9 +301,9 @@ function NewProfileDialog(props: { profiles: ProfileVersion[]; onClose: () => vo
   );
 }
 
-/** is this the version in force of its profile (the newest LIVE one: a revert withdraws the versions above it)? */
+/** is this the newest version of its profile in the list? (a revert is a new version too) */
 const isLatestVersion = (p: ProfileVersion, rows: ProfileRow[]) =>
-  !rows.some((o) => !isUnreadable(o) && o.name === p.name && o.retiredAt === null && o.version > p.version);
+  !rows.some((o) => !isUnreadable(o) && o.name === p.name && o.version > p.version);
 
 /**
  * `POST /v1/execution-profiles/:name/versions`: version n+1 of a custom profile or of `engine-worker`, from its current
@@ -355,8 +352,8 @@ function NewVersionDialog(props: { profile: ProfileVersion; nextVersion: number;
       >
         <p className={v.dim}>
           Version {props.nextVersion} copies every control of version {props.profile.version}. Running workloads keep the version they
-          started with. A lower class is an audited relaxation and needs a step-up. If the result equals an earlier live version, that version
-          is reverted to instead and the versions above it are withdrawn.
+          started with. A lower class is an audited relaxation and needs a step-up. If the result equals an earlier version, the new version
+          is recorded as a revert to it; no version is retired.
         </p>
         <Field label="Minimum isolation class">
           <Select value={minClass} onChange={(e) => setMinClass(e.target.value)}>

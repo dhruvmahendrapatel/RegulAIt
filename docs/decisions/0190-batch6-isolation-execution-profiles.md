@@ -1834,8 +1834,8 @@ Both were built 2026-10-17 in migration 0201.
 
 ## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
 
-This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). Migration
-**0202** (`0202_execution_profile_revert.sql`, hand-written) replaces the profile guard function only; journal idx 202, after 0201 (point 8). It
+This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). No migration
+(the revert first proposed with migration 0202 was withdrawn: see the Revert bullet in point 5). It
 supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "cannot be versioned" for
 `engine-worker` only. These points settle what the sections above leave open:
 
@@ -1885,24 +1885,29 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      `/jobs`). Otherwise it is refused 400 `engine_worker_profile_shape`.
    - It is never retired. Engines always run under its version in force, which is how `resolveRequirement`, the
      broker and the first-enable basis read it. A new version is written with `shipped: false`.
-   - **Revert (review of #397).** A new version whose body equals an EARLIER live version of the same profile puts
-     that version back in force as itself (same row, same digest, so its attestations still count) and withdraws the
-     versions above it, each retired, never deleted. A second row with that body cannot exist: the digest is the
-     SHA-256 of the body and unique (`execution_profiles_digest_uq`), and placements and attestations reference it.
-     A revert is judged like a new version, against the strict reference and the version in force. Going back to a
-     stricter version (an L1 engine-worker back to its exact shipped body) needs no step-up; going back to a looser
-     one needs the `settings_relax` step-up and is also audited `execution-profile-relaxed`, as a looser version is.
-     It is audited `execution-profile-reverted` (a new `ISOLATION_AUDIT_ACTIONS` entry). Like a retirement, it counts
-     the agent and stdio-server assignments pinned to a withdrawn version, which now refuse `profile_retired`, and
-     reports them as `assignmentsNowRefused` in the audit row and the response. It is a compare-and-set under the
-     per-name lock the guard takes. A withdrawn version is never reinstated. The panel labels a withdrawn row
-     "Withdrawn", not "Retired", numbers a new version after the newest version, and says "reverted" when the route
-     reverted.
+   - **Revert (review of #397), always a NEW version.** A version whose controls equal an EARLIER version of the
+     same profile is written as the next version, with that earlier body plus a `revertOf` marker
+     (`{version, digest, replacing}`). The gateway sets the marker and strips any value a client sends; no control
+     reads it. Its only job is to make the new row's digest differ: the digest is the SHA-256 of the body and unique
+     (`execution_profiles_digest_uq`), and placements and attestations reference it. Nothing is retired, un-retired or
+     changed, so retirement stays terminal and migration 0183's guard is unchanged.
+     - A revert is judged like any version, against the strict reference and the version in force (the newest
+       version). Going back to a stricter body (an L1 engine-worker back to its exact shipped controls) needs no
+       step-up. Going back to a looser one needs the `settings_relax` step-up and is audited
+       `execution-profile-relaxed`.
+     - It is audited `execution-profile-reverted` (a new `ISOLATION_AUDIT_ACTIONS` entry). Controls equal to the
+       version in force, with or without a marker, are refused `execution_profile_unchanged`.
+     - Executors attest the new digest at their next self-test before it places, so placement fails closed until
+       then.
+     - The panel numbers a new version after the newest version and says "reverted to the controls of vN" when the
+       route wrote a revert.
+     - A first build reverted by retiring the versions above the target and changed the guard (migration 0202) so a
+       profile could be versioned again after that. CI's I1 invariant test showed this let a new version follow a
+       retired newest version. It was withdrawn: 0202 and its journal entry are removed, and the number is free.
    - **A new version is a compare-and-set too** (review of #397). Its insert and audit rows run in one transaction
      holding the same per-name advisory lock, and re-check that the newest version and the version in force are
-     still the ones it was judged against. A revert or another version in between refuses 409
-     `changed_concurrently`. "The version in force" is now the newest LIVE version, wherever the newest version
-     was read before: the version route, the placement default, and the panel's "New version".
+     still the one it was judged against (and not retired). Another version in between, a revert included, refuses
+     409 `changed_concurrently`.
 6. **L1 for engines stays off by default and needs every relaxation.** Decision 11 lets an admin relax the
    engine_worker floor to L1 (owner decision 4: audited, step-up), so the L1 path exists, and it is strict by
    default. An engine task places at L1 only when all of these hold:
@@ -1925,18 +1930,11 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      read in `beforeAll`.
    - **Gateway, on a scratch database** (created and dropped by the file): `zz-adr0190-engine-worker-l1.test.ts`.
      An engine task is offered at L1 only once all three relaxations and a fresh L1 attestation exist. A version
-     equal to the shipped body then reverts without a step-up and engines require L2 again. A looser revert needs the
-     step-up, emits `execution-profile-relaxed` and counts a pinned assignment, and a withdrawn version is not
-     reinstated. A new version blocked on the per-name lock while a revert withdraws the version it was judged
-     against refuses `changed_concurrently`. Versioning after a revert succeeds (0202 is in the
-     journal).
+     equal to the shipped body then becomes v3 (the marker, a new digest) without a step-up, nothing is retired, and
+     engines require L2 again. A looser revert needs the step-up and emits `execution-profile-relaxed`. A reverted
+     profile, once retired, is never un-retired, re-stamped or versioned again (the guard and the route both refuse).
+     A new version blocked on the per-name lock while another version lands refuses `changed_concurrently`.
    - **Web:** the panel's actions (`profileActions`, mirrored from the shared list) and one mocked e2e assertion.
-
-8. **Migration 0202.** The guard function from 0183 refused any new version once the NEWEST row was retired, so a
-   reverted profile could never be versioned again. 0202 refuses a new version only when NO version of the name is
-   live (the profile itself was retired, as before). The function keeps `SET search_path = pg_catalog, public,
-   pg_temp` (the 0185 guard), and no trigger or table is added. On a database without it, the gateway answers 409
-   `execution_profile_retired` for a version after a revert, never a 500.
 
 **Not verified (M-041).**
 - **A real runc run is pending execution.** The session that built this had no Docker daemon, so the runc backend has
@@ -1947,8 +1945,6 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
 - No compose service, runbook or INSTALL.md step for a runc executor was written: none has been executed, and another
   slice owns the compose stack. The environment variables are in `main.ts` (`REGULAIT_EXECUTOR_RUNC_RUNTIME`,
   `REGULAIT_EXECUTOR_RUNC_VERSION`, and the canary, init and socket variables both backends share).
-- Migration 0202 was checked by hand against the 0185 guard (search_path pinned; no new table or refusal trigger, so
-  no TRUNCATE refusal is owed); Postgres is not available in the build environment, so CI runs the guard.
 - The gateway database suites (`zz-adr0190-runc-l1.test.ts` and the scratch-database
   `zz-adr0190-engine-worker-l1.test.ts`) have not run in the session that wrote them (no database there); CI's
   database shards run them. The mocked e2e assertion has not run locally (no browsers there).

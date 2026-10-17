@@ -9,7 +9,6 @@ import {
   executorReading,
   executorNameOk,
   parseExecutors,
-  isWithdrawn,
   nextVersionOf,
   profileActions,
   versionOutcomeText,
@@ -278,22 +277,19 @@ describe("ADR-0190 I5 follow-up: engine-worker is versioned, never retired; the 
   });
 });
 
-describe("review of #397: version numbers, withdrawn rows and the revert toast", () => {
-  const live = { name: "engine-worker", version: 1, retiredAt: null };
-  const withdrawn = { name: "engine-worker", version: 2, retiredAt: 1 };
-  const retired = { name: "team-old", version: 1, retiredAt: 1 };
-  const rows = [live, withdrawn, retired, { unreadable: true as const, index: 3 }];
-  it("a new version is numbered after the NEWEST version, withdrawn ones included", () => {
-    expect(nextVersionOf("engine-worker", rows)).toBe(3);
+describe("review of #397: version numbers and the revert toast", () => {
+  const rows = [
+    { name: "engine-worker", version: 1, retiredAt: null },
+    { name: "engine-worker", version: 2, retiredAt: null },
+    { name: "engine-worker", version: 3, retiredAt: null },
+    { unreadable: true as const, index: 3 },
+  ];
+  it("a new version is numbered after the newest version", () => {
+    expect(nextVersionOf("engine-worker", rows)).toBe(4);
     expect(nextVersionOf("team-new", rows)).toBe(1);
   });
-  it("a retired row beside a live sibling is withdrawn; a profile with none live is retired", () => {
-    expect(isWithdrawn(withdrawn, rows)).toBe(true);
-    expect(isWithdrawn(live, rows)).toBe(false);
-    expect(isWithdrawn(retired, rows)).toBe(false);
-  });
-  it("says reverted when the route reverted, versioned otherwise", () => {
-    expect(versionOutcomeText("engine-worker", { version: 1, revertedFrom: { version: 2 } })).toBe("Execution profile engine-worker reverted to v1");
+  it("says reverted when the route wrote a revert version, versioned otherwise", () => {
+    expect(versionOutcomeText("engine-worker", { version: 3, revertOf: { version: 1, replacing: 2 } })).toBe("Execution profile engine-worker reverted to the controls of v1 (new version v3)");
     expect(versionOutcomeText("engine-worker", { version: 3 })).toBe("Execution profile engine-worker versioned as v3");
     expect(versionOutcomeText("x", null)).toBe("Execution profile x versioned");
   });

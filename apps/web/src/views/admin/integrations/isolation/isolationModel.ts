@@ -462,7 +462,7 @@ export function profileActions(p: Pick<ProfileVersion, "name" | "shipped">): { v
   return { version: !p.shipped || versionedShipped, retire: !p.shipped && !versionedShipped };
 }
 
-type VersionRow = Pick<ProfileVersion, "name" | "version" | "retiredAt">;
+type VersionRow = Pick<ProfileVersion, "name" | "version">;
 const readable = (rows: readonly unknown[]): VersionRow[] =>
   rows.filter((r): r is VersionRow => r !== null && typeof r === "object" && !("unreadable" in r) && "version" in r);
 
@@ -471,16 +471,15 @@ export function nextVersionOf(name: string, rows: readonly unknown[]): number {
   return Math.max(0, ...readable(rows).filter((r) => r.name === name).map((r) => r.version)) + 1;
 }
 
-/** retired while another version of the same profile is live: withdrawn by a revert, not a retired profile */
-export function isWithdrawn(p: VersionRow, rows: readonly unknown[]): boolean {
-  return p.retiredAt !== null && readable(rows).some((r) => r.name === p.name && r.retiredAt === null);
-}
-
-/** what the version route answered, in words: a body equal to an earlier live version is a REVERT (200, `revertedFrom`) */
+/**
+ * What the version route answered, in words. A body equal to an earlier version is a REVERT: a new version carrying
+ * the gateway's `revertOf` marker (the earlier version it copies).
+ */
 export function versionOutcomeText(name: string, out: unknown): string {
-  const o = out !== null && typeof out === "object" ? (out as { version?: unknown; revertedFrom?: unknown }) : {};
+  const o = out !== null && typeof out === "object" ? (out as { version?: unknown; revertOf?: { version?: unknown } | null }) : {};
   const v = typeof o.version === "number" ? ` v${o.version}` : "";
-  return o.revertedFrom !== undefined && o.revertedFrom !== null ? `Execution profile ${name} reverted to${v}` : `Execution profile ${name} versioned${v ? ` as${v}` : ""}`;
+  if (o.revertOf && typeof o.revertOf.version === "number") return `Execution profile ${name} reverted to the controls of v${o.revertOf.version}${v ? ` (new version${v})` : ""}`;
+  return `Execution profile ${name} versioned${v ? ` as${v}` : ""}`;
 }
 
 /** `{profiles: [...]}`; null when the envelope is malformed; a malformed row is kept as `unreadable`, never dropped */
