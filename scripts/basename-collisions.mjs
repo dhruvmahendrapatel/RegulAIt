@@ -35,6 +35,16 @@ export function collisionKey(file) {
   return `${parts.join("/")}/${stem.toLowerCase()}`;
 }
 
+/**
+ * ADR-0195 SD4a: a Go module's `go.mod` and `go.sum` must sit side by side (the toolchain derives one name from the
+ * other, so no rename exists) and neither is ever the target of an import, so the pair alone is not a collision.
+ * Anything else sharing their stem still is.
+ */
+function isGoModulePair(group) {
+  const names = group.map((f) => String(f).split(/[\\/]/).pop()).sort();
+  return names.length === 2 && names[0] === "go.mod" && names[1] === "go.sum";
+}
+
 /** groups of 2+ paths that collide, each sorted, in path order */
 export function findBasenameCollisions(files) {
   const byKey = new Map();
@@ -45,7 +55,7 @@ export function findBasenameCollisions(files) {
     byKey.set(k, list);
   }
   return [...byKey.values()]
-    .filter((g) => g.length > 1)
+    .filter((g) => g.length > 1 && !isGoModulePair(g))
     .map((g) => [...g].sort())
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
