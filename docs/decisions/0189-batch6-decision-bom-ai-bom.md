@@ -2297,3 +2297,10 @@ default 5 s under CI's parallel sweep. The prebuilt `halo` wheel is **not taken*
 `halo` 0.0.31 exists from its publisher (only a `py2` wheel, which pip on CPython 3 never selects, and the sdist), and
 `spdx3-validate` 0.0.7 needs `halo>=0.0.31`. So `--no-build-isolation` and the Python 3.11 `setuptools` dependency
 stay; the reason is written in `BOM_VERIFICATION.md`.
+
+## As built — 2026-10-17: `validateCycloneDx` and the declared spec version (SEC-DEFAULTS re-check)
+
+Verified on main, no change in this batch: `validateCycloneDx(doc, "1.6")` refuses a document whose `specVersion` is
+not `"1.6"` (the official schemas type the field as any string, so a 1.7 document could pass the 1.6 schema). Added in
+commit `c9a2fb8` with its test.
+

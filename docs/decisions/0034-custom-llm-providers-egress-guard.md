@@ -935,3 +935,19 @@ Branch `b7-relax-stepups`. No migration.
   setup. The live journey `phase5-custom-providers.spec.ts` answers the prompt for its IMDS addition.
 - **Unverified locally:** the DB integration tests and the live e2e journey (no Postgres and no stack in the build
   environment). They are typechecked here and run first in CI.
+
+## As built — 2026-10-17: the defensive insert-conflict 409 no longer spends the grant (SEC-DEFAULTS)
+
+Branch `sec-defaults-1017`. No migration.
+
+- **Insert first, then spend.** `POST /v1/egress-allow-hosts` used to claim the step-up (on the root handle) before
+  its `ON CONFLICT DO NOTHING` insert, so a row written meanwhile by a writer outside this route answered 409 with the
+  grant already spent. The claim now runs after the insert, inside the same transaction and on its connection. A 409
+  from the insert leaves the grant unused, and a refused claim throws, rolling the inserted row and its audit row back.
+  The claim's own `step-up-grant-refused` row rolls back with it, so the route records it again with a look that
+  spends nothing.
+- **Test.** `zz-secure-default-stepups.test.ts`: a writer that takes no per-host lock inserts the host uncommitted;
+  the granted POST passes its re-decision, waits on the insert, gets 409 `changed_concurrently` once the writer
+  commits, and its grant stays unused.
+- **Unverified locally:** the DB integration test (no Postgres in the build environment); typechecked here, run in CI.
+

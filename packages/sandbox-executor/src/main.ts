@@ -5,8 +5,10 @@
  * first start, and runs the loop against the backend named by
  * `REGULAIT_EXECUTOR_BACKEND`.
  *
- * Backends: `gvisor` (slice I4, `runsc` under Docker); `kata` arrives with
- * I6 and `openshell` with I7. Any other name refuses to start (exit 2)
+ * Backends: `gvisor` (slice I4, `runsc` under Docker, L2) and `runc` (the
+ * default Docker runtime with the same hardening, L1 `hardened_container`
+ * only); `kata` arrives with I6 and `openshell` with I7. Any other name
+ * refuses to start (exit 2)
  * rather than run anything that is not a real OS boundary — and the fake
  * backend is deliberately not reachable from here.
  */
@@ -19,13 +21,18 @@ import { ProofChannelCredential } from "./channel-credential.js";
 import { checkGatewayUrl, ExecutorClient, ExecutorConfigError, probeGatewayReachable } from "./client.js";
 import { ExecutorFatalError, runExecutorLoop } from "./loop.js";
 import type { SandboxBackend } from "./backend.js";
-import { RunscBackendError, RunscDockerBackend } from "./runsc-backend.js";
+import { DockerBackendError } from "./docker-backend.js";
+import { RuncDockerBackend } from "./runc-backend.js";
+import { RunscDockerBackend } from "./runsc-backend.js";
 
 /**
  * The backends a deployment may name (I6 adds kata, I7 openshell). `gvisor`
  * (I4) is the runsc backend on a Docker host: it checks, before the executor
  * announces anything, that the daemon has the named runtime and that it is
- * runsc, and refuses to start otherwise.
+ * runsc, and refuses to start otherwise. `runc` is the L1 backend: it attests
+ * `hardened_container` only (never L2 or L3), and refuses to start unless the
+ * daemon has the runtime, a seccomp default that is not unconfined, and
+ * user-namespace remapping or rootless mode.
  */
 const BACKENDS: Readonly<Record<string, (() => Promise<SandboxBackend>) | undefined>> = {
   gvisor: async () => {
@@ -42,6 +49,20 @@ const BACKENDS: Readonly<Record<string, (() => Promise<SandboxBackend>) | undefi
       // review H2: the host's runsc, mounted read-only into this container, and the path the daemon names for it
       runscBinary: process.env.REGULAIT_EXECUTOR_RUNSC_BINARY || "/host-gvisor/runsc",
       runscHostPath: required("REGULAIT_EXECUTOR_RUNSC_HOST_PATH"),
+    });
+    await backend.preflight();
+    return backend;
+  },
+  runc: async () => {
+    const backend = new RuncDockerBackend({
+      runtimeName: process.env.REGULAIT_EXECUTOR_RUNC_RUNTIME || "runc",
+      canaryImage: required("REGULAIT_EXECUTOR_CANARY_IMAGE"),
+      runtimeVersion: required("REGULAIT_EXECUTOR_RUNC_VERSION"),
+      ...(process.env.REGULAIT_EXECUTOR_DOCKER_SOCKET ? { dockerSocket: process.env.REGULAIT_EXECUTOR_DOCKER_SOCKET } : {}),
+      seccompDir: process.env.REGULAIT_EXECUTOR_SECCOMP_DIR || null,
+      initSource: fileURLToPath(new URL("../sandbox-init/sandbox-init.mjs", import.meta.url)),
+      initDir: process.env.REGULAIT_EXECUTOR_INIT_DIR || "/regulait-init",
+      initVolume: required("REGULAIT_EXECUTOR_INIT_VOLUME"),
     });
     await backend.preflight();
     return backend;
@@ -214,8 +235,9 @@ export async function main(): Promise<void> {
   try {
     backend = await factory();
   } catch (e) {
-    // a missing runtime, a runtime that is not runsc, an unreachable Docker socket: nothing starts (exit 2)
-    console.error(`REGULAIT_EXECUTOR_BACKEND=${backendName}: ${e instanceof RunscBackendError ? e.message : `the backend is not usable: ${(e as Error).message}`}`);
+    // a missing runtime, a runtime that is not runsc, a runc daemon without user namespaces, an unreachable Docker
+    // socket: nothing starts (exit 2)
+    console.error(`REGULAIT_EXECUTOR_BACKEND=${backendName}: ${e instanceof DockerBackendError ? e.message : `the backend is not usable: ${(e as Error).message}`}`);
     process.exit(2);
   }
   try {

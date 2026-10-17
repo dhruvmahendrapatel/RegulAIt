@@ -137,8 +137,10 @@ describe("the adapter registry states what it cannot do", () => {
       expect(["published-spec", "declared-format", "operator-mapped"]).toContain(a.formatBasis);
     }
     // the coverage claim ADR-0055 makes must survive this slice intact
-    expect(body.posture).toMatch(/ships no collector/);
+    expect(body.posture).toMatch(/No active discovery source is enabled, so nothing is scanned/);
     expect(body.posture).toMatch(/Coverage remains exactly what you exported/);
+    // ADR-0195: what an active source adds is stated as a limit too, never as "complete" coverage
+    expect(body.posture).toMatch(/adds only what that one source can read/);
     expect(body.pipeline).toMatch(/layer, not a second importer/);
   });
 
@@ -506,6 +508,6 @@ describe("an adapter cannot mint governance, and the catalogue still decides eve
   it("the coverage statement survives: findings still say no collector ships", async () => {
     const res = await get("/v1/shadow-ai/findings");
     expect(res.statusCode).toBe(200);
-    expect(res.json().coverage.statement).toMatch(/regulAIt ships no collector/);
+    expect(res.json().coverage.statement).toMatch(/No active discovery source is enabled, so nothing is scanned/);
   });
 });

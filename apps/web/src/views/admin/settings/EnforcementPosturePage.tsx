@@ -46,6 +46,8 @@ import { QueryGate, Stat, useAction } from "../adminKit";
 import { BomPostureCard, type ReceiptSigningKeyPosture } from "./BomPostureCard";
 import { OrgSettingsCard } from "./OrgSettingsCard";
 import { IsolationSettingsCard } from "../integrations/isolation/IsolationSettings";
+import { DiscoveryPostureCard } from "../governance/DiscoveryPostureCard";
+import type { DiscoveryPostureView } from "../governance/discoverySourcesModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -79,6 +81,8 @@ interface PostureReport {
   };
   /** ADR-0189 R25 item 19: where the receipt key comes from, or that there is none; informational, blocks nothing */
   receiptSigningKey?: ReceiptSigningKeyPosture;
+  /** ADR-0195 SD0: active discovery rows (reported, never a control) */
+  discovery?: DiscoveryPostureView;
 }
 
 /**
@@ -299,6 +303,9 @@ export default function EnforcementPosturePage() {
 
           {/* ADR-0190 decision 11 (owner decision A, enforce-only): the isolation settings, the same card as under Engines */}
           <IsolationSettingsCard />
+
+          {/* ADR-0195 SD0: sources enabled, static credentials, stale credentials, write scope unverified */}
+          <DiscoveryPostureCard posture={report?.discovery} />
         </QueryGate>
       </div>
     </>
