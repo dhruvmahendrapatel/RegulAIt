@@ -30,7 +30,8 @@
  *   /v1/workload-identities[...]            identities, credentials, own grants (S6 UI)
  *   /v1/delegation-grants[...]              list (a run's tree with ?runId=), inspect, cascade-revoke (S6 UI)
  *   /v1/identity/picker-sources             the options the identity forms offer (S6 UI)
- *   /v1/identity/signing-keys[...]          issuer key list, rotate, revoke (S3, built)
+ *   /v1/identity/signing-keys[...]          issuer key list, rotate, revoke (S3, built; the writes need a
+ *                                           `key_management` step-up instead, migration 0203)
  *   /v1/identity/spiffe-trust-bundles[...]  SPIFFE trust bundles: list, upload, revoke (S9, `oauth/spiffe-bundles.ts`)
  *
  * The routes are written out literally (not looped over IDENTITY_ROUTES) so the
@@ -53,8 +54,12 @@ import {
   jwksDocument,
   listIdentitySigningKeys,
   publishedSigningKeys,
+  resolveRotationTarget,
   revokeIdentitySigningKey,
+  revokeRefusal,
   rotateIdentitySigningKey,
+  signingKeyRevokeStepUp,
+  signingKeyRotateStepUp,
 } from "./identity-signing-keys.js";
 import { workloadIdentityAdminHandlers } from "./workload-identity-admin.js";
 import { workloadIdentityS6Handlers } from "./oauth/identity-admin.js";
@@ -106,8 +111,9 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   app.get("/v1/identity/spiffe-trust-bundles", s9.list);
   app.post("/v1/identity/spiffe-trust-bundles", s9.set);
   app.post("/v1/identity/spiffe-trust-bundles/:bundleId/revoke", s9.revoke);
-  // admin: the issuer's signing keys (public halves only; every write needs an
-  // `identity_manage` step-up and is audited inside identity-signing-keys.ts)
+  // admin: the issuer's signing keys (public halves only; every write needs a
+  // `key_management` step-up bound to the op and the exact key, migration 0203,
+  // and is audited inside identity-signing-keys.ts)
   app.get("/v1/identity/signing-keys", async (_req, reply) => {
     // ADR-0188 S7: and where the private halves come from (install-generated, operator-managed, missing)
     const view: IdentitySigningKeyListView = { items: await listIdentitySigningKeys(db), configuration: await identitySigningKeyConfiguration() };
@@ -115,10 +121,17 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   });
   app.post("/v1/identity/signing-keys/rotate", async (req, reply) => {
     const body = rotateIdentitySigningKeySchema.parse(req.body ?? {});
-    const su = await requireStepUp(db, req, reply, { kind: "identity_manage", facts: { op: "signing_key_rotate", kid: body.kid ?? null } });
+    // the key rotated TO is resolved first, so the grant names it (and a refused rotation spends none)
+    let target: string;
+    try {
+      target = await resolveRotationTarget(db, body.kid);
+    } catch (err) {
+      return signingKeyRefusal(reply, err);
+    }
+    const su = await requireStepUp(db, req, reply, signingKeyRotateStepUp(target));
     if (!su.ok) return reply;
     try {
-      const out = await rotateIdentitySigningKey(db, { kid: body.kid, actorUserId: req.authCtx.userId ?? SYSTEM_USER_ID });
+      const out = await rotateIdentitySigningKey(db, { kid: target, actorUserId: req.authCtx.userId ?? SYSTEM_USER_ID, stepUp: su.method });
       return reply.status(200).send(out);
     } catch (err) {
       return signingKeyRefusal(reply, err);
@@ -127,10 +140,12 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   app.post("/v1/identity/signing-keys/:kid/revoke", async (req, reply) => {
     const { kid } = kidParam.parse(req.params);
     revokeIdentitySigningKeySchema.parse(req.body ?? {});
-    const su = await requireStepUp(db, req, reply, { kind: "identity_manage", facts: { op: "signing_key_revoke", kid } });
+    const pre = await revokeRefusal(db, kid);
+    if (pre) return signingKeyRefusal(reply, pre);
+    const su = await requireStepUp(db, req, reply, signingKeyRevokeStepUp(kid));
     if (!su.ok) return reply;
     try {
-      const out = await revokeIdentitySigningKey(db, { kid, actorUserId: req.authCtx.userId ?? SYSTEM_USER_ID });
+      const out = await revokeIdentitySigningKey(db, { kid, actorUserId: req.authCtx.userId ?? SYSTEM_USER_ID, stepUp: su.method });
       return reply.status(200).send({ kid, ...out });
     } catch (err) {
       return signingKeyRefusal(reply, err);

@@ -39,6 +39,7 @@
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
 import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome } from "@regulait/shared";
+import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 
 /** the source as a scanner sees it */
 export interface ScanSource {
@@ -175,7 +176,7 @@ export function scannerRegistry(scanners: readonly Scanner[]): ScannerRegistry {
  * THE PRODUCTION REGISTRY. Empty in SD0: SD1 to SD4 add their scanners here
  * (one line each), and the admin page and `POST /v1/discovery/sources` read it.
  */
-export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([]);
+export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([...cloudDiscoveryScanners()]);
 
 /**
  * TEST ONLY: a scanner that calls nothing and reports the observations it was
