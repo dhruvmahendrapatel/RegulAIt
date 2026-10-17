@@ -317,13 +317,20 @@ export function registerCustomProviderRoutes(
     const relaxed = relaxationsAgainst(existing);
     const relaxation = Object.keys(relaxed).length > 0;
     const stepUpArgs = { kind: "settings_relax" as const, facts: { op: "egress_allow_host", host, values: relaxed } };
-    // looked at (not spent) here, so a request without a grant is answered at once; SPENT inside the transaction,
-    // after the row is locked and the relaxation re-decided, so a concurrent change never burns it
+    // looked at (not spent) here, so a request without a grant is answered at once; SPENT inside the transaction, on
+    // its own connection, after the row is locked, the relaxation re-decided and the row written, so neither a
+    // concurrent change nor the defensive insert-conflict 409 below ever burns it
     if (relaxation) {
       const look = await checkStepUp(db, req, stepUpArgs, { spend: false });
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
     type Out = { row: typeof egressAllowHosts.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
+    /** the in-transaction claim was refused: thrown so the written row and its audit row roll back */
+    class ClaimRefused extends Error {
+      constructor(readonly refused: { status: number; body: Record<string, unknown> }) {
+        super("step-up refused");
+      }
+    }
     const out = await db.transaction(async (tx): Promise<Out> => {
       // ALWAYS locked and re-decided, relaxing or not: a write decided as "no relaxation" (a note edit re-sending
       // opt-ins that were on) must not turn an opt-in back on that a concurrent admin just turned off
@@ -336,13 +343,6 @@ export function registerCustomProviderRoutes(
       if (JSON.stringify(relaxationsAgainst(now)) !== JSON.stringify(relaxed)) {
         return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
       }
-      let stepUp: string | null = null;
-      if (relaxation) {
-        // the single-use claim is made on the root handle, so a refusal row written by it survives this rollback
-        const su = await checkStepUp(db, req, stepUpArgs);
-        if (!su.ok) return { refused: { status: su.status, body: su.body } };
-        stepUp = su.method;
-      }
       // an addition never overwrites: a row that appeared anyway (a writer outside this route) is a 409, not an
       // upsert the audit row would wrongly call "added"
       const [written] = now
@@ -350,6 +350,14 @@ export function registerCustomProviderRoutes(
         : await tx.insert(egressAllowHosts).values(values).onConflictDoNothing({ target: egressAllowHosts.host }).returning();
       if (!written) {
         return { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } };
+      }
+      // insert first, then spend: the single-use claim is made on THIS transaction's connection once the row is
+      // written, so the conflict 409 above never burns the grant, and a refused claim throws to roll the row back
+      let stepUp: string | null = null;
+      if (relaxation) {
+        const su = await checkStepUp(tx as unknown as Db, req, stepUpArgs);
+        if (!su.ok) throw new ClaimRefused({ status: su.status, body: su.body });
+        stepUp = su.method;
       }
       // AUDITED: widening what the gateway may connect to is a governance act,
       // and opting a host into private ranges or plaintext doubly so.
@@ -374,6 +382,11 @@ export function registerCustomProviderRoutes(
           (relaxation ? " (a relaxation, confirmed with a step-up)" : ""),
       });
       return { row: written! };
+    }).catch(async (e: unknown): Promise<Out> => {
+      if (!(e instanceof ClaimRefused)) throw e;
+      // the claim's own `step-up-grant-refused` row rolled back with the write: a look records it again, spending nothing
+      await checkStepUp(db, req, stepUpArgs, { spend: false });
+      return { refused: e.refused };
     });
     if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
     return reply.status(201).send(out.row);

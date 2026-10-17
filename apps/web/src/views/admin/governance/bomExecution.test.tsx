@@ -68,7 +68,7 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
   it("reads the execution section from the signed body, with its thirteen sections", async () => {
     const view = m.readDecisionBom(await v2Response(PLACED), U(1));
     expect(view.bodyVersion).toBe("regulait.decision-bom.v2");
-    expect(view.execution).toEqual({ ...PLACED, offerId: null, imageDigest: null, runtimeFlagsSha256: null });
+    expect(view.execution).toEqual({ ...PLACED, offerId: null, imageDigest: null, runtimeFlagsSha256: null, relaxation: null });
     expect(view.placementReports).toEqual([]);
     expect(view.completeness.map((c) => c.section)).toEqual([...m.DECISION_BOM_SECTIONS_V2]);
     expect(view.completeness.find((c) => c.section === "execution")).toEqual({ section: "execution", status: "recorded", reason: null });
@@ -99,6 +99,23 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
       ["a v2 body without its execution key", (() => { const { execution: _e, ...doc } = r.document; return { ...r, document: doc, bom: { ...r.bom, body: JSON.stringify(doc) } }; })()],
     ] as const) {
       expect(() => m.readDecisionBom(bad, U(1)), what).toThrow(m.BomEvidenceError);
+    }
+  });
+  it("ADR-0190 owner decision C: a relaxed requirement names the relaxation (subject kind and id), from the signed body", async () => {
+    const relaxation = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: U(950), scopeKind: "mcp_server", scopeId: U(951) };
+    const view = m.readDecisionBom(await v2Response({ ...PLACED, relaxation }), U(1));
+    expect(view.execution!.relaxation).toEqual({ relaxationId: U(950), scopeKind: "mcp_server", scopeId: U(951) });
+    const out = html(<ExecutionFacts execution={view.execution!} />);
+    expect(out).toContain("Isolation relaxation");
+    expect(out).toContain("L3 lowered to L2 by an admin for this MCP server");
+    expect(out).toContain(U(950));
+    // NEGATIVE CONTROL: no relaxation, no row
+    expect(html(<ExecutionFacts execution={m.readDecisionBom(await v2Response(PLACED), U(1)).execution!} />)).not.toContain("Isolation relaxation");
+    // a malformed one makes the whole BOM unreadable, never shown in part
+    const r = await v2Response({ ...PLACED, relaxation });
+    for (const bad of [{ ...relaxation, subjectKind: "api_key" }, { ...relaxation, scopeKind: "org" }, { ...relaxation, extra: 1 }]) {
+      const doc = { ...r.document, execution: { ...r.document.execution, relaxation: bad } };
+      expect(() => m.readDecisionBom({ ...r, document: doc, bom: { ...r.bom, body: JSON.stringify(doc) } }, U(1)), JSON.stringify(bad)).toThrow(m.BomEvidenceError);
     }
   });
   it("shows where it ran, the class it required and why, the profile, the executor and the attestation references", () => {
@@ -136,7 +153,7 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
       { id: U(909), placementId: U(901), offerId: U(906), auditId: U(910), outcome: "cancelled", appliedClass: null, reportSha256: null, refusalCode: null, endCode: "later_gate", createdAt: T },
     ];
     const view = m.readDecisionBom(await v2Response(OFFERED, "mcp_tool", reports), U(1));
-    expect(view.execution).toEqual(OFFERED);
+    expect(view.execution).toEqual({ ...OFFERED, relaxation: null });
     expect(view.placementReports.map((r) => r.outcome)).toEqual(["placed", "cancelled"]);
     const facts = html(<ExecutionFacts execution={view.execution!} />);
     expect(facts).toContain("Offered to an executor");

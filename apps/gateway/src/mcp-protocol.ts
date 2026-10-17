@@ -424,7 +424,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
     if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName: grant }))) return false;
     if (decision.effect === "allow" && stdioClosure?.ok) {
       const placed = await placeGovernedStdio(tx as unknown as Db, decisionAuditId, {
-        ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null })),
+        ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null })),
         mcpServerId: serverId,
         imageDigest: stdioClosure.image,
       });
@@ -461,10 +461,13 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
       ...(placement
         ? {
-            execution:
-              placement.kind === "offered"
+            execution: {
+              ...(placement.kind === "offered"
                 ? { placementId: placement.placementId, offerId: placement.offerId }
-                : { placementId: placement.placementId, refusal: "execution_profile_unavailable", reason: placement.code },
+                : { placementId: placement.placementId, refusal: "execution_profile_unavailable", reason: placement.code }),
+              // ADR-0190 owner decision C: the subject kind and the relaxation the requirement relied on
+              ...(placement.relaxation ? { relaxation: placement.relaxation } : {}),
+            },
           }
         : {}),
     },
@@ -631,7 +634,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
   let upstream: Client | null = null;
   try {
     try {
-      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId } });
+      upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
         await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));

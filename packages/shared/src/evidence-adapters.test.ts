@@ -584,8 +584,9 @@ describe("the registry states what it cannot do", () => {
       // assumes nothing because the operator supplied the mapping.
       expect(a.verification).toMatch(/NOT been run against a real export|Assumes nothing about your file/);
     }
-    expect(EVIDENCE_ADAPTER_POSTURE).toMatch(/ships no collector/);
+    expect(EVIDENCE_ADAPTER_POSTURE).toMatch(/reaches out to nothing/);
     expect(EVIDENCE_ADAPTER_POSTURE).toMatch(/Coverage remains exactly what you exported/);
+    expect(EVIDENCE_ADAPTER_POSTURE).toMatch(/adds only what that one source can read/);
   });
 
   it("no adapter is named after a vendor whose export nobody here has seen", () => {

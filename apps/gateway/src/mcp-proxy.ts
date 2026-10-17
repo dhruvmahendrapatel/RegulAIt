@@ -273,7 +273,14 @@ export async function connectUpstream(
      * ADR-0190 I4: the call a stdio connect serves (person, project, delegation grant), the inputs of the
      * isolation placement. Absent = no project: a stdio connect is refused `policy_unresolved` (fail closed).
      */
-    placement?: { userId: string; projectId: string | null; delegationGrantId?: string | null; linkedOfferId?: string | null } | null;
+    placement?: {
+      userId: string;
+      projectId: string | null;
+      delegationGrantId?: string | null;
+      linkedOfferId?: string | null;
+      /** ADR-0190 owner decision C: the request's server-derived session facts (absent = not an interactive person) */
+      principal?: AbacPrincipalContext | null;
+    } | null;
   } = {},
 ): Promise<Client> {
   // ADR-0128 — THE RETRY SEQUENCE WRAPS BOTH GATES, and that is the point of
@@ -872,7 +879,7 @@ async function executeGovernedToolCallInner(
       try {
         // ADR-0190 I4 (review M1): for stdio this is an UNLINKED placement (`placeStdioSession`): there is no tool
         // decision yet, so its placement row is keyed to its own audit row and is outside the I4/I8 decision contract
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null } });
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         await operationFailed(err);
@@ -1017,7 +1024,7 @@ async function executeGovernedToolCallInner(
       if (!(await decisionPolicyStillCurrent(tx as unknown as Db, { policyEpoch, killSwitch }, { serverId, toolName }))) return false;
       if (decision.effect === "allow" && stdioClosure?.ok) {
         stdioPlacement = await placeGovernedStdio(tx as unknown as Db, decisionAuditId, {
-          ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null })),
+          ...(await stdioPlacementContext(tx as unknown as Db, { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, principal: args.principal ?? null })),
           mcpServerId: serverId,
           imageDigest: stdioClosure.image,
         });
@@ -1065,9 +1072,13 @@ async function executeGovernedToolCallInner(
         // ADR-0190 I4: the placement this decision made (its row is keyed to this audit row)
         ...(stdioPlacement
           ? {
-              execution: (stdioPlacement as GovernedStdioPlacement).kind === "offered"
-                ? { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).placementId, offerId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).offerId }
-                : { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).placementId, refusal: "execution_profile_unavailable", reason: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).code },
+              execution: {
+                ...((stdioPlacement as GovernedStdioPlacement).kind === "offered"
+                  ? { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).placementId, offerId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "offered" }>).offerId }
+                  : { placementId: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).placementId, refusal: "execution_profile_unavailable", reason: (stdioPlacement as Extract<GovernedStdioPlacement, { kind: "refused" }>).code }),
+                // ADR-0190 owner decision C: the subject kind and the relaxation the requirement relied on
+                ...((stdioPlacement as GovernedStdioPlacement).relaxation ? { relaxation: (stdioPlacement as GovernedStdioPlacement).relaxation } : {}),
+              },
             }
           : {}),
       },
@@ -1321,7 +1332,7 @@ async function executeGovernedToolCallInner(
       const refused = await breakerRefusesUpstream();
       if (refused) return refused;
       try {
-        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId } });
+        upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
       } catch (err) {
         await operationFailed(err);
         if (redactActive) throw new Error("MCP upstream connection failed under PII redaction");
@@ -2259,7 +2270,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
       if (needsManifest && !storedManifest) {
         // ADR-0190 I4 (review M1): for stdio, an UNLINKED placement for the manifest (no decision exists yet): its
         // own audit row, outside the I4/I8 decision contract (`placeStdioSession`)
-        upstream = await connectUpstream(db, serverRow, { retry: connectRetry, placement: { userId, projectId } });
+        upstream = await connectUpstream(db, serverRow, { retry: connectRetry, placement: { userId, projectId, principal: abacPrincipalFromRequest(req) } });
       }
       // B3S-02: the client left while we were connecting — close it now
       if (clientGone || reply.raw.destroyed || req.raw.socket?.destroyed) {
