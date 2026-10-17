@@ -1593,14 +1593,17 @@ settle what the decisions above leave open:
 
 ## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
 
-This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). No migration. It
+This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). Migration
+**0203** (`0203_execution_profile_revert.sql`, hand-written) replaces the profile guard function only; its journal entry
+is added when 0201 and 0202 are on main (point 8). It
 supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "cannot be versioned" for
 `engine-worker` only. These points settle what the sections above leave open:
 
 1. **The runc backend** (`packages/sandbox-executor/src/runc-backend.ts`, `REGULAIT_EXECUTOR_BACKEND=runc`). The
    Docker container core moved unchanged from the I4 backend into `docker-backend.ts`, and both backends extend it, so
-   an L1 hardened container has exactly the L2 hardening minus `runsc`: the `docker run` line differs only in `--runtime`
-   (tested). Open source first (ADR-0176): Docker's own CLI and Engine API, as for gVisor; runc is the Docker
+   an L1 hardened container has exactly the L2 hardening minus `runsc`. The `docker run` line differs only in
+   `--runtime` and in `--cgroupns private`, which the runc backend asks for explicitly (tested). The gVisor line does
+   not ask for it yet: adding it there is a #385 follow-up, so the I4 backend is unchanged until L2 is verified. Open source first (ADR-0176): Docker's own CLI and Engine API, as for gVisor; runc is the Docker
    Engine's default runtime (Apache-2.0), installed with the host's Docker, so nothing joins the executor image. No
    container client library was added: the I4 backend already drives the documented CLI and Engine API, and a
    second client would duplicate it.
@@ -1619,9 +1622,9 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      `unconfined`, and user-namespace remapping or rootless mode, so the container's uid is never a host uid. There is
      no opt-out in this release, because the gateway could not audit an executor-side switch (ADR-0180).
    - After the container starts, its own `HostConfig` (`docker inspect`) must show: the runtime it was asked for;
-     not privileged; `CapDrop: [ALL]` and no `CapAdd`; `no-new-privileges`; no `seccomp=unconfined`; a read-only
-     root; network `none`; IPC `none`; no shared PID or host user namespace; no bind mount; and only read-only volume
-     mounts.
+     not privileged; `CapDrop: [ALL]` and no `CapAdd`; `no-new-privileges`; no `seccomp=unconfined` and no
+     `apparmor=unconfined`; a read-only root; network `none`; IPC `none`; `CgroupnsMode: private`; no shared PID or
+     UTS namespace and no host user namespace; no device; no bind mount; and only read-only volume mounts.
    - Each contradiction makes its probe `not run` with a `host_*` code (or `container_runtime_mismatch`), so the
      report fails whatever the init printed.
 4. **A read-side backstop for every placement path.** `freshAttestation` is the one predicate behind the broker,
@@ -1639,8 +1642,18 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      relaxation.
    - A version must keep the engine shape (`engineWorkerProfileProblem`: engine_worker only, the one `jobs` input at
      `/jobs`). Otherwise it is refused 400 `engine_worker_profile_shape`.
-   - It is never retired. Engines always run under its latest version, which is how `resolveRequirement`, the broker
-     and the first-enable basis already read it. A new version is written with `shipped: false`.
+   - It is never retired. Engines always run under its version in force, which is how `resolveRequirement`, the
+     broker and the first-enable basis read it. A new version is written with `shipped: false`.
+   - **Revert (review of #397).** A new version whose body equals an EARLIER live version of the same profile puts
+     that version back in force as itself (same row, same digest, so its attestations still count) and withdraws the
+     versions above it, each retired, never deleted. A second row with that body cannot exist: the digest is the
+     SHA-256 of the body and unique (`execution_profiles_digest_uq`), and placements and attestations reference it.
+     A revert is judged like a new version, against the strict reference and the version in force. Going back to a
+     stricter version (an L1 engine-worker back to its exact shipped body) needs no step-up; going back to a looser
+     one needs the `settings_relax` step-up. It is audited `execution-profile-reverted` (a new
+     `ISOLATION_AUDIT_ACTIONS` entry) and is a compare-and-set under the per-name lock the guard takes. A withdrawn
+     version is never reinstated. "The version in force" is now the newest LIVE version, wherever the newest version
+     was read before: the version route, the placement default, and the panel's "New version".
 6. **L1 for engines stays off by default and needs every relaxation.** Decision 11 lets an admin relax the
    engine_worker floor to L1 (owner decision 4: audited, step-up), so the L1 path exists, and it is strict by
    default. An engine task places at L1 only when all of these hold:
@@ -1656,11 +1669,23 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      before `docker run`, and the handshake with the real init on the host (refused there: `uid_mismatch`). The I4
      and I5 backend suites pass unchanged on the shared core.
    - **Shared:** `engine-worker-profile.test.ts`, the versioning rules and the L2 defaults.
-   - **Gateway, on a real database:** `zz-adr0190-runc-l1.test.ts`. It covers the 0183 backstop, the broker at
+   - **Gateway, on the shared database:** `zz-adr0190-runc-l1.test.ts`. It covers the 0183 backstop, the broker at
      L1, L2 and L3, the forged-row backstop, engine placement under strict and under relaxed org floors, the
-     first-enable basis, and the version routes' refusals. The file writes no engine-worker version: in the shared
-     test database that would change every later suite's engine placement. The pure rules cover a successful write.
+     first-enable basis, and the version routes' refusals. It writes no engine-worker version. In `afterAll` it
+     revokes every executor it registered (its open offers withdrawn) and puts the org floors back to the values it
+     read in `beforeAll`.
+   - **Gateway, on a scratch database** (created and dropped by the file): `zz-adr0190-engine-worker-l1.test.ts`.
+     An engine task is offered at L1 only once all three relaxations and a fresh L1 attestation exist. A version
+     equal to the shipped body then reverts without a step-up and engines require L2 again. A looser revert needs the
+     step-up, and a withdrawn version is not reinstated. Versioning after a revert is expected to succeed once 0203 is
+     in the journal, and 409 `execution_profile_retired` until then.
    - **Web:** the panel's actions (`profileActions`, mirrored from the shared list) and one mocked e2e assertion.
+
+8. **Migration 0203.** The guard function from 0183 refused any new version once the NEWEST row was retired, so a
+   reverted profile could never be versioned again. 0203 refuses a new version only when NO version of the name is
+   live (the profile itself was retired, as before). The function keeps `SET search_path = pg_catalog, public,
+   pg_temp` (the 0185 guard), and no trigger or table is added. Until its journal entry lands, the gateway answers 409
+   `execution_profile_retired` for a version after a revert, never a 500.
 
 **Not verified (M-041).**
 - **A real runc run is pending execution.** The session that built this had no Docker daemon, so the runc backend has
@@ -1671,11 +1696,14 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
 - No compose service, runbook or INSTALL.md step for a runc executor was written: none has been executed, and another
   slice owns the compose stack. The environment variables are in `main.ts` (`REGULAIT_EXECUTOR_RUNC_RUNTIME`,
   `REGULAIT_EXECUTOR_RUNC_VERSION`, and the canary, init and socket variables both backends share).
-- The gateway database suite has not run in the session that wrote it (no database there); CI's database shards run
-  it. The mocked e2e assertion has not run locally (no browsers there).
+- Migration 0203 is written but NOT in the journal (0201 and 0202 are not on main yet), so no database applies it
+  until the master adds the entry. Its function was checked by hand against the 0185 guard (search_path pinned).
+- The gateway database suites (`zz-adr0190-runc-l1.test.ts` and the scratch-database
+  `zz-adr0190-engine-worker-l1.test.ts`) have not run in the session that wrote them (no database there); CI's
+  database shards run them. The mocked e2e assertion has not run locally (no browsers there).
 
-**Open questions this follow-up leaves (for the owner or the master).**
-1. **User namespaces are required for L1, with no opt-out.** Should a host that cannot enable userns-remap or
-   rootless mode be allowed L1 through an audited, gateway-side relaxation? This build says no (the strict default).
-2. **Apply the `HostConfig` check to gVisor too?** It would be a cheap, stricter read-side check for L2. It was left
-   out to keep the I4 backend's behaviour unchanged until #385 verifies L2.
+**Recorded (review of #397).**
+- **L1 requires user namespaces, with no opt-out.** This is kept strict. A relaxation (audited, gateway-side, never an
+  executor switch) is added only if a customer needs it.
+- **Follow-ups after #385 verifies L2:** apply the outside `HostConfig` check to the gVisor backend too, and pass
+  `--cgroupns private` on the gVisor line.

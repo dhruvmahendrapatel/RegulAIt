@@ -17,8 +17,9 @@
  * (`/info`) must have the runtime, a seccomp-capable build whose default is not `unconfined`, and user-namespace
  * remapping or rootless mode (so the container's uid is never a host uid; there is no opt-out in this release). After
  * the container starts, its own `HostConfig` (`docker inspect`) must show the runtime it was asked for, not privileged,
- * every capability dropped and none added, `no-new-privileges`, no `seccomp=unconfined`, a read-only root, network
- * `none`, IPC `none`, no shared PID or host user namespace, no bind mount, and only read-only volume mounts. Anything
+ * every capability dropped and none added, `no-new-privileges`, no `seccomp=unconfined` or `apparmor=unconfined`, a
+ * read-only root, network `none`, IPC `none`, a private cgroup namespace (asked for with `--cgroupns private`), no
+ * shared PID, UTS or host user namespace, no device, no bind mount, and only read-only volume mounts. Anything
  * the outside view contradicts makes the matching probe `not run` with a `host_*` code, so the report fails whatever
  * the init printed. The init's inside view (uid, capabilities, seccomp, root, egress, DNS, interfaces, credentials,
  * limits) corroborates, as on gVisor.
@@ -87,11 +88,16 @@ export function runcHostConfigFailures(hostConfig: ContainerHostConfig, containe
   const sec = strings(h.SecurityOpt);
   if (!sec.some((o) => o === "no-new-privileges" || o === "no-new-privileges=true" || o === "no-new-privileges:true")) out.push(["proc_status", "host_no_new_privileges"]);
   if (sec.some((o) => o === "seccomp=unconfined" || o === "seccomp:unconfined")) out.push(["seccomp_enforced", "host_seccomp_unconfined"]);
+  if (sec.some((o) => o === "apparmor=unconfined" || o === "apparmor:unconfined")) out.push(["runtime_identity", "host_apparmor_unconfined"]);
   if (h.ReadonlyRootfs !== true) out.push(["root_read_only", "host_root_writable"]);
   if (h.NetworkMode !== "none") out.push(["network_interfaces", "host_network"]);
   if (h.IpcMode !== "none") out.push(["runtime_identity", "host_ipc_shared"]);
   if (typeof h.PidMode === "string" ? h.PidMode !== "" : h.PidMode !== undefined && h.PidMode !== null) out.push(["runtime_identity", "host_pid_shared"]);
   if (h.UsernsMode === "host") out.push(["runtime_identity", "host_userns"]);
+  if (h.UTSMode === "host") out.push(["runtime_identity", "host_uts_shared"]);
+  // the backend asks for `--cgroupns private`: anything else (the host's, or not reported) is refused
+  if (h.CgroupnsMode !== "private") out.push(["runtime_identity", "host_cgroupns"]);
+  if ((Array.isArray(h.Devices) && h.Devices.length > 0) || (h.Devices !== null && h.Devices !== undefined && !Array.isArray(h.Devices))) out.push(["runtime_identity", "host_devices"]);
   if (strings(h.Binds).length > 0 || (h.Binds !== null && h.Binds !== undefined && !Array.isArray(h.Binds))) out.push(["no_executor_credentials", "host_bind_mount"]);
   const mounts = Array.isArray(h.Mounts) ? (h.Mounts as unknown[]) : h.Mounts === null || h.Mounts === undefined ? [] : null;
   if (mounts === null || mounts.some((m) => (m as { Type?: unknown } | null)?.Type !== "volume" || (m as { ReadOnly?: unknown }).ReadOnly !== true)) {
@@ -142,6 +148,11 @@ export class RuncDockerBackend extends DockerSandboxBackend {
 
   protected async containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck): Promise<boolean> {
     return rt.verified && containerRuntime === this.opts.runtimeName;
+  }
+
+  /** L1 asks for a private cgroup namespace explicitly (the host's is refused from outside) */
+  protected override runOptions(): { cgroupnsPrivate: boolean } {
+    return { cgroupnsPrivate: true };
   }
 
   protected probesFor(init: InitObservation, side: ExecutorSideObservation, _profile: ExecutionProfileBody, wanted: readonly AttestationProbe[]): ProbeSet {

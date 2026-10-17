@@ -62,6 +62,7 @@ import {
   executionProfiles,
   executorAttestations,
   executors,
+  gt,
   inArray,
   isNull,
   lt,
@@ -132,6 +133,20 @@ function profileVersionView(row: ExecutionProfileRow): ExecutionProfileVersionVi
 /** the shipped default an agent or stdio server runs under when nothing is assigned (decision 2: `restricted`) */
 async function latestVersion(db: Db, name: string): Promise<ExecutionProfileRow | null> {
   const [row] = await db.select().from(executionProfiles).where(eq(executionProfiles.name, name)).orderBy(desc(executionProfiles.version)).limit(1);
+  return row ?? null;
+}
+
+/**
+ * The version IN FORCE: the newest live (not retired) version. Normally the newest version; after a REVERT the
+ * versions above its target are withdrawn (retired one by one), so an earlier version is in force again.
+ */
+async function currentVersion(db: Db, name: string): Promise<ExecutionProfileRow | null> {
+  const [row] = await db
+    .select()
+    .from(executionProfiles)
+    .where(and(eq(executionProfiles.name, name), isNull(executionProfiles.retiredAt)))
+    .orderBy(desc(executionProfiles.version))
+    .limit(1);
   return row ?? null;
 }
 
@@ -220,18 +235,30 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
       const problem = engineWorkerProfileProblem(body);
       if (problem) return reply.status(400).send({ error: "engine_worker_profile_shape", detail: problem });
     }
-    if (latest?.retiredAt) return reply.status(409).send({ error: "execution_profile_retired", detail: "a retired profile is not versioned again" });
+    // the version in force (the newest live one); none live = the profile was retired
+    const current = await currentVersion(db, body.name);
+    if (latest && !current) return reply.status(409).send({ error: "execution_profile_retired", detail: "a retired profile is not versioned again" });
     const text = canonicalExecutionProfile(body);
     const digest = executionProfileDigest(body);
-    const [same] = await db.select({ id: executionProfiles.id }).from(executionProfiles).where(eq(executionProfiles.digest, digest));
-    if (same) return reply.status(409).send({ error: "execution_profile_unchanged", detail: "a version with this exact body exists" });
+    const [same] = await db.select().from(executionProfiles).where(eq(executionProfiles.digest, digest));
+    if (same) {
+      // REVERT (I5 follow-up review): the body IS an earlier live version of this profile, so it is put back in force
+      // as itself (same row, same digest, its attestations still valid) and the versions above it are withdrawn. The
+      // digest is the SHA-256 of the body and unique, so a second row with that body cannot exist.
+      if (current && name !== null && same.name === body.name && same.retiredAt === null && same.version < current.version) return revertTo(req, reply, same, current);
+      return reply.status(409).send({
+        error: "execution_profile_unchanged",
+        detail: !current || same.id === current.id ? "a version with this exact body exists" : "a version with this exact body exists and was withdrawn; a withdrawn version is not reinstated",
+      });
+    }
     // judged against the strict reference AND the version it replaces (ADR-0186 decision 26). The reference is
     // `restricted`, or a versionable shipped profile's own shipped body (engine-worker: its posture was accepted when it
     // shipped; a lower minClass, or anything else looser than that body, is a relaxation)
     const reference = executionProfileReference(body.name);
     const vsReference = executionProfileRelaxations(body, reference);
     const vsRestricted = executionProfileRelaxations(body, RESTRICTED_EXECUTION_PROFILE);
-    const vsPrevious = latest ? executionProfileRelaxations(body, parseBody(latest)) : [];
+    // "the version it replaces" is the version in force
+    const vsPrevious = current ? executionProfileRelaxations(body, parseBody(current)) : [];
     const relaxations = [...new Set([...vsReference, ...vsPrevious])];
     let stepUp: string | null = null;
     if (relaxations.length > 0) {
@@ -248,7 +275,13 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
         .returning()) as [ExecutionProfileRow];
     } catch (e) {
       // a concurrent version took the number (the guard serialises versioning per name)
-      if (uniqueViolation(e) || String((e as Error)?.message ?? "").includes("must be version")) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+      const message = String((e as Error)?.message ?? "") + String((e as { cause?: Error })?.cause?.message ?? "");
+      if (uniqueViolation(e) || message.includes("must be version")) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+      // a database whose profile guard predates migration 0203 refuses a version after a revert (its newest row is
+      // withdrawn): refused, never a 500
+      if (message.includes("is retired")) {
+        return reply.status(409).send({ error: "execution_profile_retired", detail: "the newest version was withdrawn by a revert, and this database's profile guard refuses a further version until migration 0203 is applied" });
+      }
       throw e;
     }
     await auditExecutor(db, {
@@ -256,7 +289,7 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
       objectType: "execution_profile",
       objectId: row.id,
       ruleId: version === 1 ? "execution-profile-created" : "execution-profile-versioned",
-      detail: { name: row.name, version, digest, minClass: row.minClass, previousDigest: latest?.digest ?? null, relaxations },
+      detail: { name: row.name, version, digest, minClass: row.minClass, previousDigest: current?.digest ?? null, relaxations },
       reason: `execution profile ${row.name} v${version} (${row.minClass}) ${version === 1 ? "created" : "versioned"}; digest ${digest.slice(0, 12)} (ADR-0190 decision 2)`,
     });
     if (relaxations.length > 0) {
@@ -270,6 +303,68 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
       });
     }
     return reply.status(201).send({ ...profileVersionView(row), body: parseBody(row) });
+  }
+
+  /**
+   * Put an earlier live version back in force (I5 follow-up review). Judged like a new version: against the profile's
+   * strict reference and against the version in force, so going back to a stricter version (an engine-worker at L1
+   * back to its shipped L2 body) needs no step-up, and going back to a looser one does. Audited; compare-and-set under
+   * the same per-name lock the version guard takes; the versions above the target are withdrawn, never deleted.
+   */
+  async function revertTo(req: FastifyRequest, reply: FastifyReply, target: ExecutionProfileRow, current: ExecutionProfileRow) {
+    const targetBody = parseBody(target);
+    const reference = executionProfileReference(target.name);
+    const vsReference = executionProfileRelaxations(targetBody, reference);
+    const vsCurrent = executionProfileRelaxations(targetBody, parseBody(current));
+    const relaxations = [...new Set([...vsReference, ...vsCurrent])];
+    let stepUp: string | null = null;
+    if (relaxations.length > 0) {
+      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "execution_profile_revert", name: target.name, digest: target.digest, relaxations } });
+      if (!su.ok) return reply;
+      stepUp = su.method;
+    }
+    const withdrawn = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`execution_profiles:${target.name}`}))`);
+      // compare-and-set: the version in force and the target are still what this request judged
+      const live = await txDb
+        .select()
+        .from(executionProfiles)
+        .where(and(eq(executionProfiles.name, target.name), isNull(executionProfiles.retiredAt)))
+        .orderBy(desc(executionProfiles.version));
+      if (live[0]?.id !== current.id || !live.some((r) => r.id === target.id)) return null;
+      const out = await txDb
+        .update(executionProfiles)
+        .set({ retiredAt: sql`now()`, retiredBy: req.authCtx?.userId ?? null })
+        .where(and(eq(executionProfiles.name, target.name), isNull(executionProfiles.retiredAt), gt(executionProfiles.version, target.version)))
+        .returning();
+      await auditExecutor(txDb, {
+        userId: actor(req),
+        objectType: "execution_profile",
+        objectId: target.id,
+        ruleId: "execution-profile-reverted",
+        detail: {
+          name: target.name,
+          version: target.version,
+          digest: target.digest,
+          minClass: target.minClass,
+          revertedFrom: { version: current.version, digest: current.digest, minClass: current.minClass },
+          withdrawnVersions: out.map((r) => ({ version: r.version, digest: r.digest })),
+          reference: reference.name,
+          relaxations,
+          stepUp,
+        },
+        reason: `execution profile ${target.name} reverted to v${target.version} (${target.minClass}) from v${current.version} (${current.minClass}); ${out.length} version(s) withdrawn${relaxations.length > 0 ? `; looser in: ${relaxations.join(", ")} (step-up ${stepUp})` : ""} (ADR-0190 decision 2)`,
+      });
+      return out;
+    });
+    if (!withdrawn) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return reply.status(200).send({
+      ...profileVersionView(target),
+      body: targetBody,
+      revertedFrom: { version: current.version, digest: current.digest },
+      withdrawnVersions: withdrawn.map((r) => r.version),
+    });
   }
 
   app.post("/v1/execution-profiles", async (req, reply) => writeVersion(req, reply, null));

@@ -15,10 +15,12 @@
  *    (an API key cannot give it); a version must keep the engine shape; engine-worker is never retired; `restricted`
  *    is still never versioned.
  *
- * Global state (M-068): the org floors changed in one test are restored in `finally`; rows this file writes are scoped
- * by this run's ids. This file NEVER writes an engine-worker version: in this shared database that would change the
- * profile every later suite's engine tasks are placed under. A successful version write is covered by the pure rules
- * (`packages/shared/src/isolation/engine-worker-profile.test.ts`) and the refusals here.
+ * Global state (M-068): the org floors changed in one test are put back to the values read in `beforeAll` (not the
+ * strict defaults: another suite may run with other values); every executor this file registers is revoked in
+ * `afterAll` and its open offers withdrawn; other rows are scoped by this run's ids. This file NEVER writes an
+ * engine-worker version: in this shared database that would change the profile every later suite's engine tasks are
+ * placed under. The L1 engine path that does write one (placed at L1 with all three relaxations, then reverted to the
+ * shipped body) runs on its own scratch database: `zz-adr0190-engine-worker-l1.test.ts`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
@@ -26,12 +28,15 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
   aiUseCases,
+  and,
   createDb,
   desc,
   eq,
   executionOffers,
   executionPlacements,
   executionProfiles,
+  executors,
+  inArray,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
@@ -42,7 +47,6 @@ import {
   canonicalExecutionProfile,
   EXECUTION_PROFILE_SCHEMA,
   executionProfileDigest,
-  ISOLATION_STRICT_DEFAULTS,
   SHIPPED_EXECUTION_PROFILES,
   type ExecutionProfileBody,
 } from "@regulait/shared";
@@ -73,6 +77,10 @@ let adminAuth: { authorization: string };
 /** an admin's L1 profile (the shipped restricted at hardened_container), written as its own row for this run */
 let l1Digest: string;
 const restores: Array<() => Promise<void>> = [];
+/** every executor this file registers (revoked in afterAll, its open offers withdrawn) */
+const createdExecutors: string[] = [];
+/** the org floors as they were before this file ran (put back after the one test that changes them) */
+let priorFloors: { isolationFloorEngineWorker: string; isolationFloorInternal: string };
 const rows = <R>(r: unknown) => (r as { rows: R[] }).rows;
 const inject = (method: "GET" | "POST", url: string, headers: Record<string, string>, payload?: unknown) =>
   app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -97,6 +105,7 @@ async function runcExecutor(name: string, attest: Array<{ digest: string; cls: s
           values (${identityId}, ${`l1-${name}-${RUN}`}, 'runc', '1.2.6', '["hardened_container"]'::jsonb) returning id`,
     ),
   )[0]!.id;
+  createdExecutors.push(executorId);
   for (const a of attest) {
     await db.execute(
       sql`insert into executor_attestations (executor_id, profile_digest, class, report_sha256, report, verdict, observed_at, expires_at)
@@ -128,9 +137,24 @@ beforeAll(async () => {
   const l1: ExecutionProfileBody = { ...structuredClone(SHIPPED_EXECUTION_PROFILES.restricted), schema: EXECUTION_PROFILE_SCHEMA, name: `l1-team-${RUN}`, minClass: "hardened_container" };
   l1Digest = executionProfileDigest(l1);
   await db.insert(executionProfiles).values({ name: l1.name, version: 1, body: canonicalExecutionProfile(l1), digest: l1Digest, minClass: "hardened_container", shipped: false, createdBy: adminId });
+  const [floors] = await db.select({ isolationFloorEngineWorker: orgSettings.isolationFloorEngineWorker, isolationFloorInternal: orgSettings.isolationFloorInternal }).from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  priorFloors = { isolationFloorEngineWorker: String(floors!.isolationFloorEngineWorker), isolationFloorInternal: String(floors!.isolationFloorInternal) };
 }, 120_000);
 
 afterAll(async () => {
+  // M-068: nothing this file registered can take work after it: open offers withdrawn, executors revoked (terminal; an
+  // executor is never deleted), through the admin route so the revoke is audited like any other
+  if (createdExecutors.length > 0) {
+    await db.execute(
+      sql`update execution_offers set status = 'withdrawn', ended_at = now() where executor_id in (${sql.join(createdExecutors.map((id) => sql`${id}::uuid`), sql`, `)}) and status in ('offered', 'accepted')`,
+    );
+    for (const id of createdExecutors) {
+      const r = await inject("POST", `/v1/executors/${id}/revoke`, adminAuth, {});
+      if (r.statusCode !== 200) await db.update(executors).set({ status: "revoked", updatedAt: sql`now()` }).where(and(eq(executors.id, id), sql`${executors.status} <> 'revoked'`));
+    }
+    const left = await db.select({ id: executors.id }).from(executors).where(and(inArray(executors.id, createdExecutors), sql`${executors.status} <> 'revoked'`));
+    expect(left).toEqual([]);
+  }
   for (const r of restores.reverse()) await r();
   await app.close();
 });
@@ -213,7 +237,7 @@ describe("engine tasks: the engine_worker floor stays L2 (OWNER DECISION 4) agai
     } finally {
       await db
         .update(orgSettings)
-        .set({ isolationFloorEngineWorker: ISOLATION_STRICT_DEFAULTS.isolationFloorEngineWorker, isolationFloorInternal: ISOLATION_STRICT_DEFAULTS.isolationFloorInternal })
+        .set(priorFloors as Partial<typeof orgSettings.$inferInsert>)
         .where(eq(orgSettings.id, ORG_SETTINGS_ID));
     }
   });

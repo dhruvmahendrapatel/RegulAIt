@@ -221,6 +221,8 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-profile-versioned",
   "execution-profile-retired",
   "execution-profile-relaxed",
+  // ADR-0190 I5 follow-up: a profile reverted to an earlier live version (the versions above it withdrawn)
+  "execution-profile-reverted",
   "executor-registered",
   // I3: the executor's own announce over its channel (what it is, what runtime it runs)
   "executor-announced",

@@ -112,6 +112,9 @@ export interface ContainerHostConfig {
   IpcMode?: unknown;
   PidMode?: unknown;
   UsernsMode?: unknown;
+  UTSMode?: unknown;
+  CgroupnsMode?: unknown;
+  Devices?: unknown;
   Binds?: unknown;
   Mounts?: unknown;
 }
@@ -143,6 +146,11 @@ export interface DockerRunInput {
    * profile's input path (Docker's `volume-subpath`, Engine 26 or later)
    */
   input?: { volume: string; subpath: string; mountPath: string } | null;
+  /**
+   * the runc backend: a private cgroup namespace, asked for explicitly (`--cgroupns private`) rather than left to the
+   * daemon's default. The gVisor line is unchanged until #385 verifies L2 (a follow-up there).
+   */
+  cgroupnsPrivate?: boolean;
 }
 
 /**
@@ -208,6 +216,7 @@ export function dockerRunArgs(input: DockerRunInput): string[] {
     "none",
     "--ipc",
     "none",
+    ...(input.cgroupnsPrivate ? ["--cgroupns", "private"] : []),
     "--read-only",
     "--tmpfs",
     `${work}:${tmpfsOpts.join(",")}`,
@@ -563,6 +572,10 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
   protected abstract checkRuntime(force: boolean): Promise<RuntimeCheck>;
   /** after the container started: does THIS container's runtime (docker inspect) carry the backend's evidence? */
   protected abstract containerRuntimeVerified(containerRuntime: string | null, rt: RuntimeCheck): Promise<boolean>;
+  /** extra `docker run` choices a backend makes (the runc backend asks for a private cgroup namespace) */
+  protected runOptions(): { cgroupnsPrivate: boolean } {
+    return { cgroupnsPrivate: false };
+  }
   /** the report's probes from the init's line and the executor's outside observation */
   protected abstract probesFor(init: InitObservation, side: ExecutorSideObservation, profile: ExecutionProfileBody, wanted: readonly AttestationProbe[]): ProbeSet;
 
@@ -657,7 +670,7 @@ export abstract class DockerSandboxBackend implements SandboxBackend {
     };
     let args: string[];
     try {
-      args = dockerRunArgs({ name, runtimeName: this.options.runtimeName, image, profile, canary: kind === "canary", seccompDir: this.options.seccompDir ?? null, initVolume: this.options.initVolume, input });
+      args = dockerRunArgs({ name, runtimeName: this.options.runtimeName, image, profile, canary: kind === "canary", seccompDir: this.options.seccompDir ?? null, initVolume: this.options.initVolume, input, ...this.runOptions() });
     } catch (e) {
       await cleanupInput();
       throw e;

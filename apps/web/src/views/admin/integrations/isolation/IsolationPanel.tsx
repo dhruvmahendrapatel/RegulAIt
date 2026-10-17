@@ -280,9 +280,9 @@ function NewProfileDialog(props: { profiles: ProfileVersion[]; onClose: () => vo
   );
 }
 
-/** is this the newest version of its profile in the list? */
+/** is this the version in force of its profile (the newest LIVE one: a revert withdraws the versions above it)? */
 const isLatestVersion = (p: ProfileVersion, rows: ProfileRow[]) =>
-  !rows.some((o) => !isUnreadable(o) && o.name === p.name && o.version > p.version);
+  !rows.some((o) => !isUnreadable(o) && o.name === p.name && o.retiredAt === null && o.version > p.version);
 
 /**
  * `POST /v1/execution-profiles/:name/versions`: version n+1 of a custom profile or of `engine-worker`, from its current

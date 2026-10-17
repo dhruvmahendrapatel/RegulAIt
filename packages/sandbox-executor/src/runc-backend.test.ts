@@ -54,14 +54,19 @@ const valueAfter = (args: string[], flag: string) => {
 };
 
 describe("the runc hardened container is the gVisor sandbox minus runsc", () => {
-  it("the docker run line differs from the runsc line ONLY in the runtime name", () => {
+  it("the docker run line is the runsc line with the runtime name changed and a private cgroup namespace added", () => {
     for (const profile of [restricted, l1, SHIPPED_EXECUTION_PROFILES["engine-worker"]]) {
       const input = { volume: "regulait-in", subpath: "regulait-sbx-x/jobs", mountPath: "/jobs" };
       const withInput = profile.filesystem.inputs.length > 0 ? input : null;
       const runsc = dockerRunArgs({ name: "regulait-sbx-x", runtimeName: "runsc", image: IMAGE, profile, canary: false, initVolume: "regulait-init", input: withInput });
-      const runc = dockerRunArgs({ name: "regulait-sbx-x", runtimeName: "runc", image: IMAGE, profile, canary: false, initVolume: "regulait-init", input: withInput });
+      const runc = dockerRunArgs({ name: "regulait-sbx-x", runtimeName: "runc", image: IMAGE, profile, canary: false, initVolume: "regulait-init", input: withInput, cgroupnsPrivate: true });
       expect(valueAfter(runc, "--runtime")).toBe("runc");
-      expect(runc.map((a) => (a === "runc" ? "runsc" : a))).toEqual(runsc);
+      expect(valueAfter(runc, "--cgroupns")).toBe("private");
+      // the gVisor line does not ask for it yet (unchanged until #385 verifies L2; a follow-up there)
+      expect(runsc).not.toContain("--cgroupns");
+      const i = runc.indexOf("--cgroupns");
+      const withoutCgroupns = [...runc.slice(0, i), ...runc.slice(i + 2)];
+      expect(withoutCgroupns.map((a) => (a === "runc" ? "runsc" : a))).toEqual(runsc);
       // the hardening, spelled out once more for L1
       for (const f of ["--read-only", "--cap-drop", "--network", "--ipc", "--user", "--pids-limit", "--memory", "--memory-swap", "--cpus"]) expect(runc).toContain(f);
       expect(valueAfter(runc, "--network")).toBe("none");
@@ -113,6 +118,9 @@ const goodHostConfig = (): ContainerHostConfig => ({
   IpcMode: "none",
   PidMode: "",
   UsernsMode: "",
+  UTSMode: "",
+  CgroupnsMode: "private",
+  Devices: [],
   Binds: null,
   Mounts: [{ Type: "volume", Source: "regulait-init", Target: "/.regulait-init", ReadOnly: true }],
 });
@@ -204,6 +212,11 @@ describe("the outside view decides: each HostConfig property made untrue fails t
     ["a writable volume", (h) => (h.Mounts = [{ Type: "volume", Source: "v", Target: "/x", ReadOnly: false }]), "no_executor_credentials", "host_mount_not_read_only_volume"],
     ["a bind in Mounts", (h) => (h.Mounts = [{ Type: "bind", Source: "/", Target: "/x", ReadOnly: true }]), "no_executor_credentials", "host_mount_not_read_only_volume"],
     ["another runtime", (h) => (h.Runtime = "crun"), "runtime_identity", "container_runtime_mismatch"],
+    ["apparmor unconfined", (h) => (h.SecurityOpt = ["no-new-privileges=true", "apparmor=unconfined"]), "runtime_identity", "host_apparmor_unconfined"],
+    ["the host UTS namespace", (h) => (h.UTSMode = "host"), "runtime_identity", "host_uts_shared"],
+    ["the host cgroup namespace", (h) => (h.CgroupnsMode = "host"), "runtime_identity", "host_cgroupns"],
+    ["no cgroup namespace reported", (h) => delete h.CgroupnsMode, "runtime_identity", "host_cgroupns"],
+    ["a host device", (h) => (h.Devices = [{ PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm", CgroupPermissions: "rwm" }]), "runtime_identity", "host_devices"],
   ];
   it.each(cases)("%s fails", (_n, mutate, probe, code) => {
     const h = goodHostConfig();
@@ -317,6 +330,7 @@ describe("the runc backend on this host (the real init in place of docker run)",
     const b = backend(calls);
     const h = await b.start(offer, l1, "hardened_container");
     expect(valueAfter(calls[0]!, "--runtime")).toBe("runc");
+    expect(valueAfter(calls[0]!, "--cgroupns")).toBe("private");
     const probes = await h.probe(requiredReportProbes(l1, "runc", "hardened_container"));
     const r = buildReport({ kind: "placement", identifier: ID, backend: b.describe(), profileDigest: L1_DIGEST, cls: "hardened_container", probes, offerId: offer.id, imageDigest: h.imageDigest });
     const v = evaluateExecutorReport(r, { profile: l1, profileDigest: L1_DIGEST, backend: "runc", classesDeclared: ["hardened_container"], requiredClass: "hardened_container" });
