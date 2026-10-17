@@ -202,7 +202,16 @@ import { registerDeployGateRoutes } from "./deploy-gate.js";
 import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerExecutionControlRoutes } from "./execution-control.js";
 import { registerInventoryRoutes } from "./inventory.js";
-import { changeOwner, checkOwnerTarget, ownerChangeGate, registerOwnershipRoutes, resolveRegistrationOwner, withOwnership } from "./ownership.js";
+import {
+  auditOwnerChanged,
+  changeOwner,
+  checkOwnerTarget,
+  ownerChangeGate,
+  ownershipStateOf,
+  registerOwnershipRoutes,
+  resolveRegistrationOwner,
+  withOwnership,
+} from "./ownership.js";
 // ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
 // queue carries the keep/revoke decisions) and the campaign CRUD routes.
 import {
@@ -460,7 +469,7 @@ import { registerSchedulerRoutes } from "./scheduler-api.js";
 // ADR-0186 (batch 4) — the foundation registers every §4.9 route; each module
 // answers 501 not_built until its slice lands (A/B Claude, R/S/V Codex)
 import { registerPasskeyRoutes } from "./passkeys.js";
-import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, revocationLiftStepUp } from "./step-up.js";
+import { approvalRuleStepUp, CHANGED_CONCURRENTLY, checkStepUp, ownerChangeStepUpArgs, registerStepUpRoutes, requireStepUp, revocationLiftStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { ApprovalRuleWriteRefusedError, isApproverRole, lockApproverRoles, namedApproverSeatExists } from "./approval-pool.js";
 import {
   decisionView,
@@ -676,7 +685,12 @@ function auditWhere(q: AuditFilterInput, from: Date | null, to: Date | null): SQ
 
 /** a step-up refused inside a write's transaction: thrown so the write rolls back, answered after it */
 class StepUpRefusedInTx extends Error {
-  constructor(readonly status: number, readonly body: Record<string, unknown>) {
+  constructor(
+    readonly status: number,
+    readonly body: Record<string, unknown>,
+    /** the refused check, when it was claimed on the transaction's connection (its refusal row is re-recorded) */
+    readonly args?: StepUpCheckArgs,
+  ) {
     super("step_up_refused_in_transaction");
   }
 }
@@ -2192,14 +2206,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const shared = await refuseSharedIdentityAudience(db, serverId, nextUrl);
       if (shared) return reply.status(shared.status).send(shared.body);
     }
-    // ADR-0185 I9 — an owner named on PATCH goes through the same audited change as PUT …/owner. A refused
-    // request changes NOTHING: the owner target is validated (its refusal audited by the one owner writer) and
-    // both step-ups are looked at (not spent) before anything is written; then the ranges grant is spent, the
-    // columns are written (a compare-and-set), and the owner change runs last, spending its own grant.
-    const ownerChanges = body.ownerUserId !== undefined && body.ownerUserId !== before.ownerUserId;
-    if (ownerChanges) {
+    // ADR-0185 I9 — an owner named on PATCH is the same audited change as PUT …/owner (the same step-up and audit
+    // row). A refused request changes NOTHING: the owner target is validated (its refusal audited by the one owner
+    // writer) and both step-ups are looked at (not spent) before anything is written; then the columns AND the owner
+    // are written in ONE conditional update (a compare-and-set on the posture and the owner the step-ups were decided
+    // on), and both grants are spent in that transaction, on its connection, after the write.
+    // The comparison, the step-up look and the claim all use the owner id as the database returns it (`ownerTarget`,
+    // lowercased by Postgres): an uppercase spelling of the current owner is no change, and the look's facts match
+    // the claim's.
+    let ownerChanges = false;
+    let ownerTarget: string | null = null;
+    if (body.ownerUserId !== undefined && body.ownerUserId !== before.ownerUserId) {
       const target = await checkOwnerTarget(db, body.ownerUserId ?? null);
-      if (!target.ok) {
+      if (target.ok) {
+        ownerTarget = target.ownerUserId;
+        ownerChanges = ownerTarget !== before.ownerUserId;
+      } else {
         const refused = await changeOwner(db, {
           kind: "mcp_server",
           id: serverId,
@@ -2216,9 +2238,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
     if (ownerChanges) {
-      const look = await checkStepUp(db, req, ownerChangeStepUpArgs("mcp_server", serverId, body.ownerUserId ?? null), { spend: false });
+      const look = await checkStepUp(db, req, ownerChangeStepUpArgs("mcp_server", serverId, ownerTarget), { spend: false });
       if (!look.ok) return reply.status(look.status).send(look.body);
     }
+    const ownerStepUpArgs = ownerChanges ? ownerChangeStepUpArgs("mcp_server", serverId, ownerTarget) : null;
+    const fromOwnership = ownerChanges ? await ownershipStateOf(db, before.ownerUserId) : null;
     const patch: Partial<typeof mcpServers.$inferInsert> = {
       ...(body.name !== undefined ? { name: body.name } : {}),
       // a stdio row's url IS its name (`stdio:<name>`, a DB CHECK): a rename
@@ -2231,6 +2255,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ...(identity.write !== null ? { identityPropagation: identity.write } : {}),
       ...(disclosure.write !== null ? { discloseAgentWorkloadIds: disclosure.write } : {}),
       ...stdioPatch,
+      ...(ownerChanges ? { ownerUserId: ownerTarget } : {}),
     };
     let row: typeof mcpServers.$inferSelect = before;
     // ADR-0185: a body that only restates the transport (or only changes the
@@ -2239,8 +2264,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       let rangesStepUp: string | null = null;
       // Class A, for EVERY write that touches the egress posture (relaxing or not): it applies only if the private
       // ranges AND the url it was decided on are unchanged, so a concurrent change (another admin closing the ranges,
-      // or moving the url) is never overwritten by a write decided against the old values. The ranges grant is
-      // spent inside the same transaction AFTER that compare-and-set, so a 409 never burns it.
+      // or moving the url) is never overwritten by a write decided against the old values; an owner change applies
+      // only if the owner is still the one its step-up was decided on, in the SAME statement, so a concurrent change
+      // can never leave these columns written without the owner change (or the reverse). The grants are spent inside
+      // the same transaction, on its connection, AFTER that compare-and-set, so a 409 never burns them; a refused
+      // claim throws and rolls the write back.
       const touchesPosture =
         body.allowPrivateRanges !== undefined || body.url !== undefined || identity.write !== null || disclosure.write !== null;
       type Patched = { row: typeof mcpServers.$inferSelect } | { refused: { status: number; body: Record<string, unknown> } };
@@ -2254,32 +2282,50 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .update(mcpServers)
           .set(patch)
           .where(
-            touchesPosture
-              ? and(
-                  eq(mcpServers.id, serverId),
-                  before.allowPrivateRanges === null
-                    ? isNull(mcpServers.allowPrivateRanges)
-                    : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
-                  eq(mcpServers.url, before.url),
-                  eq(mcpServers.identityPropagation, before.identityPropagation),
-                  eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
-                )
-              : eq(mcpServers.id, serverId),
+            and(
+              eq(mcpServers.id, serverId),
+              ...(touchesPosture
+                ? [
+                    before.allowPrivateRanges === null
+                      ? isNull(mcpServers.allowPrivateRanges)
+                      : eq(mcpServers.allowPrivateRanges, before.allowPrivateRanges),
+                    eq(mcpServers.url, before.url),
+                    eq(mcpServers.identityPropagation, before.identityPropagation),
+                    eq(mcpServers.discloseAgentWorkloadIds, before.discloseAgentWorkloadIds),
+                  ]
+                : []),
+              ...(ownerChanges ? [sql`${mcpServers.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`] : []),
+            ),
           )
           .returning();
         if (!written) {
-          return touchesPosture
+          return touchesPosture || ownerChanges
             ? { refused: { status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } } }
             : { refused: { status: 404, body: { error: "unknown_server" } } };
         }
+        // claimed on THIS transaction's connection (never a second pooled one while the row lock is held); a
+        // refusal throws, rolling back the write and every claim made before it
+        const t = tx as unknown as Db;
         if (rangesStepUpArgs) {
-          // claimed on the root handle: single use, and its refusal row survives this transaction's rollback
-          const su = await checkStepUp(db, req, rangesStepUpArgs);
-          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body);
+          const su = await checkStepUp(t, req, rangesStepUpArgs);
+          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body, rangesStepUpArgs);
           rangesStepUp = su.method;
         }
+        if (ownerStepUpArgs) {
+          const su = await checkStepUp(t, req, ownerStepUpArgs);
+          if (!su.ok) throw new StepUpRefusedInTx(su.status, su.body, ownerStepUpArgs);
+          await auditOwnerChanged(t, {
+            kind: "mcp_server",
+            id: serverId,
+            name: before.name,
+            from: before.ownerUserId,
+            to: written.ownerUserId,
+            fromOwnership: fromOwnership!,
+            actorUserId: req.authCtx.userId,
+          });
+        }
         // every change is on the trail IN the write's transaction: an audit row that cannot be written rolls the
-        // change back, so no posture change is ever left unaudited (a step-up grant spent above stays spent)
+        // change back with the grants claimed above, so no posture change is ever left unaudited
         // the private-range posture decides which network space this server's url may reach: every change of it is
         // on the trail with both values, and an opening one as a relaxation with its step-up
         if (body.allowPrivateRanges !== undefined && (body.allowPrivateRanges ?? null) !== before.allowPrivateRanges) {
@@ -2349,18 +2395,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           await clearServerRelaxationOnProgramChange(tx as unknown as Db, { serverId, actorUserId: req.authCtx.userId ?? null, label });
         }
         return { row: written };
-      }).catch((err: unknown) => {
-        if (err instanceof StepUpRefusedInTx) return { refused: { status: err.status, body: err.body } } as Patched;
-        throw err;
+      }).catch(async (err: unknown) => {
+        if (!(err instanceof StepUpRefusedInTx)) throw err;
+        // the claim's own `step-up-grant-refused` row rolled back with the write: a look records it again, spending nothing
+        if (err.args) await checkStepUp(db, req, err.args, { spend: false });
+        return { refused: { status: err.status, body: err.body } } as Patched;
       });
       if ("refused" in out) return reply.status(out.refused.status).send(out.refused.body);
       row = out.row;
     }
-    if (body.ownerUserId !== undefined) {
+    // an owner named but unchanged: the one owner writer records the re-statement, as PUT …/owner does
+    if (body.ownerUserId !== undefined && !ownerChanges) {
       const owned = await changeOwner(db, {
         kind: "mcp_server",
         id: serverId,
-        ownerUserId: body.ownerUserId,
+        // the current owner, as stored (the body may spell it in another case)
+        ownerUserId: before.ownerUserId,
         actorUserId: req.authCtx.userId,
         gate: ownerChangeGate(db, req, "mcp_server", serverId), // ADR-0186 A: owner_change step-up
       });

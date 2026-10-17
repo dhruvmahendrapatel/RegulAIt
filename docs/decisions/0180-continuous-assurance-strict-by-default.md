@@ -186,3 +186,19 @@ Two security reviews followed, with three fix rounds. No migration besides 0155 
   - The seeded *Demo assurance suite* runs meet the evidence bar.
   - Fraud Detection carries a seeded six-month `mitigate_partially` acceptance with two compensating controls.
   - The production `demo:gate` still blocks on its two HIGH alerts.
+
+## As built — 2026-10-17: server-side secure-default gaps re-checked (SEC-DEFAULTS)
+
+Branch `sec-defaults-1017`. No migration.
+
+- **Already on main, verified:** enabling an MCP registry, allowing a registry's private ranges, and setting an
+  agent's expected served model each need a server-side `settings_relax` step-up bound to the exact change, audited
+  as a relaxation, and the web callers obtain it (commit `0a0a597`). `POST` and `PATCH /v1/mrm/cards` refuse a
+  `[redacted:` presentation-scrub marker in a text field with `400 redacted_text_refused`, server side.
+- **Negative controls tightened.** `zz-secure-default-stepups.test.ts`'s shared `relaxThroughStepUp` now presents a
+  grant made for the same change with a **different value** (not another operation) and asserts it is refused 403
+  and left unspent, for every relaxing write it drives. A missing grant was already a 403.
+- The other items of the batch are recorded where their features live: ADR-0034 (the egress entry's insert-conflict
+  409), ADR-0188 (the S9 spend ordering and connection, the revoke-first test, the `connector_policy_changed` audit
+  row, and the `PATCH /v1/servers/:serverId` owner compare-and-set) and ADR-0189 (below).
+
