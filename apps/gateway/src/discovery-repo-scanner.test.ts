@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DISCOVERY_SCANNERS } from "./discovery-scanners.js";
 import { checkObservations } from "./discovery-worker.js";
-import { repoScanner, type RepoScanContext } from "./discovery-repo-scanner.js";
+import { repoScanner, repoTargetProblem, type RepoScanContext } from "./discovery-repo-scanner.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const OLD = "89abcdef0123456789abcdef0123456789abcdef";
@@ -177,6 +177,21 @@ describe("ADR-0195 SD1 repo scanners", () => {
     const res = await repoScanner("repo_github").run(ctx(githubFake().fetchImpl).c);
     const checked = checkObservations("repo_github", res.observations, "2026-10-17T00:00:00.000Z");
     expect(checked.some((o) => o.location !== null && o.names !== null)).toBe(true);
+  });
+
+  it("shape-checks the source target and fails the run on a bad one before any request", async () => {
+    expect(repoTargetProblem("repo_github", { namespace: "acme", baseUrl: "https://ghe.example.test/api/v3", history: "true", historyDepth: "50" })).toBeNull();
+    expect(repoTargetProblem("repo_github", { org: "acme" })).toMatch(/not a repo source target key/);
+    expect(repoTargetProblem("repo_github", { baseUrl: "http://git.example.test" })).toMatch(/https/);
+    expect(repoTargetProblem("repo_github", { baseUrl: "https://u:p@git.example.test" })).toMatch(/credentials/);
+    expect(repoTargetProblem("repo_github", { baseUrl: "https://git.example.test/?t=1" })).toMatch(/query/);
+    expect(repoTargetProblem("repo_github", { namespace: "../x" })).toMatch(/namespace/);
+    expect(repoTargetProblem("repo_github", { history: "yes" })).toMatch(/history/);
+    expect(repoTargetProblem("repo_github", { historyDepth: "201" })).toMatch(/historyDepth/);
+    expect(repoTargetProblem("repo_azure_devops", {})).toMatch(/baseUrl/);
+    const fake = githubFake();
+    await expect(repoScanner("repo_github").run(ctx(fake.fetchImpl, {}, { baseUrl: API, history: "maybe" }).c)).rejects.toThrow(/^target_invalid:/);
+    expect(fake.calls).toEqual([]);
   });
 
   it("stops when the lease is lost, and needs a static token", async () => {

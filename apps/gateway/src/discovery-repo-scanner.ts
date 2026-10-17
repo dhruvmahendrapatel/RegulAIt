@@ -259,12 +259,55 @@ function scanFetch(ctx: RepoScanContext): ReadFetchLike {
   };
 }
 
+/** the target keys a repo source accepts; anything else is refused (secure by default) */
+export const REPO_TARGET_KEYS = ["namespace", "baseUrl", "history", "historyDepth"] as const;
+
+const NAMESPACE_OK = (v: string) =>
+  v.length >= 1 &&
+  v.length <= 200 &&
+  [...v].every((c) => (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-" || c === "_" || c === "." || c === "/" || c === " ") &&
+  !v.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
+
+/**
+ * Shape-check a repo source's target. Null when every key is known and well
+ * formed; otherwise the problem. `baseUrl` is an https URL with no
+ * credentials, query or fragment (the egress allow list still decides whether
+ * its host may be reached); Azure DevOps needs one (its organisation URL).
+ */
+export function repoTargetProblem(kind: string, target: Readonly<Record<string, string>>): string | null {
+  for (const key of Object.keys(target)) {
+    if (!(REPO_TARGET_KEYS as readonly string[]).includes(key)) {
+      return `'${key.slice(0, 40)}' is not a repo source target key (allowed: ${REPO_TARGET_KEYS.join(", ")})`;
+    }
+  }
+  const { namespace, baseUrl, history, historyDepth } = target;
+  if (namespace !== undefined && !NAMESPACE_OK(namespace)) return "namespace must be 1 to 200 characters of letters, digits, space, '-', '_', '.' or '/'";
+  if (baseUrl !== undefined) {
+    let u: URL;
+    try {
+      u = new URL(baseUrl);
+    } catch {
+      return "baseUrl is not a URL";
+    }
+    if (u.protocol !== "https:" || u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "" || baseUrl.length > 1024) {
+      return "baseUrl must be an https URL with no credentials, query or fragment";
+    }
+  } else if (kind === "repo_azure_devops") {
+    return "an Azure DevOps source needs baseUrl (the organisation URL)";
+  }
+  if (history !== undefined && history !== "true" && history !== "false") return "history must be 'true' or 'false'";
+  if (historyDepth !== undefined) {
+    const n = Number(historyDepth);
+    if (!/^[0-9]{1,3}$/.test(historyDepth) || n < 1 || n > REPO_SCAN_LIMITS.historyDepthMax) {
+      return `historyDepth must be a whole number from 1 to ${REPO_SCAN_LIMITS.historyDepthMax}`;
+    }
+  }
+  return null;
+}
+
 function historyDepth(target: Readonly<Record<string, string>>): number {
   const raw = target.historyDepth;
-  if (raw === undefined) return REPO_SCAN_LIMITS.historyDepthDefault;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) throw new RepoScanError("target_invalid", "historyDepth must be a whole number of commits");
-  return Math.min(n, REPO_SCAN_LIMITS.historyDepthMax);
+  return raw === undefined ? REPO_SCAN_LIMITS.historyDepthDefault : Number(raw);
 }
 
 /** an analyser `alsoKeep` that asks the admin catalogue (read-only) about a value the compiled one does not know */
@@ -335,6 +378,8 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
         );
       }
       const target = ctx.source.target;
+      const problem = repoTargetProblem(kind, target);
+      if (problem) throw new RepoScanError("target_invalid", problem);
       const history = target.history === "true";
       const depth = history ? historyDepth(target) : 0;
       const reader = resolve(PROVIDER_OF[kind], {
