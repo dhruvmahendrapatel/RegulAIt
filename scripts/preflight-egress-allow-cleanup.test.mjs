@@ -186,6 +186,39 @@ it("imds", async () => {
       expect(analyzeTestFile(shadowed.replace('const host = "169.254.169.254";\n', "")).unmatchedMarkers).toEqual([]);
     });
 
+    it("review R1: a host variable or a recorded id counts only in its own position (negative controls)", () => {
+      // the posted host's variable sits in a non-host field of a removal of ANOTHER host
+      const hostVar = (field) => `const IMDS = "169.254.169.254";
+afterAll(async () => { await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1", ${field} }); });
+it("imds", async () => {
+  // egress-allow-cleanup: afterAll — claimed, but afterAll removes another host
+  await post("/v1/egress-allow-hosts", { host: IMDS });
+});\n`;
+      expect(analyzeTestFile(hostVar("note: IMDS")).unmatchedMarkers).toEqual([5]);
+      // live controls: the variable as the removed host, in a property or in eq(t.host, x)
+      expect(analyzeTestFile(hostVar("note: IMDS").replace('{ host: "127.0.0.1", note: IMDS }', "{ host: IMDS }")).unmatchedMarkers).toEqual([]);
+      const eqHost = hostVar("note: IMDS").replace(
+        'await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1", note: IMDS });',
+        "await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, IMDS));",
+      );
+      expect(analyzeTestFile(eqHost).unmatchedMarkers).toEqual([]);
+      // a host variable compared with another column is not a removed host
+      expect(analyzeTestFile(eqHost.replace("egressAllowHosts.host, IMDS", "egressAllowHosts.note, IMDS")).unmatchedMarkers).toEqual([5]);
+      // the recorded id sits in a non-id field of a removal of ANOTHER host
+      const recorded = (removal) => `let saved;
+afterAll(async () => { await ${removal}; });
+it("imds", async () => {
+  // egress-allow-cleanup: afterAll — the id is recorded in saved
+  const r = await post("/v1/egress-allow-hosts", { host: "169.254.169.254" });
+  saved = r.json().id;
+});\n`;
+      expect(analyzeTestFile(recorded('removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1", note: String(saved) })')).unmatchedMarkers).toEqual([5]);
+      // live controls: the recorded id as `id:`, in the DELETE url, or in eq(t.id, x)
+      expect(analyzeTestFile(recorded("removeEgressAllowEntry(app, AUTH, { id: saved })")).unmatchedMarkers).toEqual([]);
+      expect(analyzeTestFile(recorded("app.inject({ method: \"DELETE\", url: `/v1/egress-allow-hosts/${saved}` })")).unmatchedMarkers).toEqual([]);
+      expect(analyzeTestFile(recorded("db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, saved))")).unmatchedMarkers).toEqual([]);
+    });
+
     it("a create in beforeAll or in a helper stays a file-level create (afterAll rule only)", () => {
       const helper = `async function allow(h) { await post("/v1/egress-allow-hosts", { host: h }); }\nit("x", async () => { await allow("a"); });\n`;
       expect(analyzeTestFile(fileLevel + helper).untrackedTestCreates).toEqual([]);

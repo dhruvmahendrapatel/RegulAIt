@@ -73,7 +73,9 @@ fa_utf8_invalid() {
 # the descriptor and shares its offset, so the checks would consume the password before the runner reads it;
 # first_admin_from_file (and install.sh, up front) refuse a password file there. A FIFO swapped in between the
 # path check and the open would block the open; it needs write access to the file's directory, which the
-# directory check refuses to anyone but the owner.
+# directory check refuses to anyone but the owner. Only the immediate parent is checked: someone who can write
+# to a grandparent (without the sticky bit) can rename the parent and put their own directory in its place. That
+# costs the same as a FIFO (a hang or a refusal), never a leak, because every check still runs on what is opened.
 fa_password_file_problem() {
   local f="$1" fd="${2:-}" src="$1" follow="" perm owner me size ctl tail2 bom at_path at_fd dir dperm downer
   [ -n "$f" ] || { echo "no file named"; return 0; }

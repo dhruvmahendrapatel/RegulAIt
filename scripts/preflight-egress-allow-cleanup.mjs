@@ -318,9 +318,12 @@ function carriersOf(sf, results, keys) {
 }
 
 /**
- * What one removal names: the call that removes (a whole `db.delete(t).where(...)` chain, or the request carrying the
- * DELETE url), its references, plus the iterable of any for-of loop variable it uses (`for (const id of ids)`), and the
- * host literals it removes: only a `host:` property value, or a literal compared with `<table>.host` (`eq(t.host, "x")`).
+ * What one removal names, by position (review R1): the host values it removes (`host:` property values, and what is
+ * compared with `<table>.host`: `eq(t.host, x)`, `inArray(t.host, xs)`) and the ids it removes (`id:` property values,
+ * what is compared with `<table>.id`, and the DELETE url template's substitutions). A literal counts only as a host
+ * value; a reference counts only in its own position, so a host variable or a recorded id in a `note:` field names
+ * nothing. A for-of loop variable in a position brings its iterable into that position (`for (const id of ids)`).
+ * The removal is the whole call: a `db.delete(t).where(...)` chain, or the request carrying the DELETE url.
  */
 function removalNames(node, keys) {
   let call = node;
@@ -331,42 +334,63 @@ function removalNames(node, keys) {
   while (call.parent && ts.isPropertyAccessExpression(call.parent) && call.parent.parent && ts.isCallExpression(call.parent.parent)) {
     call = call.parent.parent;
   }
-  const refs = refKeys(call, keys);
-  const loopVars = [];
-  const findLoopVars = (n) => {
-    if (ts.isIdentifier(n) && !isPropertyName(n)) {
-      const d = keys.declOf(n);
-      const list = d && ts.isVariableDeclaration(d) ? d.parent : undefined;
-      const loop = list && ts.isVariableDeclarationList(list) ? list.parent : undefined;
-      if (loop && (ts.isForOfStatement(loop) || ts.isForInStatement(loop))) loopVars.push(loop.expression);
-    }
-    ts.forEachChild(n, findLoopVars);
-  };
-  findLoopVars(call);
-  for (const e of loopVars) refKeys(e, keys, refs);
   const hostLiterals = new Set();
+  const hostRefs = new Set();
+  const idRefs = new Set();
+  /** the references in one position, plus the iterable of each for-of loop variable among them */
+  const collect = (expr, out) => {
+    refKeys(expr, keys, out);
+    const loops = (n) => {
+      if (ts.isIdentifier(n) && !isPropertyName(n)) {
+        const d = keys.declOf(n);
+        const list = d && ts.isVariableDeclaration(d) ? d.parent : undefined;
+        const loop = list && ts.isVariableDeclarationList(list) ? list.parent : undefined;
+        if (loop && (ts.isForOfStatement(loop) || ts.isForInStatement(loop))) refKeys(loop.expression, keys, out);
+      }
+      ts.forEachChild(n, loops);
+    };
+    loops(expr);
+  };
+  const column = (a) => (ts.isPropertyAccessExpression(a) ? a.name.text : undefined);
   const scan = (n) => {
     if (ts.isPropertyAssignment(n) && n.name.getText() === "host") {
       const v = stringValue(n.initializer);
       if (v !== undefined) hostLiterals.add(v);
+      else collect(n.initializer, hostRefs);
     }
-    if (ts.isCallExpression(n) && n.arguments.some((a) => ts.isPropertyAccessExpression(a) && a.name.text === "host")) {
-      for (const a of n.arguments) {
-        const v = stringValue(a);
-        if (v !== undefined) hostLiterals.add(v);
+    if (ts.isPropertyAssignment(n) && n.name.getText() === "id") collect(n.initializer, idRefs);
+    if (ts.isShorthandPropertyAssignment(n) && n.name.text === "host") collect(n.name, hostRefs);
+    if (ts.isShorthandPropertyAssignment(n) && n.name.text === "id") collect(n.name, idRefs);
+    if (ts.isCallExpression(n)) {
+      const cols = n.arguments.map(column);
+      for (const [col, out] of [
+        ["host", hostRefs],
+        ["id", idRefs],
+      ]) {
+        if (!cols.includes(col)) continue;
+        n.arguments.forEach((a, i) => {
+          if (cols[i] === col) return;
+          const v = stringValue(a);
+          if (v !== undefined) {
+            if (col === "host") hostLiterals.add(v);
+          } else collect(a, out);
+        });
       }
     }
+    if (ts.isTemplateExpression(n) && n.head.text.startsWith(`${ROUTE}/`)) for (const sp of n.templateSpans) collect(sp.expression, idRefs);
     ts.forEachChild(n, scan);
   };
   scan(call);
-  return { refs, hostLiterals };
+  return { hostLiterals, hostRefs, idRefs };
 }
 
 /** does any afterAll removal name what the marked create made (by its host, or by its recorded result)? */
 function removalNamesCreate(sf, stmt, removals, keys) {
   const { hostLiterals, hostKeys, results } = createdBy(stmt, keys);
-  const names = new Set([...hostKeys, ...carriersOf(sf, results, keys)]);
-  return removals.some((r) => hostLiterals.some((h) => r.hostLiterals.has(h)) || [...names].some((k) => r.refs.has(k)));
+  const carriers = carriersOf(sf, results, keys);
+  return removals.some(
+    (r) => hostLiterals.some((h) => r.hostLiterals.has(h)) || hostKeys.some((k) => r.hostRefs.has(k)) || [...carriers].some((k) => r.idRefs.has(k)),
+  );
 }
 
 /** analyse one test file's source */

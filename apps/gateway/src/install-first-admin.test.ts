@@ -322,6 +322,47 @@ fa_password_file_problem() {
     }
   });
 
+  it.runIf(posix && process.getuid?.() === 0)("the password file's directory must be owned by the installing user or root", () => {
+    // review R2: a directory another user owns can be re-moded by them, so the file in it could be swapped
+    const dir = freshDir("pwdirowner");
+    const f = path.join(dir, "pw");
+    writeFileSync(f, strong(), { mode: 0o600 });
+    chmodSync(f, 0o600);
+    chmodSync(dir, 0o755);
+    const problem = () =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" }).trim();
+    expect(problem()).toBe(""); // live control: root's own 0755 directory
+    chownSync(dir, 12345, 12345);
+    expect(problem()).toContain("is owned by uid 12345");
+    chownSync(dir, 0, 0);
+    expect(problem()).toBe("");
+  });
+
+  it.runIf(posix && process.platform === "linux")("from a file: refused outside Linux, before anything is opened or sent", () => {
+    // review R3: a bash function shadows the uname binary inside $(...), so the gate sees another kernel
+    const dir = freshDir("pwdarwin");
+    const f = path.join(dir, "pw");
+    const pw = strong();
+    writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+    chmodSync(f, 0o600);
+    const run = (kernel: string) => {
+      const stubDir = freshDir(`pwdarwin-stub-${kernel}`);
+      const shim = kernel === "Linux" ? "" : `uname() { echo ${kernel}; }`;
+      const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\n${shim}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc"\necho "OUT=$FA_OUTPUT"\n`;
+      const r = spawnSync("bash", ["-c", script, "x", f], { encoding: "utf8", env: { ...process.env, STUB_DIR: stubDir } });
+      return { out: `${r.stdout}${r.stderr}`, sent: existsSync(path.join(stubDir, "stdin.log")) };
+    };
+    const darwin = run("Darwin");
+    expect(darwin.out).toContain("RC=2");
+    expect(darwin.out).toContain("supported on Linux only");
+    expect(darwin.sent, "the runner was called").toBe(false);
+    expect(darwin.out).not.toContain(pw);
+    // live control: on Linux the same file reaches the runner
+    const linux = run("Linux");
+    expect(linux.out).not.toContain("supported on Linux only");
+    expect(linux.sent).toBe(true);
+  });
+
   it.runIf(posix && process.getuid?.() === 0)("the password file must be owned by the installing user or root", () => {
     const f = path.join(freshDir("pwowner"), "pw");
     writeFileSync(f, strong(), { mode: 0o600 });
@@ -494,6 +535,24 @@ describe("scripts/install.sh — the first-admin step and token retirement (fake
     const noEmail = install(dir, fakes, { REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile }, ["--check"]);
     expect(noEmail.status).not.toBe(0);
     expect(noEmail.out).toContain("REGULAIT_FIRST_ADMIN_EMAIL is not");
+  });
+
+  it.runIf(hasOpenssl && posix)("--check refuses a password file outside Linux, before rendering", () => {
+    // review R3: a fake uname on PATH reports another kernel for -s
+    const fakes = setupFakes();
+    writeFileSync(path.join(fakes.bin, "uname"), '#!/bin/sh\nif [ "$1" = "-s" ]; then echo Darwin; exit 0; fi\nexec /usr/bin/env PATH=/usr/bin:/bin uname "$@"\n', { mode: 0o755 });
+    const pwFile = path.join(freshDir("secret"), "pw");
+    writeFileSync(pwFile, `${strong()}\n`, { mode: 0o600 });
+    chmodSync(pwFile, 0o600);
+    const dir = freshDir("check-darwin");
+    const env = { REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile, REGULAIT_FIRST_ADMIN_EMAIL: "ops@acme.example" };
+    const r = install(dir, fakes, env, ["--check"]);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("supported on Linux only");
+    expect(existsSync(path.join(dir, ".env"))).toBe(false);
+    // live control: without the fake, the same file passes the gate
+    rmSync(path.join(fakes.bin, "uname"));
+    expect(install(freshDir("check-linux"), fakes, env, ["--check"]).out).not.toContain("supported on Linux only");
   });
 
   it.runIf(hasOpenssl && posix)("a retired token stays retired on re-render; an exported token is ignored; only --admin-token re-opens it", () => {
