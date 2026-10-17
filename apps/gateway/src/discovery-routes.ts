@@ -418,7 +418,12 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         // a target the kind's scanner rejects is refused before any grant is spent or anything is written
         const patchProblem =
           body.target !== undefined || body.scope !== undefined
-            ? (registry.get(s.kind)?.validateTarget?.(body.target ?? s.target, body.scope ?? s.scope) ?? null)
+            ? (registry
+                .get(s.kind)
+                ?.validateTarget?.(
+                  body.target ?? Object.fromEntries(Object.entries(s.target).map(([k, v]) => [k, String(v)])),
+                  body.scope ?? { orgLevel: s.scope.orgLevel === true, include: [...(s.scope.include ?? [])] },
+                ) ?? null)
             : null;
         if (patchProblem) return refusal(400, "target_invalid", patchProblem);
         const target = body.target ?? s.target;
