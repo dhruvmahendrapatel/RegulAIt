@@ -5271,7 +5271,8 @@
           }
         ],
         "caller": "api_key",
-        "personStdioRelaxation": "mcp_server"
+        "personStdioRelaxation": "mcp_server",
+        "personStdioRelaxationState": "active"
       },
       "expectedProjection": {
         "outcome": "refuse",
@@ -5314,7 +5315,8 @@
           }
         ],
         "caller": "interactive_person",
-        "personStdioRelaxation": "project"
+        "personStdioRelaxation": "project",
+        "personStdioRelaxationState": "active"
       },
       "expectedProjection": {
         "outcome": "placement_eligible",
@@ -5398,7 +5400,8 @@
           }
         ],
         "caller": "interactive_person",
-        "personStdioRelaxation": "mcp_server"
+        "personStdioRelaxation": "mcp_server",
+        "personStdioRelaxationState": "active"
       },
       "expectedProjection": {
         "outcome": "refuse",
@@ -5411,6 +5414,224 @@
         "upstreamContacts": 0
       },
       "note": "A low-assurance agent is never relaxed, even when an interactive person sponsors it (owner decision C).",
+      "origin": "claude-new"
+    },
+    {
+      "id": "person-stdio-api-key-relaxed-project-stays-L3",
+      "adrSections": [
+        "Decision 7 items 1–2",
+        "Owner decision C"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "unknown",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-l2-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "caller": "api_key",
+        "personStdioRelaxation": "project",
+        "personStdioRelaxationState": "active"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "class_below_required",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "upstreamContacts": 0
+      },
+      "note": "A person's API key with no agent stays an unknown agent at L3 where the project is relaxed too: neither scope relaxes an API key (owner decision C; slice A1).",
+      "origin": "claude-new"
+    },
+    {
+      "id": "person-stdio-workload-token-stays-L3",
+      "adrSections": [
+        "Decision 7 items 1–2",
+        "Owner decision C"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "unknown",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-l2-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "caller": "workload_token",
+        "personStdioRelaxation": "mcp_server",
+        "personStdioRelaxationState": "active"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "class_below_required",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "upstreamContacts": 0
+      },
+      "note": "A workload token with no agent identity is never an interactive person, so a relaxed server leaves it at L3 (owner decision C; slice A1).",
+      "origin": "claude-new"
+    },
+    {
+      "id": "person-stdio-interactive-relaxed-server-L2",
+      "adrSections": [
+        "Decision 7 items 1–2",
+        "Owner decision C"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "unknown",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-l2-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "caller": "interactive_person",
+        "personStdioRelaxation": "mcp_server",
+        "personStdioRelaxationState": "active"
+      },
+      "expectedProjection": {
+        "outcome": "placement_eligible",
+        "requiredClass": "L2",
+        "minimumSelectableClass": "L2",
+        "selectedClassAtLeast": "L2",
+        "evidence": "software-attested",
+        "notAnAuthorizationGrant": true
+      },
+      "note": "A person's own call (no agent) from an interactive session on a relaxed stdio server: the unknown-agent floor is L2 (owner decision C; slice A1).",
+      "origin": "claude-new"
+    },
+    {
+      "id": "person-stdio-cleared-relaxation-stays-L3",
+      "adrSections": [
+        "Decision 7 items 1–2",
+        "Owner decision C"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "unknown",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-l2-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "caller": "interactive_person",
+        "personStdioRelaxation": "project",
+        "personStdioRelaxationState": "cleared"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "class_below_required",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "upstreamContacts": 0
+      },
+      "note": "A relaxation an admin cleared (revoked) no longer applies: an interactive person's own call is back at L3. Relaxations have no expiry in the as-built model, so a cleared row is the only way one stops (owner decision C; slice A1).",
+      "origin": "claude-new"
+    },
+    {
+      "id": "person-stdio-cleared-server-relaxation-stays-L3",
+      "adrSections": [
+        "Decision 7 items 1–2",
+        "Owner decision C"
+      ],
+      "semanticRequest": {
+        "workloadKind": "mcp_stdio",
+        "sensitivity": "public",
+        "sensitivityFloor": "L2",
+        "complianceFloors": [],
+        "autonomyFloor": "L1",
+        "agentAssurance": "unknown",
+        "ownProfileFloor": "L2",
+        "parentRequiredClass": null,
+        "profileRetired": false,
+        "enforcement": "enforce",
+        "executors": [
+          {
+            "id": "synthetic-l2-executor",
+            "class": "L2",
+            "profileMatches": true,
+            "active": true,
+            "quarantined": false,
+            "attestation": "fresh_passing"
+          }
+        ],
+        "caller": "interactive_person",
+        "personStdioRelaxation": "mcp_server",
+        "personStdioRelaxationState": "cleared"
+      },
+      "expectedProjection": {
+        "outcome": "refuse",
+        "error": "execution_profile_unavailable",
+        "httpStatus": 409,
+        "ruleId": "execution-profile",
+        "reason": "class_below_required",
+        "requiredClass": "L3",
+        "minimumSelectableClass": "L3",
+        "upstreamContacts": 0
+      },
+      "note": "A cleared server relaxation (cleared by an admin, or by a program change) does not qualify either: L3 (owner decision C; slice A1).",
       "origin": "claude-new"
     }
   ]

@@ -855,7 +855,8 @@ export interface WorkloadIdentityRevokeResult {
   /** unexpired external tokens naming the identity (as actor, or authenticated by one of its credentials) */
   tokensRevoked: number;
   /** delegation grants revoked (`identity_revoked`, descendants `cascade`) */
-  grantsRevoked: string[];  /**
+  grantsRevoked: string[];
+  /**
    * the grant cascade runs after the revocation commits (security review Low 6): `incomplete` means some grant could
    * not be ended on the record (a `workload-identity-cascade-incomplete` row says which); each is still refused at
    * its next use, because what it rests on is revoked
@@ -870,7 +871,8 @@ export interface WorkloadCredentialRevokeResult {
   /** unexpired tokens it authenticated or that are bound to its key (decision 12) */
   tokensRevoked: number;
   /** grants it authenticated, and their descendants (`credential_revoked` / `cascade`) */
-  grantsRevoked: string[];  /**
+  grantsRevoked: string[];
+  /**
    * the grant cascade runs after the revocation commits (security review Low 6): `incomplete` means some grant could
    * not be ended on the record (a `workload-identity-cascade-incomplete` row says which); each is still refused at
    * its next use, because what it rests on is revoked
