@@ -449,6 +449,19 @@ export function parseProfileVersion(raw: unknown): ProfileVersion | null {
   };
 }
 
+/**
+ * The shipped profiles an admin may version but never retire (ADR-0190 I5 follow-up; mirrors
+ * `VERSIONABLE_SHIPPED_EXECUTION_PROFILES` in @regulait/shared, checked by the model test). `restricted` and
+ * `restricted-microvm` are the strict references: neither versioned nor retired.
+ */
+export const VERSIONABLE_SHIPPED_PROFILES: readonly string[] = ["engine-worker"];
+
+/** which admin actions a profile version offers (the caller also requires it to be the live latest version) */
+export function profileActions(p: Pick<ProfileVersion, "name" | "shipped">): { version: boolean; retire: boolean } {
+  const versionedShipped = VERSIONABLE_SHIPPED_PROFILES.includes(p.name);
+  return { version: !p.shipped || versionedShipped, retire: !p.shipped && !versionedShipped };
+}
+
 /** `{profiles: [...]}`; null when the envelope is malformed; a malformed row is kept as `unreadable`, never dropped */
 export function parseProfiles(value: unknown): Array<ProfileVersion | { unreadable: true; index: number }> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "profiles")) return null;

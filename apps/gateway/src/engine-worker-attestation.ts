@@ -4,9 +4,10 @@
  * Before I5 a runner reported its worker's isolation from the worker container's own self-test file. Under I5 the
  * worker runs only in an executor's sandbox, which runs only for an ENABLED engine: a runner can no longer report
  * those switches before the first enable (a deadlock). The gateway instead accepts, for the manifest's
- * `workerAttestedSwitches` only, a fresh, passing attestation by an ACTIVE executor of the shipped `engine-worker`
- * profile at or above the engine_worker floor (the org's `isolationFloorEngineWorker`, raised to the profile's own
- * `minClass`). The attestation is the executor's signed self-test of that very profile, so it proves what the
+ * `workerAttestedSwitches` only, a fresh, passing attestation by an ACTIVE executor of the `engine-worker` profile's
+ * latest live version (versioned since the I5 follow-up; version 1 is the shipped body) at or above the engine_worker
+ * floor (the org's `isolationFloorEngineWorker`, raised to that version's own `minClass`). An L1 (runc) attestation
+ * meets it only when both are L1: with the shipped L2 version it never does. The attestation is the executor's signed self-test of that very profile, so it proves what the
  * worker's self-test proved (no egress, no runner credential in reach) for every sandbox placed under it.
  *
  * Fail closed: a missing profile, a floor that does not resolve, or no fresh pass (stale, failed, quarantined,

@@ -39,6 +39,7 @@ import {
   parsePlacementDetail,
   parsePlacements,
   parseProfiles,
+  profileActions,
   profileText,
   registerBody,
   REFUSAL_REASONS,
@@ -165,21 +166,30 @@ function ProfilesCard() {
               },
               { key: "digest", header: "Digest", render: (r) => (isUnreadable(r) ? "Not reported" : <code title={r.digest}>{r.digest.slice(0, 12)}</code>) },
               {
-                // a live custom profile's latest version: a new version, or retirement (shipped profiles are the strict reference)
+                // a live custom profile's latest version: a new version, or retirement. restricted and restricted-microvm
+                // are the strict references; engine-worker is versioned, never retired (profileActions)
                 key: "manage",
                 header: "Manage",
                 align: "right",
-                render: (r) =>
-                  isUnreadable(r) || r.shipped || r.retiredAt !== null || !isLatestVersion(r, rows ?? []) ? null : (
+                render: (r) => {
+                  if (isUnreadable(r) || r.retiredAt !== null || !isLatestVersion(r, rows ?? [])) return null;
+                  const actions = profileActions(r);
+                  if (!actions.version && !actions.retire) return null;
+                  return (
                     <span>
-                      <Button size="sm" variant="ghost" aria-label={`New version of ${r.name}`} onClick={() => setVersioning(r)}>
-                        New version
-                      </Button>
-                      <Button size="sm" variant="ghost" aria-label={`Retire ${r.name}`} onClick={() => setRetiring(r)}>
-                        Retire
-                      </Button>
+                      {actions.version && (
+                        <Button size="sm" variant="ghost" aria-label={`New version of ${r.name}`} onClick={() => setVersioning(r)}>
+                          New version
+                        </Button>
+                      )}
+                      {actions.retire && (
+                        <Button size="sm" variant="ghost" aria-label={`Retire ${r.name}`} onClick={() => setRetiring(r)}>
+                          Retire
+                        </Button>
+                      )}
                     </span>
-                  ),
+                  );
+                },
               },
             ]}
             empty={<EmptyState title="No execution profiles" body="The gateway reported no profiles, so every isolable call is refused." />}
@@ -275,8 +285,9 @@ const isLatestVersion = (p: ProfileVersion, rows: ProfileRow[]) =>
   !rows.some((o) => !isUnreadable(o) && o.name === p.name && o.version > p.version);
 
 /**
- * `POST /v1/execution-profiles/:name/versions`: version n+1 of a custom profile, from its current body, at a chosen
- * class. Looser than the version it replaces (or than `restricted`) is a relaxation: step-up, audited.
+ * `POST /v1/execution-profiles/:name/versions`: version n+1 of a custom profile or of `engine-worker`, from its current
+ * body, at a chosen class. Looser than the version it replaces (or than its strict reference: `restricted`, or the
+ * shipped engine-worker body) is a relaxation: step-up, audited.
  */
 function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void }) {
   const act = useAction();

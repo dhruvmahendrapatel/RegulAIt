@@ -34,8 +34,13 @@
  *    version, than the version it replaces) is a RELAXATION: a
  *    `settings_relax` step-up and an `execution-profile-relaxed` audit row
  *    naming each field (ADR-0180, ADR-0186 decision 26).
- *  - The shipped profiles are the strict reference: never versioned or
- *    retired here. Retiring a profile is a tightening (its calls then refuse
+ *  - `restricted` and `restricted-microvm` are the strict references: never
+ *    versioned or retired here. `engine-worker` is versioned like a custom
+ *    profile (the I5 follow-up: its shipped body is version 1 and its own
+ *    strict reference, so a version looser than that body or than the version
+ *    it replaces, a lower `minClass` included, is a step-up and an audited
+ *    relaxation), keeps its shape (`engineWorkerProfileProblem`) and is never
+ *    retired. Retiring a profile is a tightening (its calls then refuse
  *    `profile_retired`), so it needs no step-up; it is audited.
  *  - ASSIGNMENT (decision 7 item 5, decision 8): a profile version on an
  *    agent's workload identity or a stdio MCP server. Assigning a profile
@@ -70,12 +75,15 @@ import {
 import {
   canonicalExecutionProfile,
   createExecutionProfileSchema,
+  engineWorkerProfileProblem,
   EXECUTION_PROFILE_NAME_RE,
   EXECUTION_PROFILE_TARGET_KINDS,
   executionPlacementsQuerySchema,
   executionProfileBodySchema,
   executionProfileDigest,
+  executionProfileReference,
   executionProfileRelaxations,
+  executionProfileVersionable,
   quarantineExecutorSchema,
   registerExecutorSchema,
   RESTRICTED_EXECUTION_PROFILE,
@@ -203,16 +211,28 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     const latest = await latestVersion(db, body.name);
     if (name === null && latest) return reply.status(409).send({ error: "execution_profile_exists", detail: "a profile of that name exists; add a version instead" });
     if (name !== null && !latest) return reply.status(404).send({ error: "execution_profile_not_found" });
-    if (SHIPPED_NAMES.has(body.name)) return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is the strict reference; create a profile of your own" });
+    // restricted and restricted-microvm are the strict references (never versioned); engine-worker is versioned (I5
+    // follow-up) and must keep the shape every engine task needs
+    if (SHIPPED_NAMES.has(body.name) && (name === null || !executionProfileVersionable(body.name))) {
+      return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is the strict reference; create a profile of your own" });
+    }
+    if (body.name === "engine-worker") {
+      const problem = engineWorkerProfileProblem(body);
+      if (problem) return reply.status(400).send({ error: "engine_worker_profile_shape", detail: problem });
+    }
     if (latest?.retiredAt) return reply.status(409).send({ error: "execution_profile_retired", detail: "a retired profile is not versioned again" });
     const text = canonicalExecutionProfile(body);
     const digest = executionProfileDigest(body);
     const [same] = await db.select({ id: executionProfiles.id }).from(executionProfiles).where(eq(executionProfiles.digest, digest));
     if (same) return reply.status(409).send({ error: "execution_profile_unchanged", detail: "a version with this exact body exists" });
-    // judged against the strict reference AND the version it replaces (ADR-0186 decision 26)
+    // judged against the strict reference AND the version it replaces (ADR-0186 decision 26). The reference is
+    // `restricted`, or a versionable shipped profile's own shipped body (engine-worker: its posture was accepted when it
+    // shipped; a lower minClass, or anything else looser than that body, is a relaxation)
+    const reference = executionProfileReference(body.name);
+    const vsReference = executionProfileRelaxations(body, reference);
     const vsRestricted = executionProfileRelaxations(body, RESTRICTED_EXECUTION_PROFILE);
     const vsPrevious = latest ? executionProfileRelaxations(body, parseBody(latest)) : [];
-    const relaxations = [...new Set([...vsRestricted, ...vsPrevious])];
+    const relaxations = [...new Set([...vsReference, ...vsPrevious])];
     let stepUp: string | null = null;
     if (relaxations.length > 0) {
       const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: name === null ? "execution_profile_create" : "execution_profile_version", name: body.name, digest, relaxations } });
@@ -245,8 +265,8 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
         objectType: "execution_profile",
         objectId: row.id,
         ruleId: "execution-profile-relaxed",
-        detail: { name: row.name, version, digest, relaxedAgainstRestricted: vsRestricted, relaxedAgainstPrevious: vsPrevious, stepUp },
-        reason: `execution profile ${row.name} v${version} is looser than ${vsPrevious.length > 0 ? "the version it replaces" : "the shipped restricted profile"} in: ${relaxations.join(", ")} (ADR-0180; step-up ${stepUp})`,
+        detail: { name: row.name, version, digest, reference: reference.name, relaxedAgainstReference: vsReference, relaxedAgainstRestricted: vsRestricted, relaxedAgainstPrevious: vsPrevious, stepUp },
+        reason: `execution profile ${row.name} v${version} is looser than ${vsPrevious.length > 0 ? "the version it replaces" : `the shipped ${reference.name} profile`} in: ${relaxations.join(", ")} (ADR-0180; step-up ${stepUp})`,
       });
     }
     return reply.status(201).send({ ...profileVersionView(row), body: parseBody(row) });
@@ -265,7 +285,8 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     if (!p.success) return reply.status(400).send({ error: "invalid_profile_name" });
     const b = retireExecutionProfileSchema.safeParse(req.body ?? {});
     if (!b.success) return reply.status(400).send({ error: "invalid_body", issues: b.error.issues });
-    if (SHIPPED_NAMES.has(p.data.name)) return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is the strict reference and is never retired" });
+    // engine-worker included: engines always run under its latest version, so it is versioned, never retired
+    if (SHIPPED_NAMES.has(p.data.name)) return reply.status(409).send({ error: "shipped_profile_immutable", detail: "a shipped profile is never retired" });
     const latest = await latestVersion(db, p.data.name);
     if (!latest) return reply.status(404).send({ error: "execution_profile_not_found" });
     // retiring tightens (its calls refuse `profile_retired`, decision 7): no step-up, audited

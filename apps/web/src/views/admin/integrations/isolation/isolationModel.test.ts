@@ -9,6 +9,7 @@ import {
   executorReading,
   executorNameOk,
   parseExecutors,
+  profileActions,
   REFUSAL_REASONS,
   registerBody,
   runtimeVersionOk,
@@ -20,6 +21,7 @@ import {
   settingsComplete,
   settingsFromEnvelope,
   type Executor,
+  VERSIONABLE_SHIPPED_PROFILES,
 } from "./isolationModel";
 
 const now = Date.parse("2026-10-11T12:00:00Z");
@@ -254,5 +256,21 @@ describe("registering an executor", () => {
     expect(registerBody({ ...ok, workloadIdentityId: "not-a-uuid" })).toHaveProperty("error");
     expect(registerBody({ ...ok, workloadIdentityId: "8d4b1f8e00000-4000-8000-000000000009" })).toHaveProperty("error");
     expect(registerBody({ ...ok, workloadIdentityId: "8D4B1F8E-0000-4000-8000-00000000000F" })).toHaveProperty("body");
+  });
+});
+
+/** the shared source, imported in the test only (the SPA mirrors it at runtime) */
+const sharedIsolation = async (): Promise<{ VERSIONABLE_SHIPPED_EXECUTION_PROFILES: readonly string[] }> => import(/* @vite-ignore */ new URL("../../../../../../../packages/shared/src/isolation/index.ts", import.meta.url).pathname);
+
+describe("ADR-0190 I5 follow-up: engine-worker is versioned, never retired; the strict references are neither", () => {
+  it("mirrors the shared list of versionable shipped profiles", async () => {
+    expect([...VERSIONABLE_SHIPPED_PROFILES]).toEqual([...(await sharedIsolation()).VERSIONABLE_SHIPPED_EXECUTION_PROFILES]);
+  });
+  it("offers a new version of engine-worker (shipped v1 and admin versions), never its retirement; nothing on restricted", () => {
+    expect(profileActions({ name: "engine-worker", shipped: true })).toEqual({ version: true, retire: false });
+    expect(profileActions({ name: "engine-worker", shipped: false })).toEqual({ version: true, retire: false });
+    expect(profileActions({ name: "restricted", shipped: true })).toEqual({ version: false, retire: false });
+    expect(profileActions({ name: "restricted-microvm", shipped: true })).toEqual({ version: false, retire: false });
+    expect(profileActions({ name: "team-profile", shipped: false })).toEqual({ version: true, retire: true });
   });
 });

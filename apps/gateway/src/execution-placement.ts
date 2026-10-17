@@ -256,11 +256,13 @@ export async function resolveRequirement(db: Db, req: PlacementRequest): Promise
     if (row) configured = profileView(row, "shipped_default");
   }
   if (!configured) return { kind: "unresolved", workloadKind: kind, fact: "configuredProfileFloor" };
-  // ADR-0190 I5 (review LOW-1): an agent-null engine run's configured profile is the SHIPPED engine-worker default; its
-  // class as a configured floor is capped at the org's engine-worker floor, so relaxing that setting (a `settings_relax`
-  // step-up, audited, never below L1: the floors are requirable classes) is honoured here. The shipped profile's own
-  // minClass still bounds where it can be PLACED (the broker raises the requirement to it), and there is no L1 (runc)
-  // backend yet: an L1 engine-worker placement needs both a relaxed profile and that backend (ADR-0190 I5 as built).
+  // ADR-0190 I5 (review LOW-1): an agent-null engine run's configured profile is the engine-worker default (its LATEST
+  // version: the profile is versioned, I5 follow-up); its class as a configured floor is capped at the org's
+  // engine-worker floor, so relaxing that setting (a `settings_relax` step-up, audited, never below L1: the floors are
+  // requirable classes) is honoured here. The profile's own minClass still bounds where it can be PLACED (the broker
+  // raises the requirement to it; the shipped version 1 is L2). An L1 engine placement therefore needs the org floor,
+  // the sensitivity floor AND an engine-worker version at L1 (each a step-up), and an executor attesting L1: the runc
+  // backend attests L1 only, and an L1 attestation never meets an L2 or L3 requirement (the broker's rank check).
   const engineWorkerFloor = org.isolationFloorEngineWorker as unknown;
   const relaxable = kind === "engine_worker" && req.agent === null && !serverRow && !agentRow && isRequirableClass(engineWorkerFloor);
   raise(relaxable && isolationClassRank(engineWorkerFloor) < isolationClassRank(configured.minClass) ? engineWorkerFloor : configured.minClass);

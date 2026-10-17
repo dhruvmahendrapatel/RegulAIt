@@ -476,11 +476,14 @@ test("Engines: a new profile starts from a live version, renamed, at the chosen 
   expect(m.profileCreates).toEqual([{ body: { schema: "regulait.execution-profile.v1", name: "team-new", minClass: "microvm", secrets: "none" } }]);
 });
 
-test("Engines: a custom profile gets a new version or is retired; shipped ones offer neither; a placement shows its evidence", async ({ page }) => {
+test("Engines: a custom profile gets a new version or is retired; the shipped references offer neither, engine-worker only a new version; a placement shows its evidence", async ({ page }) => {
   const m = await setup(page);
   await openEngines(page);
   await expect(page.getByRole("button", { name: "New version of restricted", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Retire team-old", exact: true })).toHaveCount(0);
+  // ADR-0190 I5 follow-up: engine-worker is versioned like a custom profile, and never retired
+  await expect(page.getByRole("button", { name: "New version of engine-worker", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Retire engine-worker", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "New version of team-loose", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "New version of team-loose" });
   await dialog.getByLabel("Minimum isolation class", { exact: true }).selectOption("microvm");
