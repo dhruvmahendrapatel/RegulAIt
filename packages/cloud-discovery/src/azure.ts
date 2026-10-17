@@ -19,7 +19,7 @@ import type { TokenCredential } from "@azure/core-auth";
 import { ClientAssertionCredential, ClientSecretCredential } from "@azure/identity";
 import { LogsQueryClient } from "@azure/monitor-query-logs";
 import { AZURE_FEDERATED_AUDIENCE, azureCredentialSchema, type AzureCredentialInput, type OidcTokenSupplier } from "./credentials.js";
-import { lookbackStart, PrincipalAggregator, ScanCollector, take } from "./report.js";
+import { lookbackStart, PrincipalAggregator, redact, ScanCollector, take } from "./report.js";
 import { GuardedAzureHttpClient, type GuardedFetch } from "./transport.js";
 import { MAX_AUDIT_LOOKBACK_DAYS, shouldStop, type CloudScanContext, type CloudScanner, type CloudScanResult } from "./types.js";
 
@@ -260,7 +260,7 @@ export class AzureCloudScanner implements CloudScanner {
         const res = await logs.queryWorkspace(ws, DIAGNOSTICS_QUERY, { duration: `P${days}D` });
         if (res.status !== "Success") {
           const message = "partialError" in res ? String(res.partialError?.message ?? "") : "";
-          c.report("azure.log_analytics.diagnostics", ws, "error", `partial result: ${message.slice(0, 200)}`);
+          c.report("azure.log_analytics.diagnostics", ws, "error", `partial result: ${redact(message)}`);
           continue;
         }
         const table = res.tables[0];
