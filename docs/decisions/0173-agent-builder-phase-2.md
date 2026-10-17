@@ -328,8 +328,24 @@ The full local gate also caught four new free-text columns missing from the cred
 - the monthly spend window (`monthStartUtc`) is taken from `databaseNow` at both call sites;
 - the schedule sweep's default `now` (due-ness, `lastRunAt`, `updatedAt`, next run) comes from `databaseNow`.
 
+Fix round (review of PR #418): the default alone did not cover the scheduled path. The `builder-agent-schedules`
+job passed the scheduler's `ctx.now`, which is the process clock, so only the manual sweep route used the database
+clock. The scheduler now tells a job whether its clock was injected (`SchedulerJobContext.clockInjected`, set only
+when a caller supplied `now`), and the job passes `ctx.now` to the sweep only then. Otherwise the sweep reads
+`databaseNow`. In `builder.ts`, the two schedule routes (create and update) compute `nextRunAt` from `databaseNow`,
+so the sweep never compares a process-clock `nextRunAt` with database time. The agent summaries' spend window
+(`monthStartUtc(await databaseNow(db))`) and the thread status update (`updatedAt: sql\`now()\``) moved to the
+database clock as well. `zz-builder-sweep-db-clock.test.ts` runs the registered job with a process clock two days
+behind and checks that the schedule the database says is due still runs. A control run with the same clock marked
+as injected leaves the schedule alone.
+
 The process clock stays where it measures this process's own time: the lease-wait deadline, call latency, and a
-policy span's start (`recordSpan` timing). `monthStartUtc` keeps its `new Date()` default because `builder.ts` (the
-usage route) still calls it without an argument. That caller is outside this slice and is listed as a follow-up.
+policy span's start (`recordSpan` timing). `monthStartUtc` keeps its `new Date()` default as a fallback. Every
+caller in `builder-runtime.ts` and `builder.ts` now passes `databaseNow`.
 `builder-runtime-db-clock.test.ts` is a static guard: every process-clock use in the file must be on its allow-list
-with a reason, and no row timestamp may be written from `new Date()`.
+with a reason, and no row timestamp may be written from `new Date()`. It matches text only. A clock that arrives
+through a variable or a spelling such as `new globalThis.Date()` gets past it. The behaviour test above covers the
+scheduled path.
+
+Follow-up (not built): `autonomy.ts` compares `updatedAt`/`createdAt` with a 30-day window from the process clock.
+Skew of seconds does not matter at that scale.

@@ -5,7 +5,9 @@
  *  - a compare-and-set lost to a concurrent owner change answers 409 `changed_concurrently` and leaves the grant
  *    UNSPENT (the same grant then completes the change once the owner is back where it was decided);
  *  - a successful change spends the grant exactly once (a replay of the same token is refused);
- *  - concurrent requests presenting one grant change the owner once, and the grant is spent at most once.
+ *  - concurrent requests presenting one grant change the owner once, and the grant is spent at most once;
+ *  - a grant that turns invalid between the look and the in-transaction claim rolls the write back: nothing is
+ *    spent, the owner is unchanged, no `*-owner-changed` row, and one `step-up-grant-refused` row survives.
  *
  * Under the strict step-up values (owner_change on). Real tables: a browser session row and a grant row made for
  * exactly the change, as the step-up ceremony would leave them. Org-global state touched here (the admin's TOTP flag,
@@ -112,10 +114,12 @@ async function sessionWithGrant(connectorId: string, to: string) {
     sessionAuth: { sessionId: s!.id, origin: "password" },
   } as unknown as FastifyRequest;
   const usedAt = async () => (await db.select({ usedAt: stepUpGrants.usedAt }).from(stepUpGrants).where(eq(stepUpGrants.id, g!.id)))[0]!.usedAt;
-  return { put, req, usedAt };
+  return { put, req, usedAt, grantId: g!.id };
 }
 
 const ownerOf = async (id: string) => (await db.select({ o: connectors.ownerUserId }).from(connectors).where(eq(connectors.id, id)))[0]!.o;
+const refusedRows = () =>
+  db.select().from(auditLog).where(and(eq(auditLog.objectId, adminId), eq(auditLog.ruleId, "step-up-grant-refused")));
 const changedRows = (id: string) =>
   db.select().from(auditLog).where(and(eq(auditLog.objectId, id), eq(auditLog.ruleId, OWNERSHIP_RULE_IDS.changed.connector)));
 
@@ -203,5 +207,37 @@ describe("N12: the owner_change grant is claimed inside the owner write's transa
     // exactly one A → B transition was written; any later 200 is a re-statement (B → B), which needs no grant
     const transitions = (await changedRows(id)).map((r) => (r.detail as { transitions: { ownerUserId: { from: string | null; to: string | null } } }).transitions.ownerUserId);
     expect(transitions.filter((t) => t.from === a && t.to === b)).toHaveLength(1);
+  });
+
+  it("a claim refused inside the transaction rolls the write back, spends nothing and records one refusal", async () => {
+    const a = await mkUser("a4");
+    const b = await mkUser("b4");
+    const id = await mkConnector(a);
+    const s = await sessionWithGrant(id, b);
+    const inner = ownerChangeGate(db, s.req, "connector", id);
+    const refusalsBefore = (await refusedRows()).length;
+    let claims = 0;
+    const out = await changeOwner(db, {
+      kind: "connector",
+      id,
+      ownerUserId: b,
+      actorUserId: adminId,
+      gate: async (change, opts) => {
+        // the grant expires after the look passed and the compare-and-set landed, just before the claim
+        if (opts?.spend) {
+          claims += 1;
+          await db.update(stepUpGrants).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(stepUpGrants.id, s.grantId));
+        }
+        return inner(change, opts);
+      },
+    });
+    expect(claims).toBe(1);
+    expect(out).toMatchObject({ ok: false, status: 403, body: { error: "step_up_required", actionKind: "owner_change" } });
+    // the compare-and-set's write rolled back with the refused claim
+    expect(await ownerOf(id)).toBe(a);
+    expect(await s.usedAt()).toBeNull();
+    expect(await changedRows(id)).toHaveLength(0);
+    // the in-transaction refusal row rolled back too; the second look on the root handle records exactly one
+    expect((await refusedRows()).length).toBe(refusalsBefore + 1);
   });
 });

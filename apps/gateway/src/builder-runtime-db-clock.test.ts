@@ -4,6 +4,10 @@
  * time: a lease-wait deadline, call latency, a trace span's start, and `monthStartUtc`'s default (its callers here
  * pass the database's now). A new `new Date()` or `Date.now()` fails this test until it is either moved to the
  * database clock or listed below with its reason.
+ *
+ * It matches TEXT only: a clock that arrives through a variable (the scheduler's `ctx.now`) or a spelling such as
+ * `new globalThis.Date()` gets past it. It is a ratchet, not proof; `zz-builder-sweep-db-clock.test.ts` covers the
+ * scheduled sweep's behaviour.
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
