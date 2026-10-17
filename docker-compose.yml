@@ -24,6 +24,18 @@
 # reports what the bucket itself says it enforces, so `/v1/audit/verify` can
 # answer `tamperResistant: true` on a laptop for the same reason it can in a
 # customer's cloud: because the medium was asked, not because a flag was set.
+
+# --- the Caddy image, pinned by digest (ADR-0190 I4 follow-ups) ---------------
+#
+# ONE reference for every Caddy service (the public `caddy` front, the
+# executor's `executor-front` and its `executor-front-ca` copier) and for
+# scripts/build-image-bundle.sh and scripts/install.sh, which must name the
+# same string. The tag is the Caddy release the digest was read from (the
+# `2-alpine` and `2.11.7-alpine` tags named this same OCI index on 2026-10-17,
+# resolved against the Docker Hub registry API); the digest is what is run.
+# Re-pin all four places together.
+x-caddy-image: &caddy-image caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+
 # --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------
 #
 # Each engine (promptfoo, modelscan, garak) runs as ONE long-running runner
@@ -45,6 +57,19 @@
 # secret is its runner key, which it generates itself and registers (the public half only)
 # once with a one-time enrolment token.
 # Kubernetes: the same as a deny-all NetworkPolicy except egress to the gateway.
+x-engine-image: &engine-image
+  profiles: ["engine-images"]
+  platform: linux/amd64
+  pull_policy: build
+  # never a running service: an `up` with this profile starts an inert one-shot that exits 0
+  entrypoint: ["/usr/local/bin/node", "-e", "process.exit(0)"]
+  restart: "no"
+  network_mode: none
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  user: "10001:10001"
+
 x-engine-runner: &engine-runner
   profiles: ["engines"]
   depends_on:
@@ -596,6 +621,53 @@ services:
       REGULAIT_GARAK_JOBS_DIR: /jobs
       REGULAIT_GARAK_RESULTS_DIR: /results
 
+  # --- engine task images (profile: engine-images) — ADR-0190 I5 follow-up --
+  #
+  # Each engine has ONE image with two uses (engines/*/Dockerfile): the runner
+  # above (`node /app/dist/main.js`), and the TASK the sandbox executor
+  # (profile `isolation`) starts in a gVisor sandbox under the run's
+  # `engine_worker` placement (`node /app/dist/task-main.js`, the manifest's
+  # `taskEntry`). These three services only BUILD those images on this host's
+  # daemon, from the repository root; every base in the Dockerfiles is pinned
+  # by digest and every image runs as uid 10001:
+  #
+  #   docker compose --profile engine-images build engine-promptfoo-image engine-modelscan-image engine-garak-image
+  #
+  # (pending execution: no session that wrote this had a Docker daemon.)
+  # They are never services: `up` with this profile runs each as an inert
+  # one-shot (no network, no privileges) that exits at once. The sandbox does
+  # NOT run with these settings but with the shipped `engine-worker` execution
+  # profile's, applied by the executor on every task: read-only root, a tmpfs
+  # /work, no network (the gateway channel only), uid 10001, no capabilities,
+  # the task's input read-only at /jobs.
+  #
+  # An executor starts a task only from the engine manifest's `taskImage`, the
+  # image's content digest (`docker image inspect --format '{{.Id}}'`). Every
+  # shipped `taskImage` is null until a release records a built image's digest
+  # there, so until then a built image places nothing (`policy_unresolved`, the
+  # run ends `not_run`): fail closed. The runner services above still name their
+  # image by registry digest only (REGULAIT_ENGINE_<ENGINE>_DIGEST).
+  engine-promptfoo-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/promptfoo/Dockerfile
+    image: regulait/engine-promptfoo:local
+
+  engine-modelscan-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/modelscan/Dockerfile
+    image: regulait/engine-modelscan:local
+
+  engine-garak-image:
+    <<: *engine-image
+    build:
+      context: .
+      dockerfile: engines/garak/Dockerfile
+    image: regulait/engine-garak:local
+
   # --- Identity broker (profile: sso) — ADR-0174 ------------------------------
   #
   # OFF by default. Keycloak brokers Microsoft Entra ID, Google and GitHub and
@@ -772,6 +844,13 @@ services:
       - ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}:/host-gvisor:ro
       # the TLS front's CA root certificate only (never its key), READ-ONLY; see executor-front-ca
       - executor-front-ca:/etc/regulait/executor-front-ca:ro
+      # ADR-0190 I5: the executor's INPUT volume. For each engine task the executor writes the task's input under
+      # <dir>/<sandbox name>/jobs, verifies every file's size and sha256, makes it read-only (files 0444, directories
+      # 0555), and the sandbox mounts only that sub-directory READ-ONLY at /jobs (`volume-subpath`, Docker Engine 26
+      # or later); it is removed with the sandbox. Only this service mounts it, and no host path backs it. A named
+      # volume on disk, not tmpfs: a modelscan input can be as large as the org's artifact limit (512 MiB strict
+      # default), and tmpfs pages would be charged to this container's 512m memory limit.
+      - executor-input:/executor-input
     environment:
       # review M4: https only. The default is the executor's own TLS front on `engines` (executor-front, below),
       # whose certificate is checked against the pinned CA in REGULAIT_EXECUTOR_GATEWAY_CA_FILE and nothing else
@@ -782,6 +861,10 @@ services:
       REGULAIT_EXECUTOR_GATEWAY_CA_FILE: ${REGULAIT_EXECUTOR_GATEWAY_CA_FILE-/etc/regulait/executor-front-ca/ca.pem}
       REGULAIT_EXECUTOR_INIT_VOLUME: regulait-sandbox-init
       REGULAIT_EXECUTOR_INIT_DIR: /regulait-init
+      # ADR-0190 I5: where the input volume is mounted here, and the volume's Docker name, which the executor names in
+      # each sandbox's `docker run --mount` against the host daemon. Without both it refuses every engine task.
+      REGULAIT_EXECUTOR_INPUT_DIR: /executor-input
+      REGULAIT_EXECUTOR_INPUT_VOLUME: regulait-executor-input
       REGULAIT_EXECUTOR_RUNSC_BINARY: /host-gvisor/runsc
       REGULAIT_EXECUTOR_RUNSC_HOST_PATH: ${REGULAIT_GVISOR_HOST_DIR:-/usr/local/lib/gvisor}/runsc
       REGULAIT_PUBLIC_URL: ${REGULAIT_PUBLIC_URL:-}
@@ -809,7 +892,7 @@ services:
   # Nothing is committed; `docker compose down -v` destroys the CA, and the
   # next start makes a new one that executor-front-ca copies again.
   executor-front:
-    image: caddy:2-alpine
+    image: *caddy-image
     profiles: ["isolation"]
     restart: unless-stopped
     read_only: true
@@ -833,7 +916,7 @@ services:
   # 120 s for the front to create its CA, and re-copies on every `up`, so a
   # re-created CA is picked up by the executor's next start.
   executor-front-ca:
-    image: caddy:2-alpine
+    image: *caddy-image
     profiles: ["isolation"]
     depends_on:
       executor-front:
@@ -866,7 +949,7 @@ services:
       - executor-front-ca:/ca
 
   caddy:
-    image: caddy:2-alpine
+    image: *caddy-image
     profiles: ["tls"]
     depends_on:
       - gateway
@@ -1005,6 +1088,11 @@ volumes:
   # review H2: a FIXED name, because the executor names it on each `docker run --mount` against the host daemon
   sandbox-init:
     name: regulait-sandbox-init
+  # ADR-0190 I5: the executor's engine task inputs. A FIXED name for the same reason as sandbox-init (the executor names
+  # it to the host daemon), so one host runs one isolation stack. The executor image owns its mount point (uid 10001,
+  # 0711), which a fresh named volume copies; no other service mounts it.
+  executor-input:
+    name: regulait-executor-input
   # ADR-0190 I4 follow-ups: the executor front's Caddy storage (its local CA, root key included, and its
   # certificates), its autosaved config, and the CA root certificate alone, which the executor mounts read-only
   executor-front-data:

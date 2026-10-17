@@ -20,10 +20,12 @@
 # that were built somewhere else and loaded from a file. That is the whole
 # reason the air-gapped install path refuses to build and passes --no-build.
 #
-# caddy:2-alpine serves two roles: the public TLS front (`tls` profile) and the
+# Caddy serves two roles: the public TLS front (`tls` profile) and the
 # sandbox executor's internal TLS front and CA copy (`isolation` profile,
-# ADR-0190 I4 follow-ups). Both name this one reference, so one saved image
-# covers both.
+# ADR-0190 I4 follow-ups). Every Caddy service names ONE reference, pinned by
+# digest (docker-compose.yml `x-caddy-image`), and CADDY_IMAGE below must be
+# that same string (scripts/install.sh checks for it too), so one saved image
+# covers both. Re-pin the three places together.
 #
 # The tag matters: install.sh pins the gateway to `regulait/gateway:<version>`
 # with `pull_policy: never`, so the tag written here and the --version passed
@@ -64,6 +66,7 @@ command -v docker >/dev/null 2>&1 || die "docker is required"
 docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
 
 GATEWAY_IMAGE="regulait/gateway:$VERSION"
+CADDY_IMAGE="caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
 
 if [ "$SKIP_BUILD" = "0" ]; then
   step "Building $GATEWAY_IMAGE (this pulls node:22-trixie-slim and runs pnpm install — internet required)"
@@ -72,14 +75,14 @@ if [ "$SKIP_BUILD" = "0" ]; then
 fi
 
 step "Fetching the upstream images the compose stack uses"
-for img in postgres:16 caddy:2-alpine; do
+for img in postgres:16 "$CADDY_IMAGE"; do
   docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
   ok "$img"
 done
 
 step "Saving the bundle"
 mkdir -p "$(dirname "$OUT")"
-docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 caddy:2-alpine
+docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 "$CADDY_IMAGE"
 ok "$OUT ($(du -h "$OUT" | cut -f1))"
 
 cat <<NEXT

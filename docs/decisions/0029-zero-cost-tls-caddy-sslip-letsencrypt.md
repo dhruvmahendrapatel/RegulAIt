@@ -9,7 +9,7 @@
 ## Context
 
 The dev/demo stack ([ADR-0013](0013-dev-app-deploy-single-ec2-compose.md)) serves the app over
-**plain HTTP** on `http://3.237.199.248:3000`, with the security group opening `:3000` to
+**plain HTTP** on `http://<first-address>:3000`, with the security group opening `:3000` to
 `0.0.0.0/0`. Since [ADR-0025](0025-secure-human-auth.md) that box carries real human
 authentication: passwords, server-side sessions, an `HttpOnly; SameSite=Strict` session cookie.
 
@@ -39,7 +39,7 @@ Concretely:
 
 ### 1. Caddy in the compose stack, behind a `tls` profile
 
-`infra/caddy/Caddyfile` serves `{$REGULAIT_TLS_HOST}` (default `3-237-199-248.sslip.io`) on
+`infra/caddy/Caddyfile` serves `{$REGULAIT_TLS_HOST}` (default `<dashed-first-address>.sslip.io`) on
 `:443` and reverse-proxies to `gateway:3000` over the compose network. Caddy's automatic HTTPS
 handles issuance, the HTTP-01 challenge on `:80`, the 308 redirect from `:80`, and renewal — no
 cron, no script, no human.
@@ -235,7 +235,7 @@ choice of value — that this amendment exists to end.
 #### What changed underneath the original argument
 
 [ADR-0032](0032-scheduled-power-off-dev-infra.md) attached an **Elastic IP**, precisely so the
-address survives the nightly stop/start. `3-229-246-126.sslip.io` is now stable in a way it was
+address survives the nightly stop/start. `<dashed-eip-address>.sslip.io` is now stable in a way it was
 not when §6 was written — the ADR's own "Harder / given up" bullet named an EIP as the mitigation
 and it has since been taken. The central premise of §6 has therefore **partly** expired. Partly,
 because:
@@ -251,7 +251,7 @@ because:
 
 §6 claims `includeSubDomains` on this name "would be hostile to everyone else using the service".
 **That is overstated.** HSTS policy is stored against the exact known host and `includeSubDomains`
-extends it to subdomains *of that host* — `*.3-229-246-126.sslip.io`. It has no effect on
+extends it to subdomains *of that host* — `*.<dashed-eip-address>.sslip.io`. It has no effect on
 `sslip.io` itself, nor on any sibling `a-b-c-d.sslip.io`. The real (narrower) objection stands on
 its own without the exaggeration: sslip.io resolves *any* label prefix to the same address, so the
 flag claims a namespace that follows the IP to whoever holds it next — and we serve no subdomains,

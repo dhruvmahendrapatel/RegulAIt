@@ -1127,8 +1127,9 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
        `NET_BIND_SERVICE` + `no-new-privileges`;
      - the Node version inside the pinned `node:22-trixie-slim` digest (the executor fails closed below 22.19).
 5. **Follow-ups this leaves:**
-   - Pin `caddy:2-alpine` by digest, for both Caddy services and the image bundle together (left out of this slice on
-     purpose: the bundle and both services must move in one change).
+   - ~~Pin `caddy:2-alpine` by digest, for both Caddy services and the image bundle together (left out of this slice on
+     purpose: the bundle and both services must move in one change).~~ **Done** in "I5 follow-up: engines in compose"
+     below.
    - Re-check the smoke check's containment when CI moves to a Node with a network permission (`--allow-net`), which
      would replace the `unshare` dependency.
    - A front per executor host when there are several executors (one front serves one compose stack today).
@@ -1590,3 +1591,87 @@ settle what the decisions above leave open:
    wasteful for large artifacts.
 3. **Streaming model answers** through the gateway channel are not supported. If an engine needs them, the channel
    needs chunked answer frames.
+
+## I5 follow-up: engines in compose (2026-10-17)
+
+What the stock compose stack now holds for engine tasks, and what is still unverified. No migration; nothing in the
+gateway, the executor's runtime backends or the engine code changed.
+
+1. **Engine images, built by compose.** A new `engine-images` profile has three build-only services,
+   `engine-promptfoo-image`, `engine-modelscan-image` and `engine-garak-image`. Each builds its existing
+   `engines/<engine>/Dockerfile` from the repository root and tags it `regulait/engine-<engine>:local`
+   (`platform: linux/amd64`, `pull_policy: build`). Each image has one use per entry point: the runner
+   (`/app/dist/main.js`) and the task (`/app/dist/task-main.js`, the manifest's `taskEntry`).
+   - **Already true of the Dockerfiles, checked and unchanged:** every `FROM` is pinned by digest (the garak
+     `preseed` stage builds on its own pinned `closure` stage). The runtime stage runs as uid 10001. `/work` and
+     `/jobs` exist, owned by 10001. `HOME` is `/work`. No package installer is left at run time.
+   - **The services never run.** An `up` with the profile runs each as an inert one-shot that exits 0. It has
+     `node -e "process.exit(0)"` as its entry point, `network_mode: none`, `read_only`, `cap_drop: [ALL]`,
+     `no-new-privileges` and uid 10001.
+   - **The task's real hardening is the executor's, not compose's.** The executor applies the shipped
+     `engine-worker` profile on every `docker run`: read-only root, a 1 GiB tmpfs `/work`, `--network none` (the
+     gateway channel only), uid 10001, every capability dropped, the input read-only at `/jobs`, and the task secret
+     on fd 3. Compose settings cannot widen that.
+   - **What still blocks an end-to-end run:**
+     - **Every shipped `taskImage` is still null.** An executor starts a task only from the manifest's `taskImage`,
+       the image's content digest. Until a release records a built image's digest there, a built image places nothing
+       (`policy_unresolved`, the run ends `not_run`). This slice does not change the manifest, which is code.
+     - **The runners still name their image by registry digest only** (`REGULAIT_ENGINE_<ENGINE>_DIGEST`, ADR-0187
+       decision 55). A local build has no registry digest, so a runner needs the published image or a local registry.
+       Neither exists yet: the image publish and signing pipeline is still ADR-0187's open item.
+2. **The executor's input volume.** `sandbox-executor` mounts the named volume `executor-input` (Docker name
+   `regulait-executor-input`) at `/executor-input` and sets `REGULAIT_EXECUTOR_INPUT_DIR=/executor-input` and
+   `REGULAIT_EXECUTOR_INPUT_VOLUME=regulait-executor-input`, the two variables `runsc-backend.ts` reads. Without both
+   it refuses every engine task.
+   - **Least privilege.** Only `sandbox-executor` mounts the volume, no host path backs it, and each sandbox mounts
+     only its own sub-directory, read-only, through the host daemon (`volume-subpath`).
+   - **The name is fixed**, like `regulait-sandbox-init`, because the executor names it to the host daemon. So one
+     host runs one isolation stack.
+   - **On disk, not tmpfs.** A modelscan input can be as large as the org's artifact limit (512 MiB strict default),
+     and tmpfs pages would count against the executor's 512m memory limit. Inputs never hold the run's key (that is
+     the task secret), and each one is removed with its sandbox. A crash leaves an input behind until the executor's
+     first preflight removes it (I5 point 15).
+   - **Ownership.** The executor image (`packages/sandbox-executor/Dockerfile`, one added line) creates
+     `/executor-input` owned by 10001, mode 0711, which a fresh named volume copies. The executor can write there, and
+     no other uid can list what is in it.
+3. **Caddy pinned by digest.** All three Caddy services (`caddy`, `executor-front`, `executor-front-ca`) name one YAML
+   anchor, `x-caddy-image`:
+   `caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`.
+   `scripts/build-image-bundle.sh` (`CADDY_IMAGE`) and `scripts/install.sh` (the air-gapped image check) name the same
+   string. The digest is the OCI index that both `2-alpine` and `2.11.7-alpine` named on 2026-10-17:
+   - the Docker Hub registry manifest API answered 200 for `library/caddy:2-alpine` with this
+     `docker-content-digest`;
+   - the Hub tags API lists `2.11.7-alpine` with the same digest.
+
+   This also answers the I4 follow-ups' question about the Caddy version: it is 2.11.7, no longer an unknown tag.
+4. **Repository hygiene.** The owner's development host names and addresses are replaced by neutral placeholders in
+   these files: the `apps/gateway/src/hsts.ts` comment, ADR-0029, ADR-0032 (and its index row), `docs/ops/TLS.md`,
+   `docs/ops/POWER_SCHEDULE.md` and `docs/product/ROADMAP.md`. The Caddy `REGULAIT_TLS_HOST` default was already the
+   neutral `set-regulait-tls-host.invalid` (#387).
+   - Still left: the dev instance id in `docs/ops/DB_BACKUP.md` and ADR-0035. These are outside this slice.
+   - `project-state/` was not touched, because the master owns it and the session records are immutable.
+5. **Checked here:**
+   - `docker compose config --quiet` with no profile; with `--profile engine-images --profile isolation --profile
+     tls --profile engines`; with `-f compose.tls-local.yml --profile tls`; and with `-f
+     compose.isolation-insecure-dev.yml --profile isolation`. All exit 0. The CLI renders the config without a daemon.
+   - The rendered config shows:
+     - the three image services;
+     - the pinned Caddy reference on all three Caddy services;
+     - the executor's two input variables and its `executor-input` mount;
+     - the volume's fixed name.
+   - `bash -n` on both scripts.
+   - The compose test `zz-b7-compose-engine-images.test.ts`, which pins items 1 to 3.
+6. **Not verified (pending execution, M-041).** No session had a Docker daemon.
+   - **Not run on a Docker host:**
+     - building any engine image;
+     - `up` with these profiles;
+     - a fresh `regulait-executor-input` volume copying the image's owner and mode;
+     - `volume-subpath` on the target Engine (26 or later);
+     - a sandbox reading its input under gVisor's gofer through a 0711 parent;
+     - an engine task end to end.
+   - **The air-gapped bundle by digest.** It is unverified whether `docker load` of a bundle saved by digest reference
+     keeps the repository digest on the target's image store. If it does not, the digest reference finds nothing
+     locally (`pull_policy: never`), and the installer's image check reports Caddy missing. Run the bundle round trip
+     once on each image store, the containerd store and the classic one, and record the result here.
+   - **Real gVisor** still waits on the `runsc` re-pin (I5 "Not verified").
+

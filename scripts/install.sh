@@ -752,7 +752,8 @@ if [ "$MODE" = "air_gapped" ]; then
   fi
   if [ "$DAEMON_OK" = "1" ] && [ -z "$IMAGE_BUNDLE" ]; then
     missing=""
-    for img in "$GATEWAY_IMAGE" postgres:16 caddy:2-alpine; do
+    # the Caddy reference is docker-compose.yml's `x-caddy-image` (pinned by digest; re-pin both together)
+    for img in "$GATEWAY_IMAGE" postgres:16 caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f; do
       image_present "$img" || missing="$missing $img"
     done
     # In --check mode this is a finding, not a refusal: the point of check mode
