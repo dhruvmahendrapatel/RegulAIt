@@ -59,7 +59,7 @@ import { loadLiveChain, createRootGrant } from "./delegation.js";
 import { configuredIdentitySigningKeys, rotateIdentitySigningKey } from "./identity-signing-keys.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { grantCascadeTestHooks } from "./oauth/identity-admin.js";
-import { parseSpiffeBundle, spiffeBundleRevokeStepUp, spiffeBundleSetStepUp } from "./oauth/spiffe-bundles.js";
+import { parseSpiffeBundle, spiffeBundleRevokeStepUp, spiffeBundleSetStepUp, spiffeBundleWriteTestHooks } from "./oauth/spiffe-bundles.js";
 import { tokenEndpointTestHooks } from "./oauth/token-endpoint.js";
 import type { StepUpCheckArgs } from "./step-up.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -681,6 +681,30 @@ describe("S9 — rotation and revocation (decision 12)", () => {
     expect(fresh.statusCode, fresh.body).toBe(200);
   });
 
+  it("revoke commits first, between the certificate match and the issue → refused spiffe_bundle_revoked, nothing issued", async () => {
+    const td = `s9revfirst-${RUN}.example.org`;
+    const a = await svidAgent(td, "revfirst");
+    const b1 = await upload(td, root.pem, null);
+    expect(b1.statusCode, b1.body).toBe(201);
+    const svid = await makeCert({ issuer: root, uris: [a.clientId] });
+    tokenEndpointTestHooks.afterCertificateMatch = async () => {
+      tokenEndpointTestHooks.afterCertificateMatch = undefined;
+      // the request has matched under B1's authorities; the revocation of B1 commits before the issuing transaction
+      const rv = await inject("POST", `${BUNDLES}/${b1.json().id}/revoke`, AUTH, {});
+      expect(rv.statusCode, rv.body).toBe(200);
+    };
+    let r;
+    try {
+      r = await tokenRequest(a, fwd(svid.der));
+    } finally {
+      tokenEndpointTestHooks.afterCertificateMatch = undefined;
+    }
+    expect([r.statusCode, r.json().error]).toEqual([401, "invalid_client"]);
+    expect(await lastTokenCode(a.clientId)).toBe("spiffe_bundle_revoked");
+    const made = await db.select({ id: delegationGrants.id }).from(delegationGrants).where(eq(delegationGrants.actorIdentityId, a.identityId));
+    expect(made, "nothing was issued under the revoked bundle").toEqual([]);
+  });
+
   it("#389 review L3: a step-up for a refused write (404, 409) stays unspent; the accepted write spends it", async () => {
     // the domain's first bundle, with the bootstrap credential, BEFORE an admin can step up (which ends the
     // bootstrap credential's step-up)
@@ -708,6 +732,33 @@ describe("S9 — rotation and revocation (decision 12)", () => {
       const r404 = await send(gone, `${BUNDLES}/${missing}/revoke`, {});
       expect([r404.statusCode, r404.json().error]).toEqual([404, "spiffe_bundle_not_found"]);
       expect(await used(gone.grantId), "a refused revoke spent its step-up").toBeNull();
+
+      // 409: a racing FIRST upload commits after this one's compare-and-set (no active row to lock) and before its
+      // insert; the unique violation is raised before the claim, so the step-up stays unspent (recheck Low 1)
+      const raceTd = `s9l1-${RUN}.example.org`;
+      const racer = parseSpiffeBundle(root.pem, new Date());
+      if (!("digest" in racer)) throw new Error("fixture bundle refused");
+      const raced = await sessionWithStepUp(admin.id, spiffeBundleSetStepUp({ trustDomain: raceTd, bundle: root2.pem, replacesBundleId: null }, parsed.digest));
+      spiffeBundleWriteTestHooks.beforeInsert = async () => {
+        spiffeBundleWriteTestHooks.beforeInsert = undefined;
+        await db.insert(spiffeTrustBundles).values({
+          trustDomain: raceTd,
+          format: racer.format,
+          authoritiesPem: racer.authoritiesPem,
+          authorities: racer.views,
+          digest: racer.digest,
+          jwtAuthoritiesIgnored: racer.jwtAuthoritiesIgnored,
+          createdBy: admin.id,
+        });
+      };
+      try {
+        const rRace = await send(raced, BUNDLES, { trustDomain: raceTd, bundle: root2.pem, replacesBundleId: null });
+        expect([rRace.statusCode, rRace.json().error]).toEqual([409, "spiffe_bundle_conflict"]);
+      } finally {
+        spiffeBundleWriteTestHooks.beforeInsert = undefined;
+      }
+      expect(await used(raced.grantId), "the racing first upload's loser spent its step-up").toBeNull();
+      expect((await activeBundle(raceTd))!.digest, "the winner's bundle stands").toBe(racer.digest);
 
       // positive control: the right compare-and-set is written, and only then is the step-up spent
       const ok = await sessionWithStepUp(admin.id, spiffeBundleSetStepUp({ trustDomain: td, bundle: root2.pem, replacesBundleId: first.json().id }, parsed.digest));
