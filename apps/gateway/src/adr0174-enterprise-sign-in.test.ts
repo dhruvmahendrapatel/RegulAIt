@@ -68,6 +68,7 @@ import { buildApp } from "./app.js";
 import { enrolAdminTotpForTest, relaxIdentityForTest } from "./testing/identity-posture.js";
 import { forgetStepUpMethodsForTest, relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { totpCode, totpStep } from "./auth.js";
+import { awaitTotpHeadroom } from "./testing/totp-window.js";
 import { idTokenMfa } from "./federated-identity.js";
 import { DEMO_PERSONA_EMAILS, isDemoLicense, setDemoPasswords } from "./demo-set-passwords-lib.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
@@ -743,6 +744,7 @@ describe("account linking without takeover (§5)", () => {
     const enroll = await app.inject({ method: "POST", url: "/auth/totp/enroll", headers: CSRF, cookies: { regulait_session: cookie } });
     expect(enroll.statusCode, enroll.body).toBe(200);
     const secret = enroll.json().secret as string;
+    await awaitTotpHeadroom();
     const activate = await app.inject({
       method: "POST", url: "/auth/totp/activate", headers: CSRF, cookies: { regulait_session: cookie },
       payload: { code: totpCode(secret, totpStep() - 1) },
