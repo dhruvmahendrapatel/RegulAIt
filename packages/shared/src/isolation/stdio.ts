@@ -196,7 +196,7 @@ export const executorStdioPostResponseSchema = z
 export const EXECUTOR_STDIO_REFUSALS = [
   /** the offer is not this executor's, or not placed */
   "offer_unavailable",
-  /** no longer answered (the multi-replica relay, migration 0206, answers `session_lost`); kept so an older peer reads it */
+  /** no longer answered (the multi-replica relay, migration 0204, answers `session_lost`); kept so an older peer reads it */
   "stdio_session_unknown",
   /** the session's holder is gone (its lease lapsed, or it never wrote its row): final, the sandbox stops */
   "session_lost",

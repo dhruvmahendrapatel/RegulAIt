@@ -1,5 +1,5 @@
 /**
- * ADR-0190 I4 follow-up — stdio sessions on a multi-replica gateway (the frames table, migration 0206), without a
+ * ADR-0190 I4 follow-up — stdio sessions on a multi-replica gateway (the frames table, migration 0204), without a
  * database:
  *
  *  - THE ROUTING RULE (`stdioRouteDecision`), every branch: a window or a stdout POST is served only for this

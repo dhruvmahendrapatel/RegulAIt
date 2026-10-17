@@ -969,7 +969,7 @@ Open questions I4 leaves (for the owner or the master):
    **Answered 2026-10-15: Owner decision C** (L3 by default; an admin may lower it to L2 for interactive sessions).
 2. **Multi-replica stdio sessions** (item 9): sticky routing of `/v1/executor-channel/offers/*/stdio`, or a frames
    table (a migration).
-   **Built 2026-10-17 as a frames table** (migration 0206): see "I4 follow-up: stdio sessions on a multi-replica
+   **Built 2026-10-17 as a frames table** (migration 0204): see "I4 follow-up: stdio sessions on a multi-replica
    gateway" below.
 3. **A gVisor CI job**: GitHub-hosted runners have Docker and sudo, so a job could install the pinned tarball,
    register `runsc` and run the integration suite. It was not added because it has never been run (M-041).
@@ -1519,7 +1519,9 @@ settle what the decisions above leave open:
 12. **A result needs a placed task** (review HIGH-1). In the result transaction, on the locked run, any status but
     `not_run` is accepted only when `task_placement_id` is set and that placement's linked report is `placed`.
     Otherwise the run ends `not_run` (`isolation_unavailable`, cause `engine_task_not_placed`) and the route answers
-    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested.
+    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested. A `not_run` envelope
+    of an unplaced task is accepted as the run's end but its content is dropped too (no items, raw report or scan
+    record; recheck L1, `engine-runs.ts`).
 13. **First enable** (review; was open question 1). The manifest names each engine's `workerAttestedSwitches`
     (promptfoo `REGULAIT_PROMPTFOO_WORKER_ISOLATED`, modelscan `REGULAIT_MODELSCAN_SCANNER_ISOLATED`, garak its
     worker switches and `REGULAIT_GARAK_WORKER_SELFTEST`). The runner's report meets them, or a fresh, passing
@@ -1527,7 +1529,9 @@ settle what the decisions above leave open:
     (the org floor raised to the profile's `minClass`; a customer plane through the admin's mapping), found by
     `engine-worker-attestation.ts`. Without one they fail `executor_attestation_missing:<switch>` (fail closed). The
     basis is recorded whole in the self-test verdict and its audit row (`executorAttestation`), on the admin
-    self-test, the registration and the runner's report; the lease admission reads it again in its transaction.
+    self-test, the registration and the runner's report. The lease reads it ONCE per poll, before its transaction
+    (recheck L4), records it on the lease's audit row and names it on every refusal; the admission inside the
+    transaction uses that one reading, it does not read the basis again.
     An executor never self-tests, so never attests, a profile its backend cannot serve on this host (runsc without
     an input volume for `engine-worker`); no offer of it ever reaches that executor.
 14. **The engine-worker floor setting** (review LOW-1). For an agent-null engine run whose configured profile is the
@@ -1548,8 +1552,10 @@ settle what the decisions above leave open:
     executor's attestation of the profile, which does not read the task's environment. The real control is the
     sandbox's network denial (`--network=none`, the gateway channel only), as decision 19 of ADR-0187 already says.
 18. **Review round 1, the rest.** The task start re-runs the lease's own checks (the run-as person; an agent run's
-    entitlement and project attribution; an artifact scan's artifact access) and ends the run `not_run` with the
-    lease's code. A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
+    entitlement to the target and judge, a judge that is gone, the manifest's required judge (`judge_required`),
+    an agent with no provider model (`agent_not_dispatchable`) and project attribution; an artifact scan's artifact
+    access) and ends the run `not_run` with the lease's code. (The two dispatch checks were added on 2026-10-17;
+    until then this point overstated them.) A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
     than rotating the key the sandbox holds. One gateway process holds at most 512 MiB of unacknowledged task output
     across every task (`output_overflow` past it). A `not_run` envelope of an unplaced task is dropped too (no items,
     raw report or scan record). The result route also refuses on a task refusal held in memory before the watchdog
@@ -1837,8 +1843,8 @@ Both were built 2026-10-17 in migration 0201.
 ## I4 follow-up: stdio sessions on a multi-replica gateway (2026-10-17)
 
 This closes I4 open question 2 and the item 9 caveat ("a multi-replica gateway needs the stdio routes to reach the
-placing replica, or a frames table"). Migration **0206** (`0206_isolation_stdio_relay.sql`) is hand-written; its
-journal entry (idx 206) is NOT in this change: the master adds it once 0202 to 0205 are on main.
+placing replica, or a frames table"). Migration **0204** (`0204_isolation_stdio_relay.sql`) is hand-written; its
+journal entry (idx 204) follows 0203. The number was 0206 as first written; the master assigned 0204.
 
 1. **The choice: (b) a frames table, not (a) ownership plus forwarding.**
    - **(a) An ownership table plus forwarding to the owning replica over the internal TLS front: rejected.**
@@ -1933,8 +1939,7 @@ journal entry (idx 206) is NOT in this change: the master adds it once 0202 to 0
      `stdio_session_pending` retried; the gateway typecheck of the database suite.
    - Not run here (no Postgres in the build environment): the database suite `zz-adr0190-i4-stdio-relay.test.ts`
      (ownership, isolation, the lease, loss, bounds, retention, the 0185 guards) and the existing I4 and I5 suites
-     against the relay. They run in CI once the journal entry for 0206 is added; until then they fail on the missing
-     tables.
+     against the relay. They run in CI with the journal entry for 0204 (idx 204).
    - **Pending execution:** a real multi-replica deployment (two or more gateway processes behind the front, a placed
      stdio call whose window and stdout reach a replica other than the holder, and a holder stopped mid-call). The
      database suite plays the second replica with rows written under another holder id.
@@ -1944,3 +1949,152 @@ journal entry (idx 206) is NOT in this change: the master adds it once 0202 to 0
      (`tasksByRun`). Only the executor side of an engine task's session is multi-replica now.
    - No take-over: a session whose holder dies is lost, never resumed elsewhere. Resuming would need the MCP client's
      state, which lives only in the holder.
+
+## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
+
+This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). No migration
+(the revert first proposed with migration 0202 was withdrawn: see the Revert bullet in point 5). It
+supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "cannot be versioned" for
+`engine-worker` only. These points settle what the sections above leave open:
+
+1. **The runc backend** (`packages/sandbox-executor/src/runc-backend.ts`, `REGULAIT_EXECUTOR_BACKEND=runc`). The
+   Docker container core moved unchanged from the I4 backend into `docker-backend.ts`, and both backends extend it, so
+   an L1 hardened container has exactly the L2 hardening minus `runsc`. The `docker run` line differs only in
+   `--runtime` and in `--cgroupns private`, which the runc backend asks for explicitly (tested). The gVisor line does
+   not ask for it yet: adding it there is a #385 follow-up, so the I4 backend is unchanged until L2 is verified. Open source first (ADR-0176): Docker's own CLI and Engine API, as for gVisor; runc is the Docker
+   Engine's default runtime (Apache-2.0), installed with the host's Docker, so nothing joins the executor image. No
+   container client library was added: the I4 backend already drives the documented CLI and Engine API, and a
+   second client would duplicate it.
+2. **It reports L1 honestly.** `describe()` names `runc` and `hardened_container` only. Starting one at any other
+   class is refused before `docker run`, and every report says `runc`, whatever the init prints. The gateway's existing
+   rules then refuse anything more:
+   - `runc` cannot attest L2 or L3 (`class_not_attestable_by_backend`). The `executors_classes_declared_check`
+     backstop from 0183 also refuses a runc row that declares them.
+   - A runc runtime caps the claim at L1 (`class_above_observed_runtime`).
+   - An L1 attestation never meets an L2 or L3 requirement (`class_below_required`: in the broker, at accept and at
+     report).
+   An executor that declares only L1 self-tests no L2 or L3 profile (`topClassFor`), so every shipped profile stays
+   unattested on it.
+3. **What proves the L1 hardening** (decision 6, and review H2's rule that the outside decides).
+   - Before any container starts, the daemon's `/info` must show the runtime, seccomp support whose default is not
+     `unconfined`, and user-namespace remapping or rootless mode, so the container's uid is never a host uid. There is
+     no opt-out in this release, because the gateway could not audit an executor-side switch (ADR-0180).
+   - After the container starts, its own `HostConfig` (`docker inspect`) must show: the runtime it was asked for;
+     not privileged; `CapDrop: [ALL]` and no `CapAdd`; `no-new-privileges`; no `seccomp=unconfined` and no
+     `apparmor=unconfined`, `systempaths=unconfined` or `label=disable`; a read-only root; network `none`; IPC
+     `none`; `CgroupnsMode: private`; no shared PID or UTS namespace and no host user namespace; no device, device
+     request or device cgroup rule; no bind mount; and only read-only volume mounts.
+   - Each contradiction makes its probe `not run` with a `host_*` code (or `container_runtime_mismatch`), so the
+     report fails whatever the init printed.
+4. **A read-side backstop for every placement path.** `freshAttestation` is the one predicate behind the broker,
+   accept, the live delegation chain and the engine first-enable basis. It now ignores an attestation row whose class
+   the executor's backend cannot attest, or that its registration does not declare (`attestableBy`). A forged L2
+   pass on a runc executor therefore never counts: the broker refuses `attestation_stale` and offers nothing.
+5. **The engine-worker profile is versioned** (owner decision 4's floor is unchanged).
+   - `restricted` and `restricted-microvm` stay the strict references, never versioned or retired.
+   - `engine-worker` is versioned through the ordinary flow (`POST /v1/execution-profiles/engine-worker/versions`).
+     The Isolation panel offers "New version" on it and never "Retire".
+   - Its shipped body is version 1 and its own strict reference (`executionProfileReference`). Its shipped posture
+     (the jobs input, the task-scoped secret, the larger resources) is not re-judged against `restricted`. Anything
+     looser than that body, or than the version it replaces, is a `settings_relax` step-up and an
+     `execution-profile-relaxed` audit row, whose detail now names the `reference`. A lower `minClass` is such a
+     relaxation.
+   - A version must keep the engine shape (`engineWorkerProfileProblem`: engine_worker only, the one `jobs` input at
+     `/jobs`). Otherwise it is refused 400 `engine_worker_profile_shape`.
+   - It is never retired. Engines always run under its version in force, which is how `resolveRequirement`, the
+     broker and the first-enable basis read it. A new version is written with `shipped: false`.
+   - **Revert (review of #397), always a NEW version.** A version whose controls equal an EARLIER version of the
+     same profile is written as the next version, with that earlier body plus a `revertOf` marker
+     (`{version, digest, replacing}`). The gateway sets the marker and strips any value a client sends; no control
+     reads it. Its only job is to make the new row's digest differ: the digest is the SHA-256 of the body and unique
+     (`execution_profiles_digest_uq`), and placements and attestations reference it. Nothing is retired, un-retired or
+     changed, so retirement stays terminal and migration 0183's guard is unchanged.
+     - A revert is judged like any version, against the strict reference and the version in force (the newest
+       version). Going back to a stricter body (an L1 engine-worker back to its exact shipped controls) needs no
+       step-up. Going back to a looser one needs the `settings_relax` step-up and is audited
+       `execution-profile-relaxed`.
+     - It is audited `execution-profile-reverted` (a new `ISOLATION_AUDIT_ACTIONS` entry). Controls equal to the
+       version in force, with or without a marker, are refused `execution_profile_unchanged`.
+     - Executors attest the new digest at their next self-test before it places, so placement fails closed until
+       then.
+     - A revert changes only the profile's newest version. An agent or stdio server assigned to an older version
+       (for a custom profile, perhaps an older, looser one) keeps that assignment: an admin moves it with the
+       assignment route. The dialog says so.
+     - The panel numbers a new version after the newest version and says "reverted to the controls of vN" when the
+       route wrote a revert.
+     - A first build reverted by retiring the versions above the target and changed the guard (migration 0202) so a
+       profile could be versioned again after that. CI's I1 invariant test showed this let a new version follow a
+       retired newest version. It was withdrawn: 0202 and its journal entry are removed, and the number is free.
+   - **A new version is a compare-and-set too** (review of #397). Its insert and audit rows run in one transaction
+     holding the same per-name advisory lock, and re-check that the newest version and the version in force are
+     still the one it was judged against (and not retired). Another version in between, a revert included, refuses
+     409 `changed_concurrently`.
+6. **L1 for engines stays off by default and needs every relaxation.** Decision 11 lets an admin relax the
+   engine_worker floor to L1 (owner decision 4: audited, step-up), so the L1 path exists, and it is strict by
+   default. An engine task places at L1 only when all of these hold:
+   - the org's engine_worker floor, the project's sensitivity floor and the engine-worker profile (a new version)
+     are all at L1, each a step-up;
+   - an active executor holds a fresh L1 attestation of that version.
+   With the shipped version 1 (L2), nothing places at L1 even when both org floors are relaxed: the broker raises
+   the requirement to the profile's floor (`requiredBy: configured_profile`).
+7. **Tests.**
+   - **Executor:** `runc-backend.test.ts`. It covers the argument parity with runsc, the daemon posture, the honest
+     class (an L1 pass, an L2 or L3 claim failing, an L1 placement report refused against L2 and L3, a forged
+     gVisor init still `runc`), each `HostConfig` property made untrue one at a time, self-test selection, refusal
+     before `docker run`, and the handshake with the real init on the host (refused there: `uid_mismatch`). The I4
+     and I5 backend suites pass unchanged on the shared core.
+   - **Shared:** `engine-worker-profile.test.ts`, the versioning rules and the L2 defaults.
+   - **Gateway, on the shared database:** `zz-adr0190-runc-l1.test.ts`. It covers the 0183 backstop, the broker at
+     L1, L2 and L3, the forged-row backstop, engine placement under strict and under relaxed org floors, the
+     first-enable basis, and the version routes' refusals. It writes no engine-worker version. In `afterAll` it
+     revokes every executor it registered (its open offers withdrawn) and puts the org floors back to the values it
+     read in `beforeAll`.
+   - **Gateway, on a scratch database** (created and dropped by the file): `zz-adr0190-engine-worker-l1.test.ts`.
+     An engine task is offered at L1 only once all three relaxations and a fresh L1 attestation exist. A version
+     equal to the shipped body then becomes v3 (the marker, a new digest) without a step-up, nothing is retired, and
+     engines require L2 again. A looser revert needs the step-up and emits `execution-profile-relaxed`. A reverted
+     profile, once retired, is never un-retired, re-stamped or versioned again (the guard and the route both refuse).
+     A new version blocked on the per-name lock while another version lands refuses `changed_concurrently`.
+   - **Web:** the panel's actions (`profileActions`, mirrored from the shared list) and one mocked e2e assertion.
+
+**Not verified (M-041).**
+- **A real runc run is pending execution.** The session that built this had no Docker daemon, so the runc backend has
+  never started a container. Its arguments, its outside checks and its handshake with the real init are tested
+  without one. The `HostConfig` and `/info` field shapes it checks are taken from the Docker Engine API
+  documentation, not observed on a daemon. Until it has run on a Docker host with user-namespace remapping, L1 is
+  unverified, as L2 is.
+- No compose service, runbook or INSTALL.md step for a runc executor was written: none has been executed, and another
+  slice owns the compose stack. The environment variables are in `main.ts` (`REGULAIT_EXECUTOR_RUNC_RUNTIME`,
+  `REGULAIT_EXECUTOR_RUNC_VERSION`, and the canary, init and socket variables both backends share).
+- The gateway database suites (`zz-adr0190-runc-l1.test.ts` and the scratch-database
+  `zz-adr0190-engine-worker-l1.test.ts`) have not run in the session that wrote them (no database there); CI's
+  database shards run them. The mocked e2e assertion has not run locally (no browsers there).
+
+**Recorded (review of #397).**
+- **L1 requires user namespaces, with no opt-out.** This is kept strict. A relaxation (audited, gateway-side, never an
+  executor switch) is added only if a customer needs it.
+- **Follow-ups after #385 verifies L2:** apply the outside `HostConfig` check to the gVisor backend too, and pass
+  `--cgroupns private` on the gVisor line.
+
+## I5 follow-up: refusal ordering (2026-10-17)
+
+No migration. CI gateway shard 4 (run 38991262736) saw "an executor that reports another input digest" read the
+task's refusal as `session_lost` instead of `execution_profile_mismatch`. The mismatch, the offer's `mismatch`
+status and its report row commit in one transaction, before the quarantine. The stdio watchdog then sees the offer
+ended and calls `lose()` on the session, and the task's end hook stamped `session_lost` in memory before any read of
+the committed report.
+
+1. **A lost session is no longer a refusal by itself.** The task records only that its session was lost
+   (`sessionLost`). Reading the task's state resolves the refusal in order: a refusal already held, then the
+   placement's linked report (`mismatch` reads `execution_profile_mismatch`; a `session_lost` row reads
+   `session_lost`), then the offer's own end (`offer_<status>`), and only then the lost session. The result route's
+   in-memory check (`engineTaskRefusalOf`) still refuses a lost session before it is resolved (fail closed).
+2. **Point 18's dispatch checks** (`judge_required`, `agent_not_dispatchable`, a judge that is gone) now run at the
+   task start, as at the lease (pinned in `zz-adr0190-i5-engines.test.ts`).
+3. **Points 12 and 13** were corrected above: the dropped `not_run` envelope of an unplaced task, and the attestation
+   basis read once per poll, outside the lease transaction.
+4. The "a refusal holds no task of its own" test now asks about its own run (`engineTaskHeldFor(runId)`) rather than
+   comparing the process-wide task count, which other tests' tasks could change.
+
+**Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
+database shards run it.

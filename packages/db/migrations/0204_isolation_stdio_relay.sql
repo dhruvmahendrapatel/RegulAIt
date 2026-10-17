@@ -1,6 +1,6 @@
 -- ADR-0190 I4 follow-up: stdio sessions on a multi-replica gateway (the frames table).
 -- Hand-authored (never drizzle-kit generate). Re-runnable: every statement is idempotent.
--- Journal entry: NOT added by the builder; the master adds idx 206 once 0202-0205 are on main.
+-- Journal entry: idx 204 (`0204_isolation_stdio_relay`), right after 0203; the number was assigned by the master.
 --
 -- A stdio session is held by the gateway replica that placed it (its MCP client lives there), but the executor's
 -- window (`GET /v1/executor-channel/offers/:id/stdio`) and its stdout POSTs may reach ANY replica. Every replica

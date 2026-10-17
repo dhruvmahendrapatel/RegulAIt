@@ -1,5 +1,5 @@
 /**
- * ADR-0190 I4 follow-up — stdio sessions on a multi-replica gateway, on a real database (migration 0206):
+ * ADR-0190 I4 follow-up — stdio sessions on a multi-replica gateway, on a real database (migration 0204):
  *
  *  - OWNERSHIP: the holder writes its row once, for a committed offer of the executor it names; the offer, executor
  *    and holding replica never change; a row another replica holds is never touched by this one's holder calls.
@@ -123,8 +123,8 @@ afterAll(async () => {
   await until(() => liveStdioSessions() === 0).catch(() => undefined);
 });
 
-describe("ADR-0190 I4 multi-replica stdio: migration 0206", () => {
-  it("is applied (its journal entry is added by the master) and keeps the 0185 guards", async () => {
+describe("ADR-0190 I4 multi-replica stdio: migration 0204", () => {
+  it("is applied (journal idx 204) and keeps the 0185 guards", async () => {
     const tables = rows<{ t: string }>(
       await db.execute(sql`select table_name as t from information_schema.tables where table_schema = 'public' and table_name like 'stdio_relay_%' order by 1`),
     ).map((r) => r.t);

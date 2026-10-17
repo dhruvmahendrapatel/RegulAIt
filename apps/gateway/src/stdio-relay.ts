@@ -1,5 +1,5 @@
 /**
- * ADR-0190 I4 follow-up — STDIO SESSIONS ON A MULTI-REPLICA GATEWAY: the frames table (migration 0206).
+ * ADR-0190 I4 follow-up — STDIO SESSIONS ON A MULTI-REPLICA GATEWAY: the frames table (migration 0204).
  *
  * A stdio session is held by the gateway replica that placed it: its MCP client, and the caller waiting on it, live
  * in that process. The executor's window (`GET …/offers/:id/stdio`) and its stdout POSTs reach whichever replica the

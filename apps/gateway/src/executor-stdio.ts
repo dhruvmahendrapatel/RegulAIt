@@ -27,7 +27,7 @@
  * its MCP client) is held in THIS gateway process, keyed by the offer id,
  * from the moment the offer is made. The executor's window and stdout POSTs
  * may reach ANY replica, so the routes serve the session from the database
- * (the frames table, `stdio-relay.ts`, migration 0206) and the holder relays
+ * (the frames table, `stdio-relay.ts`, migration 0204) and the holder relays
  * between the database and its session (`relayOnce`, every
  * `STDIO_RELAY_POLL_MS` and at once when this process has news). The holder
  * renews a lease on its row; a route that finds the lease lapsed ends the
@@ -177,7 +177,7 @@ export class StdioSession {
    * sandbox has spoken (its first stdout POST proves the release happened) and when the session ends.
    */
   secret: string | undefined = undefined;
-  /** the relay (migration 0206): the row is written; every stdin frame below `persistedTo` is in the table */
+  /** the relay (migration 0204): the row is written; every stdin frame below `persistedTo` is in the table */
   persisted = false;
   persistedTo = 0;
   closeMarked = false;
@@ -359,7 +359,7 @@ function watchStdioSession(db: Db, session: StdioSession): void {
 }
 
 // ---------------------------------------------------------------------------
-// The relay (migration 0206): this process's sessions <-> the frames table
+// The relay (migration 0204): this process's sessions <-> the frames table
 // ---------------------------------------------------------------------------
 
 let relayDb: Db | null = null;

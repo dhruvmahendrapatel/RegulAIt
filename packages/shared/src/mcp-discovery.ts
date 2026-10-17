@@ -261,7 +261,7 @@ export function findMcpEndpoints(content: string): McpEndpointObservation[] {
  * the payload never has to infer the posture from marketing. */
 export const MCP_DISCOVERY_POSTURE =
   "MCP discovery classifies evidence YOU supply — a proxy/CASB export, a gateway log, a manifest. " +
-  "Nothing is scanned, resolved, crawled or connected to, and no network call is made. A host is " +
+  "This classifier scans, resolves, crawls and connects to nothing, and makes no network call. A host is " +
   "reported as UNREGISTERED when it appears in your evidence and matches no server in this " +
   "deployment's MCP registry; that is a statement about your registry and your evidence, not a " +
   "claim to have searched your estate.";
