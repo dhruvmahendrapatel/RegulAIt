@@ -10,6 +10,7 @@ const WS = "00000000-0000-4000-8000-0000000000bb";
 const NOW = new Date("2026-10-17T12:00:00Z");
 const ACCOUNT_ID = `/subscriptions/${SUB}/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acme-openai`;
 
+const SPEECH_ID = `/subscriptions/${SUB}/resourceGroups/rg-ai/providers/Microsoft.CognitiveServices/accounts/acme-speech`;
 const ctx = (): CloudScanContext => ({ now: NOW, auditLookbackDays: 30, pseudonymise: testPseudonymise, maxPagesPerCall: 5 });
 
 function entraRoutes(c: RecordedCall): Response | undefined {
@@ -60,8 +61,10 @@ function armRoutes(opts: { graphDeployments: boolean }) {
       if (!filter.includes("Microsoft.CognitiveServices")) return json({ value: [] });
       return json({
         value: [
-          { caller: "dev@acme.example", operationName: { value: "Microsoft.CognitiveServices/accounts/deployments/write" }, eventTimestamp: "2026-10-11T09:00:00Z" },
-          { caller: "dev@acme.example", operationName: { value: "Microsoft.CognitiveServices/accounts/listKeys/action" }, eventTimestamp: "2026-10-12T09:00:00Z" },
+          { caller: "dev@acme.example", resourceId: `${ACCOUNT_ID}/deployments/chat`, operationName: { value: "Microsoft.CognitiveServices/accounts/deployments/write" }, eventTimestamp: "2026-10-11T09:00:00Z" },
+          { caller: "dev@acme.example", resourceId: ACCOUNT_ID, operationName: { value: "Microsoft.CognitiveServices/accounts/listKeys/action" }, eventTimestamp: "2026-10-12T09:00:00Z" },
+          // a Speech account: Cognitive Services, but not a discovered AI service (finding 4)
+          { caller: "speech@acme.example", resourceId: SPEECH_ID, operationName: { value: "Microsoft.CognitiveServices/accounts/write" }, eventTimestamp: "2026-10-12T10:00:00Z" },
         ],
       });
     },
@@ -78,7 +81,10 @@ function armRoutes(opts: { graphDeployments: boolean }) {
                   { name: "firstSeen", type: "datetime" },
                   { name: "lastSeen", type: "datetime" },
                 ],
-                rows: [[ACCOUNT_ID.toUpperCase(), "ChatCompletions_Create", 1234, "2026-10-01T00:00:00Z", "2026-10-16T00:00:00Z"]],
+                rows: [
+                  [ACCOUNT_ID.toUpperCase(), "ChatCompletions_Create", 1234, "2026-10-01T00:00:00Z", "2026-10-16T00:00:00Z"],
+                  [SPEECH_ID, "Transcribe", 99, "2026-10-01T00:00:00Z", "2026-10-16T00:00:00Z"],
+                ],
               },
             ],
           })
@@ -126,8 +132,12 @@ describe("AzureCloudScanner through the real Azure SDKs and a fake cloud", () =>
     const principal = res.observations.find((o) => o.subjectKind === "cloud_principal")!;
     expect(principal.callCount).toBe(2);
     expect(JSON.stringify(res.observations)).not.toContain("acme.example");
-    const diag = res.observations.find((o) => o.resourceType === "cognitive_services.diagnostics")!;
-    expect(diag.callCount).toBe(1234);
+    const diag = res.observations.filter((o) => o.resourceType === "cognitive_services.diagnostics");
+    expect(diag.map((o) => o.callCount)).toEqual([1234]);
+    // nothing about the Speech account is reported as an AI service
+    expect(JSON.stringify(res.observations)).not.toContain("acme-speech");
+    expect(res.observations.filter((o) => o.subjectKind === "cloud_principal")).toHaveLength(1);
+    expect(res.capabilities.find((x) => x.capability === "azure.activity_log.Microsoft.CognitiveServices")?.detail).toContain("1 event(s) on resources that are not a discovered AI service");
   });
 
   it("uses Resource Graph deployments when present and skips diagnostics without a workspace", async () => {

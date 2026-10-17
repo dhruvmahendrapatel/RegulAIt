@@ -45,10 +45,23 @@ const DIAGNOSTICS_QUERY =
   "AzureDiagnostics | where ResourceProvider == 'MICROSOFT.COGNITIVESERVICES' " +
   "| summarize calls = count(), firstSeen = min(TimeGenerated), lastSeen = max(TimeGenerated) by ResourceId, OperationName";
 
-const ACTIVITY_PROVIDERS = [
-  { provider: "Microsoft.CognitiveServices", serviceKey: AZURE_SERVICE_KEYS.openai },
-  { provider: "Microsoft.MachineLearningServices", serviceKey: AZURE_SERVICE_KEYS.machineLearning },
-] as const;
+/**
+ * Activity-log providers read. Their events are attributed only to an AI resource this scan discovered (review of
+ * #404, finding 4): `Microsoft.CognitiveServices` also covers Speech, Language, Vision and other non-generative
+ * accounts, which must not be reported as an OpenAI service.
+ */
+const ACTIVITY_PROVIDERS = ["Microsoft.CognitiveServices", "Microsoft.MachineLearningServices"] as const;
+
+/** the parent AI resource of an ARM id: the id cut after `/accounts/<name>` or `/workspaces/<name>`, lower-cased */
+export function parentAiResource(resourceId: string): string | null {
+  const parts = resourceId.toLowerCase().split("/");
+  for (let i = 0; i < parts.length - 1; i++) {
+    if ((parts[i] === "accounts" && parts[i - 1] === "microsoft.cognitiveservices") || (parts[i] === "workspaces" && parts[i - 1] === "microsoft.machinelearningservices")) {
+      return parts.slice(0, i + 2).join("/");
+    }
+  }
+  return null;
+}
 
 export const AZURE_PUBLIC_AUTHORITY_HOST = "https://login.microsoftonline.com";
 
@@ -141,8 +154,11 @@ export class AzureCloudScanner implements CloudScanner {
     const scope = this.target.managementGroupId ? `managementGroups/${this.target.managementGroupId}` : this.target.subscriptionIds.join(",");
     const graph = new ResourceGraphClient(this.#credential, { httpClient: this.#httpClient });
 
+    // every AI resource this scan discovered, by lower-cased id: the only things audit evidence is attributed to
+    const discovered = new Map<string, string>();
     const resource = (row: GraphRow, serviceKey: string, resourceType: string) => {
       if (!row.id) return;
+      if (resourceType === "cognitive_services.account" || resourceType === "machine_learning.workspace") discovered.set(row.id.toLowerCase(), serviceKey);
       const attributes: Record<string, string> = {};
       if (row.kind) attributes.kind = row.kind;
       if (row.sku) attributes.sku = row.sku;
@@ -174,12 +190,15 @@ export class AzureCloudScanner implements CloudScanner {
     for (const d of graphDeployments ?? []) {
       const parent = (d.id ?? "").toLowerCase().split("/deployments/")[0]!;
       covered.add(parent);
-      resource(d, accountServiceKey(accountKind.get(parent)) ?? AZURE_SERVICE_KEYS.openai, "cognitive_services.deployment");
+      // only deployments of a discovered OpenAI or AIServices account
+      const key = accountKind.has(parent) ? accountServiceKey(accountKind.get(parent)) : null;
+      if (key) resource(d, key, "cognitive_services.deployment");
     }
     for (const a of accounts ?? []) {
       if (!a.id || !a.subscriptionId || !a.resourceGroup || !a.name || covered.has(a.id.toLowerCase())) continue;
       const arm = new CognitiveServicesManagementClient(this.#credential, a.subscriptionId, { httpClient: this.#httpClient });
-      const key = accountServiceKey(a.kind) ?? AZURE_SERVICE_KEYS.openai;
+      const key = accountServiceKey(a.kind);
+      if (!key) continue;
       await c.attempt("azure.arm.deployments", a.id, () => take(arm.deployments.list(a.resourceGroup!, a.name!), ctx.maxPagesPerCall * 100), (items) => {
         for (const d of items) resource({ id: d.id, name: d.name, location: a.location, subscriptionId: a.subscriptionId, ...(d.sku?.name ? { sku: d.sku.name } : {}) }, key, "cognitive_services.deployment");
       });
@@ -191,22 +210,29 @@ export class AzureCloudScanner implements CloudScanner {
 
     for (const subscriptionId of this.target.subscriptionIds) {
       if (await shouldStop(ctx)) break;
-      await this.#activityLog(c, ctx, subscriptionId);
+      await this.#activityLog(c, ctx, subscriptionId, discovered);
     }
-    await this.#diagnostics(c, ctx);
+    await this.#diagnostics(c, ctx, discovered);
     return c.finish();
   }
 
-  async #activityLog(c: ScanCollector, ctx: CloudScanContext, subscriptionId: string): Promise<void> {
+  async #activityLog(c: ScanCollector, ctx: CloudScanContext, subscriptionId: string, discovered: ReadonlyMap<string, string>): Promise<void> {
     // The activity log keeps 90 days.
     const start = lookbackStart(ctx, MAX_AUDIT_LOOKBACK_DAYS);
     const monitor = new MonitorClient(this.#credential, subscriptionId, { httpClient: this.#httpClient });
-    for (const { provider, serviceKey } of ACTIVITY_PROVIDERS) {
+    for (const provider of ACTIVITY_PROVIDERS) {
       const agg = new PrincipalAggregator("azure");
+      let unattributed = 0;
       const filter = `eventTimestamp ge '${start.toISOString()}' and eventTimestamp le '${ctx.now.toISOString()}' and resourceProvider eq '${provider}'`;
       await c.attempt(`azure.activity_log.${provider}`, subscriptionId, () => take(monitor.activityLogs.list(filter), ctx.maxPagesPerCall * 200), (events) => {
         for (const e of events) {
           if (!e.caller) continue;
+          const parent = e.resourceId ? parentAiResource(e.resourceId) : null;
+          const serviceKey = parent ? discovered.get(parent) : undefined;
+          if (!serviceKey) {
+            unattributed += 1;
+            continue;
+          }
           agg.record({
             rawIdentifier: e.caller,
             container: subscriptionId,
@@ -216,12 +242,12 @@ export class AzureCloudScanner implements CloudScanner {
             at: e.eventTimestamp ? e.eventTimestamp.toISOString() : ctx.now.toISOString(),
           });
         }
-      }, () => `${agg.size} caller(s) since ${start.toISOString()}`);
+      }, () => `${agg.size} caller(s) since ${start.toISOString()}${unattributed ? `; ${unattributed} event(s) on resources that are not a discovered AI service, not attributed` : ""}`);
       await agg.flush(c);
     }
   }
 
-  async #diagnostics(c: ScanCollector, ctx: CloudScanContext): Promise<void> {
+  async #diagnostics(c: ScanCollector, ctx: CloudScanContext, discovered: ReadonlyMap<string, string>): Promise<void> {
     const workspaces = this.target.logAnalyticsWorkspaceIds ?? [];
     if (!workspaces.length) {
       c.report("azure.log_analytics.diagnostics", null, "skipped", "no Log Analytics workspace configured: diagnostic logs are read only from a workspace the reader can query");
@@ -244,6 +270,9 @@ export class AzureCloudScanner implements CloudScanner {
         for (const row of table?.rows ?? []) {
           const resourceId = row[idx("ResourceId")];
           if (typeof resourceId !== "string") continue;
+          const parent = parentAiResource(resourceId);
+          const serviceKey = parent ? discovered.get(parent) : undefined;
+          if (!serviceKey) continue; // a Speech, Language or other non-generative account: not attributed
           rows += 1;
           const op = row[idx("OperationName")];
           const first = row[idx("firstSeen")];
@@ -252,7 +281,7 @@ export class AzureCloudScanner implements CloudScanner {
             provider: "azure",
             subjectKind: "cloud_resource",
             subject: resourceId.toLowerCase(),
-            serviceKey: AZURE_SERVICE_KEYS.openai,
+            serviceKey,
             signalSource: "cloud_audit_log",
             resourceType: "cognitive_services.diagnostics",
             location: null,
