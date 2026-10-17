@@ -115,6 +115,7 @@ import { assertProjectAttribution, piiInternationalCategories, projectPiiMode } 
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { beginTrace, childContext, finishTrace, recordSpan, type TraceContext } from "./tracing.js";
 import type { VirtualKeyContext } from "./virtual-keys.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 /** how much prior conversation a turn replays to the model */
@@ -1730,7 +1731,7 @@ async function resumeUnderGate(
       // state is cleared, the failure is audited
       // one line, no query text: a database error's `cause` is the driver's
       // own message (the wrapper's message embeds the SQL and its parameters)
-      const msg = (err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err))
+      const msg = (safeErrorMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err))
         .replace(/\s+/g, " ")
         .slice(0, 300);
       const now = sql`now()`; // the database clock

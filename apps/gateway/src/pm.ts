@@ -56,6 +56,7 @@ import {
 } from "./compiled-egress.js";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -238,7 +239,7 @@ export async function mirrorNodeStatus(
   } catch (err) {
     // §3 "never drift silently": the failure is returned to the caller and
     // the link's lastSyncedAt stays stale — visible, not hidden.
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -350,7 +351,7 @@ export async function mirrorApprovalDecision(
     });
     return { ok: true, action: action.kind };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -910,8 +911,8 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
               } catch (err) {
                 // the push failed — the drift stays SURFACED, never hidden
                 await auditDrift(
-                  { autoResolveFailed: err instanceof Error ? err.message : String(err) },
-                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${err instanceof Error ? err.message : String(err)}); drift stays surfaced, state machine untouched`,
+                  { autoResolveFailed: safeErrorMessage(err) },
+                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${safeErrorMessage(err)}); drift stays surfaced, state machine untouched`,
                 );
               }
             } else if (conn.driftResolution === "prefer_pm") {
@@ -1172,7 +1173,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
             reason: `decision mirrored as ${pmMirror.action}`,
           });
         } catch (err) {
-          pmMirror = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          pmMirror = { ok: false, error: safeErrorMessage(err) };
         }
       }
     }
@@ -1346,7 +1347,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           const item = await liveProvider.getWorkItem(conn.project, link.externalId);
           return { ...link, live: { state: item.state, fields: item.fields, comments: item.comments } };
         } catch (err) {
-          return { ...link, live: null, liveError: err instanceof Error ? err.message : String(err) };
+          return { ...link, live: null, liveError: safeErrorMessage(err) };
         }
       }),
     );

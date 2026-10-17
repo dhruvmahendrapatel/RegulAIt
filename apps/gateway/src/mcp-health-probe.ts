@@ -102,6 +102,7 @@ import {
   recordUpstreamSuccess,
   type BreakerRow,
 } from "./upstream-breaker.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 /** How many upstreams one pass will probe. A connect is cheap next to the
  *  rescan's manifest fetch, so this is generous; it exists to bound the pass,
@@ -447,7 +448,7 @@ export async function runMcpHealthProbeSweep(
         continue;
       }
       out.failed += 1;
-      await recordUpstreamFailure(db, row, err instanceof Error ? err.message : String(err));
+      await recordUpstreamFailure(db, row, safeErrorMessage(err));
     }
   }
 

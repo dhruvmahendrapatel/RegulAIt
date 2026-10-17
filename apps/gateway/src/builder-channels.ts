@@ -102,6 +102,7 @@ import { scheduleBackgroundWork } from "./background-work.js";
 import { loadVisibleAgent } from "./builder-access.js";
 import { onBuilderTurnResumed, resumeBuilderStep, runBuilderTurn, type TurnOutcome } from "./builder-runtime.js";
 import { projectPiiMode } from "./projects.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -504,7 +505,7 @@ export async function acceptInboundMessage(
       });
     } catch (err) {
       await audit(db, person.id, "builder_agent", agent.id, BUILDER_CHANNEL_RULE_IDS.turnFailed, "deny",
-        `the ${conn.provider} turn for '${agent.name}' failed: ${err instanceof Error ? err.message : String(err)}`,
+        `the ${conn.provider} turn for '${agent.name}' failed: ${safeErrorMessage(err)}`,
         baseDetail);
       await postReply(db, deps, conn, msg, composeChannelRefusal("internal_error", null), person.id, "builder-channel-refusal");
       throw err;
@@ -651,7 +652,7 @@ async function postTo(
   try {
     res = await deps.post(conn, { target: where.target, threadRef: where.threadRef, text, ...(blocks ? { blocks } : {}) }, actorUserId, label);
   } catch (err) {
-    res = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+    res = { ok: false, status: 502, body: { error: safeErrorMessage(err) } };
   }
   if (promptId && res.ok) {
     await db
@@ -869,7 +870,7 @@ export async function acceptStepInteraction(
         "builder-step-prompt-retired",
       );
     } catch (err) {
-      res = { ok: false, status: 502, body: { error: err instanceof Error ? err.message : String(err) } };
+      res = { ok: false, status: 502, body: { error: safeErrorMessage(err) } };
     }
     await audit(db, person.id, "chatops_connection", conn.id,
       res.ok ? BUILDER_CHANNEL_RULE_IDS.replyPosted : BUILDER_CHANNEL_RULE_IDS.replyFailed, res.ok ? "allow" : "deny",

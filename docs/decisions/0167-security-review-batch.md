@@ -396,3 +396,120 @@ suite 3367 passed on the implementer's run, and the dispatcher's full gate on th
 - A hard crash after a `202 deferred_to_running_executor` still waits out the claim TTL before the
   stage is re-taken.
 - An `applyEvent` precondition-write hazard was noted in review; safe with today's callers.
+
+## As built 2026-10-17 — no request body in a log line or a refusal (N8, branch `sec-logleak-spiffe-1017`)
+
+Decisions 7 and 9 left one path open. The error handler logged a parser refusal's message and returned it as
+`detail`, and its 500 branch logged the whole error with `req.url`, query string included. A content-type parser that
+passed Node's `SyntaxError` through (the SCIM parser did, so a malformed SCIM body was a 500) put a snippet of the
+body in that message, and an unmapped database failure logged drizzle's `DrizzleQueryError`, whose message and
+`params` carry every bound value, many taken from the body. What changed (all in `apps/gateway`):
+
+1. **Parser and validation refusals** (`parserRefusal`, `parserRefusalLogFields` in `gateway-logger.ts`). The same
+   `FST_ERR_*` 4xx scope and the same snake-case `error` names as decision 7. The caller gets a fixed sentence per code
+   (never the parser's message); the `warn` line carries only the code, the method, the route template and the status,
+   with pino's `reqId` binding. Zod validation refusals were already not logged by the handler (the refusal line from
+   decision 9 names the route and status only); their `issues` carry no input values under zod 4, but an
+   `unrecognized_keys` issue names the extra keys the caller sent.
+2. **The SCIM parser** raises Fastify's own `FST_ERR_CTP_INVALID_JSON_BODY`, so a malformed SCIM body is a 400 like
+   any other JSON body.
+3. **The 500 line** (`unhandledErrorLogFields`) logs the path without its query string. A `SyntaxError` keeps its stack
+   frames, not its message. A failed query keeps its SQL text (as `sql`), the SQLSTATE and the constraint, table and
+   column names, and withholds the message, the parameters (their count only) and Postgres's `detail`. Any other error
+   is logged whole, as before, so an operator still sees its reason.
+4. **pino's own redaction** (ADR-0176: its `redact` paths, not a scrubber) now also masks `body`, `query`,
+   `req.body`, `req.query`, `err.body`, `headers["x-api-key"]` and `proxy-authorization` wherever a call site logs
+   them. The line scrubber at `streamWrite` (decision 9's D4A-05 hook, for values inside strings, which `redact`
+   cannot match) now also replaces credential-named query parameters (`code`, `state`, `token`, `access_token`,
+   `sig`, …), keeping the names.
+5. **Sweep.** The other log sites in the gateway are the refusal hook (route, path without query, credential kind),
+   two boot timers (`{ err }` from internal jobs, no request input), and one AI BOM integrity line (ids only). Fastify's
+   per-request lines stay disabled (decision 9). No other site logs a body, a credential header or a query string.
+6. **Tests.** `log-leak.test.ts` (offline: the serving logger config into a memory sink; malformed JSON and SCIM JSON,
+   over-limit, unknown media type, a handler `SyntaxError`, a drizzle-shaped failure with a token in the query, the
+   redact paths, the query scrubber, and a negative control that an ordinary error keeps its message). One negative
+   control was run: with the `SyntaxError` branch disabled, the handler-parse test fails. `zz-n8-log-leak.test.ts`
+   (Postgres, runs in CI) drives the real app: malformed, empty, over-limit and unknown-type bodies on `/v1/users`, a
+   malformed SCIM body on `/scim/v2/Users`, a schema-invalid JSON body, a `text/plain` body, and a form-encoded SAML ACS
+   post, each with a synthetic marker that must appear in neither the captured lines nor the response.
+
+Open: the refusal line's `path` still carries path parameters. Only the feedback link (decision 9) is known to put a
+credential in a path; whether any route puts personal data in one was not swept in this follow-up.
+
+### As built 2026-10-17 — N8 fix round (independent review F1–F5)
+
+**Correction to item 5.** The sweep covered pino call sites only, so its last sentence was wrong. Several `console.*`
+writes on post-commit, `finally` and scheduler paths printed `err.message` straight to stderr, which skips pino's
+`redact` and the `streamWrite` scrubber; for a failed query that message is drizzle's `Failed query: …\nparams: …`
+with every bound value. `DEBUG_ERRORS` printed the whole error object. What changed:
+
+1. **`safeErrorText(err)`** (`gateway-logger.ts`) applies the 500 line's withholding to one line of text: a
+   `SyntaxError` or a failed query anywhere in the cause chain gives its name (and SQLSTATE), never its message;
+   anything else gives `Name: message` through `redactLogText`. **`safeLogObject(obj)`** does the same for each value
+   of a flat log object. Used at `workflows.ts` (the deferred span, the use-case mirror and its `{obj}` logger, the
+   stage re-evaluation), `in-process-delegation.ts` (the chain revoke), `scheduler.ts` (the job failure, the tick and
+   the audit lines), `scheduler-health.ts`, `boot.ts` (scheduler sync) and `eval-dataset-sources.ts` (a pino line that
+   logged the message as a string, which `redact` cannot see). A grep of the gateway's non-test sources for a
+   `console.*` or a `log.warn/error` carrying `.message` now finds only CLI scripts (seed, demo, first-admin,
+   reencrypt, main), which run against no request.
+2. **`DEBUG_ERRORS`** prints the same fields as the log line (withheld where the line withholds) plus the stack frames,
+   never the raw error. Turning it on no longer relaxes what reaches stderr (ADR-0180). INSTALL.md says so.
+3. **The cause chain (F2).** `unhandledErrorLogFields` walks `err.cause` (bounded, cycle-safe) and withholds when any
+   link is a `SyntaxError` or a failed query, adding `causeType`. pino's serializer folds every cause's message into
+   `message`, so a wrapper used to carry the inner text.
+4. **Query names (F3).** `client_secret`, `code_verifier`, `X-Amz-Signature`, `X-Amz-Credential` and
+   `X-Goog-Signature` are added to the scrubber as exact names (no prefix wildcards, for the ReDoS gate, M-074).
+5. **Nested headers (F4).** pino wildcard paths `*.headers.authorization`, `*.headers.cookie`, `*.headers["x-api-key"]`,
+   `*.headers["proxy-authorization"]` and `err.*.headers.authorization` mask an outbound client's
+   `config/request/response.headers` one level down.
+6. **The refusal line's path.** A matched route logs its template only. The raw path is logged only when no route
+   matched (a scan, a misconfigured client: `/scim/v2/Users/<email>`), without its query, through `redactLogText`, and
+   cut at 120 characters. This closes the "Open" note at the end of the section above.
+7. **Tests (F5).** The handler body is now `handleGatewayError` (exported from `app.ts`) and the SCIM parser is
+   `parseScimJsonBody` (exported from `scim.ts`); `log-leak.test.ts` drives both offline instead of re-implementing
+   them. `req.body`/`req.query` are probed under a logger whose `req` serializer keeps the raw value, so only the
+   redact paths stand in the way. The db-fail case uses a non-credential query name, so it pins the path strip itself.
+   Mutations run, each turning the file red: the SCIM parser passing a `SyntaxError` through, the `req.body` path
+   removed, the `*.headers.authorization` path removed, the cause walk cut to one link, and the parser-refusal branch
+   of the real handler disabled.
+
+**Open.** pino's generic `{ err }` lines (`background-work.ts`, `builder-channels.ts`, `ai-bom-signoff.ts`, the boot
+timers) still go through pino's standard error serializer, which folds a cause's message in. No such line is known to
+carry a failed query today; a gateway `err` serializer that applies the same withholding would close it, and needs
+`pino` as a direct dependency of the gateway (it is only Fastify's today).
+
+### As built 2026-10-17 — N8 fix round 2 (independent recheck R1–R5)
+
+**Correction to the fix round's item 1.** Its last sentence ("a grep … now finds only CLI scripts") was wrong. The grep
+looked for `.message` on the same line as a `console.*` or `log.warn/error`, so it missed a message that reached stderr
+through an injected `log` function (`condition-metrics.ts`, `review-policy.ts`, `boot.ts`), and a message stored before
+it was printed: the main `scheduled … pass FAILED` line in `scheduler-health.ts` and the `audit_log` row and `lastError`
+it writes, the job `error` that `scheduler.ts` persists and its tick result's `error`. What changed:
+
+1. **A second helper, `safeErrorMessage(err)`** (`gateway-logger.ts`): the same withholding as `safeErrorText`, without
+   the `Name: ` prefix, for a site that stores or reports a message. `scheduler-health.ts` computes the message once with
+   `safeErrorText`, so the console line, `lastError` and the audit row's `detail.error` and `reason` all carry the
+   withheld form. The unhandled-rejection and uncaught-exception lines in `boot.ts` print `safeErrorText` plus the
+   stack frames (a stack's first line is the message).
+2. **The whole gateway, not a list.** Every generic form (`x instanceof Error ? x.message : String(x)`,
+   `(x as Error).message`, the `Name: message` variant and the cause-preferring variant) in a non-CLI gateway module now
+   goes through `safeErrorMessage` or `safeErrorText`: 46 modules, including the job, audit-chain, upstream-failure,
+   PM-mirror and provider-error fields that are stored or returned. An ordinary error keeps its message (through
+   `redactLogText`); only a withheld shape changes. A typed error whose message we wrote (`err.code` refusals) is left
+   as it is.
+3. **A source scan pins it** (`log-error-text.test.ts`). In every non-CLI gateway module it refuses the generic forms
+   anywhere, `err.stack ?? err.message`, `const m = err.message`, and, inside a `console.*(…)`, `log(…)` or
+   `*.log.<level>(…)` call, an error's `.message`/`.stack`, `String(err)`, `${err}` or a raw error argument. A
+   `// log-safe: <why>` comment exempts one line (used once, for a constraint-name match that is never logged).
+   Negative controls cover each form; reverting a converted site turns it red.
+4. **Nested headers (R2).** `err.*.headers.cookie`, `err.*.headers["x-api-key"]` and `err.*.headers["proxy-authorization"]`
+   are added. Deeper shapes (`err.response.config.headers.*`, a non-`err` key two levels down) belong to the `err`
+   serializer slice in the Open note above.
+5. **Fragments (R3).** The query-credential scrubber also matches after `#`, so an implicit-flow redirect
+   (`#access_token=…`) is scrubbed. The pattern stays a literal alternation with no nested quantifier (M-074).
+6. **Bare driver errors (R5).** A link with a five-character SQLSTATE `code` plus `severity` or `detail` (node-postgres
+   `DatabaseError`) is withheld like a failed query; the 500 line keeps its SQLSTATE and constraint, table and column.
+7. **SPIFFE tripwire (R4, ADR-0188).** The egress scan also refuses `child_process` (static, dynamic or `require`), a
+   destructured `globalThis.fetch` and an `import()` of a non-literal specifier.
+
+The Open note above (pino's generic `{ err }` serializer) stands.
