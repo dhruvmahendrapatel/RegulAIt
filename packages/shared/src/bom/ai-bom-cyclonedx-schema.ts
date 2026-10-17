@@ -85,6 +85,12 @@ export interface CycloneDxValidation {
 }
 
 export function validateCycloneDx(doc: unknown, spec: CycloneDxSpecVersion): CycloneDxValidation {
+  // The official schemas type `specVersion` as any string, so a 1.7 document can pass
+  // the 1.6 schema. Asking for one version accepts only a document that declares it.
+  const declared = doc !== null && typeof doc === "object" ? (doc as { specVersion?: unknown }).specVersion : undefined;
+  if (declared !== spec) {
+    return { valid: false, errors: [{ path: "/specVersion", message: `must be "${spec}" (declared: ${JSON.stringify(declared ?? null)})` }] };
+  }
   const fn = validators()[spec];
   if (fn(doc)) return { valid: true, errors: [] };
   return { valid: false, errors: (fn.errors ?? []).map((e) => ({ path: e.instancePath, message: e.message ?? e.keyword })) };

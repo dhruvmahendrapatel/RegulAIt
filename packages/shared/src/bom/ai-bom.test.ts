@@ -216,6 +216,21 @@ describe("official schema validation, offline, both versions", () => {
     delete withEmail.metadata.manufacturer.contact;
     expect(validateCycloneDx(withEmail, "1.7").valid).toBe(true);
   });
+  it("asking for one spec version refuses a document that declares another (the schemas alone type specVersion as any string)", () => {
+    const b = buildAiBom(fixture(), meta(), opts);
+    const v17 = cdx(b, "cyclonedx-1.7");
+    expect(v17.specVersion).toBe("1.7");
+    expect(validateCycloneDx(v17, "1.7").valid).toBe(true);
+    const asked16 = validateCycloneDx(v17, "1.6");
+    expect(asked16.valid).toBe(false);
+    expect(asked16.errors[0]!.path).toBe("/specVersion");
+    const v16 = cdx(b, "cyclonedx-1.6");
+    expect(validateCycloneDx(v16, "1.6").valid).toBe(true);
+    expect(validateCycloneDx(v16, "1.7").valid).toBe(false);
+    const { specVersion: _drop, ...noVersion } = v17;
+    expect(validateCycloneDx(noVersion, "1.7").valid).toBe(false);
+    expect(validateCycloneDx(null, "1.7").valid).toBe(false);
+  }, 60_000);
   it("amendment 2: iri-reference is the ASCII uri-reference check; the library's accept-all would pass a non-ASCII IRI", () => {
     const doc = cdx(buildAiBom(fixture(), meta(), opts));
     doc.externalReferences = [{ type: "website", url: "https://exämple.test/ü" }];
