@@ -315,6 +315,7 @@ Then:
 | `isolation_enforcement` | `enforce` | none: `enforce` is the only value (owner decision A, 2026-10-11). To run where a class is unavailable, an admin lowers the requirement itself through the floor relaxations below | not relaxable; a request to set any other value is refused 400 |
 | Sensitivity floors | public/internal/confidential L2, regulated L3 | down to L1 per sensitivity, never below | audited, step-up |
 | `mcp_stdio` floor | L2 | L1 | audited, step-up |
+| Unknown-agent floor for `mcp_stdio`, "a person's own call" (owner decision C) | L3 | L2, only for a call with no agent from a person in an interactive session, per stdio server or project, never org-wide | audited, step-up (`settings_relax`) |
 | `engine_worker` floor | L2 | L1 (OWNER DECISION 4) | audited, step-up |
 | `executor_attestation_max_age` | 2 h | up to 24 h | audited |
 | Profile `network` | `gateway_only` | `allow_list` entries, each exact host:port and on the egress allow-list | each entry audited |
@@ -1127,8 +1128,9 @@ This closes I4 open question 5 (an https gateway address on `engines`). No migra
        `NET_BIND_SERVICE` + `no-new-privileges`;
      - the Node version inside the pinned `node:22-trixie-slim` digest (the executor fails closed below 22.19).
 5. **Follow-ups this leaves:**
-   - Pin `caddy:2-alpine` by digest, for both Caddy services and the image bundle together (left out of this slice on
-     purpose: the bundle and both services must move in one change).
+   - ~~Pin `caddy:2-alpine` by digest, for both Caddy services and the image bundle together (left out of this slice on
+     purpose: the bundle and both services must move in one change).~~ **Done** in "I5 follow-up: engines in compose"
+     below.
    - Re-check the smoke check's containment when CI moves to a Node with a network permission (`--allow-net`), which
      would replace the `unshare` dependency.
    - A front per executor host when there are several executors (one front serves one compose stack today).
@@ -1591,11 +1593,249 @@ settle what the decisions above leave open:
 3. **Streaming model answers** through the gateway channel are not supported. If an engine needs them, the channel
    needs chunked answer frames.
 
+## I5 follow-up: engines in compose (2026-10-17)
+
+What the stock compose stack now holds for engine tasks, and what is still unverified. No migration; nothing in the
+gateway, the executor's runtime backends or the engine code changed.
+
+1. **Engine images, built by compose.** A new `engine-images` profile has three build-only services,
+   `engine-promptfoo-image`, `engine-modelscan-image` and `engine-garak-image`. Each builds its existing
+   `engines/<engine>/Dockerfile` from the repository root and tags it `regulait/engine-<engine>:local`
+   (`platform: linux/amd64`, `pull_policy: build`). Each image has one use per entry point: the runner
+   (`/app/dist/main.js`) and the task (`/app/dist/task-main.js`, the manifest's `taskEntry`).
+   - **Already true of the Dockerfiles, checked and unchanged:** every `FROM` is pinned by digest (the garak
+     `preseed` stage builds on its own pinned `closure` stage). The runtime stage runs as uid 10001. `/work` and
+     `/jobs` exist, owned by 10001. `HOME` is `/work`. No package installer is left at run time.
+   - **The services never run.** An `up` with the profile runs each as an inert one-shot that exits 0. It has
+     `node -e "process.exit(0)"` as its entry point, `network_mode: none`, `read_only`, `cap_drop: [ALL]`,
+     `no-new-privileges` and uid 10001.
+   - **The task's real hardening is the executor's, not compose's.** The executor applies the shipped
+     `engine-worker` profile on every `docker run`: read-only root, a 1 GiB tmpfs `/work`, `--network none` (the
+     gateway channel only), uid 10001, every capability dropped, the input read-only at `/jobs`, and the task secret
+     on fd 3. Compose settings cannot widen that.
+   - **What still blocks an end-to-end run:**
+     - **Every shipped `taskImage` is still null.** An executor starts a task only from the manifest's `taskImage`,
+       the image's content digest. Until a release records a built image's digest there, a built image places nothing
+       (`policy_unresolved`, the run ends `not_run`). This slice does not change the manifest, which is code.
+     - **The runners still name their image by registry digest only** (`REGULAIT_ENGINE_<ENGINE>_DIGEST`, ADR-0187
+       decision 55). A local build has no registry digest, so a runner needs the published image or a local registry.
+       Neither exists yet: the image publish and signing pipeline is still ADR-0187's open item.
+2. **The executor's input volume.** `sandbox-executor` mounts the named volume `executor-input` (Docker name
+   `regulait-executor-input`) at `/executor-input` and sets `REGULAIT_EXECUTOR_INPUT_DIR=/executor-input` and
+   `REGULAIT_EXECUTOR_INPUT_VOLUME=regulait-executor-input`, the two variables `runsc-backend.ts` reads. Without both
+   it refuses every engine task.
+   - **Least privilege.** Only `sandbox-executor` mounts the volume, no host path backs it, and each sandbox mounts
+     only its own sub-directory, read-only, through the host daemon (`volume-subpath`).
+   - **The name is fixed**, like `regulait-sandbox-init`, because the executor names it to the host daemon. So one
+     host runs one isolation stack.
+   - **On disk, not tmpfs.** A modelscan input can be as large as the org's artifact limit (512 MiB strict default),
+     and tmpfs pages would count against the executor's 512m memory limit. Inputs never hold the run's key (that is
+     the task secret), and each one is removed with its sandbox. A crash leaves an input behind until the executor's
+     first preflight removes it (I5 point 15).
+   - **Ownership.** The executor image (`packages/sandbox-executor/Dockerfile`, one added line) creates
+     `/executor-input` owned by 10001, mode 0711, which a fresh named volume copies. The executor can write there, and
+     no other uid can list what is in it.
+3. **Caddy pinned by digest.** All three Caddy services (`caddy`, `executor-front`, `executor-front-ca`) name one YAML
+   anchor, `x-caddy-image`:
+   `caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`.
+   `scripts/build-image-bundle.sh` (`CADDY_IMAGE`) and `scripts/install.sh` (the air-gapped image check) name the same
+   string. The digest is the OCI index that both `2-alpine` and `2.11.7-alpine` named on 2026-10-17:
+   - the Docker Hub registry manifest API answered 200 for `library/caddy:2-alpine` with this
+     `docker-content-digest`;
+   - the Hub tags API lists `2.11.7-alpine` with the same digest.
+
+   This also answers the I4 follow-ups' question about the Caddy version: it is 2.11.7, no longer an unknown tag.
+
+   **Air-gapped (review of #396).** On Docker's classic image store, `docker save` of a digest reference writes the
+   image untagged, so after `docker load` neither the tag nor the repository digest exists. The installer would then
+   report Caddy missing, and compose (`pull_policy: never`, digest reference) would find nothing. So:
+   - The online path keeps the digest reference (`x-caddy-image`).
+   - The bundle pulls by digest, tags that image `caddy:2.11.7-alpine` (`CADDY_TAG`) and saves both references. Before
+     saving, it checks the tagged image's id against `CADDY_IMAGE_IDS`.
+   - The air-gapped install looks for the tag, and runs the tag for all three Caddy services in its generated override
+     (`pull_policy: never`).
+   - The installer refuses an image whose id is not pinned. It checks in the preflight when the images are already
+     loaded, and again right after `docker load` of a bundle.
+   - **The pinned ids** were read from the Docker Hub registry API on 2026-10-17 for this index:
+     - On the classic store, an image's id is its platform's config digest: linux/amd64
+       `sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77` (manifest `sha256:173b2630…`) and
+       linux/arm64 `sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71` (manifest
+       `sha256:84058f1a…`).
+     - On the containerd image store, the id is expected to be the index digest
+       `sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`. It may instead be the platform
+       manifest digest when only one platform was pulled: linux/amd64
+       `sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229`, linux/arm64
+       `sha256:84058f1a0e5beb97664a9b79dcfd267b594c033d5bb88d8463cdfb59c0779197`. Both were read from the same index.
+     - Both scripts carry the same five ids, and the compose test pins them.
+   - Checked here: `install.sh --check --mode air_gapped` rendered the override, and `docker compose config` with it
+     shows `caddy:2.11.7-alpine` on all three Caddy services.
+4. **Repository hygiene.** The owner's development host names and addresses are replaced by neutral placeholders in
+   these files: the `apps/gateway/src/hsts.ts` comment, ADR-0029, ADR-0032 (and its index row), `docs/ops/TLS.md`,
+   `docs/ops/POWER_SCHEDULE.md` and `docs/product/ROADMAP.md`. The Caddy `REGULAIT_TLS_HOST` default was already the
+   neutral `set-regulait-tls-host.invalid` (#387).
+   - The dev instance id in `docs/ops/DB_BACKUP.md` and ADR-0035 is replaced too. A repo-wide grep (excluding
+     `project-state/` and `node_modules`) finds none of the host names, addresses or the instance id left.
+   - The air-gapped bundle does not carry the engine images (master, 2026-10-17); an opt-in flag is a logged follow-up.
+   - `project-state/` was not touched, because the master owns it and the session records are immutable.
+5. **Checked here:**
+   - `docker compose config --quiet` with no profile; with `--profile engine-images --profile isolation --profile
+     tls --profile engines`; with `-f compose.tls-local.yml --profile tls`; and with `-f
+     compose.isolation-insecure-dev.yml --profile isolation`. All exit 0. The CLI renders the config without a daemon.
+   - The rendered config shows:
+     - the three image services;
+     - the pinned Caddy reference on all three Caddy services;
+     - the executor's two input variables and its `executor-input` mount;
+     - the volume's fixed name.
+   - `bash -n` on both scripts.
+   - The compose test `zz-b7-compose-engine-images.test.ts`, which pins items 1 to 3.
+6. **Not verified (pending execution, M-041).** No session had a Docker daemon.
+   - **Not run on a Docker host:**
+     - building any engine image;
+     - `up` with these profiles;
+     - a fresh `regulait-executor-input` volume copying the image's owner and mode;
+     - `volume-subpath` on the target Engine (26 or later);
+     - a sandbox reading its input under gVisor's gofer through a 0711 parent;
+     - an engine task end to end.
+   - **The air-gapped Caddy round trip.** Building the bundle, then `docker load` and the installer's image-id check,
+     have not run on either image store.
+     - Still to confirm: the tag survives the round trip, and the loaded image's `.Id` is one of the pinned ids.
+     - The id values were read from registry metadata, not from a Docker daemon. The containerd store's id being the
+       index digest is an expectation, not an observation.
+     - Run the round trip once on each store, on amd64 and arm64, and record the result here.
+     - **The cross-store case is unverified too:** a bundle built on the classic store and loaded on a containerd
+       target, or the other way round. Until it has run, build the bundle on a host with the same image store type
+       as the target (`docker info` on each host reports which store it uses). The installer still refuses any loaded
+       Caddy image whose id is not pinned.
+   - **Real gVisor** still waits on the `runsc` re-pin (I5 "Not verified").
+
+## As built: owner decisions C and D (2026-10-17)
+
+Migration **0201** (`0201_isolation_person_stdio_and_project_sensitivity.sql`, hand-written; journal idx 201, after
+0200) adds the relaxation table and the project column. Its one new function pins
+`search_path = pg_catalog, public, pg_temp`, and the table it guards refuses TRUNCATE (migration 0185's invariants).
+These points settle the build-time choices both decisions left open.
+
+**Decision 11, as built.** Owner decision C added the "person's own call" row to decision 11's table. As built,
+setting the relaxation is audited and needs the `settings_relax` step-up; clearing it is audited and needs none,
+because it tightens. Owner decision D's project sensitivity is not a decision 11 row; it works like one:
+- default: the strictest use case; with neither the use case nor the field, `policy_unresolved`;
+- relaxation: none, because an admin field can only raise it;
+- every change is audited and needs a step-up.
+Both were built 2026-10-17 in migration 0201.
+
+**Owner decision C: a person's own stdio call.**
+1. **Storage.** An `execution_person_stdio_relaxations` row, with `scope_kind` (`mcp_server` or `project`, no org
+   scope), `scope_id`, who set it and when, and who cleared it and when. A partial unique index allows one active row
+   per scope. A guard trigger refuses DELETE and lets an UPDATE only set the clearing, once. A cleared row keeps its
+   id, so a decision that relied on it still names it. `scope_id` has no foreign key: the row is evidence and must
+   not block, or vanish with, its server or project. No row exists by default.
+2. **Enforced in the resolution.** `resolveRequirement` (execution-placement.ts) reads the active row for the call's
+   server, then its project. It reads one only for an `mcp_stdio` call with `agent: null`, no parent grant and
+   `interactivePerson: true`. The unknown-agent floor is then L2 (`unknownAgentFloor`, shared), and the call is
+   placed under its configured profile (the server's, else the shipped `restricted`) instead of
+   `restricted-microvm`. The pure function checks the kind and the `unknown` assurance again. A low-assurance agent
+   (`no_identity`, `observed_autonomy_above_declared`), an engine and any other kind stay at L3. The floor is still
+   one term of the MAX, so a regulated project, a compliance tag, the server's own `minClass` and a parent grant
+   still win. It never goes below L2, even when the `mcp_stdio` and sensitivity floors are relaxed to L1.
+3. **Who is an interactive person.** `interactivePersonCaller` is the one predicate. It needs a session whose origin
+   is a person's sign-in (`password`, `oidc`, `saml`; the shared `INTERACTIVE_SESSION_ORIGINS`, held equal to the
+   gateway's `HUMAN_SESSION_ORIGINS` by a test) and no delegation grant. The origin comes from the session row, through
+   `abacPrincipalFromRequest`. An API key, a session exchanged from one (`api_key`), the bootstrap identity, a workload
+   token and a worker loop that supplies no principal are never interactive. The MCP proxy route, the governed tool
+   call and the governed protocol call pass the request's principal to `stdioPlacementContext`. The builder runtime,
+   orchestration and the node tool manifest pass none, so they stay at L3.
+4. **Recorded.** The requirement carries `relaxation` (`kind: person_stdio_l2`, `subjectKind: interactive_person`,
+   `relaxationId`, `scopeKind`, `scopeId`). A governed stdio decision writes it in its audit row's
+   `detail.execution.relaxation`, beside the placement it keys. An unlinked placement's refusal row carries it in its
+   audit detail too.
+   - **In the decision's facts** (review fix): `regulait.decision-facts.v2`'s `execution` section gains an optional
+     `relaxation` with the same five fields, as I4 added `offerId`, `imageDigest` and `runtimeFlagsSha256`. The
+     capture writes it only when a relaxation was used, so facts without one stay byte-identical and every stored v2
+     document still parses and verifies. The contract allows it only on a resolved `mcp_stdio` requirement, never on
+     `in_gateway` or `external`. A malformed one on the decision row fails the capture (fail closed), never dropped.
+   - The Decision BOM panel shows it as "Isolation relaxation" with the relaxation id. A malformed one makes the
+     whole BOM unreadable.
+   - **Vectors** (review fix): the placement corpus gains four `person-stdio-*` vectors. The request gains `caller`
+     and `personStdioRelaxation`. They pin the API-key case at L3 even where the server is relaxed, the relaxed
+     interactive case at L2, the default at L3, and a low-assurance agent at L3. The checker computes the floor and
+     rejects four new corruptions. The product test runs the vectors through `computeRequiredClass`. These vectors
+     were written by the builder, not independently (the corpus README says so).
+5. **Routes** (admin, in `ISOLATION_ROUTES`):
+   - `GET /v1/execution-person-stdio-relaxations` lists the active rows.
+   - `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId` takes `{relaxed}`. Setting needs a
+     `settings_relax` step-up bound to the scope, and is audited `execution-person-stdio-relaxed`. Clearing needs no
+     step-up and is audited `execution-person-stdio-relaxation-cleared`. Both are compare-and-set: a racing set
+     fails on the unique index, and a clear updates only the row it read. Either answers `409 changed_concurrently`.
+   - A remote server answers 409 `not_a_stdio_server`, a scope kind other than the two answers 400, and a missing
+     scope answers 404.
+   - Review fix: an active relaxation whose server or project was deleted can still be cleared. The active row is
+     looked up by scope kind and id without the scope existing. Setting needs a live scope.
+   - **A program change clears it** (review fix). When a stdio server's command, args or closure digest changes
+     (`PATCH /v1/servers/:id`), its active server-scope relaxation is cleared in the same transaction, with
+     `cleared_by` = the actor. It is audited `execution-person-stdio-relaxation-cleared` with
+     `cause: stdio_program_changed`. This follows ADR-0188 S8, where an identity opt-in does not follow a url move.
+     A rename or an unchanged program keeps it. A project-scope relaxation is untouched.
+   - **A set is bound to the program** (review fix). For server scope, the set's step-up facts include the server's
+     `stdioCommandDigest`, and the audit row records it. The insert transaction re-reads that digest under the
+     server row's lock (`FOR UPDATE`, the row a program-change PATCH also locks). A digest that moved answers
+     `409 changed_concurrently` and writes nothing. In either order, no relaxation survives on a new program. The
+     test holds the server row in a second connection, moves the digest while the set waits, and expects the 409.
+   - **The vector runner** (review fix) maps each vector's `caller` to the credential it stands for and passes it
+     through `abacPrincipalFromRequest` and `interactivePersonCaller`. The API-key vector therefore pins the product
+     predicate, not a test-side rule.
+
+**Owner decision D: the project's sensitivity.**
+6. **Storage and rule.** The column is `projects.isolation_sensitivity` (nullable, CHECKed to the four values).
+   `projectSensitivity` returns MAX(the use cases' strictest, the field), through the shared
+   `projectIsolationSensitivity`. Having neither, a missing project, or any value outside the vocabulary does not
+   resolve: `policy_unresolved`, as before. A field below the use cases has no effect on the MAX.
+7. **Routes.**
+   - `GET /v1/execution-project-sensitivities` lists every project with its use-case sensitivity, the field, the
+     result and its project-scope relaxation.
+   - `PUT /v1/execution-project-sensitivities/:projectId` takes `{sensitivity}` (null clears). Every change, a
+     clear included, needs a `settings_relax` step-up bound to the project, the old value and the new one. It is
+     audited `execution-project-sensitivity-set` with the old and new field and the result before and after. It is
+     compare-and-set on the value read. An unchanged value is a no-op with no step-up.
+
+**Console** (apps/web isolation views).
+8. The Engines page gains a "Project isolation" card. It lists each project's sensitivity from its use cases, the
+   admin field and the one in force; a project with neither shows "Unresolved · calls refused". A Manage panel sets
+   the field through `withStepUp`. It says when a value has no effect, and when a use case is unreadable it says that
+   the field cannot resolve the project (review fix). Each stdio server's execution card on the MCP
+   servers page, and each project's Manage panel, has the person's own call control: "L3 (strict default)" or "L2
+   allowed · audited". Allowing is confirmed in a dialog, then stepped up; restoring L3 asks for none. An unreadable
+   answer shows "Not reported" and offers no control. `KNOWN_UI_GAPS` stays 0.
+
+**Tests.**
+- Pure: `adr0190-owner-cd.test.ts` (gateway). It shows `unknownAgentFloor` must fail when the kind and assurance
+  checks are removed.
+- On a database: `zz-adr0190-owner-cd.test.ts`. It covers the migration's guard, the resolution with and without
+  each scope, the API-key negative control, a low-assurance agent, a regulated project, an L2 offer, the refusal
+  audit, both routes' step-up, and D's resolve, raise and no-lower cases.
+- Web: `ownerDecisionsCD.test.ts`, `bomExecution.test.tsx` (the BOM row) and the mocked
+  `isolation-owner-cd.mock.spec.ts`.
+- Review fixes:
+  - `i8-execution.test.ts` covers the facts capture and the contract.
+  - In `zz-adr0190-i4-stdio-move.test.ts`, a governed tool call with a person's session facts records the
+    relaxation on its decision row and in its facts; the API-key control does not.
+  - In `zz-adr0190-owner-cd.test.ts`, the program-change clear and the orphan clear.
+  - The `person-stdio-*` vectors.
+
+**Not verified.**
+- The database tests typecheck, but have not run in the session that wrote them (no Postgres there). CI's database
+  shards run them.
+- No test drives a real browser session through the HTTP MCP proxy route to an L2 placement. The governed tool call
+  is tested with the session facts the route derives; the route's own `abacPrincipalFromRequest` is tested in pure
+  tests.
+- Owner decision C asked that the Decision BOM panel and the settings UI show the relaxation, and that vectors pin the
+  API-key case. Both are now built; the vectors are builder-written rather than independent (a deviation recorded
+  here, not in the owner's section).
+- L2 itself (gVisor) stays unverified, as recorded above.
+
 ## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
 
 This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). Migration
-**0202** (`0202_execution_profile_revert.sql`, hand-written) replaces the profile guard function only; its journal entry
-is added when 0201 is on main (point 8). It
+**0202** (`0202_execution_profile_revert.sql`, hand-written) replaces the profile guard function only; journal idx 202, after 0201 (point 8). It
 supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "cannot be versioned" for
 `engine-worker` only. These points settle what the sections above leave open:
 
@@ -1688,14 +1928,14 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
      equal to the shipped body then reverts without a step-up and engines require L2 again. A looser revert needs the
      step-up, emits `execution-profile-relaxed` and counts a pinned assignment, and a withdrawn version is not
      reinstated. A new version blocked on the per-name lock while a revert withdraws the version it was judged
-     against refuses `changed_concurrently`. Versioning after a revert is expected to succeed once 0202 is
-     in the journal, and 409 `execution_profile_retired` until then.
+     against refuses `changed_concurrently`. Versioning after a revert succeeds (0202 is in the
+     journal).
    - **Web:** the panel's actions (`profileActions`, mirrored from the shared list) and one mocked e2e assertion.
 
 8. **Migration 0202.** The guard function from 0183 refused any new version once the NEWEST row was retired, so a
    reverted profile could never be versioned again. 0202 refuses a new version only when NO version of the name is
    live (the profile itself was retired, as before). The function keeps `SET search_path = pg_catalog, public,
-   pg_temp` (the 0185 guard), and no trigger or table is added. Until its journal entry lands, the gateway answers 409
+   pg_temp` (the 0185 guard), and no trigger or table is added. On a database without it, the gateway answers 409
    `execution_profile_retired` for a version after a revert, never a 500.
 
 **Not verified (M-041).**
@@ -1707,8 +1947,8 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
 - No compose service, runbook or INSTALL.md step for a runc executor was written: none has been executed, and another
   slice owns the compose stack. The environment variables are in `main.ts` (`REGULAIT_EXECUTOR_RUNC_RUNTIME`,
   `REGULAIT_EXECUTOR_RUNC_VERSION`, and the canary, init and socket variables both backends share).
-- Migration 0202 is written but NOT in the journal (0201 is not on main yet), so no database applies it
-  until the master adds the entry. Its function was checked by hand against the 0185 guard (search_path pinned).
+- Migration 0202 was checked by hand against the 0185 guard (search_path pinned; no new table or refusal trigger, so
+  no TRUNCATE refusal is owed); Postgres is not available in the build environment, so CI runs the guard.
 - The gateway database suites (`zz-adr0190-runc-l1.test.ts` and the scratch-database
   `zz-adr0190-engine-worker-l1.test.ts`) have not run in the session that wrote them (no database there); CI's
   database shards run them. The mocked e2e assertion has not run locally (no browsers there).

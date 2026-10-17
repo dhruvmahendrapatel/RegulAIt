@@ -243,6 +243,11 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-cancelled",
   // I4 (review M3): a stdio window reached a gateway process that does not hold the session (our own refusal)
   "execution-session-lost",
+  // owner decision C: a person's own stdio call relaxed to L2 for a server or a project (step-up), and cleared
+  "execution-person-stdio-relaxed",
+  "execution-person-stdio-relaxation-cleared",
+  // owner decision D: the admin-set project sensitivity set, changed or cleared (step-up)
+  "execution-project-sensitivity-set",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -715,4 +720,10 @@ export const ISOLATION_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT"; p
   { method: "PUT", path: "/v1/executors/:executorId/declared-class", cls: "admin", slice: "I3", built: true },
   { method: "GET", path: "/v1/execution-placements", cls: "admin", slice: "I2", built: true },
   { method: "GET", path: "/v1/execution-placements/:placementId", cls: "admin", slice: "I2", built: true },
+  // owner decision C: a person's own stdio call, relaxed to L2 per MCP server or per project
+  { method: "GET", path: "/v1/execution-person-stdio-relaxations", cls: "admin", slice: "owner-C", built: true },
+  { method: "PUT", path: "/v1/execution-person-stdio-relaxations/:scopeKind/:scopeId", cls: "admin", slice: "owner-C", built: true },
+  // owner decision D: the admin-set project sensitivity (it can only raise the use cases' strictest)
+  { method: "GET", path: "/v1/execution-project-sensitivities", cls: "admin", slice: "owner-D", built: true },
+  { method: "PUT", path: "/v1/execution-project-sensitivities/:projectId", cls: "admin", slice: "owner-D", built: true },
 ];
