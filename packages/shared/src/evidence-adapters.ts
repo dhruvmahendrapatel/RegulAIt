@@ -1587,7 +1587,8 @@ export function describeEvidenceAdapters(): Array<{
 export const EVIDENCE_ADAPTER_POSTURE =
   "An adapter reads a file you exported. It sits on no network path and reaches out to nothing: these adapters " +
   "remove the manual reshaping step between your export and regulAIt's evidence model, and change nothing about " +
-  "coverage. Coverage from an import remains exactly what you exported; any active discovery is named separately. " +
+  "coverage. Coverage remains exactly what you exported: an adapter adds no visibility of its own. An enabled active " +
+  "discovery source adds only what that one source can read, read-only, and each is named after this paragraph. " +
   "Each adapter states whether it implements a published format or was mapped by you — and none of " +
   "them has been verified against a live export from any vendor's product by this project.";
 
