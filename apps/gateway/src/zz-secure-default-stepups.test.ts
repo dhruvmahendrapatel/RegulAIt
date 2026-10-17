@@ -7,6 +7,7 @@
  *  - MCP registry: enabling (create or update), allowing private ranges (create or update);
  *  - MCP server: allowing private ranges (create or update);
  *  - agent expected served model: setting or changing it (PUT, and at agent create);
+ *  - egress allow entry: adding one (ADR-0034 owner amendment 2026-10-16) or turning an opt-in on;
  *  - PATCH and POST /v1/mrm/cards: a `[redacted:…]` marker in any text field → 400 `redacted_text_refused`.
  *
  * Under the strict step-up values; global state is put back strict in afterAll (M-068), and the admin's
@@ -42,7 +43,7 @@ import { scrubAuditText, STEP_UP_HEADER } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
-import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+import { forgetStepUpMethodsForTest, relaxStepUpAround } from "./testing/step-up-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { importRegistryEntry } from "./mcp-registry.js";
 
@@ -122,12 +123,14 @@ beforeAll(async () => {
   restoreIdentity = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await db.execute(STRICT_SQL);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
-  const allow = await app.inject({
+  // adding an entry is a stepped-up relaxation (ADR-0034 owner amendment 2026-10-16); this is suite setup, not the
+  // case under test, and another suite on the shared database may already have an admin with a step-up method
+  const allow = await relaxStepUpAround(db, () => app.inject({
     method: "POST",
     url: "/v1/egress-allow-hosts",
     headers: AUTH,
     payload: { host: PUBLIC_HOST, note: `sds ${RUN}: a public MCP/registry destination (never contacted)` },
-  });
+  }));
   expect(allow.statusCode, allow.body).toBe(201);
   allowHostId = allow.json().id as string;
   const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `sds-${RUN}@example.com`, displayName: "sds admin", isAdmin: true } });
@@ -310,14 +313,64 @@ describe("MCP server: opening private ranges is a relaxation", () => {
   });
 });
 
-describe("egress allow entries: the private-range and plaintext opt-ins are relaxations", () => {
-  it("turning an opt-in on needs a step-up bound to the host and the opt-ins; a plain entry and turning them off need nothing", async () => {
+describe("egress allow entries: adding one, and turning an opt-in on, are relaxations", () => {
+  it("adding a plain entry needs a step-up bound to the host (ADR-0034 owner amendment 2026-10-16); a note edit and removal need nothing", async () => {
+    const host = `sds-add-${RUN}.example.test`;
+    const before = (await db.select({ id: egressAllowHosts.id }).from(egressAllowHosts).where(eq(egressAllowHosts.host, host))).length;
+    // egress-allow-cleanup: afterAll — the id lands in created.allowHosts, which afterAll removes
+    const added = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, note: "sds: plain entry" }, {
+      op: "egress_allow_host",
+      host,
+      values: { added: true },
+    });
+    expect(before).toBe(0); // nothing was written by the refused attempts
+    expect(added.statusCode, added.body).toBe(201);
+    created.allowHosts.push(added.json().id);
+    expect(added.json()).toMatchObject({ host, allowPrivateRanges: false, allowPlaintextHttp: false });
+    const row = await lastAudit("egress-allow-host-set", added.json().id);
+    expect(row!.detail).toMatchObject({ relaxation: true, relaxed: { added: true }, stepUp: "passkey" });
+    expect(row!.reason).toContain("added");
+
+    // an upsert of the same host that turns nothing on names no new destination: no step-up, even via an API key
+    // egress-allow-cleanup: afterAll — the same host (an upsert), removed in afterAll
+    const noted = await viaKey("POST", "/v1/egress-allow-hosts", { host, note: "sds: note edited" });
+    expect(noted.statusCode, noted.body).toBe(201);
+    expect((await lastAudit("egress-allow-host-set", noted.json().id))!.detail).toMatchObject({ relaxation: false, note: "sds: note edited" });
+
+    // removing it tightens: no step-up, through an API key, audited
+    const removed = await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${added.json().id}`, headers: admin.key });
+    expect(removed.statusCode, removed.body).toBe(200);
+    created.allowHosts.splice(created.allowHosts.indexOf(added.json().id), 1); // removed here, not in afterAll
+    expect((await lastAudit("egress-allow-host-removed", added.json().id))!.detail).toMatchObject({ removed: host });
+  });
+
+  it("a new entry with opt-ins presents ONE step-up bound to the addition and the opt-ins together", async () => {
+    const host = `sds-addopen-${RUN}.lan.example.test`;
+    // egress-allow-cleanup: afterAll — the id lands in created.allowHosts, which afterAll removes
+    const ok = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true, allowPlaintextHttp: true }, {
+      op: "egress_allow_host",
+      host,
+      values: { added: true, allowPrivateRanges: true, allowPlaintextHttp: true },
+    });
+    expect(ok.statusCode, ok.body).toBe(201);
+    created.allowHosts.push(ok.json().id);
+    expect((await lastAudit("egress-allow-host-set", ok.json().id))!.detail).toMatchObject({
+      relaxation: true,
+      relaxed: { added: true, allowPrivateRanges: true, allowPlaintextHttp: true },
+      stepUp: "passkey",
+    });
+  });
+
+  it("turning an opt-in on needs a step-up bound to the host and the opt-ins; turning them off needs nothing", async () => {
     const host = `sds-${RUN}.lan.example.test`;
     // egress-allow-cleanup: afterAll — every id lands in created.allowHosts, which afterAll removes
-    const plain = await viaKey("POST", "/v1/egress-allow-hosts", { host, note: "sds: plain entry" });
+    const plain = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, note: "sds: plain entry" }, {
+      op: "egress_allow_host",
+      host,
+      values: { added: true },
+    });
     expect(plain.statusCode, plain.body).toBe(201);
     created.allowHosts.push(plain.json().id);
-    expect((await lastAudit("egress-allow-host-set", plain.json().id))!.detail).toMatchObject({ relaxation: false });
 
     // egress-allow-cleanup: afterAll — the same host (an upsert), removed in afterAll
     const opened = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true }, {
@@ -521,14 +574,14 @@ describe("recheck: spellings, fail-closed import, concurrency and url binding", 
     const asked = await asAdmin("POST", "/v1/egress-allow-hosts", { host: `${host.toUpperCase()}.`, allowPrivateRanges: true });
     expect(asked.statusCode, asked.body).toBe(403);
     // the facts carry the normalised host (lower case, no trailing dot): by design, the gateway's one spelling
-    expect(asked.json().action).toEqual({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { allowPrivateRanges: true } } });
+    expect(asked.json().action).toEqual({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true, allowPrivateRanges: true } } });
     const token = await grantFor(asked.json().action);
     // egress-allow-cleanup: afterAll — the same host, removed in afterAll
     const ok = await asAdmin("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true }, { [STEP_UP_HEADER]: token });
     expect(ok.statusCode, ok.body).toBe(201);
     created.allowHosts.push(ok.json().id);
     // a different host is a different binding
-    const other = await grantFor({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { allowPrivateRanges: true } } });
+    const other = await grantFor({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true, allowPrivateRanges: true } } });
     // egress-allow-cleanup: refused — a grant for another host never writes
     const wrong = await asAdmin("POST", "/v1/egress-allow-hosts", { host: `x${host}`, allowPrivateRanges: true }, { [STEP_UP_HEADER]: other });
     expect(wrong.statusCode, wrong.body).toBe(403);
@@ -540,7 +593,7 @@ describe("recheck: spellings, fail-closed import, concurrency and url binding", 
     const opened = await relaxThroughStepUp("POST", "/v1/egress-allow-hosts", { host, allowPrivateRanges: true }, {
       op: "egress_allow_host",
       host,
-      values: { allowPrivateRanges: true },
+      values: { added: true, allowPrivateRanges: true },
     });
     expect(opened.statusCode, opened.body).toBe(201);
     created.allowHosts.push(opened.json().id);

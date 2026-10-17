@@ -318,7 +318,7 @@ if (process.argv.includes("--open-assurance-window")) {
 
 // ADR-0181 (FX2): Ada enrols TOTP before any key is minted for her — an
 // un-enrolled admin's key is refused, and none is issued (seedAdminMfa below)
-await seedDemoEgressAllow(); // before Ada enrols: its loopback entries are a stepped-up relaxation (B4S-06)
+await seedDemoEgressAllow(); // before Ada enrols: adding an allow entry is a stepped-up relaxation (B4S-06, ADR-0034)
 const adminMfa = await seedAdminMfa(adminId);
 
 const keys: Record<string, string> = {};
@@ -1664,13 +1664,26 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
 //    sync and admitted on a clean manifest, like any other server.
 // ===========================================================================
 /**
- * ADR-0181 (SC) + ADR-0186 A: the demo's local MCP hosts are loopback over plaintext http, so their allow entries
- * opt into private ranges and plaintext — a relaxation, which needs a settings_relax step-up. The bootstrap
- * credential passes that only during FIRST-ADMIN SETUP (B4S-06), so this runs before Ada enrols her authenticator
- * (the same pattern as the passwords, grants and stewardship above). Converges on re-seed: a host already on the
- * allow-list is left alone.
+ * ADR-0181 (SC) + ADR-0186 A + ADR-0034 owner amendment 2026-10-16: ADDING any egress allow entry is a relaxation
+ * that needs a settings_relax step-up — the plain Gemini entry as much as the loopback ones, which also opt into
+ * private ranges and plaintext (one step-up covers an addition and its opt-ins). The bootstrap credential passes a
+ * step-up only during FIRST-ADMIN SETUP (B4S-06), so this runs before Ada enrols her authenticator (the same
+ * pattern as the passwords, grants and stewardship above); there is no seed-only bypass. Converges on re-seed: a
+ * host already on the allow-list is left alone. A host that is MISSING on a re-seed after Ada enrolled cannot be
+ * added by the bootstrap credential any more: it is reported, not forced, and an admin adds it in the UI.
  */
 async function seedDemoEgressAllow(): Promise<void> {
+  const addEntry = async (payload: Json): Promise<void> => {
+    const res = await app.inject({ method: "POST", url: "/v1/egress-allow-hosts", headers: AUTH, payload });
+    if (res.statusCode === 403 && (res.json() as Json).error === "step_up_required") {
+      console.log(
+        `  egress allow entry '${payload.host}' not added: an admin can step up now, so the bootstrap credential no ` +
+          "longer passes the step-up (B4S-06). Add it as an admin under Custom LLM providers > Egress allow-list.",
+      );
+      return;
+    }
+    if (res.statusCode >= 400) throw new Error(`POST /v1/egress-allow-hosts -> ${res.statusCode}: ${res.body}`);
+  };
   const localHosts = [
     ...new Set(
       ["127.0.0.1", "127.0.0.2", process.env.REGULAIT_DEMO_MCP_HOST_REPO, process.env.REGULAIT_DEMO_MCP_HOST_WAREHOUSE].filter(
@@ -1683,7 +1696,7 @@ async function seedDemoEgressAllow(): Promise<void> {
   );
   for (const host of localHosts) {
     if (allowed.has(host)) continue;
-    await call("POST", "/v1/egress-allow-hosts", {
+    await addEntry({
       host,
       allowPrivateRanges: true,
       allowPlaintextHttp: true,
@@ -1691,7 +1704,7 @@ async function seedDemoEgressAllow(): Promise<void> {
     });
   }
   if (!allowed.has("generativelanguage.googleapis.com")) {
-    await call("POST", "/v1/egress-allow-hosts", {
+    await addEntry({
       host: "generativelanguage.googleapis.com",
       note: "demo: the seeded gemini-pro agent's compiled endpoint (strict compiled-egress posture, ADR-0181)",
     });

@@ -392,12 +392,13 @@ describe("dispatch time: a row that never went through the endpoint is still ref
     // The literal is never trusted and neither is the name: what matters is
     // what it answers. Resolution is injected so the case is deterministic and
     // needs no network — the allow-list it is checked against is the real one.
-    const allowed = await app.inject({
+    // ADR-0034 owner amendment 2026-10-16: adding any entry is a stepped-up relaxation; this suite is about the guard
+    const allowed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("models.corp-cdn.example"), note: "looks like an ordinary vendor host" },
-    });
+    }));
     expect(allowed.statusCode).toBe(201);
     const rebound = await checkCredentialBaseUrl(db, "https://models.corp-cdn.example/v1", {
       resolve: async () => [{ address: "169.254.169.254", family: 4 }],

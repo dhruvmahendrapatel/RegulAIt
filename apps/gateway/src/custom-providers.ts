@@ -298,14 +298,16 @@ export function registerCustomProviderRoutes(
       note: body.note ?? null,
       createdBy: req.authCtx.userId ?? null,
     };
-    // ADR-0180/0186 A: a plain entry (a named public host, https only) is ordinary configuration of the
-    // default-deny allow-list, audited and with no step-up: the host still passes DNS pinning, the unconditional
-    // ranges and every private-range check. Opting a host INTO private ranges or plaintext http relaxes those
-    // checks, so turning either opt-in on (a new entry, or an upsert that widens an existing one) needs a
-    // settings_relax step-up bound to the host and the opt-ins it turns on. Turning them off needs nothing.
-    /** the opt-ins this write turns on, against a stored row (or none) */
+    // ADR-0180/0186 A, ADR-0034 owner amendment 2026-10-16 (D4): ADDING any entry widens what the gateway may
+    // connect to, so a new host needs a settings_relax step-up even when it is a plain entry (https only, no
+    // opt-in), bound to the host and `values: {added: true, ...opt-ins turned on}` — ONE grant covers a new entry
+    // and its opt-ins. On an existing host, turning an opt-in on (private ranges or plaintext http) needs the
+    // step-up bound to just those opt-ins; an upsert that turns nothing on (a note edit, or turning opt-ins off)
+    // names no new destination and needs nothing. Removing an entry (DELETE) tightens and needs nothing.
+    /** what this write relaxes, against a stored row (or none): `added` for a new host, plus each opt-in it turns on */
     const relaxationsAgainst = (stored: { allowPrivateRanges: boolean; allowPlaintextHttp: boolean } | undefined) => {
       const out: Record<string, true> = {};
+      if (!stored) out.added = true;
       if (values.allowPrivateRanges && !stored?.allowPrivateRanges) out.allowPrivateRanges = true;
       if (values.allowPlaintextHttp && !stored?.allowPlaintextHttp) out.allowPlaintextHttp = true;
       return out;
@@ -357,7 +359,7 @@ export function registerCustomProviderRoutes(
         ruleId: "egress-allow-host-set",
         ruleChain: [],
         reason:
-          `egress allow-list entry for '${host}'` +
+          (now ? `egress allow-list entry for '${host}' updated` : `egress allow-list entry for '${host}' added`) +
           (values.allowPrivateRanges ? " WITH private-range access" : "") +
           (values.allowPlaintextHttp ? " WITH plaintext http" : "") +
           (relaxation ? " (a relaxation, confirmed with a step-up)" : ""),
