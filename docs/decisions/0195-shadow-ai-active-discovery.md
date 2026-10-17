@@ -377,6 +377,19 @@ kind as "not built yet" with the slice that builds it.
       schedule: enabling sets no `next_run_at`, the worker never queues a scheduled run for them, and the UI hides the
       schedule field ("fed by uploads").
 
+14. **Recheck of #403 (scope frozen after this):**
+    - No credential in clear from a scanner: any subject (other than a pseudonym), host, package name, artifact value,
+      location path or name that `scrubAuditText` would change refuses the observation, and a name matching an
+      enabled `api_key_prefix` row is refused as a value. Refused observations are never stored or shown.
+    - The enable step-up also binds the live credential id, so a credential swapped between the grant and its spend
+      makes the grant fail. A `cloud_aws` source's target must carry `accountId` (12 digits).
+    - `publicConfigProblem` checks own keys only (`constructor`, `__proto__` are unknown fields); route record keys
+      are identifier-checked again.
+    - Classification reloads the catalogue after the scan; the pre-scan copy serves only `ctx.catalogue`.
+    - `ctx.registerSecret(value)` lets a scanner register a short-lived secret it obtained (a federated access token, a
+      signed URL) for scrubbing; the source's own secret is registered already.
+    - The new `ai_endpoint_signatures` CHECKs are declared in `schema.ts`; the browser's step-up cap follows the kinds.
+
 **Not built in SD0 (left to the slices):** any scanner; cloud SDK transports over `ctx.fetch` (SD2); the git-provider
 read methods (SD1); `SHADOW_AI_CATALOG_V2` and seed rows for the artifact kinds (SD1/SD3); the endpoint-notice
 template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" state for cloud sources (SD2).

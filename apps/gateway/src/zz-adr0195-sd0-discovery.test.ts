@@ -241,14 +241,20 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(r2.statusCode).toBe(403);
     expect(r2.json().error).toBe("step_up_required");
     // NEGATIVE CONTROL 3: a grant made for ANOTHER scope is refused and not spent
-    const wrong = await session(enableStepUpArgs(s.id, s.kind, s.target, { orgLevel: true, include: [] }));
+    const credId = (await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id)))[0]!.id;
+    const wrong = await session(enableStepUpArgs(s.id, s.kind, s.target, { orgLevel: true, include: [] }, credId));
     const r3 = await wrong.send("POST", `/v1/discovery/sources/${s.id}/enable`, { version: s.version });
     expect(r3.statusCode).toBe(403);
     expect(await wrong.grantUsed()).toBe(false);
     expect((await sourceRow(s.id)).enabled).toBe(false);
 
+    // NEGATIVE CONTROL 4: a grant made for ANOTHER credential (a swap between grant and spend) is refused, not spent
+    const swapped = await session(enableStepUpArgs(s.id, s.kind, s.target, s.scope, "00000000-0000-0000-0000-0000000000aa"));
+    expect((await swapped.send("POST", `/v1/discovery/sources/${s.id}/enable`, { version: s.version })).statusCode).toBe(403);
+    expect(await swapped.grantUsed()).toBe(false);
+
     // the right grant
-    const ok = await session(enableStepUpArgs(s.id, s.kind, s.target, s.scope));
+    const ok = await session(enableStepUpArgs(s.id, s.kind, s.target, s.scope, credId));
     const r4 = await ok.send("POST", `/v1/discovery/sources/${s.id}/enable`, { version: s.version });
     expect(r4.statusCode, r4.body).toBe(200);
     expect(await ok.grantUsed()).toBe(true);
@@ -335,6 +341,16 @@ describe("ADR-0195 SD0 discovery foundation", () => {
 
   it("an AWS federated credential gets a generated external id the admin cannot choose", async () => {
     const reg = scannerRegistry([noopTestScanner("cloud_aws")]);
+    {
+      const noAccount = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, discoveryScanners: reg });
+      try {
+        const bad = await inject("POST", "/v1/discovery/sources", AUTH, { name: `aws-noacct-${RUN}`, kind: "cloud_aws", target: { region: "eu-west-1" }, scope: { orgLevel: true, include: [] } }, noAccount);
+        expect(bad.statusCode).toBe(400);
+        expect(bad.json().error).toBe("target_invalid");
+      } finally {
+        await noAccount.close();
+      }
+    }
     const a2 = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, discoveryScanners: reg });
     try {
       const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `aws-${RUN}`, kind: "cloud_aws", target: { accountId: "000000000000" }, scope: { orgLevel: true, include: [] } }, a2);
@@ -361,7 +377,8 @@ describe("ADR-0195 SD0 discovery foundation", () => {
   it("the worker: findings through the import path, merge on a second run, catalogue gaps, posture names the source", async () => {
     const s = await createSource("worker");
     expect((await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig: { appId: "123", installationId: "456" }, replacesCredentialId: null })).statusCode).toBe(200);
-    const ok = await session(enableStepUpArgs(s.id, s.kind, s.target, s.scope));
+    const wCred = (await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id)))[0]!.id;
+    const ok = await session(enableStepUpArgs(s.id, s.kind, s.target, s.scope, wCred));
     expect((await ok.send("POST", `/v1/discovery/sources/${s.id}/enable`, { version: s.version })).statusCode).toBe(200);
     // enabling queues nothing by itself; the pass enqueues the due source (next_run_at = now)
     const pass1 = await runDiscoveryPass(db, { registry: REGISTRY, dataKey: DATA_KEY, owner: `sd0-a-${RUN}`, limit: 20 });

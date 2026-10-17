@@ -117,7 +117,7 @@ const credentialSchema = z
     mode: z.enum(DISCOVERY_CREDENTIAL_MODES),
     // checked against the kind's allowlist (DISCOVERY_PUBLIC_CONFIG) in the route
     publicConfig: z
-      .record(z.string().min(1).max(64), z.string().trim().min(1).max(1024))
+      .record(configKey, z.string().trim().min(1).max(1024))
       .refine((c) => Object.keys(c).length <= 20, { message: "at most 20 public config fields" })
       .default({}),
     secret: z.string().min(1).max(16384).optional(),
@@ -221,8 +221,18 @@ function sourceView(s: DiscoverySourceRow, registry: ScannerRegistry, cred: Cred
 // ---------------------------------------------------------------------------
 
 /** enabling a source, or widening an enabled one: bound to its kind, target and scope */
-export function enableStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown): StepUpCheckArgs {
-  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope } } } };
+/**
+ * Enabling a source, or widening an enabled one: bound to its kind, target, scope AND the live credential it will scan
+ * with (review of #403), so a credential swapped between the grant and its spend makes the grant fail.
+ */
+export function enableStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown, credentialId: string | null): StepUpCheckArgs {
+  return { kind: "settings_relax", facts: { values: { [DISCOVERY_STEP_UP_KEYS.enable]: { sourceId, kind, target, scope, credentialId } } } };
+}
+
+/** per-kind target requirements the gateway can check (SD2 matches credentials against them) */
+function targetProblem(kind: string, target: Record<string, string>): string | null {
+  if (kind === "cloud_aws" && !/^[0-9]{12}$/.test(target.accountId ?? "")) return "an AWS source's target needs accountId (12 digits)";
+  return null;
 }
 /** storing a credential on an ENABLED source whose account cannot be matched to the target: the enable step-up, with the config */
 export function credentialOnEnabledStepUpArgs(sourceId: string, kind: string, target: unknown, scope: unknown, mode: string, publicConfig: Record<string, string>): StepUpCheckArgs {
@@ -356,6 +366,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     const parsed = createSchema.safeParse(req.body ?? {});
     if (!parsed.success) return badRequest(reply, parsed.error);
     const body = parsed.data;
+    const tp = targetProblem(body.kind, body.target);
+    if (tp) return send(reply, refusal(400, "target_invalid", tp));
     if (!registry.has(body.kind)) {
       return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${body.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[body.kind].slice}); a source of this kind cannot be created`));
     }
@@ -407,6 +419,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         const patchProblem = body.target !== undefined ? (registry.get(s.kind)?.validateTarget?.(body.target) ?? null) : null;
         if (patchProblem) return refusal(400, "target_invalid", patchProblem);
         const target = body.target ?? s.target;
+        const tp = body.target ? targetProblem(s.kind, body.target) : null;
+        if (tp) return refusal(400, "target_invalid", tp);
         const scope = body.scope ?? s.scope;
         const targetChanged = body.target !== undefined && JSON.stringify(body.target) !== JSON.stringify(s.target);
         const widened = body.scope !== undefined && scopeWidens(s.scope, body.scope);
@@ -420,7 +434,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         }
         // decision 1: widening an ENABLED source (a new target, more items, an org-level scope) is the enable step-up
         if (s.enabled && (targetChanged || widened)) {
-          const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, target, scope), s.id);
+          const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, target, scope, (await liveCredential(t, s.id))?.id ?? null), s.id);
           if (r) return r;
         }
         const [row] = await t
@@ -469,7 +483,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (enableCred?.writeScope === "refused") {
         return refusal(409, "credential_refused", "this source's credential grants write access and is refused; replace it with a read-only credential first");
       }
-      const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, s.target, s.scope), s.id);
+      const r = await spendStepUp(req, enableStepUpArgs(s.id, s.kind, s.target, s.scope, enableCred?.id ?? null), s.id);
       if (r) return r;
       const [row] = await t
         .update(discoverySources)

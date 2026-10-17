@@ -51,6 +51,22 @@ describe("ADR-0195 SD0 scanner contract", () => {
     expect(checkObservations("repo_github", [{ ...base, actorPseudonym: `psn:${"cd".repeat(12)}` }], NOW)[0]!.actorPseudonym).toBe(`psn:${"cd".repeat(12)}`);
   });
 
+  it("refuses a key passed off as a name, a path, a subject or a value; refuses non-string os/ecosystem", () => {
+    const base = { evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject: "acme/web" };
+    const sk = "sk-proj-" + "Z9".repeat(24);
+    const keyRow = { provider: "p", kind: "api_key_prefix" as const, value: "sk-", matchType: "key_prefix" as const, minLength: 40, provenance: "admin", enabled: true };
+    expect(() => checkObservations("repo_github", [{ ...base, names: [sk] }], NOW, [keyRow])).toThrow(ObservationRefused);
+    const ghp = "ghp_" + "a1B2".repeat(9);
+    expect(() => checkObservations("repo_github", [{ ...base, names: [ghp] }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, location: { path: `config/${ghp}.json` } }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, subject: `acme/${ghp}` }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, packageName: ghp }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, os: 1 as never }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, ecosystem: {} as never }], NOW)).toThrow(ObservationRefused);
+    // ordinary names, paths and subjects pass
+    expect(() => checkObservations("repo_github", [{ ...base, names: ["OPENAI_API_KEY"], location: { path: "src/app.ts" }, packageName: "openai" }], NOW, [keyRow])).not.toThrow();
+  });
+
   it("scrubs the run's secret, URL query strings and credential shapes from stored text, and caps it", () => {
     const secret = "sd0-unit-" + "q7".repeat(16);
     const out = scrubRunText(`denied for ${secret} at https://h.example.test/a/b?token=${secret}&x=1 then ${JSON.stringify(secret)}`, [secret]);
