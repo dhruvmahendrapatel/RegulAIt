@@ -2,10 +2,11 @@
 
 - **Status**: Accepted
 - **Date**: 2026-10-17
-- **Amends**: ADR-0055 (shadow-AI discovery) and ADR-0083 (first-party discovery). Their "evidence only, no
-  collectors" stance and ADR-0083 §1's refusal of endpoint collection are superseded by this ADR. Everything they
-  built stays: the catalogue, imports, raw adapters, paste-in classifier, MCP discovery, findings, dispositions and
-  the remediation plan.
+- **Amends**: ADR-0055 (shadow-AI discovery), ADR-0071 (format adapters), ADR-0083 (first-party discovery) and
+  ADR-0122 (MCP discovery). Their "evidence only, no collector, nothing is scanned" stance and ADR-0083 §1's refusal
+  of endpoint collection and of integrations with the existing git-provider and cloud set are superseded by this
+  ADR. Everything they built stays: the catalogue, imports, raw adapters, paste-in classifier, MCP discovery,
+  findings, dispositions and the remediation plan, and "detection is data" (ADR-0083 §3) stands.
 
 ## Context
 
@@ -37,7 +38,10 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
 1. **Active, read-only scanning.** RegulAIt may call customer systems to discover AI use. Every scanner is
    read-only: it never writes to, changes or deletes anything in a scanned system. Every discovery source is off
    until an admin enables it. Enabling a source is a `settings_relax` step-up bound to the source's kind, target and
-   scope, and is audited. Disabling one is free. Every scan run is audited with its source, scope, counts and
+   scope, and is audited. Widening a source's scope (more repos, accounts, projects, subscriptions or regions, or an
+   organisation-level scope) is the same step-up; narrowing and disabling are free. A source may target one account,
+   project or subscription, or an organisation-level scope (an AWS Organization, a GCP organization or folder, an
+   Azure management group). Every scan run is audited with its source, scope, counts and
    outcome.
 2. **Endpoints: both options are offered.** The customer chooses per org:
    - **(a) No agent.** RegulAIt ships a signed osquery query pack that the customer deploys through their own MDM or
@@ -46,7 +50,10 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
    Either can be enabled alone, or both.
 3. **Cloud credentials: federated and static are both allowed.** Federated, short-lived credentials are the default
    and need no relaxation: AWS role assumption with an external ID, GCP workload identity federation, and Azure
-   workload identity federation or managed identity. Static credentials (an AWS access key, a GCP service-account
+   workload identity federation or managed identity. RegulAIt presents an OIDC token from its own workload identity
+   issuer (ADR-0188) to AWS `AssumeRoleWithWebIdentity`, to GCP workload identity federation and to an Azure
+   federated credential, so a BYOC or on-premises install needs no AWS principal of its own. Where an AWS principal
+   does exist, `AssumeRole` uses an external ID that RegulAIt generates per source; the admin never chooses it. Static credentials (an AWS access key, a GCP service-account
    key file, an Azure client secret) are allowed as an admin relaxation under ADR-0180: storing one is a
    `settings_relax` step-up, the secret is encrypted at rest with the existing data key, it is never returned by any
    route, enforcement posture shows every source that uses one, and the UI warns once the secret is older than 90
@@ -55,21 +62,37 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
 
 ### Shared rules for every scanner
 
-5. **Findings go into the existing model.** Every scanner writes `shadow_ai_findings` through the same merge-by-usage
-   path as imports, so repeat sightings merge, and dispositions, risk-register feed and the remediation plan work
-   unchanged. New evidence kinds: `repo_scan`, `cloud_inventory`, `cloud_audit_log`, `endpoint_osquery`,
-   `endpoint_inventory` and `endpoint_agent`.
+5. **Detection is data (ADR-0083 §3 stands).** A scanner observation becomes a finding only when it matches an
+   enabled `ai_endpoint_signatures` row. SD0 adds signature kinds `cloud_ai_service`, `desktop_app`, `ide_extension`,
+   `browser_extension`, `local_runtime` and `assistant_config`, with matchers that never evaluate a regex taken from
+   data. An observation that matches only compiled detection is an unmatched observation reported in
+   `deploymentCatalogueGaps`, as ADR-0083 §3 does today.
+5a. **Findings go into the existing model.** Matched observations merge into `shadow_ai_findings` through the same
+   merge-by-usage path as imports, keyed by subject kind, subject and provider, so dispositions, the risk-register
+   feed and the remediation plan work unchanged. SD0 adds subject kinds `device`, `cloud_resource` and
+   `cloud_principal`, and records which source produced each sighting as a signal source per scan run:
+   `repo_scan`, `cloud_inventory`, `cloud_audit_log`, `endpoint_osquery`, `endpoint_inventory` and `endpoint_agent`
+   (the closed `shadow_ai_imports.kind` enum is extended to match, so imports and scans share one path).
+5b. **Posture statements tell the truth.** The posture sentences the shadow-AI and MCP-discovery routes return today
+   ("ships no collector", "nothing is scanned") are rewritten to list the active sources enabled for the org. With
+   none enabled they keep saying nothing is scanned.
 6. **Data minimisation.** No scanner stores file contents, prompt or response content, or a full secret. A detected
    key is kept only as the existing 8-character redacted prefix plus where it was found (repo, path, line, commit;
    or device and config file). Repo scanners keep only the matched signature, path and line. Raw scanner output is
-   digested (SHA-256) and discarded, like pasted content today.
+   digested (SHA-256) and discarded, like pasted content today. A scanner never calls a provider to test a key it
+   finds: liveness checks would be an outbound use of a customer secret.
 7. **Credentials.** Scanner credentials live in a dedicated table, encrypted with the data key, scoped to one
    source, never returned, and rotated or revoked by admins (revoking is free; replacing is the same step-up as
    adding). Git-provider credentials reuse the provider's read-only scopes; a credential that grants write scopes
-   is refused where the provider lets us check.
-8. **Egress.** Every outbound scanner call goes through `guardedFetch` and the egress allow list (ADR-0034, with the
-   ADR-0034 D4 step-up for new hosts). Cloud and git-provider API hosts are added by the admin when the source is
-   enabled, not shipped pre-allowed.
+   is refused where the provider lets us check; where it cannot be checked, the source's posture row says "write
+   scope unverified".
+8. **Egress.** Every outbound scanner call goes through `guardedFetch` and the egress allow list (ADR-0034, with
+   the owner amendment of 2026-10-16: adding any allow entry is a `settings_relax` step-up, built in #395). The cloud
+   SDKs bring their own HTTP stacks, so each client is constructed with a transport that delegates to
+   `guardedFetch`: a custom `requestHandler` for the AWS SDK v3, a custom `HttpClient` for `@azure/core-rest-pipeline`,
+   and Google clients in REST fallback mode with a guarded fetch. gRPC transports are not used. A test proves that a
+   willing network spy records no call when the host is not allow-listed. Cloud and git-provider API hosts are added
+   by the admin when the source is enabled, not shipped pre-allowed.
 9. **Scheduling and runs.** Sources run on an admin-set schedule (default daily; a shorter interval is not a
    relaxation) and on demand. Runs are leased rows with expiry, as the workflow engine does (REL-06), so a crashed
    worker's run is retried, never lost or doubled. Each source is rate-limited per provider and backs off on 429.
@@ -78,11 +101,14 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
     honest "unreachable in air-gapped mode" state. Endpoint options work unchanged.
 11. **Open source first (ADR-0176).** Cloud scanners use the official SDKs (AWS SDK for JavaScript v3, Apache-2.0;
     `@google-cloud/*`, Apache-2.0; `@azure/*`, MIT). The repo scanner evaluates syft (Apache-2.0) for dependency
-    inventory and gitleaks rules (MIT) for key detection, provided each runs air-gapped from a pinned artifact;
-    the builder records what it found. The endpoint query pack uses osquery (Apache-2.0 / GPL-2.0 dual licence;
+    inventory, provided it runs air-gapped from a pinned artifact. Key detection reuses the gitleaks-derived
+    `dlp.secret.*` patterns already in `packages/shared`, or the gitleaks binary with its own RE2 engine; no regex
+    taken from data is evaluated in JavaScript (ADR-0055). The builder records what it found. The endpoint query pack uses osquery (Apache-2.0 / GPL-2.0 dual licence;
     RegulAIt ships only queries, not osquery itself).
-12. **No vendor-named presets.** The refusal of vendor-named CASB or SWG scrapers (PENDING) stands. MDM and EDR
-    exports come in through a generic mapped importer, as `generic_mapped` does today.
+12. **No vendor-named presets.** ADR-0083 §1's "no vendor-named integration" is superseded only for the existing
+    git-provider and cloud set (GitHub, GitLab, Bitbucket, Azure DevOps, AWS, GCP, Azure). Named CASB, SWG, MDM and
+    EDR presets stay refused (PENDING). MDM and EDR exports come in through a generic mapped importer, as
+    `generic_mapped` does today.
 
 ### Code repos
 
@@ -92,19 +118,27 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
     Go, Maven, Gradle, NuGet, RubyGems, Cargo), source imports, AI tool configuration files (for example MCP server
     configs, coding-assistant instruction files and `.env.example` names), and AI provider key patterns. Scanning
     history is an admin relaxation (step-up), off by default.
-15. The catalogue gains coding-assistant signatures, closing PENDING S17 (GitHub Copilot and the other assistants
-    that leave config files or packages behind).
+15. Coding-assistant signatures ship in a new `SHADOW_AI_CATALOG_V2` alongside v1 (v1 stays byte-identical as
+    ADR-0083 §2 requires; v2 is pinned by entry count and hash), plus seed rows for the admin catalogue. Each endpoint
+    is verified against current vendor documentation, as PENDING S17 requires; S17 closes when SD1 ships.
 
 ### Cloud accounts
 
 16. One `CloudScanner` interface with three adapters, each listing only AI services:
-    - **AWS:** Bedrock (custom and imported models, provisioned throughput, agents, knowledge bases, guardrails,
-      model-invocation logging settings), SageMaker endpoints and models, and CloudTrail `InvokeModel`,
-      `InvokeModelWithResponseStream` and `Converse` events grouped by calling principal.
-    - **GCP:** Vertex AI endpoints, models and deployed indexes through Cloud Asset Inventory, and Cloud Audit Logs for
-      `aiplatform.googleapis.com` and `generativelanguage.googleapis.com`.
-    - **Azure:** Cognitive Services accounts of kind OpenAI or AIServices and their deployments through Azure Resource
-      Graph, and activity and diagnostic logs for those accounts.
+    - **AWS:** in every enabled region, Bedrock (custom and imported models, provisioned throughput, agents,
+      knowledge bases, guardrails, model-invocation logging settings) and SageMaker endpoints and models; and
+      CloudTrail `InvokeModel`, `InvokeModelWithResponseStream`, `Converse` and `ConverseStream` events grouped by
+      calling principal. `LookupEvents` covers 90 days of management events only; agent and knowledge-base calls
+      (`InvokeAgent`, `Retrieve`, `RetrieveAndGenerate`) are data events, readable only when the customer has enabled
+      data-event selectors and granted read on the trail's bucket. The scanner reports which of these it could read.
+    - **GCP:** a Service Usage check for enabled `aiplatform.googleapis.com` and `generativelanguage.googleapis.com`
+      (cheap and strong); Vertex AI endpoints, models and index endpoints through Cloud Asset Inventory; and Cloud
+      Audit Logs. Vertex prediction calls appear only in Data Access audit logs, which are off by default and need
+      `roles/logging.privateLogViewer`; the scanner reports "not enabled" honestly when they are absent.
+    - **Azure:** Cognitive Services accounts of kind OpenAI or AIServices through Azure Resource Graph; their
+      deployments through Resource Graph where present, otherwise the ARM list-deployments call; Azure Machine
+      Learning and AI Foundry hub and project workspaces; and the activity log. Diagnostic logs are read only when the
+      customer routes them to a Log Analytics workspace the reader can query.
 17. The read-only role or permission set each adapter needs is published as a document and as IaC snippets the
     customer applies in their own account. RegulAIt never creates IAM in a customer account.
 
@@ -113,22 +147,28 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
 18. **No-agent option.** The signed query pack covers installed AI desktop apps, IDE extensions, browser extensions,
     local model runtimes and their listening ports, AI CLIs, and the names (never values) of AI-related environment
     variables and config files. Results are imported as `endpoint_osquery`; MDM or EDR inventory exports as
-    `endpoint_inventory`.
+    `endpoint_inventory`. The pack is signed (mechanism decided in the SD4 spike with the agent's release signing;
+    `infra/release-keys/` is not reused without an owner decision).
 19. **Agent option.** The agent collects the same facts as the query pack and nothing more. Explicit non-goals: no
     keystrokes, screenshots, clipboard, file contents, prompt or response content, or browsing history. Key values
     are redacted on the device before anything is sent. It enrols with its own workload identity using the ADR-0188
     S7 pattern (its own key, DPoP-bound tokens, rotation), sends only to the org's gateway, and verifies signed
-    releases before any update. The customer distributes it through MDM; RegulAIt never installs it.
-20. **Privacy.** Device users are pseudonymous by default (a keyed hash, per tenant); revealing a name is an admin
-    action with step-up and audit. RegulAIt ships an employee-notice template. Employee-monitoring and privacy law
+    releases before any update. The customer distributes it through MDM; RegulAIt never installs it. By default it
+    updates only through MDM; self-update is a relaxation. The SD4 spike decides the signing mechanism, how
+    enrolment scales to thousands of devices (an MDM-delivered enrolment token) and device revocation.
+20. **Privacy.** People are pseudonymous by default: device users, git commit authors and cloud calling principals
+    are shown as a keyed hash (HMAC key per tenant, as in ADR-0193). The display name is stored encrypted under the
+    data key in a separate table; revealing it decrypts it under a step-up and is audited. Endpoint evidence has a
+    strict default retention of 90 days; lengthening it is a relaxation. RegulAIt ships an employee-notice template. Employee-monitoring and privacy law
     (for example GDPR and works-council rules) varies by country: as with ADR-0193 Art. 50, RegulAIt makes no
     compliance claim and recommends the customer takes legal advice before enabling either endpoint option.
 
 ### Slices
 
-- **SD0 Foundation** (migration 0202): discovery sources, scanner credentials, scan runs and schedules; the new
-  evidence kinds; enable and credential step-ups; posture rows; an admin "Discovery sources" page; the scan worker
-  with leased runs.
+- **SD0 Foundation** (migration 0202; 0201 is claimed by the ADR-0190 isolation-admin build in flight): discovery
+  sources, scanner credentials, scan runs and schedules; the new signature kinds, subject kinds and signal sources;
+  the pseudonym table; enable, widen and credential step-ups; posture rows and the rewritten posture sentences; an
+  admin "Discovery sources" page; the scan worker with leased runs. Depends on #395 (egress step-up).
 - **SD1 Repo scanner** over SD0 (all four git providers).
 - **SD2 Cloud scanners** over SD0 (AWS, GCP, Azure in one interface).
 - **SD3 Endpoint, no agent**: query pack, signing, osquery and generic MDM/EDR importers.
