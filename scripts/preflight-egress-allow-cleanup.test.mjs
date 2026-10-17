@@ -219,6 +219,34 @@ it("imds", async () => {
       expect(analyzeTestFile(recorded("db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, saved))")).unmatchedMarkers).toEqual([]);
     });
 
+    it("#414 recheck S1: a negated comparison keeps the posted row, so it names nothing (negative controls)", () => {
+      const marked = (removal) => `const IMDS = "169.254.169.254";
+let saved;
+afterAll(async () => { await ${removal}; });
+it("imds", async () => {
+  // egress-allow-cleanup: afterAll — claimed, but afterAll removes every row EXCEPT the posted one
+  const r = await post("/v1/egress-allow-hosts", { host: IMDS });
+  saved = r.json().id;
+});\n`;
+      for (const removal of [
+        "db.delete(egressAllowHosts).where(ne(egressAllowHosts.host, IMDS))",
+        "db.delete(egressAllowHosts).where(notInArray(egressAllowHosts.host, [IMDS]))",
+        'db.delete(egressAllowHosts).where(ne(egressAllowHosts.host, "169.254.169.254"))',
+        "db.delete(egressAllowHosts).where(ne(egressAllowHosts.id, saved))",
+        'removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1", note: fmt(cfg.host, IMDS) })',
+      ]) {
+        expect(analyzeTestFile(marked(removal)).unmatchedMarkers, removal).toEqual([6]);
+      }
+      // live controls: the same removals through eq / inArray name the posted row
+      for (const removal of [
+        "db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, IMDS))",
+        "db.delete(egressAllowHosts).where(inArray(egressAllowHosts.host, [IMDS]))",
+        "db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, saved))",
+      ]) {
+        expect(analyzeTestFile(marked(removal)).unmatchedMarkers, removal).toEqual([]);
+      }
+    });
+
     it("a create in beforeAll or in a helper stays a file-level create (afterAll rule only)", () => {
       const helper = `async function allow(h) { await post("/v1/egress-allow-hosts", { host: h }); }\nit("x", async () => { await allow("a"); });\n`;
       expect(analyzeTestFile(fileLevel + helper).untrackedTestCreates).toEqual([]);

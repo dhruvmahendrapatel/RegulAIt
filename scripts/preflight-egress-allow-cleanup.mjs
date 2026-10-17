@@ -320,11 +320,15 @@ function carriersOf(sf, results, keys) {
 /**
  * What one removal names, by position (review R1): the host values it removes (`host:` property values, and what is
  * compared with `<table>.host`: `eq(t.host, x)`, `inArray(t.host, xs)`) and the ids it removes (`id:` property values,
- * what is compared with `<table>.id`, and the DELETE url template's substitutions). A literal counts only as a host
+ * what is compared with `<table>.id`, and the DELETE url template's substitutions). Only `eq` and `inArray` compare: a
+ * negated comparison (`ne`, `notInArray`) or any other call naming the column removes nothing it names. A literal counts only as a host
  * value; a reference counts only in its own position, so a host variable or a recorded id in a `note:` field names
  * nothing. A for-of loop variable in a position brings its iterable into that position (`for (const id of ids)`).
  * The removal is the whole call: a `db.delete(t).where(...)` chain, or the request carrying the DELETE url.
  */
+/** the column comparisons whose rows a removal deletes: the named values themselves */
+const REMOVING_COMPARISONS = new Set(["eq", "inArray"]);
+
 function removalNames(node, keys) {
   let call = node;
   if (!ts.isCallExpression(call)) {
@@ -361,7 +365,9 @@ function removalNames(node, keys) {
     if (ts.isPropertyAssignment(n) && n.name.getText() === "id") collect(n.initializer, idRefs);
     if (ts.isShorthandPropertyAssignment(n) && n.name.text === "host") collect(n.name, hostRefs);
     if (ts.isShorthandPropertyAssignment(n) && n.name.text === "id") collect(n.name, idRefs);
-    if (ts.isCallExpression(n)) {
+    // only the comparisons that keep the named rows in the removal (`eq`, `inArray`): a negated one (`ne`,
+    // `notInArray`) removes everything EXCEPT them, and any other call merely mentions the column (#414 recheck S1)
+    if (ts.isCallExpression(n) && REMOVING_COMPARISONS.has(calleeName(n) ?? "")) {
       const cols = n.arguments.map(column);
       for (const [col, out] of [
         ["host", hostRefs],
