@@ -8,7 +8,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -161,13 +161,16 @@ export default async function globalSetup() {
   await waitFor(`http://127.0.0.1:${PORT}/health`, 30_000);
 
   // `mode` applies only when the file is created: remove a state file left by an
-  // earlier run first, so a loosely-permissioned old file never holds this run's passwords
+  // earlier run first, so a loosely-permissioned old file never holds this run's passwords.
+  // `wx` refuses anything (a file, a symlink) that reappears in between, and the
+  // chmod states 0600 explicitly rather than trusting create-time `mode` alone.
   rmSync(STATE_FILE, { force: true });
   writeFileSync(
     STATE_FILE,
     // settledPasswords: what the journeys set in place of the one-time ones, fresh per run (ADR-0174 §6)
     JSON.stringify({ pid: child.pid, passwords, settledPasswords: generateSettledPasswords(), baseUrl: `http://127.0.0.1:${PORT}` }, null, 2),
-    { mode: 0o600 },
+    { mode: 0o600, flag: "wx" },
   );
+  chmodSync(STATE_FILE, 0o600);
   process.env.E2E_BASE_URL = `http://127.0.0.1:${PORT}`;
 }

@@ -24,9 +24,11 @@ export async function typeAt(page: Page, target: Locator, text: string) {
 }
 
 export async function selectAt(page: Page, target: Locator, value: string) {
-  const index = await target.evaluate((element, wanted) =>
+  // options can arrive after a fetch (the simulation's tools load once a server is chosen): wait for this one
+  const indexOf = () => target.evaluate((element, wanted) =>
     Array.from((element as HTMLSelectElement).options).findIndex((option) => option.value === wanted), value);
-  expect(index, `option ${value} must exist`).toBeGreaterThanOrEqual(0);
+  await expect.poll(indexOf, { message: `option ${value} must exist` }).toBeGreaterThanOrEqual(0);
+  const index = await indexOf();
   await tabTo(page, target);
   await page.keyboard.press("Home");
   for (let step = 0; step < index; step += 1) await page.keyboard.press("ArrowDown");

@@ -121,6 +121,37 @@ The short version:
     --image-bundle /media/usb/regulait-images-0.2.0.tar
 ```
 
+### Migrations that block audit writes while they run (BYOC)
+
+Some migrations build an index on `audit_log` with plain `CREATE INDEX`, not `CREATE INDEX
+CONCURRENTLY`. The migrator applies pending files in one transaction, and `CONCURRENTLY` cannot run
+inside a transaction. While such an index builds, PostgreSQL holds a `SHARE` lock on `audit_log`.
+**Every insert into the audit trail waits until the build finishes.** Every governed call writes an
+audit row, so on a live deployment these calls stall for that time. The build time grows with the
+size of the trail.
+
+Migrations that do this: **0193** (`0193_identity_s6_review.sql`: two partial indexes on decision
+rows, by acting identity and time), and earlier 0067, 0154, 0155, 0167, 0180 and 0192. This is the
+complete list as of 0202, found by searching the migrations for an index on `audit_log` (0000 is left
+out: it creates the table, which is empty then).
+
+What this means when you upgrade a BYOC or air-gapped install whose trail is already large:
+
+- **One gateway (the installer's default topology):** the gateway runs migrations at boot, before
+  it serves traffic. Nothing else is writing during the build, so the lock blocks nobody. Expect a
+  longer start than usual.
+- **More than one gateway replica, or anything else that writes `audit_log`:** a replica still on
+  the old version keeps serving while the new one migrates. Its audit inserts, and so its governed
+  calls, wait for the whole build. Stop or drain every other writer before the first upgraded
+  gateway starts. Treat the upgrade as a maintenance window.
+- **Rollback:** an index is not data. Restoring the pre-upgrade dump (step 2) removes it with
+  everything else.
+
+**Pending execution:** no build time has been measured on a large trail, and the drain steps for a
+multi-replica BYOC topology have not been run. No command is given here for that reason (they will
+be added once executed). For the single-gateway path, applying an update as above is all that is
+needed.
+
 ### Rolling back
 
 ```sh

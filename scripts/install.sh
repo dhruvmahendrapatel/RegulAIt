@@ -658,6 +658,7 @@ fi
 . "$SCRIPT_DIR/lib/first-admin.sh"
 FIRST_ADMIN_USERNAME="$(printf '%s' "${FIRST_ADMIN_USERNAME:-admin}" | tr '[:upper:]' '[:lower:]')"
 if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
+  [ "$(uname -s)" = "Linux" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is supported on Linux only: run the installer interactively for the first admin."
   problem="$(fa_password_file_problem "$FIRST_ADMIN_PASSWORD_FILE")"
   [ -z "$problem" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE: $problem"
   [ -n "$FIRST_ADMIN_EMAIL" ] || die "REGULAIT_FIRST_ADMIN_PASSWORD_FILE is set but REGULAIT_FIRST_ADMIN_EMAIL is not: the first admin needs an email."
@@ -1215,11 +1216,13 @@ first_admin_exec() {
 }
 FIRST_ADMIN_STATE="skipped"   # created | exists | skipped | failed
 FIRST_ADMIN_NAME=""
+FIRST_ADMIN_DEMO_ONLY=0       # 1 when every admin is a demo seed persona (first-admin.js --status says so)
 FA_STATUS_RC=0
 FA_STATUS_LINE="$(first_admin_exec --status </dev/null 2>&1)" || FA_STATUS_RC=$?
 case "$FA_STATUS_RC" in
   3)
     ok "an active admin already exists — skipped, nothing changed"
+    case "$FA_STATUS_LINE" in *"only the demo seed's personas are admins"*) FIRST_ADMIN_DEMO_ONLY=1 ;; esac
     FIRST_ADMIN_STATE="exists" ;;
   0)
     if [ -n "$FIRST_ADMIN_PASSWORD_FILE" ]; then
@@ -1309,7 +1312,7 @@ case "$FIRST_ADMIN_STATE" in
     if [ "$FIRST_ADMIN_STATE" = "created" ]; then
       FA_HEADLINE="Created: '$FIRST_ADMIN_NAME'. Sign in at the URL above with the password you chose.
     The first sign-in enrols an authenticator app (MFA is required for admins)."
-    elif [ "$SEED_DEMO" = "1" ]; then
+    elif [ "$SEED_DEMO" = "1" ] && [ "$FIRST_ADMIN_DEMO_ONLY" = "1" ]; then
       # --seed-demo: the demo seed made its personas first, so the demo admin IS the existing admin
       FA_HEADLINE="The demo dataset is loaded (--seed-demo), so its personas are the admins
     (admin@regulait.local) and you were not asked for one. Their one-time passwords are
@@ -1317,19 +1320,22 @@ case "$FIRST_ADMIN_STATE" in
     own account, sign in as the demo admin, create your admin under Admin -> Users, then
     deactivate the demo personas. With the token retired, the demo seed that re-runs at
     each gateway start can no longer act and logs a failure; the loaded data stays."
+    elif [ "$SEED_DEMO" = "1" ]; then
+      # a real admin existed, so the demo seed's guard (seed-demo-guard.ts) refused: nothing was loaded
+      FA_HEADLINE="An admin of your own already exists, so --seed-demo loaded nothing: the demo seed
+    never touches a database with a real admin (the refusal is in docker compose -p $PROJECT logs gateway).
+    This run did not change any account."
     else
       FA_HEADLINE="An admin already exists; this run did not change any account."
     fi
-    if [ "$BOOTSTRAP_RETIRED" = "1" ]; then
-      FA_TOKEN_LINE="The bootstrap token is retired."
-      if [ "$TOKEN_RETIRED_NOW" = "1" ]; then
-        FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
-      fi
-    elif [ "$TOKEN_REOPENED" = "1" ]; then
+    # created|exists always retires the token above (or dies trying) unless --admin-token re-opened it
+    if [ "$TOKEN_REOPENED" = "1" ]; then
       FA_TOKEN_LINE="The bootstrap token is OPEN: you re-opened it with --admin-token. Re-run without
     --admin-token to retire it again."
+    elif [ "$TOKEN_RETIRED_NOW" = "1" ]; then
+      FA_TOKEN_LINE="The bootstrap token is retired: removed from $ENV_FILE, gateway restarted."
     else
-      FA_TOKEN_LINE="The bootstrap token is still live: re-run this installer to retire it."
+      FA_TOKEN_LINE="The bootstrap token is retired."
     fi
     cat <<SUMMARY
 
