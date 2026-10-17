@@ -59,8 +59,9 @@ shrinks the file.
   holds every call open and checks that the screen announces loading (`role="status"` or `aria-busy`). It then
   fails every call and checks for an alert (`role="alert"`). It also measures every table's cell padding and font
   size against a probe styled like the kit's `Table`. Empty states need per-screen data and come with the
-  feature-baseline fixtures. `scripts/preflight-ui-tokens.mjs` runs stylelint's built-in rules over the CSS
-  (`color-no-hex`, `color-named`, colour functions, px/rem/em on padding, margin and gap) and scans TS/TSX for colour
+  feature-baseline fixtures. `scripts/preflight-ui-tokens.mjs` parses the CSS with postcss and applies four
+  rules named after stylelint's built-ins (`color-no-hex`, `color-named`, colour functions, px/rem/em on padding,
+  margin and gap) and scans TS/TSX for colour
   literals and literal inline spacing. `tokens.css`, `fonts.css` and test files are left out.
 - **Bar 4**: `perf.ent.spec.ts` injects web-vitals into the page and measures LCP and INP on every screen in
   Chromium. INP comes from one click on the screen's heading. The budgets are web-vitals' "good" thresholds,
@@ -75,9 +76,13 @@ shrinks the file.
   `file` plugin only reads built files, so it needs no bundler and no network.
 - **Web vitals**: `web-vitals` 6.2.3 (Apache-2.0), the reference implementation. Lighthouse CI was not chosen: it
   needs its own Chrome flow per URL and cannot drive the mocked API.
-- **CSS lint**: `stylelint` 17.16.0 (MIT), built-in rules only. The `stylelint-declaration-strict-value` plugin
-  was considered and is not needed for these rules. stylelint does not read inline styles in TSX, so the TSX scan is
-  a narrow written exception. It is a regex over string literals and style objects; a known false positive is a
+- **CSS lint**: `stylelint` 17.16.0 (MIT, built-in rules only) was the first choice and was dropped. Its globbing
+  dependencies bring in `braces` 3.0.3, which has a high advisory (GHSA-vfj7-8cjw-p6xm) with no fixed release, and
+  the dependency audit gate refused it. Allow-listing it was rejected (ADR-0180: the strict default). The scan now
+  uses `postcss` 8.5.28 (MIT), the CSS parser vite already ships, pinned as a direct dev dependency. Over the same
+  source it reproduces stylelint's counts exactly (739). The rule logic, about 30 lines, is a written exception: no
+  maintained package that needs no glob dependency provides these four checks. TSX inline styles are covered by
+  neither tool, so the TSX scan is a second narrow exception. It is a regex over string literals and style objects; a known false positive is a
   `#412`-shaped issue number in copy, which the ratchet tolerates.
 - **Accessibility**: the existing `@axe-core/playwright` (test-only, MPL-2.0 exception already recorded).
 - **Ratchet and baseline merge**: no package fits these per-key counts compared with git history; the script is

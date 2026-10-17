@@ -10,12 +10,14 @@
  * (scripts/ui-enterprise-baseline.mjs --guard).
  *
  * Findings:
- *   CSS (stylelint, MIT, pinned in apps/web; built-in rules only, no plugin):
+ *   CSS (parsed with postcss, MIT, pinned in apps/web; the rule names follow stylelint's built-in rules):
  *     color-no-hex                          `#0af`, `#00aaff` …
  *     color-named                           `white`, `red` … (`transparent` and `currentColor` are not colours here)
- *     function-disallowed-list              `rgb()`, `hsl()`, `oklch()` … colour functions with literal channels
+ *     function-disallowed-list              `rgb()`, `hsl()`, `oklch()` … colour functions
  *     declaration-property-unit-disallowed-list   px / rem / em on padding, margin and gap
- *   TS/TSX (a scan of string literals and inline style objects; stylelint does not read TSX):
+ *   stylelint itself was tried first (ADR-0196) and dropped: its file-globbing dependencies pull in `braces` 3.0.3,
+ *   which has a high advisory with no fixed release, and the four rules need only a CSS parser.
+ *   TS/TSX (a scan of string literals and inline style objects):
  *     ts-color-literal                      a hex or colour-function literal inside a string
  *     ts-spacing-literal                    padding / margin / gap given a number or a px / rem / em string
  *
@@ -36,16 +38,38 @@ const SRC = path.join(WEB, "src");
 export const BASELINE_FILE = path.join(root, "scripts", "ui-tokens.baseline.json");
 const TOKEN_SOURCES = new Set(["apps/web/src/theme/tokens.css", "apps/web/src/theme/fonts.css"]);
 
-export const STYLELINT_CONFIG = {
-  rules: {
-    "color-no-hex": true,
-    "color-named": "never",
-    "function-disallowed-list": ["rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch"],
-    "declaration-property-unit-disallowed-list": {
-      "/^(padding|margin|gap|row-gap|column-gap)(-|$)/": ["px", "rem", "em"],
-    },
-  },
-};
+/** CSS Color 4 named colours (`transparent` and `currentcolor` are keywords, not colours, and are allowed) */
+const NAMED_COLORS = new Set(("aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown " +
+  "burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray " +
+  "darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue " +
+  "darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite " +
+  "forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray green greenyellow grey honeydew hotpink indianred indigo ivory " +
+  "khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen " +
+  "lightgrey lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime " +
+  "limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue " +
+  "mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive " +
+  "olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum " +
+  "powderblue purple rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue " +
+  "slateblue slategray slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke " +
+  "yellow yellowgreen").split(" "));
+const COLOR_FUNCTION = /\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(/gi;
+const HEX = /#[0-9a-fA-F]{3,8}\b/g;
+const SPACING_PROP = /^(padding|margin|gap|row-gap|column-gap)(-|$)/;
+const SPACING_UNIT = /(?:^|[\s(,+*/-])-?\d*\.?\d+(?:px|rem|em)\b/g;
+
+/** the findings in one CSS declaration; a local custom property holding a literal counts too (only tokens.css defines tokens) */
+export function cssDeclFindings(prop, value) {
+  const f = {};
+  const add = (rule, n) => {
+    if (n > 0) f[rule] = (f[rule] ?? 0) + n;
+  };
+  const v = value.replace(/url\([^)]*\)/gi, "url()").replace(/"[^"]*"|'[^']*'/g, '""');
+  add("color-no-hex", (v.match(HEX) ?? []).length);
+  add("function-disallowed-list", (v.match(COLOR_FUNCTION) ?? []).length);
+  add("color-named", v.split(/[^A-Za-z-]+/).filter((w) => NAMED_COLORS.has(w.toLowerCase())).length);
+  if (SPACING_PROP.test(prop.toLowerCase())) add("declaration-property-unit-disallowed-list", (v.match(SPACING_UNIT) ?? []).length);
+  return f;
+}
 
 const COLOR_LITERAL = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(/;
 const STRING = /(["'`])((?:\\.|(?!\1)[^\\\n])*)\1/g;
@@ -79,16 +103,17 @@ export function scanTs(files) {
   return out;
 }
 
-/** `{ file: { rule: count } }` from stylelint over every CSS file in apps/web/src */
+/** `{ file: { rule: count } }` over CSS files, parsed with postcss (the parser vite already uses) */
 export async function scanCss(cssFiles) {
   const req = createRequire(path.join(WEB, "package.json"));
-  const { default: stylelint } = await import(pathToFileURL(req.resolve("stylelint")).href);
-  const { results } = await stylelint.lint({ files: cssFiles, config: STYLELINT_CONFIG, cwd: root });
+  const { default: postcss } = await import(pathToFileURL(req.resolve("postcss")).href);
   const out = {};
-  for (const r of results) {
+  for (const file of cssFiles) {
     const f = {};
-    for (const w of r.warnings) f[w.rule] = (f[w.rule] ?? 0) + 1;
-    if (Object.keys(f).length) out[rel(r.source)] = f;
+    postcss.parse(readFileSync(file, "utf8"), { from: file }).walkDecls((decl) => {
+      for (const [rule, n] of Object.entries(cssDeclFindings(decl.prop, decl.value))) f[rule] = (f[rule] ?? 0) + n;
+    });
+    if (Object.keys(f).length) out[rel(file)] = f;
   }
   return out;
 }

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { spaRoutes, routeSlug, PARAM_FIXTURE } from "./ui-spa-routes.mjs";
 import { growth, merge, readFindings, stale } from "./ui-enterprise-baseline.mjs";
-import { compare, currentFindings, readBaseline, scanTs } from "./preflight-ui-tokens.mjs";
+import { compare, cssDeclFindings, currentFindings, readBaseline, scanTs } from "./preflight-ui-tokens.mjs";
 import { readPack, renderIndex } from "./ui-screenshot-index.mjs";
 
 const dirs = [];
@@ -93,6 +93,17 @@ describe("design-token ratchet (ADR-0196)", () => {
       ["clean.ts", 'export const x = "var(--s2)";'],
     ]);
     expect(found).toEqual({ "a.tsx": { "ts-color-literal": 2, "ts-spacing-literal": 2 } });
+  });
+
+  it("finds hex, named and functional colours and literal spacing in CSS declarations, not tokens or urls", () => {
+    expect(cssDeclFindings("color", "#fff")).toEqual({ "color-no-hex": 1 });
+    expect(cssDeclFindings("border", "1px solid white")).toEqual({ "color-named": 1 });
+    expect(cssDeclFindings("box-shadow", "0 0 2px rgba(0, 0, 0, 0.4), 0 1px hsl(0 0% 0%)")).toEqual({ "function-disallowed-list": 2 });
+    expect(cssDeclFindings("padding", "8px var(--s2) 0.5rem")).toEqual({ "declaration-property-unit-disallowed-list": 2 });
+    expect(cssDeclFindings("--mon-s1", "#2a78d6")).toEqual({ "color-no-hex": 1 });
+    expect(cssDeclFindings("color", "var(--rg-signal)")).toEqual({});
+    expect(cssDeclFindings("background", "url(#abc) transparent")).toEqual({});
+    expect(cssDeclFindings("width", "12px")).toEqual({});
   });
 
   it("compares both ways: above the baseline is new, below it is stale", () => {
