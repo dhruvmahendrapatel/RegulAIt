@@ -48,6 +48,7 @@ import { EXECUTION_PROFILE_SCHEMA, executionProfileDigest, SHIPPED_EXECUTION_PRO
 import { buildApp } from "./app.js";
 import { admitChildGrant, createRootGrant, DelegationRefusedError, governedActorFor, loadLiveChain } from "./delegation.js";
 import { decidePlacement } from "./execution-placement.js";
+import { offerLinkedPlacement } from "./executor-channel.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStepUpForTest } from "./testing/step-up-posture.js";
 
@@ -716,20 +717,20 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
   it("N11 fix round B2: a placement with several report rows is ONE row; limit=1 walks every placement once, its reports listed", async () => {
     // two offered placements, each later carrying a `placed` report AND a `cancelled` row (0198 allows both)
     const ex = await newExecutor("l2-reports", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
-    const { agentId } = await newAgent("reports");
-    const projectId = await newProject("public");
     const mine: string[] = [];
     for (let i = 0; i < 2; i++) {
-      const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 600 });
+      // the governed stdio path's linked placement (I4): an `offered` row; a ten-minute offer, so no expiry sweep
+      // writes its own end report while this test runs
+      const d = await db.transaction(async (tx) =>
+        offerLinkedPlacement(tx as unknown as Db, randomUUID(), { workloadKind: "mcp_stdio", requiredClass: "user_space_kernel", requiredBy: "workload_kind", profileDigest: RESTRICTED_DIGEST, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 600 }),
+      );
       expect(d.kind).toBe("offered");
       if (d.kind !== "offered") return;
-      // (a ten-minute offer: no expiry sweep writes its own end report while this test runs)
-      const [p] = await db.select({ id: executionPlacements.id }).from(executionPlacements).where(eq(executionPlacements.offerId, d.offerId));
       await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, applied_class, report_sha256)
-        VALUES (${p!.id}, ${d.offerId}, ${randomUUID()}, 'placed', 'user_space_kernel', ${"a".repeat(64)})`);
+        VALUES (${d.placementId}, ${d.offerId}, ${randomUUID()}, 'placed', 'user_space_kernel', ${"a".repeat(64)})`);
       await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, end_code)
-        VALUES (${p!.id}, ${d.offerId}, ${randomUUID()}, 'cancelled', 'later_gate')`);
-      mine.push(p!.id);
+        VALUES (${d.placementId}, ${d.offerId}, ${randomUUID()}, 'cancelled', 'later_gate')`);
+      mine.push(d.placementId);
     }
     type Listed = { id: string; outcome: string; reports: Array<{ outcome: string }> };
     const seen: Listed[] = [];
