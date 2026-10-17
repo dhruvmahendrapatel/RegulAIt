@@ -1352,7 +1352,6 @@ async function answer(
     )
     .orderBy(asc(auditLog.at))
     .limit(1);
-  const now = new Date();
   await seg.db
     .update(builderToolSteps)
     .set({
@@ -1365,8 +1364,9 @@ async function answer(
       costUsd: run.costUsd ?? null,
       ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
       auditLogId: auditRow?.id ?? null,
-      updatedAt: now,
-      finishedAt: now,
+      // M-075: the step's times are on the database clock, as its created_at is
+      updatedAt: sql`now()`,
+      finishedAt: sql`now()`,
     })
     .where(eq(builderToolSteps.id, stepId));
   state.results.push({ type: "tool_result", toolUseId: call.id, content: run.modelText, ...(run.isError ? { isError: true } : {}) });

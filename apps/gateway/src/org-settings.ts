@@ -77,6 +77,7 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { databaseNow } from "./db-clock.js";
 import {
   breakGlassChange,
   CHANGED_CONCURRENTLY,
@@ -271,10 +272,13 @@ export async function retentionFloor(db: Db): Promise<RetentionFloor> {
     .filter((p) => p.auditRetentionDays === retainedDays)
     .map((p) => p.tag);
   if (orgDays != null && orgDays === retainedDays) floorSource.push("org_default");
-  const cutoff = new Date(Date.now() - retainedDays * 24 * 3600 * 1000);
+  // M-075: the cutoff is compared with audit_log.at (database clock): a process
+  // clock running ahead would otherwise prune audit rows before their floor
+  const nowMs = (await databaseNow(db)).getTime();
+  const cutoff = new Date(nowMs - retainedDays * 24 * 3600 * 1000);
   // A4: MAX-only per-mode overrides — rows of an overridden mode stay retained
   // for the longer window; everything else prunes under the global floor.
-  const modeOverrides = effectiveModeOverrides(org.modeAuditRetention, retainedDays);
+  const modeOverrides = effectiveModeOverrides(org.modeAuditRetention, retainedDays, nowMs);
   const [row] = await db
     .select({ n: count() })
     .from(auditLog)
