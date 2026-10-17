@@ -512,3 +512,119 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   software fallback applies and posture flags it.
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
+
+## As built: SD2b federation signer (2026-10-17): BLOCKED on a migration
+
+**Status: not built. Blocked on a migration number from the master.** Branch `sd2b-federation-signer`.
+
+Why a migration is unavoidable. The RS256 federation key must be generated in the product and its private half kept
+encrypted under the data key. The existing issuer key store cannot hold it:
+
+- `identity_signing_keys` CHECKs `algorithm = 'Ed25519'` and an `OKP`/`Ed25519` public JWK;
+- it has one global "one active key" index, so an active RS256 key would collide with the active Ed25519 signer;
+- it has no private-key column (the Ed25519 private halves are a deploy-time file, ADR-0188 decision 5);
+- the data-key re-encryption sweep (`data-key-reencrypt.ts`) updates ciphertext rows `WHERE id = …`, so a key table
+  needs an `id` column.
+
+Loosening the Ed25519 table's CHECKs would weaken the delegated-token verifier's invariants, which `issued_tokens`
+references by `kid`. A separate table leaves them untouched.
+
+Design the migration below supports (to be built once a number is assigned):
+
+- `federation_signing_keys`: generated in-product (Node `crypto`, RSA 2048-bit, e = 65537; `kid` is the RFC 7638
+  thumbprint through `jose`), the PKCS#8 private half enveloped under the data key and listed in
+  `CIPHERTEXT_COLUMNS`. A retired or revoked key's private half is destroyed in the same update (CHECK).
+- Federation is off until an admin generates and activates the first key. That first activation is a
+  `settings_relax` step-up, because it turns federation on. Rotating and revoking go through the issuer-key
+  management routes under the `identity_manage` step-up those routes require today. PR #415's `key_management` kind
+  is not on main. Revoking is compromise handling: the key leaves the JWKS at once.
+- The public halves (active, plus retired keys inside the overlap) are published as `alg: RS256` entries in
+  `/.well-known/jwks.json` beside the Ed25519 keys. The Ed25519 verifier never accepts an RS256 `kid`.
+- Federation JWTs: `iss` = the issuer, `sub` = `discovery-source:<sourceId>`, `aud` bound per target (AWS
+  `sts.amazonaws.com`, the GCP pool provider resource, Entra `api://AzureADTokenExchange`), at most 5 minutes, `jti`
+  random. AWS `AssumeRoleWithWebIdentity` uses `@aws-sdk/client-sts`, GCP STS uses `google-auth-library`'s external
+  account client (with the SD2 transporter workaround), and Entra uses `@azure/identity`'s `ClientAssertionCredential`.
+  All of them are already pinned in `packages/cloud-discovery`, and every call goes through the guarded fetch.
+- AWS Organizations `ListAccounts` (paginated, read-only) for organisation-level AWS sources, from RegulAIt's own AWS
+  principal (`assume_role` with the per-source external ID).
+
+Exact SQL proposed (number `NNNN` to be assigned by the master; hand-written, no journal entry added here):
+
+```sql
+-- ADR-0195 SD2b: the issuer's RS256 federation signing keys (cloud workload identity federation).
+-- Hand-authored (never drizzle-kit generate). Separate from identity_signing_keys so the Ed25519 verifier's
+-- CHECKs, its one-active index and the issued_tokens FK are untouched.
+CREATE TABLE "federation_signing_keys" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "kid" text NOT NULL,
+  "algorithm" text DEFAULT 'RS256' NOT NULL,
+  "public_jwk" jsonb NOT NULL,
+  "private_key_ciphertext" text,
+  "created_by" uuid NOT NULL,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  "activated_at" timestamp with time zone,
+  "retired_at" timestamp with time zone,
+  "revoked_at" timestamp with time zone,
+  CONSTRAINT "federation_signing_keys_kid_uq" UNIQUE ("kid"),
+  CONSTRAINT "federation_signing_keys_kid_check" CHECK ("kid" ~ '^[A-Za-z0-9._:-]{1,128}$'),
+  CONSTRAINT "federation_signing_keys_algorithm_check" CHECK ("algorithm" = 'RS256'),
+  CONSTRAINT "federation_signing_keys_public_only_check" CHECK (
+    COALESCE(
+      jsonb_typeof("public_jwk") = 'object'
+      AND "public_jwk" ->> 'kty' = 'RSA'
+      AND "public_jwk" ->> 'e' = 'AQAB'
+      AND jsonb_typeof("public_jwk" -> 'n') = 'string'
+      AND length("public_jwk" ->> 'n') BETWEEN 342 AND 683
+      AND NOT ("public_jwk" ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']),
+      false
+    )
+  ),
+  -- a live key holds its private half; a retired or revoked key never does
+  CONSTRAINT "federation_signing_keys_private_check" CHECK (
+    ("retired_at" IS NULL AND "revoked_at" IS NULL) = ("private_key_ciphertext" IS NOT NULL)
+  ),
+  CONSTRAINT "federation_signing_keys_order_check" CHECK (
+    ("activated_at" IS NULL OR "activated_at" >= "created_at")
+    AND ("retired_at" IS NULL OR ("activated_at" IS NOT NULL AND "retired_at" >= "activated_at"))
+    AND ("revoked_at" IS NULL OR "revoked_at" >= "created_at")
+  )
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "federation_signing_keys_one_active_uq" ON "federation_signing_keys" ((true))
+  WHERE "activated_at" IS NOT NULL AND "retired_at" IS NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+-- never deleted; identity and each lifecycle stamp written once; the ciphertext may be re-encrypted (data-key
+-- rotation) while live, and once destroyed it never comes back
+CREATE OR REPLACE FUNCTION public."regulait_federation_signing_key_guard"() RETURNS trigger
+  SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'federation_signing_keys: a signing key is never deleted'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF NEW."id" IS DISTINCT FROM OLD."id" OR NEW."kid" IS DISTINCT FROM OLD."kid"
+     OR NEW."algorithm" IS DISTINCT FROM OLD."algorithm" OR NEW."public_jwk" IS DISTINCT FROM OLD."public_jwk"
+     OR NEW."created_by" IS DISTINCT FROM OLD."created_by" OR NEW."created_at" IS DISTINCT FROM OLD."created_at"
+     OR (OLD."activated_at" IS NOT NULL AND NEW."activated_at" IS DISTINCT FROM OLD."activated_at")
+     OR (OLD."retired_at" IS NOT NULL AND NEW."retired_at" IS DISTINCT FROM OLD."retired_at")
+     OR (OLD."revoked_at" IS NOT NULL AND NEW."revoked_at" IS DISTINCT FROM OLD."revoked_at")
+     OR (OLD."private_key_ciphertext" IS NULL AND NEW."private_key_ciphertext" IS NOT NULL) THEN
+    RAISE EXCEPTION 'federation_signing_keys: a key and each of its lifecycle stamps are written once'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER "federation_signing_keys_guard"
+  BEFORE UPDATE OR DELETE ON "federation_signing_keys"
+  FOR EACH ROW EXECUTE FUNCTION public."regulait_federation_signing_key_guard"();
+--> statement-breakpoint
+CREATE TRIGGER "federation_signing_keys_no_truncate" BEFORE TRUNCATE ON public."federation_signing_keys"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+```
+
+Nothing above has been run (no Postgres in the build environment). It follows the 0185 guard rules (pinned
+`search_path`, TRUNCATE refused beside the row guard), and the code side adds the `CIPHERTEXT_COLUMNS` entry and the
+`schema.ts` declaration with the same CHECKs.
