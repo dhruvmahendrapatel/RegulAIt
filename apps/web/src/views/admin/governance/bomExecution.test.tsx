@@ -232,6 +232,7 @@ describe("ADR-0190 owner decision C (A1): the relaxation's record beside the sig
       ["another scope kind", { ...record, scopeKind: "mcp_server" }],
       ["another scope", { ...record, scopeId: U(961) }],
       ["cleared with no one", { ...record, clearedAt: "2026-10-12T09:00:00.000Z" }],
+      ["cleared before it was set", { ...record, clearedBy: U(963), clearedAt: "2000-01-01T00:00:00.000Z" }],
       ["an extra field", { ...record, apiKeyId: U(962) }],
       ["null while the facts name one", null],
     ] as const) {

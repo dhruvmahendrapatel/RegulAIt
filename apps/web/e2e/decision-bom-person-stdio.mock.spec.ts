@@ -124,9 +124,6 @@ async function setup(page: Page): Promise<Proxy> {
   await page.route(/\/v1\/users(\?|$)/, (route) =>
     json(route, { users: [{ id: SETTER, email: "avery@example.test", displayName: "Avery Admin", isAdmin: true, disabledAt: null, createdAt: T }] }),
   );
-  await page.route(/\/v1\/users(\?|$)/, (route) =>
-    json(route, { users: [{ id: SETTER, email: "avery@example.test", displayName: "Avery Admin", isAdmin: true, disabledAt: null, createdAt: T }] }),
-  );
   await page.route(/\/v1\/audit\/retention$/, (route) => json(route, { retainedDays: null, floorSource: [], prunable: 0 }));
   await page.route(/\/v1\/decisions\/[^/]+\/bom(\?|$)/, async (route) => {
     const id = /\/v1\/decisions\/([^/]+)\/bom/.exec(new URL(route.request().url()).pathname)![1]!;

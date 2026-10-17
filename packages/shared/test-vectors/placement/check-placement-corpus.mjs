@@ -287,7 +287,8 @@ export const PLACEMENT_MUTATIONS = [
   ['workload token treated as interactive', (c) => { find(c, 'person-stdio-workload-token-stays-L3').semanticRequest.caller = 'interactive_person'; }],
   ['cleared relaxation still relaxes', (c) => { const e = find(c, 'person-stdio-cleared-relaxation-stays-L3').expectedProjection; e.outcome = 'placement_eligible'; e.requiredClass = 'L2'; e.minimumSelectableClass = 'L2'; e.selectedClassAtLeast = 'L2'; e.notAnAuthorizationGrant = true; }],
   ['cleared relaxation read as active', (c) => { find(c, 'person-stdio-cleared-server-relaxation-stays-L3').semanticRequest.personStdioRelaxationState = 'active'; }],
-  ['relaxation with an invented expiry state', (c) => { find(c, 'person-stdio-interactive-relaxed-server-L2').semanticRequest.personStdioRelaxationState = 'expired'; }],
+  // on a cleared (L3) vector, so only the RELAXATION_STATES check can reject it (an active one fails the class check too)
+  ['relaxation with an invented expiry state', (c) => { find(c, 'person-stdio-cleared-relaxation-stays-L3').semanticRequest.personStdioRelaxationState = 'expired'; }],
   ['relaxation state with no relaxation', (c) => { find(c, 'person-stdio-interactive-unrelaxed-L3').semanticRequest.personStdioRelaxationState = 'active'; }],
   ['relaxation without its state', (c) => { delete find(c, 'person-stdio-interactive-relaxed-L2').semanticRequest.personStdioRelaxationState; }],
   ['relaxed sensitivity lowers code_exec', (c) => { const e = find(c, 'code_exec-relaxed-sensitivity-keeps-L3').expectedProjection; e.requiredClass = 'L1'; e.minimumSelectableClass = 'L1'; e.selectedClassAtLeast = 'L1'; }],

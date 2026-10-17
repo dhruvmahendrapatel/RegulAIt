@@ -337,7 +337,10 @@ describe("ADR-0190 owner decision C: the routes", () => {
     // NEGATIVE CONTROLS: facts naming no relaxation have no record; a named row that does not exist refuses the read
     expect(await decisionExecutionRelaxationRecord(db, { execution: null })).toBeNull();
     expect(await decisionExecutionRelaxationRecord(db, { execution: { relaxation: null } })).toBeNull();
-    await expect(decisionExecutionRelaxationRecord(db, { execution: { relaxation: { relaxationId: randomUUID() } } })).rejects.toThrow(/does not exist/);
+    // a named row that is missing is a broken invariant: a 500 the route sends as such, never the facts without it
+    await expect(decisionExecutionRelaxationRecord(db, { execution: { relaxation: { relaxationId: randomUUID() } } })).rejects.toMatchObject({
+      name: "BomRouteError", status: 500, body: { error: "bom_relaxation_missing" },
+    });
   });
 
   it("review: a set racing a program change never lands on the new program (409, nothing written; the step-up names the digest)", async () => {

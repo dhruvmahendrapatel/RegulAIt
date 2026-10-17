@@ -134,7 +134,9 @@ export async function decisionExecutionRelaxationRecord(db: Db, document: unknow
   const relaxationId = execution?.relaxation?.relaxationId;
   if (typeof relaxationId !== "string") return null;
   const [row] = await db.select().from(executionPersonStdioRelaxations).where(eq(executionPersonStdioRelaxations.id, relaxationId));
-  if (!row) throw new Error(`the Decision BOM names person-stdio relaxation ${relaxationId}, which does not exist (ADR-0190 owner decision C)`);
+  if (!row) {
+    throw new BomRouteError(500, { error: "bom_relaxation_missing", detail: "The Decision BOM names a person-stdio relaxation that does not exist (ADR-0190 owner decision C)." });
+  }
   const audits = await db
     .select({ id: auditLog.id })
     .from(auditLog)

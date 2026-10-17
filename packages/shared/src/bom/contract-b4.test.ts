@@ -52,6 +52,7 @@ import {
   DECISION_BOM_REQUIRED_CHECKS,
   DECISION_BOM_SECTIONS,
   DECISION_BOM_VERSION,
+  DECISION_BOM_VERSION_V2,
   DECISION_FACTS_VERSION,
   decisionBomBundleHref,
   decisionBomReadQuerySchema,
@@ -286,6 +287,31 @@ describe("B4 contract: GET /v1/decisions/:auditId/bom", () => {
     expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, clearedAt: T }).success).toBe(false);
     expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, clearedBy: U(954), clearedAt: "2026-01-01T00:00:00.000Z" }).success).toBe(false);
     expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, viaApiKey: false }).success).toBe(false);
+  });
+  it("ADR-0190 owner decision C (A1): on a v2 body that names a relaxation, only the named row is accepted", () => {
+    const relaxation = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: U(950), scopeKind: "project", scopeId: U(951) } as const;
+    const execution = {
+      workloadKind: "mcp_stdio", placement: "placed", placementId: U(960), requiredClass: "user_space_kernel", requiredBy: "workload_kind",
+      appliedClass: "user_space_kernel", refusalCode: null,
+      profile: { id: U(961), name: "restricted", version: 1, digest: H("a") },
+      executor: { id: U(962), backend: "gvisor", runtimeVersion: "test-only-1.0", identityId: U(963), identity: "spiffe://test-only.example/TEST-ONLY-CANARY/regulait/worker_runtime/executor-1" },
+      attestation: { placementReportSha256: H("b"), executorAttestationId: null, executorReportSha256: null },
+      relaxation,
+    } as const;
+    const v1 = readResponse();
+    const doc = { ...v1.document, v: DECISION_BOM_VERSION_V2, execution, completeness: { ...v1.document.completeness, execution: { status: "recorded" } } } as DecisionBomBody;
+    const body = bomCanonicalBytes(doc);
+    const r = { ...v1, document: doc, bom: { ...v1.bom, body, bodySha256: bomSha256(body) }, versions: [{ ...v1.versions[0]!, bodySha256: bomSha256(body) }] };
+    const record = { id: U(950), scopeKind: "project", scopeId: U(951), setBy: U(952), setAt: T, clearedBy: null, clearedAt: null, setAuditId: U(953) } as const;
+    // POSITIVE CONTROL: the row the signed facts name parses; the v2 body itself parses
+    expect(decisionBomReadResponseSchema.safeParse(r).success).toBe(true);
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: record }).success).toBe(true);
+    // a body that names a relaxation needs its row: null is refused
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: null }).success).toBe(false);
+    // NEGATIVE CONTROLS: another row, another scope kind, another scope id
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: { ...record, id: U(970) } }).success).toBe(false);
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: { ...record, scopeKind: "mcp_server" } }).success).toBe(false);
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: { ...record, scopeId: U(971) } }).success).toBe(false);
   });
   it("the query takes an optional positive version", () => {
     expect(decisionBomReadQuerySchema.parse({})).toEqual({});

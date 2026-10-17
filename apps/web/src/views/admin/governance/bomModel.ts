@@ -582,6 +582,8 @@ export function readRelaxationRecord(value: unknown, signed: ExecutionView["rela
   if (
     !r || !signed || !exactKeys(r, RELAXATION_RECORD_KEYS) || !uuid(r.id) || !uuid(r.scopeId) || !uuid(r.setBy) || !time(r.setAt) ||
     !nullOr(r.clearedBy, uuid) || !(r.clearedAt === null || time(r.clearedAt)) || (r.clearedBy === null) !== (r.clearedAt === null) || !nullOr(r.setAuditId, uuid) ||
+    // cleared after it was set, as the shared contract requires
+    (r.clearedAt !== null && Date.parse(r.clearedAt as string) < Date.parse(r.setAt as string)) ||
     r.id !== signed.relaxationId || r.scopeKind !== signed.scopeKind || r.scopeId !== signed.scopeId
   ) {
     return unreadable("The Decision BOM");

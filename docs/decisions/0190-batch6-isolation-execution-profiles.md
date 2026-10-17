@@ -1897,6 +1897,19 @@ migration and no change to the placement code.
   (gateway, MCP proxy, executor, gVisor L2) is pending execution: it needs Docker and an L2 executor.
 - The new vectors were written by the builder, not independently.
 
+**A1 review fixes (2026-10-17).** The independent review of A1's PR asked for five changes:
+1. `contract-b4.test.ts` now builds a v2 body whose facts name a relaxation. It shows that the named row is accepted,
+   that null is refused, and that another id, scope kind or scope id is refused. The earlier case had a v1 body, so it
+   proved only "a record with no relaxation".
+2. The "invented expiry state" corruption control now edits `person-stdio-cleared-relaxation-stays-L3`. On the active
+   vector, the class check also rejected `expired`. On the cleared vector, only the `RELAXATION_STATES` check can, so
+   the control fails if that check is removed (tried during the fix).
+3. The web reader (`readRelaxationRecord`) refuses a record cleared before it was set, as the shared schema does. A
+   negative case was added to `bomExecution.test.tsx`.
+4. A named relaxation row that is missing is a `BomRouteError` 500 `{ error: "bom_relaxation_missing" }`, which the
+   read route sends as such, rather than an unhandled error.
+5. The mocked end-to-end spec registered the `/v1/users` route twice; the duplicate is gone.
+
 ## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
 
 This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). No migration
