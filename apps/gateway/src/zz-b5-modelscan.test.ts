@@ -361,9 +361,12 @@ describe("B5-M through the real gateway: the lease, the stream, the scan record"
     expect(exec.jobs[0]).toMatchObject({ format: "pickle", artifactName: "artifact.bin", scannedAs: "artifact.pkl" });
     expect(scan).toMatchObject({ verdict: "unsafe", format: "pickle", artifactSha256: artifact.sha256, scannerVersion: "0.8.8" });
     // ENG-IMG review (secure by default): the runner artifact route is REMOVED, so no credential reaches the bytes
-    // through it. A human key gets no route (404); the runner's token is refused by its route ceiling, never served.
+    // through it. Neither credential is ever served: the engine-runner route class refuses a human key before
+    // routing (403), and the runner's token finds no route (or its ceiling refuses it).
     expect(app.hasRoute({ method: "GET", url: "/v1/engine-runner/artifacts/:artifactId" })).toBe(false);
-    expect((await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: alice.key })).statusCode).toBe(404);
+    const asHuman = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: alice.key });
+    expect([403, 404]).toContain(asHuman.statusCode);
+    expect(asHuman.headers["x-regulait-artifact-sha256"]).toBeUndefined();
     const asRunner = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: await runnerKey.headers("GET", `/v1/engine-runner/artifacts/${artifact.id}`) });
     expect([403, 404]).toContain(asRunner.statusCode);
     expect(asRunner.headers["x-regulait-artifact-sha256"]).toBeUndefined();
