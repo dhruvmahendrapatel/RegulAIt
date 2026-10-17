@@ -15,6 +15,10 @@
  */
 import http from "node:http";
 import https from "node:https";
+import http2 from "node:http2";
+import net from "node:net";
+import tls from "node:tls";
+import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -87,28 +91,33 @@ const networkReads = (r: CloudScanResult) => r.capabilities.filter((c) => c.stat
 
 describe("cloud discovery: the guarded fetch is the only network path (ADR-0195 decision 8)", () => {
   const escaped: string[] = [];
-  const saved = { fetch: globalThis.fetch, hr: http.request, hg: http.get, sr: https.request, sg: https.get };
+  // every way out of the process a client could take without the guarded fetch
+  const mods = { global: globalThis, http, https, net, tls, http2 } as unknown as Record<string, Record<string, unknown>>;
+  const targets: Array<[string, string]> = [
+    ["global", "fetch"], ["http", "request"], ["http", "get"], ["https", "request"], ["https", "get"],
+    ["net", "connect"], ["net", "createConnection"], ["tls", "connect"], ["http2", "connect"],
+  ];
+  const saved = targets.map(([m, k]) => [m, k, mods[m]![k]] as const);
   beforeAll(() => {
-    const trip = (label: string) =>
-      ((...args: unknown[]) => {
-        escaped.push(`${label} ${String(args[0] instanceof Request ? args[0].url : args[0])}`);
-        throw new Error(`tripwire: ${label}`);
-      }) as never;
-    globalThis.fetch = trip("fetch");
-    http.request = trip("http.request");
-    http.get = trip("http.get");
-    https.request = trip("https.request");
-    https.get = trip("https.get");
+    for (const [m, k] of targets) {
+      mods[m]![k] = (...args: unknown[]) => {
+        const a = args[0];
+        escaped.push(`${m}.${k} ${a instanceof Request ? a.url : a instanceof URL ? a.href : typeof a === "string" ? a : String((a as { host?: unknown } | undefined)?.host)}`);
+        throw new Error(`tripwire: ${m}.${k}`);
+      };
+    }
   });
   afterEach(() => {
     expect(escaped.splice(0)).toEqual([]);
   });
   afterAll(() => {
-    globalThis.fetch = saved.fetch;
-    http.request = saved.hr;
-    http.get = saved.hg;
-    https.request = saved.sr;
-    https.get = saved.sg;
+    for (const [m, k, v] of saved) mods[m]![k] = v;
+  });
+
+  it("tripwire positive control: an AWS client on its default handler is recorded", async () => {
+    const client = new STSClient({ region: "us-east-1", credentials: { accessKeyId: synthetic("a"), secretAccessKey: synthetic("s") }, maxAttempts: 1 });
+    await expect(client.send(new GetCallerIdentityCommand({}))).rejects.toThrow();
+    expect(escaped.splice(0).some((e) => e.includes("sts.us-east-1.amazonaws.com"))).toBe(true);
   });
 
   for (const name of ["awsFederated", "awsStatic", "gcpFederated", "gcpStatic", "azureFederated", "azureStatic"] as const) {

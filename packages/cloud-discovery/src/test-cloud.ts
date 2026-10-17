@@ -48,33 +48,51 @@ export function fakeCloud(routes: Route[]): { fetch: typeof fetch; calls: Record
 
 /**
  * Trips if anything leaves the process except through the injected fetch: global fetch, node:http and node:https
- * request/get are replaced with recorders that refuse. Returns the record and a restore function.
+ * request/get, net.connect/createConnection, tls.connect and http2.connect are replaced with recorders that refuse.
+ * Returns the record and a restore function. A positive control (a client on its default handler) proves it trips.
  */
 export async function installNetworkTripwire(): Promise<{ escaped: string[]; restore: () => void }> {
-  const http = (await import("node:http")).default;
-  const https = (await import("node:https")).default;
+  const mods: Record<string, Record<string, unknown>> = {
+    http: (await import("node:http")).default as unknown as Record<string, unknown>,
+    https: (await import("node:https")).default as unknown as Record<string, unknown>,
+    net: (await import("node:net")).default as unknown as Record<string, unknown>,
+    tls: (await import("node:tls")).default as unknown as Record<string, unknown>,
+    http2: (await import("node:http2")).default as unknown as Record<string, unknown>,
+    global: globalThis as unknown as Record<string, unknown>,
+  };
+  const targets: Array<[string, string]> = [
+    ["global", "fetch"],
+    ["http", "request"],
+    ["http", "get"],
+    ["https", "request"],
+    ["https", "get"],
+    ["net", "connect"],
+    ["net", "createConnection"],
+    ["tls", "connect"],
+    ["http2", "connect"],
+  ];
   const escaped: string[] = [];
-  const saved = { fetch: globalThis.fetch, httpRequest: http.request, httpGet: http.get, httpsRequest: https.request, httpsGet: https.get };
-  const refuse = (label: string) =>
-    ((...args: unknown[]) => {
-      const first = args[0];
-      const where = first instanceof URL ? first.href : typeof first === "string" ? first : first instanceof Request ? first.url : JSON.stringify(first ?? {});
-      escaped.push(`${label} ${where}`);
-      throw new Error(`network tripwire: ${label} called outside the injected fetch`);
-    }) as never;
-  globalThis.fetch = refuse("fetch");
-  http.request = refuse("http.request");
-  http.get = refuse("http.get");
-  https.request = refuse("https.request");
-  https.get = refuse("https.get");
+  const saved = targets.map(([m, k]) => [m, k, mods[m]![k]] as const);
+  const describe = (first: unknown): string => {
+    if (first instanceof URL) return first.href;
+    if (typeof first === "string") return first;
+    if (first instanceof Request) return first.url;
+    if (first && typeof first === "object") {
+      const o = first as { host?: unknown; hostname?: unknown; port?: unknown };
+      return `${String(o.hostname ?? o.host ?? "?")}:${String(o.port ?? "")}`;
+    }
+    return String(first);
+  };
+  for (const [m, k] of targets) {
+    mods[m]![k] = (...args: unknown[]) => {
+      escaped.push(`${m}.${k} ${describe(args[0])}`);
+      throw new Error(`network tripwire: ${m}.${k} called outside the injected fetch`);
+    };
+  }
   return {
     escaped,
     restore: () => {
-      globalThis.fetch = saved.fetch;
-      http.request = saved.httpRequest;
-      http.get = saved.httpGet;
-      https.request = saved.httpsRequest;
-      https.get = saved.httpsGet;
+      for (const [m, k, v] of saved) mods[m]![k] = v;
     },
   };
 }
