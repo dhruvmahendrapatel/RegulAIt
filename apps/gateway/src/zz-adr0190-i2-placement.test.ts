@@ -30,6 +30,7 @@ import {
   aiUseCases,
   and,
   auditLog,
+  builderAgents,
   complianceProfiles,
   createDb,
   delegationGrants,
@@ -132,6 +133,12 @@ async function newProject(sensitivity: "public" | "internal" | "confidential" | 
     await db.insert(aiUseCases).values({ name: `i2-uc-${RUN}`, description: "d", ownerUserId: adminId, businessContext: "b", dataSensitivity: sensitivity, projectId });
   }
   return projectId;
+}
+
+/** a builder agent (no workload identity), owned by the suite's admin */
+async function newBuilderAgent(name: string): Promise<string> {
+  const [ba] = await db.insert(builderAgents).values({ name: `i2-${name}-${RUN}`, ownerUserId: adminId, connectionFormat: "shared" }).returning({ id: builderAgents.id });
+  return ba!.id;
 }
 
 const offersFor = async (executorId: string) => (await db.select().from(executionOffers).where(eq(executionOffers.executorId, executorId))).length;
@@ -337,6 +344,36 @@ describe("ADR-0190 decision 7: the placement decision from the database", () => 
     }
   });
 
+  it("NULL project classifications mean no tags (no compliance floor), unlike a malformed value", async () => {
+    const ex = await newExecutor("l2-null-tags", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
+    const { agentId } = await newAgent("null-tags");
+    const projectId = await newProject("public");
+    // M-068: restored to the list shape before the test ends (other suites walk every project's classifications)
+    await db.execute(sql`update projects set classifications = null where id = ${projectId}`);
+    try {
+      const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 1 });
+      expect(d).toMatchObject({ kind: "offered", executorId: ex });
+      if (d.kind === "offered") expect(d.requirement).toMatchObject({ requiredClass: "user_space_kernel", requiredBy: "workload_kind", sensitivity: "public" });
+    } finally {
+      await db.execute(sql`update projects set classifications = '[]'::jsonb where id = ${projectId}`);
+    }
+  });
+
+  it("an archived builder agent's autonomy class is not read: the decision does not resolve (autonomyFloor)", async () => {
+    const builderId = await newBuilderAgent("archived-place");
+    const projectId = await newProject("public");
+    const decide = () =>
+      decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "builder_agent", id: builderId }, imageDigest: IMAGE, onlyExecutorIds: [randomUUID()] });
+    // the control: live, its class is read and the requirement resolves (no executor is offered here)
+    const live = await decide();
+    expect(live).toMatchObject({ kind: "refused", code: "no_executor" });
+    if (live.kind === "refused") expect(live.requirement.kind).toBe("required");
+    await db.update(builderAgents).set({ archivedAt: new Date() }).where(eq(builderAgents.id, builderId));
+    const archived = await decide();
+    expect(archived).toMatchObject({ kind: "refused", code: "policy_unresolved", placementId: null });
+    if (archived.kind === "refused") expect(archived.requirement).toMatchObject({ kind: "unresolved", fact: "autonomyFloor" });
+  });
+
   it("a non-isolable kind is never placed: in_gateway or external", async () => {
     expect(await decidePlacement(db, { workloadKind: "model_call", projectId: null, agent: null, imageDigest: IMAGE })).toEqual({ kind: "not_isolable", execution: "in_gateway" });
     expect(await decidePlacement(db, { workloadKind: "remote_mcp", projectId: null, agent: null, imageDigest: IMAGE })).toEqual({ kind: "not_isolable", execution: "external" });
@@ -523,6 +560,67 @@ describe("ADR-0190 decision 8: delegation-isolation and the live chain", () => {
     expect((await loadLiveChain(db, root.id))!.failure).toEqual({ index: 0, code: "executor_attestation_stale" });
   });
 
+  it("two actors racing for one placement: exactly one root grant is created, the other refused placement_bound_elsewhere", async () => {
+    const { placementId } = await l3Placement("race");
+    const a = await newAgent("race-a");
+    const b = await newAgent("race-b");
+    const settled = await Promise.allSettled([rootOn(a, placementId, "microvm"), rootOn(b, placementId, "microvm")]);
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const [lost] = settled.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    // the gateway check (row lock on the placement) refuses it; the trigger's advisory lock is the backstop
+    const reason: unknown = lost!.reason;
+    const said = reason instanceof DelegationRefusedError ? reason.code : `${String((reason as Error)?.message)} ${String((reason as { cause?: Error })?.cause?.message ?? "")}`;
+    expect(said).toMatch(/placement_bound_elsewhere|another actor's or another chain's/);
+    const owners = await db.select({ actor: delegationGrants.actorIdentityId }).from(delegationGrants).where(eq(delegationGrants.executionPlacementId, placementId));
+    expect(owners).toHaveLength(1);
+    expect([a.identityId, b.identityId]).toContain(owners[0]!.actor);
+  });
+
+  it("review L3: when the refusal's audit write fails, that error propagates (fail closed) and nothing is created", async () => {
+    const { placementId } = await l3Placement("audit-down");
+    const actor = await newAgent("audit-down");
+    // the same database, except that the top-level insert into audit_log (the refusal row) fails
+    const auditDown = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "insert") {
+          return (table: unknown) => {
+            if (table === auditLog) throw new Error("CANARY audit write failed");
+            return target.insert(table as typeof auditLog);
+          };
+        }
+        const v = Reflect.get(target, prop, target) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as Db;
+    const before = rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from audit_log where rule_id = 'delegation-isolation' and detail ->> 'executionPlacementId' = ${placementId}`))[0]!.n;
+    const failed = await createRootGrant(auditDown, {
+      sponsorUserId: adminId,
+      actorIdentityId: actor.identityId!,
+      scope: scopeOf(actor.agentId),
+      capMicros: null,
+      ttlMs: 3_600_000,
+      environment: ENV,
+      projectId: null,
+      binding: { kind: "in_process" },
+      isolation: { requiredClass: "user_space_kernel", placementId },
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    // the audit error, not the refusal: a refusal whose record could not be written is not reported as a clean refusal
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(DelegationRefusedError);
+    expect((failed as Error).message).toBe("CANARY audit write failed");
+    expect((await db.select().from(delegationGrants).where(eq(delegationGrants.executionPlacementId, placementId))).length).toBe(0);
+    expect(rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from audit_log where rule_id = 'delegation-isolation' and detail ->> 'executionPlacementId' = ${placementId}`))[0]!.n).toBe(before);
+    // the control: the same refusal through the real database is a DelegationRefusedError, audited
+    const refused = await rootOn(actor, placementId, "user_space_kernel").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(refused).toBeInstanceOf(DelegationRefusedError);
+  });
+
   it("a placement belongs to one actor in one chain: another actor's grant naming it is refused (code and trigger), audited", async () => {
     const { placementId } = await l3Placement("owned");
     const owner = await newAgent("own-a");
@@ -651,6 +749,20 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
     expect((await inject("PUT", `/v1/execution-profile-assignments/agent/${noId}`, adminAuth, { profileId: null })).statusCode).toBe(409);
     expect((await inject("GET", `/v1/execution-profile-assignments/mcp_server/${randomUUID()}`, adminAuth)).statusCode).toBe(404);
     expect((await inject("GET", `/v1/execution-profile-assignments/nothing/${randomUUID()}`, adminAuth)).statusCode).toBe(400);
+  });
+
+  it("assignments: an archived builder agent is not a target (404), where a live one is found", async () => {
+    const builderId = await newBuilderAgent("archived-assign");
+    // the control: found, and refused only because it has no workload identity
+    const live = await inject("GET", `/v1/execution-profile-assignments/builder_agent/${builderId}`, adminAuth);
+    expect(live.statusCode, live.body).toBe(409);
+    expect(live.json()).toMatchObject({ error: "no_workload_identity" });
+    await db.update(builderAgents).set({ archivedAt: new Date() }).where(eq(builderAgents.id, builderId));
+    for (const method of ["GET", "PUT"] as const) {
+      const r = await inject(method, `/v1/execution-profile-assignments/builder_agent/${builderId}`, adminAuth, method === "PUT" ? { profileId: null } : undefined);
+      expect(r.statusCode, `${method} ${r.body}`).toBe(404);
+      expect(r.json()).toEqual({ error: "target_not_found" });
+    }
   });
 
   it("placements: listed newest first with filters; one placement with its audit row; 404 and 400", async () => {

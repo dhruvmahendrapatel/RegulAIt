@@ -24,7 +24,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, eq, inArray, runMigrations, sql, users, type Db } from "@regulait/db";
 import { verifyPassword } from "./auth.js";
-import { createFirstAdmin, firstAdminStatus } from "./first-admin-lib.js";
+import { createFirstAdmin, FIRST_ADMIN_STATUS_DEMO_ONLY, firstAdminStatus } from "./first-admin-lib.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -73,6 +73,30 @@ describe("createFirstAdmin (first-admin-lib.ts)", () => {
   });
 
   it("status: no admin yet", async () => {
+    expect((await firstAdminStatus(db)).exitCode).toBe(0);
+  });
+
+  it("status: demo personas only says so (install.sh's --seed-demo summary); a real admin does not", async () => {
+    const [persona] = await db
+      .insert(users)
+      .values({ email: "admin@regulait.local", displayName: "demo admin", isAdmin: true })
+      .returning({ id: users.id });
+    try {
+      expect(await firstAdminStatus(db)).toEqual({ exitCode: 3, line: FIRST_ADMIN_STATUS_DEMO_ONLY });
+      const [real] = await db
+        .insert(users)
+        .values({ email: "real-admin@acme.example", displayName: "real admin", isAdmin: true })
+        .returning({ id: users.id });
+      try {
+        const s = await firstAdminStatus(db);
+        expect(s.exitCode).toBe(3);
+        expect(s.line).not.toContain("demo seed");
+      } finally {
+        await db.delete(users).where(eq(users.id, real!.id));
+      }
+    } finally {
+      await db.delete(users).where(eq(users.id, persona!.id));
+    }
     expect((await firstAdminStatus(db)).exitCode).toBe(0);
   });
 

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- LaunchAgent: the agent runs in each logged-in user's GUI session, unprivileged (R15 §2.1, call 1). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.regulait.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/RegulAIt/Agent/bin/regulait-agent</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>300</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+</dict>
+</plist>
