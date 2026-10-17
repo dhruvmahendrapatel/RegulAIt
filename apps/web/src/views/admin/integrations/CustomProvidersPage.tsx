@@ -545,8 +545,9 @@ function EgressAllowListCard(props: {
           void act
             .run(
               host.trim(),
-              // opting a host into private ranges or plaintext http is a relaxation the gateway confirms with a
-              // step-up (settings_relax); a plain public https entry asks for nothing
+              // adding a host, and opting one into private ranges or plaintext http, are relaxations the gateway
+              // confirms with a step-up (settings_relax; ADR-0034 owner amendment 2026-10-16). An upsert of a listed
+              // host that turns nothing on asks for nothing; removing an entry never does
               () =>
                 withStepUp((h) =>
                   stepUpApi.post(

@@ -163,12 +163,13 @@ describe("egress allow-list: default-deny before anything else", () => {
   });
 
   it("refuses an IMDS baseUrl outright, allow-listed or not", async () => {
-    const listed = await app.inject({
+    // ADR-0034 owner amendment 2026-10-16: adding any entry is a stepped-up relaxation; this suite is about the guard
+    const listed = await relaxStepUpAround(db, () => app.inject({
       method: "POST",
       headers: AUTH,
       url: "/v1/egress-allow-hosts",
       payload: { host: perTest.trackHost("169.254.169.254"), note: "deliberate SSRF attempt for the test" },
-    });
+    }));
     expect(listed.statusCode).toBe(201);
     const res = await app.inject({
       method: "POST",

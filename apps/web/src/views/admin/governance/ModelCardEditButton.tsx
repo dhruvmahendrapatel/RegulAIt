@@ -37,7 +37,7 @@ export function ModelCardEditButton(props: { card: EditableCard & { id: string }
   const notice = (k: CardTextField) =>
     masked.includes(k) ? (
       <p id={`mc-redacted-${k}`} className={v.faint} role="note">
-        This field was redacted for display; saving replaces it.
+        This field was redacted for display; editing replaces it.
       </p>
     ) : null;
   const set = (k: keyof CardDraft) => (e: { target: { value: string } }) => setDraft((d) => ({ ...d, [k]: e.target.value }));
