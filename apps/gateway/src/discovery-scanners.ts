@@ -39,6 +39,7 @@
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
 import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome } from "@regulait/shared";
+import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 import { ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
 
@@ -160,6 +161,12 @@ export interface Scanner {
   /** whether a run needs a live credential (repo and cloud scanners do) */
   requiresCredential: boolean;
   run: (ctx: ScanContext) => Promise<ScanResult>;
+  /**
+   * Optional (secure by default): shape-check a source's target and scope for
+   * this kind. Null when acceptable, else the problem. The create and PATCH
+   * routes refuse what it rejects (400 `target_invalid`) before anything is written.
+   */
+  validateTarget?: (target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>) => string | null;
 }
 
 export type ScannerRegistry = ReadonlyMap<DiscoverySourceKind, Scanner>;
@@ -174,13 +181,15 @@ export function scannerRegistry(scanners: readonly Scanner[]): ScannerRegistry {
 }
 
 /**
- * THE PRODUCTION REGISTRY. Empty in SD0; SD2 adds the three cloud kinds and SD3 the two upload-fed endpoint kinds. SD1 and SD4 add their scanners here
+ * THE PRODUCTION REGISTRY. SD0 shipped it empty; SD1 to SD4 add their scanners here
  * (one line each), and the admin page and `POST /v1/discovery/sources` read it.
  */
 export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
-  // ADR-0195 SD2: the three cloud kinds (discovery-cloud-scanners.ts)
+  // SD1: repo_github, repo_gitlab, repo_bitbucket, repo_azure_devops
+  ...REPO_SCANNERS,
+  // SD2: cloud_aws, cloud_gcp, cloud_azure
   ...cloudDiscoveryScanners(),
-  // ADR-0195 SD3: the no-agent endpoint kinds, fed by upload (endpoint-import-routes.ts)
+  // SD3: endpoint_osquery, endpoint_inventory, the no-agent endpoint kinds fed by upload (endpoint-import-routes.ts)
   ...ENDPOINT_IMPORT_SCANNERS,
 ]);
 
