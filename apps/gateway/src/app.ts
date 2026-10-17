@@ -596,6 +596,8 @@ const auditFilterQuery = z.object({
   effect: z.enum(["allow", "deny", "require_approval"]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
+  /** ADR-0190 owner decision C (A1): one row by id, the target of an evidence link (the Decision BOM's relaxation) */
+  id: z.string().uuid().optional(),
 });
 type AuditFilterInput = z.infer<typeof auditFilterQuery>;
 
@@ -647,6 +649,7 @@ const auditLogColumns = {
  */
 function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): SQL[] {
   const out: SQL[] = [];
+  if (q.id) out.push(eq(auditLog.id, q.id));
   if (q.userId) out.push(eq(auditLog.userId, q.userId));
   if (q.deployMode) {
     // 'unknown' is deploy_mode IS NULL — an explicit, equal bucket, never an

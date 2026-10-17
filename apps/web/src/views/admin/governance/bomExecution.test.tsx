@@ -4,9 +4,10 @@
  * reader is only tested on what the live contract accepts; then it is shown, from the signed body only.
  */
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import * as m from "./bomModel";
-import { ExecutionFacts, PlacementReports } from "./DecisionBomPanel";
+import { ExecutionFacts, PlacementReports, RelaxationRecord } from "./DecisionBomPanel";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Any = any;
@@ -29,7 +30,7 @@ const PLACED = {
 const IN_GATEWAY = { workloadKind: "model_call", placement: "in_gateway", placementId: null, requiredClass: null, requiredBy: null, appliedClass: "in_gateway", refusalCode: null, profile: null, executor: null, attestation: null };
 
 /** a v2 read response for one decision, assembled by the shared assembler from v2 facts carrying `execution` */
-async function v2Response(execution: Any, objectType = "mcp_tool", placementReports?: Any[]): Promise<Any> {
+async function v2Response(execution: Any, objectType = "mcp_tool", placementReports?: Any[], extra: Record<string, unknown> = {}): Promise<Any> {
   const s = await sharedBom();
   const { canonicalJson } = await sharedFile("audit-chain.ts");
   const { RECEIPT_PAYLOAD_VERSION } = await sharedFile("batch4.ts");
@@ -58,6 +59,7 @@ async function v2Response(execution: Any, objectType = "mcp_tool", placementRepo
     bundle: { schema: "regulait.export-bundle/3", subject: "decision-bom", href: `/v1/decisions/${auditId}/bom/bundle?version=1` },
     capabilities: caps,
     ...(placementReports ? { placementReports } : {}),
+    ...extra,
   };
   expect(s.decisionBomReadResponseSchema.safeParse(r).success).toBe(true);
   return JSON.parse(JSON.stringify(r));
@@ -180,5 +182,66 @@ describe("ADR-0190 I8: a v2 Decision BOM's execution facts in the browser", () =
     expect(out).toContain("Ran in the gateway (L0, not isolated)");
     expect(out.toLowerCase()).not.toContain("sandbox");
     expect(out).not.toContain("Software-attested");
+  });
+});
+
+describe("ADR-0190 owner decision C (A1): the relaxation's record beside the signed facts", () => {
+  const relaxation = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: U(950), scopeKind: "project", scopeId: U(951) };
+  const RELAXED = { ...PLACED, relaxation };
+  const record = { id: U(950), scopeKind: "project", scopeId: U(951), setBy: U(952), setAt: "2026-10-09T08:30:00.000Z", clearedBy: null, clearedAt: null, setAuditId: U(953) };
+  const shown = (r: m.RelaxationRecordView | undefined) =>
+    html(
+      <MemoryRouter>
+        <RelaxationRecord record={r} names={new Map([[U(952), "Avery Admin"], [U(954), "Drew Reviewer"]])} />
+      </MemoryRouter>,
+    );
+
+  it("shows its id, who set it, its scope, when, and a link to the audit row that set it", async () => {
+    // the fixture passed the shared read-response schema first (v2Response), so this is the live contract
+    const view = m.readDecisionBom(await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: record }), U(1));
+    expect(view.relaxationRecord).toEqual(record);
+    const out = shown(view.relaxationRecord!);
+    expect(out).toContain(U(950));
+    expect(out).toContain("Avery Admin");
+    expect(out).toContain(U(952));
+    expect(out).toContain(`Project <code`);
+    expect(out).toContain(U(951));
+    expect(out).toContain(m.shownTime("2026-10-09T08:30:00.000Z"));
+    expect(out).toContain(`href="/admin/audit?id=${U(953)}"`);
+    expect(out).toContain("Still in force");
+    expect(out).toContain("not part of the signed Decision BOM");
+  });
+  it("says when the audit row is gone and when the relaxation was cleared since", () => {
+    const out = shown({ ...record, setAuditId: null, clearedBy: U(954), clearedAt: "2026-10-12T09:00:00.000Z" } as m.RelaxationRecordView);
+    expect(out).toContain("Not found: the audit row may have been pruned");
+    expect(out).not.toContain("href=");
+    expect(out).toContain("by Drew Reviewer; L3 applies again");
+  });
+  it("a gateway before A1 reports nothing: the screen says so, and no record is invented", async () => {
+    const view = m.readDecisionBom(await v2Response(RELAXED), U(1));
+    expect(view.relaxationRecord).toBeUndefined();
+    expect(shown(undefined)).toContain("Not reported");
+    // NEGATIVE CONTROL: with no relaxation in the facts the record is null, not undefined
+    expect(m.readDecisionBom(await v2Response(PLACED, "mcp_tool", undefined, { executionRelaxation: null }), U(1)).relaxationRecord).toBeNull();
+  });
+  it("a record that is not the row the signed facts name makes the whole BOM unreadable", async () => {
+    const s = await sharedBom();
+    const r = await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: record });
+    for (const [what, bad] of [
+      ["another relaxation", { ...record, id: U(960) }],
+      ["another scope kind", { ...record, scopeKind: "mcp_server" }],
+      ["another scope", { ...record, scopeId: U(961) }],
+      ["cleared with no one", { ...record, clearedAt: "2026-10-12T09:00:00.000Z" }],
+      ["an extra field", { ...record, apiKeyId: U(962) }],
+      ["null while the facts name one", null],
+    ] as const) {
+      expect(() => m.readDecisionBom({ ...r, executionRelaxation: bad }, U(1)), what).toThrow(m.BomEvidenceError);
+      // the shared contract refuses the same response (the gateway could not send it)
+      expect(s.decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: bad }).success, what).toBe(false);
+    }
+    // a record when the facts name no relaxation
+    const plain = await v2Response(PLACED);
+    expect(() => m.readDecisionBom({ ...plain, executionRelaxation: record }, U(1))).toThrow(m.BomEvidenceError);
+    expect(s.decisionBomReadResponseSchema.safeParse({ ...plain, executionRelaxation: record }).success).toBe(false);
   });
 });

@@ -1831,3 +1831,62 @@ Both were built 2026-10-17 in migration 0201.
   API-key case. Both are now built; the vectors are builder-written rather than independent (a deviation recorded
   here, not in the owner's section).
 - L2 itself (gVisor) stays unverified, as recorded above.
+
+## As built: slice A1, the relaxation in the Decision BOM (2026-10-17)
+
+Owner decision C asked that the Decision BOM panel show the relaxation and that vectors pin the API-key case. A1
+finishes that: the panel shows the relaxation's id, who set it, its scope, when, and a link to the audit row. No
+migration and no change to the placement code.
+
+1. **The signed facts are unchanged; no v3.** `regulait.decision-facts.v2`'s `execution.relaxation` already signs
+   which relaxation the requirement relied on (id, scope kind, scope id, subject kind). Who set it and when are
+   facts about the relaxation row, not about the decision. That row is never deleted, and its set fields never change
+   (migration 0201's guard). Adding them to v2 would have needed the placement resolution to read them, and two copies
+   of the same fact. They are therefore read live from the row and shown beside the signed body, as the I4 placement
+   reports are.
+2. **The read response** (`decisionBomReadResponseSchema`, contract-b4) gains an optional `executionRelaxation`
+   (`decisionExecutionRelaxationRecordSchema`):
+   - the fields are `id`, `scopeKind`, `scopeId`, `setBy`, `setAt`, `clearedBy`, `clearedAt` and `setAuditId`;
+   - it is present exactly when the signed facts name a relaxation, and it must be the row they name (id and scope);
+   - the schema refuses a mismatch, a clear without its actor, and a clear before the set;
+   - it is null when the facts name none, and absent from a gateway before A1.
+3. **The gateway** (`decisionExecutionRelaxationRecord`, bom-routes.ts) reads the row by the signed id.
+   - `setAuditId` is the `execution-person-stdio-relaxed` row that the set wrote in its own transaction (same actor,
+     `detail.relaxationId`). It is found through the `(user_id, at)` index within a minute of `created_at`. It is
+     null when that row is no longer there (audit retention) or is not exactly one row.
+   - A named row that does not exist refuses the read rather than show the facts without it.
+4. **The audit link.** `GET /v1/audit` takes `id` (one row by id), and the audit log page reads `?id=`. It shows "one
+   audit row" and a control to show every row. The panel links `/admin/audit?id=<setAuditId>`.
+5. **The panel.** Under the signed execution facts, "The isolation relaxation" shows:
+   - the relaxation id, the scope (MCP server or project, and its id), who set it (name and id), and when;
+   - the audit row link, or "Not found" when the row was pruned;
+   - "Today": still in force, or cleared when and by whom.
+   It says that this record is not part of the signed Decision BOM. A gateway that does not report it shows "Not
+   reported". A record that is not the row the facts name makes the whole BOM unreadable.
+6. **Vectors.**
+   - The request gains `personStdioRelaxationState` (`active` or `cleared`).
+   - Five new vectors: an API key on a relaxed project and a workload token stay at L3; the server scope relaxes an
+     interactive person; a cleared row at either scope stays at L3.
+   - Seven new corruption controls (149 vectors, 36 controls).
+   - The gateway runner treats only an `active` row as in scope, as the resolution reads `cleared_at IS NULL`.
+   - **There is no expiry:** a relaxation stops applying only when it is cleared, by an admin or by a program change.
+     So the checker refuses an `expired` state rather than pin one the model does not have.
+7. **Tests.**
+   - Shared: `contract-b4.test.ts`, the record's binding to the facts and its negative controls.
+   - Web: `bomExecution.test.tsx`. Each fixture passes the shared schema first. The tests cover the record, a pruned
+     audit row, a cleared relaxation, "not reported", and six mismatches that the shared schema also refuses.
+   - Gateway, on a database: `zz-adr0190-owner-cd.test.ts`, which covers the record after a real set and clear, the
+     `?id=` read, and the missing-row refusal.
+   - Mocked end to end: `decision-bom-person-stdio.mock.spec.ts`.
+     - The browser calls `POST /mcp/:serverId` with its session cookie and no `authorization` header. The mocked
+       gateway records an L2 placement naming the relaxation.
+     - The audit log opens that decision's BOM, which shows the record. Its link opens exactly the audit row that set
+       the relaxation.
+     - The same call with a bearer key is refused at L3, and its BOM names no relaxation. Axe runs on the panel.
+
+**Not verified.**
+- The database test typechecks but has not run in the session that wrote it (no Postgres there); CI's database
+  shards run it.
+- The end-to-end spec mocks the gateway. It pins what the console sends and shows, not the placement. A real run
+  (gateway, MCP proxy, executor, gVisor L2) is pending execution: it needs Docker and an L2 executor.
+- The new vectors were written by the builder, not independently.

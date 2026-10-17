@@ -38,7 +38,8 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import { executionProfileDigest, SHIPPED_EXECUTION_PROFILES } from "@regulait/shared";
+import { decisionExecutionRelaxationRecordSchema, executionProfileDigest, SHIPPED_EXECUTION_PROFILES } from "@regulait/shared";
+import { decisionExecutionRelaxationRecord } from "./bom-routes.js";
 import { buildApp } from "./app.js";
 import { decidePlacement, resolveRequirement } from "./execution-placement.js";
 import { stdioPlacementContext } from "./executor-stdio.js";
@@ -316,6 +317,27 @@ describe("ADR-0190 owner decision C: the routes", () => {
     expect(await personCall(server, project, true)).toMatchObject({ requiredClass: "microvm", relaxation: null });
     const twice = await inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: false });
     expect(twice.json()).toEqual({ relaxation: null, changed: false });
+  });
+
+  it("slice A1: the Decision BOM read links the relaxation's record (who, scope, when, the audit row) and the audit row opens by id", async () => {
+    const project = await newProject("public");
+    const set = await relaxWithStepUpOff("project", project);
+    const doc = { execution: { relaxation: { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: set.relaxation.id, scopeKind: "project", scopeId: project } } };
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-person-stdio-relaxed"), eq(auditLog.objectId, project)));
+    const record = await decisionExecutionRelaxationRecord(db, doc);
+    expect(decisionExecutionRelaxationRecordSchema.parse(record)).toEqual(record);
+    expect(record).toMatchObject({ id: set.relaxation.id, scopeKind: "project", scopeId: project, setBy: adminId, clearedBy: null, clearedAt: null, setAuditId: audit!.id });
+    // the evidence link: GET /v1/audit?id= answers exactly that row
+    const one = await inject("GET", `/v1/audit?id=${audit!.id}`, adminAuth);
+    expect(one.statusCode, one.body).toBe(200);
+    expect((one.json() as { entries: Array<{ id: string; ruleId: string }> }).entries.map((e) => [e.id, e.ruleId])).toEqual([[audit!.id, "execution-person-stdio-relaxed"]]);
+    // cleared since: the record says by whom and when; the signed facts still name the same row
+    await inject("PUT", `/v1/execution-person-stdio-relaxations/project/${project}`, adminAuth, { relaxed: false });
+    expect(await decisionExecutionRelaxationRecord(db, doc)).toMatchObject({ id: set.relaxation.id, clearedBy: adminId, setAuditId: audit!.id });
+    // NEGATIVE CONTROLS: facts naming no relaxation have no record; a named row that does not exist refuses the read
+    expect(await decisionExecutionRelaxationRecord(db, { execution: null })).toBeNull();
+    expect(await decisionExecutionRelaxationRecord(db, { execution: { relaxation: null } })).toBeNull();
+    await expect(decisionExecutionRelaxationRecord(db, { execution: { relaxation: { relaxationId: randomUUID() } } })).rejects.toThrow(/does not exist/);
   });
 
   it("review: a set racing a program change never lands on the new program (409, nothing written; the step-up names the digest)", async () => {

@@ -49,6 +49,7 @@ import {
   decisionBomSectionsFor,
   decisionBomBodySchema,
   DECISION_EXECUTION_REFUSAL_CODES,
+  decisionExecutionRelaxationSchema,
   findEmailShapes,
   hasEmailShape,
   type DecisionBomFinalityState,
@@ -77,6 +78,30 @@ export const decisionPlacementReportSchema = z
   })
   .strict();
 export type DecisionPlacementReport = z.infer<typeof decisionPlacementReportSchema>;
+
+/**
+ * ADR-0190 owner decision C (slice A1): the `execution_person_stdio_relaxations` row the signed body's
+ * `execution.relaxation` names, and the audit row that set it. NOT part of the signed body: the facts sign which
+ * relaxation the requirement relied on (its id and scope); who set it, when, and whether it was cleared since come from
+ * that row, which is never deleted and whose set fields never change (migration 0201's guard). The read route shows it
+ * beside the body, like the placement reports. `setAuditId` is the `execution-person-stdio-relaxed` row written in the
+ * set's own transaction, or null when it is no longer found (pruned by the audit retention).
+ */
+export const decisionExecutionRelaxationRecordSchema = z
+  .object({
+    id: bomUuidSchema,
+    scopeKind: decisionExecutionRelaxationSchema.shape.scopeKind,
+    scopeId: bomUuidSchema,
+    setBy: bomUuidSchema,
+    setAt: bomTimeSchema,
+    clearedBy: bomUuidSchema.nullable(),
+    clearedAt: bomTimeSchema.nullable(),
+    setAuditId: bomUuidSchema.nullable(),
+  })
+  .strict()
+  .refine((r) => (r.clearedBy === null) === (r.clearedAt === null), "a relaxation is cleared by someone at a time, or not at all")
+  .refine((r) => r.clearedAt === null || Date.parse(r.clearedAt) >= Date.parse(r.setAt), "a relaxation is cleared after it was set");
+export type DecisionExecutionRelaxationRecord = z.infer<typeof decisionExecutionRelaxationRecordSchema>;
 
 // ---------------------------------------------------------------------------
 // shared pieces
@@ -265,10 +290,24 @@ export const decisionBomReadResponseSchema = z
     capabilities: bomCapabilitiesSchema,
     /** ADR-0190 I4: the linked reports of the decision's offered placement (live, unsigned; absent before I4) */
     placementReports: z.array(decisionPlacementReportSchema).max(8).optional(),
+    /**
+     * ADR-0190 owner decision C (A1): the relaxation row the body's `execution.relaxation` names (live, unsigned).
+     * Null when the body names none; absent from a gateway before A1.
+     */
+    executionRelaxation: decisionExecutionRelaxationRecordSchema.nullable().optional(),
   })
   .strict()
   .superRefine((r, ctx) => {
     const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    // A1: the linked record is exactly the row the signed facts name, and present whenever they name one
+    if (r.executionRelaxation !== undefined) {
+      const signed = "execution" in r.document ? (r.document.execution?.relaxation ?? null) : null;
+      const linked = r.executionRelaxation;
+      if ((signed === null) !== (linked === null)) issue("executionRelaxation is present exactly when the signed facts name a relaxation");
+      else if (signed && linked && (signed.relaxationId !== linked.id || signed.scopeKind !== linked.scopeKind || signed.scopeId !== linked.scopeId)) {
+        issue("executionRelaxation is the row the signed facts name (id and scope)");
+      }
+    }
     if (bomSha256(r.bom.body) !== r.bom.bodySha256) issue("bodySha256 is SHA-256 of body");
     let canonical: string | null = null;
     try {

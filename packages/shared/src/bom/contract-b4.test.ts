@@ -56,6 +56,7 @@ import {
   decisionBomBundleHref,
   decisionBomReadQuerySchema,
   decisionBomReadResponseSchema,
+  decisionExecutionRelaxationRecordSchema,
   exportBundleV3ManifestSchema,
   isUnverifiableByDesign,
   projectBomRow,
@@ -270,6 +271,21 @@ describe("B4 contract: GET /v1/decisions/:auditId/bom", () => {
     expect(decisionBomReadResponseSchema.safeParse({ ...r, versions: [{ ...r.versions[0]!, id: U(99) }] }).success).toBe(false);
     expect(decisionBomReadResponseSchema.safeParse({ ...r, bundle: { ...r.bundle, subject: "ai-bom" } }).success).toBe(false);
     expect(decisionBomReadResponseSchema.safeParse({ ...r, extra: 1 }).success).toBe(false);
+  });
+  it("ADR-0190 owner decision C (A1): the relaxation record is bound to the signed facts and well formed", () => {
+    const r = readResponse();
+    // a body that names no relaxation: null (or absent, a gateway before A1) is the only answer
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: null }).success).toBe(true);
+    expect(decisionBomReadResponseSchema.safeParse(r).success).toBe(true);
+    const record = { id: U(950), scopeKind: "project", scopeId: U(951), setBy: U(952), setAt: T, clearedBy: null, clearedAt: null, setAuditId: U(953) };
+    expect(decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: record }).success).toBe(false);
+    expect(decisionExecutionRelaxationRecordSchema.safeParse(record).success).toBe(true);
+    expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, setAuditId: null }).success).toBe(true);
+    // NEGATIVE CONTROLS: an org scope, a clear with no actor, a clear before the set, an extra field
+    expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, scopeKind: "org" }).success).toBe(false);
+    expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, clearedAt: T }).success).toBe(false);
+    expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, clearedBy: U(954), clearedAt: "2026-01-01T00:00:00.000Z" }).success).toBe(false);
+    expect(decisionExecutionRelaxationRecordSchema.safeParse({ ...record, viaApiKey: false }).success).toBe(false);
   });
   it("the query takes an optional positive version", () => {
     expect(decisionBomReadQuerySchema.parse({})).toEqual({});
