@@ -2,8 +2,9 @@
  * ADR-0195 SD0 — SHADOW-AI ACTIVE DISCOVERY, THE FOUNDATION, on a real database
  * through the real app (`buildApp`) and its hooks:
  *
- *  - HONEST REGISTRY: with the production registry (empty in SD0) every kind is
- *    "not built" and no source can be created.
+ *  - HONEST REGISTRY: with the production registry (SD1's repo scanners, SD2's
+ *    cloud scanners and SD3's two upload-fed endpoint kinds) every other kind is
+ *    "not built" and no source of it can be created.
  *  - ADMIN ONLY: a non-admin key reads nothing.
  *  - STEP-UPS, with negative controls: enabling needs a `settings_relax`
  *    step-up bound to the source's kind, target and scope (refused without one,
@@ -189,18 +190,51 @@ afterAll(async () => {
 });
 
 describe("ADR-0195 SD0 discovery foundation", () => {
-  it("the production registry is empty: every kind is not built, and no source can be created", async () => {
+  it("the production registry holds only the built scanners (SD1 repos, SD2 clouds, SD3 upload-fed endpoint kinds); any other kind cannot be created", async () => {
     const k = await inject("GET", "/v1/discovery/scanners", AUTH, undefined, bare);
     expect(k.statusCode).toBe(200);
-    expect((k.json().kinds as Array<{ built: boolean }>).every((x) => !x.built)).toBe(true);
-    const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "repo_github", target: { org: "x" }, scope: { orgLevel: true, include: [] } }, bare);
+    const kinds = k.json().kinds as Array<{ kind: string; built: boolean }>;
+    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_inventory", "endpoint_osquery", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab"]);
+    // the endpoint agent (SD4) has no scanner yet
+    const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "endpoint_agent", target: { fleet: "x" }, scope: { orgLevel: true, include: [] } }, bare);
     expect(c.statusCode).toBe(409);
     expect(c.json().error).toBe("scanner_not_built");
   });
 
+  it("SD1: create and PATCH refuse a repo target the scanner rejects (400 target_invalid) before writing", async () => {
+    const bad = await inject("POST", "/v1/discovery/sources", AUTH, { name: `badtarget-${RUN}`, kind: "repo_github", target: { baseUrl: "http://git.example.test" }, scope: { orgLevel: false, include: ["acme/app"] } }, bare);
+    expect(bad.statusCode, bad.body).toBe(400);
+    expect(bad.json().error).toBe("target_invalid");
+    const unknownKey = await inject("POST", "/v1/discovery/sources", AUTH, { name: `badkey-${RUN}`, kind: "repo_gitlab", target: { org: "acme" }, scope: { orgLevel: true, include: [] } }, bare);
+    expect(unknownKey.statusCode, unknownKey.body).toBe(400);
+    // nothing was written for either refused name (rows scoped to this run's names, not a global count)
+    const written = await db
+      .select({ id: discoverySources.id })
+      .from(discoverySources)
+      .where(inArray(discoverySources.name, [`badtarget-${RUN}`, `badkey-${RUN}`]));
+    expect(written).toEqual([]);
+
+    const ok = await inject("POST", "/v1/discovery/sources", AUTH, { name: `goodtarget-${RUN}`, kind: "repo_github", target: { namespace: "acme", baseUrl: "https://ghe.example.test/api/v3" }, scope: { orgLevel: false, include: ["acme/app"] } }, bare);
+    expect(ok.statusCode, ok.body).toBe(201);
+    const created = ok.json() as { id: string; version: number };
+    createdIds.push(created.id);
+    const patch = await inject("PATCH", `/v1/discovery/sources/${created.id}`, AUTH, { version: created.version, target: { namespace: "acme", history: "sometimes" } }, bare);
+    expect(patch.statusCode, patch.body).toBe(400);
+    expect(patch.json().error).toBe("target_invalid");
+    // a scope naming a three-segment GitHub repo is refused the same way
+    const scopePatch = await inject("PATCH", `/v1/discovery/sources/${created.id}`, AUTH, { version: created.version, scope: { orgLevel: false, include: ["acme/app/extra"] } }, bare);
+    expect(scopePatch.statusCode, scopePatch.body).toBe(400);
+    expect(scopePatch.json().error).toBe("target_invalid");
+    const row = await sourceRow(created.id);
+    expect(row.target).toEqual({ namespace: "acme", baseUrl: "https://ghe.example.test/api/v3" });
+    expect(row.version).toBe(created.version);
+  });
+
   it("is admin-only", async () => {
     expect((await inject("GET", "/v1/discovery/sources", memberKey)).statusCode).toBe(403);
-    expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { org: "x" }, scope: { orgLevel: true, include: [] } })).statusCode).toBe(403);
+    // a body valid under every check (SD1's repo target schema too), so only the admin gate can refuse it
+    expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { namespace: "x" }, scope: { orgLevel: true, include: [] } })).statusCode).toBe(403);
+    expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { namespace: "x" }, scope: { orgLevel: true, include: [] } }, bare)).statusCode).toBe(403);
   });
 
   it("a new source is disabled; enabling needs the step-up bound to kind, target and scope", async () => {

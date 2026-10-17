@@ -1,61 +1,43 @@
 /**
- * ADR-0187 B5-M — THE MODELSCAN ADAPTER: one lease → fetch the artifact (streamed, sha256 and size
- * checked) → decide its REAL format from its bytes → hand it to the scanner under the extension of
- * that format → map the `-o` report into the envelope body.
+ * ADR-0187 B5-M — THE MODELSCAN ADAPTER: one lease → stage the job (the artifact only PLACED) → the
+ * scanner, in the executor's sandbox, decides the artifact's REAL format from its bytes and scans a
+ * scannable one under that format's extension → map the `-o` report into the envelope body.
+ *
+ * ENG-IMG (ADR-0190 I5 open question 2): the runner no longer downloads the artifact. The gateway
+ * streams it from its store to the executor, which writes it into the sandbox's read-only input and
+ * checks its size and sha256 as it writes (`task-input.ts`; a mismatch starts nothing). The runner
+ * makes no request for a scan at all, and the sandbox reaches nothing.
  *
  * Fail closed:
  *   - a lease with no artifact, or more than one → `not_run` (`no_artifact`) / `failed`;
- *   - a fetch that fails, is short, long or has another sha256 → `failed` (`artifact_fetch_failed`):
- *     every reading unknown;
+ *   - a scanner that read no format (no done file, an unreadable artifact) → `failed`
+ *     (`artifact_unread`, or `engine_timeout` past its limit): every reading unknown;
  *   - a format modelscan does not scan → the format item decides (safetensors verified by its header;
  *     an unsupported format declared not run); modelscan is never started;
  *   - a cancel throws (the runner core posts nothing); a time-out, a missing or bad report → the
  *     mapper's `failed`, never clean.
- * The run's model access is none: the lease carries no key (`target: null`) and this adapter makes no
- * request but the artifact fetch.
+ * The run's model access is none: the lease carries no key (`target: null`).
  */
 import { createReadStream } from "node:fs";
-import { open, rename } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ArtifactFetchError, downloadArtifact, type ArtifactSource, type EngineAdapter } from "@regulait/engine-runner";
-import {
-  ARTIFACT_FORMAT_PLANS,
-  detectArtifactFormat,
-  mapModelscanReport,
-  modelscanArtifactName,
-  MODELSCAN_SCAN_ITEM_KEY,
-  type ArtifactReader,
-  type ModelscanEnvelopeBody,
-} from "@regulait/shared";
-import type { ScanExecutor } from "./exchange.js";
+import type { EngineAdapter } from "@regulait/engine-runner";
+import { mapModelscanReport, MODELSCAN_SCAN_ITEM_KEY, type EngineLease, type ModelscanEnvelopeBody } from "@regulait/shared";
+import { PLACED_ARTIFACT_NAME, type ScanExecutor } from "./exchange.js";
 
 export interface ModelscanAdapterOptions {
-  /** ADR-0188 S7: who fetches the artifact — the runner client, with its DPoP-bound self token */
-  artifacts: ArtifactSource;
   executor: ScanExecutor;
+  /**
+   * what is written at the artifact's place in the staged job. Default: nothing (an empty file): the bridge only
+   * places it and the gateway streams the bytes to the executor. Tests write the bytes here, standing in for that
+   * stream.
+   */
+  artifactInput?: (lease: EngineLease, placePath: string, signal: AbortSignal) => Promise<void>;
   /** the scanner's time limit is the run's remaining time less this margin (to report before the deadline) */
   reportMarginMs?: number;
 }
 
 class Cancelled extends Error {}
-
-/** a reader over a local file (for format detection) */
-export async function fileReader(file: string): Promise<{ reader: ArtifactReader; close: () => Promise<void> }> {
-  const fh = await open(file, "r");
-  const size = (await fh.stat()).size;
-  return {
-    reader: {
-      size,
-      async read(offset, length) {
-        const n = Math.max(0, Math.min(length, size - offset));
-        const buf = Buffer.alloc(n);
-        if (n > 0) await fh.read(buf, 0, n, offset);
-        return new Uint8Array(buf.buffer, buf.byteOffset, n);
-      },
-    },
-    close: () => fh.close(),
-  };
-}
 
 function failedBody(errorCode: string, reason: string): ModelscanEnvelopeBody {
   return {
@@ -84,44 +66,30 @@ export function modelscanAdapter(opts: ModelscanAdapterOptions): EngineAdapter {
     if (lease.artifacts.length !== 1) {
       return { ...failedBody("no_artifact", "the lease named no single artifact to scan"), status: lease.artifacts.length === 0 ? "not_run" : "failed" };
     }
-    const artifact = lease.artifacts[0]!;
     // PR #212 review [4234946104]: before each scan, nothing of any other run stays in the exchange
     // (a runner that crashed after staging or publishing left it there)
     await opts.executor.reconcile(lease.runId);
     const dir = await opts.executor.stage(lease.runId);
     try {
-      const fetched = path.join(dir, "fetched.bin");
-      try {
-        await downloadArtifact({ source: opts.artifacts, artifact, destPath: fetched, deadlineAt: lease.deadlineAt, signal: ctx.signal });
-      } catch (e) {
-        if (ctx.signal.aborted) throw new Cancelled("cancelled");
-        const code = e instanceof ArtifactFetchError ? e.code : "artifact_http";
-        return failedBody("artifact_fetch_failed", `the artifact could not be fetched intact (${code})`);
-      }
-      ctx.progress(0.2);
-      // THE FORMAT IS DECIDED FROM THE BYTES (G19 2): never the uploaded name
-      const { reader, close } = await fileReader(fetched);
-      let detection;
-      try {
-        detection = await detectArtifactFormat(reader);
-      } finally {
-        await close();
-      }
-      const name = modelscanArtifactName(detection.format);
-      if (!ARTIFACT_FORMAT_PLANS[detection.format].scanAs || !name) {
-        // not a modelscan format: the format item alone decides (safetensors verified; else not run or unknown)
-        return mapModelscanReport({ format: detection.format, formatDetail: detection.evidence, exitCode: null, timedOut: false, report: null });
-      }
-      await rename(fetched, path.join(dir, name));
+      const place = path.join(dir, PLACED_ARTIFACT_NAME);
+      if (opts.artifactInput) await opts.artifactInput(lease, place, ctx.signal);
+      else await writeFile(place, "", { mode: 0o640 });
+      if (ctx.signal.aborted) throw new Cancelled("cancelled");
       const margin = opts.reportMarginMs ?? 10_000;
       const timeoutMs = Math.max(1000, Date.parse(lease.deadlineAt) - Date.now() - margin);
       ctx.progress(0.3);
-      const outcome = await opts.executor.scan({ runId: lease.runId, format: detection.format, artifactName: name, timeoutMs }, ctx.signal);
+      const outcome = await opts.executor.scan({ runId: lease.runId, artifactName: PLACED_ARTIFACT_NAME, timeoutMs }, ctx.signal);
       if (ctx.signal.aborted || outcome.cancelled) throw new Cancelled("cancelled");
       ctx.progress(0.9);
+      // THE FORMAT IS DECIDED FROM THE BYTES (G19 2), by the scanner that read them: never the uploaded name
+      if (!outcome.detection) {
+        return outcome.timedOut
+          ? failedBody("engine_timeout", "the scanner did not finish within the run's time limit")
+          : failedBody("artifact_unread", "the scanner read no format from the artifact");
+      }
       return mapModelscanReport({
-        format: detection.format,
-        formatDetail: detection.evidence,
+        format: outcome.detection.format,
+        formatDetail: outcome.detection.evidence,
         exitCode: outcome.exitCode,
         timedOut: outcome.timedOut,
         report: outcome.reportTooLarge ? "too_large" : outcome.report,

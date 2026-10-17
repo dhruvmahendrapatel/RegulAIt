@@ -14,7 +14,7 @@ export interface RecordedRequest {
   body: unknown;
 }
 
-export type FakeResponse = { status: number; body: unknown };
+export type FakeResponse = { status: number; body: unknown; headers?: Record<string, string> };
 export type Responder = FakeResponse | ((req: RecordedRequest) => FakeResponse);
 
 export class FakeUpstream {
@@ -63,10 +63,10 @@ export class FakeUpstream {
         const out = typeof responder === "function" ? responder(rec) : responder;
         if (typeof out.body === "string") {
           // string bodies go out raw (e.g. ADO's HTML sign-in page)
-          res.writeHead(out.status, { "content-type": "text/html" });
+          res.writeHead(out.status, { "content-type": "text/html", ...(out.headers ?? {}) });
           res.end(out.body);
         } else {
-          res.writeHead(out.status, { "content-type": "application/json" });
+          res.writeHead(out.status, { "content-type": "application/json", ...(out.headers ?? {}) });
           res.end(JSON.stringify(out.body));
         }
       });

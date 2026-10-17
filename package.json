@@ -3,6 +3,10 @@
   "private": true,
   "license": "UNLICENSED",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dhruvmahendrapatel/RegulAIt.git"
+  },
   "packageManager": "pnpm@10.34.5",
   "engines": {
     "node": ">=22"

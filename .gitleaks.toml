@@ -75,6 +75,23 @@ regexes = [
   '''^regulait-test-key-0123456789abcdef$''',
 ]
 
+# --- ADR-0195 SD3 endpoint importer test input (2026-10-17) ---
+# Historic commit 81d7623 carries this SYNTHETIC dashed value as the input of a
+# test that proves an environment variable "name" shaped like a value is
+# refused. The current source assembles it at runtime; the entry exists only
+# because the PR and full-history scans walk that commit. Path AND exact value.
+
+[[allowlists]]
+description = "SD3 endpoint importer: synthetic env-var-name refusal input (historic commit 81d7623)"
+condition = "AND"
+paths = [
+  '''^packages/shared/src/endpoint-discovery/endpoint-discovery\.test\.ts$''',
+]
+regexTarget = "secret"
+regexes = [
+  '''^sk-live-SYNTHETIC123$''',
+]
+
 # --- Header-only PEM test inputs (review B1-08) ---
 # gitleaks' private-key rule matches lazily from a BEGIN header to the next
 # "KEY-----", so these two matches span code, not key material, and a prefix

@@ -1,0 +1,509 @@
+# Copyright 2026 Aman Karir
+# SPDX-License-Identifier: Apache-2.0
+# Part of Shadow AI Guard, https://github.com/AmanSK5/shadow-ai-guard
+
+# ai-guard AI service registry - single source of truth.
+# Every consumer (browser extension, endpoint collector, CLI scanner,
+# discovery job) is generated from this file by build.py. Edit here only.
+#
+# approved: true or false records whether a tool is sanctioned in your
+# organisation. It does NOT affect finding severity, and never has. Severity is
+# decided by the reporter at the point of detection and depends on the account
+# domain: a personal account is warn on any surface, the presence of a tool is
+# info whether or not it is approved. That is deliberate, because a daily
+# fleet-wide scan would otherwise alert per device per unapproved tool every
+# morning, and every tool here ships unapproved. See receiver_reporter.py.
+#
+# Discovery-job candidates are posted to the receiver and wait in the portal's
+# review queue, where a person defines or dismisses each one - a tool defined
+# there reaches the fleet with no rebuild. With GitLab configured the
+# discovery job proposes a merge request against this file instead, which is
+# the original route and still the one to use if your registry review lives
+# in a forge. Either way a human is the gate: nothing is detected until
+# somebody decides.
+
+version: 1
+
+tools:
+  - id: claude
+    name: Claude
+    env_vars: [ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN]
+    vendor: Anthropic
+    category: assistant
+    license_group: anthropic-claude
+    approved: false
+    added_by: manual
+    domains: [claude.ai, anthropic.com, api.anthropic.com, claude.com, claudeusercontent.com, console.anthropic.com]
+    inference_domains: [api.anthropic.com]
+    app_names: ["Claude.app", "Claude"]
+    bundle_ids: [com.anthropic.claudefordesktop]
+    mcp_config_paths_macos:
+      - "Library/Application Support/Claude/claude_desktop_config.json"
+    mcp_config_paths_windows:
+      - "AppData/Roaming/Claude/claude_desktop_config.json"
+    mcp_config_paths_linux:
+      - ".config/Claude/claude_desktop_config.json"
+    email_senders: [anthropic.com, mail.anthropic.com]
+    risk_tier: high
+    mcp_identifiers: [anthropic-claude]
+    exe_names: [claude.exe]
+    notes: Claude desktop app supports MCP server connections.
+
+  - id: claude-code
+    name: Claude Code
+    env_vars: [ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN]
+    vendor: Anthropic
+    category: coding
+    license_group: anthropic-claude
+    approved: false
+    added_by: manual
+    domains: []
+    extension_ids:
+      vscode: [anthropic.claude-code]
+    cli:
+      config_paths: [".claude.json", ".claude"]
+      account_json_path: ".claude.json"
+      account_json_keys: [oauthAccount, emailAddress]
+      binaries: [claude]
+    mcp_config_paths: [".claude.json"]
+    risk_tier: high
+    email_senders: [anthropic.com]
+    notes: CLI tool with agentic capabilities.
+
+  - id: chatgpt
+    name: ChatGPT
+    env_vars: [OPENAI_API_KEY]
+    vendor: OpenAI
+    category: assistant
+    license_group: openai-chatgpt
+    approved: false
+    added_by: manual
+    domains: [chat.openai.com, chatgpt.com, openai.com, api.openai.com, cdn.oaistatic.com, auth0.openai.com]
+    inference_domains: [api.openai.com, chat.openai.com]
+    app_names: ["ChatGPT.app", "ChatGPT"]
+    bundle_ids: [com.openai.chat]
+    extension_ids:
+      vscode: [openai.chatgpt]
+    email_senders: [openai.com, tm.openai.com, email.openai.com]
+    risk_tier: high
+    exe_names: [ChatGPT.exe]
+    notes: Users can sign up with work email + password without any Entra involvement.
+
+  - id: codex-cli
+    name: Codex CLI
+    env_vars: [OPENAI_API_KEY, CODEX_API_KEY]
+    vendor: OpenAI
+    category: coding
+    license_group: openai-chatgpt
+    approved: false
+    added_by: manual
+    domains: []
+    cli:
+      config_paths: [".codex"]
+      account_json_path: ".codex/auth.json"
+      # Identity lives inside the id_token JWT, not a plain field.
+      account_jwt_path: [tokens, id_token]
+      account_jwt_claim: email
+      binaries: [codex]
+    risk_tier: medium
+
+  - id: gemini
+    name: Gemini
+    vendor: Google
+    category: assistant
+    license_group: google-gemini
+    approved: false
+    added_by: manual
+    domains: [gemini.google.com, aistudio.google.com, generativelanguage.googleapis.com]
+    email_senders: [google.com]
+    risk_tier: high
+
+  - id: gemini-cli
+    name: Gemini CLI
+    env_vars: [GEMINI_API_KEY, GOOGLE_API_KEY]
+    vendor: Google
+    category: coding
+    license_group: google-gemini
+    approved: false
+    added_by: manual
+    domains: []
+    extension_ids:
+      vscode: [google.geminicodeassist]
+    cli:
+      config_paths: [".gemini"]
+      account_json_path: ".gemini/google_accounts.json"
+      account_json_keys: [active]
+      binaries: [gemini]
+    risk_tier: medium
+
+  - id: github-copilot
+    name: GitHub Copilot
+    vendor: GitHub
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [copilot-proxy.githubusercontent.com, api.githubcopilot.com, copilot.github.com]
+    inference_domains: [api.githubcopilot.com, copilot-proxy.githubusercontent.com]
+    extension_ids:
+      vscode: [github.copilot, github.copilot-chat]
+      jetbrains: [github-copilot]
+    risk_tier: medium
+    email_senders: [github.com]
+
+  - id: cursor
+    name: Cursor
+    env_vars: [CURSOR_API_KEY]
+    vendor: Anysphere
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [cursor.com, cursor.sh, api2.cursor.sh]
+    # A VS Code fork: having it installed says an editor is installed.
+    form: ide
+    inference_domains: [api2.cursor.sh]
+    app_names: ["Cursor.app", "Cursor"]
+    bundle_ids: [com.todesktop.230313mzl4w4u92]
+    cli:
+      config_paths: [".cursor"]
+    mcp_config_paths: [".cursor/mcp.json"]
+    email_senders: [cursor.com, cursor.sh]
+    risk_tier: high
+    exe_names: [Cursor.exe]
+
+  - id: cline
+    name: Cline
+    vendor: Cline Bot Inc
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [api.cline.bot]
+    extension_ids:
+      vscode: [saoudrizwan.claude-dev]
+    risk_tier: medium
+
+  - id: roo-code
+    name: Roo Code
+    vendor: Roo Veterinary Inc
+    category: coding
+    approved: false
+    added_by: manual
+    domains: []
+    extension_ids:
+      vscode: [rooveterinaryinc.roo-cline]
+    risk_tier: medium
+
+  - id: continue
+    name: Continue
+    vendor: Continue Dev
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [continue.dev]
+    extension_ids:
+      vscode: [continue.continue]
+    risk_tier: medium
+
+  # One entry, three names. Codeium renamed itself Windsurf in 2025;
+  # Cognition then bought it and folded it into Devin, and windsurf.com
+  # now redirects to devin.ai/desktop. They are one product on one
+  # licence, so they stay one id - splitting them would split the counts
+  # the receiver's domain map exists to merge. The id stays `codeium`
+  # because it is the label on every finding already stored.
+  - id: codeium
+    name: Windsurf / Devin (Cognition)
+    vendor: Cognition
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [codeium.com, windsurf.com, server.codeium.com, codeiumdata.com,
+              devin.ai, app.devin.ai, api.devin.ai, cognition.ai]
+    # Also a VS Code fork. server.codeium.com is the completion backend the
+    # editor calls per keystroke and api.devin.ai is the agent API; the rest
+    # are the site, the account portal and the update/licence hosts, which
+    # the editor reaches on launch with the AI untouched. codeiumdata.com is
+    # deliberately NOT here: it looks like telemetry and we have not
+    # confirmed it carries completions, and over-claiming one of these turns
+    # "the app opened" into "someone used AI".
+    form: ide
+    inference_domains: [server.codeium.com, api.devin.ai]
+    app_names: ["Windsurf.app", "Windsurf"]
+    extension_ids:
+      vscode: [codeium.codeium]
+    risk_tier: high
+    email_senders: [codeium.com, windsurf.com, devin.ai, cognition.ai]
+    bundle_ids: [com.codeium.windsurf]
+    exe_names: [Windsurf.exe]
+
+  - id: tabnine
+    name: Tabnine
+    vendor: Tabnine
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [tabnine.com, api.tabnine.com]
+    inference_domains: [api.tabnine.com]
+    extension_ids:
+      vscode: [tabnine.tabnine-vscode]
+    risk_tier: medium
+
+  - id: otter
+    name: Otter
+    vendor: Otter.ai
+    category: transcription
+    approved: false
+    added_by: manual
+    domains: [otter.ai, api.otter.ai]
+    inference_domains: [api.otter.ai]
+    app_names: ["Otter.app", "Otter"]
+    email_senders: [otter.ai]
+    risk_tier: high
+    bundle_ids: [ai.otter.otter]
+    exe_names: [Otter.exe]
+    extension_ids:
+      chrome: [bnmojkbbkkonlmlfgejehefjldooied]
+
+  - id: grammarly
+    name: Grammarly
+    vendor: Grammarly
+    category: writing
+    approved: false
+    added_by: manual
+    domains: [grammarly.com, in.grammarly.com, app.grammarly.com, gnar.grammarly.com]
+    app_names: ["Grammarly Desktop.app", "Grammarly"]
+    extension_ids:
+      chrome: [kbfnbcaeplbcioakkpcpgfkobkghlhen]
+      edge: [kbfnbcaeplbcioakkpcpgfkobkghlhen]
+    email_senders: [grammarly.com]
+    risk_tier: medium
+    bundle_ids: [com.grammarly.ProjectLlama]
+    exe_names: [Grammarly.Desktop.exe]
+
+  - id: wispr-flow
+    name: Wispr Flow
+    vendor: Wispr
+    category: voice
+    approved: false
+    added_by: manual
+    domains: [wisprflow.ai, wisprflow.com, api.wisprflow.ai]
+    inference_domains: [api.wisprflow.ai]
+    app_names: ["Wispr Flow.app", "Wispr Flow"]
+    risk_tier: high
+    email_senders: [wisprflow.ai]
+
+  - id: warp
+    name: Warp
+    vendor: Warp
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [warp.dev, app.warp.dev]
+    inference_domains: [app.warp.dev]
+    app_names: ["Warp.app", "Warp"]
+    # Warp's binary is named after its release channel, not the product:
+    # Warp.app/Contents/MacOS/stable. Nothing derives "Warp" from that, which
+    # is why it arrived as an unaccountable process reaching a model.
+    # Warp's macOS binary is literally the release channel name. It is far
+    # too generic to match on: any process called "stable" would be read as
+    # Warp and quietly excused. Left out on purpose - the review queue asks
+    # about it instead, which is the right place for a name this ambiguous.
+    exe_names: ["warp.exe"]
+    risk_tier: medium
+    bundle_ids: [dev.warp.Warp-Stable]
+  - id: perplexity
+    name: Perplexity
+    env_vars: [PERPLEXITY_API_KEY]
+    vendor: Perplexity AI
+    category: search
+    approved: false
+    added_by: manual
+    domains: [perplexity.ai, api.perplexity.ai, www.perplexity.ai]
+    inference_domains: [api.perplexity.ai]
+    app_names: ["Perplexity.app", "Perplexity"]
+    email_senders: [perplexity.ai]
+    risk_tier: medium
+    bundle_ids: [ai.perplexity.mac]
+    extension_ids:
+      chrome: [hlgbcneanomplepojfcnclggenpcoldo]
+
+  - id: ollama
+    name: Ollama
+    vendor: Ollama
+    category: local-model
+    approved: false
+    added_by: manual
+    notes: Local models; data stays on device but model provenance unknown. Separate risk class.
+    domains: [ollama.com, registry.ollama.ai, ollama.ai, api.ollama.com]
+    inference_domains: [api.ollama.com]
+    app_names: ["Ollama.app", "Ollama", ollama]
+    cli:
+      config_paths: [".ollama/models"]
+      binaries: [ollama]
+    risk_tier: high
+    exe_names: [ollama.exe, Ollama.exe]
+
+  - id: lm-studio
+    name: LM Studio
+    vendor: Element Labs
+    category: local-model
+    approved: false
+    added_by: manual
+    domains: [lmstudio.ai]
+    app_names: ["LM Studio.app", "LM Studio"]
+    cli:
+      config_paths: [".lmstudio"]
+    risk_tier: medium
+
+  - id: deepseek
+    name: DeepSeek
+    env_vars: [DEEPSEEK_API_KEY]
+    vendor: DeepSeek
+    category: assistant
+    approved: false
+    added_by: manual
+    domains: [chat.deepseek.com, deepseek.com, api.deepseek.com]
+    inference_domains: [api.deepseek.com, chat.deepseek.com]
+    email_senders: [deepseek.com]
+    risk_tier: high
+
+  - id: mistral
+    name: Mistral Le Chat
+    env_vars: [MISTRAL_API_KEY]
+    vendor: Mistral AI
+    category: assistant
+    approved: false
+    added_by: manual
+    domains: [chat.mistral.ai, mistral.ai, api.mistral.ai]
+    inference_domains: [api.mistral.ai, chat.mistral.ai]
+    email_senders: [mistral.ai]
+    risk_tier: medium
+  - id: grok
+    name: Grok
+    vendor: xAI
+    category: assistant
+    approved: false
+    added_by: manual
+    domains: [grok.com]
+    risk_tier: medium
+    email_senders: [x.com]
+  - id: microsoft-copilot
+    name: Microsoft Copilot (Free)
+    vendor: Microsoft
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [copilot.microsoft.com, copilot.cloud.microsoft, sydney.bing.com]
+    risk_tier: medium
+    exe_names: [Microsoft.Copilot]
+    extension_ids:
+      edge: [Microsoft-Copilot]
+  - id: microsoft-365-copilot
+    name: Microsoft 365 Copilot
+    vendor: Microsoft
+    category: coding
+    approved: false
+    added_by: manual
+    domains: [substrate.office.com]
+    risk_tier: high
+    entra_app_ids: [fb8d53bb-d7db-4b18-a257-9560e2f3a024]
+  - id: atlassian-rovo
+    name: Atlassian Rovo
+    vendor: Atlassian
+    category: productivity
+    approved: false
+    added_by: manual
+    domains: [rovo.atlassian.com, api.atlassian.com]
+    risk_tier: high
+    mcp_identifiers: [atlassian]
+  - id: notion-ai
+    name: Notion AI
+    vendor: Notion Labs
+    category: productivity
+    approved: false
+    added_by: manual
+    domains: [notion.so, api.notion.com, notion.ai]
+    risk_tier: medium
+    mcp_identifiers: [notion]
+    email_senders: [notion.so, makenotion.com]
+    bundle_ids: [notion.id]
+    exe_names: [Notion.exe]
+  - id: fireflies
+    name: Fireflies.ai
+    vendor: Fireflies
+    category: productivity
+    approved: false
+    added_by: manual
+    domains: [fireflies.ai, app.fireflies.ai]
+    inference_domains: [app.fireflies.ai]
+    risk_tier: high
+    email_senders: [fireflies.ai]
+    app_names: ["Fireflies.app", "Fireflies"]
+    exe_names: ["Fireflies.exe"]
+
+  - id: midjourney
+    name: Midjourney
+    vendor: Midjourney
+    category: assistant
+    approved: false
+    added_by: manual
+    domains: [midjourney.com, www.midjourney.com]
+    risk_tier: low
+    email_senders: [midjourney.com]
+  - id: openai-api-platform
+    name: OpenAI API Platform
+    vendor: OpenAI
+    category: platform
+    approved: false
+    added_by: manual
+    domains: [platform.openai.com]
+    risk_tier: high
+    email_senders: [openai.com]
+  - id: hugging-face
+    name: Hugging Face
+    env_vars: [HUGGINGFACE_API_KEY, HF_TOKEN]
+    vendor: Hugging Face
+    category: platform
+    approved: false
+    added_by: manual
+    domains: [huggingface.co, api-inference.huggingface.co]
+    inference_domains: [api-inference.huggingface.co]
+    risk_tier: medium
+    email_senders: [huggingface.co]
+bridge_targets:
+  - name: Atlassian (Jira/Confluence)
+    domains: [api.atlassian.com, atlassian.net]
+    notes: "API token creation is self-service for all users."
+  - name: GitHub
+    domains: [api.github.com, github.com]
+    notes: "Personal access tokens are self-service."
+  - name: Slack
+    domains: [api.slack.com, slack.com]
+    notes: "User tokens can be created without admin approval."
+  - name: Microsoft 365 / SharePoint
+    domains: [graph.microsoft.com, sharepoint.com]
+    notes: "OAuth consent is locked to admin."
+  - name: Google Workspace
+    domains: [www.googleapis.com, drive.googleapis.com, drive.google.com, docs.google.com]
+    notes: "Google API keys can be self-provisioned."
+  - name: Figma
+    domains: [api.figma.com, figma.com]
+    notes: "Personal access tokens are self-service."
+# Matched after normalisation (lowercased, path and .exe stripped, a macOS
+# "X Helper (Role)" reduced to X), so one entry covers a name in every
+# shape the platforms report it in - chrome, chrome.exe and Google Chrome
+# Helper all match the two Chrome entries below.
+allowed_processes: [chrome, "Google Chrome", chromium, firefox, safari, msedge, "Microsoft Edge",
+  brave, arc, opera, vivaldi, Slack, Teams, "Microsoft Teams", ms-teams, OneDrive, Outlook,
+  # Office resolves the Copilot endpoints as background M365 activity.
+  Excel, PowerPnt, PowerPoint, WinWord, OneNote, MsAccess, MSPub, lync,
+  Figma, Notion, svchost.exe, explorer.exe, git, gh, systemd-resolved, mDNSResponder,
+  trustd, nsurlsessiond,
+  # Windows shell and search. These reach substrate.office.com as background
+  # M365 activity - the Start menu and Search box have model-backed features
+  # nobody opened on purpose.
+  SearchHost, StartMenuExperienceHost, ShellExperienceHost, SearchApp,
+  Microsoft.Notes, OneDriveStandaloneUpdater, msedgewebview2,
+  # Editors. An IDE reaching a model is a person using an AI extension in
+  # their editor - the ordinary case the register and the IDE surface both
+  # already cover, and the same reason browsers are here.
+  Code, "Code - Insiders", idea, pycharm, webstorm, goland, rider, clion]
+discover_exclude_domains: [jetbrains.com, fastly.net, ably.net, ably-realtime.com, shopifysvc.com, shopifycloud.com, vsassets.io, vscode-cdn.net, vercel.app, thehubevents.com, ai.engineer, www.ai.engineer]

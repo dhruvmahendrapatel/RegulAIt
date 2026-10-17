@@ -4683,5 +4683,11 @@ export * from "./receipts/verify.js";
 export * from "./eval-datasets/cyberseceval.js";
 // ADR-0188 S7: REGULAIT_PUBLIC_URL parsed one way, by the gateway and by engine runners
 export * from "./public-url.js";
+// ADR-0195 SD1: the v2 shadow-AI catalogue (v1 frozen inside it), seed rows, and the pure repo analyser
+export * from "./shadow-catalog-v2.js";
+export * from "./repo-manifests.js";
+export * from "./repo-analysis.js";
 // ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
 export * from "./discovery/index.js";
+// ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
+export * from "./endpoint-discovery/index.js";
