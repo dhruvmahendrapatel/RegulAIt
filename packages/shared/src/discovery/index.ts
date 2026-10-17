@@ -256,7 +256,8 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
 export function publicConfigProblem(kind: DiscoverySourceKind, mode: DiscoveryCredentialMode, config: Readonly<Record<string, string>>): string | null {
   const spec = DISCOVERY_PUBLIC_CONFIG[kind][mode];
   for (const key of Object.keys(config)) {
-    const field = spec[key];
+    // own keys only: `constructor`, `__proto__` or `toString` are unknown fields, never the prototype's
+    const field = Object.hasOwn(spec, key) ? spec[key] : undefined;
     if (!field) {
       const allowed = Object.keys(spec);
       return `'${key.slice(0, 40)}' is not a public config field of a ${mode} ${kind} credential (allowed: ${allowed.length ? allowed.join(", ") : "none"}); a secret belongs in the static credential's secret`;

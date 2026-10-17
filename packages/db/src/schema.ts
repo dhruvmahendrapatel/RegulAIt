@@ -6833,7 +6833,15 @@ export const aiEndpointSignatures = pgTable(
     confidence: text("confidence", { enum: SIGNATURE_CONFIDENCES }).notNull().default("high"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("ai_endpoint_signatures_provider_idx").on(t.provider)],
+  (t) => [
+    index("ai_endpoint_signatures_provider_idx").on(t.provider),
+    // ADR-0195 SD0 (migration 0203): declared for parity with the migration
+    check("ai_endpoint_signatures_os_ck", sql`${t.os} IS NULL OR ${t.os} IN ('macos', 'windows', 'linux')`),
+    check("ai_endpoint_signatures_ecosystem_ck", sql`${t.ecosystem} IS NULL OR ${t.ecosystem} ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'`),
+    check("ai_endpoint_signatures_tool_id_ck", sql`${t.toolId} IS NULL OR ${t.toolId} ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'`),
+    check("ai_endpoint_signatures_note_ck", sql`${t.note} IS NULL OR char_length(${t.note}) <= 500`),
+    check("ai_endpoint_signatures_confidence_ck", sql`${t.confidence} IN ('high', 'medium', 'low')`),
+  ],
 );
 
 /**
