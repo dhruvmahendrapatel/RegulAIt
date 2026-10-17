@@ -2289,3 +2289,10 @@ bundle; moving a packed kit to a separate air-gapped machine; the out-of-band tr
 engagement; Python 3.12 or later (its `venv` bundles no
 `setuptools`, which the offline `halo` build needs); offline verification of the release's own AI BOM (B7; its
 air-gapped trust root is owner item 2); and the whole receipt v2 cutover with the replica drain.
+
+## As built — 2026-10-17: `validateCycloneDx` and the declared spec version (SEC-DEFAULTS re-check)
+
+Verified on main, no change in this batch: `validateCycloneDx(doc, "1.6")` refuses a document whose `specVersion` is
+not `"1.6"` (the official schemas type the field as any string, so a 1.7 document could pass the 1.6 schema). Added in
+commit `c9a2fb8` with its test.
+
