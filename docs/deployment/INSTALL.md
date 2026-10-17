@@ -423,6 +423,12 @@ recoverable: the next boot makes a new key under a new key id, and the receipts 
 one still verify against its recorded public key. Read the key-retirement section there: the
 product has no way yet to retire the old key id.
 
+**Related runbooks.** To check a Decision BOM or AI BOM bundle on a machine with no network (an
+auditor's check, or the operator producing the bundle in a BYOC or air-gapped install), see
+[BOM_VERIFICATION.md](../ops/BOM_VERIFICATION.md). A multi-replica deployment drains its old
+replicas before the receipt v2 cutover: see [RECEIPT_V2_CUTOVER.md](../ops/RECEIPT_V2_CUTOVER.md),
+which is marked not yet executable.
+
 ### The identity issuer key and the public URL (ADR-0188 S7)
 
 Engine runners and PDP clients (the Kong adapter) no longer hold bearer secrets: each holds its own

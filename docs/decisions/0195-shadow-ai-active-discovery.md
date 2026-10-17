@@ -52,7 +52,11 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
    and need no relaxation: AWS role assumption with an external ID, GCP workload identity federation, and Azure
    workload identity federation or managed identity. RegulAIt presents an OIDC token from its own workload identity
    issuer (ADR-0188) to AWS `AssumeRoleWithWebIdentity`, to GCP workload identity federation and to an Azure
-   federated credential, so a BYOC or on-premises install needs no AWS principal of its own. Where an AWS principal
+   federated credential. Federation tokens are signed with an RS256 or ES256 key held beside the issuer's Ed25519
+   keys, because the clouds do not accept EdDSA. AWS and Azure fetch the issuer's discovery document and JWKS over
+   public HTTPS; GCP can instead take an uploaded JWKS. An install whose issuer the cloud cannot reach uses GCP's
+   uploaded JWKS, a customer-side identity, or a static credential (the relaxation below). SD2 verifies each cloud's
+   accepted algorithms against current documentation. Where an AWS principal
    does exist, `AssumeRole` uses an external ID that RegulAIt generates per source; the admin never chooses it. Static credentials (an AWS access key, a GCP service-account
    key file, an Azure client secret) are allowed as an admin relaxation under ADR-0180: storing one is a
    `settings_relax` step-up, the secret is encrypted at rest with the existing data key, it is never returned by any
@@ -82,15 +86,16 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
    digested (SHA-256) and discarded, like pasted content today. A scanner never calls a provider to test a key it
    finds: liveness checks would be an outbound use of a customer secret.
 7. **Credentials.** Scanner credentials live in a dedicated table, encrypted with the data key, scoped to one
-   source, never returned, and rotated or revoked by admins (revoking is free; replacing is the same step-up as
-   adding). Git-provider credentials reuse the provider's read-only scopes; a credential that grants write scopes
+   source, never returned, and rotated or revoked by admins (revoking is free; replacing a static credential is the same
+   step-up as storing one; replacing a federated one is free). Git-provider credentials reuse the provider's read-only scopes; a credential that grants write scopes
    is refused where the provider lets us check; where it cannot be checked, the source's posture row says "write
    scope unverified".
 8. **Egress.** Every outbound scanner call goes through `guardedFetch` and the egress allow list (ADR-0034, with
-   the owner amendment of 2026-10-16: adding any allow entry is a `settings_relax` step-up, built in #395). The cloud
+   the owner amendment of 2026-10-16: adding any allow entry is a `settings_relax` step-up, being built in #395, open). The cloud
    SDKs bring their own HTTP stacks, so each client is constructed with a transport that delegates to
    `guardedFetch`: a custom `requestHandler` for the AWS SDK v3, a custom `HttpClient` for `@azure/core-rest-pipeline`,
-   and Google clients in REST fallback mode with a guarded fetch. gRPC transports are not used. A test proves that a
+   and Google clients in REST fallback mode with a guarded fetch. gRPC transports are not used. The credential providers' token exchanges (AWS STS, Google STS and IAM Credentials,
+   the Azure identity token endpoint) use the same guarded transport. A test proves that a
    willing network spy records no call when the host is not allow-listed. Cloud and git-provider API hosts are added
    by the admin when the source is enabled, not shipped pre-allowed.
 9. **Scheduling and runs.** Sources run on an admin-set schedule (default daily; a shorter interval is not a
@@ -105,7 +110,7 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
     `dlp.secret.*` patterns already in `packages/shared`, or the gitleaks binary with its own RE2 engine; no regex
     taken from data is evaluated in JavaScript (ADR-0055). The builder records what it found. The endpoint query pack uses osquery (Apache-2.0 / GPL-2.0 dual licence;
     RegulAIt ships only queries, not osquery itself).
-12. **No vendor-named presets.** ADR-0083 §1's "no vendor-named integration" is superseded only for the existing
+12. **No vendor-named presets.** ADR-0071 §5's "no vendor-named preset" and ADR-0083 §1's "no vendor-named integration" are superseded only for the existing
     git-provider and cloud set (GitHub, GitLab, Bitbucket, Azure DevOps, AWS, GCP, Azure). Named CASB, SWG, MDM and
     EDR presets stay refused (PENDING). MDM and EDR exports come in through a generic mapped importer, as
     `generic_mapped` does today.
@@ -156,7 +161,7 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
     releases before any update. The customer distributes it through MDM; RegulAIt never installs it. By default it
     updates only through MDM; self-update is a relaxation. The SD4 spike decides the signing mechanism, how
     enrolment scales to thousands of devices (an MDM-delivered enrolment token) and device revocation.
-20. **Privacy.** People are pseudonymous by default: device users, git commit authors and cloud calling principals
+20. **Privacy.** People are pseudonymous by default: device users and device names, git commit authors and cloud calling principals
     are shown as a keyed hash (HMAC key per tenant, as in ADR-0193). The display name is stored encrypted under the
     data key in a separate table; revealing it decrypts it under a step-up and is audited. Endpoint evidence has a
     strict default retention of 90 days; lengthening it is a relaxation. RegulAIt ships an employee-notice template. Employee-monitoring and privacy law
@@ -189,7 +194,8 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
   minimal fixed fact set and the notice template help; no compliance claim is made.
 - Cloud discovery fills ADR-0083 limit 3: Bedrock calls become attributable through CloudTrail.
 - Air-gapped installs get repo and endpoint discovery, and cloud discovery only through private endpoints.
-- Follow-ups: browser-extension and SaaS OAuth-grant discovery through IdP APIs remain out of scope here; IGA-owned
+- Follow-ups: discovery of SaaS OAuth grants through IdP APIs, and of browser extensions through browser-management
+  consoles, remains out of scope here (browser extensions on managed devices are covered by SD3 and SD4); IGA-owned
   identity discovery stays refused (PENDING).
 
 ## Open-source evaluation (ADR-0176, 2026-10-17)
@@ -199,10 +205,10 @@ two contribute detection data under their licences.
 
 | Project | Licence | Finding |
 |---|---|---|
-| knostic/AgentSonar | No licence file (all rights reserved) | Endpoint network sensor (packet capture, SNI/DNS, process pairing, traffic-shape scoring). Cannot be reused; the traffic-shape idea informs SD4. |
+| An endpoint network-sensor repository from a commercial vendor | No licence file (all rights reserved) | Endpoint network sensor (packet capture, SNI/DNS, process pairing, traffic-shape scoring). Cannot be reused; the traffic-shape idea informs SD4. |
 | AmanSK5/shadow-ai-guard | Apache-2.0 (with NOTICE and a trademark policy) | Its `registry/registry.yaml` (31 tools: env-var names, bundle ids, executables, per-OS MCP config paths, inference domains) is imported into the catalogue with NOTICE and per-entry provenance, for SD3 and SD4. Its endpoint collector scripts and MDM importers are reference designs only. Not taken as a dependency: Python, and its registry loader and classifier make network calls, so it is not air-gap safe. Its name is not used (trademark policy). |
 | giggsoinc/PatronAI | Apache-2.0 (repo level) | Its provider and detector data files cross-check and extend the catalogue for SD1 and SD2, pinned by commit (no release tags). |
-| transilienceai/shasta | MIT | Snapshot of a hosted product; detector regexes used only to compare coverage for SD1. |
+| A hosted product's open snapshot from a commercial vendor | MIT | One snapshot commit, not maintained in the open; detector regexes used only to compare coverage for SD1. |
 | datacline/open-threat-detector | MIT | One detector, inactive; not used. |
 | HEUDavid/shadow-ai | No licence file | Not a detector: a hidden assistant built to evade monitoring. Not used; its traits (no visible window, LAN remote control) become SD3/SD4 detection signatures written by us. |
 
