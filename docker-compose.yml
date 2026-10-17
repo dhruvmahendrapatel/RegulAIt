@@ -511,16 +511,21 @@ services:
   #
   # OFF unless the `engines` profile is up, and the engine stays disabled in the
   # product until an admin enables it after this runner's self-test passes.
-  # Build the image from the repository root (engines/promptfoo/Dockerfile),
-  # then name its digest ONCE (decision 55):
+  # ENG-IMG: the image is published by .github/workflows/engine-images.yml and
+  # recorded in engines/images.lock.json; scripts/engine-images-lock.mjs writes
+  # the lock's repository and digest as the DEFAULTS below, so a stock install
+  # needs no variable once the lock holds a publish. Until then the default is
+  # an all-zero digest that names no image: with pull_policy never nothing
+  # starts, and a runner given it refuses to start. The digest is named ONCE
+  # (decision 55):
   #
-  #   REGULAIT_ENGINE_PROMPTFOO_DIGEST=sha256:<digest>
+  #   REGULAIT_ENGINE_PROMPTFOO_DIGEST=sha256:<digest>   (optional override)
   #
   # The image reference AND the digest the runner reports are both built from
   # that one variable, so they cannot disagree, and the reference is always
-  # pinned by digest (no tag). The default is an all-zero digest that names no
-  # image: with pull_policy never nothing starts, and a runner given it refuses
-  # to start. The reported digest is a CONSISTENCY check, not proof — a
+  # pinned by digest (no tag). An override is admitted only when it equals the
+  # gateway manifest's digest (the lock's): any other is refused at
+  # registration and audited (engine-runner-register-obsolete-build). The reported digest is a CONSISTENCY check, not proof — a
   # container cannot prove which image it runs; admission is the signature
   # verification at deploy time (ADR-0187 decision 55, open item). The digest
   # must also equal the shipped manifest's, or the self-test fails.
@@ -576,9 +581,10 @@ services:
   # admits (512 MiB strict default): raise REGULAIT_ENGINE_MODELSCAN_JOBS_SIZE
   # with that setting.
   # Digest pinning as for promptfoo: one variable,
-  # REGULAIT_ENGINE_MODELSCAN_DIGEST=sha256:<digest>, names the image of BOTH
-  # containers and the digest the runner reports; the all-zero default names
-  # no image.
+  # REGULAIT_ENGINE_MODELSCAN_DIGEST=sha256:<digest>, names the image and the
+  # digest the runner reports; its default is the lock's digest (ENG-IMG), or
+  # all-zero (no image) until a publish is recorded. The runner never downloads
+  # the artifact: the gateway streams it to the executor (ENG-IMG).
   engine-modelscan:
     <<: *engine-runner
     platform: linux/amd64
@@ -604,8 +610,8 @@ services:
   # only through the gateway channel this runner's task bridge carries. Both
   # exchange volumes are the runner's own, tmpfs-backed. Digest pinning as for the other
   # engines: one variable, REGULAIT_ENGINE_GARAK_DIGEST=sha256:<digest>, names
-  # the image of BOTH containers and the digest the runner reports; the
-  # all-zero default names no image.
+  # the image and the digest the runner reports; its default is the lock's
+  # digest (ENG-IMG), or all-zero (no image) until a publish is recorded.
   engine-garak:
     <<: *engine-runner
     platform: linux/amd64
@@ -643,11 +649,12 @@ services:
   # the task's input read-only at /jobs.
   #
   # An executor starts a task only from the engine manifest's `taskImage`, the
-  # image's content digest (`docker image inspect --format '{{.Id}}'`). Every
-  # shipped `taskImage` is null until a release records a built image's digest
-  # there, so until then a built image places nothing (`policy_unresolved`, the
-  # run ends `not_run`): fail closed. The runner services above still name their
-  # image by registry digest only (REGULAIT_ENGINE_<ENGINE>_DIGEST).
+  # image's content digest (`docker image inspect --format '{{.Id}}'`), which
+  # comes from engines/images.lock.json (ENG-IMG). It is null until a publish
+  # is recorded there, so until then a locally built image places nothing
+  # (`policy_unresolved`, the run ends `not_run`): fail closed. A local build is
+  # for checking the Dockerfiles; the runners and tasks run the PUBLISHED image
+  # (pulled by the lock's digest, or loaded from an air-gapped bundle).
   engine-promptfoo-image:
     <<: *engine-image
     build:
