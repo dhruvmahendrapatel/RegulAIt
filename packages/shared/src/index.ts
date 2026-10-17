@@ -2974,6 +2974,11 @@ export { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
 export {
   AI_MATCH_TYPES,
   AI_SIGNATURE_KINDS,
+  ARTIFACT_SIGNATURE_KINDS,
+  SHADOW_AI_SUBJECT_KINDS,
+  artifactMatchesSignature,
+  isArtifactSignatureKind,
+  type ArtifactSignatureKind,
   DEFAULT_AI_SIGNATURES,
   EVIDENCE_KINDS,
   EVIDENCE_MAX_BYTES,
@@ -3015,6 +3020,7 @@ export {
   type EvidenceImport,
   type EvidenceKind,
   type EvidenceScreenFinding,
+  type FindingSignalSource,
   type Observation,
   type ShadowAiConfidence,
   type ShadowAiDisposition,
@@ -4673,3 +4679,5 @@ export * from "./public-url.js";
 export * from "./shadow-catalog-v2.js";
 export * from "./repo-manifests.js";
 export * from "./repo-analysis.js";
+// ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
+export * from "./discovery/index.js";

@@ -60,6 +60,7 @@
  * correctly. A finding is a pointer to a secret, never a copy of one.
  */
 import { z } from "zod";
+import { activeDiscoveryPosture, type ActiveDiscoverySource, type DiscoveryEvidenceKind } from "./discovery/index.js";
 
 // ===========================================================================
 // 1. BOUNDS — the untrusted-input envelope
@@ -149,11 +150,30 @@ export function screenEvidencePayload(payload: unknown, basePath = ""): Evidence
 // 3. THE CATALOGUE — data, not code
 // ===========================================================================
 
-export const AI_SIGNATURE_KINDS = ["hostname", "sdk_package", "api_key_prefix", "web_app"] as const;
+/**
+ * ADR-0195 decision 5: the ARTIFACT kinds active discovery observes (a cloud AI
+ * service, an installed desktop app, an IDE or browser extension, a local model
+ * runtime, a coding-assistant config file). Each is matched by `identifier`:
+ * whole-value, case-insensitive equality. Never a regular expression.
+ */
+export const ARTIFACT_SIGNATURE_KINDS = [
+  "cloud_ai_service",
+  "desktop_app",
+  "ide_extension",
+  "browser_extension",
+  "local_runtime",
+  "assistant_config",
+] as const;
+export type ArtifactSignatureKind = (typeof ARTIFACT_SIGNATURE_KINDS)[number];
+
+export const AI_SIGNATURE_KINDS = ["hostname", "sdk_package", "api_key_prefix", "web_app", ...ARTIFACT_SIGNATURE_KINDS] as const;
 export type AiSignatureKind = (typeof AI_SIGNATURE_KINDS)[number];
 
-export const AI_MATCH_TYPES = ["exact_host", "host_suffix", "package", "key_prefix"] as const;
+export const AI_MATCH_TYPES = ["exact_host", "host_suffix", "package", "key_prefix", "identifier"] as const;
 export type AiMatchType = (typeof AI_MATCH_TYPES)[number];
+
+export const isArtifactSignatureKind = (k: string): k is ArtifactSignatureKind =>
+  (ARTIFACT_SIGNATURE_KINDS as readonly string[]).includes(k);
 
 export interface AiSignature {
   provider: string;
@@ -193,8 +213,9 @@ export const catalogueSignatureSchema = z
   .refine(
     (s) =>
       (s.kind === "sdk_package") === (s.matchType === "package") &&
-      (s.kind === "api_key_prefix") === (s.matchType === "key_prefix"),
-    { message: "matchType must agree with kind (sdk_package↔package, api_key_prefix↔key_prefix)" },
+      (s.kind === "api_key_prefix") === (s.matchType === "key_prefix") &&
+      isArtifactSignatureKind(s.kind) === (s.matchType === "identifier"),
+    { message: "matchType must agree with kind (sdk_package↔package, api_key_prefix↔key_prefix, artifact kinds↔identifier)" },
   );
 
 export type CatalogueSignatureInput = z.infer<typeof catalogueSignatureSchema>;
@@ -240,6 +261,8 @@ export const DEFAULT_AI_SIGNATURES: ReadonlyArray<Omit<AiSignature, "lastUpdated
 
 export const EVIDENCE_KINDS = ["egress_log", "code_scan", "saas_export", "self_reported"] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
+/** ADR-0195: a finding's signal comes from an import (`EvidenceKind`) or from a discovery scanner */
+export type FindingSignalSource = EvidenceKind | DiscoveryEvidenceKind;
 
 const isoish = z.string().min(4).max(40);
 
@@ -372,6 +395,17 @@ export function hostMatchesSignature(host: string, sig: AiSignature): boolean {
   return false;
 }
 
+/**
+ * ADR-0195: an artifact identifier (a cloud service name, an extension id, an
+ * app bundle id, a runtime or config file name) is compared whole and
+ * case-insensitively, and only against a signature of the SAME artifact kind.
+ */
+export function artifactMatchesSignature(kind: ArtifactSignatureKind, value: string, sig: AiSignature): boolean {
+  if (sig.kind !== kind || sig.matchType !== "identifier") return false;
+  const v = sig.value.trim().toLowerCase();
+  return v.length > 0 && value.trim().toLowerCase() === v;
+}
+
 /** Package names are compared whole. `openai-mock` is a different package. */
 export function packageMatchesSignature(pkg: string, sig: AiSignature): boolean {
   if (sig.kind !== "sdk_package") return false;
@@ -398,19 +432,23 @@ export function keyMatchesSignature(fragment: string, fullLength: number | null 
 // 6. OBSERVATIONS → CLASSIFICATION
 // ===========================================================================
 
-export type ShadowAiSubjectKind = "host" | "repo" | "saas_app" | "system";
+/** ADR-0195 adds `device`, `cloud_resource` and `cloud_principal` (migration 0202) */
+export const SHADOW_AI_SUBJECT_KINDS = ["host", "repo", "saas_app", "system", "device", "cloud_resource", "cloud_principal"] as const;
+export type ShadowAiSubjectKind = (typeof SHADOW_AI_SUBJECT_KINDS)[number];
 
 export interface Observation {
   subjectKind: ShadowAiSubjectKind;
   /** the thing that would be REMEDIATED — the repo, the calling host, the app */
   subject: string;
-  signalSource: EvidenceKind;
+  signalSource: FindingSignalSource;
   observedAt: string;
   count: number;
   host?: string | null;
   packageName?: string | null;
   keyFragment?: string | null;
   keyLength?: number | null;
+  /** ADR-0195: an artifact a discovery scanner saw (matched only by an `identifier` signature of the same kind) */
+  artifact?: { kind: ArtifactSignatureKind; value: string } | null;
   declaredProvider?: string | null;
   detail?: Record<string, unknown>;
 }
@@ -461,6 +499,28 @@ const UNMATCHED: Classification = Object.freeze({
  *             act. This tier is why the inventory is workable: a wall of
  *             `low` package hits never buries the one `critical`.
  */
+/**
+ * ADR-0195 artifact severities: a deployed cloud AI service, an installed app,
+ * extension or local runtime is real usage outside the gateway (medium, like a
+ * consumer web app); an assistant config file is a capability (low, like an SDK).
+ */
+const ARTIFACT_SEVERITY: Readonly<Record<ArtifactSignatureKind, ShadowAiSeverity>> = {
+  cloud_ai_service: "medium",
+  desktop_app: "medium",
+  ide_extension: "medium",
+  browser_extension: "medium",
+  local_runtime: "medium",
+  assistant_config: "low",
+};
+const ARTIFACT_PHRASE: Readonly<Record<ArtifactSignatureKind, string>> = {
+  cloud_ai_service: "the cloud AI service",
+  desktop_app: "the desktop app",
+  ide_extension: "the IDE extension",
+  browser_extension: "the browser extension",
+  local_runtime: "the local model runtime",
+  assistant_config: "the coding-assistant config",
+};
+
 export function classifyObservation(obs: Observation, catalogue: readonly AiSignature[]): Classification {
   const enabled = catalogue.filter((s) => s.enabled);
   const hit = (sig: AiSignature, severity: ShadowAiSeverity, matchedValue: string, reason: string): Classification => ({
@@ -528,6 +588,22 @@ export function classifyObservation(obs: Observation, catalogue: readonly AiSign
     }
   }
 
+  // 2b. ADR-0195: an artifact active discovery saw (a deployed cloud AI
+  //     service, an installed app/extension/runtime, an assistant config file).
+  //     Whole-identifier equality against a signature of the same kind only.
+  if (obs.artifact) {
+    const art = obs.artifact;
+    const sig = enabled.find((s) => artifactMatchesSignature(art.kind, art.value, s));
+    if (sig) {
+      return hit(
+        sig,
+        ARTIFACT_SEVERITY[art.kind],
+        sig.value,
+        `${obs.subject} has ${ARTIFACT_PHRASE[art.kind]} '${art.value}', which matches the ${sig.provider} ${art.kind} signature`,
+      );
+    }
+  }
+
   // 3. a capability, not an act
   if (obs.packageName) {
     for (const sig of enabled) {
@@ -569,7 +645,7 @@ export interface CorrelatedFinding {
   subjectKind: ShadowAiSubjectKind;
   subject: string;
   provider: string;
-  signalSources: EvidenceKind[];
+  signalSources: FindingSignalSource[];
   signatureKinds: AiSignatureKind[];
   firstSeenAt: string;
   lastSeenAt: string;
@@ -578,7 +654,7 @@ export interface CorrelatedFinding {
   confidence: ShadowAiConfidence;
   replacementAgentId: string | null;
   replacementNote: string | null;
-  evidence: Array<{ source: EvidenceKind; matchedValue: string; reason: string; observedAt: string }>;
+  evidence: Array<{ source: FindingSignalSource; matchedValue: string; reason: string; observedAt: string }>;
 }
 
 /**
@@ -801,7 +877,11 @@ const SOURCE_NOTES: Record<EvidenceKind, { whatItSees: string; whatItMisses: str
   },
 };
 
-export function coverageScorecard(inputs: readonly CoverageInput[]): CoverageScorecard {
+export function coverageScorecard(
+  inputs: readonly CoverageInput[],
+  /** ADR-0195 decision 5b: the active discovery sources enabled now (name and kind); none means nothing is scanned */
+  activeSources: readonly ActiveDiscoverySource[] = [],
+): CoverageScorecard {
   const byKind = new Map(inputs.map((i) => [i.kind, i]));
   const sources = EVIDENCE_KINDS.map((kind) => {
     const i = byKind.get(kind) ?? { kind, imports: 0, rows: 0, lastImportedAt: null };
@@ -814,7 +894,7 @@ export function coverageScorecard(inputs: readonly CoverageInput[]): CoverageSco
     sourcesPossible: EVIDENCE_KINDS.length,
     statement:
       `Discovery has analyzed ${sourcesOn} of ${EVIDENCE_KINDS.length} evidence classes. ` +
-      `regulAIt ships no collector: every finding below derives from evidence you supplied, so this inventory ` +
-      `reduces shadow AI — it does not prove its absence.`,
+      `${activeDiscoveryPosture(activeSources)} Every finding below derives from evidence you supplied or from a ` +
+      `source an admin enabled, so this inventory reduces shadow AI — it does not prove its absence.`,
   };
 }
