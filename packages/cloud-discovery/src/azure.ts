@@ -50,6 +50,8 @@ const ACTIVITY_PROVIDERS = [
   { provider: "Microsoft.MachineLearningServices", serviceKey: AZURE_SERVICE_KEYS.machineLearning },
 ] as const;
 
+export const AZURE_PUBLIC_AUTHORITY_HOST = "https://login.microsoftonline.com";
+
 export interface AzureScanTarget {
   subscriptionIds: string[];
   /** optional management group scope for Resource Graph (organisation-level scope) */
@@ -79,7 +81,11 @@ interface GraphRow {
 /** build the Entra credential for one source, on the guarded HttpClient */
 export function azureCredential(deps: AzureScannerDeps, authorityHost?: string): TokenCredential {
   const cred = azureCredentialSchema.parse(deps.credential);
-  const options = { httpClient: new GuardedAzureHttpClient(deps.fetch), ...(authorityHost ? { authorityHost } : {}) };
+  // finding 1: always name the authority host, so AZURE_AUTHORITY_HOST in the process environment cannot move the
+  // token request (and the client assertion or secret it carries) to another host. @azure/identity also reads
+  // AZURE_REGIONAL_AUTHORITY_NAME with no option to override it; that only selects a regional Microsoft host
+  // (`<region>.login.microsoft.com`), which still has to be on the egress allow list.
+  const options = { httpClient: new GuardedAzureHttpClient(deps.fetch), authorityHost: authorityHost ?? AZURE_PUBLIC_AUTHORITY_HOST };
   if (cred.mode === "azure_client_secret") return new ClientSecretCredential(cred.tenantId, cred.clientId, cred.clientSecret, options);
   const supplier = deps.oidcToken;
   if (!supplier) throw new Error("cloud-discovery: azure_federated needs an OIDC token supplier");

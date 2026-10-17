@@ -72,6 +72,19 @@ export interface AwsScannerDeps {
 }
 
 const DEFAULT_SESSION_NAME = "regulait-discovery";
+
+/**
+ * Pinned endpoint resolution (review of #404, finding 1). The AWS SDK otherwise honours ambient configuration that
+ * can move a signed request to another host: AWS_ENDPOINT_URL and AWS_ENDPOINT_URL_<SERVICE>, `endpoint_url` in a
+ * shared config profile (AWS_PROFILE / AWS_CONFIG_FILE), and the FIPS and dual-stack switches. Every client and every
+ * STS client sets these explicitly, so only the region decides the host and the egress allow list decides whether
+ * it is reachable.
+ */
+export const AWS_PINNED_ENDPOINT_CONFIG = Object.freeze({
+  ignoreConfiguredEndpointUrls: true,
+  useFipsEndpoint: false,
+  useDualstackEndpoint: false,
+});
 const FALLBACK_REGION = "us-east-1";
 
 /** share one set of short-lived credentials across every regional client; refresh five minutes before expiry */
@@ -95,7 +108,7 @@ function memoizeCredentials(provider: AwsCredentialIdentityProvider): AwsCredent
 /** build the credential provider for one source; every STS call goes through the guarded handler */
 export function awsCredentialProvider(deps: AwsScannerDeps, stsRegion: string): AwsCredentialIdentityProvider {
   const cred = awsCredentialSchema.parse(deps.credential);
-  const clientConfig = { region: stsRegion, requestHandler: guardedAwsRequestHandler(deps.fetch) };
+  const clientConfig = { region: stsRegion, requestHandler: guardedAwsRequestHandler(deps.fetch), ...AWS_PINNED_ENDPOINT_CONFIG };
   const sessionName = deps.roleSessionName ?? DEFAULT_SESSION_NAME;
   switch (cred.mode) {
     case "aws_static": {
@@ -162,7 +175,7 @@ export class AwsCloudScanner implements CloudScanner {
   }
 
   #config(region: string) {
-    return { region, credentials: this.#credentials, requestHandler: guardedAwsRequestHandler(this.#fetch), maxAttempts: 3 };
+    return { region, credentials: this.#credentials, requestHandler: guardedAwsRequestHandler(this.#fetch), maxAttempts: 3, ...AWS_PINNED_ENDPOINT_CONFIG };
   }
 
   async scan(ctx: CloudScanContext): Promise<CloudScanResult> {
@@ -321,7 +334,7 @@ export class AwsCloudScanner implements CloudScanner {
         "no trail bucket configured: agent and knowledge-base calls (InvokeAgent, Retrieve, RetrieveAndGenerate) are data events that LookupEvents cannot return");
       return;
     }
-    const s3 = new S3Client({ ...this.#config(tb.region), forcePathStyle: false });
+    const s3 = new S3Client({ ...this.#config(tb.region), forcePathStyle: false, useAccelerateEndpoint: false, useArnRegion: false });
     const maxObjects = Math.min(tb.maxObjects ?? 200, 2000);
     const start = lookbackStart(ctx, MAX_AUDIT_LOOKBACK_DAYS);
     const agg = new PrincipalAggregator("aws");

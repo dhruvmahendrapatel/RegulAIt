@@ -58,6 +58,13 @@ const VERTEX_RESOURCE_TYPES: Record<string, string> = {
  */
 const CALL_OPTIONS = { maxRetries: 2 } as const;
 
+/**
+ * Pinned universe (review of #404, finding 1). The GAPIC clients otherwise read GOOGLE_CLOUD_UNIVERSE_DOMAIN and
+ * would send the bearer token to `<service>.<that domain>`. Every client and auth client names the public universe
+ * explicitly.
+ */
+export const GCP_UNIVERSE_DOMAIN = "googleapis.com";
+
 const LOGGING_ENTRIES_URL = "https://logging.googleapis.com/v2/entries:list";
 
 export interface GcpScanTarget {
@@ -79,7 +86,7 @@ export function gcpAuthClient(deps: GcpScannerDeps): AuthClient {
   const transporter = guardedGaxios(deps.fetch);
   if (cred.mode === "gcp_service_account_key") {
     const key = parseServiceAccountKey(cred.keyJson);
-    return new JWT({ email: key.clientEmail, key: key.privateKey, scopes: [GCP_READ_ONLY_SCOPE], transporter });
+    return new JWT({ email: key.clientEmail, key: key.privateKey, scopes: [GCP_READ_ONLY_SCOPE], transporter, universeDomain: GCP_UNIVERSE_DOMAIN });
   }
   const supplier = deps.oidcToken;
   if (!supplier) throw new Error("cloud-discovery: gcp_workload_identity needs an OIDC token supplier");
@@ -92,6 +99,7 @@ export function gcpAuthClient(deps: GcpScannerDeps): AuthClient {
     token_url: GCP_STS_TOKEN_URL,
     subject_token_supplier: { getSubjectToken: () => supplier(tokenAudience) },
     scopes: [GCP_READ_ONLY_SCOPE],
+    universe_domain: GCP_UNIVERSE_DOMAIN,
     ...(cred.serviceAccountEmail
       ? {
           service_account_impersonation_url: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(cred.serviceAccountEmail)}:generateAccessToken`,
@@ -142,7 +150,7 @@ export class GcpCloudScanner implements CloudScanner {
   constructor(readonly target: GcpScanTarget, deps: GcpScannerDeps) {
     this.#auth = gcpAuthClient(deps);
     // fallback: true is REST over authClient.fetch; never gRPC (decision 8)
-    const opts = { fallback: true as const, authClient: this.#auth };
+    const opts = { fallback: true as const, authClient: this.#auth, universeDomain: GCP_UNIVERSE_DOMAIN };
     this.#serviceUsage = new ServiceUsageClient(opts);
     this.#asset = new AssetServiceClient(opts);
     this.#projects = new ProjectsClient(opts);
