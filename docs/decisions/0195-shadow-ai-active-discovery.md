@@ -213,3 +213,20 @@ two contribute detection data under their licences.
 | HEUDavid/shadow-ai | No licence file | Not a detector: a hidden assistant built to evade monitoring. Not used; its traits (no visible window, LAN remote control) become SD3/SD4 detection signatures written by us. |
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
+
+### SD1 builder findings (decision 11, 2026-10-17)
+
+- **Dependency inventory.** syft was not adopted: it catalogues a checked-out filesystem or image, while the repo
+  scanner never clones (it reads a bounded set of files through the provider API and keeps no content), and it would
+  add a binary to the image. Manifests are parsed with `smol-toml` (BSD-3-Clause, already pinned in the repo) and
+  `fast-xml-parser` (MIT, entity processing off); npm, requirements.txt and go.mod reuse the ADR-0083 readers.
+  Gradle scripts and Gemfiles are programs and are read by a bounded literal line scan.
+- **Key detection.** The compiled gitleaks-derived `dlp.secret.*` rules are reused in JavaScript (they are compiled,
+  not data, and linear by construction); the gitleaks binary was not needed.
+- **Git provider clients.** No provider SDK is used: the existing adapters already call the four REST APIs through
+  an injected fetch, and the readers extend that pattern so every call stays on the guarded fetch.
+- **JSONC.** No maintained JSONC parser meets ADR-0176's maintenance window; a `.vscode/*.json` file with comments
+  is reported by its path and its contents are counted as unparsed.
+- **Catalogue v2.** 173 entries (v1's 81 unchanged first); coding-assistant entries were checked against vendor
+  documentation or the VS Code marketplace on 2026-10-17. One PatronAI extension id no longer resolves and was left
+  out.
