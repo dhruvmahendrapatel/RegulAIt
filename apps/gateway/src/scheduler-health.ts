@@ -23,6 +23,7 @@
  * A tick still never crashes the gateway, and the next tick still retries —
  * the change is that a human can now find out.
  */
+import { safeErrorText } from "./gateway-logger.js";
 import { asc, auditLog, eq, users, type Db } from "@regulait/db";
 
 export type SchedulerName = "audit-prune" | "backup-verify";
@@ -140,9 +141,7 @@ export async function recordSchedulerFailure(
     });
   } catch (auditErr) {
     console.error(
-      `[regulait] could not audit the ${name} failure (health surface still records it): ${
-        auditErr instanceof Error ? auditErr.message : String(auditErr)
-      }`,
+      `[regulait] could not audit the ${name} failure (health surface still records it): ${safeErrorText(auditErr)}`,
     );
   }
 }

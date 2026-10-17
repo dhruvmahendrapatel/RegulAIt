@@ -9,8 +9,14 @@
  * reach a metadata address. This source check refuses that: every gateway
  * module that handles SPIFFE material may reach the network only through the
  * egress guard (`guardConnectionCall(...)`, whose `fetchImpl` is the guarded
- * fetch). A bare `fetch(`, `globalThis.fetch`, node:http(s), undici or a raw
- * socket in such a module fails this test.
+ * fetch). A bare `fetch` (called or aliased), `globalThis.fetch`,
+ * node:http/https/http2, undici or a raw socket, imported statically, through
+ * `import()` or through `require()`, fails this test.
+ *
+ * The scan covers every gateway module that names SPIFFE, every module under
+ * `oauth/` (where a helper the SPIFFE code calls would live, named or not) and
+ * `packages/shared/src/identity/`. It is a tripwire, not the gate: the fetch
+ * slice, when built, carries a behavioural test (ADR-0188 S9 follow-ups).
  */
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -18,30 +24,43 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SHARED_IDENTITY = path.resolve(SRC, "../../../packages/shared/src/identity");
 
-/** every non-test .ts under src that handles SPIFFE material */
-function spiffeModules(): string[] {
+/** every non-test .ts under `dir` that `take` accepts */
+function sources(dir: string, take: (p: string) => boolean): string[] {
   const out: string[] = [];
-  const walk = (dir: string) => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, e.name);
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
       if (e.isDirectory()) {
         if (e.name !== "node_modules" && e.name !== "testing") walk(p);
-      } else if (e.name.endsWith(".ts") && !e.name.endsWith(".test.ts") && /spiffe/i.test(readFileSync(p, "utf8"))) {
+      } else if (e.name.endsWith(".ts") && !e.name.endsWith(".test.ts") && !e.name.endsWith(".d.ts") && take(p)) {
         out.push(p);
       }
     }
   };
-  walk(SRC);
+  walk(dir);
   return out;
+}
+
+/** the scanned modules: SPIFFE-naming gateway modules, all of oauth/, and the shared identity package */
+function spiffeModules(): string[] {
+  const named = sources(SRC, (p) => /spiffe/i.test(readFileSync(p, "utf8")));
+  const oauth = sources(path.join(SRC, "oauth"), () => true);
+  const shared = sources(SHARED_IDENTITY, () => true);
+  return [...new Set([...named, ...oauth, ...shared])];
 }
 
 /** the raw outbound calls a SPIFFE module may not make; the guarded `.fetchImpl(` is not one */
 const RAW_EGRESS: ReadonlyArray<readonly [string, RegExp]> = [
-  ["bare fetch", /(?<![.\w$])fetch\s*\(/],
+  // called or aliased (`const f = fetch`); an object key `fetch:` and `.fetchImpl` are not the global
+  ["bare fetch", /(?<![.\w$])fetch\b(?!\s*:)/],
   ["globalThis.fetch", /\bglobalThis\s*\.\s*fetch\b/],
-  ["node:http(s)", /from\s+["'](?:node:)?https?["']|require\(\s*["'](?:node:)?https?["']\s*\)/],
-  ["undici", /from\s+["']undici["']/],
+  // a value import (or re-export); `import type` is not egress
+  ["node:http(s)", /^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s+["'](?:node:)?(?:https?|http2)["']/m],
+  ["undici", /^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s+["']undici["']/m],
+  // a dynamic import or a require of any network module
+  ["dynamic network import", /\b(?:import|require)\s*\(\s*["'](?:node:)?(?:https?|http2|undici|net|tls|dgram)["']\s*\)/],
   // a whole-module import, or a connecting name; `BlockList`/`isIP` and type-only imports are not egress
   ["raw socket", /import\s+(?:\*\s+as\s+)?\w+\s+from\s+["'](?:node:)?(?:net|tls|dgram)["']|import\s+\{[^}]*\b(?:connect|createConnection|Socket|createSocket)\b[^}]*\}\s*from\s+["'](?:node:)?(?:net|tls|dgram)["']/],
 ];
@@ -60,6 +79,7 @@ describe("SPIFFE modules reach the network only through the egress guard", () =>
   it("finds the SPIFFE modules (the scan is not vacuous)", () => {
     const names = spiffeModules().map((p) => path.relative(SRC, p).split(path.sep).join("/"));
     expect(names).toEqual(expect.arrayContaining(["oauth/spiffe-bundles.ts", "oauth/spiffe-trust-domains.ts", "oauth/x509.ts"]));
+    expect(names.some((n) => n.includes("packages/shared/src/identity/"))).toBe(true);
   });
 
   it("none makes a raw outbound call", () => {
@@ -73,6 +93,14 @@ describe("SPIFFE modules reach the network only through the egress guard", () =>
     expect(violations("const r = await fetch(bundleUrl);")).toEqual(["bare fetch"]);
     expect(violations("const f = globalThis.fetch; await f(u);")).toEqual(["globalThis.fetch"]);
     expect(violations('import https from "node:https";')).toEqual(["node:http(s)"]);
+    expect(violations('import { connect } from "node:http2";')).toEqual(["node:http(s)"]);
+    expect(violations("const f = fetch; await f(u);")).toEqual(["bare fetch"]);
+    expect(violations("const { request } = await import(\"node:https\");")).toEqual(["dynamic network import"]);
+    expect(violations("const http2 = await import('http2');")).toEqual(["dynamic network import"]);
+    expect(violations('const { request } = require("undici");')).toEqual(["dynamic network import"]);
+    expect(violations('const h = require("node:http");')).toEqual(["dynamic network import"]);
+    expect(violations("const deps = { fetch: g.fetchImpl };")).toEqual([]);
+    expect(violations('import type { IncomingMessage } from "node:http";')).toEqual([]);
     expect(violations('import { request } from "undici";')).toEqual(["undici"]);
     expect(violations('import tls from "node:tls";')).toEqual(["raw socket"]);
     expect(violations('import { connect } from "node:tls";')).toEqual(["raw socket"]);

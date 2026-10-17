@@ -435,3 +435,45 @@ body in that message, and an unmapped database failure logged drizzle's `Drizzle
 
 Open: the refusal line's `path` still carries path parameters. Only the feedback link (decision 9) is known to put a
 credential in a path; whether any route puts personal data in one was not swept in this follow-up.
+
+### As built 2026-10-17 — N8 fix round (independent review F1–F5)
+
+**Correction to item 5.** The sweep covered pino call sites only, so its last sentence was wrong. Several `console.*`
+writes on post-commit, `finally` and scheduler paths printed `err.message` straight to stderr, which skips pino's
+`redact` and the `streamWrite` scrubber; for a failed query that message is drizzle's `Failed query: …\nparams: …`
+with every bound value. `DEBUG_ERRORS` printed the whole error object. What changed:
+
+1. **`safeErrorText(err)`** (`gateway-logger.ts`) applies the 500 line's withholding to one line of text: a
+   `SyntaxError` or a failed query anywhere in the cause chain gives its name (and SQLSTATE), never its message;
+   anything else gives `Name: message` through `redactLogText`. **`safeLogObject(obj)`** does the same for each value
+   of a flat log object. Used at `workflows.ts` (the deferred span, the use-case mirror and its `{obj}` logger, the
+   stage re-evaluation), `in-process-delegation.ts` (the chain revoke), `scheduler.ts` (the job failure, the tick and
+   the audit lines), `scheduler-health.ts`, `boot.ts` (scheduler sync) and `eval-dataset-sources.ts` (a pino line that
+   logged the message as a string, which `redact` cannot see). A grep of the gateway's non-test sources for a
+   `console.*` or a `log.warn/error` carrying `.message` now finds only CLI scripts (seed, demo, first-admin,
+   reencrypt, main), which run against no request.
+2. **`DEBUG_ERRORS`** prints the same fields as the log line (withheld where the line withholds) plus the stack frames,
+   never the raw error. Turning it on no longer relaxes what reaches stderr (ADR-0180). INSTALL.md says so.
+3. **The cause chain (F2).** `unhandledErrorLogFields` walks `err.cause` (bounded, cycle-safe) and withholds when any
+   link is a `SyntaxError` or a failed query, adding `causeType`. pino's serializer folds every cause's message into
+   `message`, so a wrapper used to carry the inner text.
+4. **Query names (F3).** `client_secret`, `code_verifier`, `X-Amz-Signature`, `X-Amz-Credential` and
+   `X-Goog-Signature` are added to the scrubber as exact names (no prefix wildcards, for the ReDoS gate, M-074).
+5. **Nested headers (F4).** pino wildcard paths `*.headers.authorization`, `*.headers.cookie`, `*.headers["x-api-key"]`,
+   `*.headers["proxy-authorization"]` and `err.*.headers.authorization` mask an outbound client's
+   `config/request/response.headers` one level down.
+6. **The refusal line's path.** A matched route logs its template only. The raw path is logged only when no route
+   matched (a scan, a misconfigured client: `/scim/v2/Users/<email>`), without its query, through `redactLogText`, and
+   cut at 120 characters. This closes the "Open" note at the end of the section above.
+7. **Tests (F5).** The handler body is now `handleGatewayError` (exported from `app.ts`) and the SCIM parser is
+   `parseScimJsonBody` (exported from `scim.ts`); `log-leak.test.ts` drives both offline instead of re-implementing
+   them. `req.body`/`req.query` are probed under a logger whose `req` serializer keeps the raw value, so only the
+   redact paths stand in the way. The db-fail case uses a non-credential query name, so it pins the path strip itself.
+   Mutations run, each turning the file red: the SCIM parser passing a `SyntaxError` through, the `req.body` path
+   removed, the `*.headers.authorization` path removed, the cause walk cut to one link, and the parser-refusal branch
+   of the real handler disabled.
+
+**Open.** pino's generic `{ err }` lines (`background-work.ts`, `builder-channels.ts`, `ai-bom-signoff.ts`, the boot
+timers) still go through pino's standard error serializer, which folds a cause's message in. No such line is known to
+carry a failed query today; a gateway `err` serializer that applies the same withholding would close it, and needs
+`pino` as a direct dependency of the gateway (it is only Fastify's today).

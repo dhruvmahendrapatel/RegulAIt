@@ -1658,7 +1658,13 @@ Open after the fix round (recheck follow-ups):
    not include. What is built is the rule for when one is: `oauth/spiffe-egress.test.ts` scans every gateway module
    that names SPIFFE and refuses a bare `fetch(`, `globalThis.fetch`, `node:http(s)`, `undici` or a connecting
    `net`/`tls`/`dgram` import; the guarded form (`guardConnectionCall(...)` then its `fetchImpl`) passes. Negative
-   controls for each form are in the test. The design for the fetch slice, when it is scheduled:
+   controls for each form are in the test. Fix round (review F6): the scan also catches an aliased `fetch`, a dynamic
+   `import()` or `require()` of any network module, and `node:http2`, and it covers every module under `oauth/` and
+   `packages/shared/src/identity/` whether or not it names SPIFFE. **It is a tripwire, not the gate.** A source scan
+   cannot see a helper elsewhere in the tree, a fetch passed in as a dependency, or a redirect followed by the guarded
+   call itself. The fetch slice, when built, carries a behavioural test as its real gate: a redirect is not followed
+   (`redirect: "manual"`), a URL outside the egress allow-list is refused and audited, and a metadata or private
+   address is refused, each through `guardConnectionCall`. The design for the fetch slice, when it is scheduled:
    - a bundle endpoint URL per trust domain, set by an admin with the same `identity_manage` step-up and audit as an
      upload, and checked against the egress allow-list when it is set (ADR-0034 owner amendment 2026-10-16: an allow
      entry for it needs its own step-up);

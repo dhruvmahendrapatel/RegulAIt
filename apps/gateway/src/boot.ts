@@ -36,6 +36,7 @@
  * `verifyDataKeyOnBoot`. Constructing an app is not putting a deployment into
  * service, and ~103 test files construct apps.
  */
+import { safeErrorText } from "./gateway-logger.js";
 import { runAuditV2Cutover } from "@regulait/db";
 import { AUDIT_V2_CUTOVER_ENV, assertAuditChainWritable } from "./audit-v2-cutover.js";
 import { ensureInternalIdentities } from "./in-process-delegation.js";
@@ -360,7 +361,7 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     // gateway is already listening at this point and every sweep has an
     // endpoint; losing the schedule is a degradation, not an outage.
     console.error(
-      `[regulait] could not sync scheduler job definitions: ${err instanceof Error ? err.message : String(err)}`,
+      `[regulait] could not sync scheduler job definitions: ${safeErrorText(err)}`,
     );
   }
   if (schedulerConfig.enabled) {

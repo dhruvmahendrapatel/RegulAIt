@@ -7,20 +7,26 @@
  * (the SCIM parser did) puts a snippet of the body in that message, and a
  * failed database query puts every bound parameter in drizzle's. This file
  * drives a bare Fastify instance with the SAME pino configuration the serving
- * process resolves, and the gateway's own refusal and line builders, into an
- * in-memory sink; `zz-n8-log-leak.test.ts` repeats the body cases through the
- * real app against Postgres.
+ * process resolves, the gateway's REAL error handler (`handleGatewayError`)
+ * and the REAL SCIM body parser (`parseScimJsonBody`), into an in-memory sink;
+ * `zz-n8-log-leak.test.ts` repeats the body cases through the whole app
+ * against Postgres.
  */
 import { Writable } from "node:stream";
-import Fastify, { errorCodes, LogController, type FastifyInstance } from "fastify";
+import Fastify, { LogController, type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { handleGatewayError } from "./app.js";
 import {
   parserRefusal,
-  parserRefusalLogFields,
   redactLogText,
+  requestLogFields,
   resolveGatewayLogger,
+  safeErrorText,
+  safeLogObject,
+  UNMATCHED_PATH_MAX,
   unhandledErrorLogFields,
 } from "./gateway-logger.js";
+import { parseScimJsonBody } from "./scim.js";
 
 // built at runtime so no secret-shaped literal sits in the source
 const MARKER = ["N8", "LEAK", "MARKER", String(Date.now())].join("_");
@@ -49,15 +55,7 @@ beforeAll(async () => {
     logger: { ...(resolved as object), stream: sink } as never,
     logController: new LogController({ disableRequestLogging: true }),
   });
-  app.setErrorHandler((err, req, reply) => {
-    const refusal = parserRefusal(err);
-    if (refusal) {
-      req.log.warn(parserRefusalLogFields(req, refusal), "request body refused");
-      return reply.status(refusal.status).send(refusal.body);
-    }
-    req.log.error(unhandledErrorLogFields(req, err), "unhandled error");
-    return reply.status(500).send({ error: "internal" });
-  });
+  app.setErrorHandler(handleGatewayError);
   app.post("/json", async () => ({ ok: true }));
   app.post("/handler-parse", async (req) => {
     // parsed and discarded: the route answers nothing of what it read
@@ -78,14 +76,13 @@ beforeAll(async () => {
     err.name = "DrizzleQueryError";
     throw err;
   });
+  app.post("/wrapped-fail", async () => {
+    // F2: a wrapper whose cause is a failed query (pino folds every cause's message into `message`)
+    const inner = Object.assign(new Error(`Failed query: select 2\nparams: ${MARKER}`), { query: "select 2", params: [MARKER, 1] });
+    throw new Error(`could not finish: ${inner.message}`, { cause: inner });
+  });
   app.register(async (scope) => {
-    scope.addContentTypeParser("application/scim+json", { parseAs: "string" }, (_req, body: string, done) => {
-      try {
-        done(null, JSON.parse(body));
-      } catch {
-        done(new errorCodes.FST_ERR_CTP_INVALID_JSON_BODY());
-      }
-    });
+    scope.addContentTypeParser("application/scim+json", { parseAs: "string" }, parseScimJsonBody);
     scope.post("/scim", async () => ({ ok: true }));
   });
   await app.ready();
@@ -148,12 +145,34 @@ describe("the 500 line withholds what can quote request input", () => {
 
   it("a failed query keeps its SQL and SQLSTATE, not its params or Postgres's quoted values", async () => {
     out = "";
-    const res = await app.inject({ method: "POST", url: "/db-fail?token=QTOKEN_VALUE&page=2", payload: {} });
+    // a non-credential name: only the path strip keeps it out (the scrubber would not)
+    const res = await app.inject({ method: "POST", url: "/db-fail?q=QSEARCH_VALUE&page=2", payload: {} });
     expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({ error: "internal" });
     expect(out).not.toContain(MARKER);
-    expect(out).not.toContain("QTOKEN_VALUE");
+    expect(out).not.toContain("QSEARCH_VALUE");
     const line = lineWith("unhandled error");
     expect(line).toMatchObject({ sql: "select 1 where id = $1", params: "[1 withheld]", pgCode: "22P02", path: "/db-fail" });
+  });
+
+  it("a wrapper whose cause is a failed query is withheld the same way (F2)", async () => {
+    out = "";
+    const res = await app.inject({ method: "POST", url: "/wrapped-fail", payload: {} });
+    expect(res.statusCode).toBe(500);
+    expect(out).not.toContain(MARKER);
+    expect(lineWith("unhandled error")).toMatchObject({ errType: "Error", causeType: "Error", sql: "select 2", params: "[2 withheld]" });
+    const viaSyntax = unhandledErrorLogFields(
+      { method: "POST", url: "/x", routeOptions: { url: "/x" } } as never,
+      new Error("outer", { cause: new SyntaxError(`Unexpected token in JSON at "${MARKER}"`) }),
+    );
+    expect(JSON.stringify(viaSyntax)).not.toContain(MARKER);
+    expect(viaSyntax).toMatchObject({ causeType: "SyntaxError", errMessage: expect.stringContaining("withheld") });
+  });
+
+  it("a cyclic cause chain terminates and falls through to the ordinary line", () => {
+    const a = new Error("a") as Error & { cause?: unknown };
+    a.cause = a;
+    expect((unhandledErrorLogFields({ method: "GET", url: "/x" } as never, a).err as Error).message).toBe("a");
   });
 
   it("negative control: an ordinary error still logs its message for the operator", async () => {
@@ -173,7 +192,7 @@ describe("pino's own redaction and the line scrubber", () => {
       {
         body: { note: MARKER },
         query: { q: MARKER },
-        req: { body: MARKER, query: MARKER, headers: { authorization: MARKER, "proxy-authorization": MARKER } },
+        req: { headers: { authorization: MARKER, "proxy-authorization": MARKER } },
         headers: { "x-api-key": MARKER, "proxy-authorization": MARKER },
         err: { body: MARKER },
       },
@@ -183,9 +202,112 @@ describe("pino's own redaction and the line scrubber", () => {
     expect(out).not.toContain(MARKER);
   });
 
+  it("masks req.body and req.query where no serializer drops them first", async () => {
+    // Fastify's `req` serializer already omits the body; this logger keeps the
+    // raw `req` value, so only the redact paths stand between it and the line
+    let raw = "";
+    const sink = new Writable({
+      write(chunk, _enc, cb) {
+        raw += String(chunk);
+        cb();
+      },
+    });
+    const resolved = resolveGatewayLogger({ LOG_LEVEL: "info" } as NodeJS.ProcessEnv) as object;
+    const bare = Fastify({ logger: { ...resolved, stream: sink, serializers: { req: (r: unknown) => r } } as never });
+    await bare.ready();
+    bare.log.warn({ req: { body: { note: MARKER }, query: { q: MARKER }, method: "POST" } }, "bare probe");
+    await bare.close();
+    expect(raw).toContain("bare probe");
+    expect(raw).toContain('"method":"POST"');
+    expect(raw).not.toContain(MARKER);
+  });
+
+  it("masks credential headers one level down: an outbound client's config/request/response (F4)", () => {
+    out = "";
+    app.log.error(
+      {
+        config: { headers: { authorization: MARKER, cookie: MARKER, "x-api-key": MARKER, "proxy-authorization": MARKER } },
+        request: { headers: { authorization: MARKER } },
+        err: { response: { headers: { authorization: MARKER } } },
+      },
+      "nested probe",
+    );
+    expect(out).toContain("nested probe");
+    expect(out).not.toContain(MARKER);
+  });
+
   it("replaces credential-shaped query values in any line, keeping the names", () => {
     expect(redactLogText("/cb?code=abc&state=def&page=2")).toBe("/cb?code=[redacted]&state=[redacted]&page=2");
     expect(redactLogText("/x?access_token=a1#f")).toBe("/x?access_token=[redacted]#f");
     expect(redactLogText("/x?page=2&sort=asc")).toBe("/x?page=2&sort=asc");
+  });
+
+  it.each(["client_secret", "code_verifier", "X-Amz-Signature", "X-Amz-Credential", "X-Goog-Signature"])(
+    "replaces the %s query value (F3)",
+    (name) => {
+      expect(redactLogText(`/x?a=1&${name}=v1v2v3&b=2`)).toBe(`/x?a=1&${name}=[redacted]&b=2`);
+    },
+  );
+});
+
+describe("the refusal line's path (unmatched routes only)", () => {
+  const req = (url: string, route?: string) =>
+    ({ method: "GET", url, routeOptions: route ? { url: route } : {}, ip: "203.0.113.5", headers: {} }) as never;
+
+  it("a matched route logs its template, not the raw path", () => {
+    const f = requestLogFields(req(`/v1/users/${MARKER}?x=1`, "/v1/users/:id"), 404);
+    expect(f).toMatchObject({ route: "/v1/users/:id", status: 404 });
+    expect(f).not.toHaveProperty("path");
+    expect(JSON.stringify(f)).not.toContain(MARKER);
+  });
+
+  it("an unmatched path is logged without its query, redacted and bounded", () => {
+    const f = requestLogFields(req(`/scim/v2/Users/alice@corp.example/${"z".repeat(300)}?token=abc`), 404);
+    expect(f.route).toBeNull();
+    expect(String(f.path).startsWith("/scim/v2/Users/alice@corp.example/")).toBe(true);
+    expect(String(f.path)).toHaveLength(UNMATCHED_PATH_MAX + "[truncated]".length);
+    expect(String(f.path)).not.toContain("token");
+    const feedback = requestLogFields(req(`/v1/feedback/l/rglf_${"a1".repeat(32)}`), 404);
+    expect(feedback.path).toBe("/v1/feedback/l/[redacted]");
+  });
+});
+
+describe("console-bound error text (F1)", () => {
+  it("withholds a failed query's message and params, keeping its name and SQLSTATE", () => {
+    const err = Object.assign(new Error(`Failed query: select 1\nparams: ${MARKER}`), {
+      query: "select 1",
+      params: [MARKER],
+      cause: Object.assign(new Error(`Key (email)=(${MARKER}) already exists`), { code: "23505" }),
+    });
+    err.name = "DrizzleQueryError";
+    const text = safeErrorText(err);
+    expect(text).not.toContain(MARKER);
+    expect(text).toContain("DrizzleQueryError");
+    expect(text).toContain("23505");
+  });
+
+  it("withholds a SyntaxError anywhere in the cause chain", () => {
+    expect(safeErrorText(new SyntaxError(MARKER))).not.toContain(MARKER);
+    expect(safeErrorText(new Error("outer", { cause: new SyntaxError(MARKER) }))).toMatch(/^Error \(cause SyntaxError\)/);
+  });
+
+  it("keeps an ordinary message, with credential query values scrubbed", () => {
+    expect(safeErrorText(new Error("pool exhausted"))).toBe("Error: pool exhausted");
+    expect(safeErrorText(new Error("GET /cb?code=abc failed"))).toBe("Error: GET /cb?code=[redacted] failed");
+    expect(safeErrorText("plain")).toBe("plain");
+  });
+
+  it("safeLogObject: the {obj} a console logger receives carries no withheld text", () => {
+    const dbErr = Object.assign(new Error(`params: ${MARKER}`), { query: "q", params: [MARKER] });
+    const o = safeLogObject({ err: dbErr, subject: "s1", url: "/cb?state=xyz" }) as Record<string, unknown>;
+    expect(JSON.stringify(o)).not.toContain(MARKER);
+    expect(o).toMatchObject({ subject: "s1", url: "/cb?state=[redacted]" });
+  });
+});
+
+describe("the real SCIM parser", () => {
+  it("accepts an empty body (no refusal)", async () => {
+    const empty = await app.inject({ method: "POST", url: "/scim", headers: { "content-type": "application/scim+json" }, payload: "" });
+    expect(empty.statusCode).toBe(200);
   });
 });

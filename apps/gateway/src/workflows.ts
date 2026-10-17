@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { safeErrorText, safeLogObject } from "./gateway-logger.js";
 import type { FastifyInstance } from "fastify";
 // ADR-0187: loaded lazily where used (engine-runs.ts reaches back into this module)
 import type { EngineCheckOutcome } from "./engine-runs.js";
@@ -381,7 +382,7 @@ async function recordDeferredSpan(db: Db, span: DeferredSpan | undefined): Promi
   try {
     await recordWorkflowStageSpan(db, span.instanceId, span.event, span.applied);
   } catch (err) {
-    console.error(`workflow_stage span for ${span.instanceId} not recorded: ${(err as Error).message}`);
+    console.error(`workflow_stage span for ${span.instanceId} not recorded: ${safeErrorText(err)}`);
   }
 }
 
@@ -836,11 +837,12 @@ async function mirrorAfterExecutor(db: Db, instanceId: string, actorUserId: stri
   try {
     const { mirrorInstanceTransition } = await import("./use-cases.js");
     return await mirrorInstanceTransition(db, instanceId, actorUserId, {
-      warn: (obj, msg) => console.warn(msg ?? "", obj),
-      error: (obj, msg) => console.error(msg ?? "", obj),
+      // N8 F1: the object can carry an error; a console write skips pino's redaction
+      warn: (obj, msg) => console.warn(msg ?? "", safeLogObject(obj)),
+      error: (obj, msg) => console.error(msg ?? "", safeLogObject(obj)),
     });
   } catch (err) {
-    console.error(`use-case mirror after the executor of ${instanceId} failed: ${(err as Error).message}`);
+    console.error(`use-case mirror after the executor of ${instanceId} failed: ${safeErrorText(err)}`);
     return undefined;
   }
 }
@@ -1317,7 +1319,7 @@ async function runGitExecutions(
         await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId: stage.id }], actorUserId, dataKey, 1, hooks);
       } catch (err) {
         if (!(err instanceof WorkflowStateError)) {
-          console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${(err as Error).message}`);
+          console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${safeErrorText(err)}`);
         }
       }
     };

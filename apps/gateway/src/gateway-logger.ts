@@ -46,7 +46,7 @@ const URL_CREDENTIALS: ReadonlyArray<readonly [RegExp, string]> = [
  * reaches a log line through any `url` field; the value is replaced, the name
  * stays so the line still says what was sent.
  */
-const QUERY_CREDENTIAL = /([?&](?:access_token|id_token|refresh_token|token|code|state|key|api_key|apikey|secret|password|sig|signature|client_assertion|assertion|session)=)[^&#\s"'\\]*/gi;
+const QUERY_CREDENTIAL = /([?&](?:access_token|id_token|refresh_token|token|code|state|key|api_key|apikey|secret|password|sig|signature|client_assertion|assertion|session|client_secret|code_verifier|X-Amz-Signature|X-Amz-Credential|X-Goog-Signature)=)[^&#\s"'\\]*/gi;
 
 /** a log line (or field) with every URL credential replaced */
 export function redactLogText(s: string): string {
@@ -73,6 +73,13 @@ export const LOG_REDACT_PATHS = [
   "body",
   "query",
   "err.body",
+  // F4: an outbound client's error nests the request it sent (`config.headers`,
+  // `request.headers`, `response.headers`) one level down
+  "*.headers.authorization",
+  "*.headers.cookie",
+  '*.headers["x-api-key"]',
+  '*.headers["proxy-authorization"]',
+  "err.*.headers.authorization",
 ] as const;
 
 /**
@@ -117,14 +124,27 @@ export function credentialKind(req: FastifyRequest): string {
 
 /** the structured fields on every refusal/failure line */
 export function requestLogFields(req: FastifyRequest, status: number): Record<string, unknown> {
+  const route = req.routeOptions?.url ?? null;
   return {
     status,
     method: req.method,
-    route: req.routeOptions?.url ?? null,
-    path: redactLogText(req.url.split("?")[0] ?? ""),
+    route,
+    // N8: a matched route's template says where the request went; the raw path
+    // is logged only when nothing matched (a scan, a misconfigured client), and
+    // then bounded and redacted: a stray path can carry an email or a token
+    ...(route === null ? { path: unmatchedPath(req.url) } : {}),
     ip: req.ip ?? null,
     credential: credentialKind(req),
   };
+}
+
+/** the longest unmatched path a refusal line carries */
+export const UNMATCHED_PATH_MAX = 120;
+
+/** an unmatched request's path: no query, redacted, at most UNMATCHED_PATH_MAX characters */
+function unmatchedPath(url: string): string {
+  const p = redactLogText(url.split("?")[0] ?? "");
+  return p.length > UNMATCHED_PATH_MAX ? `${p.slice(0, UNMATCHED_PATH_MAX)}[truncated]` : p;
 }
 
 /**
@@ -190,7 +210,7 @@ export function parserRefusalLogFields(req: FastifyRequest, refusal: ClientRefus
 const WITHHELD = "[withheld: may quote request input]";
 
 /** an error's stack frames without its first line (the message) */
-function framesOnly(err: Error): string {
+export function framesOnly(err: Error): string {
   return (err.stack ?? "").split("\n").filter((l) => /^\s+at /.test(l)).join("\n");
 }
 
@@ -214,25 +234,88 @@ export function unhandledErrorLogFields(req: FastifyRequest, err: unknown): Reco
     route: req.routeOptions?.url ?? null,
     path: redactLogText(req.url.split("?")[0] ?? ""),
   };
-  if (err instanceof SyntaxError) {
-    return { ...base, errType: "SyntaxError", errMessage: WITHHELD, errStack: framesOnly(err) };
+  // F2: a wrapper whose `cause` is one of these shapes carries the same text
+  // (pino's serializer folds every cause's message into `message`)
+  const link = withheldLink(err);
+  if (!link) return { ...base, err };
+  const top = err as Error;
+  const causeType = link === err ? {} : { causeType: link.name };
+  if (link instanceof SyntaxError) {
+    return { ...base, errType: top.name, ...causeType, errMessage: WITHHELD, errStack: framesOnly(top) };
   }
-  const q = err as { query?: unknown; params?: unknown; cause?: unknown } | null;
-  if (err instanceof Error && typeof q?.query === "string" && Array.isArray(q.params)) {
-    const pg = (q.cause ?? {}) as { code?: unknown; constraint?: unknown; table?: unknown; column?: unknown };
-    const name = (v: unknown) => (typeof v === "string" ? v : undefined);
-    return {
-      ...base,
-      errType: err.name,
-      errMessage: WITHHELD,
-      sql: q.query,
-      params: `[${q.params.length} withheld]`,
-      pgCode: name(pg.code),
-      pgConstraint: name(pg.constraint),
-      pgTable: name(pg.table),
-      pgColumn: name(pg.column),
-      errStack: framesOnly(err),
-    };
+  const q = link as Error & { query: string; params: unknown[]; cause?: unknown };
+  const pg = (q.cause ?? {}) as { code?: unknown; constraint?: unknown; table?: unknown; column?: unknown };
+  const name = (v: unknown) => (typeof v === "string" ? v : undefined);
+  return {
+    ...base,
+    errType: top.name,
+    ...causeType,
+    errMessage: WITHHELD,
+    sql: q.query,
+    params: `[${q.params.length} withheld]`,
+    pgCode: name(pg.code),
+    pgConstraint: name(pg.constraint),
+    pgTable: name(pg.table),
+    pgColumn: name(pg.column),
+    errStack: framesOnly(top),
+  };
+}
+
+/** a failed database query: drizzle's `DrizzleQueryError` shape (SQL text plus bound params) */
+function isFailedQuery(e: unknown): boolean {
+  const q = e as { query?: unknown; params?: unknown } | null;
+  return e instanceof Error && typeof q?.query === "string" && Array.isArray(q.params);
+}
+
+/**
+ * The first link of an error's `cause` chain (the error itself included) whose
+ * message can quote request input, or null. Bounded and cycle-safe: a cause
+ * chain is caller-shaped data too.
+ */
+function withheldLink(err: unknown): Error | null {
+  const seen = new Set<unknown>();
+  let cur: unknown = err;
+  for (let depth = 0; depth < 10 && cur && typeof cur === "object" && !seen.has(cur); depth++) {
+    seen.add(cur);
+    if (cur instanceof SyntaxError || isFailedQuery(cur)) return cur as Error;
+    cur = (cur as { cause?: unknown }).cause;
   }
-  return { ...base, err };
+  return null;
+}
+
+/**
+ * N8 F1 — one line of text for an error written OUTSIDE pino (a `console.*`
+ * on a post-commit or `finally` path, which skips pino's `redact` and the
+ * `streamWrite` scrubber). The same withholding rules as the 500 line: a
+ * `SyntaxError` or a failed query anywhere in the cause chain gives its name
+ * (and the SQLSTATE) but never its message; anything else gives
+ * `Name: message` through `redactLogText`.
+ */
+export function safeErrorText(err: unknown): string {
+  const link = withheldLink(err);
+  if (link) {
+    const top = err as Error;
+    const pgCode = (link as { cause?: { code?: unknown } }).cause?.code;
+    const via = link === err ? "" : ` (cause ${link.name})`;
+    const code = typeof pgCode === "string" ? ` [SQLSTATE ${pgCode}]` : "";
+    return `${top.name}${via}${code}: ${WITHHELD}`;
+  }
+  if (err instanceof Error) return redactLogText(`${err.name}: ${err.message}`);
+  return redactLogText(String(err));
+}
+
+/**
+ * N8 F1 — a log object bound for a `console.*` write: every value that is an
+ * error becomes its `safeErrorText`, every string goes through `redactLogText`.
+ * Shallow on purpose: the objects these sites log are flat field bags
+ * (`{ err, subject, signoffId }`).
+ */
+export function safeLogObject(obj: unknown): unknown {
+  if (obj instanceof Error) return safeErrorText(obj);
+  if (!obj || typeof obj !== "object") return typeof obj === "string" ? redactLogText(obj) : obj;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    out[k] = v instanceof Error ? safeErrorText(v) : typeof v === "string" ? redactLogText(v) : v;
+  }
+  return out;
 }

@@ -358,6 +358,24 @@ const pageQuery = z.object({
   count: z.coerce.number().int().min(0).max(1000).default(200),
 });
 
+/**
+ * The `application/scim+json` body parser. N8: Node's SyntaxError quotes a
+ * snippet of the body; Fastify's own refusal carries a fixed message and maps
+ * to a 400 (SEC-03). Exported so `log-leak.test.ts` drives it offline.
+ */
+export function parseScimJsonBody(
+  _req: FastifyRequest,
+  body: string,
+  done: (err: Error | null, body?: unknown) => void,
+): void {
+  if (body.length === 0) return done(null, undefined);
+  try {
+    done(null, JSON.parse(body));
+  } catch {
+    done(new errorCodes.FST_ERR_CTP_INVALID_JSON_BODY());
+  }
+}
+
 export function registerScimRoutes(app: FastifyInstance, db: Db) {
   // ---- audit ---------------------------------------------------------------
   /**
@@ -646,16 +664,7 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
     scope.addContentTypeParser(
       "application/scim+json",
       { parseAs: "string" },
-      (_req, body: string, done) => {
-        if (body.length === 0) return done(null, undefined);
-        try {
-          done(null, JSON.parse(body));
-        } catch {
-          // N8: Node's SyntaxError quotes a snippet of the body; Fastify's own
-          // refusal carries a fixed message and maps to a 400 (SEC-03)
-          done(new errorCodes.FST_ERR_CTP_INVALID_JSON_BODY());
-        }
-      },
+      parseScimJsonBody,
     );
 
     /**
