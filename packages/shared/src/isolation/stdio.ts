@@ -132,7 +132,9 @@ const frameData = z
   .min(1)
   .refine((s) => stdioLineBytes(s) <= STDIO_FRAME_MAX_BYTES && !s.includes("\n"), {
     message: `one line of at most ${STDIO_FRAME_MAX_BYTES} bytes`,
-  });
+  })
+  // a raw NUL is never a JSON-RPC line (JSON escapes it): refused as `invalid_body`, never a server error (review)
+  .refine((s) => !s.includes("\u0000"), { message: "no NUL" });
 
 /** the server's entry point inside the image and its fixed argv (as registered), sent to the sandbox init at release */
 export const stdioWorkloadSchema = z

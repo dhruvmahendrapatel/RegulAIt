@@ -9,7 +9,8 @@
  *
  *   stdio_relay_sessions   the holder (a random id per process) and its LEASE, which it renews every
  *                          `STDIO_OWNER_HEARTBEAT_MS`; the sealed `start` line; the counters; one window at a time
- *   stdio_relay_frames     stdin frames until the executor acknowledges them, stdout frames until the holder takes them
+ *   stdio_relay_frames     stdin frames until the executor acknowledges them, stdout frames until the holder takes them,
+ *                          each SEALED at rest (below)
  *
  * WHO MAY READ WHAT. A route reads only the row and frames of the offer in its path AND of the executor its proof
  * names (every query joins on both), so one executor never reads another's frames, and no request reads a session
@@ -21,11 +22,19 @@
  * answers 409 `session_lost`, which the executor treats as final and stops the sandbox. A holder that comes back
  * finds its row ended and fails its call as lost. Nothing ever takes a session over.
  *
+ * FRAMES ARE SEALED AT REST (ADR-0180; review finding 3). JSON-RPC stdin and stdout carry tool arguments and results,
+ * so a frame is stored only as AES-256-GCM under a key derived from the gateway's data key (the same root as the
+ * sealed `start` line), with the offer id, the direction and the sequence number as associated data: a frame moved
+ * to another session, turned around, or put in another place in the order does not open. A frame that does not open
+ * (another root: no shared data key; or altered at rest) is never delivered: the session ends LOST (`unsealed`) and
+ * the loss is recorded, fail closed. Without a data key each process has its own random root, so one replica works
+ * and a second one cannot read the first one's frames.
+ *
  * BOUNDS. One frame ≤ 768 KiB; stdin ≤ 4 MiB per session (the holder refuses more); stdout ≤ 4 MiB buffered (the
  * route refuses more and the session is lost: the holder is not draining it). An ended row stays 5 minutes so a late
  * window gets `offer_unavailable`, then `sweepStdioRelay` deletes it with its frames.
  */
-import { randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes, randomUUID } from "node:crypto";
 import { sql, type Db } from "@regulait/db";
 import { STDIO_POST_MAX_FRAMES, STDIO_SESSION_BUFFER_MAX_BYTES, stdioLineBytes } from "@regulait/shared";
 
@@ -42,15 +51,53 @@ export const STDIO_RELAY_ENDED_RETENTION_MS = 5 * 60_000;
 /** a row whose lease lapsed this long ago is deleted whatever its state */
 export const STDIO_RELAY_STALE_MS = 60 * 60_000;
 
-/** how a session ended (`end_code`); the last two are LOSSES (our own refusal, never the server's failure) */
-export type StdioRelayEndCode = "ended" | "sequence" | "lease_expired" | "buffer_full";
-export const STDIO_RELAY_LOST_CODES: ReadonlySet<StdioRelayEndCode> = new Set(["lease_expired", "buffer_full"]);
-export const STDIO_RELAY_LOST_TEXT: Record<"lease_expired" | "buffer_full", string> = {
+/** how a session ended (`end_code`); the last three are LOSSES (our own refusal, never the server's failure) */
+export type StdioRelayEndCode = "ended" | "sequence" | "lease_expired" | "buffer_full" | "unsealed";
+export type StdioRelayLostCode = "lease_expired" | "buffer_full" | "unsealed";
+export const STDIO_RELAY_LOST_CODES: ReadonlySet<StdioRelayEndCode> = new Set<StdioRelayLostCode>(["lease_expired", "buffer_full", "unsealed"]);
+export const STDIO_RELAY_LOST_TEXT: Record<StdioRelayLostCode, string> = {
   lease_expired: "the gateway replica holding the session stopped renewing it",
   buffer_full: "the gateway replica holding the session stopped taking its output",
+  unsealed: "a relayed frame of the session did not open on this gateway replica (no shared data key, or altered at rest)",
 };
 
 const rowsOf = <R>(r: unknown) => (r as { rows: R[] }).rows;
+
+// ---------------------------------------------------------------------------
+// Frames at rest: sealed (AES-256-GCM; the offer, the direction and the sequence number as associated data)
+// ---------------------------------------------------------------------------
+
+export type StdioFrameDirection = "in" | "out";
+const frameSealKeyOf = (root: Buffer) => Buffer.from(hkdfSync("sha256", root, Buffer.alloc(0), "regulait/adr0190/stdio-frame-seal/v1", 32));
+/** a random root until the gateway sets its own (`setStdioMacRoot`): never a fixed key */
+let frameSealKey: Buffer = frameSealKeyOf(randomBytes(32));
+/** the root the frame key is derived from (the session MAC root: every replica with the data key derives the same) */
+export function setStdioFrameSealRoot(root: Buffer): void {
+  frameSealKey = frameSealKeyOf(root);
+}
+const frameAad = (offerId: string, direction: StdioFrameDirection, seq: number) => Buffer.from(`regulait/adr0190/stdio-frame/v1\n${offerId}\n${direction}\n${seq}`, "utf8");
+
+/** one frame as stored: `iv.tag.ciphertext`, base64url (the table's CHECK holds it to this shape and its size) */
+export function sealStdioFrame(offerId: string, direction: StdioFrameDirection, seq: number, data: string, key: Buffer = frameSealKey): string {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", key, iv);
+  c.setAAD(frameAad(offerId, direction, seq));
+  const ct = Buffer.concat([c.update(data, "utf8"), c.final()]);
+  return [iv, c.getAuthTag(), ct].map((b) => b.toString("base64url")).join(".");
+}
+/** null when the frame does not open here: another root, or another offer, direction or place in the order, or altered */
+export function openStdioFrame(offerId: string, direction: StdioFrameDirection, seq: number, sealed: string, key: Buffer = frameSealKey): string | null {
+  try {
+    const [iv, tag, ct, extra] = sealed.split(".").map((p) => Buffer.from(p, "base64url"));
+    if (!iv || !tag || !ct || extra || iv.length !== 12 || tag.length !== 16) return null;
+    const d = createDecipheriv("aes-256-gcm", key, iv);
+    d.setAAD(frameAad(offerId, direction, seq));
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
 /** a uuid list as one bound parameter (`= ANY(…)`), never spliced into the text */
 const uuidArray = (ids: readonly string[]) => sql`string_to_array(${ids.join(",")}, ',')::uuid[]`;
 
@@ -198,21 +245,44 @@ export async function stdioInputFrom(
   executorId: string,
   offerId: string,
   cursor: number,
-): Promise<{ frames: Array<{ seq: number; data: string }>; closed: boolean; ended: boolean; leaseLive: boolean }> {
+): Promise<{ frames: Array<{ seq: number; data: string }>; unopened: boolean; closed: boolean; ended: boolean; leaseLive: boolean }> {
   const state = rowsOf<{ closed: boolean; ended: boolean; lease_live: boolean }>(
     await db.execute(sql`
       SELECT closed_at IS NOT NULL AS closed, ended_at IS NOT NULL AS ended, lease_expires_at > now() AS lease_live
         FROM stdio_relay_sessions WHERE offer_id = ${offerId} AND executor_id = ${executorId}`),
   )[0];
-  if (!state) return { frames: [], closed: true, ended: true, leaseLive: false };
-  const frames = rowsOf<{ seq: string; data: string }>(
+  if (!state) return { frames: [], unopened: false, closed: true, ended: true, leaseLive: false };
+  const stored = rowsOf<{ seq: string; data_sealed: string }>(
     await db.execute(sql`
-      SELECT f.seq, f.data FROM stdio_relay_frames f
+      SELECT f.seq, f.data_sealed FROM stdio_relay_frames f
         JOIN stdio_relay_sessions s ON s.offer_id = f.offer_id
        WHERE f.offer_id = ${offerId} AND s.executor_id = ${executorId} AND f.direction = 'in' AND f.seq >= ${cursor}
        ORDER BY f.seq LIMIT ${STDIO_POST_MAX_FRAMES}`),
-  ).map((f) => ({ seq: Number(f.seq), data: f.data }));
-  return { frames, closed: state.closed, ended: state.ended, leaseLive: state.lease_live };
+  );
+  // the frames up to the first that does not open (`unopened`: the caller ends the session lost, fail closed)
+  const frames: Array<{ seq: number; data: string }> = [];
+  for (const f of stored) {
+    const data = openStdioFrame(offerId, "in", Number(f.seq), f.data_sealed);
+    if (data === null) return { frames, unopened: true, closed: state.closed, ended: state.ended, leaseLive: state.lease_live };
+    frames.push({ seq: Number(f.seq), data });
+  }
+  return { frames, unopened: false, closed: state.closed, ended: state.ended, leaseLive: state.lease_live };
+}
+
+/**
+ * End a session a frame of which did not open (`unsealed`, a loss): by the route, filtered on the executor its proof
+ * names, or by the holder, on its own rows. True only for the one caller whose UPDATE moved the row (it records it).
+ */
+export async function endUnsealedStdioSession(db: Db, offerId: string, by: { executorId: string } | "holder"): Promise<boolean> {
+  const whose = by === "holder" ? sql`owner_replica = ${STDIO_REPLICA_ID}` : sql`executor_id = ${by.executorId}`;
+  const moved = rowsOf<{ offer_id: string }>(
+    await db.execute(sql`
+      UPDATE stdio_relay_sessions SET ended_at = now(), end_code = 'unsealed', start_sealed = NULL, window_token = NULL, window_until = NULL
+       WHERE offer_id = ${offerId} AND ${whose} AND ended_at IS NULL
+       RETURNING offer_id`),
+  );
+  if (moved.length > 0) await db.execute(sql`DELETE FROM stdio_relay_frames WHERE offer_id = ${offerId}`);
+  return moved.length > 0;
 }
 
 export type StdioOutputAppend =
@@ -251,7 +321,9 @@ export async function appendStdioOutput(db: Db, executorId: string, offerId: str
       return { kind: "buffer_full" as const };
     }
     for (const f of sized) {
-      await t.execute(sql`INSERT INTO stdio_relay_frames (offer_id, direction, seq, data, bytes) VALUES (${offerId}, 'out', ${f.seq}, ${f.data}, ${f.bytes})`);
+      await t.execute(sql`
+        INSERT INTO stdio_relay_frames (offer_id, direction, seq, data_sealed, bytes)
+        VALUES (${offerId}, 'out', ${f.seq}, ${sealStdioFrame(offerId, "out", f.seq, f.data)}, ${f.bytes})`);
     }
     await t.execute(sql`
       UPDATE stdio_relay_sessions
@@ -301,7 +373,9 @@ export async function appendStdioInput(db: Db, offerId: string, from: number, fr
     );
     if (moved.length === 0) return false;
     for (const [i, f] of frames.entries()) {
-      await t.execute(sql`INSERT INTO stdio_relay_frames (offer_id, direction, seq, data, bytes) VALUES (${offerId}, 'in', ${from + i}, ${f.data}, ${f.bytes})`);
+      await t.execute(sql`
+        INSERT INTO stdio_relay_frames (offer_id, direction, seq, data_sealed, bytes)
+        VALUES (${offerId}, 'in', ${from + i}, ${sealStdioFrame(offerId, "in", from + i, f.data)}, ${f.bytes})`);
     }
     return true;
   });
@@ -327,22 +401,30 @@ export async function stdioHolderView(db: Db, offerIds: readonly string[]): Prom
   ).map((r) => ({ offerId: r.offer_id, offerStatus: r.status, inAckedTo: Number(r.in_acked_to), outNextSeq: Number(r.out_next_seq), eof: r.eof, endCode: r.end_code }));
 }
 
-/** the holder takes its stdout frames from `from` on (in order) and frees their space */
-export async function takeStdioOutput(db: Db, offerId: string, from: number): Promise<Array<{ seq: number; data: string }>> {
+/**
+ * The holder takes its stdout frames from `from` on (in order) and frees their space. Null when any of them does not
+ * open (the holder ends the session lost, `unsealed`: none of them is delivered, fail closed).
+ */
+export async function takeStdioOutput(db: Db, offerId: string, from: number): Promise<Array<{ seq: number; data: string }> | null> {
   return db.transaction(async (tx) => {
     const t = tx as unknown as Db;
-    const taken = rowsOf<{ seq: string; data: string; bytes: number }>(
+    const taken = rowsOf<{ seq: string; data_sealed: string; bytes: number }>(
       await t.execute(sql`
         DELETE FROM stdio_relay_frames f USING stdio_relay_sessions s
          WHERE f.offer_id = ${offerId} AND s.offer_id = f.offer_id AND s.owner_replica = ${STDIO_REPLICA_ID}
            AND f.direction = 'out' AND f.seq >= ${from}
-        RETURNING f.seq, f.data, f.bytes`),
+        RETURNING f.seq, f.data_sealed, f.bytes`),
     )
-      .map((f) => ({ seq: Number(f.seq), data: f.data, bytes: Number(f.bytes) }))
+      .map((f) => ({ seq: Number(f.seq), data: openStdioFrame(offerId, "out", Number(f.seq), f.data_sealed), bytes: Number(f.bytes) }))
       .sort((a, b) => a.seq - b.seq);
     const freed = taken.reduce((n, f) => n + f.bytes, 0);
     if (freed > 0) await t.execute(sql`UPDATE stdio_relay_sessions SET out_buffered_bytes = GREATEST(0, out_buffered_bytes - ${freed}) WHERE offer_id = ${offerId}`);
-    return taken.map(({ seq, data }) => ({ seq, data }));
+    const opened: Array<{ seq: number; data: string }> = [];
+    for (const f of taken) {
+      if (f.data === null) return null;
+      opened.push({ seq: f.seq, data: f.data });
+    }
+    return opened;
   });
 }
 

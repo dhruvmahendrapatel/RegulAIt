@@ -10,6 +10,10 @@
  *  - THE SEALED START LINE: it opens only for its own offer (the offer id is the associated data), never after a
  *    byte is altered, and never under another replica's root (a replica without the shared data key cannot open it,
  *    so it cannot hand the sandbox a workload or an engine task's secret).
+ *  - THE SEALED FRAMES (review finding 3, ADR-0180): a stored frame opens only for its own offer, direction and
+ *    place in the order (all three are the associated data), never after a byte is altered, and never under another
+ *    root (no shared data key: fail closed); the stored text never carries the frame in the clear.
+ *  - A RAW NUL in a stdout frame (review finding 2) is refused by the POST body schema (`invalid_body`), never a 500.
  *  - THE VOCABULARY: both new refusals are in the fixed list, and the lost-session text the holder fails its call
  *    with is the one the routes record.
  * The database half (ownership, leases, loss, isolation between sessions and executors, retention, the 0185 guards)
@@ -17,9 +21,17 @@
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { EXECUTOR_STDIO_REFUSALS, stdioFrameMacValid, stdioMacKey, type ExecutorStdioMessage } from "@regulait/shared";
+import { EXECUTOR_STDIO_REFUSALS, executorStdioPostSchema, stdioFrameMacValid, stdioMacKey, type ExecutorStdioMessage } from "@regulait/shared";
 import { openStdioStart, sealStdioStart, setStdioMacRoot, StdioSession, stdioSecretFor } from "./executor-stdio.js";
-import { STDIO_OWNER_HEARTBEAT_MS, STDIO_OWNER_LEASE_MS, STDIO_RELAY_LOST_CODES, stdioRouteDecision, type StdioRouteState } from "./stdio-relay.js";
+import {
+  STDIO_OWNER_HEARTBEAT_MS,
+  STDIO_OWNER_LEASE_MS,
+  STDIO_RELAY_LOST_CODES,
+  openStdioFrame,
+  sealStdioFrame,
+  stdioRouteDecision,
+  type StdioRouteState,
+} from "./stdio-relay.js";
 
 const live = { ended: false, leaseLive: true };
 
@@ -74,12 +86,12 @@ describe("ADR-0190 I4 multi-replica: the routing rule", () => {
     expect(stdioRouteDecision(state, allowPending)).toEqual(want);
   });
 
-  it("every refusal code the rule answers is in the fixed vocabulary; only the two lease ends are losses", () => {
+  it("every refusal code the rule answers is in the fixed vocabulary; only the lease, buffer and seal ends are losses", () => {
     for (const [, state, allowPending] of cases) {
       const d = stdioRouteDecision(state, allowPending);
       if (d.kind === "refuse") expect(EXECUTOR_STDIO_REFUSALS).toContain(d.code);
     }
-    expect([...STDIO_RELAY_LOST_CODES].sort()).toEqual(["buffer_full", "lease_expired"]);
+    expect([...STDIO_RELAY_LOST_CODES].sort()).toEqual(["buffer_full", "lease_expired", "unsealed"]);
   });
 
   it("the holder renews at least twice within one lease, so one missed beat is never a loss", () => {
@@ -131,5 +143,56 @@ describe("ADR-0190 I4 multi-replica: the sealed start line", () => {
     // and its MAC would not verify either: the two fail together
     const other = new StdioSession(s.offerId, s.executorId, WORKLOAD);
     expect(other.macKey.equals(s.macKey)).toBe(false);
+  });
+});
+
+describe("ADR-0190 I4 multi-replica: frames are sealed at rest (review finding 3)", () => {
+  const key = randomBytes(32);
+  const offerId = randomUUID();
+  const line = '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"lookup","arguments":{"email":"user@example.org"}}}';
+
+  it("opens for its own offer, direction and sequence number; the stored text is not the frame", () => {
+    const sealed = sealStdioFrame(offerId, "in", 3, line, key);
+    expect(openStdioFrame(offerId, "in", 3, sealed, key)).toBe(line);
+    expect(sealed).not.toContain("user@example.org");
+    expect(sealed).toMatch(/^[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]+$/);
+    // the table's CHECK: the stored length follows from the plaintext size exactly
+    const bytes = Buffer.byteLength(line, "utf8");
+    expect(sealed.length).toBe(40 + Math.floor((bytes * 4 + 2) / 3));
+    // a fresh iv every time: two seals of one frame differ
+    expect(sealStdioFrame(offerId, "in", 3, line, key)).not.toBe(sealed);
+  });
+
+  it("never opens moved: another offer, the other direction, or another place in the order (reordered)", () => {
+    const first = sealStdioFrame(offerId, "out", 0, '"first"', key);
+    const second = sealStdioFrame(offerId, "out", 1, '"second"', key);
+    expect(openStdioFrame(randomUUID(), "out", 0, first, key)).toBeNull();
+    expect(openStdioFrame(offerId, "in", 0, first, key)).toBeNull();
+    // swapped at rest: neither opens in the other's place
+    expect(openStdioFrame(offerId, "out", 0, second, key)).toBeNull();
+    expect(openStdioFrame(offerId, "out", 1, first, key)).toBeNull();
+  });
+
+  it("never opens altered, malformed, or under another root (no shared data key: fail closed)", () => {
+    const sealed = sealStdioFrame(offerId, "in", 0, line, key);
+    const [iv, tag, ct] = sealed.split(".");
+    for (const part of [0, 1, 2]) {
+      const pieces = [iv!, tag!, ct!].map((p) => Buffer.from(p, "base64url"));
+      pieces[part]![0] = pieces[part]![0]! ^ 1;
+      expect(openStdioFrame(offerId, "in", 0, pieces.map((b) => b.toString("base64url")).join("."), key)).toBeNull();
+    }
+    expect(openStdioFrame(offerId, "in", 0, `${sealed}.x`, key)).toBeNull();
+    expect(openStdioFrame(offerId, "in", 0, "not.a.seal", key)).toBeNull();
+    expect(openStdioFrame(offerId, "in", 0, line, key)).toBeNull();
+    expect(openStdioFrame(offerId, "in", 0, sealed, randomBytes(32))).toBeNull();
+  });
+});
+
+describe("ADR-0190 I4 multi-replica: a raw NUL in stdout (review finding 2)", () => {
+  it("is refused by the POST body (the route answers invalid_body), never stored or a server error", () => {
+    // JSON's own escape (six characters, no NUL byte) is a valid line
+    expect(executorStdioPostSchema.safeParse({ frames: [{ seq: 0, data: '{"jsonrpc":"2.0","id":1,"result":"a\\u0000b"}' }] }).success).toBe(true);
+    expect(executorStdioPostSchema.safeParse({ frames: [{ seq: 0, data: "{\"jsonrpc\":\"2.0\"}\u0000" }] }).success).toBe(false);
+    expect(executorStdioPostSchema.safeParse({ frames: [{ seq: 0, data: "\u0000" }] }).success).toBe(false);
   });
 });

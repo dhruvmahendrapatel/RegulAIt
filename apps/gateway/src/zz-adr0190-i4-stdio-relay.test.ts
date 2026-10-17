@@ -12,6 +12,10 @@
  *  - FRAMES AND BOUNDS: stdin is acknowledged with `from` (dropped below it; `from` past the written frames or below
  *    the acknowledged ones is refused); stdout is contiguous (a gap ends the session `sequence`) and bounded at
  *    4 MiB buffered (`buffer_full`, a loss); one window at a time on every replica.
+ *  - SEALED AT REST (review finding 3): no frame is stored in the clear (the CHECK refuses plaintext); a frame put in
+ *    another place in the order does not open, and the session ends `unsealed` (a loss) on the route's or the
+ *    holder's side, exactly once.
+ *  - ONE POISONED SESSION (review finding 1) does not stop the replica's lease renewal: it is lost alone.
  *  - RETENTION: an ended row is deleted after 5 minutes and a long-lapsed one after an hour, frames with them.
  *  - THE 0185 GUARDS: both new functions pin their search_path; both tables refuse TRUNCATE; frames are never
  *    rewritten.
@@ -24,21 +28,26 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createDb, runMigrations, sql, type Db } from "@regulait/db";
 import { executionProfileDigest, SHIPPED_EXECUTION_PROFILES, STDIO_SESSION_BUFFER_MAX_BYTES } from "@regulait/shared";
-import { holdStdioSession, liveStdioSessions, StdioSession, useRelayDb } from "./executor-stdio.js";
+import { holdStdioSession, liveStdioSessions, setStdioRelayFailingMsForTest, StdioSession, useRelayDb } from "./executor-stdio.js";
 import {
+  STDIO_OWNER_HEARTBEAT_MS,
   STDIO_REPLICA_ID,
   ackStdioInput,
   appendStdioInput,
   appendStdioOutput,
   claimStdioWindow,
   endLapsedStdioSession,
+  endUnsealedStdioSession,
+  markStdioClosed,
   markStdioEnded,
   persistStdioSession,
   releaseStdioWindow,
   renewStdioLeases,
+  sealStdioFrame,
+  stdioHolderView,
   stdioInputFrom,
   stdioRouteDecision,
   stdioRouteState,
@@ -168,10 +177,14 @@ describe("ADR-0190 I4 multi-replica stdio: ownership and isolation", () => {
     expect(await appendStdioInput(db, offerId, 0, [{ data: "{}", bytes: 2 }])).toBe(false);
     expect(await appendStdioOutput(db, executorA, offerId, [{ seq: 0, data: '{"jsonrpc":"2.0"}' }], false)).toMatchObject({ kind: "ok" });
     expect(await takeStdioOutput(db, offerId, 0)).toEqual([]);
+    await markStdioClosed(db, offerId);
     await markStdioEnded(db, offerId);
     await renewStdioLeases(db, [offerId]);
+    expect(await endUnsealedStdioSession(db, offerId, "holder")).toBe(false);
+    expect(await stdioHolderView(db, [offerId])).toEqual([]);
     const r = await sessionRow(offerId);
     expect(r).toMatchObject({ ended: false, in_next_seq: 0, out_next_seq: 1 });
+    expect(rows(await db.execute(sql`select 1 from stdio_relay_sessions where offer_id = ${offerId} and closed_at is null`))).toHaveLength(1);
     // but every replica's ROUTES serve it (that is the point: the executor may reach any replica)
     expect(stdioRouteDecision((await stdioRouteState(db, executorA, offerId)).state, true)).toEqual({ kind: "serve" });
   });
@@ -215,7 +228,7 @@ describe("ADR-0190 I4 multi-replica stdio: frames, windows and bounds", () => {
     expect((await stdioInputFrom(db, executorA, offerId, 0)).frames.map((f) => f.seq)).toEqual([1]);
     expect(await ackStdioInput(db, executorA, offerId, 0)).toBe(false);
     expect(await sessionRow(offerId)).toMatchObject({ in_next_seq: 2, in_acked_to: 1 });
-    await refusedWith(sql`update stdio_relay_frames set data = '"forged"' where offer_id = ${offerId}`, /never rewritten/);
+    await refusedWith(sql`update stdio_relay_frames set data_sealed = data_sealed where offer_id = ${offerId}`, /never rewritten/);
   });
 
   it("one window at a time across replicas; a released window can be claimed again", async () => {
@@ -246,7 +259,7 @@ describe("ADR-0190 I4 multi-replica stdio: frames, windows and bounds", () => {
     let out: Awaited<ReturnType<typeof appendStdioOutput>> = { kind: "gone" };
     // the holder takes the first frame (so the counter goes down), then is "stuck"
     expect(await appendStdioOutput(db, executorA, offerId, [{ seq: seq++, data: big }], false)).toMatchObject({ kind: "ok" });
-    expect((await takeStdioOutput(db, offerId, 0)).map((f) => f.seq)).toEqual([0]);
+    expect((await takeStdioOutput(db, offerId, 0))?.map((f) => f.seq)).toEqual([0]);
     expect((await sessionRow(offerId)).out_buffered_bytes).toBe(0);
     for (let i = 0; i < Math.ceil(STDIO_SESSION_BUFFER_MAX_BYTES / big.length) + 1; i++) {
       out = await appendStdioOutput(db, executorA, offerId, [{ seq: seq++, data: big }], false);
@@ -264,6 +277,9 @@ describe("ADR-0190 I4 multi-replica stdio: the lease and session loss", () => {
     await db.execute(sql`update stdio_relay_sessions set lease_expires_at = now() - interval '1 second' where offer_id = ${offerId}`);
     const st = await stdioRouteState(db, executorA, offerId);
     expect(stdioRouteDecision(st.state, true)).toEqual({ kind: "refuse", code: "session_lost", record: true, endLease: true });
+    // another executor's route never ends it
+    expect(await endLapsedStdioSession(db, executorB, offerId)).toBe(false);
+    expect((await sessionRow(offerId)).ended).toBe(false);
     expect(await endLapsedStdioSession(db, executorA, offerId)).toBe(true);
     // the second replica to notice moves nothing
     expect(await endLapsedStdioSession(db, executorA, offerId)).toBe(false);
@@ -338,6 +354,114 @@ describe("ADR-0190 I4 multi-replica stdio: the lease and session loss", () => {
   });
 });
 
+describe("ADR-0190 I4 multi-replica stdio: frames sealed at rest (review finding 3)", () => {
+  const frameRows = (offerId: string) =>
+    db.execute(sql`select direction, seq::int, data_sealed, bytes from stdio_relay_frames where offer_id = ${offerId} order by direction, seq`).then((r) =>
+      rows<{ direction: "in" | "out"; seq: number; data_sealed: string; bytes: number }>(r),
+    );
+
+  it("no frame is stored in the clear, and the table refuses one that is", async () => {
+    const offerId = await ownedSession();
+    const secretArg = `"user-${RUN}@example.org"`;
+    expect(await appendStdioInput(db, offerId, 0, [{ data: secretArg, bytes: secretArg.length }])).toBe(true);
+    expect(await appendStdioOutput(db, executorA, offerId, [{ seq: 0, data: secretArg }], false)).toMatchObject({ kind: "ok" });
+    const stored = await frameRows(offerId);
+    expect(stored).toHaveLength(2);
+    for (const f of stored) {
+      expect(f.data_sealed).not.toContain(`user-${RUN}`);
+      expect(f.bytes).toBe(secretArg.length);
+    }
+    await refusedWith(
+      sql`insert into stdio_relay_frames (offer_id, direction, seq, data_sealed, bytes) values (${offerId}, 'in', 1, ${secretArg}, ${secretArg.length})`,
+      /stdio_relay_frames_sealed_check/,
+    );
+    // and they open for the reader they are for
+    expect((await stdioInputFrom(db, executorA, offerId, 0)).frames).toEqual([{ seq: 0, data: secretArg }]);
+    expect(await takeStdioOutput(db, offerId, 0)).toEqual([{ seq: 0, data: secretArg }]);
+  });
+
+  it("stdin put in another place in the order does not open: the route ends the session `unsealed`, once", async () => {
+    const offerId = await ownedSession();
+    expect(await appendStdioInput(db, offerId, 0, [{ data: '"i0"', bytes: 4 }, { data: '"i1"', bytes: 4 }])).toBe(true);
+    const [f0, f1] = await frameRows(offerId);
+    // swapped at rest (frames cannot be rewritten in place: deleted and written back in each other's place)
+    await db.execute(sql`delete from stdio_relay_frames where offer_id = ${offerId}`);
+    await db.execute(sql`insert into stdio_relay_frames (offer_id, direction, seq, data_sealed, bytes)
+                         values (${offerId}, 'in', 0, ${f1!.data_sealed}, 4), (${offerId}, 'in', 1, ${f0!.data_sealed}, 4)`);
+    const st = await stdioInputFrom(db, executorA, offerId, 0);
+    expect(st).toMatchObject({ frames: [], unopened: true });
+    expect(await endUnsealedStdioSession(db, offerId, { executorId: executorB })).toBe(false);
+    expect(await endUnsealedStdioSession(db, offerId, { executorId: executorA })).toBe(true);
+    expect(await endUnsealedStdioSession(db, offerId, { executorId: executorA })).toBe(false);
+    expect(await sessionRow(offerId)).toMatchObject({ ended: true, end_code: "unsealed" });
+    expect(await frameRows(offerId)).toEqual([]);
+  });
+
+  it("stdout reordered at rest is never delivered (null)", async () => {
+    const offerId = await ownedSession();
+    expect(await appendStdioOutput(db, executorA, offerId, [{ seq: 0, data: '"o0"' }, { seq: 1, data: '"o1"' }], false)).toMatchObject({ kind: "ok" });
+    const [f0, f1] = await frameRows(offerId);
+    await db.execute(sql`delete from stdio_relay_frames where offer_id = ${offerId}`);
+    await db.execute(sql`insert into stdio_relay_frames (offer_id, direction, seq, data_sealed, bytes)
+                         values (${offerId}, 'out', 0, ${f1!.data_sealed}, 4), (${offerId}, 'out', 1, ${f0!.data_sealed}, 4)`);
+    expect(await takeStdioOutput(db, offerId, 0)).toBeNull();
+  });
+
+  it("THE HOLDER: stdout sealed under another root (no shared data key) fails its call as LOST `unsealed`", async () => {
+    useRelayDb(db);
+    const offerId = await placedOffer(executorA);
+    const s = new StdioSession(offerId, executorA, WORKLOAD);
+    const got: string[] = [];
+    s.onLine = (l) => got.push(l);
+    expect(holdStdioSession(s)).toBe(true);
+    held.push(s);
+    s.watched = true;
+    await until(async () => rows(await db.execute(sql`select 1 from stdio_relay_sessions where offer_id = ${offerId}`)).length === 1);
+    // what a replica with another data key would have stored
+    await db.execute(sql`insert into stdio_relay_frames (offer_id, direction, seq, data_sealed, bytes)
+                         values (${offerId}, 'out', 0, ${sealStdioFrame(offerId, "out", 0, '"x"', randomBytes(32))}, 3)`);
+    await db.execute(sql`update stdio_relay_sessions set out_next_seq = 1, out_buffered_bytes = 3 where offer_id = ${offerId}`);
+    await until(() => s.ended);
+    expect(got).toEqual([]);
+    expect(s.lostReason).toMatch(/did not open/);
+    expect(await sessionRow(offerId)).toMatchObject({ ended: true, end_code: "unsealed" });
+  });
+});
+
+describe("ADR-0190 I4 multi-replica stdio: one poisoned session (review finding 1)", () => {
+  it("does not stop the replica's lease renewal: the healthy session's lease moves on, the poisoned one is lost alone", { timeout: 45_000 }, async () => {
+    useRelayDb(db);
+    // long enough that a heartbeat falls while the poisoned session is still held and failing
+    const failingMs = STDIO_OWNER_HEARTBEAT_MS * 2 + 1_000;
+    setStdioRelayFailingMsForTest(failingMs);
+    try {
+      const offerId = await placedOffer(executorA);
+      const good = new StdioSession(offerId, executorA, WORKLOAD);
+      expect(holdStdioSession(good)).toBe(true);
+      held.push(good);
+      good.watched = true;
+      await until(async () => rows(await db.execute(sql`select 1 from stdio_relay_sessions where offer_id = ${offerId}`)).length === 1);
+      const leaseOf = async () => (await one<{ ms: number }>(sql`select (extract(epoch from lease_expires_at) * 1000)::float8 as ms from stdio_relay_sessions where offer_id = ${offerId}`)).ms;
+      // every statement for this session throws (its executor id is not a uuid): a persistent per-session fault
+      const poisoned = new StdioSession(await placedOffer(executorA), "not-a-uuid", WORKLOAD);
+      expect(holdStdioSession(poisoned)).toBe(true);
+      held.push(poisoned);
+      await until(() => poisoned.relayFailingSince !== null);
+      const before = await leaseOf();
+      // the healthy session's lease is renewed on the next heartbeat WHILE the poisoned one fails every tick
+      await until(async () => (await leaseOf()) > before, STDIO_OWNER_HEARTBEAT_MS + 2_000);
+      expect(poisoned.ended).toBe(false);
+      // then the poisoned session alone is lost (and recorded); the healthy one stays live
+      await until(() => poisoned.ended, failingMs + 5_000);
+      expect(poisoned.lostReason).toMatch(/could not relay/);
+      expect(good.ended).toBe(false);
+      expect(await sessionRow(offerId)).toMatchObject({ ended: false });
+    } finally {
+      setStdioRelayFailingMsForTest(null);
+    }
+  });
+});
+
 describe("ADR-0190 I4 multi-replica stdio: retention", () => {
   it("an ended row goes after 5 minutes, a long-lapsed one after an hour, frames with them; a live row stays", async () => {
     const ended = await placedOffer(executorA);
@@ -347,7 +471,7 @@ describe("ADR-0190 I4 multi-replica stdio: retention", () => {
                          values (${ended}, ${executorA}, ${randomUUID()}, now() - interval '10 minutes', now() - interval '6 minutes', 'ended')`);
     await db.execute(sql`insert into stdio_relay_sessions (offer_id, executor_id, owner_replica, lease_expires_at, in_next_seq)
                          values (${stale}, ${executorA}, ${randomUUID()}, now() - interval '2 hours', 1)`);
-    await db.execute(sql`insert into stdio_relay_frames (offer_id, direction, seq, data, bytes) values (${stale}, 'in', 0, '{}', 2)`);
+    await db.execute(sql`insert into stdio_relay_frames (offer_id, direction, seq, data_sealed, bytes) values (${stale}, 'in', 0, ${sealStdioFrame(stale, "in", 0, "{}")}, 2)`);
     expect(await sweepStdioRelay(db)).toBeGreaterThanOrEqual(2);
     const left = rows<{ offer_id: string }>(await db.execute(sql`select offer_id from stdio_relay_sessions where offer_id in (${ended}, ${stale}, ${kept})`)).map((r) => r.offer_id);
     expect(left).toEqual([kept]);

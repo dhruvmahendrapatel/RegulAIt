@@ -2012,8 +2012,8 @@ journal entry (idx 204) follows 0203. The number was 0206 as first written; the 
      - the sealed `start` line;
      - the counters (`in_next_seq`, `in_acked_to`, `out_next_seq`, `out_buffered_bytes`);
      - one window token at a time, with an expiry if its replica dies;
-     - `closed_at`, `eof_at`, `ended_at` and an `end_code` limited by a CHECK to `ended`, `sequence`, `lease_expired`
-       or `buffer_full`. There is no free-text column, so the ADR-0102 prose-scrub registry is unaffected.
+     - `closed_at`, `eof_at`, `ended_at` and an `end_code` limited by a CHECK to `ended`, `sequence`, `lease_expired`,
+       `buffer_full` or (point 9) `unsealed`. There is no free-text column, so the ADR-0102 prose-scrub registry is unaffected.
    - A frame row is one stdin or stdout line (at most 768 KiB). Stdin frames are deleted once the executor's `from`
      acknowledges them. Stdout frames are deleted once the holder takes them. All of a session's frames go when it
      ends.
@@ -2088,6 +2088,42 @@ journal entry (idx 204) follows 0203. The number was 0206 as first written; the 
      (`tasksByRun`). Only the executor side of an engine task's session is multi-replica now.
    - No take-over: a session whose holder dies is lost, never resumed elsewhere. Resuming would need the MCP client's
      state, which lives only in the holder.
+9. **Review fixes (the independent review of PR #417, findings 1 to 4).** These supersede the points above where they
+   differ; migration 0204 was still unmerged, so it was edited in place.
+   - **Finding 1 (Medium): one session's fault no longer stalls the replica's leases.** `relayOnce` now renews the
+     leases FIRST, in its own catch. The work for each session (its row, stdin and close; then what the routes did)
+     runs in its own catch. A session whose work fails on every tick for one lease length (15 s, so a database outage
+     loses no session earlier than its lease would) is lost on its own, and the loss is recorded (`where: holder`).
+     The replica's other sessions keep their leases. Ending rows and the sweep also each have their own catch. Test:
+     a session whose every statement throws is held next to a healthy one; the healthy lease is renewed while the
+     poisoned session fails, and then only the poisoned one is lost.
+   - **Finding 2 (Low): a raw NUL in a frame is refused.** The frame schema (`packages/shared`, `frameData`) refuses
+     U+0000, so a stdout POST carrying one is a clean 400 `invalid_body`, never a 500 from the insert. JSON-RPC
+     never needs one, because JSON escapes it. Test in `adr0190-i4-stdio-relay.test.ts`.
+   - **Finding 3 (Low; the master decided to seal, ADR-0180): frames are sealed at rest.** This supersedes point 2's
+     plain frame row. Each frame is stored as AES-256-GCM (`data_sealed`, `iv.tag.ciphertext` in base64url) under a
+     key derived from the same root as the `start` seal (HKDF label `regulait/adr0190/stdio-frame-seal/v1`). The
+     associated data is the offer id, the direction and the sequence number. So a frame moved to another session,
+     turned around, or swapped with another frame in the order does not open.
+     - `bytes` is the plaintext size. A CHECK holds `data_sealed` to the sealed shape, with a length that follows
+       exactly from `bytes`, so the table refuses a frame in the clear. The old `octet_length(data) = bytes` CHECK
+       is gone with the `data` column.
+     - Fail closed: a frame that does not open (another root, so no shared data key; or altered at rest) is never
+       delivered. The session ends with the new end code **`unsealed`**, which is a loss, recorded once by whoever
+       moved the row: the route that finds it in a window, or the holder that finds it in stdout. `end_code`'s CHECK
+       gains `unsealed`, and `STDIO_RELAY_LOST_CODES` is now `lease_expired`, `buffer_full` and `unsealed`.
+     - Without a data key, each process seals under its own random root, as for the `start` line. One replica works;
+       a second cannot open the first one's frames, and the session is lost rather than served.
+     - Tests: unit tests for seal and open (another offer, the other direction, swapped seqs, an altered iv, tag or
+       ciphertext, another root), and DB tests (no plaintext stored and a plaintext insert refused; stdin swapped at
+       rest ends the session `unsealed` on the route side exactly once; stdout swapped at rest is never delivered;
+       stdout under another root fails the holder's call as lost `unsealed`).
+   - **Finding 4 (Low, tests): the filters the review could remove are now pinned.** In the foreign-holder test,
+     `markStdioClosed` leaves `closed_at` NULL, `stdioHolderView` returns nothing, and the holder's
+     `endUnsealedStdioSession` moves nothing. On a lapsed row, `endLapsedStdioSession` for executor B returns
+     `false` and the row stays live until executor A's call ends it.
+   - Run here: the build; the gateway non-database tests for I4 and I5; `packages/shared`; `packages/sandbox-executor`;
+     the gateway typecheck of the database suite. The database suite runs in CI (no Postgres here).
 
 ## As built: slice A1, the relaxation in the Decision BOM (2026-10-17)
 

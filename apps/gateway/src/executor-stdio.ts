@@ -65,19 +65,23 @@ import { decidePlacement, interactivePersonCaller, resolveRequirement, type Pers
 import { stdioSessionLostError, stdioSessionLostResponse } from "./stdio-session-loss.js";
 import {
   STDIO_OWNER_HEARTBEAT_MS,
+  STDIO_OWNER_LEASE_MS,
   STDIO_RELAY_LOST_CODES,
   STDIO_RELAY_LOST_TEXT,
   STDIO_RELAY_POLL_MS,
+  type StdioRelayLostCode,
   ackStdioInput,
   appendStdioInput,
   appendStdioOutput,
   claimStdioWindow,
   endLapsedStdioSession,
+  endUnsealedStdioSession,
   markStdioClosed,
   markStdioEnded,
   persistStdioSession,
   releaseStdioWindow,
   renewStdioLeases,
+  setStdioFrameSealRoot,
   stdioHolderView,
   stdioInputFrom,
   stdioRouteDecision,
@@ -102,9 +106,12 @@ export class StdioSessionError extends Error {}
  * works; secure by default either way: never a fixed value).
  */
 let macRoot: Buffer = randomBytes(32);
+// the relay's frames are sealed under a key from the same root (`stdio-relay.ts`)
+setStdioFrameSealRoot(macRoot);
 export function setStdioMacRoot(dataKey: string | undefined): void {
   if (typeof dataKey === "string" && dataKey.length >= 32) {
     macRoot = Buffer.from(hkdfSync("sha256", Buffer.from(dataKey, "utf8"), Buffer.alloc(0), "regulait/adr0190/stdio-mac-root/v1", 32));
+    setStdioFrameSealRoot(macRoot);
   }
 }
 /** the session secret the gateway hands the executor in its answer to the accepted report */
@@ -185,6 +192,8 @@ export class StdioSession {
   watched = false;
   /** the relay's work on this session runs one step at a time (stdout is delivered in order, once) */
   relayChain: Promise<unknown> = Promise.resolve();
+  /** when the relay's work on this session started failing every tick (null: the last tick went through) */
+  relayFailingSince: number | null = null;
 
   constructor(
     readonly offerId: string,
@@ -443,6 +452,14 @@ async function runRelay(): Promise<void> {
 /** the holder takes the output the routes stored for a session, in order, and hands it to the transport */
 async function drainOutput(db: Db, s: StdioSession): Promise<void> {
   const frames = await takeStdioOutput(db, s.offerId, s.nextOutSeq);
+  if (frames === null) {
+    // a frame that does not open here is never delivered: the session is lost (fail closed), recorded once
+    const why = STDIO_RELAY_LOST_TEXT.unsealed;
+    const moved = await endUnsealedStdioSession(db, s.offerId, "holder");
+    s.lose(why);
+    if (moved) await recordSessionLost(db, s.offerId, { executorId: s.executorId, where: "holder", why }).catch(() => undefined);
+    return;
+  }
   for (const f of frames) {
     if (f.seq !== s.nextOutSeq) {
       // never a gap (the routes keep stdout contiguous); if one appears, fail closed
@@ -458,89 +475,153 @@ async function drainOutput(db: Db, s: StdioSession): Promise<void> {
 
 const LIVE_OFFER = new Set(["placed", "offered", "accepted"]);
 
+/**
+ * How long one session's relay work may fail every tick before that session alone is lost (review finding 1): a
+ * lease's length, so a database outage loses no session earlier than its lease would.
+ */
+let relaySessionFailingMs = STDIO_OWNER_LEASE_MS;
+/** tests only: a shorter limit, so a poisoned session is lost within the test (null restores the default) */
+export function setStdioRelayFailingMsForTest(ms: number | null): void {
+  relaySessionFailingMs = ms ?? STDIO_OWNER_LEASE_MS;
+}
+
+/**
+ * One relay tick. Review finding 1: no session's fault stops another's. The leases are renewed FIRST (one statement
+ * for every session, whatever any one of them does next), each session's work has its own catch, and a session whose
+ * work keeps failing for `relaySessionFailingMs` is lost on its own (recorded), never the replica's other sessions.
+ */
 async function relayOnce(db: Db): Promise<void> {
-  // 1. the rows of sessions that ended here
-  for (const offerId of [...endingInDb]) {
-    await markStdioEnded(db, offerId);
-    endingInDb.delete(offerId);
-    wakeWindows(offerId);
+  // 1. the leases (a failure here is the database, not a session: the tick goes on, and the next one retries)
+  const now = Date.now();
+  if (now - lastHeartbeat >= STDIO_OWNER_HEARTBEAT_MS) {
+    try {
+      await renewStdioLeases(
+        db,
+        [...stdioSessions.values()].filter((s) => s.persisted && !s.ended).map((s) => s.offerId),
+      );
+      lastHeartbeat = now;
+    } catch {
+      // retried on the next tick
+    }
   }
-  // 2. new sessions get their row; pushed stdin and a local close reach the table
+  // 2. the rows of sessions that ended here (one that cannot be written now is retried; its lease is no longer renewed)
+  for (const offerId of [...endingInDb]) {
+    try {
+      await markStdioEnded(db, offerId);
+      endingInDb.delete(offerId);
+      wakeWindows(offerId);
+    } catch {
+      // retried on the next tick
+    }
+  }
   const held = [...stdioSessions.values()];
+  const failed = new Set<StdioSession>();
+  // 3. new sessions get their row; pushed stdin and a local close reach the table
   for (const s of held) {
     if (s.ended) continue;
-    if (!s.persisted) {
-      s.persisted = await persistStdioSession(db, { offerId: s.offerId, executorId: s.executorId, startSealed: sealStdioStart(s.offerId, s.startLine()) });
-      if (!s.persisted) continue;
-      // it ended while its row was being written: the row says so at once (no lease is left to lapse into a "loss")
-      if (s.ended) {
-        await markStdioEnded(db, s.offerId);
-        continue;
-      }
-    }
-    const pending = s.unpersistedFrames();
-    if (pending.length > 0 && (await appendStdioInput(db, s.offerId, s.persistedTo, pending))) {
-      s.persistedTo += pending.length;
-      wakeWindows(s.offerId);
-    }
-    if (s.closed && !s.closeMarked) {
-      await markStdioClosed(db, s.offerId);
-      s.closeMarked = true;
-      wakeWindows(s.offerId);
+    try {
+      await persistAndPush(db, s);
+    } catch {
+      failed.add(s);
     }
   }
-  // 3. what the routes did: acknowledgements, output, ends, and the offer under each watched session
-  const persisted = held.filter((s) => s.persisted && !s.ended);
-  const views = await stdioHolderView(db, persisted.map((s) => s.offerId));
-  const seen = new Set<string>();
-  for (const v of views) {
-    seen.add(v.offerId);
-    const s = stdioSessions.get(v.offerId);
-    if (!s || s.ended) continue;
-    if (v.inAckedTo > s.ackedThrough) s.ack(v.inAckedTo);
-    if (v.outNextSeq > s.nextOutSeq) await inSessionOrder(s, () => drainOutput(db, s));
+  // 4. what the routes did: acknowledgements, output, ends, and the offer under each watched session
+  const persisted = held.filter((s) => s.persisted && !s.ended && !failed.has(s));
+  let views: Awaited<ReturnType<typeof stdioHolderView>> | null = null;
+  try {
+    views = await stdioHolderView(db, persisted.map((s) => s.offerId));
+  } catch {
+    // one statement for every session: the database, not a session (nothing below is judged this tick)
+  }
+  if (views !== null) {
+    const seen = new Set<string>();
+    for (const v of views) {
+      seen.add(v.offerId);
+      const s = stdioSessions.get(v.offerId);
+      if (!s || s.ended) continue;
+      try {
+        await applyHolderView(db, s, v);
+      } catch {
+        failed.add(s);
+      }
+    }
+    // a row that is gone (swept after its lease lapsed): the session is lost
+    for (const s of persisted) {
+      if (!seen.has(s.offerId) && !s.ended) s.lose(STDIO_RELAY_LOST_TEXT.lease_expired);
+    }
+  }
+  // 5. a session whose work keeps failing is lost alone (its lease is not renewed past it), and recorded
+  for (const s of held) {
     if (s.ended) continue;
-    if (v.endCode !== null) {
-      if (STDIO_RELAY_LOST_CODES.has(v.endCode)) s.lose(STDIO_RELAY_LOST_TEXT[v.endCode as "lease_expired" | "buffer_full"]);
-      else s.end();
+    if (!failed.has(s)) {
+      s.relayFailingSince = null;
       continue;
     }
-    const drained = s.nextOutSeq >= v.outNextSeq;
-    if (v.eof && drained) {
-      s.end();
-      continue;
-    }
-    // the executor ended its offer (its `/end`, on any replica): the session ends with it, once its output is in
-    if (v.offerStatus === "ended") {
-      if (drained) s.end();
-      continue;
-    }
-    if (!s.watched || LIVE_OFFER.has(v.offerStatus)) continue;
-    if (s.closed) {
-      // a session the gateway itself closed is ending normally: its offer going away is the expected answer
-      s.end();
-    } else {
-      const why = `the executor's side of the session ended (offer ${v.offerStatus}) while the call still held it`;
+    s.relayFailingSince ??= now;
+    if (now - s.relayFailingSince >= relaySessionFailingMs) {
+      const why = `the gateway could not relay the session (its relay work failed for ${Math.round((now - s.relayFailingSince) / 1000)} s)`;
       s.lose(why);
       await recordSessionLost(db, s.offerId, { executorId: s.executorId, where: "holder", why }).catch(() => undefined);
     }
   }
-  // a row that is gone (swept after its lease lapsed): the session is lost
-  for (const s of persisted) {
-    if (!seen.has(s.offerId) && !s.ended) s.lose(STDIO_RELAY_LOST_TEXT.lease_expired);
-  }
-  // 4. the leases, and retention
-  const now = Date.now();
-  if (now - lastHeartbeat >= STDIO_OWNER_HEARTBEAT_MS) {
-    lastHeartbeat = now;
-    await renewStdioLeases(
-      db,
-      [...stdioSessions.values()].filter((s) => s.persisted && !s.ended).map((s) => s.offerId),
-    );
-  }
+  // 6. retention
   if (now - lastSweep >= RELAY_SWEEP_MS) {
     lastSweep = now;
-    await sweepStdioRelay(db);
+    await sweepStdioRelay(db).catch(() => undefined);
+  }
+}
+
+/** step 3 for one session: its row, its pushed stdin, its local close */
+async function persistAndPush(db: Db, s: StdioSession): Promise<void> {
+  if (!s.persisted) {
+    s.persisted = await persistStdioSession(db, { offerId: s.offerId, executorId: s.executorId, startSealed: sealStdioStart(s.offerId, s.startLine()) });
+    if (!s.persisted) return;
+    // it ended while its row was being written: the row says so at once (no lease is left to lapse into a "loss")
+    if (s.ended) {
+      await markStdioEnded(db, s.offerId);
+      return;
+    }
+  }
+  const pending = s.unpersistedFrames();
+  if (pending.length > 0 && (await appendStdioInput(db, s.offerId, s.persistedTo, pending))) {
+    s.persistedTo += pending.length;
+    wakeWindows(s.offerId);
+  }
+  if (s.closed && !s.closeMarked) {
+    await markStdioClosed(db, s.offerId);
+    s.closeMarked = true;
+    wakeWindows(s.offerId);
+  }
+}
+
+/** step 4 for one session: what the routes did to its row, and its offer */
+async function applyHolderView(db: Db, s: StdioSession, v: Awaited<ReturnType<typeof stdioHolderView>>[number]): Promise<void> {
+  if (v.inAckedTo > s.ackedThrough) s.ack(v.inAckedTo);
+  if (v.outNextSeq > s.nextOutSeq) await inSessionOrder(s, () => drainOutput(db, s));
+  if (s.ended) return;
+  if (v.endCode !== null) {
+    if (STDIO_RELAY_LOST_CODES.has(v.endCode)) s.lose(STDIO_RELAY_LOST_TEXT[v.endCode as StdioRelayLostCode]);
+    else s.end();
+    return;
+  }
+  const drained = s.nextOutSeq >= v.outNextSeq;
+  if (v.eof && drained) {
+    s.end();
+    return;
+  }
+  // the executor ended its offer (its `/end`, on any replica): the session ends with it, once its output is in
+  if (v.offerStatus === "ended") {
+    if (drained) s.end();
+    return;
+  }
+  if (!s.watched || LIVE_OFFER.has(v.offerStatus)) return;
+  if (s.closed) {
+    // a session the gateway itself closed is ending normally: its offer going away is the expected answer
+    s.end();
+  } else {
+    const why = `the executor's side of the session ended (offer ${v.offerStatus}) while the call still held it`;
+    s.lose(why);
+    await recordSessionLost(db, s.offerId, { executorId: s.executorId, where: "holder", why }).catch(() => undefined);
   }
 }
 
@@ -910,7 +991,7 @@ export function registerExecutorStdioRoutes(scope: RouteScope, db: Db, deps: Std
     const end = Date.now() + q.data.window * 1000;
     let lastKeepalive = Date.now();
     let cursor = q.data.from;
-    let lost = false;
+    let lostWhy: string | null = null;
     try {
       // a session closed before anything used it gives the sandbox no workload: `close` only. A sandbox that already
       // spoke had its start (the row dropped it): none is sent again
@@ -921,6 +1002,13 @@ export function registerExecutorStdioRoutes(scope: RouteScope, db: Db, deps: Std
           write(stdinLineFor(macKey, offerId, f));
           cursor = f.seq + 1;
         }
+        if (st.unopened) {
+          // a frame that does not open here is never sent: the session is lost (fail closed)
+          if (await endUnsealedStdioSession(db, offerId, { executorId: executor.id })) {
+            lostWhy = `${STDIO_RELAY_LOST_TEXT.unsealed} (an open stdio window found it)`;
+          }
+          break;
+        }
         if (st.frames.length === STDIO_POST_MAX_FRAMES) continue;
         if (st.closed || st.ended) {
           write({ type: "close" });
@@ -928,7 +1016,9 @@ export function registerExecutorStdioRoutes(scope: RouteScope, db: Db, deps: Std
         }
         if (!st.leaseLive) {
           // the holder is gone: the session is lost, and the executor's next window is told it is over
-          lost = await endLapsedStdioSession(db, executor.id, offerId);
+          if (await endLapsedStdioSession(db, executor.id, offerId)) {
+            lostWhy = "the gateway replica holding the session stopped renewing it (an open stdio window found its lease lapsed)";
+          }
           break;
         }
         if (Date.now() - lastKeepalive >= deps.keepaliveMs) {
@@ -937,14 +1027,12 @@ export function registerExecutorStdioRoutes(scope: RouteScope, db: Db, deps: Std
         }
         await waitForRelay(offerId, Math.max(1, Math.min(STDIO_RELAY_POLL_MS, deps.keepaliveMs, end - Date.now())));
       }
-      if (!gone && !lost && Date.now() >= end) write({ type: "bye", reason: "window" });
+      if (!gone && lostWhy === null && Date.now() >= end) write({ type: "bye", reason: "window" });
     } finally {
       await releaseStdioWindow(db, offerId, token).catch(() => undefined);
       reply.raw.end();
     }
-    if (lost) {
-      await recordSessionLost(db, offerId, { executorId: executor.id, where: "window", why: "the gateway replica holding the session stopped renewing it (an open stdio window found its lease lapsed)" }).catch(() => undefined);
-    }
+    if (lostWhy !== null) await recordSessionLost(db, offerId, { executorId: executor.id, where: "window", why: lostWhy }).catch(() => undefined);
     return reply;
   });
 

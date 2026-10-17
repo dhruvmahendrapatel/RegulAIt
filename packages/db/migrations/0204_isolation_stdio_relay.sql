@@ -10,7 +10,10 @@
 --   stdio_relay_sessions   one row per placed session: which replica holds it (a lease the holder renews), the
 --                          sealed `start` line, the sequence counters, one open window at a time, and how it ended.
 --   stdio_relay_frames     the frames in flight, each direction. A frame is deleted once it is acknowledged (stdin)
---                          or delivered to the holder (stdout); a session's frames go when it ends.
+--                          or delivered to the holder (stdout); a session's frames go when it ends. A frame is
+--                          stored SEALED (`data_sealed`: AES-256-GCM, `iv.tag.ciphertext` base64url, the offer id,
+--                          direction and seq as associated data); `bytes` is its plaintext size, so the CHECK below
+--                          ties the stored length to it exactly. No column holds a frame in the clear (ADR-0180).
 --
 -- Bounds: one frame is at most 768 KiB (STDIO_FRAME_MAX_BYTES); the holder refuses stdin past 4 MiB per session and
 -- the routes refuse stdout past 4 MiB buffered (`out_buffered_bytes`), so one session holds at most 8 MiB. Ended
@@ -42,7 +45,7 @@ CREATE TABLE IF NOT EXISTS "stdio_relay_sessions" (
   CONSTRAINT "stdio_relay_sessions_start_check" CHECK ("start_sealed" IS NULL OR char_length("start_sealed") <= 1200000),
   CONSTRAINT "stdio_relay_sessions_end_check" CHECK (
     ("ended_at" IS NULL AND "end_code" IS NULL)
-    OR ("ended_at" IS NOT NULL AND "end_code" IN ('ended', 'sequence', 'lease_expired', 'buffer_full'))
+    OR ("ended_at" IS NOT NULL AND "end_code" IN ('ended', 'sequence', 'lease_expired', 'buffer_full', 'unsealed'))
   )
 );
 --> statement-breakpoint
@@ -54,13 +57,18 @@ CREATE TABLE IF NOT EXISTS "stdio_relay_frames" (
   "offer_id" uuid NOT NULL REFERENCES "stdio_relay_sessions"("offer_id") ON DELETE CASCADE,
   "direction" text NOT NULL,
   "seq" bigint NOT NULL,
-  "data" text NOT NULL,
+  "data_sealed" text NOT NULL,
   "bytes" integer NOT NULL,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY ("offer_id", "direction", "seq"),
   CONSTRAINT "stdio_relay_frames_direction_check" CHECK ("direction" IN ('in', 'out')),
   CONSTRAINT "stdio_relay_frames_seq_check" CHECK ("seq" >= 0),
-  CONSTRAINT "stdio_relay_frames_bytes_check" CHECK ("bytes" >= 0 AND "bytes" <= 786432 AND octet_length("data") = "bytes")
+  -- 12-byte iv (16 chars), 16-byte tag (22 chars), and a ciphertext as long as the plaintext (GCM), all base64url
+  CONSTRAINT "stdio_relay_frames_bytes_check" CHECK ("bytes" >= 1 AND "bytes" <= 786432),
+  CONSTRAINT "stdio_relay_frames_sealed_check" CHECK (
+    "data_sealed" ~ '^[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]+$'
+    AND char_length("data_sealed") = 40 + ("bytes" * 4 + 2) / 3
+  )
 );
 --> statement-breakpoint
 -- ownership is fixed and an ended session stays ended (no takeover, no revival); frames are never rewritten
