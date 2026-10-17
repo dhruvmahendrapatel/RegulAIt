@@ -37,6 +37,9 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: "chromium",
+    // e2e only: reduced motion, which global.css honours by cutting every transition and animation to 0.01 ms,
+    // so an axe check right after a theme switch never reads a colour mid-way through a 120 ms transition (N9)
+    contextOptions: { reducedMotion: "reduce" },
     launchOptions: process.env.E2E_CHROMIUM_EXECUTABLE ? { executablePath: process.env.E2E_CHROMIUM_EXECUTABLE } : undefined,
     viewport: { width: 1400, height: 900 },
     // no trace, no video: a trace keeps every typed password (playwright.credential-safe.ts)
