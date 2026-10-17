@@ -446,3 +446,71 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   software fallback applies and posture flags it.
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
+
+## As built: lane A6, environment-variable-name and CLI presence signatures (2026-10-17)
+
+**Status: shared matcher, catalogue data and tests built on branch `sd-env-name-signatures`. The admin-catalogue kinds
+and the wiring are BLOCKED on a migration number (below).** Nothing above is changed.
+
+1. **Master decision (data minimisation).** A presence match records only that a signature matched and the
+   signature's id. The variable names themselves and any values are never stored as evidence. Values are never read
+   beyond what matching needs: `envNamePresenceInText` slices only the candidate name on each line (before its `=` or
+   `:`) and moves to the next line with `indexOf`, so no value substring is ever created. `matchEnvNames`,
+   `matchCliNames` and `envNamePresenceInText` return `{signatureId, provider, kind, confidence}` and nothing else.
+2. **Kinds.** `PRESENCE_SIGNATURE_KINDS = ["env_name", "cli"]` (`packages/shared/src/discovery/presence-signatures.ts`).
+   Decision 18 lists AI CLIs and the names (never values) of AI-related environment variables among the endpoint
+   facts, and decision 14 lists `.env.example` names among the repo facts. No SD0 kind fits either (`local_runtime` is
+   a model runtime), so both are added.
+3. **Name shape.** An env name must match the endpoint agent's pattern `^[A-Z][A-Z0-9_]*$` and be at most 128
+   characters. Anything else is skipped and never matched. Matching is whole-name, case-sensitive equality. A CLI
+   name is the base name of a path (`/` or `\`), lower-cased, without `.exe`, checked against
+   `^[a-z0-9][a-z0-9._-]{0,63}$`, then compared whole. No regex comes from data. Inputs are bounded: at most 5,000 names
+   per call and 2,000,000 characters per text. Going over the bound throws an error; the input is never silently cut.
+4. **Text formats.** `dotenv` (`[export] NAME=`), `dockerfile` (`ENV`/`ARG NAME`, `NAME=` or `NAME value`) and
+   `ci_yaml` (`NAME:`, `- NAME=`, `- NAME:`, `name: NAME`). Stated limits: one name per line, so `ENV A=1 B=2` yields
+   only `A`; continuation lines and YAML flow mappings are not parsed; commented-out lines do not match.
+5. **Catalogue data (`PRESENCE_SIGNATURES_V1`, 16 rows, pinned by count and SHA-256 in the test).** There are 13
+   env names and 3 CLI names. All are taken from the `env_vars` and `cli.binaries` fields of the Apache-2.0 registry
+   that the open-source evaluation above names, at commit `12b7bbf733032d7822b2fb16e88b0f7a1399d1da`. Its LICENSE and
+   NOTICE are kept in `src/discovery/vendor/shadow-ai-guard/`, and `THIRD_PARTY.md` lists the registry. Each row cites
+   the commit. A generic Google Cloud key name is low confidence. The three short CLI names are medium confidence,
+   because other programs may share them. Open source first: the registry is the data source; no maintained library
+   matches env-name presence with these minimisation rules, so the matcher is ours.
+6. **BLOCKED: migration needed.** Migration 0202 closes `ai_endpoint_signatures_kind_ck` and
+   `ai_endpoint_signatures_kind_match_ck`, so `env_name` and `cli` rows cannot be stored, and `AI_SIGNATURE_KINDS`
+   does not list them. A test asserts that they are not listed. The SQL the follow-up needs is below. It is not
+   written as a migration, and it is pending execution:
+   ```sql
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_ck" CHECK ("kind" IN (
+     'hostname', 'sdk_package', 'api_key_prefix', 'web_app',
+     'cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime', 'assistant_config',
+     'env_name', 'cli'));
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_match_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_match_ck" CHECK (
+     ("kind" = 'sdk_package') = ("match_type" = 'package')
+     AND ("kind" = 'api_key_prefix') = ("match_type" = 'key_prefix')
+     AND ("kind" IN ('cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime',
+                     'assistant_config', 'env_name', 'cli')) = ("match_type" = 'identifier')
+   );
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_presence_value_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_presence_value_ck" CHECK (
+     ("kind" <> 'env_name' OR ("value" ~ '^[A-Z][A-Z0-9_]*$' AND char_length("value") <= 128))
+     AND ("kind" <> 'cli' OR "value" ~ '^[a-z0-9][a-z0-9._-]{0,63}$')
+   );
+   ```
+   The statements create no function and no trigger, so the 0185 guard has nothing new to check. `schema.ts` would
+   declare the new value CHECK for parity, as SD0 did.
+7. **Follow-ups (not built):**
+   - the migration above;
+   - adding the two kinds to `AI_SIGNATURE_KINDS` and `catalogueSignatureSchema`, with the value shapes above;
+   - seed rows from `PRESENCE_SIGNATURES_V1`, with `tool_id` and `confidence` carried;
+   - a `presence` step in `classifyObservation` that takes a signature id from the A6 matcher, not a name;
+   - SD1 calling `envNamePresenceInText` on `.env.example`, CI configs and Dockerfiles;
+   - SD3 and SD4 calling `matchEnvNames`/`matchCliNames` on osquery, inventory and agent rows.
+
+   SD1 (#402) and SD3 (#401) are not on main, so their files are not touched here.
+8. **Open question for the owner.** SD0 addition 12 lets a scanner put identifier-like NAMES on a sighting
+   (`ScanObservation.names`, kept in `FindingEvidence.names`). The master decision above says env names are never
+   stored as evidence. Under that decision, SD1 should report env-name presence through the A6 matcher (signature
+   ids), not through `names`.
