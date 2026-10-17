@@ -233,5 +233,10 @@ No package covers "hand back once enabled", so the hand-back is about 40 lines i
 polyfill (W3C/WICG, MIT) changes how `:focus-visible` matches with a class, not which controls it covers, so it would
 not fix the WebKit gap. A plain CSS selector does.
 
+Result: the keyboard baseline went from 15 findings in 5 keys to 0. The counts came from CI runs at a24c234 (Chromium,
+Firefox, WebKit), applied with `ui-enterprise-baseline.mjs --update`, and the `--guard` against main passes. Before:
+`dialog-focus-not-restored` 1 on the settings step-up in each browser, and WebKit `focus-not-visible` 7 on approvals,
+1 on intake and 4 on the step-up. The axe baseline stays empty.
+
 Not in U1: the 29 `states` findings (loading and error announcements) and the design-token ratchet belong to bar 3,
 and responsive belongs to U2.

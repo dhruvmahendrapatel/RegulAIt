@@ -1,11 +1,4 @@
 {
   "_about": "ADR-0196: keyboard-journey findings per browser|journey. Counts may only shrink.",
-  "entries": {
-    "firefox|settings-step-up": {
-      "dialog-focus-not-restored": 1
-    },
-    "webkit|settings-step-up": {
-      "dialog-focus-not-restored": 1
-    }
-  }
+  "entries": {}
 }
