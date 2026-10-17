@@ -9,7 +9,7 @@
  *    back to a stricter version is free), audited `execution-profile-reverted`, and v2 is withdrawn; engines require
  *    L2 again (the runc executor is refused `class_below_required`). Reverting to a LOOSER earlier version needs the
  *    step-up. A withdrawn version is not reinstated.
- *  - After a revert, versioning again works once migration 0203 (the profile guard) is applied; before that the
+ *  - After a revert, versioning again works once migration 0202 (the profile guard) is applied; before that the
  *    gateway refuses it 409 `execution_profile_retired`, never a 500. The expectation follows the journal.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -40,9 +40,9 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 const IMAGE = `sha256:${"9".repeat(64)}`;
 const ENGINE = SHIPPED_EXECUTION_PROFILES["engine-worker"];
 const ENGINE_DIGEST = executionProfileDigest(ENGINE);
-/** is migration 0203 (the profile guard that allows a version after a revert) in the journal yet? */
-const GUARD_0203 = (JSON.parse(readFileSync(path.join(migrationsFolder, "meta/_journal.json"), "utf8")) as { entries: Array<{ tag: string }> }).entries.some((e) =>
-  e.tag.startsWith("0203_"),
+/** is migration 0202 (the profile guard that allows a version after a revert) in the journal yet? */
+const GUARD_0202 = (JSON.parse(readFileSync(path.join(migrationsFolder, "meta/_journal.json"), "utf8")) as { entries: Array<{ tag: string }> }).entries.some((e) =>
+  e.tag.startsWith("0202_"),
 );
 
 let admin: Db;
@@ -167,10 +167,10 @@ describe("the revert: back to the exact shipped body, free, audited, and engines
     }
   });
 
-  it(`after a revert a new version is ${GUARD_0203 ? "written (migration 0203)" : "refused 409 execution_profile_retired until migration 0203 is applied"}`, async () => {
+  it(`after a revert a new version is ${GUARD_0202 ? "written (migration 0202)" : "refused 409 execution_profile_retired until migration 0202 is applied"}`, async () => {
     // a tightening (L3): no step-up either way
     const r = await inject("POST", "/v1/execution-profiles/engine-worker/versions", adminAuth, { body: engineBody({ minClass: "microvm" }) });
-    if (GUARD_0203) {
+    if (GUARD_0202) {
       expect(r.statusCode, r.body).toBe(201);
       expect(r.json()).toMatchObject({ version: 3, minClass: "microvm" });
     } else {

@@ -277,10 +277,10 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
       // a concurrent version took the number (the guard serialises versioning per name)
       const message = String((e as Error)?.message ?? "") + String((e as { cause?: Error })?.cause?.message ?? "");
       if (uniqueViolation(e) || message.includes("must be version")) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
-      // a database whose profile guard predates migration 0203 refuses a version after a revert (its newest row is
+      // a database whose profile guard predates migration 0202 refuses a version after a revert (its newest row is
       // withdrawn): refused, never a 500
       if (message.includes("is retired")) {
-        return reply.status(409).send({ error: "execution_profile_retired", detail: "the newest version was withdrawn by a revert, and this database's profile guard refuses a further version until migration 0203 is applied" });
+        return reply.status(409).send({ error: "execution_profile_retired", detail: "the newest version was withdrawn by a revert, and this database's profile guard refuses a further version until migration 0202 is applied" });
       }
       throw e;
     }

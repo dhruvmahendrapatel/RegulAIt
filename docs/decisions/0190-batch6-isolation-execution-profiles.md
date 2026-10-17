@@ -1594,8 +1594,8 @@ settle what the decisions above leave open:
 ## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
 
 This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). Migration
-**0203** (`0203_execution_profile_revert.sql`, hand-written) replaces the profile guard function only; its journal entry
-is added when 0201 and 0202 are on main (point 8). It
+**0202** (`0202_execution_profile_revert.sql`, hand-written) replaces the profile guard function only; its journal entry
+is added when 0201 is on main (point 8). It
 supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "cannot be versioned" for
 `engine-worker` only. These points settle what the sections above leave open:
 
@@ -1677,12 +1677,12 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
    - **Gateway, on a scratch database** (created and dropped by the file): `zz-adr0190-engine-worker-l1.test.ts`.
      An engine task is offered at L1 only once all three relaxations and a fresh L1 attestation exist. A version
      equal to the shipped body then reverts without a step-up and engines require L2 again. A looser revert needs the
-     step-up, and a withdrawn version is not reinstated. Versioning after a revert is expected to succeed once 0203 is
+     step-up, and a withdrawn version is not reinstated. Versioning after a revert is expected to succeed once 0202 is
      in the journal, and 409 `execution_profile_retired` until then.
    - **Web:** the panel's actions (`profileActions`, mirrored from the shared list) and one mocked e2e assertion.
 
-8. **Migration 0203.** The guard function from 0183 refused any new version once the NEWEST row was retired, so a
-   reverted profile could never be versioned again. 0203 refuses a new version only when NO version of the name is
+8. **Migration 0202.** The guard function from 0183 refused any new version once the NEWEST row was retired, so a
+   reverted profile could never be versioned again. 0202 refuses a new version only when NO version of the name is
    live (the profile itself was retired, as before). The function keeps `SET search_path = pg_catalog, public,
    pg_temp` (the 0185 guard), and no trigger or table is added. Until its journal entry lands, the gateway answers 409
    `execution_profile_retired` for a version after a revert, never a 500.
@@ -1696,7 +1696,7 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
 - No compose service, runbook or INSTALL.md step for a runc executor was written: none has been executed, and another
   slice owns the compose stack. The environment variables are in `main.ts` (`REGULAIT_EXECUTOR_RUNC_RUNTIME`,
   `REGULAIT_EXECUTOR_RUNC_VERSION`, and the canary, init and socket variables both backends share).
-- Migration 0203 is written but NOT in the journal (0201 and 0202 are not on main yet), so no database applies it
+- Migration 0202 is written but NOT in the journal (0201 is not on main yet), so no database applies it
   until the master adds the entry. Its function was checked by hand against the 0185 guard (search_path pinned).
 - The gateway database suites (`zz-adr0190-runc-l1.test.ts` and the scratch-database
   `zz-adr0190-engine-worker-l1.test.ts`) have not run in the session that wrote them (no database there); CI's
