@@ -4,13 +4,13 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { applyPublish, ENGINE_IDS, LockError, PATHS, renderCompose, renderTs, UNSET_DIGEST, validateLock } from "./engine-images-lock.mjs";
+import { applyPublish, assertCommitOnMain, ENGINE_IDS, GHCR_OWNER, LockError, PATHS, renderCompose, renderTs, repositoryOwner, UNSET_DIGEST, validateLock } from "./engine-images-lock.mjs";
 
 const lock = () => JSON.parse(readFileSync(PATHS.lock, "utf8"));
 const hex = (c) => `sha256:${c.repeat(64)}`;
 const commit = "a".repeat(40);
 const publish = (engines, sourceCommit = commit) => ({ sourceCommit, publishedAt: "2026-10-17T05:00:00.000Z", engines });
-const entry = (id, d = "1", i = "2") => ({ repository: `ghcr.io/owner-x/regulait-engine-${id}`, manifestDigest: hex(d), imageId: hex(i) });
+const entry = (id, d = "1", i = "2") => ({ repository: `ghcr.io/${GHCR_OWNER}/regulait-engine-${id}`, manifestDigest: hex(d), imageId: hex(i) });
 
 describe("ENG-IMG engine image lock", () => {
   it("the committed lock is valid, and the generated module and compose defaults are derived from it", () => {
@@ -42,15 +42,17 @@ describe("ENG-IMG engine image lock", () => {
     expect(renderTs(next)).toContain(`manifestDigest: "${hex("3")}"`);
     const compose = renderCompose(readFileSync(PATHS.compose, "utf8"), next);
     expect(compose).toContain(`\${REGULAIT_ENGINE_MODELSCAN_DIGEST:-${hex("3")}}`);
-    expect(compose).toContain("${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/owner-x/regulait-engine-modelscan}");
+    expect(compose).toContain(`\${REGULAIT_ENGINE_MODELSCAN_REPOSITORY:-ghcr.io/${GHCR_OWNER}/regulait-engine-modelscan}`);
     expect(compose).not.toContain(`\${REGULAIT_ENGINE_MODELSCAN_DIGEST:-${UNSET_DIGEST}}`);
   });
 
   it("refuses anything but the workflow's shape: another repository, a tag, the zero digest, an unknown engine, a partial entry", () => {
     const bad = [
       publish({ modelscan: { ...entry("modelscan"), repository: "docker.io/x/regulait-engine-modelscan" } }),
-      publish({ modelscan: { ...entry("modelscan"), repository: "ghcr.io/Owner/regulait-engine-modelscan" } }),
-      publish({ modelscan: { ...entry("modelscan"), repository: "ghcr.io/owner-x/regulait-engine-garak" } }),
+      publish({ modelscan: { ...entry("modelscan"), repository: `ghcr.io/${GHCR_OWNER.toUpperCase()}/regulait-engine-modelscan` } }),
+      publish({ modelscan: { ...entry("modelscan"), repository: `ghcr.io/${GHCR_OWNER}/regulait-engine-garak` } }),
+      // another namespace (a fork, or anyone else) is refused: the owner is pinned to this repository's
+      publish({ modelscan: { ...entry("modelscan"), repository: "ghcr.io/someone-else/regulait-engine-modelscan" } }),
       publish({ modelscan: { ...entry("modelscan"), manifestDigest: "latest" } }),
       publish({ modelscan: { ...entry("modelscan"), imageId: UNSET_DIGEST } }),
       publish({ other: entry("other") }),
@@ -61,5 +63,29 @@ describe("ENG-IMG engine image lock", () => {
     const partial = lock();
     partial.engines.garak.manifestDigest = hex("5");
     expect(() => validateLock(partial)).toThrow(/all null/);
+  });
+
+  it("the GHCR owner is this repository's owner, read from package.json repository and lowercased", () => {
+    const pkg = JSON.parse(readFileSync(PATHS.pkg, "utf8"));
+    const url = typeof pkg.repository === "string" ? pkg.repository : pkg.repository.url;
+    const owner = /github\.com\/([^/]+)\//.exec(url)[1].toLowerCase();
+    expect(GHCR_OWNER).toBe(owner);
+    expect(repositoryOwner({ repository: { url: "git+https://github.com/Some-Owner/RegulAIt.git" } })).toBe("some-owner");
+    expect(repositoryOwner({ repository: "https://github.com/acme/regulait" })).toBe("acme");
+    for (const bad of [{}, { repository: "https://gitlab.com/acme/regulait" }, { repository: { url: "git@github.com:acme/regulait.git" } }]) {
+      expect(() => repositoryOwner(bad)).toThrow(LockError);
+    }
+  });
+
+  it("--apply records only a build of a commit reachable from origin/main", () => {
+    const seen = [];
+    assertCommitOnMain(commit, { git: (args) => seen.push(args) });
+    expect(seen).toEqual([["merge-base", "--is-ancestor", commit, "origin/main"]]);
+    const refuse = () => {
+      throw new Error("exit 1");
+    };
+    expect(() => assertCommitOnMain(commit, { git: refuse })).toThrow(/not reachable from origin\/main/);
+    expect(() => assertCommitOnMain("abc", { git: () => undefined })).toThrow(LockError);
+    expect(() => assertCommitOnMain(undefined, { git: () => undefined })).toThrow(LockError);
   });
 });

@@ -1732,12 +1732,18 @@ migration; the gateway's only change is that its manifest reads the lock (below)
      at tag v0.8.8, read 2026-10-17), so the report still names `artifact.<ext>`;
    - `done.json` gains `detection` (`{format, evidence}` or null). The adapter maps a null detection to `failed`:
      `artifact_unread`, or `engine_timeout` past the limit. It is never clean;
-   - the runner makes no request for a scan. The runner artifact route (`GET /v1/engine-runner/artifacts/:id`) is
-     unchanged and still lease-bound; the stock runner no longer calls it. `zz-b5-modelscan` uses it as the test's
-     stand-in for the gateway's stream, so its lease rules stay proven.
+   - the runner makes no request for a scan. **The runner artifact route (`GET /v1/engine-runner/artifacts/:id`) is
+     removed** (review fix, secure by default): nothing called it any more, so it is gone rather than kept behind a
+     setting. It is out of `ENGINE_RUNNER_ROUTES`, the OpenAPI registry and the runner client, and
+     `RunnerClient.artifact` with `downloadArtifact` (`packages/engine-runner/src/artifact.ts`) are deleted with it,
+     as is the refusal code `engine_artifact_not_leased`. `zz-b5-modelscan` now places the bytes from the gateway's
+     store and asserts the route is gone (no route registered; a human key gets 404, the runner's token its scope
+     refusal). The gateway's only artifact stream is the executor input (`engine-tasks.ts`, audited phase
+     `task_input`, proven in `zz-adr0190-i5-engines`).
 3. **The publish workflow** (`.github/workflows/engine-images.yml`):
    - it runs on push to `main` (only when an engine's own files change) and on `workflow_dispatch`, never on
-     `pull_request`;
+     `pull_request`. The `publish` job carries `if: github.ref == 'refs/heads/main'` (as `security.yml`'s sign
+     job does), so a manual dispatch started on any other branch publishes nothing, and `record` is skipped with it;
    - the workflow grants `contents: read`, and only the `publish` job gets `packages: write`, through `GITHUB_TOKEN`;
    - every action is pinned by commit sha, and the build is the runner's Docker CLI with its buildx plugin
      (`scripts/build-engine-image.sh`). It builds linux/amd64 with provenance and SBOM attestations off, so each
@@ -1766,9 +1772,16 @@ migration; the gateway's only change is that its manifest reads the lock (below)
 5. **Digest plumbing: the lock.** `engines/images.lock.json` (schema `regulait.engine-images-lock.v1`) holds, per
    engine: `repository`, `manifestDigest`, `imageId`, `publishGeneration`, `sourceCommit` and `publishedAt`. Every
    value is null (and the generation 0) until the first publish. `scripts/engine-images-lock.mjs`:
-   - `--apply <publish.json>` validates the workflow's output. The repository must be a lowercase
-     `ghcr.io/<owner>/regulait-engine-<engine>`, and both digests must be `sha256:<64 hex>` and not the zero digest.
+   - `--apply <publish.json>` validates the workflow's output. The repository must be
+     `ghcr.io/<owner>/regulait-engine-<engine>` where `<owner>` is **pinned to this repository's owner**, read from
+     the root `package.json` `repository` URL and lowercased (`GHCR_OWNER`; `validateLock` applies it, so `--check`
+     refuses another namespace too). Both digests must be `sha256:<64 hex>` and not the zero digest.
      It bumps an engine's `publishGeneration` only when the build changes, then regenerates the derived files;
+   - `--apply` also refuses a publish file whose `sourceCommit` is not reachable from `origin/main`
+     (`git merge-base --is-ancestor`, against the local clone, so `origin/main` must be fetched first; a commit the
+     clone does not have is refused too). **Limit:** the publish file is unsigned workflow output, so this proves the
+     named commit is on main, not that the digests were built from it. The workflow's main-only guard is what ties
+     the two; whoever runs `--apply` must take the file from a run on `main`;
    - `--write` regenerates them, and `--check` fails when they are stale. `scripts/engine-images-lock.test.mjs`
      runs in CI's `vitest --dir scripts` step and does the same check.
    - The derived files are `packages/shared/src/engines/images-lock.ts` (generated), which the manifest reads, and
@@ -1796,7 +1809,9 @@ migration; the gateway's only change is that its manifest reads the lock (below)
    - `docker load` keeps the image id, which is the `taskImage` the executor runs by. The air-gapped install's
      override runs the three runner services from the `:bundled` tags (`pull_policy: never`), because a digest
      reference does not survive save/load on the classic store (as with Caddy). After loading a bundle, the installer
-     checks each present `:bundled` tag's id against that engine's lock block.
+     checks each present `:bundled` tag's id against that engine's lock entry, read as JSON with `node` (as
+     `build-image-bundle.sh` does, review fix replacing a `grep -A8` line read). Without `node` on the target the
+     check fails closed and the install stops; it applies only when the bundle carries engine images.
 7. **ADR-0176 (search first).** The digests come from BuildKit's own metadata file, and the pushes use the Docker CLI
    with no new dependency. For the lock, the digest-update bots and pinning tools that were considered track
    UPSTREAM images by tag. None records our own build's output and writes it into a TypeScript manifest and compose

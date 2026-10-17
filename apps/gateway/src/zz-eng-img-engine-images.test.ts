@@ -4,7 +4,9 @@
  *   - the publish workflow runs on push to main and workflow_dispatch only, never on pull_request; only its publish
  *     job may write packages, through GITHUB_TOKEN; every action is pinned by commit sha; nothing signs through the
  *     public-good Sigstore instance (signing is skipped with its reason logged);
+ *   - the publish job runs only when the ref is main, so a workflow_dispatch from another branch publishes nothing;
  *   - the pull_request workflow only builds: no packages permission, no registry login, no push;
+ *   - the runner artifact route is removed (the gateway streams an artifact only to the executor's input);
  *   - the air-gapped bundle carries the engine images only behind --with-engines, by the lock's digests, and the
  *     installer runs and checks the bundled tags.
  */
@@ -38,6 +40,15 @@ describe("ENG-IMG: the engine image workflows", () => {
     expect(publish).not.toMatch(/id-token: write|attestations: write/);
     // the token is GITHUB_TOKEN, nothing else
     expect(publish.match(/secrets\.[A-Z_]+/g)).toEqual(["secrets.GITHUB_TOKEN"]);
+  });
+
+  it("publish: only main publishes, whatever the trigger (a manual dispatch can start on any branch)", () => {
+    const jobPublish = publish.slice(publish.indexOf("\n  publish:"), publish.indexOf("\n  record:"));
+    expect(jobPublish).toMatch(/\n {4}if: github\.ref == 'refs\/heads\/main'\n/);
+    // the record job runs only after publish, so it is skipped with it
+    const jobRecord = publish.slice(publish.indexOf("\n  record:"));
+    expect(jobRecord).toMatch(/\n {4}needs: publish\n/);
+    expect(jobRecord).not.toMatch(/\n {4}if:/);
   });
 
   it("publish: no public-good keyless signing; the sign step logs why it signs nothing", () => {
@@ -90,5 +101,21 @@ describe("ENG-IMG: engine images in the air-gapped bundle (opt-in)", () => {
       expect(install).toContain(`\n  engine-${e}:\n    image: regulait/engine-${e}:bundled\n    pull_policy: never\n`);
     }
     expect(install).toMatch(/engine_bundled_id_ok "\$engine" \|\| die/);
+    // the lock is read as JSON with node (as the bundle script does), never by line layout
+    const start = install.indexOf("engine_bundled_id_ok() {");
+    const fn = install.slice(start, install.indexOf("\n}\n", start));
+    expect(fn).toContain("JSON.parse(");
+    expect(fn).toContain('engines/images.lock.json" "$1"');
+    expect(fn).not.toMatch(/grep -A/);
+  });
+});
+
+describe("ENG-IMG review: the runner artifact route is removed (secure by default)", () => {
+  it("no runner route, no registration, no client call", () => {
+    const route = "/v1/engine-runner/artifacts/";
+    expect(read("packages/shared/src/engines/contract.ts")).not.toContain(`GET ${route}`);
+    expect(read("apps/gateway/src/model-artifacts.ts")).not.toMatch(/app\.get\("\/v1\/engine-runner\/artifacts/);
+    expect(read("apps/gateway/src/openapi-registry.ts")).not.toContain(`GET ${route}`);
+    expect(read("packages/engine-runner/src/runner.ts")).not.toContain(route);
   });
 });

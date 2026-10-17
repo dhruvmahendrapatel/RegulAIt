@@ -18,11 +18,13 @@
  *   node scripts/engine-images-lock.mjs --write                   rewrite the derived files from the lock
  *   node scripts/engine-images-lock.mjs --apply <publish.json>    record a publish (the workflow's artifact)
  *
- * `--apply` takes the `engine-images-publish.json` artifact the workflow uploads. It refuses anything that is not
- * a lowercase `ghcr.io/<owner>/regulait-engine-<engine>` repository with two `sha256:<64 hex>` digests, bumps an
+ * `--apply` takes the `engine-images-publish.json` artifact the workflow uploads. It refuses a sourceCommit not
+ * reachable from origin/main, and anything that is not `ghcr.io/<this repository's owner>/regulait-engine-<engine>`
+ * (the owner from package.json `repository`, lowercased) with two `sha256:<64 hex>` digests, bumps an
  * engine's `publishGeneration` only when its digest changes (the manifest generation must move with every build,
  * ADR-0187 decision 95), and rewrites the derived files. Commit all three in one PR.
  */
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,16 +34,44 @@ export const LOCK_SCHEMA = "regulait.engine-images-lock.v1";
 export const UNSET_DIGEST = `sha256:${"0".repeat(64)}`;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-const repoPattern = (id) => new RegExp(`^ghcr\\.io/[a-z0-9](?:[a-z0-9-]{0,38})/regulait-engine-${id}$`);
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PATHS = {
   lock: path.join(ROOT, "engines/images.lock.json"),
   ts: path.join(ROOT, "packages/shared/src/engines/images-lock.ts"),
   compose: path.join(ROOT, "docker-compose.yml"),
+  pkg: path.join(ROOT, "package.json"),
 };
 
 export class LockError extends Error {}
+
+/**
+ * The GHCR owner the lock accepts: this repository's own owner, read from the root package.json `repository`
+ * (a github.com URL), lowercased as GHCR requires. An image pushed by a fork, or by anyone else, under another
+ * namespace is refused by `--apply` and by `--check`.
+ */
+export function repositoryOwner(pkg = JSON.parse(readFileSync(PATHS.pkg, "utf8"))) {
+  const url = typeof pkg.repository === "string" ? pkg.repository : pkg.repository?.url;
+  const m = /^(?:git\+)?https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/[A-Za-z0-9._-]+?(?:\.git)?$/.exec(url ?? "");
+  if (!m) throw new LockError("package.json must name this repository as a https://github.com/<owner>/<repo> URL (the GHCR owner is pinned to it)");
+  return m[1].toLowerCase();
+}
+export const GHCR_OWNER = repositoryOwner();
+const repoPattern = (id) => new RegExp(`^ghcr\\.io/${GHCR_OWNER}/regulait-engine-${id}$`);
+
+/**
+ * `--apply` records only a build of a commit on main: the publish job runs only on main (engine-images.yml), and this
+ * refuses a publish file whose sourceCommit is not an ancestor of `ref` (default origin/main, which must be fetched),
+ * or is unknown to the local clone. `git` is injectable for tests.
+ */
+export function assertCommitOnMain(sourceCommit, { ref = "origin/main", git = (args) => execFileSync("git", args, { cwd: ROOT, stdio: "ignore" }) } = {}) {
+  if (!COMMIT.test(sourceCommit ?? "")) throw new LockError("the publish must name its sourceCommit (a full commit sha)");
+  try {
+    git(["merge-base", "--is-ancestor", sourceCommit, ref]);
+  } catch {
+    throw new LockError(`the publish's sourceCommit ${sourceCommit} is not reachable from ${ref} (fetch ${ref} first; a build of any other branch is never recorded)`);
+  }
+}
 
 /** validate a lock object; returns it unchanged or throws LockError */
 export function validateLock(lock) {
@@ -59,7 +89,7 @@ export function validateLock(lock) {
       if (e.publishGeneration !== 0) throw new LockError(`${id}: an unpublished entry has publishGeneration 0`);
       continue;
     }
-    if (!repoPattern(id).test(e.repository)) throw new LockError(`${id}: repository must be ghcr.io/<owner>/regulait-engine-${id} (lowercase)`);
+    if (!repoPattern(id).test(e.repository)) throw new LockError(`${id}: repository must be ghcr.io/${GHCR_OWNER}/regulait-engine-${id} (this repository's owner, lowercase)`);
     if (!DIGEST.test(e.manifestDigest) || e.manifestDigest === UNSET_DIGEST) throw new LockError(`${id}: manifestDigest must be sha256:<64 hex>`);
     if (!DIGEST.test(e.imageId) || e.imageId === UNSET_DIGEST) throw new LockError(`${id}: imageId must be sha256:<64 hex>`);
     if (!COMMIT.test(e.sourceCommit)) throw new LockError(`${id}: sourceCommit must be a full commit sha`);
@@ -169,7 +199,9 @@ function main(argv) {
     let lock = readLock();
     if (mode === "--apply") {
       if (!arg) throw new LockError("--apply needs the publish file (the workflow's engine-images-publish.json artifact)");
-      lock = applyPublish(lock, JSON.parse(readFileSync(arg, "utf8")));
+      const publish = JSON.parse(readFileSync(arg, "utf8"));
+      assertCommitOnMain(publish?.sourceCommit);
+      lock = applyPublish(lock, publish);
       writeFileSync(PATHS.lock, `${JSON.stringify(lock, null, 2)}\n`);
     }
     writeFileSync(PATHS.ts, renderTs(lock));

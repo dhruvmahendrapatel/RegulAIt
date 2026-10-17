@@ -398,12 +398,23 @@ caddy_image_id_ok() {
 # field per line by scripts/engine-images-lock.mjs, so the engine's block is the 8 lines after its name.
 ENGINE_IDS="promptfoo modelscan garak"
 engine_bundled_id_ok() { # engine
-  local id block
+  local id entry
   docker_up || return 1
   id="$(docker image inspect --format '{{.Id}}' "regulait/engine-$1:bundled" 2>/dev/null)" || return 1
   printf '%s' "$id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
-  block="$(grep -A8 "\"$1\": {" "$SCRIPT_DIR/../engines/images.lock.json" 2>/dev/null)" || return 1
-  printf '%s\n' "$block" | grep -Eq "\"(imageId|manifestDigest)\": \"$id\""
+  # the lock read as JSON (as build-image-bundle.sh does), never by line layout. No node: the check fails closed.
+  have node || { warn "node is needed to read engines/images.lock.json and check the bundled engine images"; return 1; }
+  # one line: <manifestDigest> <imageId>, or nothing when the engine was never published
+  entry="$(node -e '
+    const l = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    const e = l.engines[process.argv[2]];
+    if (e && e.manifestDigest && e.imageId) console.log(`${e.manifestDigest} ${e.imageId}`);
+  ' "$SCRIPT_DIR/../engines/images.lock.json" "$1" 2>/dev/null)" || return 1
+  [ -n "$entry" ] || return 1
+  case " $entry " in
+    *" $id "*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ===========================================================================

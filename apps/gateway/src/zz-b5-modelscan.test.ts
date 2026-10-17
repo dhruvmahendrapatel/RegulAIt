@@ -1,20 +1,20 @@
 /**
  * ADR-0187 B5-M — the modelscan shim against the REAL gateway on a real database: the upload, the
- * runner core (`runOnce`, `RunnerClient`) with the modelscan adapter fetching the artifact through
- * the gateway's runner route, and the scan record and evidence, with only modelscan itself replaced
+ * runner core (`runOnce`, `RunnerClient`) with the modelscan adapter (the artifact placed from the gateway's
+ * store, standing in for the executor input stream: the runner route is removed), and the scan record and evidence, with only modelscan itself replaced
  * by an executor answering what the pinned 0.8.8 answered for each fixture (the real engine runs in
  * packages/engine-modelscan, modelscan-real.test.ts, opt-in).
  *
  * Required proofs (ADR-0187 "Work split", G19): renamed pickle, legacy .pt, importlib pickle,
  * truncated pickle and nested zip never clean; engine error → unknown; cancel revokes (no key to
- * revoke for this engine: the run ends, the artifact stream and the result are refused). Egress
+ * revoke for this engine: the run ends, the heartbeat cancels and the result is refused). Egress
  * denied and budget spent do not apply: this engine has no network and no model access.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import {
@@ -34,12 +34,12 @@ import {
   type Db,
 } from "@regulait/db";
 import { ARTIFACT_FORMAT_PLANS, ARTIFACT_SCAN_CHIP, BATCH5_STRICT_DEFAULTS, detectArtifactFormat, ENGINE_MANIFEST, modelscanArtifactName, type ArtifactFormat, ENGINE_RESULT_VERSION, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
-import { buildSelfTest, downloadArtifact, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
+import { buildSelfTest, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
 import { modelscanAdapter, type ScanExecutor, type ScanJob, type ScannerOutcome } from "@regulait/engine-modelscan";
 import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, safetensorsFile, truncatedMaliciousPickle } from "@regulait/engine-modelscan/fixtures";
 import { buildApp } from "./app.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
-import { FileArtifactStore } from "./model-artifacts.js";
+import { artifactStorageKey, FileArtifactStore } from "./model-artifacts.js";
 import { startEngineTaskRig, type EngineTaskRig } from "./testing/engine-task-rig.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -175,12 +175,18 @@ function report(p: { scanned?: string[]; issues?: Array<{ module: string; operat
 const osSystem = report({ scanned: ["artifact.pkl"], issues: [{ module: "os", operator: "system", source: "artifact.pkl" }] });
 
 async function once(executor: ScanExecutor) {
-  // ENG-IMG: the stock runner fetches nothing (the gateway streams the artifact to the executor). Here the runner
-  // route stands in for that stream, so this suite still proves the route's lease rules.
+  // ENG-IMG: the stock runner fetches nothing (the gateway streams the artifact to the executor's input, proven in
+  // zz-adr0190-i5-engines). Here the bytes come straight from the gateway's store, checked against the lease.
   const adapter = modelscanAdapter({
     executor,
-    artifactInput: async (lease, placePath, signal) => {
-      await downloadArtifact({ source: client, artifact: lease.artifacts[0]!, destPath: placePath, deadlineAt: lease.deadlineAt, signal });
+    artifactInput: async (lease, placePath) => {
+      const want = lease.artifacts[0]!;
+      const opened = await store.open(artifactStorageKey(want.sha256));
+      const chunks: Buffer[] = [];
+      for await (const c of opened.stream) chunks.push(Buffer.from(c as Uint8Array));
+      const bytes = Buffer.concat(chunks);
+      expect({ size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }).toEqual({ size: want.size, sha256: want.sha256 });
+      await writeFile(placePath, bytes, { mode: 0o600, flag: "wx" });
     },
   });
   return runOnce(client, adapter, { ...MS_BUILD, engineId: "modelscan", workRoot: await mkdtemp(path.join(tmpdir(), "b5m-w-")), heartbeatMs: 25, retryBaseMs: 10 });
@@ -346,7 +352,7 @@ describe("B5-M upload: bounded, content-addressed, the format from the bytes, au
 });
 
 describe("B5-M through the real gateway: the lease, the stream, the scan record", () => {
-  it("the lease carries the artifact and no key; the stream reaches only the live lease's runner; a finding is unsafe", async () => {
+  it("the lease carries the artifact and no key; the runner artifact route is gone; a finding is unsafe", async () => {
     const exec = answering({ exitCode: 1, report: osSystem });
     const { run, scan, out, artifact } = await scanned(maliciousPickle(), exec, "renamed.safetensors");
     expect(out).toMatchObject({ outcome: "posted", status: 200 });
@@ -354,14 +360,13 @@ describe("B5-M through the real gateway: the lease, the stream, the scan record"
     expect(run).toMatchObject({ status: "completed", virtualKeyId: null });
     expect(exec.jobs[0]).toMatchObject({ format: "pickle", artifactName: "artifact.bin", scannedAs: "artifact.pkl" });
     expect(scan).toMatchObject({ verdict: "unsafe", format: "pickle", artifactSha256: artifact.sha256, scannerVersion: "0.8.8" });
-    const streamed = await db.select().from(auditLog).where(eq(auditLog.objectId, run.id));
-    expect(streamed.map((x) => x.ruleId)).toContain("engine-run-artifact-streamed");
-    // after the run ended, the runner cannot fetch it again
-    const again = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: await runnerKey.headers("GET", `/v1/engine-runner/artifacts/${artifact.id}`) });
-    expect(again.statusCode).toBe(409);
-    expect(again.json().error).toBe("engine_artifact_not_leased");
-    // a human credential cannot reach the runner route at all
-    expect((await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: alice.key })).statusCode).toBe(401);
+    // ENG-IMG review (secure by default): the runner artifact route is REMOVED, so no credential reaches the bytes
+    // through it. A human key gets no route (404); the runner's token is refused by its route ceiling, never served.
+    expect(app.hasRoute({ method: "GET", url: "/v1/engine-runner/artifacts/:artifactId" })).toBe(false);
+    expect((await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: alice.key })).statusCode).toBe(404);
+    const asRunner = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${artifact.id}`, headers: await runnerKey.headers("GET", `/v1/engine-runner/artifacts/${artifact.id}`) });
+    expect([403, 404]).toContain(asRunner.statusCode);
+    expect(asRunner.headers["x-regulait-artifact-sha256"]).toBeUndefined();
   });
 
   it("RED PROOFS: legacy .pt, importlib pickle, truncated pickle and nested zip are never clean", async () => {
@@ -443,20 +448,16 @@ describe("B5-M through the real gateway: the lease, the stream, the scan record"
     }
   });
 
-  it("RED PROOF cancel ends the run (no key exists to revoke): the stream, the heartbeat and the result are refused", async () => {
+  it("RED PROOF cancel ends the run (no key exists to revoke): the heartbeat cancels and the result is refused", async () => {
     const a = await uploaded(cleanPickle(), "cancel.pkl");
     const runId = await startScan(a.id);
-    let afterCancel: { stream: number; status: number } | null = null;
     const exec = answering({ exitCode: 0, report: report({ scanned: ["artifact.pkl"] }) }, async () => {
       const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, { reason: "stop" });
       expect(c.statusCode, c.body).toBe(200);
-      const s = await app.inject({ method: "GET", url: `/v1/engine-runner/artifacts/${a.id}`, headers: await runnerKey.headers("GET", `/v1/engine-runner/artifacts/${a.id}`) });
-      afterCancel = { stream: s.statusCode, status: 0 };
       // the scanner keeps going until the runner's heartbeat delivers the cancel
       await new Promise((r) => setTimeout(r, 120));
     });
     const out = await once(exec);
-    expect(afterCancel).toMatchObject({ stream: 409 });
     expect(["cancelled", "posted"]).toContain(out.outcome);
     const [run] = await db.select().from(engineRuns).where(eq(engineRuns.id, runId));
     expect(run).toMatchObject({ status: "cancelled", virtualKeyId: null });

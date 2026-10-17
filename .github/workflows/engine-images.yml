@@ -8,7 +8,9 @@ name: Engine images
 # ── Triggers ─────────────────────────────────────────────────────────────────
 # Push to main (only when an engine's own files change, so the Actions budget
 # in ci.yml stays true) and workflow_dispatch (for anything else that lands in
-# an image, such as packages/shared). NEVER pull_request: a PR run cannot hold
+# an image, such as packages/shared). The publish job runs only when the ref is
+# main (`if: github.ref == 'refs/heads/main'`): a dispatch from any other
+# branch publishes nothing. NEVER pull_request: a PR run cannot hold
 # a token that writes packages. The pull_request check that only BUILDS lives
 # in engine-images-build.yml.
 #
@@ -64,6 +66,10 @@ concurrency:
 jobs:
   publish:
     name: publish ${{ matrix.engine }}
+    # Only main publishes, whatever the trigger: a manual workflow_dispatch can be started on any branch, and
+    # that run must never push an image (security.yml's sign job uses the same guard). `record` needs this job,
+    # so it is skipped with it.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
