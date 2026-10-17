@@ -24,7 +24,8 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 
 function githubFake(extra: Route = () => undefined) {
   const files: Record<string, string> = {
-    "package.json": JSON.stringify({ dependencies: { "@anthropic-ai/sdk": "1", "left-pad": "1" } }),
+    "package.json": JSON.stringify({ dependencies: { "@anthropic-ai/sdk": "1", "left-pad": "1", "@acme/in-house-llm": "2" } }, null, 2),
+    ".mcp.json": JSON.stringify({ mcpServers: { files: { command: "/opt/bin/uvx", args: ["--secret-arg"] } } }),
     ".github/copilot-instructions.md": "style",
     ".vscode/extensions.json": JSON.stringify({ recommendations: ["GitHub.copilot"] }),
     ".env.example": "OPENAI_API_KEY=\n",
@@ -90,6 +91,7 @@ function ctx(fetchImpl: typeof fetch, over: Partial<RepoScanContext> = {}, targe
       return true;
     },
     signal: new AbortController().signal,
+    catalogue: { matches: (o) => o.packageName === "@acme/in-house-llm" },
     ...over,
   };
   return { c, pseudonymised, raw, counts: () => ({ throttles, backoffs, heartbeats }) };
@@ -116,12 +118,27 @@ describe("ADR-0195 SD1 repo scanners", () => {
       expect.arrayContaining(["@anthropic-ai/sdk", "openai", "api.groq.com", ".github/copilot-instructions.md", "github.copilot", `key:${key().slice(0, 8)}:${key().length}`]),
     );
     expect(flat).not.toContain("left-pad");
+    // kept only because the admin catalogue (ctx.catalogue) matches it
+    expect(flat).toContain("@acme/in-house-llm");
+    // every sighting carries where it was found and the head commit's author pseudonym
+    for (const o of res.observations) {
+      expect(o.location?.path, JSON.stringify(o)).toBeTruthy();
+      expect(o.location?.commit).toBe(SHA);
+      expect(o.actorPseudonym).toBe(`psn:${"a".repeat(24)}`);
+    }
+    expect(res.observations.find((o) => o.packageName === "@anthropic-ai/sdk")!.location).toEqual({ path: "package.json", line: 3, commit: SHA });
+    expect(res.observations.find((o) => o.keyFragment)!.location).toEqual({ path: "src/a.py", line: 3, commit: SHA });
+    // NAMES only: the .env.example variable names and the stdio MCP command basename
+    expect(res.observations.find((o) => o.location?.path === ".env.example")!.names).toEqual(["OPENAI_API_KEY"]);
+    expect(res.observations.find((o) => o.names?.includes("uvx"))!.artifact).toEqual({ kind: "assistant_config", value: ".mcp.json" });
     expect(res.observations.find((o) => o.artifact?.kind === "assistant_config")!.artifact!.value).toBe(".github/copilot-instructions.md");
     // the author only through SD0's hook, and nothing raw in the result
     expect(t.pseudonymised).toEqual([["commit_author", "dev@example.test"]]);
     const serialised = JSON.stringify(res);
     expect(serialised).not.toContain("example.test");
     expect(serialised).not.toContain(key());
+    expect(serialised).not.toContain("secret-arg");
+    expect(serialised).not.toContain("/opt/bin");
     // throttled before every request, heartbeat per repo, history untouched
     expect(t.counts().throttles).toBe(fake.calls.length);
     expect(t.counts().heartbeats).toBe(1);
@@ -135,6 +152,9 @@ describe("ADR-0195 SD1 repo scanners", () => {
     await repoScanner("repo_github").run(t.c);
     expect(fake.calls).toContain(`/repos/acme/app/git/commits/${OLD}`);
     expect(t.pseudonymised.map((p) => p[1])).toEqual(["dev@example.test", "old@example.test"]);
+    const res2 = await repoScanner("repo_github").run(ctx(githubFake().fetchImpl, {}, { baseUrl: API, history: "true" }).c);
+    const oldSighting = res2.observations.find((o) => o.location?.path === "old.txt");
+    expect(oldSighting).toBeUndefined(); // old.txt holds nothing AI-related: history adds only real sightings
     expect(t.counts().heartbeats).toBe(2);
   });
 
@@ -151,6 +171,12 @@ describe("ADR-0195 SD1 repo scanners", () => {
     const t = ctx(fake.fetchImpl);
     await expect(repoScanner("repo_github").run(t.c)).rejects.toThrow(/^rate_limited:/);
     expect(t.counts().backoffs).toBe(2); // one retry granted, the second refused
+  });
+
+  it("every observation passes SD0's own checks, including location, names and actor", async () => {
+    const res = await repoScanner("repo_github").run(ctx(githubFake().fetchImpl).c);
+    const checked = checkObservations("repo_github", res.observations, "2026-10-17T00:00:00.000Z");
+    expect(checked.some((o) => o.location !== null && o.names !== null)).toBe(true);
   });
 
   it("stops when the lease is lost, and needs a static token", async () => {

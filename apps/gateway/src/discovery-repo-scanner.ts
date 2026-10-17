@@ -18,16 +18,22 @@
  *   historyDepth commits per repo when history is on (default 20, at most 200)
  * The scope's `include` names repos (`owner/name`); an org-level scope lists them.
  *
+ * CREDENTIALS: a static read-only token only. A federated credential is
+ * refused (`credential_unusable`) until git-provider federation exists.
+ *
  * WHAT IT USES OF THE CONTEXT: `ctx.fetch` only (the egress-guarded fetch);
  * `ctx.throttle()` before every request and `ctx.backoff(res)` on 429/503;
  * `ctx.recordRaw()` with each file read (digested, never kept);
- * `ctx.pseudonymise("commit_author", …)` for every commit author; and
- * `ctx.heartbeat()` before each repo and history commit.
+ * `ctx.pseudonymise("commit_author", …)` for the author of each commit read;
+ * `ctx.heartbeat()` before each repo and history commit; and
+ * `ctx.catalogue.matches()` to keep sightings only an admin-added row knows.
  *
- * WHAT IT DROPS, because an SD0 observation has no field for it: the file
- * path, line and commit of a sighting, `.env.example` variable names, and the
- * launch command of a stdio MCP server. The run's raw-output digest covers
- * what was read.
+ * WHAT EACH OBSERVATION CARRIES (decision 6): the matchable value (package,
+ * host, key prefix and length, or artifact), its location (path, line, commit),
+ * NAMES only where they apply (a stdio MCP server's command basename,
+ * `.env.example` variable names), and `actorPseudonym`: the pseudonym of the
+ * author of the commit the tree was read at. That is the commit's author, not
+ * a per-line blame.
  */
 import {
   EVIDENCE_MAX_ROWS,
@@ -35,10 +41,12 @@ import {
   analyseRepo,
   type ArtifactSignatureKind,
   type DiscoveryPseudonymKind,
+  type DiscoveryReadOutcome,
   type DiscoverySourceKind,
   type RepoAnalysisResult,
   type RepoAuthorInput,
   type RepoFileRead,
+  type RepoObservationKind,
 } from "@regulait/shared";
 import {
   GitProviderRateLimitError,
@@ -51,10 +59,25 @@ import {
 } from "@regulait/git-provider";
 
 /**
- * The slice of SD0's `ScanContext` / `ScanObservation` / `Scanner` this module
+ * The parts of SD0's `ScanContext` / `ScanObservation` / `Scanner` this module
  * uses, declared structurally so it does not import `discovery-scanners.ts`
  * (which imports this module to register it: no import cycle).
  */
+export interface RepoScanObservation {
+  evidenceKind: "repo_scan";
+  subjectKind: "repo";
+  subject: string;
+  count?: number;
+  host?: string;
+  packageName?: string;
+  keyFragment?: string;
+  keyLength?: number;
+  artifact?: { kind: ArtifactSignatureKind; value: string };
+  location?: { path: string; line?: number; commit?: string };
+  names?: string[];
+  actorPseudonym?: string;
+}
+
 export interface RepoScanContext {
   source: {
     id: string;
@@ -71,23 +94,13 @@ export interface RepoScanContext {
   pseudonymise: (kind: DiscoveryPseudonymKind, displayName: string) => Promise<string>;
   heartbeat: () => Promise<boolean>;
   signal: AbortSignal;
-}
-
-export interface RepoScanObservation {
-  evidenceKind: "repo_scan";
-  subjectKind: "repo";
-  subject: string;
-  count?: number;
-  host?: string;
-  packageName?: string;
-  keyFragment?: string;
-  keyLength?: number;
-  artifact?: { kind: ArtifactSignatureKind; value: string };
+  catalogue: { matches: (observation: RepoScanObservation) => boolean };
 }
 
 export interface RepoScanResult {
   observations: RepoScanObservation[];
   credentialWriteScope?: "read_only" | "write" | "unverified";
+  readOutcomes?: DiscoveryReadOutcome[];
 }
 
 export interface RepoScanner {
@@ -110,6 +123,11 @@ export const REPO_SCAN_LIMITS = Object.freeze({
   maxRepos: 1_000,
   historyDepthDefault: 20,
   historyDepthMax: 200,
+  /** SD0's location.path bound */
+  pathMax: 512,
+  /** SD0's names bounds */
+  namesMax: 50,
+  readOutcomesMax: 100,
 });
 
 /** a stable, bounded error a run fails with; never carries the token (the readers scrub it) */
@@ -127,6 +145,18 @@ const ASSISTANT_PATTERN_BY_ID: ReadonlyMap<string, string> = new Map(
   SHADOW_AI_CATALOG_V2.filter((e) => e.kind === "assistant_config").map((e) => [e.id, e.pattern]),
 );
 
+/** SD0's name rule: a letter or `_`, then up to 127 of `[A-Za-z0-9_.-]` (checked without a regex) */
+export function isScanName(n: string): boolean {
+  if (n.length < 1 || n.length > 128) return false;
+  const first = n[0]!;
+  if (!((first >= "A" && first <= "Z") || (first >= "a" && first <= "z") || first === "_")) return false;
+  for (const c of n) {
+    const ok = (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "_" || c === "." || c === "-";
+    if (!ok) return false;
+  }
+  return true;
+}
+
 /** the commit author as SD0 pseudonymises it: email when present (stable), else the name */
 const authorDisplayName = (a: RepoAuthorInput): string | null => {
   const email = a.email?.trim().toLowerCase();
@@ -135,49 +165,84 @@ const authorDisplayName = (a: RepoAuthorInput): string | null => {
   return name ? name.slice(0, 200) : null;
 };
 
+const isCommit = (sha: string) => sha.length >= 7 && sha.length <= 64 && [...sha].every((c) => "0123456789abcdef".includes(c));
+
+/** the value fields an observation is matched on (location, names and actor excluded) */
+const valueKey = (o: RepoScanObservation) =>
+  JSON.stringify([o.host ?? "", o.packageName ?? "", o.keyFragment ?? "", o.keyLength ?? "", o.artifact?.kind ?? "", o.artifact?.value ?? ""]);
+
 /**
- * Map one analysed tree onto SD0 observations, merging duplicates into a count.
- * Exported for tests.
+ * Map one analysed tree onto SD0 observations: one per distinct value and
+ * location, duplicates merged into a count. Exported for tests.
  */
-export function toScanObservations(subject: string, analysis: RepoAnalysisResult): RepoScanObservation[] {
+export function toScanObservations(subject: string, analysis: RepoAnalysisResult, actorPseudonym: string | null): RepoScanObservation[] {
   const merged = new Map<string, RepoScanObservation>();
-  const add = (o: Omit<RepoScanObservation, "evidenceKind" | "subjectKind" | "subject">) => {
-    const key = JSON.stringify([o.host ?? "", o.packageName ?? "", o.keyFragment ?? "", o.keyLength ?? "", o.artifact?.kind ?? "", o.artifact?.value ?? ""]);
+  const commit = isCommit(analysis.commitSha.toLowerCase()) ? analysis.commitSha.toLowerCase() : null;
+  const envNamesByPath = new Map<string, Set<string>>();
+  const add = (
+    o: Pick<RepoScanObservation, "host" | "packageName" | "keyFragment" | "keyLength" | "artifact" | "names">,
+    path: string,
+    line: number | null,
+  ) => {
+    const location: RepoScanObservation["location"] =
+      path.length > 0 && path.length <= REPO_SCAN_LIMITS.pathMax
+        ? { path, ...(line !== null && line >= 1 ? { line } : {}), ...(commit ? { commit } : {}) }
+        : undefined;
+    const full: RepoScanObservation = {
+      evidenceKind: "repo_scan",
+      subjectKind: "repo",
+      subject,
+      count: 1,
+      ...o,
+      ...(location ? { location } : {}),
+      ...(actorPseudonym ? { actorPseudonym } : {}),
+    };
+    const key = JSON.stringify([valueKey(full), path, line ?? "", (o.names ?? []).join(",")]);
     const prev = merged.get(key);
-    if (prev) {
-      prev.count = (prev.count ?? 1) + 1;
-      return;
-    }
-    merged.set(key, { evidenceKind: "repo_scan", subjectKind: "repo", subject, count: 1, ...o });
+    if (prev) prev.count = (prev.count ?? 1) + 1;
+    else merged.set(key, full);
   };
   for (const o of analysis.observations) {
     switch (o.kind) {
       case "dependency":
       case "source_import":
-        if (o.packageName) add({ packageName: o.packageName });
+        if (o.packageName) add({ packageName: o.packageName }, o.path, o.line);
         break;
       case "endpoint_reference":
-        if (o.host) add({ host: o.host });
+        if (o.host) add({ host: o.host }, o.path, o.line);
         break;
-      case "mcp_server":
-        // a remote MCP server is a host; a stdio server's command has no SD0 field
-        if (o.mcpServer?.host) add({ host: o.mcpServer.host });
+      case "mcp_server": {
+        const value = (o.catalogEntryId && ASSISTANT_PATTERN_BY_ID.get(o.catalogEntryId)) || o.path;
+        const cmd = o.mcpServer?.command && isScanName(o.mcpServer.command) ? [o.mcpServer.command] : undefined;
+        if (o.mcpServer?.host) add({ host: o.mcpServer.host }, o.path, o.line);
+        // a stdio server: the config file's artifact, with the command basename as a NAME
+        else if (cmd) add({ artifact: { kind: "assistant_config", value }, names: cmd }, o.path, o.line);
         break;
+      }
       case "ai_key":
-        if (o.key) add({ keyFragment: o.key.fragment, keyLength: o.key.length });
+        if (o.key) add({ keyFragment: o.key.fragment, keyLength: o.key.length }, o.path, o.line);
         break;
       case "assistant_config": {
         // the matched catalogue pattern is the identifier the seed rows carry
         const value = (o.catalogEntryId && ASSISTANT_PATTERN_BY_ID.get(o.catalogEntryId)) || o.path;
-        add({ artifact: { kind: "assistant_config", value } });
+        add({ artifact: { kind: "assistant_config", value } }, o.path, o.line);
         break;
       }
       case "ide_extension":
-        if (o.extensionId) add({ artifact: { kind: "ide_extension", value: o.extensionId } });
+        if (o.extensionId) add({ artifact: { kind: "ide_extension", value: o.extensionId } }, o.path, o.line);
         break;
       case "env_var_name":
+        if (o.envVarName && isScanName(o.envVarName)) {
+          const set = envNamesByPath.get(o.path) ?? new Set<string>();
+          set.add(o.envVarName);
+          envNamesByPath.set(o.path, set);
+        }
         break;
     }
+  }
+  // `.env.example` names: one observation per file, NAMES only (values are never read)
+  for (const [path, names] of envNamesByPath) {
+    add({ names: [...names].slice(0, REPO_SCAN_LIMITS.namesMax) }, path, null);
   }
   return [...merged.values()];
 }
@@ -202,8 +267,33 @@ function historyDepth(target: Readonly<Record<string, string>>): number {
   return Math.min(n, REPO_SCAN_LIMITS.historyDepthMax);
 }
 
-async function analyseTree(ctx: RepoScanContext, reader: RepoReader, repo: string, tree: RepoTree): Promise<RepoAnalysisResult> {
-  return analyseRepo({
+/** an analyser `alsoKeep` that asks the admin catalogue (read-only) about a value the compiled one does not know */
+function adminKeep(ctx: RepoScanContext, subject: string): (o: { kind: RepoObservationKind; value: string }) => boolean {
+  const base = { evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject };
+  return ({ kind, value }) => {
+    switch (kind) {
+      case "dependency":
+      case "source_import":
+        return ctx.catalogue.matches({ ...base, packageName: value });
+      case "endpoint_reference":
+        return ctx.catalogue.matches({ ...base, host: value });
+      case "ide_extension":
+        return ctx.catalogue.matches({ ...base, artifact: { kind: "ide_extension", value } });
+      default:
+        return false;
+    }
+  };
+}
+
+async function analyseTree(
+  ctx: RepoScanContext,
+  reader: RepoReader,
+  repo: string,
+  subject: string,
+  tree: RepoTree,
+): Promise<{ analysis: RepoAnalysisResult; actor: string | null }> {
+  let actor: string | null = null;
+  const analysis = await analyseRepo({
     repo,
     commitSha: tree.commitSha,
     entries: tree.entries,
@@ -218,9 +308,12 @@ async function analyseTree(ctx: RepoScanContext, reader: RepoReader, repo: strin
     author: tree.author,
     pseudonymiseAuthor: async (a) => {
       const display = authorDisplayName(a);
-      return display ? ctx.pseudonymise("commit_author", display) : "";
+      actor = display ? await ctx.pseudonymise("commit_author", display) : null;
+      return actor ?? "";
     },
+    alsoKeep: adminKeep(ctx, subject),
   });
+  return { analysis, actor };
 }
 
 async function alive(ctx: RepoScanContext): Promise<void> {
@@ -234,7 +327,7 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
     kind,
     requiresCredential: true,
     run: async (ctx) => {
-      const token = ctx.credential?.secret ?? null;
+      const token = ctx.credential?.mode === "static" ? ctx.credential.secret : null;
       if (!token) {
         throw new RepoScanError(
           "credential_unusable",
@@ -252,6 +345,10 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
         // 429/503 waits are SD0's (ctx.backoff); a limit still hit after them fails the run
         maxRetries: 0,
       });
+      const outcomes: DiscoveryReadOutcome[] = [];
+      const outcome = (o: DiscoveryReadOutcome) => {
+        if (outcomes.length < REPO_SCAN_LIMITS.readOutcomesMax) outcomes.push(o);
+      };
 
       try {
         const scope = await reader.inspectCredential();
@@ -264,6 +361,7 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
             maxRepos: REPO_SCAN_LIMITS.maxRepos,
           });
           repos = listed.repos.filter((r) => !r.archived && r.defaultBranch !== null).map((r) => r.fullName);
+          if (listed.truncated) outcome({ read: "repository list", status: "skipped", detail: `listing stopped at ${REPO_SCAN_LIMITS.maxRepos} repositories` });
         } else {
           repos = ctx.source.scope.include.map((r) => r.trim()).filter(Boolean).slice(0, REPO_SCAN_LIMITS.maxRepos);
         }
@@ -271,12 +369,22 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
         const out: RepoScanObservation[] = [];
         const subjectPrefix = PROVIDER_OF[kind];
         for (const repo of repos) {
-          if (out.length >= EVIDENCE_MAX_ROWS) break;
+          if (out.length >= EVIDENCE_MAX_ROWS) {
+            outcome({ read: `repository ${repo}`.slice(0, 200), status: "skipped", detail: "the run's observation limit was reached" });
+            continue;
+          }
           await alive(ctx);
           const subject = `${subjectPrefix}:${repo}`;
           const tree = await reader.getTree(repo);
-          if (!tree.commitSha) continue;
-          out.push(...toScanObservations(subject, await analyseTree(ctx, reader, repo, tree)));
+          if (!tree.commitSha) {
+            outcome({ read: `repository ${repo}`.slice(0, 200), status: "skipped", detail: "empty repository (no default branch head)" });
+            continue;
+          }
+          const head = await analyseTree(ctx, reader, repo, subject, tree);
+          out.push(...toScanObservations(subject, head.analysis, head.actor));
+          if (tree.truncated || head.analysis.stats.truncated) {
+            outcome({ read: `repository ${repo}`.slice(0, 200), status: "read", detail: "read partially: a file, size or count limit was reached" });
+          }
 
           if (history) {
             const commits = await reader.listCommits(repo, { ...(tree.ref ? { ref: tree.ref } : {}), maxCommits: depth });
@@ -284,13 +392,15 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
               if (c.sha === tree.commitSha || out.length >= EVIDENCE_MAX_ROWS) continue;
               await alive(ctx);
               const old = await reader.getTreeAt(repo, c.sha);
-              out.push(...toScanObservations(subject, await analyseTree(ctx, reader, repo, { ...old, author: c.author ?? old.author })));
+              const past = await analyseTree(ctx, reader, repo, subject, { ...old, author: c.author ?? old.author });
+              out.push(...toScanObservations(subject, past.analysis, past.actor));
             }
           }
         }
         return {
           observations: mergeAcrossTrees(out).slice(0, EVIDENCE_MAX_ROWS),
           credentialWriteScope: scope.status === "read_only" ? "read_only" : "unverified",
+          ...(outcomes.length > 0 ? { readOutcomes: outcomes } : {}),
         };
       } catch (err) {
         if (err instanceof GitProviderRateLimitError) {
@@ -304,11 +414,15 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
   };
 }
 
-/** the same sighting in several trees (history) is one observation with a summed count */
+/**
+ * The same sighting (same value, path and line) in several trees is one
+ * observation: the first one kept is the head's (its commit and author), the
+ * count sums every tree it appeared in.
+ */
 function mergeAcrossTrees(obs: RepoScanObservation[]): RepoScanObservation[] {
   const m = new Map<string, RepoScanObservation>();
   for (const o of obs) {
-    const key = JSON.stringify([o.subject, o.host ?? "", o.packageName ?? "", o.keyFragment ?? "", o.keyLength ?? "", o.artifact?.kind ?? "", o.artifact?.value ?? ""]);
+    const key = JSON.stringify([o.subject, valueKey(o), o.location?.path ?? "", o.location?.line ?? "", (o.names ?? []).join(",")]);
     const prev = m.get(key);
     if (prev) prev.count = (prev.count ?? 1) + (o.count ?? 1);
     else m.set(key, { ...o });

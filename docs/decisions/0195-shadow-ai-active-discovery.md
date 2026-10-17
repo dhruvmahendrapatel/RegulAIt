@@ -389,5 +389,11 @@ template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" sta
   step-up, turning history on for an enabled source is that step-up (decision 14). Requests go through `ctx.fetch`
   after `ctx.throttle()`; 429 and 503 waits are `ctx.backoff`'s, and a limit still in force afterwards fails the run
   as `rate_limited` (the next scheduled run retries). Commit authors go only to `ctx.pseudonymise("commit_author")`.
-  An SD0 observation has no field for a sighting's path, line or commit, for `.env.example` names or for a stdio MCP
-  server's command, so those are not reported (open question for SD0).
+  Every observation carries SD0's `location` (path, line, commit); `.env.example` variable names and a stdio MCP
+  server's command basename travel as `names` (names only, never values); `actorPseudonym` is the pseudonym of the
+  author of the commit the tree was read at (not a per-line blame). `ctx.catalogue.matches()` keeps a package, host
+  or extension id that only an admin-added row knows. Partial reads, empty repos and the repo-list cap are reported
+  as `readOutcomes`.
+- **Follow-up: federated git credentials.** The repo scanners accept only a static read-only token; a federated
+  credential is refused with `credential_unusable`. GitHub App installation tokens and OIDC federation (GitLab,
+  Azure DevOps workload identity) are later work.
