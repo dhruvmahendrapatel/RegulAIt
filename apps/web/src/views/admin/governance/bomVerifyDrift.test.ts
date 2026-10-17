@@ -174,6 +174,7 @@ describe("drift: readVerifyReport accepts exactly what the shared bomVerifyRespo
       ["a section added to an AI BOM", (r) => (r.sections.length ? r : { ...r, sections: [{ section: s.DECISION_BOM_SECTIONS[0], status: "valid", completeness: "recorded", notRecordedReason: null }] })],
       ["a section of an unknown name", (r) => (r.sections.length ? firstSection(r, { section: "not_a_section" }) : r)],
       ["a not-recorded section without its reason", (r) => (r.sections.length ? firstSection(r, { completeness: "not_recorded", notRecordedReason: null }) : r)],
+      ["a section with an extra key", (r) => (r.sections.length ? firstSection(r, { extra: 1 }) : r)],
       // body versions this build does not know
       ["bodyVersion unknown", (r) => ({ ...r, bodyVersion: "regulait.decision-bom/99" })],
       ["bodyVersion empty", (r) => ({ ...r, bodyVersion: "" })],
@@ -186,6 +187,7 @@ describe("drift: readVerifyReport accepts exactly what the shared bomVerifyRespo
       ["manifest files unsorted", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: [...r.manifest.files].reverse() } } : r)],
       ["manifest files emptied", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: [] } } : r)],
       ["manifest file without a digest", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: [{ path: "README.txt" }] } } : r)],
+      ["manifest file digest not hex", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: r.manifest.files.map((f: Any, i: number) => (i === 0 ? { ...f, sha256: "Z".repeat(64) } : f)) } } : r)],
       ["manifest chain segment dropped", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, audit: null } } : r)],
       ["manifest subject of an unknown kind", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, subject: { ...r.manifest.subject, kind: "other-bom" } } } : r)],
       ["manifest with an extra key", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, extra: true } } : r)],

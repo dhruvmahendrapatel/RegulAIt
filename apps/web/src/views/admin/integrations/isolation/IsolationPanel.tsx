@@ -332,7 +332,7 @@ function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void 
             {CLASSES.map((c) => (
               <option key={c} value={c}>
                 {classText(c)}
-                {c === props.profile.minClass ? ` (version ${props.profile.version} today)` : ""}
+                {c === props.profile.minClass ? " (current)" : ""}
               </option>
             ))}
           </Select>
