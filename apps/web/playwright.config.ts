@@ -28,7 +28,7 @@ export default defineConfig({
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105",
     browserName: "chromium",
-    // e2e only: reduced motion, which global.css honours by cutting every transition and animation to 0.01 ms,
+    // e2e only: reduced motion, under which global.css removes every transition and animation,
     // so an axe check right after a theme switch never reads a colour mid-way through a 120 ms transition (N9)
     contextOptions: { reducedMotion: "reduce" },
     launchOptions: process.env.E2E_CHROMIUM_EXECUTABLE

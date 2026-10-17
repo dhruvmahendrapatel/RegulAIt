@@ -131,7 +131,9 @@ audit row, so on a live deployment these calls stall for that time. The build ti
 size of the trail.
 
 Migrations that do this: **0193** (`0193_identity_s6_review.sql`: two partial indexes on decision
-rows, by acting identity and time), and earlier 0154, 0155, 0167 and 0192.
+rows, by acting identity and time), and earlier 0067, 0154, 0155, 0167, 0180 and 0192. This is the
+complete list as of 0202, found by searching the migrations for an index on `audit_log` (0000 is left
+out: it creates the table, which is empty then).
 
 What this means when you upgrade a BYOC or air-gapped install whose trail is already large:
 

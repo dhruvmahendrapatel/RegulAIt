@@ -77,7 +77,7 @@ test("UX-AG-3: unpriced is explicit, does not submit staged prices, and recorded
   await pricing.selectOption("unpriced");
   await expect(input).toBeDisabled();
   await expect(input).toHaveValue("1.25");
-  // N9: the e2e configs emulate reduced motion, which global.css honours by cutting transitions to 0.01 ms, so the
+  // N9: the e2e configs emulate reduced motion, under which global.css removes every transition, so the
   // theme flip below leaves no 120 ms colour transition for axe to read mid-way
   expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
   for (const theme of ["light", "dark"]) {

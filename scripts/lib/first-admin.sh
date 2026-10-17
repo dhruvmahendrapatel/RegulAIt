@@ -66,6 +66,11 @@ fa_utf8_invalid() {
 # reads that open file (through /dev/fd, which on Linux re-opens the same file at offset 0, leaving the
 # caller's descriptor where it was), and the path must still name it. Checking the path and then opening
 # it again would leave a window in which the file can be swapped.
+#
+# The descriptor form relies on Linux `/dev/fd` semantics. Elsewhere (macOS, BSD) `/dev/fd/N` duplicates
+# the descriptor and shares its offset, so the checks would consume the password before the runner reads it.
+# That fails closed: the runner gets an empty stdin and refuses (exit 2). A FIFO swapped in between the path
+# check and the open blocks the open (a hang, never a leak); it needs write access to the file's directory.
 fa_password_file_problem() {
   local f="$1" fd="${2:-}" src="$1" follow="" perm owner me size ctl tail2 bom at_path at_fd
   [ -n "$f" ] || { echo "no file named"; return 0; }
