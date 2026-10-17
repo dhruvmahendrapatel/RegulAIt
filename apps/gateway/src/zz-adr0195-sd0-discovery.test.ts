@@ -194,6 +194,31 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(c.json().error).toBe("scanner_not_built");
   });
 
+  it("SD1: create and PATCH refuse a repo target the scanner rejects (400 target_invalid) before writing", async () => {
+    const bad = await inject("POST", "/v1/discovery/sources", AUTH, { name: `badtarget-${RUN}`, kind: "repo_github", target: { baseUrl: "http://git.example.test" }, scope: { orgLevel: false, include: ["acme/app"] } }, bare);
+    expect(bad.statusCode, bad.body).toBe(400);
+    expect(bad.json().error).toBe("target_invalid");
+    const unknownKey = await inject("POST", "/v1/discovery/sources", AUTH, { name: `badkey-${RUN}`, kind: "repo_gitlab", target: { org: "acme" }, scope: { orgLevel: true, include: [] } }, bare);
+    expect(unknownKey.statusCode, unknownKey.body).toBe(400);
+    // nothing was written for either refused name (rows scoped to this run's names, not a global count)
+    const written = await db
+      .select({ id: discoverySources.id })
+      .from(discoverySources)
+      .where(inArray(discoverySources.name, [`badtarget-${RUN}`, `badkey-${RUN}`]));
+    expect(written).toEqual([]);
+
+    const ok = await inject("POST", "/v1/discovery/sources", AUTH, { name: `goodtarget-${RUN}`, kind: "repo_github", target: { namespace: "acme", baseUrl: "https://ghe.example.test/api/v3" }, scope: { orgLevel: false, include: ["acme/app"] } }, bare);
+    expect(ok.statusCode, ok.body).toBe(201);
+    const created = ok.json() as { id: string; version: number };
+    createdIds.push(created.id);
+    const patch = await inject("PATCH", `/v1/discovery/sources/${created.id}`, AUTH, { version: created.version, target: { namespace: "acme", history: "sometimes" } }, bare);
+    expect(patch.statusCode, patch.body).toBe(400);
+    expect(patch.json().error).toBe("target_invalid");
+    const row = await sourceRow(created.id);
+    expect(row.target).toEqual({ namespace: "acme", baseUrl: "https://ghe.example.test/api/v3" });
+    expect(row.version).toBe(created.version);
+  });
+
   it("is admin-only", async () => {
     expect((await inject("GET", "/v1/discovery/sources", memberKey)).statusCode).toBe(403);
     expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { org: "x" }, scope: { orgLevel: true, include: [] } })).statusCode).toBe(403);

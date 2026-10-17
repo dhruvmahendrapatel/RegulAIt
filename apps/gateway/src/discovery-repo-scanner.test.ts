@@ -101,6 +101,9 @@ describe("ADR-0195 SD1 repo scanners", () => {
   it("are the registered scanners for the four repo kinds and need a credential", () => {
     for (const k of ["repo_github", "repo_gitlab", "repo_bitbucket", "repo_azure_devops"] as const) {
       expect(DISCOVERY_SCANNERS.get(k)?.requiresCredential).toBe(true);
+      // the routes call this at save time
+      expect(DISCOVERY_SCANNERS.get(k)?.validateTarget?.({ org: "x" })).toMatch(/not a repo source target key/);
+      expect(DISCOVERY_SCANNERS.get(k)?.validateTarget?.({ namespace: "acme", baseUrl: "https://git.example.test" })).toBeNull();
     }
   });
 

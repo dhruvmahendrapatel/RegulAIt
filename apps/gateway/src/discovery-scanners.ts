@@ -153,6 +153,12 @@ export interface Scanner {
   /** whether a run needs a live credential (repo and cloud scanners do) */
   requiresCredential: boolean;
   run: (ctx: ScanContext) => Promise<ScanResult>;
+  /**
+   * Optional (secure by default): shape-check a source's target for this kind.
+   * Null when it is acceptable, else the problem. The create and PATCH routes
+   * refuse a target it rejects (400 `target_invalid`) before anything is written.
+   */
+  validateTarget?: (target: Readonly<Record<string, string>>) => string | null;
 }
 
 export type ScannerRegistry = ReadonlyMap<DiscoverySourceKind, Scanner>;

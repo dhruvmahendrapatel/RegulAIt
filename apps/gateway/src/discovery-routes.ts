@@ -359,6 +359,9 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!registry.has(body.kind)) {
       return send(reply, refusal(409, "scanner_not_built", `no scanner is built for ${body.kind} yet (ADR-0195 ${DISCOVERY_KIND_SPECS[body.kind].slice}); a source of this kind cannot be created`));
     }
+    // secure by default: a target the kind's scanner rejects is refused at save time, not at run time
+    const createProblem = registry.get(body.kind)!.validateTarget?.(body.target) ?? null;
+    if (createProblem) return send(reply, refusal(400, "target_invalid", createProblem));
     try {
       const row = await db.transaction(async (tx) => {
         const t = tx as unknown as Db;
@@ -400,6 +403,9 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         const s = await lockSource(t, p.data.sourceId);
         if (!s) return refusal(404, "not_found", "no such discovery source");
         if (s.version !== body.version) return versionConflict(s.version);
+        // a target the kind's scanner rejects is refused before any grant is spent or anything is written
+        const patchProblem = body.target !== undefined ? (registry.get(s.kind)?.validateTarget?.(body.target) ?? null) : null;
+        if (patchProblem) return refusal(400, "target_invalid", patchProblem);
         const target = body.target ?? s.target;
         const scope = body.scope ?? s.scope;
         const targetChanged = body.target !== undefined && JSON.stringify(body.target) !== JSON.stringify(s.target);

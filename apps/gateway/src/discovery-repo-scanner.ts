@@ -107,6 +107,7 @@ export interface RepoScanner {
   kind: DiscoverySourceKind;
   requiresCredential: boolean;
   run: (ctx: RepoScanContext) => Promise<RepoScanResult>;
+  validateTarget: (target: Readonly<Record<string, string>>) => string | null;
 }
 
 export const REPO_SCANNER_KINDS = ["repo_github", "repo_gitlab", "repo_bitbucket", "repo_azure_devops"] as const;
@@ -369,6 +370,7 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
   return {
     kind,
     requiresCredential: true,
+    validateTarget: (target) => repoTargetProblem(kind, target),
     run: async (ctx) => {
       const token = ctx.credential?.mode === "static" ? ctx.credential.secret : null;
       if (!token) {
