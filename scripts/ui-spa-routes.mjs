@@ -13,7 +13,8 @@
  *
  * Rules: a `<Route path>` is a screen; a relative path is resolved against the enclosing route (a `<Routes>` inside
  * `path="/admin/*"`'s element gives `/admin/<path>`); a catch-all (`*`) and a route whose element is a `<Navigate>`
- * redirect are left out; a pathless route is a layout. A screen under a layout whose element is one of
+ * redirect are left out; a pathless route is a layout. A splat route (`path="/x/*"`) must render its `<Routes>` inline:
+ * one whose element holds no `<Routes>` (its screens live in another file) fails the census rather than dropping them. A screen under a layout whose element is one of
  * SIGNED_IN_LAYOUTS needs a session; any other screen is PUBLIC (`public: true`), and the harness opens it signed out.
  * A `:param` is filled with PARAM_FIXTURE, an id the harness's mock API knows nothing about, so a detail page shows
  * its not-found or error state rather than invented data.
@@ -68,6 +69,12 @@ function elementJsx(init) {
   return isJsx(e) ? e : null;
 }
 
+/** whether `node`'s JSX subtree renders a `<Routes>` */
+function containsRoutes(node) {
+  if (isJsx(node) && tagName(node) === "Routes") return true;
+  return ts.forEachChild(node, (c) => (containsRoutes(c) ? true : undefined)) ?? false;
+}
+
 const join = (prefix, p) => (p.startsWith("/") ? p : `${prefix}${p}`);
 
 /** `[{ path, url, public }]` in source order: `path` is the router pattern, `url` the one the harness opens (under /ui) */
@@ -89,6 +96,11 @@ export function spaRoutes(src = readFileSync(APP_FILE, "utf8")) {
     const redirect = element !== null && tagName(element) === "Navigate";
 
     if (attrs.index) throw new Error(`App.tsx: an index <Route> at ${where(node)} is not handled by the census yet`);
+    // a splat route that renders its screens from another file would drop them all silently: the census reads App.tsx
+    // only, so the `<Routes>` its element renders must be written inline
+    if (full !== null && full.endsWith("*") && full !== "/*" && full !== "*" && !redirect && !(element && containsRoutes(element))) {
+      throw new Error(`App.tsx: <Route path="${raw}"> at ${where(node)} renders no inline <Routes>; the census cannot see the screens under it`);
+    }
     if (full !== null && !full.includes("*") && !redirect) {
       if (seen.has(full)) throw new Error(`App.tsx routes ${full} twice`);
       seen.add(full);

@@ -13,12 +13,15 @@
  *
  * Record mode turns every browser check into record-only, and the baseline guard cannot see that, so in CI (the `CI`
  * variable set) it is refused unless the run exists to rewrite the baselines: ENTERPRISE_RECORD=update on a manual
- * (workflow_dispatch) run. A pull-request run can never record. See recordMode().
+ * (workflow_dispatch) run. A pull-request run can never record. See recordMode() in record-mode.ts.
  */
 import { mkdirSync, readFileSync, appendFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type TestInfo } from "@playwright/test";
+import { recordMode } from "./record-mode";
+
+export { recordMode };
 
 export type Category = "axe" | "keyboard" | "responsive" | "states" | "density" | "perf";
 export type Findings = Record<string, number>;
@@ -28,17 +31,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const BASELINE_DIR = path.join(here, "baselines");
 export const FINDINGS_DIR = process.env.ENTERPRISE_FINDINGS_DIR ?? path.resolve(here, "..", "..", "test-results", "enterprise-findings");
 
-/** whether this run only records; throws when record mode is switched on in CI for anything but an --update run */
-export function recordMode(env: NodeJS.ProcessEnv = process.env): boolean {
-  const record = env.ENTERPRISE_RECORD;
-  if (!record || record === "0") return false;
-  if (!env.CI) return true;
-  if (record === "update" && env.GITHUB_EVENT_NAME === "workflow_dispatch") return true;
-  throw new Error(
-    "ENTERPRISE_RECORD is set in CI: record mode would pass every browser check unseen by the baseline guard. " +
-      "It is allowed in CI only as ENTERPRISE_RECORD=update on a manual run that rewrites the baselines with --update (ADR-0196).",
-  );
-}
 const RECORD = recordMode();
 
 const cache = new Map<Category, Baseline>();

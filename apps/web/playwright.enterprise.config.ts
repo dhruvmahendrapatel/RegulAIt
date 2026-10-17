@@ -10,7 +10,7 @@ import { defineConfig, devices } from "@playwright/test";
  *
  * Projects:
  *   chromium              every check (axe, keyboard, responsive, states, density, performance)
- *   firefox, webkit       the cross-browser checks: keyboard journeys and the responsive pass
+ *   firefox, webkit       the cross-browser checks: keyboard journeys (and the walk's self-test) and the responsive pass
  *   screenshots           the screenshot pack (route x viewport x theme); only run on request (its own CI job)
  *
  * Browsers: Chromium comes from PLAYWRIGHT_BROWSERS_PATH here (never `playwright install` on a dev box); CI
@@ -18,7 +18,7 @@ import { defineConfig, devices } from "@playwright/test";
  */
 const PORT = 4180;
 const DESKTOP = { width: 1440, height: 900 };
-const CROSS_BROWSER = /enterprise\/(keyboard|responsive)\.ent\.spec\.ts$/;
+const CROSS_BROWSER = /enterprise\/(keyboard|keyboard-selftest|responsive)\.ent\.spec\.ts$/;
 const chromiumLaunch = process.env.E2E_CHROMIUM_EXECUTABLE ? { executablePath: process.env.E2E_CHROMIUM_EXECUTABLE } : undefined;
 
 export default defineConfig({

@@ -6,7 +6,8 @@ name: UI enterprise harness
 #   static       design tokens (scripts/preflight-ui-tokens.mjs, a postcss parse of the CSS + a TSX scan), the
 #                baseline guard (no baseline file may grow against the base branch, and no bundle ceiling in
 #                apps/web/.size-limit.json may rise, go or change its files), and the JS/CSS bundle ceilings
-#                themselves (size-limit) on the production build.
+#                themselves (size-limit, pinned to `--config .size-limit.json`) on the production build; the guard
+#                also refuses any other place size-limit could read ceilings from (a package.json key, a second file).
 #   browsers     apps/web/playwright.enterprise.config.ts, one job per browser. Chromium runs every check (axe on
 #                every screen in both themes, keyboard journeys, the five viewports, loading/error states, table
 #                density, LCP/INP); Firefox and WebKit run the keyboard journeys and the viewports. The browsers
@@ -74,7 +75,7 @@ jobs:
 
       - name: Bundle-size ceilings (size-limit)
         if: success() || failure()
-        run: pnpm --filter @regulait/web exec size-limit
+        run: pnpm --filter @regulait/web exec size-limit --config .size-limit.json
 
   browsers:
     name: ui enterprise / ${{ matrix.browser }}

@@ -170,3 +170,32 @@ These change what the Decision above says; where they differ, this section is wh
    failing spec keeps the pack. The workflow header names the postcss scan, not stylelint. The settings step-up
    journey reaches the Reason field and the submit button by Tab from the dialog's own focus (`tabTo` with
    `fromStart: false`); either one not reachable is `dialog-control-unreachable`.
+
+### As built: review fixes, round 2 (PR #410 recheck)
+
+These add to the subsection above; where they differ, this one ships.
+
+1. **The bundle ceilings can only be read from `.size-limit.json`.** size-limit 14.2.0 searches `package.json` before
+   `.size-limit.json`, so a `size-limit` key there (or a second `.size-limit.js`/`.cjs`) bypassed the guarded file.
+   The `size` script and the static job now run `size-limit --config .size-limit.json`, and `--guard` fails, on HEAD
+   alone, when `apps/web/package.json` has a `size-limit` key, any other `apps/web/.size-limit*` file exists, or the
+   `size` script is anything but that pinned command. `apps/web/package.json` and the harness test have CODEOWNERS
+   entries. The copied `parseBytes` now carries its MIT notice (size-limit 14.2.0 `bytes.js`, (c) Andrey Sitnik), is
+   listed in `apps/web/THIRD_PARTY.md`, and a drift test compares it with the installed size-limit's own function
+   over a value table (the ADR-0176 §4 exception: `bytes` reads kB as 1024, so no importable module matches).
+2. **A trap on one control is caught (`focus-stuck`).** Item 4 above said a repeat on the same control still counted
+   toward `focus-stuck`; it could not (the walk stopped on the first repeat). The walk now keeps the last Tab keydown,
+   caught on `window` in the capture phase so a handler that stops propagation cannot hide it, and reads its
+   `defaultPrevented` after the key: focus that stays put on a swallowed Tab is `focus-stuck`; on a Tab the page did
+   not swallow it is Tab leaving the page for the browser's UI (Chromium keeps the active element), the normal end
+   of the walk. The walk lives in `e2e/enterprise/keyboard-walk.ts`, and `keyboard-selftest.ent.spec.ts` plants
+   traps in a fixture page (test-only HTML) in all three browsers: a control that swallows Tab, the same with
+   `stopPropagation`, and an A→B→A cycle each fire, and a page with no trap fires neither. The journeys' baselines
+   hold no `focus-stuck` or `focus-trapped`, so a false positive on `approvals` or any other journey fails the run.
+3. **Record mode is tested.** `recordMode()` moved to `e2e/enterprise/record-mode.ts`, which has no
+   `@playwright/test` import (re-exported from `ratchet.ts`); `scripts/ui-enterprise-harness.test.mjs` covers its
+   five branches (unset or `0`; local `1`; CI with `1` throws; CI `update` on `pull_request` throws; CI `update` on
+   `workflow_dispatch` is allowed).
+4. **Census gaps closed.** An index route is tested to throw. A splat route (`path="/x/*"`) whose element renders no
+   inline `<Routes>` now throws, because its screens would live in a file the census never reads; the top-level
+   catch-all and a splat `<Navigate>` redirect are exempt.

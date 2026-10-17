@@ -5,13 +5,18 @@
  *   skip-link-*        the first Tab reaches a visible "Skip to main content" that moves focus into <main>
  *   focus-not-visible  a control reached by Tab draws no focus indicator (outline or box-shadow)
  *   focus-lost         Tab lands on <body> part-way through the page
- *   focus-stuck        three Tabs in a row leave focus on the same element (a trap outside a dialog)
+ *   focus-stuck        the page swallows a Tab (preventDefault) and focus stays on the same control: a trap on one
+ *                      control outside a dialog. A Tab that is not swallowed and leaves focus in place is Tab leaving
+ *                      the page for the browser's UI, the normal end of the walk (see keyboard-walk.ts)
  *   focus-trapped      Tab cycles through several controls outside a dialog: the walk comes back to an earlier
- *                      control, not the page's first stop (a real wrap-around) and not the control it is on
+ *                      control, not the page's first stop (a real wrap-around)
  *   positive-tabindex  a tabindex above 0 reorders the page
  *   order-*            a journey's controls are reached out of reading order
  *   dialog-*           a dialog opened from the keyboard does not take focus, lets Tab escape, ignores Escape,
  *                      or does not hand focus back to the control that opened it
+ *
+ * keyboard-selftest.ent.spec.ts plants both traps in a fixture page and proves each finding fires, and that a page
+ * without one reports neither.
  *
  * WebKit moves through links only with Option+Tab (Safari's default), so the walk presses Alt+Tab there.
  */
@@ -19,54 +24,9 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mockApi } from "./mock-api";
 import { requireStepUpOn } from "../step-up-harness";
 import { bump, ratchet, type Findings } from "./ratchet";
+import { auditWalk, focused, focusStartOfPage, keys } from "./keyboard-walk";
 
-const WALK = 80;
 const ISO = "2026-10-07T10:00:00.000Z";
-
-function keys(browserName: string) {
-  return browserName === "webkit" ? { tab: "Alt+Tab", back: "Alt+Shift+Tab" } : { tab: "Tab", back: "Shift+Tab" };
-}
-
-type Focused = { id: string; tag: string; name: string; visible: boolean; body: boolean; tabindex: number };
-
-/** what has focus now, and whether it shows a focus indicator */
-const focused = (page: Page) =>
-  page.evaluate((): Focused => {
-    const el = document.activeElement as HTMLElement | null;
-    if (!el || el === document.body || el === document.documentElement) {
-      return { id: "body", tag: "body", name: "", visible: false, body: true, tabindex: -1 };
-    }
-    if (!el.dataset.kbId) el.dataset.kbId = String(Math.random()).slice(2);
-    const s = getComputedStyle(el);
-    const outline = s.outlineStyle !== "none" && parseFloat(s.outlineWidth) > 0;
-    const shadow = s.boxShadow !== "none" && s.boxShadow !== "";
-    return {
-      id: el.dataset.kbId,
-      tag: el.tagName.toLowerCase(),
-      name: (el.getAttribute("aria-label") ?? el.textContent ?? "").trim().slice(0, 60),
-      visible: outline || shadow,
-      body: false,
-      tabindex: el.tabIndex,
-    };
-  });
-
-/**
- * Put the sequential-focus starting point at the top of the document. `body.focus()` does not do this in Firefox
- * (it keeps the last focused element as the starting point, so Tab runs on into the browser chrome), so focus a
- * non-tabbable marker placed first in <body>: the next Tab reaches the page's first control in every engine.
- */
-async function focusStartOfPage(page: Page) {
-  await page.evaluate(() => {
-    let start = document.querySelector<HTMLElement>("[data-kb-start]");
-    if (!start) {
-      start = document.createElement("span");
-      start.dataset.kbStart = "";
-      start.tabIndex = -1;
-      document.body.prepend(start);
-    }
-    start.focus();
-  });
-}
 
 /** the skip link: first Tab, visible, and Enter moves focus into <main> */
 async function auditSkipLink(page: Page, tab: string, f: Findings) {
@@ -82,48 +42,6 @@ async function auditSkipLink(page: Page, tab: string, f: Findings) {
   await page.keyboard.press("Enter");
   const inMain = await page.evaluate(() => Boolean(document.querySelector("main")?.contains(document.activeElement)));
   if (!inMain) bump(f, "skip-link-target");
-}
-
-/** Tab through the page: indicator on every stop, no lost or stuck focus, no positive tabindex */
-async function auditWalk(page: Page, tab: string, f: Findings, detail: string[]) {
-  await focusStartOfPage(page);
-  const seen = new Set<string>();
-  let first = "";
-  let last = "";
-  let repeats = 0;
-  for (let i = 0; i < WALK; i += 1) {
-    await page.keyboard.press(tab);
-    const now = await focused(page);
-    if (now.body) {
-      // reaching <body> after the last control is the normal wrap-around; before any control it is not
-      if (seen.size === 0) bump(f, "focus-lost");
-      break;
-    }
-    repeats = now.id === last ? repeats + 1 : 0;
-    if (repeats >= 2) {
-      bump(f, "focus-stuck");
-      detail.push(`focus stuck on <${now.tag}> "${now.name}"`);
-      break;
-    }
-    const previous = last;
-    last = now.id;
-    if (seen.has(now.id)) {
-      // back at the first stop is the normal wrap-around, and staying on the last stop is Tab leaving the page for
-      // the browser's own UI (the document keeps its active element); back at any other stop is a cycle
-      if (now.id !== first && now.id !== previous) {
-        bump(f, "focus-trapped");
-        detail.push(`focus cycles back to <${now.tag}> "${now.name}" without leaving the page`);
-      }
-      break;
-    }
-    if (!first) first = now.id;
-    seen.add(now.id);
-    if (!now.visible) {
-      bump(f, "focus-not-visible");
-      detail.push(`no focus indicator on <${now.tag}> "${now.name}"`);
-    }
-    if (now.tabindex > 0) bump(f, "positive-tabindex");
-  }
 }
 
 /** Tab to `target` from the top of the page (or, with `fromStart: false`, from the current focus); false when it is not in the tab order */

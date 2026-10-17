@@ -32,6 +32,8 @@
 /apps/web/e2e/enterprise/                         @dhruvmahendrapatel
 /.github/workflows/ui-enterprise.yml              @dhruvmahendrapatel
 /apps/web/.size-limit.json                        @dhruvmahendrapatel
+/apps/web/package.json                            @dhruvmahendrapatel
+/scripts/ui-enterprise-harness.test.mjs           @dhruvmahendrapatel
 /scripts/ui-enterprise-baseline.mjs               @dhruvmahendrapatel
 /scripts/ui-spa-routes.mjs                        @dhruvmahendrapatel
 /scripts/ui-tokens.baseline.json                  @dhruvmahendrapatel

@@ -1,9 +1,12 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { spaRoutes, routeSlug, PARAM_FIXTURE } from "./ui-spa-routes.mjs";
-import { growth, merge, parseBytes, readFindings, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
+import { growth, merge, parseBytes, readFindings, SIZE_SCRIPT_PIN, sizeLimitBypass, sizeLimitLoosened, stale } from "./ui-enterprise-baseline.mjs";
+import { recordMode } from "../apps/web/e2e/enterprise/record-mode.ts";
 import { compare, cssDeclFindings, currentFindings, readBaseline, scanTs } from "./preflight-ui-tokens.mjs";
 import { readPack, renderIndex } from "./ui-screenshot-index.mjs";
 
@@ -49,6 +52,16 @@ describe("SPA route census (ADR-0196)", () => {
   it("fails loudly on a path it cannot read instead of dropping the route", () => {
     expect(() => spaRoutes("<Route path={base + '/x'} element={<X />} />")).toThrow(/not a literal/);
     expect(() => spaRoutes("<Route {...props} />")).toThrow(/spread/);
+    expect(() => spaRoutes('<Route path="/a" element={<A />} /><Route index element={<X />} />')).toThrow(/index/);
+  });
+
+  it("fails a splat route whose screens live in another file, and not one that renders <Routes> inline", () => {
+    expect(() => spaRoutes('<Route path="/a" element={<A />} /><Route path="/x/*" element={<XRoutes />} />')).toThrow(/no inline <Routes>/);
+    expect(() => spaRoutes('<Route path="/a" element={<A />} /><Route path="/x/*" />')).toThrow(/no inline <Routes>/);
+    const inline = '<Route path="/x/*" element={<Guard><Routes><Route path="y" element={<Y />} /></Routes></Guard>} />';
+    expect(spaRoutes(inline).map((r) => r.path)).toEqual(["/x/y"]);
+    // the top-level catch-all and a splat redirect are not screens and need no <Routes>
+    expect(spaRoutes('<Route path="/a" element={<A />} /><Route path="*" element={<Navigate to="/" />} /><Route path="/old/*" element={<Navigate to="/" />} />').map((r) => r.path)).toEqual(["/a"]);
   });
 
   it("marks screens under a signed-in layout, and resolves nested and descendant routes", () => {
@@ -157,9 +170,60 @@ describe("bundle-size ceilings guard (ADR-0196)", () => {
     expect(sizeLimitLoosened(base, edit("entry JS", { path: ["dist/assets/index-*.js"] }))).toEqual([]);
   });
 
+  it("matches size-limit's own parseBytes over a value table (drift test against the installed size-limit)", async () => {
+    const webRequire = createRequire(new URL("../apps/web/package.json", import.meta.url));
+    const bytesJs = join(dirname(webRequire.resolve("size-limit/package.json")), "bytes.js");
+    const upstream = await import(pathToFileURL(bytesJs).href);
+    const table = ["817 kB", "1.02 MB", "10KB", "10kb", "1 KiB", "2.5 MiB", "500 B", "500", "0 B", "+3 GB", "-1 kB", "1 s", "kB", "1 XB", 1234, 0];
+    for (const v of table) expect(parseBytes(v), String(v)).toBe(upstream.parseBytes(v));
+  });
+
+  it("refuses ceilings read from anywhere but .size-limit.json: a package.json key, a second file, an unpinned script", () => {
+    const pkg = { scripts: { size: SIZE_SCRIPT_PIN } };
+    expect(sizeLimitBypass(pkg, [".size-limit.json", "package.json"])).toEqual([]);
+    const keyed = sizeLimitBypass({ ...pkg, "size-limit": [{ name: "loose", path: "dist/assets/*.js", limit: "50 MB" }] }, [".size-limit.json"]);
+    expect(keyed).toHaveLength(1);
+    expect(keyed[0]).toMatch(/"size-limit" key/);
+    const files = sizeLimitBypass(pkg, [".size-limit.json", ".size-limit.cjs", ".size-limit.js"]);
+    expect(files).toHaveLength(2);
+    expect(files[0]).toMatch(/\.size-limit\.cjs is a second size-limit config/);
+    expect(sizeLimitBypass({ scripts: { size: "size-limit" } }, [".size-limit.json"])[0]).toMatch(/must be exactly/);
+    expect(sizeLimitBypass({ scripts: { size: "size-limit --config .size-limit.cjs" } }, [".size-limit.json"])[0]).toMatch(/must be exactly/);
+    expect(sizeLimitBypass({}, [".size-limit.json"])[0]).toMatch(/must be exactly/);
+  });
+
+  it("finds no bypass in the real apps/web", async () => {
+    const { readFileSync, readdirSync } = await import("node:fs");
+    const web = new URL("../apps/web/", import.meta.url);
+    expect(sizeLimitBypass(JSON.parse(readFileSync(new URL("package.json", web), "utf8")), readdirSync(web))).toEqual([]);
+  });
+
   it("refuses a doubled name and a limit that is not a size", () => {
     expect(() => sizeLimitLoosened(base, [...base, base[0]])).toThrow(/twice/);
     expect(sizeLimitLoosened(base, edit("lazy", { limit: "1 s" }))).toEqual(['"lazy": limit "1 s" is not a size']);
+  });
+});
+
+describe("record mode (ADR-0196)", () => {
+  it("is off when unset or 0", () => {
+    expect(recordMode({})).toBe(false);
+    expect(recordMode({ ENTERPRISE_RECORD: "0", CI: "true" })).toBe(false);
+  });
+
+  it("is on locally with 1", () => {
+    expect(recordMode({ ENTERPRISE_RECORD: "1" })).toBe(true);
+  });
+
+  it("throws in CI with 1", () => {
+    expect(() => recordMode({ ENTERPRISE_RECORD: "1", CI: "true", GITHUB_EVENT_NAME: "workflow_dispatch" })).toThrow(/record mode/);
+  });
+
+  it("throws in CI with update on a pull request", () => {
+    expect(() => recordMode({ ENTERPRISE_RECORD: "update", CI: "true", GITHUB_EVENT_NAME: "pull_request" })).toThrow(/record mode/);
+  });
+
+  it("is allowed in CI only as update on a manual run", () => {
+    expect(recordMode({ ENTERPRISE_RECORD: "update", CI: "true", GITHUB_EVENT_NAME: "workflow_dispatch" })).toBe(true);
   });
 });
 

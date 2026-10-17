@@ -19,6 +19,10 @@
  *                       `name`: a raised `limit`, a removed entry, or a changed `path`, `gzip` or other option fails.
  *                       A new entry is allowed (it only adds a ceiling). A ceiling may rise only through an exception
  *                       recorded in an ADR, landed by the owner (ADR-0196).
+ *                       And it fails when the ceilings could be read from anywhere else: size-limit searches
+ *                       package.json before .size-limit.json, so a `size-limit` key in apps/web/package.json, another
+ *                       apps/web/.size-limit* file (.js, .cjs, …), or a `size` script that does not pin
+ *                       `--config .size-limit.json` would bypass the guarded file. Those are checked on HEAD alone.
  *
  * Exit 0 clean, 1 on a guard failure, 2 if it could not run.
  */
@@ -32,6 +36,9 @@ export const BASELINE_DIR = path.join(root, "apps", "web", "e2e", "enterprise", 
 export const CATEGORIES = ["axe", "keyboard", "responsive", "states", "density", "perf"];
 const TOKENS_BASELINE = "scripts/ui-tokens.baseline.json";
 export const SIZE_LIMIT_FILE = "apps/web/.size-limit.json";
+const WEB_DIR = path.join(root, "apps", "web");
+/** the one way the `size` script may call size-limit: with the guarded file pinned */
+export const SIZE_SCRIPT_PIN = "size-limit --config .size-limit.json";
 const DEFAULT_FINDINGS = path.join(root, "apps", "web", "test-results", "enterprise-findings");
 const ABOUT = {
   axe: "serious and critical axe violations (node counts) per screen|theme",
@@ -103,7 +110,11 @@ export function stale(baseline, run) {
  * A size-limit `limit` in bytes, read exactly as size-limit 14.2.0 reads it (its bytes.js `parseBytes`: B, kB, MB…
  * are powers of 1000, KiB, MiB… powers of 1024, case-insensitive; a bare number is bytes). size-limit does not export
  * that function (only its CLI and `index.js`), so it is mirrored here; the test pins it against size-limit's own
- * examples. Returns null for anything else (a time limit such as "1 s" is not a size).
+ * examples and a drift test compares it with size-limit's own bytes.js over a value table. Returns null for anything
+ * else (a time limit such as "1 s" is not a size).
+ *
+ * Copied from size-limit 14.2.0 bytes.js, (c) Andrey Sitnik, MIT licence (listed in apps/web/THIRD_PARTY.md).
+ * ADR-0176 §4 exception: `bytes` reads kB as 1024, so no importable module matches size-limit's semantics.
  */
 export function parseBytes(value) {
   if (typeof value === "number") return value;
@@ -140,6 +151,21 @@ export function sizeLimitLoosened(before, after) {
     else if (lb !== null && la > lb) out.push(`"${name}": limit raised ${b.limit} -> ${a.limit}`);
     if (options(a) !== options(b)) out.push(`"${name}": path, gzip or another option changed`);
   }
+  return out;
+}
+
+/**
+ * Ways the bundle ceilings could be read from somewhere other than the guarded .size-limit.json, as lines.
+ * `pkg` is apps/web/package.json, `files` the names in apps/web.
+ */
+export function sizeLimitBypass(pkg, files) {
+  const out = [];
+  if (Object.hasOwn(pkg, "size-limit")) out.push(`apps/web/package.json has a "size-limit" key, which size-limit reads before .size-limit.json`);
+  for (const name of files.filter((n) => n.startsWith(".size-limit") && n !== ".size-limit.json").sort()) {
+    out.push(`apps/web/${name} is a second size-limit config; the ceilings live only in .size-limit.json`);
+  }
+  const script = pkg.scripts?.size ?? "";
+  if (script.trim() !== SIZE_SCRIPT_PIN) out.push(`apps/web/package.json script "size" must be exactly "${SIZE_SCRIPT_PIN}" (it is "${script}")`);
   return out;
 }
 
@@ -204,6 +230,9 @@ function main(argv) {
       }
       failed += loosened.length;
     }
+    const bypass = sizeLimitBypass(JSON.parse(readFileSync(path.join(WEB_DIR, "package.json"), "utf8")), readdirSync(WEB_DIR));
+    for (const line of bypass) console.log(`::error file=apps/web/package.json::the bundle ceilings could bypass ${SIZE_LIMIT_FILE}: ${line}`);
+    failed += bypass.length;
     console.log(failed ? `${failed} baseline entries grew or ceilings loosened` : "no baseline grew and no ceiling loosened");
     return failed ? 1 : 0;
   }

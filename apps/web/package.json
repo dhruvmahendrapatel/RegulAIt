@@ -11,7 +11,7 @@
     "test": "vitest run --dir src",
     "e2e": "playwright test",
     "e2e:enterprise": "playwright test -c playwright.enterprise.config.ts",
-    "size": "size-limit"
+    "size": "size-limit --config .size-limit.json"
   },
   "dependencies": {
     "@dagrejs/dagre": "3.1.1",
