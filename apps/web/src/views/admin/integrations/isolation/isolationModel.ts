@@ -384,11 +384,17 @@ const hex = (c: string) => digit(c) || (c >= "a" && c <= "f") || (c >= "A" && c 
 export const uuidOk = (s: string) =>
   s.length === 36 && [...s].every((c, i) => ([8, 13, 18, 23].includes(i) ? c === "-" : hex(c)));
 
+/** `IDENTITY_PICKER_MAX` (packages/shared identity contract, mirrored; pinned by isolationPlacementModel.test.ts): each picker list's cap */
+export const IDENTITY_PICKER_MAX = 1000;
+
 /**
  * `GET /v1/identity/picker-sources` `workerIdentities` (ADR-0188 S6): the active worker_runtime identities an
  * executor may be registered against, as `{id, label}` (the label is the SPIFFE identifier). Null when the answer
- * cannot be read; a malformed option is dropped from the choices (it could not be sent anyway), and `truncated`
- * says when the gateway capped the list.
+ * cannot be read; a malformed option is dropped from the choices (it could not be sent anyway).
+ *
+ * `truncated` is per list here, though the gateway's flag is one for every list it returns: it is true only when
+ * the gateway says something was cut AND this list is at the cap. A shorter list was not cut, whatever another list
+ * did. (A per-list flag from the gateway would make this exact: a backend follow-up.)
  */
 export function parseWorkerIdentities(value: unknown): { options: Array<{ id: string; label: string }>; truncated: boolean } | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -397,7 +403,7 @@ export function parseWorkerIdentities(value: unknown): { options: Array<{ id: st
   const options = v.workerIdentities
     .filter((o): o is { id: string; label: string } => o !== null && typeof o === "object" && uuidOk(String((o as { id?: unknown }).id ?? "")) && str((o as { label?: unknown }).label))
     .map((o) => ({ id: o.id, label: o.label }));
-  return { options, truncated: v.truncated === true };
+  return { options, truncated: v.truncated === true && v.workerIdentities.length >= IDENTITY_PICKER_MAX };
 }
 
 /** the body to post, or what is wrong with the draft. The gateway re-checks all of it. */
@@ -588,8 +594,20 @@ export function parsePlacements(
   };
 }
 
-/** `GET /v1/execution-placements/:placementId`: the decision with the audit row it was recorded under; null when unreadable */
-export function parsePlacementDetail(value: unknown): { id: string; auditId: string | null; auditRuleId: string | null; auditReason: string | null; reportSha256: string | null } | null {
+/**
+ * `GET /v1/execution-placements/:placementId`: the decision with the audit row it was recorded under; null when
+ * unreadable. `report` tells apart no report (a null hash: nothing was started) from a hash that is there but is
+ * not a SHA-256, which is never shown as "none". `attestationStrength` is the gateway's own word for the evidence,
+ * null when it is missing or not one this build knows.
+ */
+export function parsePlacementDetail(value: unknown): {
+  id: string;
+  auditId: string | null;
+  auditRuleId: string | null;
+  auditReason: string | null;
+  report: { kind: "none" } | { kind: "hash"; sha256: string } | { kind: "unreadable" };
+  attestationStrength: AttestationStrength | null;
+} | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
   if (!str(v.id)) return null;
@@ -600,9 +618,22 @@ export function parsePlacementDetail(value: unknown): { id: string; auditId: str
     auditId: audit ? text(audit.id) : null,
     auditRuleId: audit ? text(audit.ruleId) : null,
     auditReason: audit ? text(audit.reason) : null,
-    reportSha256: typeof v.reportSha256 === "string" && /^[0-9a-f]{64}$/.test(v.reportSha256) ? v.reportSha256 : null,
+    report:
+      v.reportSha256 === null
+        ? { kind: "none" }
+        : typeof v.reportSha256 === "string" && /^[0-9a-f]{64}$/.test(v.reportSha256)
+          ? { kind: "hash", sha256: v.reportSha256 }
+          : { kind: "unreadable" },
+    attestationStrength: oneOfStrength(v.attestationStrength),
   };
 }
+
+/** contract `ATTESTATION_STRENGTH` (mirrored; pinned by isolationPlacementModel.test.ts): the only strength a report has today */
+export const ATTESTATION_STRENGTHS = ["software_attested"] as const;
+export type AttestationStrength = (typeof ATTESTATION_STRENGTHS)[number];
+const oneOfStrength = (x: unknown): AttestationStrength | null => ((ATTESTATION_STRENGTHS as readonly unknown[]).includes(x) ? (x as AttestationStrength) : null);
+/** an attestation strength in words; null (missing or unknown) is said, never assumed */
+export const strengthText = (s: AttestationStrength | null): string => (s === "software_attested" ? "software-attested" : "attestation strength not reported");
 
 /** a refusal code in words: decision 7's reasons, or the mismatch */
 export const refusalText = (code: string | null): string =>

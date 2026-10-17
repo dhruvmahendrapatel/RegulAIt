@@ -37,6 +37,7 @@ import {
   parseExecutors,
   parseWorkerIdentities,
   parsePlacementDetail,
+  strengthText,
   parsePlacements,
   parseProfiles,
   profileText,
@@ -281,10 +282,14 @@ const isLatestVersion = (p: ProfileVersion, rows: ProfileRow[]) =>
 function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void }) {
   const act = useAction();
   const formId = useId();
-  const [minClass, setMinClass] = useState<string>(props.profile.minClass);
+  // no class is preselected: a version at the current class copies version n exactly, and the gateway refuses it 409
+  const [minClass, setMinClass] = useState<string>("");
   const [problem, setProblem] = useState<string | null>(null);
   const submit = async () => {
     if (!isClass(minClass)) return setProblem("Choose the minimum isolation class.");
+    if (minClass === props.profile.minClass) {
+      return setProblem(`Version ${props.profile.version} already requires ${classText(minClass)}. Choose a different class: a new version must change something.`);
+    }
     setProblem(null);
     const name = props.profile.name;
     const ok = await act.run(async () => {
@@ -322,10 +327,12 @@ function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void 
           started with. A lower class is an audited relaxation and needs a step-up.
         </p>
         <Field label="Minimum isolation class">
-          <Select value={minClass} onChange={(e) => setMinClass(e.target.value)}>
+          <Select value={minClass} onChange={(e) => { setProblem(null); setMinClass(e.target.value); }}>
+            <option value="">Choose a class</option>
             {CLASSES.map((c) => (
               <option key={c} value={c}>
                 {classText(c)}
+                {c === props.profile.minClass ? ` (version ${props.profile.version} today)` : ""}
               </option>
             ))}
           </Select>
@@ -489,7 +496,16 @@ function PlacementEvidence(props: { placementId: string }) {
           </div>
           <div>
             <dt>Report</dt>
-            <dd>{detail.reportSha256 ? <code>{detail.reportSha256.slice(0, 16)}</code> : "None (nothing was started)"} · software-attested</dd>
+            <dd>
+              {detail.report.kind === "hash" ? (
+                <code>{detail.report.sha256.slice(0, 16)}</code>
+              ) : detail.report.kind === "none" ? (
+                "None (nothing was started)"
+              ) : (
+                "Not readable: the gateway's report hash is not a SHA-256"
+              )}{" "}
+              · {strengthText(detail.attestationStrength)}
+            </dd>
           </div>
         </dl>
       )}
@@ -733,7 +749,7 @@ function RegisterExecutorDialog(props: { onClose: () => void }) {
               ? sources.isError
                 ? unavailableText("worker identities", availabilityOf(sources.error))
                 : "The gateway's worker identities could not be read, so none can be chosen."
-              : `The active worker_runtime workload identity the executor authenticates as (enrol it under Workload identities first). The gateway refuses any other kind of identity, or one that is not in service.${workers.truncated ? " The list is cut short: not every identity is shown." : ""}`}
+              : `The active worker_runtime workload identity the executor authenticates as (enrol it under Workload identities first). The gateway refuses any other kind of identity, or one that is not in service.${workers.truncated ? " This list is at the gateway's limit and was cut short: not every identity is shown." : ""}`}
         </p>
         <Field label="Executor name">
           <Input value={draft.name} maxLength={63} autoComplete="off" onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
