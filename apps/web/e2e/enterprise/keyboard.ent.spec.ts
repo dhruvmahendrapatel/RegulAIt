@@ -48,9 +48,27 @@ const focused = (page: Page) =>
     };
   });
 
+/**
+ * Put the sequential-focus starting point at the top of the document. `body.focus()` does not do this in Firefox
+ * (it keeps the last focused element as the starting point, so Tab runs on into the browser chrome), so focus a
+ * non-tabbable marker placed first in <body>: the next Tab reaches the page's first control in every engine.
+ */
+async function focusStartOfPage(page: Page) {
+  await page.evaluate(() => {
+    let start = document.querySelector<HTMLElement>("[data-kb-start]");
+    if (!start) {
+      start = document.createElement("span");
+      start.dataset.kbStart = "";
+      start.tabIndex = -1;
+      document.body.prepend(start);
+    }
+    start.focus();
+  });
+}
+
 /** the skip link: first Tab, visible, and Enter moves focus into <main> */
 async function auditSkipLink(page: Page, tab: string, f: Findings) {
-  await page.locator("body").focus();
+  await focusStartOfPage(page);
   await page.keyboard.press(tab);
   const first = await focused(page);
   if (!/skip to main content/i.test(first.name)) {
@@ -66,7 +84,7 @@ async function auditSkipLink(page: Page, tab: string, f: Findings) {
 
 /** Tab through the page: indicator on every stop, no lost or stuck focus, no positive tabindex */
 async function auditWalk(page: Page, tab: string, f: Findings, detail: string[]) {
-  await page.locator("body").focus();
+  await focusStartOfPage(page);
   const seen = new Set<string>();
   let last = "";
   let repeats = 0;
@@ -98,7 +116,7 @@ async function auditWalk(page: Page, tab: string, f: Findings, detail: string[])
 /** Tab from the top to `target`; false when it is not in the tab order */
 async function tabTo(page: Page, tab: string, target: Locator) {
   await expect(target).toBeVisible();
-  await page.locator("body").focus();
+  await focusStartOfPage(page);
   for (let i = 0; i < 200; i += 1) {
     if (await target.evaluate((el) => el === document.activeElement)) return true;
     await page.keyboard.press(tab);
@@ -108,7 +126,7 @@ async function tabTo(page: Page, tab: string, target: Locator) {
 
 /** the order in which `targets` are first reached by Tab, as their indexes */
 async function reachOrder(page: Page, tab: string, targets: Locator[]) {
-  await page.locator("body").focus();
+  await focusStartOfPage(page);
   const order: number[] = [];
   for (let i = 0; i < 200 && order.length < targets.length; i += 1) {
     await page.keyboard.press(tab);
