@@ -88,6 +88,12 @@ describe("SHADOW_AI_CATALOG_V2 (ADR-0195 decision 15)", () => {
     expect(matchCatalogV2AssistantConfig(".cursor/mcp.json")?.id).toBe("cfg-cursor-mcp-json");
   });
 
+  it("the schema refuses a wildcard after a leading **/", () => {
+    const base = SHADOW_AI_CATALOG_V2.find((e) => e.id === "cfg-agents-md")!;
+    expect(shadowCatalogV2EntrySchema.safeParse({ ...base, pattern: "**/AGENTS*.md" }).success).toBe(false);
+    expect(shadowCatalogV2EntrySchema.safeParse({ ...base, pattern: "**/AGENTS.md" }).success).toBe(true);
+  });
+
   it("assistant_config path patterns are literal", () => {
     expect(matchCatalogV2AssistantConfig("services/api/AGENTS.md")?.id).toBe("cfg-agents-md");
     expect(matchCatalogV2AssistantConfig("NOTAGENTS.md")).toBeNull();

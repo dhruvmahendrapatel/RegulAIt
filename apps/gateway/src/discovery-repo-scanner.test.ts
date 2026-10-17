@@ -65,6 +65,7 @@ function githubFake(extra: Route = () => undefined) {
 function ctx(fetchImpl: typeof fetch, over: Partial<RepoScanContext> = {}, target: Record<string, string> = { baseUrl: API }) {
   const pseudonymised: Array<[string, string]> = [];
   const raw: string[] = [];
+  const registered: string[] = [];
   let throttles = 0;
   let backoffs = 0;
   let heartbeats = 0;
@@ -74,6 +75,9 @@ function ctx(fetchImpl: typeof fetch, over: Partial<RepoScanContext> = {}, targe
     fetch: fetchImpl,
     throttle: async () => {
       throttles++;
+    },
+    registerSecret: (v) => {
+      registered.push(v);
     },
     backoff: async () => {
       backoffs++;
@@ -94,7 +98,7 @@ function ctx(fetchImpl: typeof fetch, over: Partial<RepoScanContext> = {}, targe
     catalogue: { matches: (o) => o.packageName === "@acme/in-house-llm" },
     ...over,
   };
-  return { c, pseudonymised, raw, counts: () => ({ throttles, backoffs, heartbeats }) };
+  return { c, pseudonymised, raw, registered, counts: () => ({ throttles, backoffs, heartbeats }) };
 }
 
 describe("ADR-0195 SD1 repo scanners", () => {
@@ -102,8 +106,9 @@ describe("ADR-0195 SD1 repo scanners", () => {
     for (const k of ["repo_github", "repo_gitlab", "repo_bitbucket", "repo_azure_devops"] as const) {
       expect(DISCOVERY_SCANNERS.get(k)?.requiresCredential).toBe(true);
       // the routes call this at save time
-      expect(DISCOVERY_SCANNERS.get(k)?.validateTarget?.({ org: "x" })).toMatch(/not a repo source target key/);
-      expect(DISCOVERY_SCANNERS.get(k)?.validateTarget?.({ namespace: "acme", baseUrl: "https://git.example.test" })).toBeNull();
+      const org = { orgLevel: true, include: [] as string[] };
+      expect(DISCOVERY_SCANNERS.get(k)?.validateTarget?.({ org: "x" }, org)).toMatch(/not a repo source target key/);
+      expect(DISCOVERY_SCANNERS.get(k)?.validateTarget?.({ namespace: "acme", baseUrl: "https://git.example.test" }, org)).toBeNull();
     }
   });
 
@@ -147,6 +152,8 @@ describe("ADR-0195 SD1 repo scanners", () => {
     expect(t.counts().heartbeats).toBe(1);
     expect(fake.calls.some((p) => p.includes("/commits"))).toBe(false);
     expect(t.raw.length).toBeGreaterThan(0);
+    // the derived Basic forms of the token are registered for scrubbing
+    expect(t.registered).toContain(Buffer.from(`:${t.c.credential!.secret}`).toString("base64"));
   });
 
   it("scans history only when the source target turns it on (the enable step-up binds the target)", async () => {
@@ -192,6 +199,15 @@ describe("ADR-0195 SD1 repo scanners", () => {
     expect(repoTargetProblem("repo_github", { history: "yes" })).toMatch(/history/);
     expect(repoTargetProblem("repo_github", { historyDepth: "201" })).toMatch(/historyDepth/);
     expect(repoTargetProblem("repo_azure_devops", {})).toMatch(/baseUrl/);
+    const v = (k: "repo_github" | "repo_gitlab" | "repo_bitbucket" | "repo_azure_devops", include: string[]) =>
+      DISCOVERY_SCANNERS.get(k)!.validateTarget!({ namespace: "acme", baseUrl: "https://git.example.test" }, { orgLevel: false, include });
+    expect(v("repo_github", ["acme/app"])).toBeNull();
+    expect(v("repo_github", ["acme/app/extra"])).toMatch(/owner\/name/);
+    expect(v("repo_bitbucket", ["ws"])).toMatch(/owner\/name/);
+    expect(v("repo_gitlab", ["grp/sub/proj"])).toBeNull();
+    expect(v("repo_gitlab", ["grp/../proj"])).toMatch(/group\/project/);
+    expect(v("repo_azure_devops", ["Proj A/svc"])).toBeNull();
+    expect(v("repo_github", [])).toMatch(/at least one/);
     const fake = githubFake();
     await expect(repoScanner("repo_github").run(ctx(fake.fetchImpl, {}, { baseUrl: API, history: "maybe" }).c)).rejects.toThrow(/^target_invalid:/);
     expect(fake.calls).toEqual([]);

@@ -160,11 +160,11 @@ export interface Scanner {
   requiresCredential: boolean;
   run: (ctx: ScanContext) => Promise<ScanResult>;
   /**
-   * Optional (secure by default): shape-check a source's target for this kind.
-   * Null when it is acceptable, else the problem. The create and PATCH routes
-   * refuse a target it rejects (400 `target_invalid`) before anything is written.
+   * Optional (secure by default): shape-check a source's target and scope for
+   * this kind. Null when acceptable, else the problem. The create and PATCH
+   * routes refuse what it rejects (400 `target_invalid`) before anything is written.
    */
-  validateTarget?: (target: Readonly<Record<string, string>>) => string | null;
+  validateTarget?: (target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>) => string | null;
 }
 
 export type ScannerRegistry = ReadonlyMap<DiscoverySourceKind, Scanner>;

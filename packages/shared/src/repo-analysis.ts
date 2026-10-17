@@ -423,7 +423,10 @@ function mcpServers(doc: unknown, max: number): RepoMcpServer[] | null {
       }
     }
     const transport: RepoMcpServer["transport"] = type === "sse" ? "sse" : url ? "http" : command ? "stdio" : "unknown";
-    const cmdBase = command ? command.split(/[\\/]/).pop()!.split(" ")[0]!.slice(0, 100) : null;
+    // the FIRST whitespace token is the program; only then its basename. Splitting on `/` first would let an
+    // argument such as `--token abc/SECRETPART` become the "command" (review of #402)
+    const program = command ? (command.trim().split(/\s+/)[0] ?? "") : "";
+    const cmdBase = program ? (program.split(/[\\/]/).pop() ?? "").slice(0, 100) : null;
     out.push({ name: name.slice(0, 100), transport, command: cmdBase || null, host });
   }
   return out;

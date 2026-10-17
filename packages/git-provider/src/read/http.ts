@@ -64,19 +64,44 @@ export function nextLinkFromHeader(value: string | null): string | null {
   return null;
 }
 
-/** validate a repo address: 2+ segments, none empty, `.` or `..` */
-export function repoSegments(repo: string, minSegments = 2): string[] {
+/** validate a repo address: `minSegments` to `maxSegments` segments, none empty, `.` or `..` */
+export function repoSegments(repo: string, minSegments = 2, maxSegments = 2): string[] {
   if (repo.length === 0 || repo.length > 512) throw new GitProviderError(`invalid repo '${repo.slice(0, 80)}'`, 400);
   const segs = repo.split("/");
-  if (segs.length < minSegments || segs.some((s) => s.length === 0 || s === "." || s === ".." || s.includes("\\"))) {
+  if (
+    segs.length < minSegments ||
+    segs.length > maxSegments ||
+    segs.some((s) => s.length === 0 || s === "." || s === ".." || s.includes("\\"))
+  ) {
     throw new GitProviderError(`invalid repo '${repo.slice(0, 80)}'`, 400);
   }
   return segs;
 }
 
-/** the repo address with each segment URL-encoded, for a request path */
-export function encodeRepo(repo: string, minSegments = 2): string {
-  return repoSegments(repo, minSegments).map(encodeURIComponent).join("/");
+/** the repo address with each segment URL-encoded, for a request path (exactly owner/name by default) */
+export function encodeRepo(repo: string, minSegments = 2, maxSegments = 2): string {
+  return repoSegments(repo, minSegments, maxSegments).map(encodeURIComponent).join("/");
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * A reader's API base: https with no credentials, query or fragment. Plain
+ * http is accepted only for a loopback host (the package's own fake-upstream
+ * tests); the gateway's guarded fetch refuses loopback in production anyway.
+ */
+export function assertApiBase(label: string, baseUrl: string): URL {
+  let u: URL;
+  try {
+    u = new URL(baseUrl);
+  } catch {
+    throw new GitProviderError(`${label}: baseUrl is not a URL`, 400);
+  }
+  const httpsOk = u.protocol === "https:" || (u.protocol === "http:" && LOOPBACK_HOSTS.has(u.hostname));
+  if (!httpsOk || u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "") {
+    throw new GitProviderError(`${label}: baseUrl must be an https URL with no credentials, query or fragment`, 400);
+  }
+  return u;
 }
 
 /** a file path inside a repo, each segment URL-encoded; refuses traversal */
@@ -123,6 +148,8 @@ export class ReadClient {
   private readonly maxWaitMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
+  /** the token and its derived auth forms, scrubbed from any error text */
+  readonly secrets: string[];
 
   constructor(private readonly init: ReadClientInit) {
     if (typeof init.opts.fetchImpl !== "function") {
@@ -130,7 +157,9 @@ export class ReadClient {
       throw new GitProviderError(`${init.label} reader requires an injected guarded fetch`);
     }
     this.base = trimTrailingSlashes(init.baseUrl);
-    this.origin = new URL(this.base).origin;
+    this.origin = assertApiBase(init.label, this.base).origin;
+    // the token and every auth header value derived from it (Basic base64 forms) are scrubbed from errors
+    this.secrets = [init.token, ...Object.values(init.authHeaders).flatMap((v) => [v, v.slice(v.indexOf(" ") + 1)])].filter((x) => x.length >= 8);
     this.fetchImpl = init.opts.fetchImpl;
     // 0 is meaningful: the caller (SD0's ctx.backoff) does the waiting itself
     const retries = init.opts.maxRetries;
@@ -172,11 +201,11 @@ export class ReadClient {
     return res.status === 403 && (header(res, "x-ratelimit-remaining") === "0" || header(res, "retry-after") !== null);
   }
 
-  async get(pathOrUrl: string, extraHeaders: Record<string, string> = {}): Promise<ReadResponse> {
+  async get(pathOrUrl: string, extraHeaders: Record<string, string> = {}, method: "GET" | "HEAD" = "GET"): Promise<ReadResponse> {
     const target = this.url(pathOrUrl);
     for (let attempt = 0; ; attempt++) {
       const res = await this.fetchImpl(target, {
-        method: "GET",
+        method,
         headers: { ...this.init.authHeaders, "user-agent": "regulait-repo-scanner", ...extraHeaders },
       });
       if (this.isRateLimited(res)) {
@@ -199,7 +228,8 @@ export class ReadClient {
 
   /** throw the scrubbed error for a failed response */
   async fail(res: ReadResponse, hint: (status: number) => string): Promise<never> {
-    const body = scrubSecrets((await res.text()).slice(0, 2_000), [this.init.token]);
+    const capped = await readCapped(res, 2_000);
+    const body = scrubSecrets(capped.text ?? "", this.secrets);
     throw new GitProviderError(`${this.init.label} GET failed (HTTP ${res.status})${hint(res.status)}: ${body}`, res.status);
   }
 
@@ -219,6 +249,48 @@ export class ReadClient {
     return header(res, name);
   }
 }
+
+/**
+ * Read a response body, stopping as soon as it passes `maxBytes`: a file
+ * larger than the cap is never fully downloaded. `text` is null when the cap
+ * was passed. Falls back to `text()` (then checks) when there is no stream.
+ */
+export async function readCapped(res: ReadResponse, maxBytes: number): Promise<{ text: string | null; bytes: number }> {
+  const declared = Number(res.headers?.get("content-length") ?? "NaN");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => undefined);
+    return { text: null, bytes: declared };
+  }
+  if (!res.body) {
+    const t = await res.text();
+    const bytes = Buffer.byteLength(t);
+    return bytes > maxBytes ? { text: null, bytes } : { text: t, bytes };
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return { text: null, bytes };
+    }
+    chunks.push(value);
+  }
+  return { text: Buffer.concat(chunks).toString("utf8"), bytes };
+}
+
+/** read a JSON body under a byte cap; `tooLarge` when the cap was passed */
+export async function readJsonCapped<T>(res: ReadResponse, maxBytes: number): Promise<{ body: T | null; tooLarge: boolean }> {
+  const r = await readCapped(res, maxBytes);
+  if (r.text === null) return { body: null, tooLarge: true };
+  return { body: JSON.parse(r.text) as T, tooLarge: false };
+}
+
+/** the JSON envelope cap for a base64 file payload of at most `maxBytes` decoded bytes */
+export const base64EnvelopeCap = (maxBytes: number): number => Math.ceil((maxBytes * 4) / 3) + 16_384;
 
 /** decode a base64 payload as UTF-8; null when it holds a NUL byte (binary) */
 export function decodeBase64Text(b64: string): string | null {

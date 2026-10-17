@@ -9,6 +9,7 @@ import {
   HistoryScanDisabledError,
   looksBinary,
   ReadClient,
+  readCapped,
   splitRawAuthor,
 } from "./http.js";
 import {
@@ -33,6 +34,15 @@ const hint = (status: number): string =>
     : status === 404
       ? " (not found: repo is 'workspace/repo_slug')"
       : "";
+
+/**
+ * ALLOW-LIST (secure by default, ADR-0180): Bitbucket scopes known to be
+ * read-only — the bare OAuth scopes (`repository`, `account`, ...) and API-token
+ * scopes that start with `read:`. Anything else (`*:write`, `*:admin`,
+ * `webhook`, `pipeline:variable`, an unknown future scope) counts as write.
+ */
+const BITBUCKET_READ_ONLY_SCOPES = new Set(["account", "email", "repository", "project", "pullrequest", "issue", "wiki", "snippet", "team", "pipeline", "runner"]);
+const bitbucketScopeReadOnly = (s: string): boolean => BITBUCKET_READ_ONLY_SCOPES.has(s) || (s.startsWith("read:") && !s.includes("write") && !s.includes("admin") && !s.includes("delete"));
 
 /** how deep the recursive `src` listing goes; deeper trees are reported truncated */
 const BITBUCKET_MAX_DEPTH = 30;
@@ -136,11 +146,11 @@ export class BitbucketRepoReader implements RepoReader {
     );
     if (res.status === 404) return { status: "not_found" };
     if (res.status >= 400) await this.http.fail(res, hint);
-    const declared = Number(this.http.header(res, "content-length") ?? "NaN");
-    if (Number.isFinite(declared) && declared > maxBytes) return { status: "too_large", size: declared };
-    const text = await res.text();
-    const size = Buffer.byteLength(text);
-    if (size > maxBytes) return { status: "too_large", size };
+    // stops reading as soon as the body passes the cap (Content-Length or streamed bytes)
+    const capped = await readCapped(res, maxBytes);
+    if (capped.text === null) return { status: "too_large", size: capped.bytes };
+    const text = capped.text;
+    const size = capped.bytes;
     if (looksBinary(text)) return { status: "binary", size };
     return { status: "ok", content: text, size };
   }
@@ -152,7 +162,7 @@ export class BitbucketRepoReader implements RepoReader {
       return { status: "unverified", scopes: [], detail: "Bitbucket did not report this credential's scopes; write scope unverified" };
     }
     const scopes = raw.split(",").map((s) => s.trim()).filter(Boolean);
-    const write = scopes.filter((s) => s.endsWith(":write") || s.endsWith(":admin") || s.endsWith(":delete") || s === "repository:write" || s === "admin");
+    const write = scopes.filter((s) => !bitbucketScopeReadOnly(s));
     return write.length > 0
       ? { status: "write_scope", scopes, detail: `the credential grants write scope(s): ${write.join(", ")}` }
       : { status: "read_only", scopes, detail: "credential scopes are read-only" };

@@ -9,6 +9,7 @@ import {
   encodeRepoPath,
   HistoryScanDisabledError,
   ReadClient,
+  readJsonCapped,
   repoSegments,
 } from "./http.js";
 import {
@@ -149,7 +150,10 @@ export class AzureDevOpsRepoReader implements RepoReader {
     if (res.status === 404) return { status: "not_found" };
     if (res.status === 203) throw new GitProviderError("azure_devops GET failed (HTTP 203: sign-in page)" + hint(401), 401);
     if (res.status >= 400) await this.http.fail(res, hint);
-    const body = (await res.json()) as { content?: string; contentMetadata?: { isBinary?: boolean }; size?: number };
+    // JSON-escaped content can grow up to 6x (\uXXXX); the envelope is read under a cap, never in full
+    const capped = await readJsonCapped<{ content?: string; contentMetadata?: { isBinary?: boolean }; size?: number }>(res, maxBytes * 6 + 16_384);
+    if (capped.tooLarge || !capped.body) return { status: "too_large", size: null };
+    const body = capped.body;
     const size = typeof body.size === "number" ? body.size : null;
     if (size !== null && size > maxBytes) return { status: "too_large", size };
     if (body.contentMetadata?.isBinary) return { status: "binary", size };

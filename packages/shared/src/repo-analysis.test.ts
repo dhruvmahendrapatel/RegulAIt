@@ -107,6 +107,24 @@ describe("analyseRepo", () => {
     expect(res.observations.every((o) => o.commitSha === SHA)).toBe(true);
   });
 
+  it("takes the program's basename from the FIRST token, never an argument fragment", async () => {
+    const secret = "SECRET" + "PART";
+    const mcp = JSON.stringify({
+      mcpServers: {
+        a: { command: `npx -y @acme/server-x --token Zm9vYmFy/${secret}` },
+        b: { command: "node /home/alice/private/run.js" },
+        c: { command: "/usr/local/bin/uvx", args: ["x"] },
+        d: { command: "C:\\tools\\srv.exe --flag a\\b" },
+      },
+    });
+    const r = repo({ ".mcp.json": mcp });
+    const res = await analyseRepo({ repo: "a/b", commitSha: SHA, entries: r.entries, readFile: r.readFile });
+    const cmds = res.observations.filter((o) => o.kind === "mcp_server").map((o) => o.mcpServer!.command);
+    expect(cmds).toEqual(["npx", "node", "uvx", "srv.exe"]);
+    expect(JSON.stringify(res)).not.toContain(secret);
+    expect(JSON.stringify(res)).not.toContain("alice");
+  });
+
   it("drops the author when no pseudonym hook is given", async () => {
     const r = repo({ "package.json": "{}" });
     const res = await analyseRepo({ repo: "a/b", commitSha: SHA, entries: r.entries, readFile: r.readFile, author: { name: "X", email: "x@example.test" } });

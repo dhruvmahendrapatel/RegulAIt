@@ -47,7 +47,7 @@ describe("repo readers (ADR-0195 SD1)", () => {
       ...(extra.maxWaitMs !== undefined ? { maxWaitMs: extra.maxWaitMs } : {}),
     });
 
-  const onlyGets = () => expect(upstream.requests.every((r) => r.method === "GET")).toBe(true);
+  const onlyGets = () => expect(upstream.requests.every((r) => r.method === "GET" || r.method === "HEAD")).toBe(true);
 
   it("refuses to build a reader without an injected (guarded) fetch", () => {
     expect(() =>
@@ -140,6 +140,7 @@ describe("repo readers (ADR-0195 SD1)", () => {
       await expect(r.readFile("acme/one", "../etc/passwd", { commitSha: SHA })).rejects.toThrow(/invalid file path/);
       await expect(r.readFile("acme/one", "x", { commitSha: "main" })).rejects.toThrow(/invalid commit sha/);
       await expect(r.getTree("acme/../x")).rejects.toThrow(/invalid repo/);
+      await expect(r.getTree("acme/one/extra")).rejects.toThrow(/invalid repo/);
       onlyGets();
     });
 
@@ -205,6 +206,11 @@ describe("repo readers (ADR-0195 SD1)", () => {
       upstream.reset();
       upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "read:org, read:user" } });
       expect((await reader("github").inspectCredential()).status).toBe("read_only");
+      for (const scope of ["gist", "user", "project", "write:discussion", "admin:gpg_key", "codespace", "delete:packages", "brand:new"]) {
+        upstream.reset();
+        upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": `read:org, ${scope}` } });
+        expect((await reader("github").inspectCredential()).status, scope).toBe("write_scope");
+      }
       upstream.reset();
       upstream.route("GET", "/user", { status: 200, body: {} });
       expect((await reader("github").inspectCredential()).status).toBe("unverified");
@@ -243,6 +249,11 @@ describe("repo readers (ADR-0195 SD1)", () => {
           { path: "app/requirements.txt", type: "blob" },
         ],
       });
+      upstream.route("HEAD", `/api/v4/projects/${P}/repository/files/app%2Frequirements.txt?ref=${SHA}`, {
+        status: 200,
+        body: {},
+        headers: { "x-gitlab-size": "7" },
+      });
       upstream.route("GET", `/api/v4/projects/${P}/repository/files/app%2Frequirements.txt?ref=${SHA}`, {
         status: 200,
         body: { size: 7, encoding: "base64", content: b64("openai\n") },
@@ -255,12 +266,23 @@ describe("repo readers (ADR-0195 SD1)", () => {
       onlyGets();
     });
 
-    it("refuses a token with the api scope", async () => {
+    it("never downloads a file whose HEAD size is past the cap", async () => {
+      upstream.route("HEAD", `/api/v4/projects/${P}/repository/files/big.json?ref=${SHA}`, { status: 200, body: {}, headers: { "x-gitlab-size": "9000000" } });
+      expect(await reader("gitlab").readFile("grp/sub/proj", "big.json", { commitSha: SHA })).toEqual({ status: "too_large", size: 9_000_000 });
+      expect(upstream.requests.map((r) => r.method)).toEqual(["HEAD"]);
+    });
+
+    it("refuses a token with the api scope, or any scope not on the read-only allow-list", async () => {
       upstream.route("GET", "/api/v4/personal_access_tokens/self", { status: 200, body: { scopes: ["api"] } });
       expect((await reader("gitlab").inspectCredential()).status).toBe("write_scope");
       upstream.reset();
       upstream.route("GET", "/api/v4/personal_access_tokens/self", { status: 200, body: { scopes: ["read_api", "read_repository"] } });
       expect((await reader("gitlab").inspectCredential()).status).toBe("read_only");
+      for (const scope of ["self_rotate", "ai_features", "write_virtual_registry", "some_future_scope"]) {
+        upstream.reset();
+        upstream.route("GET", "/api/v4/personal_access_tokens/self", { status: 200, body: { scopes: ["read_api", scope] } });
+        expect((await reader("gitlab").inspectCredential()).status, scope).toBe("write_scope");
+      }
     });
   });
 
@@ -294,6 +316,30 @@ describe("repo readers (ADR-0195 SD1)", () => {
       expect(await r.readFile("ws/app", "svc/go.mod", { commitSha: SHA })).toEqual({ status: "ok", content: "module x\n", size: 9 });
       expect(upstream.requests[0]!.headers.authorization).toBe(`Bearer ${token}`);
       onlyGets();
+    });
+  });
+
+  describe("Bitbucket caps and scopes", () => {
+    it("stops reading a raw file past the cap (no Content-Length), and treats unknown scopes as write", async () => {
+      upstream.route("GET", `/repositories/ws/app/src/${SHA}/big.txt`, { status: 200, body: "x".repeat(300_000) });
+      expect((await reader("bitbucket").readFile("ws/app", "big.txt", { commitSha: SHA, maxBytes: 1_000 })).status).toBe("too_large");
+      upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "repository, account" } });
+      expect((await reader("bitbucket").inspectCredential()).status).toBe("read_only");
+      for (const scope of ["webhook", "pipeline:variable", "repository:write", "new-thing"]) {
+        upstream.reset();
+        upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": `repository, ${scope}` } });
+        expect((await reader("bitbucket").inspectCredential()).status, scope).toBe("write_scope");
+      }
+      await expect(reader("bitbucket").getTree("ws/app/extra")).rejects.toThrow(/invalid repo/);
+    });
+  });
+
+  describe("API base", () => {
+    it("must be https with no credentials, query or fragment (http only on loopback for tests)", () => {
+      for (const baseUrl of ["http://git.example.test", "https://u:p@git.example.test", "https://git.example.test/?a=1", "https://git.example.test/#x", "not a url"]) {
+        expect(() => reader("github", { baseUrl }), baseUrl).toThrow(/baseUrl/);
+      }
+      expect(() => reader("github", { baseUrl: "https://ghe.example.test/api/v3" })).not.toThrow();
     });
   });
 

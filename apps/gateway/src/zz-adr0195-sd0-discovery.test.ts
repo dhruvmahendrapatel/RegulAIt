@@ -214,6 +214,10 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const patch = await inject("PATCH", `/v1/discovery/sources/${created.id}`, AUTH, { version: created.version, target: { namespace: "acme", history: "sometimes" } }, bare);
     expect(patch.statusCode, patch.body).toBe(400);
     expect(patch.json().error).toBe("target_invalid");
+    // a scope naming a three-segment GitHub repo is refused the same way
+    const scopePatch = await inject("PATCH", `/v1/discovery/sources/${created.id}`, AUTH, { version: created.version, scope: { orgLevel: false, include: ["acme/app/extra"] } }, bare);
+    expect(scopePatch.statusCode, scopePatch.body).toBe(400);
+    expect(scopePatch.json().error).toBe("target_invalid");
     const row = await sourceRow(created.id);
     expect(row.target).toEqual({ namespace: "acme", baseUrl: "https://ghe.example.test/api/v3" });
     expect(row.version).toBe(created.version);

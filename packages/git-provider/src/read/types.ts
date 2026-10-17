@@ -9,6 +9,8 @@ import type { GitProviderKind } from "../types.js";
 export interface ReadResponse {
   status: number;
   headers?: { get(name: string): string | null };
+  /** the streamed body (the global Response has one): lets a read stop at its byte cap */
+  body?: ReadableStream<Uint8Array> | null;
   json(): Promise<unknown>;
   text(): Promise<string>;
 }
@@ -21,7 +23,7 @@ export interface ReadResponse {
  */
 export type ReadFetchLike = (
   url: string,
-  init: { method: "GET"; headers: Record<string, string> },
+  init: { method: "GET" | "HEAD"; headers: Record<string, string> },
 ) => Promise<ReadResponse>;
 
 export type RepoReaderKind = Exclude<GitProviderKind, "mock">;

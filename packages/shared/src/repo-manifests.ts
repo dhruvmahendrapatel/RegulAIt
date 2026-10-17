@@ -70,13 +70,48 @@ export function manifestKindForPath(path: string): ManifestKind | null {
   return null;
 }
 
-/** the 1-based line of the first occurrence of `needle`, or null */
+/**
+ * Line numbers for one file, computed once: the offsets of every newline are
+ * indexed a single time and each lookup is a binary search. The search for a
+ * needle resumes from the previous hit (manifests list dependencies in file
+ * order), wrapping round once, so a whole manifest is located in about one
+ * pass rather than one pass per dependency.
+ */
+export class LineLocator {
+  private readonly newlines: number[] = [];
+  private cursor = 0;
+
+  constructor(private readonly content: string) {
+    for (let i = content.indexOf("\n"); i !== -1; i = content.indexOf("\n", i + 1)) this.newlines.push(i);
+  }
+
+  /** the 1-based line holding character offset `at` */
+  lineAt(at: number): number {
+    let lo = 0;
+    let hi = this.newlines.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.newlines[mid]! < at) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo + 1;
+  }
+
+  /** the line of the next occurrence of `needle` from the last hit (wrapping once), or null */
+  line(needle: string): number | null {
+    if (!needle) return null;
+    let at = this.content.indexOf(needle, this.cursor);
+    if (at === -1 && this.cursor > 0) at = this.content.indexOf(needle);
+    if (at === -1) return null;
+    this.cursor = at + needle.length;
+    return this.lineAt(at);
+  }
+}
+
+/** the 1-based line of the first occurrence of `needle`, or null (one-off lookups) */
 export function lineOf(content: string, needle: string): number | null {
-  const at = content.indexOf(needle);
-  if (at === -1) return null;
-  let line = 1;
-  for (let i = 0; i < at; i++) if (content.charCodeAt(i) === 10) line++;
-  return line;
+  const at = needle ? content.indexOf(needle) : -1;
+  return at === -1 ? null : new LineLocator(content).lineAt(at);
 }
 
 /** PEP 508: the name ends at the first version, marker, extra or URL character */
@@ -103,21 +138,19 @@ function tomlDoc(content: string): Record<string, unknown> | null {
   }
 }
 
-function push(out: RepoDependency[], seen: Set<string>, ecosystem: RepoEcosystem, name: string | null, content: string, needle?: string): void {
+function push(out: RepoDependency[], seen: Set<string>, ecosystem: RepoEcosystem, name: string | null, loc: LineLocator, needle?: string): void {
   if (!name || name.length > NAME_MAX) return;
   const key = `${ecosystem}\u0000${name}`;
   if (seen.has(key)) return;
   seen.add(key);
-  out.push({ ecosystem, name, line: lineOf(content, needle ?? name) });
+  out.push({ ecosystem, name, line: loc.line(needle ?? name) });
 }
 
-function pyproject(content: string): RepoDependency[] {
-  const doc = tomlDoc(content);
-  if (!doc) return [];
+function pyproject(doc: Record<string, unknown>, loc: LineLocator): RepoDependency[] {
   const out: RepoDependency[] = [];
   const seen = new Set<string>();
   const specs = (v: unknown) => {
-    if (Array.isArray(v)) for (const s of v) if (typeof s === "string") push(out, seen, "pypi", pep508Name(s), content);
+    if (Array.isArray(v)) for (const s of v) if (typeof s === "string") push(out, seen, "pypi", pep508Name(s), loc);
   };
   const project = isRecord(doc.project) ? doc.project : {};
   specs(project.dependencies);
@@ -125,7 +158,7 @@ function pyproject(content: string): RepoDependency[] {
   if (isRecord(doc["dependency-groups"])) for (const v of Object.values(doc["dependency-groups"])) specs(v);
   const poetry = isRecord(doc.tool) && isRecord(doc.tool.poetry) ? doc.tool.poetry : null;
   const keys = (v: unknown) => {
-    if (isRecord(v)) for (const k of Object.keys(v)) if (k.toLowerCase() !== "python") push(out, seen, "pypi", k, content);
+    if (isRecord(v)) for (const k of Object.keys(v)) if (k.toLowerCase() !== "python") push(out, seen, "pypi", k, loc);
   };
   if (poetry) {
     keys(poetry.dependencies);
@@ -135,21 +168,17 @@ function pyproject(content: string): RepoDependency[] {
   return out;
 }
 
-function pipfile(content: string): RepoDependency[] {
-  const doc = tomlDoc(content);
-  if (!doc) return [];
+function pipfile(doc: Record<string, unknown>, loc: LineLocator): RepoDependency[] {
   const out: RepoDependency[] = [];
   const seen = new Set<string>();
   for (const section of ["packages", "dev-packages"]) {
     const v = doc[section];
-    if (isRecord(v)) for (const k of Object.keys(v)) push(out, seen, "pypi", k, content);
+    if (isRecord(v)) for (const k of Object.keys(v)) push(out, seen, "pypi", k, loc);
   }
   return out;
 }
 
-function cargo(content: string): RepoDependency[] {
-  const doc = tomlDoc(content);
-  if (!doc) return [];
+function cargo(doc: Record<string, unknown>, loc: LineLocator): RepoDependency[] {
   const out: RepoDependency[] = [];
   const seen = new Set<string>();
   const table = (v: unknown) => {
@@ -157,7 +186,7 @@ function cargo(content: string): RepoDependency[] {
     for (const [k, spec] of Object.entries(v)) {
       // `alias = { package = "real-name", ... }` declares real-name
       const real = isRecord(spec) && typeof spec.package === "string" ? spec.package : k;
-      push(out, seen, "cargo", real, content);
+      push(out, seen, "cargo", real, loc);
     }
   };
   for (const s of ["dependencies", "dev-dependencies", "build-dependencies"]) table(doc[s]);
@@ -170,9 +199,8 @@ function cargo(content: string): RepoDependency[] {
   return out;
 }
 
-function gradleCatalog(content: string): RepoDependency[] {
-  const doc = tomlDoc(content);
-  if (!doc || !isRecord(doc.libraries)) return [];
+function gradleCatalog(doc: Record<string, unknown>, loc: LineLocator): RepoDependency[] {
+  if (!isRecord(doc.libraries)) return [];
   const out: RepoDependency[] = [];
   const seen = new Set<string>();
   for (const lib of Object.values(doc.libraries)) {
@@ -182,7 +210,7 @@ function gradleCatalog(content: string): RepoDependency[] {
       if (typeof lib.module === "string") coord = lib.module;
       else if (typeof lib.group === "string" && typeof lib.name === "string") coord = `${lib.group}:${lib.name}`;
     }
-    if (coord && coord.split(":").length === 2) push(out, seen, "gradle", coord, content, coord.split(":")[1]);
+    if (coord && coord.split(":").length === 2) push(out, seen, "gradle", coord, loc, coord.split(":")[1]);
   }
   return out;
 }
@@ -283,41 +311,35 @@ function elements(node: unknown, tag: string, visit: (el: Record<string, unknown
 
 const text = (v: unknown): string | null => (typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : null);
 
-function pom(content: string): RepoDependency[] {
-  const doc = xmlDoc(content);
-  if (!doc) return [];
+function pom(doc: Record<string, unknown>, loc: LineLocator): RepoDependency[] {
   const out: RepoDependency[] = [];
   const seen = new Set<string>();
   elements(doc, "dependency", (d) => {
     const g = text(d.groupId);
     const a = text(d.artifactId);
-    if (g && a && COORD_OK(g) && COORD_OK(a)) push(out, seen, "maven", `${g}:${a}`, content, `<artifactId>${a}</artifactId>`);
+    if (g && a && COORD_OK(g) && COORD_OK(a)) push(out, seen, "maven", `${g}:${a}`, loc, `<artifactId>${a}</artifactId>`);
   });
   return out;
 }
 
-function nugetProject(content: string): RepoDependency[] {
-  const doc = xmlDoc(content);
-  if (!doc) return [];
+function nugetProject(doc: Record<string, unknown>, loc: LineLocator): RepoDependency[] {
   const out: RepoDependency[] = [];
   const seen = new Set<string>();
   for (const tag of ["PackageReference", "PackageVersion"]) {
     elements(doc, tag, (el) => {
       const id = text(el["@_Include"]) ?? text(el["@_Update"]);
-      if (id && COORD_OK(id)) push(out, seen, "nuget", id, content);
+      if (id && COORD_OK(id)) push(out, seen, "nuget", id, loc);
     });
   }
   return out;
 }
 
-function packagesConfig(content: string): RepoDependency[] {
-  const doc = xmlDoc(content);
-  if (!doc) return [];
+function packagesConfig(doc: Record<string, unknown>, loc: LineLocator): RepoDependency[] {
   const out: RepoDependency[] = [];
   const seen = new Set<string>();
   elements(doc, "package", (el) => {
     const id = text(el["@_id"]);
-    if (id && COORD_OK(id)) push(out, seen, "nuget", id, content);
+    if (id && COORD_OK(id)) push(out, seen, "nuget", id, loc);
   });
   return out;
 }
@@ -336,7 +358,10 @@ export function readManifest(kind: ManifestKind, content: string): { ok: boolean
       case "package_json":
         return {
           ok: true,
-          dependencies: dedupe(parsePackageJsonManifest(content).map((e) => ({ ecosystem: "npm" as const, name: e.name, line: lineOf(content, `"${e.name}"`) }))),
+          dependencies: (() => {
+            const loc = new LineLocator(content);
+            return dedupe(parsePackageJsonManifest(content).map((e) => ({ ecosystem: "npm" as const, name: e.name, line: loc.line(`"${e.name}"`) })));
+          })(),
         };
       case "requirements_txt":
         return { ok: true, dependencies: dedupe(parseRequirementsManifest(content).map((e) => ({ ecosystem: "pypi" as const, name: e.name, line: lineFromOrigin(e.origin) }))) };
@@ -366,13 +391,15 @@ export function readManifest(kind: ManifestKind, content: string): { ok: boolean
   }
 }
 
+/** parse ONCE, then read the dependencies from the parsed document */
 function wrap(
   content: string,
-  read: (c: string) => RepoDependency[],
+  read: (doc: Record<string, unknown>, loc: LineLocator) => RepoDependency[],
   parse: (c: string) => Record<string, unknown> | null,
 ): { ok: boolean; dependencies: RepoDependency[] } {
-  if (parse(content) === null) return { ok: false, dependencies: [] };
-  return { ok: true, dependencies: read(content) };
+  const doc = parse(content);
+  if (doc === null) return { ok: false, dependencies: [] };
+  return { ok: true, dependencies: read(doc, new LineLocator(content)) };
 }
 
 function dedupe(deps: RepoDependency[]): RepoDependency[] {

@@ -3,6 +3,8 @@
 
 import {
   assertCommitSha,
+  base64EnvelopeCap,
+  readJsonCapped,
   clampLimit,
   decodeBase64Text,
   encodeRepoPath,
@@ -35,8 +37,12 @@ const hint = (status: number): string =>
       ? " (not found, or the token cannot see it: repo is 'group/project')"
       : "";
 
-/** scopes that can write; `read_api` and `read_repository` are what a scan needs */
-const GITLAB_WRITE_SCOPES = new Set(["api", "write_repository", "write_registry", "sudo", "admin_mode", "k8s_proxy", "create_runner", "manage_runner"]);
+/**
+ * ALLOW-LIST (secure by default, ADR-0180): the token scopes known to be
+ * read-only. Any other scope (api, write_*, sudo, admin_mode, self_rotate,
+ * ai_features, an unknown future scope) counts as write.
+ */
+const GITLAB_READ_ONLY_SCOPES = new Set(["read_api", "read_repository", "read_user", "read_registry", "read_virtual_registry", "openid", "profile", "email"]);
 
 interface GlProject {
   path_with_namespace?: string;
@@ -62,7 +68,8 @@ export class GitLabRepoReader implements RepoReader {
   }
 
   private project(repo: string): string {
-    return encodeURIComponent(repoSegments(repo, 2).join("/"));
+    // group/subgroup/.../project: nested groups are allowed (up to 20 levels)
+    return encodeURIComponent(repoSegments(repo, 2, 21).join("/"));
   }
 
   /** follow x-next-page until done, the item cap or the page cap */
@@ -137,12 +144,19 @@ export class GitLabRepoReader implements RepoReader {
   async readFile(repo: string, path: string, opts: ReadFileOptions): Promise<ReadFileResult> {
     const maxBytes = clampLimit(opts.maxBytes, REPO_READ_DEFAULTS.maxFileBytes, REPO_READ_DEFAULTS.maxFileBytesCeiling);
     const encodedPath = encodeURIComponent(decodeURIComponent(encodeRepoPath(path)));
-    const res = await this.http.get(
-      `/projects/${this.project(repo)}/repository/files/${encodedPath}?ref=${assertCommitSha(opts.commitSha)}`,
-    );
+    const url = `/projects/${this.project(repo)}/repository/files/${encodedPath}?ref=${assertCommitSha(opts.commitSha)}`;
+    // HEAD first: X-Gitlab-Size says how big the file is before any of it is downloaded
+    const head = await this.http.get(url, {}, "HEAD");
+    if (head.status === 404) return { status: "not_found" };
+    if (head.status >= 400) await this.http.fail(head, hint);
+    const declared = Number(this.http.header(head, "x-gitlab-size") ?? "NaN");
+    if (Number.isFinite(declared) && declared > maxBytes) return { status: "too_large", size: declared };
+    const res = await this.http.get(url);
     if (res.status === 404) return { status: "not_found" };
     if (res.status >= 400) await this.http.fail(res, hint);
-    const body = (await res.json()) as { size?: number; encoding?: string; content?: string };
+    const capped = await readJsonCapped<{ size?: number; encoding?: string; content?: string }>(res, base64EnvelopeCap(maxBytes));
+    if (capped.tooLarge || !capped.body) return { status: "too_large", size: Number.isFinite(declared) ? declared : null };
+    const body = capped.body;
     const size = typeof body.size === "number" ? body.size : null;
     if (size !== null && size > maxBytes) return { status: "too_large", size };
     if (body.encoding !== "base64" || typeof body.content !== "string") return { status: "binary", size };
@@ -160,7 +174,7 @@ export class GitLabRepoReader implements RepoReader {
     if (res.status >= 400) await this.http.fail(res, hint);
     const body = (await res.json()) as { scopes?: unknown };
     const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s): s is string => typeof s === "string") : [];
-    const write = scopes.filter((s) => GITLAB_WRITE_SCOPES.has(s));
+    const write = scopes.filter((s) => !GITLAB_READ_ONLY_SCOPES.has(s));
     return write.length > 0
       ? { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` }
       : { status: "read_only", scopes, detail: "token scopes are read-only" };

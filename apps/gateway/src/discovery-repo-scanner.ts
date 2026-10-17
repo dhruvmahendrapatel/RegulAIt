@@ -90,6 +90,7 @@ export interface RepoScanContext {
   fetch: typeof fetch;
   throttle: () => Promise<void>;
   backoff: (res: Response) => Promise<boolean>;
+  registerSecret: (value: string) => void;
   recordRaw: (chunk: string | Uint8Array) => void;
   pseudonymise: (kind: DiscoveryPseudonymKind, displayName: string) => Promise<string>;
   heartbeat: () => Promise<boolean>;
@@ -107,7 +108,7 @@ export interface RepoScanner {
   kind: DiscoverySourceKind;
   requiresCredential: boolean;
   run: (ctx: RepoScanContext) => Promise<RepoScanResult>;
-  validateTarget: (target: Readonly<Record<string, string>>) => string | null;
+  validateTarget: (target: Readonly<Record<string, string>>, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>) => string | null;
 }
 
 export const REPO_SCANNER_KINDS = ["repo_github", "repo_gitlab", "repo_bitbucket", "repo_azure_devops"] as const;
@@ -306,6 +307,37 @@ export function repoTargetProblem(kind: string, target: Readonly<Record<string, 
   return null;
 }
 
+/** how many path segments a repo address has, per provider: GitHub/Bitbucket owner/name, ADO project/repo, GitLab group(s)/project */
+const REPO_SEGMENTS: Readonly<Record<RepoScannerKind, readonly [number, number]>> = {
+  repo_github: [2, 2],
+  repo_bitbucket: [2, 2],
+  repo_azure_devops: [2, 2],
+  repo_gitlab: [2, 21],
+};
+
+const SEGMENT_OK = (seg: string) =>
+  seg.length >= 1 &&
+  seg.length <= 200 &&
+  seg !== "." &&
+  seg !== ".." &&
+  [...seg].every((c) => (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "-" || c === "_" || c === "." || c === " ");
+
+/** each named repo in a non-org-level scope must be a well-formed address for its provider */
+export function repoScopeProblem(kind: string, scope: Readonly<{ orgLevel: boolean; include: readonly string[] }>): string | null {
+  if (scope.orgLevel) return null;
+  const bounds = REPO_SEGMENTS[kind as RepoScannerKind];
+  if (!bounds) return null;
+  if (scope.include.length === 0) return "a repo-level scope names at least one repository";
+  for (const raw of scope.include) {
+    const segs = raw.trim().split("/");
+    if (segs.length < bounds[0] || segs.length > bounds[1] || !segs.every(SEGMENT_OK)) {
+      const shape = kind === "repo_gitlab" ? "group/project (subgroups allowed)" : kind === "repo_azure_devops" ? "project/repository" : "owner/name";
+      return `scope entry '${raw.slice(0, 80)}' is not a ${shape} repository address`;
+    }
+  }
+  return null;
+}
+
 function historyDepth(target: Readonly<Record<string, string>>): number {
   const raw = target.historyDepth;
   return raw === undefined ? REPO_SCAN_LIMITS.historyDepthDefault : Number(raw);
@@ -370,7 +402,7 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
   return {
     kind,
     requiresCredential: true,
-    validateTarget: (target) => repoTargetProblem(kind, target),
+    validateTarget: (target, scope) => repoTargetProblem(kind, target) ?? repoScopeProblem(kind, scope),
     run: async (ctx) => {
       const token = ctx.credential?.mode === "static" ? ctx.credential.secret : null;
       if (!token) {
@@ -380,8 +412,11 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
         );
       }
       const target = ctx.source.target;
-      const problem = repoTargetProblem(kind, target);
+      const problem = repoTargetProblem(kind, target) ?? repoScopeProblem(kind, ctx.source.scope);
       if (problem) throw new RepoScanError("target_invalid", problem);
+      // the auth header forms derived from the token (Basic base64) are secrets too: scrub them from any stored text
+      ctx.registerSecret(Buffer.from(token, "utf8").toString("base64"));
+      ctx.registerSecret(Buffer.from(`:${token}`, "utf8").toString("base64"));
       const history = target.history === "true";
       const depth = history ? historyDepth(target) : 0;
       const reader = resolve(PROVIDER_OF[kind], {

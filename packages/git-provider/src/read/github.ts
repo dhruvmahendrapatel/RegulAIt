@@ -2,6 +2,8 @@
 
 import {
   assertCommitSha,
+  base64EnvelopeCap,
+  readJsonCapped,
   clampLimit,
   decodeBase64Text,
   encodeRepoPath,
@@ -33,17 +35,27 @@ const hint = (status: number): string =>
       ? " (not found, or the token cannot see it: repo is 'owner/name')"
       : "";
 
-/** classic-token scopes that can write to repos or org settings */
-const GITHUB_WRITE_SCOPES = new Set([
-  "repo",
-  "public_repo",
-  "write:org",
-  "admin:org",
-  "workflow",
-  "delete_repo",
-  "write:packages",
-  "admin:repo_hook",
-  "write:repo_hook",
+/**
+ * ALLOW-LIST (secure by default, ADR-0180): the classic-token scopes known to
+ * be read-only. Any other scope (repo, gist, user, project, write:*, admin:*,
+ * codespace, delete:*, workflow, an unknown future scope) counts as write.
+ * A classic token cannot read private repos without `repo`, which can write,
+ * so private-repo scanning needs a fine-grained read-only token (reported as
+ * "unverified": GitHub does not expose fine-grained permissions this way).
+ */
+const GITHUB_READ_ONLY_SCOPES = new Set([
+  "read:org",
+  "read:user",
+  "user:email",
+  "read:packages",
+  "read:discussion",
+  "read:project",
+  "read:gpg_key",
+  "read:public_key",
+  "read:repo_hook",
+  "read:ssh_signing_key",
+  "read:enterprise",
+  "read:audit_log",
 ]);
 
 interface GhRepo {
@@ -134,7 +146,10 @@ export class GitHubRepoReader implements RepoReader {
     const res = await this.http.get(`/repos/${r}/contents/${encodeRepoPath(path)}?ref=${assertCommitSha(opts.commitSha)}`);
     if (res.status === 404) return { status: "not_found" };
     if (res.status >= 400) await this.http.fail(res, hint);
-    const body = (await res.json()) as { type?: string; encoding?: string; content?: string; size?: number };
+    // the base64 envelope is read under a byte cap: a large file is never fully downloaded
+    const capped = await readJsonCapped<{ type?: string; encoding?: string; content?: string; size?: number }>(res, base64EnvelopeCap(maxBytes));
+    if (capped.tooLarge || !capped.body) return { status: "too_large", size: null };
+    const body = capped.body;
     const size = typeof body.size === "number" ? body.size : null;
     if (body.type !== "file") return { status: "not_found" };
     if (size !== null && size > maxBytes) return { status: "too_large", size };
@@ -157,7 +172,7 @@ export class GitHubRepoReader implements RepoReader {
       };
     }
     const scopes = raw.split(",").map((s) => s.trim()).filter(Boolean);
-    const write = scopes.filter((s) => GITHUB_WRITE_SCOPES.has(s));
+    const write = scopes.filter((s) => !GITHUB_READ_ONLY_SCOPES.has(s));
     return write.length > 0
       ? { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` }
       : { status: "read_only", scopes, detail: "classic token with read-only scopes" };
