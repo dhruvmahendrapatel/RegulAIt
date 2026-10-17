@@ -118,7 +118,7 @@ export class EndpointImportFormatError extends Error {
   readonly code = "unreadable_endpoint_file";
   constructor(
     message: string,
-    readonly detail: { importer: EndpointImportSource; found?: string[]; missing?: string[] },
+    readonly detail: { importer: EndpointImportSource; missing?: string[] },
   ) {
     super(message);
     this.name = "EndpointImportFormatError";

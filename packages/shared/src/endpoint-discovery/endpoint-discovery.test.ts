@@ -602,29 +602,39 @@ describe("recheck fixes (#401)", () => {
   });
 
   it("malformed osquery JSON and unparseable JSON rows quote no snippet", () => {
-    let msg = "";
-    try {
-      importOsqueryResults({ content: '[{"hostIdentifier": "alice-macbook", "name": ', pseudonymise: hook });
-    } catch (e) {
-      msg = (e as Error).message;
+    // a bad token mid-file makes the parser quote the text around it; truncated input would prove nothing
+    // the first input of each list makes the parser's own message quote "alice-macb": the importer must not pass it on
+    const badOsquery = ['[{"hostIdentifier": alice-macbook}]', '[{"hostIdentifier":"alice-macbook","name": x}]', '[{"hostIdentifier": "alice-macbook", "name": ', "[{\"hostIdentifier\":\"alice-macbook\",\"name\":\"ai_apps_macos\" bob-laptop}]"];
+    for (const content of badOsquery) {
+      let msg = "";
+      try {
+        importOsqueryResults({ content, pseudonymise: hook });
+      } catch (e) {
+        msg = JSON.stringify({ m: (e as Error).message, d: (e as EndpointImportFormatError).detail });
+      }
+      expect(msg, content).toMatch(/not valid JSON/);
+      for (const cell of ["alice", "macbook", "bob"]) expect(msg.includes(cell), `${content}: ${cell}`).toBe(false);
     }
-    expect(msg).toMatch(/not valid JSON/);
-    expect(msg.includes("alice")).toBe(false);
-    let msg2 = "";
-    try {
-      importEndpointInventory({ content: '[{"device": "alice-macbook", ', format: "json", pseudonymise: hook });
-    } catch (e) {
-      msg2 = (e as Error).message;
+    const badInventory = ['[{"device": alice-macbook}]', '[{"device":"alice-macbook","software": x}]', '[{"device": "alice-macbook", ', '[{"device":"alice-macbook","software":"Cursor" bob-laptop}]'];
+    for (const content of badInventory) {
+      let msg = "";
+      try {
+        importEndpointInventory({ content, format: "json", pseudonymise: hook });
+      } catch (e) {
+        msg = JSON.stringify({ m: (e as Error).message, d: (e as EndpointImportFormatError).detail });
+      }
+      expect(msg.length, content).toBeGreaterThan(0);
+      for (const cell of ["alice", "macbook", "bob", "Cursor"]) expect(msg.includes(cell), `${content}: ${cell}`).toBe(false);
     }
-    expect(msg2.length).toBeGreaterThan(0);
-    expect(msg2.includes("alice")).toBe(false);
   });
 
   it("row refusals name fields and positions, never cell or header text", () => {
-    const csv = "device,software,type,Command-Line\nd1,Cursor,firmware-alice,\nd2,Cursor,app,run --as alice\n";
+    const csv = "device,software,type,last_seen,Command-Line\nd1,Cursor,firmware-alice,,\nd2,Cursor,app,,run --as alice\nd3,Cursor,app,yesterday-alice-carol,\n";
     const r = importEndpointInventory({ content: csv, format: "csv", pseudonymise: hook });
     const dump = JSON.stringify(r.refusals);
-    expect(r.refusals.map((x) => x.line)).toEqual([2, 3]);
+    expect(r.refusals.map((x) => x.line)).toEqual([2, 3, 4]);
+    expect(r.refusals[2]!.field).toBe("observedAt");
+    expect(dump.includes("carol")).toBe(false);
     expect(dump.includes("alice")).toBe(false);
     expect(dump.includes("Command-Line")).toBe(false);
   });
