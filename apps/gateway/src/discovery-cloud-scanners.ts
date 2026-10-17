@@ -184,7 +184,7 @@ const list = (v: string | undefined): string[] => (v ?? "").split(",").map((x) =
 /** build the adapter for one run; exported for tests */
 export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, fetchImpl: typeof fetch, opts: CloudScannerOptions, credentialFetch?: typeof fetch): CloudScanner {
   // every short-lived credential the adapter obtains or sends is registered for scrubbing (SD0 registerSecret)
-  const credFetch = { ...(credentialFetch ? { credentialFetch } : {}), onSecret: (v: string) => ctx.registerSecret(v) };
+  const credFetch = { ...(credentialFetch ? { credentialFetch } : {}), onSecret: dedupedSecretSink(ctx.registerSecret) };
   const t = ctx.source.target;
   const scope = ctx.source.scope;
   const oidc = opts.oidcToken ? { oidcToken: opts.oidcToken } : {};
@@ -228,6 +228,20 @@ export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, f
     default:
       throw new CloudSourceConfigError(`not a cloud source kind: ${kind}`);
   }
+}
+
+/**
+ * The adapters see every token on every request; SD0 keeps at most 64 registered values per run. Registering each
+ * distinct value once keeps the cap for new ones (a token refreshed an hour into a long run must still be scrubbed;
+ * review of #404 round 2, finding 1).
+ */
+export function dedupedSecretSink(register: (value: string) => void): (value: string) => void {
+  const seen = new Set<string>();
+  return (value) => {
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    register(value);
+  };
 }
 
 /** an adapter observation in SD0's terms */

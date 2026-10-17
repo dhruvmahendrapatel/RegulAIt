@@ -6,7 +6,8 @@
  */
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { cloudScanner, capabilitySummary, digestBounded, scannerFetch } from "./discovery-cloud-scanners.js";
+import { captureSentSecrets } from "@regulait/cloud-discovery";
+import { cloudScanner, capabilitySummary, dedupedSecretSink, digestBounded, scannerFetch } from "./discovery-cloud-scanners.js";
 import type { ScanContext } from "./discovery-scanners.js";
 import { checkObservations } from "./discovery-worker.js";
 
@@ -215,6 +216,45 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
     const registered = [...gcp.calls.secrets, ...az.calls.secrets];
     for (const m of markers) expect(registered).toContain(m);
     expect(registered).toContain(oidc);
+  });
+
+  it("secret registration is deduplicated: past 64 requests a rotated token is still registered (round 2, finding 1)", async () => {
+    // SD0's cap, as the worker applies it: at most 64 registered values
+    const store: string[] = [];
+    const capped = (v: string) => {
+      if (store.length < 64) store.push(v);
+    };
+    const sink = dedupedSecretSink(capped);
+    const sent: string[] = [];
+    const f = captureSentSecrets((async (_u: string | URL | Request, init?: RequestInit) => {
+      sent.push(new Headers(init?.headers).get("authorization") ?? "");
+      return new Response("{}");
+    }) as typeof fetch, sink);
+    const first = synthetic("tok-a");
+    const rotated = synthetic("tok-b");
+    for (let i = 0; i < 70; i++) await f("https://management.azure.com/x", { headers: { authorization: `Bearer ${first}` } });
+    for (let i = 0; i < 5; i++) await f("https://management.azure.com/x", { headers: { authorization: `Bearer ${rotated}` } });
+    expect(sent).toHaveLength(75);
+    expect(store).toEqual([first, rotated]);
+
+    // end to end: an Azure scan over 40 subscriptions sends one token on 80+ requests and registers it once
+    const az = ctxFor({
+      fetch: (async (input: string | URL | Request) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        if (url.hostname === "login.microsoftonline.com") {
+          const base = `https://login.microsoftonline.com/${url.pathname.split("/")[1]}`;
+          if (url.pathname.endsWith("/discovery/instance")) return json({ tenant_discovery_endpoint: `${base}/v2.0/.well-known/openid-configuration`, metadata: [] });
+          if (url.pathname.endsWith("/openid-configuration")) return json({ token_endpoint: `${base}/oauth2/v2.0/token`, authorization_endpoint: `${base}/oauth2/v2.0/authorize`, issuer: `${base}/v2.0` });
+          return json({ token_type: "Bearer", expires_in: 3600, access_token: synthetic("entra") });
+        }
+        return json({ totalRecords: 0, count: 0, resultTruncated: "false", data: [], value: [] });
+      }) as typeof fetch,
+      source: { id: "a", name: "az", kind: "cloud_azure", target: {}, scope: { orgLevel: false, include: Array.from({ length: 40 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`) } },
+      credential: { mode: "static", publicConfig: { tenantId: "00000000-0000-4000-8000-000000000001", clientId: "00000000-0000-4000-8000-000000000002" }, secret: synthetic("cs") },
+    });
+    await cloudScanner("cloud_azure").run(az.ctx).catch(() => undefined);
+    expect(az.calls.throttle).toBeGreaterThan(80);
+    expect(new Set(az.calls.secrets).size).toBe(az.calls.secrets.length);
   });
 
   it("capabilitySummary lists only reads that did not succeed", () => {
