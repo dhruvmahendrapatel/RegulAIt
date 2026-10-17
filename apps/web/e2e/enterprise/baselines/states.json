@@ -1,0 +1,80 @@
+{
+  "_about": "ADR-0196: loading and error state findings per screen. Counts may only shrink.",
+  "entries": {
+    "/admin/agents": {
+      "loading-not-announced": 1
+    },
+    "/admin/approvals": {
+      "loading-not-announced": 1
+    },
+    "/admin/compliance": {
+      "loading-not-announced": 1
+    },
+    "/admin/connectors": {
+      "loading-not-announced": 1
+    },
+    "/admin/cost": {
+      "loading-not-announced": 1
+    },
+    "/admin/custom-providers": {
+      "error-not-shown": 1,
+      "loading-not-announced": 1
+    },
+    "/admin/deploy-targets": {
+      "loading-not-announced": 1
+    },
+    "/admin/git-connections": {
+      "loading-not-announced": 1
+    },
+    "/admin/governance/decision-regression": {
+      "loading-not-announced": 1
+    },
+    "/admin/governance/intake": {
+      "error-not-shown": 1,
+      "loading-not-announced": 1
+    },
+    "/admin/model-credentials": {
+      "loading-not-announced": 1
+    },
+    "/admin/optimization": {
+      "loading-not-announced": 1
+    },
+    "/admin/pm-connections": {
+      "loading-not-announced": 1
+    },
+    "/admin/prompt-versions": {
+      "error-not-shown": 1,
+      "loading-not-announced": 1
+    },
+    "/admin/roles": {
+      "loading-not-announced": 1
+    },
+    "/admin/rules": {
+      "loading-not-announced": 1
+    },
+    "/admin/teams": {
+      "error-not-shown": 1,
+      "loading-not-announced": 1
+    },
+    "/admin/workflow-templates": {
+      "loading-not-announced": 1
+    },
+    "/builder/playground": {
+      "error-not-shown": 1,
+      "loading-not-announced": 1
+    },
+    "/chat": {
+      "error-not-shown": 1
+    },
+    "/feedback/:useCaseId": {
+      "error-not-shown": 1,
+      "loading-not-announced": 1
+    },
+    "/runs": {
+      "loading-not-announced": 1
+    },
+    "/workflows": {
+      "loading-not-announced": 1
+    }
+  }
+}

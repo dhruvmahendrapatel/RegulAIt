@@ -116,5 +116,20 @@ comes from `PLAYWRIGHT_BROWSERS_PATH`. Never run `playwright install` there. Fir
 
 ## As built
 
-- Baseline counts at commit time (Chromium; Firefox and WebKit baselines are written from their first CI run):
-  see the PR's builder report.
+Baseline at commit time, from one Chromium run of all 112 screens (450 tests passed, 2 skipped: the two public
+screens in the states check):
+
+- axe, serious or critical, both themes: 0. A planted check (low-contrast text, an unnamed button, an image without
+  alt) was caught, so the zero is a real reading of the error-state screens.
+- keyboard (Chromium): 1, `dialog-focus-not-restored` on the settings step-up (Escape on the step-up dialog leaves
+  focus on `<body>`).
+- responsive (Chromium, five widths): 0.
+- states: 29 on 23 screens: 22 `loading-not-announced` and 7 `error-not-shown`.
+- table density: 0. perf: 0 over budget (highest LCP 1396 ms, highest INP 16 ms, on this container).
+- design tokens: 739 findings in 98 files: 370 px/rem/em spacing in CSS, 298 literal inline spacing in TSX,
+  47 colour literals in TSX, 22 hex colours and 2 colour functions in CSS.
+- bundle (gzip): entry JS 792.7 kB, entry CSS 28.6 kB, SeriesLineChart 106.1 kB, RunGraphCanvas 75.9 kB, all JS
+  989.2 kB.
+
+The Firefox and WebKit baselines are written from their first CI run, because those browsers are not installed on
+the build container.
