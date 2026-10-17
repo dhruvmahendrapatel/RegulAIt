@@ -2289,3 +2289,11 @@ bundle; moving a packed kit to a separate air-gapped machine; the out-of-band tr
 engagement; Python 3.12 or later (its `venv` bundles no
 `setuptools`, which the offline `halo` build needs); offline verification of the release's own AI BOM (B7; its
 air-gapped trust root is owner item 2); and the whole receipt v2 cutover with the replica drain.
+
+**B8 follow-ups (2026-10-17).** The two runbooks are linked from `docs/deployment/INSTALL.md` (already on main when
+checked). `scripts/release-ai-bom.test.mjs` sets an explicit 60 s timeout per case, like the other `scripts/bom-*`
+CLI tests: each case spawns processes, and the gate's near-miss case takes about 3 s alone, too close to vitest's
+default 5 s under CI's parallel sweep. The prebuilt `halo` wheel is **not taken**: no pinned Python 3 wheel of
+`halo` 0.0.31 exists from its publisher (only a `py2` wheel, which pip on CPython 3 never selects, and the sdist), and
+`spdx3-validate` 0.0.7 needs `halo>=0.0.31`. So `--no-build-isolation` and the Python 3.11 `setuptools` dependency
+stay; the reason is written in `BOM_VERIFICATION.md`.
