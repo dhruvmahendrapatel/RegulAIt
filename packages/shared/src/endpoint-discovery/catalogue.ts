@@ -36,6 +36,7 @@ import {
   type EndpointSignatureSeed,
 } from "./endpoint-signatures.js";
 import type { EndpointImportResult, EndpointObservation } from "./observation.js";
+import { scrubAuditText } from "../audit-scrub.js";
 
 export const ENDPOINT_PORT_IDENTIFIER_PREFIX = "port:";
 export const ENDPOINT_TRAIT_IDENTIFIER_PREFIX = "trait:";
@@ -186,6 +187,8 @@ export interface EndpointReduction {
   /** observations no enabled row matched: a bounded sample, for the run's catalogue gaps */
   unmatched: Array<{ device: string; os: SignatureOs | null; kind: ArtifactSignatureKind; value: string }>;
   unmatchedCount: number;
+  /** candidate values the audit scrubber would change (a credential shape): never matched, sampled or sent on */
+  credentialShapedDropped: number;
 }
 
 /**
@@ -207,10 +210,15 @@ export function reduceEndpointObservations(
   const unmatched: EndpointReduction["unmatched"] = [];
   const unmatchedSeen = new Set<string>();
   let unmatchedCount = 0;
+  let credentialShapedDropped = 0;
   for (const obs of result.observations) {
     const providers = new Set<string>();
     const os = endpointOsToSignatureOs(obs.os);
-    const candidates = endpointArtifactCandidates(obs);
+    // SD0 refuses an observation whose text the audit scrubber would change; such a value is likely a secret
+    // someone placed in a name column, so it is dropped here, counted, and never matched, sampled or stored
+    const all = endpointArtifactCandidates(obs);
+    const candidates = all.filter((c) => scrubAuditText(c.value) === c.value);
+    credentialShapedDropped += all.length - candidates.length;
     for (const c of candidates) {
       const sig = enabled.find(
         (s) =>
@@ -252,5 +260,5 @@ export function reduceEndpointObservations(
       }
     }
   }
-  return { matched: [...matched.values()], unmatched, unmatchedCount };
+  return { matched: [...matched.values()], unmatched, unmatchedCount, credentialShapedDropped };
 }

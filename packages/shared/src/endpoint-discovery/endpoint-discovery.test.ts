@@ -562,3 +562,16 @@ describe("review fixes (#401)", () => {
     expect(r.refusals).toHaveLength(1);
   });
 });
+
+describe("credential-shaped values (SD0 scrubber parity)", () => {
+  it("drops a candidate the audit scrubber would change, and never samples it as a gap", () => {
+    const hook = testHook();
+    // synthetic, built at runtime: a value shaped like a provider key (gitleaks-safe)
+    const keyShaped = ["sk", "ant", "api03", "z".repeat(90)].join("-");
+    const content = JSON.stringify({ name: "ai_running_processes", hostIdentifier: "h", columns: { name: keyShaped } });
+    const r = importOsqueryResults({ content, pseudonymise: hook });
+    const red = reduceEndpointObservations(r, endpointCatalogueSignatures().map(({ seedIds: _s, ...sig }) => sig));
+    expect(red.credentialShapedDropped).toBeGreaterThan(0);
+    expect(JSON.stringify(red)).not.toContain(keyShaped);
+  });
+});

@@ -5,8 +5,8 @@
  * own osquery or MDM/EDR produces the file and an admin imports it through
  * `POST /v1/discovery/sources/:sourceId/endpoint-imports` (endpoint-import-routes.ts).
  * RegulAIt never reaches out to a device, so the scanner itself observes
- * nothing: a scheduled or "run now" run of one of these sources succeeds with
- * zero observations, calls nothing and reads no credential.
+ * nothing. SD0 never schedules an upload-fed kind; a "run now" of one succeeds
+ * with zero observations, calls nothing and reads no credential.
  */
 import type { Scanner } from "./discovery-scanners.js";
 

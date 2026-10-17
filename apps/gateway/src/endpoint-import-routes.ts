@@ -97,7 +97,7 @@ function requestLocalHook(): { hook: EndpointPseudonymHook; clearOf: (token: str
   };
 }
 
-function summarise(result: EndpointImportResult, matched: number, unmatched: number) {
+function summarise(result: EndpointImportResult, matched: number, unmatched: number, credentialShapedDropped = 0) {
   return {
     rowsParsed: result.rowsParsed,
     observations: result.observations.length,
@@ -107,6 +107,7 @@ function summarise(result: EndpointImportResult, matched: number, unmatched: num
     devices: result.devices,
     sightingsMatched: matched,
     observationsUnmatched: unmatched,
+    credentialShapedDropped,
   };
 }
 
@@ -189,7 +190,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
 
     const catalogue = await loadEnabledCatalogue(db);
     const reduction = reduceEndpointObservations(result, catalogue);
-    const summary = summarise(result, reduction.matched.length, reduction.unmatchedCount);
+    const summary = summarise(result, reduction.matched.length, reduction.unmatchedCount, reduction.credentialShapedDropped);
     if (reduction.matched.length + reduction.unmatched.length > EVIDENCE_MAX_ROWS) {
       return refuseAudited(
         422,
@@ -286,7 +287,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
       for (const u of reduction.unmatched) {
         scan.push({ evidenceKind, subjectKind: "device", subject: GAP_PLACEHOLDER_SUBJECT, artifact: { kind: u.kind, value: u.value }, ...(u.os ? { os: u.os } : {}) });
       }
-      const checked = checkObservations(source.kind, scan, new Date().toISOString());
+      const checked = checkObservations(source.kind, scan, new Date().toISOString(), catalogue);
       const verdict = await applyDiscoveryRunObservations(db, run, owner, source, checked, digest, catalogue, [], (t) => recordPseudonyms(t, dataKey, [...derived.values()]));
       if (verdict !== "succeeded") {
         return refuseAudited(409, "run_lost", "the import's run lost its lease before it committed; nothing was imported", { runId: run.id }, { payloadSha256: digest, runId: run.id });
