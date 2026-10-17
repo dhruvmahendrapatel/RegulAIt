@@ -62,6 +62,9 @@ import {
   DISCOVERY_READ_OUTCOMES_MAX,
   DISCOVERY_READ_STATUSES,
   PSEUDONYMISED_SUBJECT_KINDS,
+  SIGNATURE_ECOSYSTEM_PATTERN,
+  SIGNATURE_OSES,
+  UPLOAD_FED_SOURCE_KINDS,
   isArtifactSignatureKind,
   redactKeyFragment,
   scrubAuditText,
@@ -259,6 +262,7 @@ export async function enqueueDueDiscoveryRuns(db: Db): Promise<Array<{ runId: st
       UPDATE discovery_sources
          SET next_run_at = now() + make_interval(secs => schedule_interval_seconds)
        WHERE enabled AND (next_run_at IS NULL OR next_run_at <= now())
+         AND NOT (kind = ANY (${sql.raw(`ARRAY[${UPLOAD_FED_SOURCE_KINDS.map((k) => `'${k}'`).join(", ") || "''"}]::text[]`)}))
        RETURNING id, version, kind
     )
     INSERT INTO discovery_runs (source_id, trigger, status, source_version, kind)
@@ -421,6 +425,10 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
         return n;
       });
     }
+    if (o.os !== undefined && !(SIGNATURE_OSES as readonly string[]).includes(o.os)) throw new ObservationRefused(`observation ${i}: os must be macos, windows or linux`);
+    if (o.ecosystem !== undefined && !SIGNATURE_ECOSYSTEM_PATTERN.test(o.ecosystem.trim().toLowerCase())) {
+      throw new ObservationRefused(`observation ${i}: '${String(o.ecosystem).slice(0, 40)}' is not an ecosystem name`);
+    }
     if (o.actorPseudonym !== undefined && !DISCOVERY_PSEUDONYM_PATTERN.test(o.actorPseudonym)) {
       throw new ObservationRefused(`observation ${i}: actorPseudonym must be a pseudonym (psn:…) from ctx.pseudonymise`);
     }
@@ -440,6 +448,8 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
       location,
       names,
       actorPseudonym: o.actorPseudonym ?? null,
+      os: o.os ?? null,
+      ecosystem: o.ecosystem ? o.ecosystem.trim().toLowerCase() : null,
     };
   });
 }
@@ -482,6 +492,11 @@ export const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
     replacementNote: r.replacementNote,
     provenance: r.provenance,
     enabled: r.enabled,
+    os: r.os,
+    ecosystem: r.ecosystem,
+    toolId: r.toolId,
+    note: r.note,
+    confidence: r.confidence,
   }));
 
 // ---------------------------------------------------------------------------
@@ -764,7 +779,7 @@ export async function runEndpointRetention(db: Db): Promise<{ findingsDeleted: n
   const pseudonyms = await db.execute(sql`
     DELETE FROM discovery_pseudonyms
      WHERE id IN (SELECT id FROM discovery_pseudonyms
-                   WHERE kind = 'device_user' AND last_seen_at < now() - make_interval(days => ${endpointRetentionDays})
+                   WHERE kind IN ('device_user', 'device') AND last_seen_at < now() - make_interval(days => ${endpointRetentionDays})
                    LIMIT ${RETENTION_BATCH})
      RETURNING id`);
   const out = { findingsDeleted: findings.rows.length, pseudonymsDeleted: pseudonyms.rows.length };

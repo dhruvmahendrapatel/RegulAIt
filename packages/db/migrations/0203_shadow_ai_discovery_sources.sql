@@ -58,6 +58,28 @@ ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind
                   'assistant_config')) = ("match_type" = 'identifier')
 );
 
+-- catalogue rows scoped to an OS or a package ecosystem, a tool id, an admin note, and a confidence (SD3 request)
+ALTER TABLE "ai_endpoint_signatures" ADD COLUMN IF NOT EXISTS "os" text;
+ALTER TABLE "ai_endpoint_signatures" ADD COLUMN IF NOT EXISTS "ecosystem" text;
+ALTER TABLE "ai_endpoint_signatures" ADD COLUMN IF NOT EXISTS "tool_id" text;
+ALTER TABLE "ai_endpoint_signatures" ADD COLUMN IF NOT EXISTS "note" text;
+ALTER TABLE "ai_endpoint_signatures" ADD COLUMN IF NOT EXISTS "confidence" text DEFAULT 'high' NOT NULL;
+ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_os_ck";
+ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_os_ck"
+  CHECK ("os" IS NULL OR "os" IN ('macos', 'windows', 'linux'));
+ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_ecosystem_ck";
+ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_ecosystem_ck"
+  CHECK ("ecosystem" IS NULL OR "ecosystem" ~ '^[a-z0-9][a-z0-9_.-]{0,63}$');
+ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_tool_id_ck";
+ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_tool_id_ck"
+  CHECK ("tool_id" IS NULL OR "tool_id" ~ '^[a-z0-9][a-z0-9_.-]{0,127}$');
+ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_note_ck";
+ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_note_ck"
+  CHECK ("note" IS NULL OR char_length("note") <= 500);
+ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_confidence_ck";
+ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_confidence_ck"
+  CHECK ("confidence" IN ('high', 'medium', 'low'));
+
 ALTER TABLE "shadow_ai_imports" DROP CONSTRAINT IF EXISTS "shadow_ai_imports_kind_ck";
 ALTER TABLE "shadow_ai_imports" ADD CONSTRAINT "shadow_ai_imports_kind_ck" CHECK ("kind" IN (
   'egress_log', 'code_scan', 'saas_export', 'self_reported',
@@ -233,7 +255,7 @@ CREATE TABLE IF NOT EXISTS "discovery_pseudonyms" (
   "display_name_ciphertext" text NOT NULL,
   "first_seen_at" timestamp with time zone DEFAULT now() NOT NULL,
   "last_seen_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "discovery_pseudonyms_kind_check" CHECK ("kind" IN ('device_user', 'commit_author', 'cloud_principal')),
+  CONSTRAINT "discovery_pseudonyms_kind_check" CHECK ("kind" IN ('device_user', 'commit_author', 'cloud_principal', 'device')),
   CONSTRAINT "discovery_pseudonyms_pseudonym_check" CHECK ("pseudonym" ~ '^psn:[0-9a-f]{24}$'),
   CONSTRAINT "discovery_pseudonyms_seen_check" CHECK ("first_seen_at" <= "last_seen_at")
 );

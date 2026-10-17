@@ -244,9 +244,12 @@ export default function DiscoverySourcesPage() {
                       </Select>
                     </Field>
                   )}
-                  <Field label="Schedule (hours)">
-                    <Input type="number" min={1} max={720} value={form.scheduleHours} onChange={(e) => setForm({ ...form, scheduleHours: e.target.value })} />
-                  </Field>
+                  {/* an upload-fed kind (osquery results, MDM/EDR exports) is never scheduled */}
+                  {!kinds.find((k) => k.kind === (form.editing?.kind ?? form.kind))?.uploadFed && (
+                    <Field label="Schedule (hours)">
+                      <Input type="number" min={1} max={720} value={form.scheduleHours} onChange={(e) => setForm({ ...form, scheduleHours: e.target.value })} />
+                    </Field>
+                  )}
                 </div>
                 <Field label="Target (one key=value per line)">
                   <Textarea rows={3} value={form.target} spellCheck={false} onChange={(e) => setForm({ ...form, target: e.target.value })} />
@@ -279,7 +282,7 @@ export default function DiscoverySourcesPage() {
               columns={[
                 { key: "name", header: "Source", render: (s) => <><strong>{s.name}</strong><div className={v.mono}>{s.kind}</div></> },
                 { key: "state", header: "State", render: (s) => (s.enabled ? <Badge tone="warn">enabled</Badge> : <Badge tone="neutral">disabled</Badge>) },
-                { key: "scope", header: "Scope", render: (s) => <>{describeScope(s.scope)}<div className={v.faint}>{describeSchedule(s.scheduleIntervalSeconds)}</div></> },
+                { key: "scope", header: "Scope", render: (s) => <>{describeScope(s.scope)}<div className={v.faint}>{kinds.find((k) => k.kind === s.kind)?.uploadFed ? "fed by uploads" : describeSchedule(s.scheduleIntervalSeconds)}</div></> },
                 {
                   key: "credential",
                   header: "Credential",

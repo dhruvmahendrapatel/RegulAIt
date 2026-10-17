@@ -9,6 +9,8 @@ export interface ScannerKindView {
   label: string;
   family: "repo" | "cloud" | "endpoint";
   slice: string;
+  /** fed by uploads: no schedule */
+  uploadFed?: boolean;
   evidenceKinds: string[];
   subjectKinds: string[];
   built: boolean;
@@ -188,14 +190,17 @@ export interface SightingView {
   location?: { path: string; line?: number; commit?: string };
   names?: string[];
   actor?: string;
+  signatureConfidence?: "high" | "medium" | "low";
 }
 
 /** the sightings in words: at most `max`, only those with a location, names or an actor */
 export function sightingLines(evidence: readonly SightingView[] | undefined, max = 3): Array<{ text: string; actor: string | null }> {
   const out: Array<{ text: string; actor: string | null }> = [];
   for (const e of evidence ?? []) {
-    if (!e.location && !(e.names && e.names.length) && !e.actor) continue;
+    const lowConfidence = e.signatureConfidence === "low" || e.signatureConfidence === "medium";
+    if (!e.location && !(e.names && e.names.length) && !e.actor && !lowConfidence) continue;
     const parts: string[] = [];
+    if (lowConfidence) parts.push(`${e.signatureConfidence}-confidence signature`);
     if (e.location) {
       parts.push(`${e.location.path}${e.location.line ? `:${e.location.line}` : ""}${e.location.commit ? ` @${e.location.commit.slice(0, 8)}` : ""}`);
     }

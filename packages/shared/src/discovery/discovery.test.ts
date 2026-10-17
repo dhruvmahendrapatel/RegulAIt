@@ -32,6 +32,10 @@ const obs = (o: Partial<Observation>): Observation => ({
 });
 
 describe("ADR-0195 SD0 discovery vocabulary", () => {
+  it("upload-fed kinds are exactly the two no-agent endpoint importers", () => {
+    expect(DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed)).toEqual(["endpoint_osquery", "endpoint_inventory"]);
+  });
+
   it("every source kind has a spec whose evidence and subject kinds are non-empty", () => {
     for (const k of DISCOVERY_SOURCE_KINDS) {
       expect(DISCOVERY_KIND_SPECS[k].evidenceKinds.length).toBeGreaterThan(0);
@@ -98,6 +102,28 @@ describe("ADR-0195 artifact signatures (detection is data)", () => {
     expect(classifyObservation(o, [ide]).severity).toBe("medium");
     expect(classifyObservation(o, [{ ...ide, enabled: false }]).matched).toBe(false);
     expect(classifyObservation(o, []).matched).toBe(false);
+  });
+
+  it("a row scoped to an OS or an ecosystem matches only observations from it; a low-confidence match says so", () => {
+    const mac = { ...ide, os: "macos" as const, confidence: "low" as const };
+    const art = { artifact: { kind: "ide_extension" as const, value: "acme.assistant" } };
+    expect(classifyObservation(obs({ ...art, os: "macos" }), [mac]).matched).toBe(true);
+    expect(classifyObservation(obs({ ...art, os: "macos" }), [mac]).signatureConfidence).toBe("low");
+    expect(classifyObservation(obs({ ...art, os: "windows" }), [mac]).matched).toBe(false);
+    expect(classifyObservation(obs(art), [mac]).matched).toBe(false);
+    const npm = sig({ kind: "sdk_package", value: "acme-ai", matchType: "package", ecosystem: "npm" });
+    expect(classifyObservation(obs({ subjectKind: "repo", subject: "r", packageName: "acme-ai", ecosystem: "NPM" }), [npm]).matched).toBe(true);
+    expect(classifyObservation(obs({ subjectKind: "repo", subject: "r", packageName: "acme-ai", ecosystem: "pypi" }), [npm]).matched).toBe(false);
+    expect(classifyObservation(obs({ ...art, os: "macos" }), [ide]).signatureConfidence).toBeUndefined();
+  });
+
+  it("the catalogue schema accepts bounded scope fields and refuses malformed ones", () => {
+    const base = { provider: "p", kind: "desktop_app", value: "x", matchType: "identifier" };
+    expect(catalogueSignatureSchema.parse({ ...base, os: "linux", ecosystem: "npm", toolId: "acme.tool", note: "n" }).confidence).toBe("high");
+    expect(catalogueSignatureSchema.safeParse({ ...base, os: "beos" }).success).toBe(false);
+    expect(catalogueSignatureSchema.safeParse({ ...base, ecosystem: "NPM Registry" }).success).toBe(false);
+    expect(catalogueSignatureSchema.safeParse({ ...base, note: "x".repeat(501) }).success).toBe(false);
+    expect(catalogueSignatureSchema.safeParse({ ...base, confidence: "certain" }).success).toBe(false);
   });
 
   it("the catalogue schema binds artifact kinds to the identifier match type", () => {

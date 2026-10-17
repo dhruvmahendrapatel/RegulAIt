@@ -456,6 +456,27 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect(seen).toEqual({ matched: true, unmatched: false, rows: 1 });
   });
 
+  it("an upload-fed source is never queued by schedule; catalogue rows keep their OS, ecosystem, note and confidence; device pseudonyms", async () => {
+    const [src] = await db
+      .insert(discoverySources)
+      .values({ name: `upload-${RUN}`, kind: "endpoint_inventory", target: { fleet: "x" }, scope: { orgLevel: true, include: [] }, createdBy: adminId, enabled: true, enabledAt: new Date(), enabledBy: adminId, nextRunAt: null })
+      .returning();
+    createdIds.push(src!.id);
+    await runDiscoveryPass(db, { registry: REGISTRY, dataKey: DATA_KEY, owner: `sd0-upload-${RUN}`, limit: 20 });
+    expect((await db.select().from(discoveryRuns).where(eq(discoveryRuns.sourceId, src!.id))).length).toBe(0);
+
+    const value = `sd0-app-${RUN}`;
+    const c = await inject("POST", "/v1/shadow-ai/catalogue", AUTH, { provider: PROVIDER, kind: "desktop_app", value, matchType: "identifier", os: "macos", ecosystem: "brew", toolId: "acme.app", note: "sd0", confidence: "low" });
+    expect(c.statusCode, c.body).toBe(201);
+    const [row] = await db.select().from(aiEndpointSignatures).where(eq(aiEndpointSignatures.value, value));
+    expect(row).toMatchObject({ os: "macos", ecosystem: "brew", toolId: "acme.app", note: "sd0", confidence: "low" });
+    await db.delete(aiEndpointSignatures).where(eq(aiEndpointSignatures.value, value));
+
+    const dev = await pseudonymise(db, DATA_KEY, "device", `laptop-${RUN}`);
+    expect(dev).toMatch(/^psn:[0-9a-f]{24}$/);
+    expect(dev).not.toBe(await pseudonymise(db, DATA_KEY, "device_user", `laptop-${RUN}`));
+  });
+
   it("a credential reporting write scope fails the run", async () => {
     const s = await createSource("write");
     await db.insert(discoveryCredentials).values({ sourceId: s.id, credentialMode: "federated", publicConfig: {}, createdBy: adminId });

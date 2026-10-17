@@ -86,8 +86,8 @@ export interface ScanObservation {
   subjectKind: DiscoverySubjectKind;
   /**
    * the thing that would be remediated: a repo, a cloud resource, a cloud principal or a device. A
-   * `cloud_principal` or `device` subject MUST be a pseudonym from `ctx.pseudonymise` (`psn:` + 24 hex); anything
-   * else is refused
+   * `cloud_principal` or `device` subject MUST be a pseudonym from `ctx.pseudonymise` (`psn:` + 24 hex; a device's
+   * name with kind `device`, a principal's with `cloud_principal`); anything else is refused
    */
   subject: string;
   /** ISO time it was seen (default: now) */
@@ -111,6 +111,10 @@ export interface ScanObservation {
   names?: string[];
   /** Optional (decision 20): the person behind the sighting, from `ctx.pseudonymise` (`psn:` + 24 hex) */
   actorPseudonym?: string;
+  /** Optional: the OS the sighting came from; a catalogue row scoped to an OS matches only it */
+  os?: "macos" | "windows" | "linux";
+  /** Optional: the package ecosystem (npm, pypi…); a catalogue row scoped to an ecosystem matches only it */
+  ecosystem?: string;
 }
 
 /**
