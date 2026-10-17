@@ -34,11 +34,52 @@ function* causes(err: unknown): Generator<Record<string, unknown>> {
   }
 }
 
-/** the first 200 characters of a message, with anything after `Bearer ` or a `key=` removed */
-function redact(message: string): string {
-  const cut = message.length > 200 ? `${message.slice(0, 200)}...` : message;
-  const bearer = cut.toLowerCase().indexOf("bearer ");
-  return bearer >= 0 ? `${cut.slice(0, bearer)}[redacted]` : cut;
+/** parameter names whose value is a secret wherever it appears as `name=value` in an error message */
+const SECRET_PARAMS = ["key", "token", "secret", "signature", "sig", "password", "assertion", "credential", "code"];
+const isNameChar = (c: number): boolean =>
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 45 || c === 46;
+const VALUE_END = new Set(["&", " ", '"', "'", ",", ";", ")", "]", "}", "\n", "\r", "\t"]);
+
+/**
+ * Remove secrets from an error message, then keep the first 200 characters (review of #404, finding 5):
+ * everything after `Bearer ` is dropped, and the value of every `<name>=` whose name ends in one of
+ * SECRET_PARAMS (`key=`, `access_token=`, `X-Amz-Signature=`, `client_secret=` ...) is replaced up to its delimiter.
+ * A character scan, not a regex.
+ */
+export function redact(message: string): string {
+  let text = message;
+  const bearer = text.toLowerCase().indexOf("bearer ");
+  if (bearer >= 0) text = `${text.slice(0, bearer)}Bearer [redacted]`;
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const eq = text.indexOf("=", i);
+    if (eq < 0) {
+      out += text.slice(i);
+      break;
+    }
+    // the parameter name: the run of letters, digits, `_`, `-` or `.` just before `=`
+    let start = eq;
+    while (start > i && isNameChar(text.charCodeAt(start - 1))) start--;
+    const name = text.slice(start, eq).toLowerCase();
+    out += text.slice(i, eq + 1);
+    i = eq + 1;
+    if (SECRET_PARAMS.some((p) => name.endsWith(p))) {
+      const quote = text[i] === '"' || text[i] === "'" ? text[i]! : null;
+      if (quote) {
+        // a quoted value runs to the matching quote
+        const close = text.indexOf(quote, i + 1);
+        out += `${quote}[redacted]${quote}`;
+        i = close < 0 ? text.length : close + 1;
+      } else {
+        let end = i;
+        while (end < text.length && !VALUE_END.has(text[end]!)) end++;
+        if (end > i) out += "[redacted]";
+        i = end;
+      }
+    }
+  }
+  return out.length > 200 ? `${out.slice(0, 200)}...` : out;
 }
 
 /** map any SDK or transport error to a capability status and a secret-free detail */

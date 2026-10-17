@@ -8,7 +8,7 @@ import {
   isStaticCredential,
   parseServiceAccountKey,
 } from "./credentials.js";
-import { classifyError, digestObservations } from "./report.js";
+import { classifyError, digestObservations, redact } from "./report.js";
 import { CLOUD_AI_SERVICE_SEED } from "./seed.js";
 import { fakeCloud } from "./test-cloud.js";
 import { GuardedAzureHttpClient, requestAwareFetch } from "./transport.js";
@@ -90,6 +90,18 @@ describe("classifyError", () => {
     expect(classifyError(Object.assign(new Error("no"), { code: 7 })).status).toBe("denied");
     expect(classifyError(Object.assign(new Error("no"), { code: "AuthorizationFailed", statusCode: 403 })).status).toBe("denied");
   });
+  it("redacts key=, token=, signature= and similar parameter values (finding 5)", () => {
+    const k = `k${"1".repeat(20)}`;
+    const msg = `GET https://x.example/?api_key=${k}&X-Amz-Signature=abc123&access_token=tok.en&region=us-east-1 client_secret='${k}' failed`;
+    const out = redact(msg);
+    expect(out).not.toContain(k);
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("tok.en");
+    expect(out).toContain("region=us-east-1");
+    expect(out).toContain("api_key=[redacted]&X-Amz-Signature=[redacted]&access_token=[redacted]");
+    expect(redact("x".repeat(195) + `key=${k}`)).not.toContain(k.slice(0, 5));
+  });
+
   it("never echoes a bearer token", () => {
     expect(classifyError(new Error("failed with Bearer abc.def")).detail).not.toContain("abc.def");
   });
