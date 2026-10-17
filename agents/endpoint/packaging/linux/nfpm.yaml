@@ -1,4 +1,5 @@
-# nfpm config for the endpoint agent's .deb and .rpm (R15 §4.4). Variables come from scripts/package-linux.sh.
+# nfpm config for the endpoint agent's .deb and .rpm (R15 §4.4). scripts/package-linux.sh runs it in a staging
+# directory holding this directory's files and the binary as ./regulait-agent; arch and version come from its env.
 # The package installs the binary and a systemd USER unit (the agent never runs as root, R15 call 1), creates the
 # empty config directories, and runs the install step (scripts/postinstall.sh) once as root. MDM places
 # /etc/regulait-agent/config.json (0644) and /etc/regulait-agent/enrol.json (root:root 0600); neither is packaged.
@@ -13,7 +14,7 @@ description: RegulAIt endpoint agent. Read-only discovery of AI tools on this de
 vendor: RegulAIt
 license: Proprietary
 contents:
-  - src: ${AGENT_BIN}
+  - src: ./regulait-agent
     dst: /usr/bin/regulait-agent
     file_info:
       mode: 0755

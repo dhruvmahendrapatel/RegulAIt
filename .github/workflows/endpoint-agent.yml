@@ -1,0 +1,221 @@
+name: Endpoint agent
+
+# ADR-0195 SD4a: the Go endpoint agent in agents/endpoint (outside the pnpm workspace).
+#
+#   test           gofmt, vet for all six targets, unit tests (with -race), the TPM store against the reference
+#                  TPM simulator (-tags tpmsim, cgo), and the linked-module licence check
+#   secret-rules   the compiled key patterns agree with packages/shared's dlp.secret.* rules (needs shared built)
+#   test-macos     the unit tests on macOS, including the real plutil conversion and the process table
+#   test-windows   the unit tests on Windows, including DPAPI, the NCrypt probe (a runner without a TPM must answer
+#                  "no hardware"), the Toolhelp/TCP tables and the registry
+#   build          the six binaries and the unsigned .deb/.rpm
+#   package-macos  the unsigned universal .pkg
+#   sign-*         Developer ID + notarisation, OV Authenticode through the cloud HSM, and Linux package signing.
+#                  The company accounts, certificate and keys do not exist yet (owner decisions a and b), so each
+#                  job checks for its secrets and SKIPS with the reason when they are absent. Pending execution.
+
+on:
+  pull_request:
+    paths:
+      - 'agents/endpoint/**'
+      - 'packages/shared/src/guardrails.ts'
+      - '.github/workflows/endpoint-agent.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'agents/endpoint/**'
+      - 'packages/shared/src/guardrails.ts'
+      - '.github/workflows/endpoint-agent.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: endpoint-agent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: agents/endpoint
+
+jobs:
+  test:
+    name: endpoint agent / test (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: agents/endpoint/go.mod
+          cache-dependency-path: agents/endpoint/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "::error::gofmt needed:"; echo "$unformatted"; exit 1; fi
+      - name: go vet, all six targets
+        run: |
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            echo "vet $t"; GOOS="${t%/*}" GOARCH="${t#*/}" CGO_ENABLED=0 go vet ./...
+          done
+      - name: Unit tests
+        run: go test -race -count=1 ./...
+      - name: TPM store against the reference TPM simulator
+        run: |
+          dpkg -s libssl-dev >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev; }
+          CGO_ENABLED=1 go test -count=1 -v -tags tpmsim -run TPM ./internal/devicekey/
+      - name: Linked modules are listed in THIRD_PARTY.md
+        run: bash scripts/check-licences.sh
+
+  secret-rules:
+    name: endpoint agent / key patterns match packages/shared
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        working-directory: .
+      - run: pnpm --filter @regulait/shared build
+        working-directory: .
+      - run: node scripts/check-secret-rules.mjs
+
+  test-macos:
+    name: endpoint agent / test (macos)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: agents/endpoint/go.mod
+          cache-dependency-path: agents/endpoint/go.sum
+      - run: go test -count=1 -v ./internal/collect/ -run 'Darwin'
+      - run: go test -count=1 ./...
+
+  test-windows:
+    name: endpoint agent / test (windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: agents/endpoint/go.mod
+          cache-dependency-path: agents/endpoint/go.sum
+      - run: go test -count=1 -v ./internal/devicekey/ ./internal/collect/ -run 'Windows|DPAPI|NCrypt'
+      - run: go test -count=1 ./...
+
+  build:
+    name: endpoint agent / build (6 targets, .deb, .rpm)
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: agents/endpoint/go.mod
+          cache-dependency-path: agents/endpoint/go.sum
+      - name: Six binaries
+        run: bash scripts/build.sh "$RUNNER_TEMP/bin" "0.1.0-ci.${GITHUB_RUN_NUMBER}"
+      - name: The build is reproducible (linux/amd64 rebuilt and compared)
+        run: |
+          bash scripts/build.sh "$RUNNER_TEMP/bin2" "0.1.0-ci.${GITHUB_RUN_NUMBER}" >/dev/null
+          cmp "$RUNNER_TEMP/bin/regulait-agent-linux-amd64" "$RUNNER_TEMP/bin2/regulait-agent-linux-amd64"
+      - name: Unsigned .deb and .rpm
+        run: bash scripts/package-linux.sh "$RUNNER_TEMP/bin" "$RUNNER_TEMP/pkg" "0.1.0-ci.${GITHUB_RUN_NUMBER}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: endpoint-agent-unsigned
+          path: |
+            ${{ runner.temp }}/bin
+            ${{ runner.temp }}/pkg
+          retention-days: 7
+
+  package-macos:
+    name: endpoint agent / unsigned macOS .pkg
+    runs-on: macos-latest
+    needs: build
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: endpoint-agent-unsigned
+          path: ${{ runner.temp }}/artifact
+      - run: bash packaging/macos/build-pkg.sh "$RUNNER_TEMP/artifact/bin" "$RUNNER_TEMP/macpkg" "0.1.0-ci.${GITHUB_RUN_NUMBER}"
+
+  sign-macos:
+    name: endpoint agent / Developer ID sign + notarise (skips without secrets)
+    runs-on: macos-latest
+    needs: package-macos
+    timeout-minutes: 10
+    steps:
+      - name: Signing identity present?
+        env:
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+        working-directory: .
+        run: |
+          if [ -z "${APPLE_DEVELOPER_ID_P12}" ] || [ -z "${APPLE_NOTARY_KEY}" ]; then
+            echo "::notice title=sign-macos skipped::No Developer ID identity or notary key in this repository's secrets. Owner decision a (a company Apple Developer account, identity in a release-only secret store) is not provisioned yet; signing and notarisation are pending execution (ADR-0195 As built: SD4a)."
+            exit 0
+          fi
+          echo "::error::Signing secrets are present, but the signing steps are not written yet (SD4h). Refusing to publish an unsigned build as signed."
+          exit 1
+
+  sign-windows:
+    name: endpoint agent / OV Authenticode via cloud HSM (skips without secrets)
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+    steps:
+      - name: HSM signing key present?
+        env:
+          WINDOWS_SIGNING_HSM_CREDENTIAL: ${{ secrets.WINDOWS_SIGNING_HSM_CREDENTIAL }}
+          WINDOWS_SIGNING_CERT_CHAIN: ${{ secrets.WINDOWS_SIGNING_CERT_CHAIN }}
+        working-directory: .
+        run: |
+          if [ -z "${WINDOWS_SIGNING_HSM_CREDENTIAL}" ] || [ -z "${WINDOWS_SIGNING_CERT_CHAIN}" ]; then
+            echo "::notice title=sign-windows skipped::No OV code-signing certificate or cloud HSM credential in this repository's secrets. Owner decision b is not provisioned yet; Authenticode signing (jsign, SD4h) is pending execution (ADR-0195 As built: SD4a)."
+            exit 0
+          fi
+          echo "::error::Signing secrets are present, but the jsign step is not written yet (SD4h). Refusing to publish an unsigned build as signed."
+          exit 1
+
+  sign-linux-packages:
+    name: endpoint agent / Linux package signing (skips without secrets)
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+    steps:
+      - name: Package-signing key present?
+        env:
+          LINUX_PACKAGE_SIGNING_KEY: ${{ secrets.LINUX_PACKAGE_SIGNING_KEY }}
+        working-directory: .
+        run: |
+          if [ -z "${LINUX_PACKAGE_SIGNING_KEY}" ]; then
+            echo "::notice title=sign-linux-packages skipped::No Linux package-signing key in this repository's secrets; .deb/.rpm signing is pending execution (ADR-0195 As built: SD4a)."
+            exit 0
+          fi
+          echo "::error::A signing key is present, but the nfpm signing step is not written yet (SD4h)."
+          exit 1

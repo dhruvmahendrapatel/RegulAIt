@@ -9,10 +9,16 @@ case "$version" in *[!0-9A-Za-z.+-]*) echo "bad version: $version" >&2; exit 2 ;
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 bin="$(cd -- "$bin" && pwd)"; mkdir -p "$out"; out="$(cd -- "$out" && pwd)"
 NFPM="github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0"
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+(cd "$here" && GOBIN="$stage/bin" go install "$NFPM")
 for arch in amd64 arm64; do
+  rm -rf "$stage/$arch" && mkdir -p "$stage/$arch"
+  cp "$here"/packaging/linux/* "$stage/$arch/"
+  install -m 0755 "$bin/regulait-agent-linux-$arch" "$stage/$arch/regulait-agent"
   for fmt in deb rpm; do
-    (cd "$here/packaging/linux" && AGENT_BIN="$bin/regulait-agent-linux-$arch" AGENT_ARCH="$arch" AGENT_VERSION="$version" \
-      go run "$NFPM" package --config nfpm.yaml --packager "$fmt" --target "$out/")
+    (cd "$stage/$arch" && AGENT_ARCH="$arch" AGENT_VERSION="$version" \
+      "$stage/bin/nfpm" package --config nfpm.yaml --packager "$fmt" --target "$out/")
   done
 done
 ls -l "$out"
