@@ -1,5 +1,7 @@
 // SD4 spike: run a binary and print its peak resident set size (ru_maxrss, KiB on Linux).
-// Go starts children with vfork semantics, so the parent's memory is not counted in the child.
+// Caveat: Linux counts this helper's own resident memory in the child's peak (the child shares
+// the parent's address space until exec), so results near the helper's own RSS are a floor, not
+// the child's real figure. In the spike run the floor was 2,388 KiB.
 package main
 
 import (

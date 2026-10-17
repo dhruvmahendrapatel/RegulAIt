@@ -6,10 +6,10 @@ Throwaway code for the design spike in [`docs/research/R15-endpoint-agent-sd4-sp
 | Path | What it is |
 |---|---|
 | `go-hello/` | Go hello world: the toolchain's floor binary size |
-| `go-probe/` | Go, standard library only: Ed25519 key, RFC 9449 DPoP proof and RFC 7638 thumbprint, one directory listing, a TLS 1.3 HTTP client. No network call |
-| `rust-hello/` | Rust hello world, release profile tuned for size |
+| `go-probe/` | Go, standard library only: Ed25519 key, RFC 9449 DPoP proof and RFC 7638 thumbprint, a home-directory listing, and a TLS 1.3 HTTP client that is constructed but never used. No network call, no socket-table read |
+| `rust-hello/` | Rust hello world, release profile tuned for size. No crate dependencies, so no `Cargo.lock` is committed (the repo's basename-collision guard refuses `Cargo.lock` beside `Cargo.toml`); `cargo` generates one on build |
 | `node-probe/` | The `go-probe` equivalent in Node, using `jose` 6.2.12 (the version the gateway pins), packaged as a Node 22 single executable application |
-| `peakrss/` | Runs a binary and prints its peak RSS (Linux `ru_maxrss`) |
+| `peakrss/` | Runs a binary and prints its peak RSS (Linux `ru_maxrss`). Its own RSS is a floor under every result (2,388 KiB in the spike run) |
 | `build-go.sh` | Cross-compiles both Go programs for six targets with `CGO_ENABLED=0` |
 | `build-rust.sh` | Builds the Rust hello world for the two Linux musl targets with the bundled `rust-lld` |
 | `build-node-sea.sh` | Bundles `node-probe` with esbuild and injects it into the host `node` with postject |

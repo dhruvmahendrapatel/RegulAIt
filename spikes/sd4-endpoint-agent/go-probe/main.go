@@ -1,7 +1,8 @@
 // SD4 spike: a size probe closer to the real agent. It uses only the Go standard library to
 // (1) generate an Ed25519 key, (2) build an RFC 9449 DPoP proof JWS and its RFC 7638 JWK
-// thumbprint, (3) list one directory and the TCP listeners the OS reports, and (4) build an
-// HTTPS client with TLS 1.3 minimum. It sends nothing: there is no network call.
+// thumbprint, (3) list the home directory, and (4) construct (but never use) an HTTPS client
+// with TLS 1.3 minimum, so net/http and crypto/tls are linked in. It sends nothing: there is no
+// network call. It does not read the socket table; the size of that code is not measured here.
 package main
 
 import (
