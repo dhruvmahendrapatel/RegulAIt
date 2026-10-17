@@ -33,7 +33,7 @@ export function awsSts(call: RecordedCall, account = "111122223333"): Response |
   if (action === "GetCallerIdentity") {
     return xml(`<GetCallerIdentityResponse ${ns}><GetCallerIdentityResult><Arn>arn:aws:sts::${account}:assumed-role/regulait-discovery/s</Arn><UserId>AROA:s</UserId><Account>${account}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`);
   }
-  const creds = `<Credentials><AccessKeyId>${synthetic("akid")}</AccessKeyId><SecretAccessKey>${synthetic("sk")}</SecretAccessKey><SessionToken>${synthetic("st")}</SessionToken><Expiration>2026-10-17T13:00:00Z</Expiration></Credentials>`;
+  const creds = `<Credentials><AccessKeyId>${synthetic("akid")}</AccessKeyId><SecretAccessKey>${synthetic("sk")}</SecretAccessKey><SessionToken>${synthetic("st")}</SessionToken><Expiration>${new Date(Date.now() + 3_600_000).toISOString()}</Expiration></Credentials>`;
   return xml(`<${action}Response ${ns}><${action}Result>${creds}</${action}Result></${action}Response>`);
 }
 
