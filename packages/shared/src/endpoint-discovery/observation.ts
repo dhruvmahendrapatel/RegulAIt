@@ -17,23 +17,56 @@ export const ENDPOINT_IMPORT_MAX_BYTES = 5_000_000;
 export const ENDPOINT_IMPORT_MAX_ROWS = 20_000;
 /** one osquery log line */
 export const ENDPOINT_IMPORT_MAX_LINE_BYTES = 262_144;
-/** one cell */
-export const ENDPOINT_IMPORT_MAX_CELL = 1_024;
+/** one cell: SD0's observation value bound (VALUE_MAX), so a kept value always fits a run */
+export const ENDPOINT_IMPORT_MAX_CELL = 512;
 
 /** Column names whose presence means a pack was edited to collect values. Such a row is refused, never stored. */
 export const ENDPOINT_FORBIDDEN_COLUMNS = [
   "value",
+  "values",
   "data",
   "cmdline",
+  "cmd",
   "command_line",
+  "commandline",
+  "args",
+  "argv",
+  "arguments",
   "environment",
+  "environment_variables",
+  "environ",
   "env",
+  "env_value",
+  "env_values",
+  "envs",
   "content",
   "contents",
   "secret",
   "token",
   "password",
 ] as const;
+
+/** a column name compared with the forbidden list: lower-cased, spaces, dashes and dots as `_` */
+export function normaliseColumnName(h: string): string {
+  let out = "";
+  for (const c of h.trim().toLowerCase()) out += c === " " || c === "-" || c === "." ? "_" : c;
+  return out;
+}
+
+export const isForbiddenColumn = (h: string): boolean => (ENDPOINT_FORBIDDEN_COLUMNS as readonly string[]).includes(normaliseColumnName(h));
+
+/**
+ * An environment variable NAME: a letter or `_`, then letters, digits or `_`,
+ * at most 128 characters. Character-scanned. A "name" that fails this (a key,
+ * a token, anything with a dash) is refused: it is likely a value.
+ */
+export function isEnvVarName(v: string): boolean {
+  if (v.length === 0 || v.length > 128) return false;
+  const first = v[0]!;
+  const letter = (c: string) => (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c === "_";
+  if (!letter(first)) return false;
+  return [...v].every((c) => letter(c) || (c >= "0" && c <= "9"));
+}
 
 export interface EndpointObservation {
   source: EndpointImportSource;

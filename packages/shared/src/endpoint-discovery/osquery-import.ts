@@ -24,7 +24,8 @@ import { pseudonymisePath, pseudonymiseRegistryKey, guardPseudonymHook, type End
 import { ENDPOINT_PACK_NAME, getEndpointPackQuery, type EndpointPackQuery } from "./osquery-pack.js";
 import type { EndpointExtensionEcosystem, EndpointObservationKey, EndpointOs, EndpointTrait } from "./endpoint-signatures.js";
 import {
-  ENDPOINT_FORBIDDEN_COLUMNS,
+  isEnvVarName,
+  isForbiddenColumn,
   ENDPOINT_IMPORT_MAX_BYTES,
   ENDPOINT_IMPORT_MAX_CELL,
   ENDPOINT_IMPORT_MAX_LINE_BYTES,
@@ -229,7 +230,7 @@ export function importOsqueryResults(opts: OsqueryImportOptions): EndpointImport
       const refuse = (reason: string, field?: string) => refusals.push({ line, ...item, reason, ...(field ? { field } : {}) });
       if (typeof row !== "object" || row === null || Array.isArray(row)) return refuse("a result row is a JSON object of column values");
       const cols = row as Record<string, unknown>;
-      const forbidden = Object.keys(cols).find((k) => (ENDPOINT_FORBIDDEN_COLUMNS as readonly string[]).includes(lower(k)));
+      const forbidden = Object.keys(cols).find((k) => isForbiddenColumn(k));
       if (forbidden) {
         return refuse(`the row carries the column '${forbidden}' — values, command lines and contents are never imported; the row is refused and the cell discarded`, forbidden);
       }
@@ -312,6 +313,9 @@ function buildObservation(query: EndpointPackQuery, cells: Map<string, string>, 
     const value = raw.trim();
     switch (role.role) {
       case "key":
+        if (role.matchTypes.includes("env_var_name") && !isEnvVarName(value)) {
+          return { ok: false, reason: `column '${col}' is not an environment variable name — names only, never values`, field: col };
+        }
         for (const mt of role.matchTypes) {
           const isExt = mt === "ide_extension_id" || mt === "browser_extension_id";
           addKey({ matchType: mt, value, ...(isExt && ecosystem ? { ecosystem } : {}) });

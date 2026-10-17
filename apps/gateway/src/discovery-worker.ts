@@ -369,15 +369,35 @@ async function pseudonymKey(db: Db, dataKey: string): Promise<Buffer> {
 
 /** the pseudonym of one person; stores the display name enveloped (first sight) and stamps last seen */
 export async function pseudonymise(db: Db, dataKey: string, kind: DiscoveryPseudonymKind, displayName: string): Promise<string> {
+  const derived = await derivePseudonym(db, dataKey, kind, displayName);
+  await recordPseudonyms(db, dataKey, [derived]);
+  return derived.pseudonym;
+}
+
+/** a pseudonym computed but not yet stored (SD3: stored only in the transaction that commits its findings) */
+export interface DerivedPseudonym {
+  kind: DiscoveryPseudonymKind;
+  pseudonym: string;
+  name: string;
+}
+
+/** compute one person's (or device's) pseudonym without storing its display name */
+export async function derivePseudonym(db: Db, dataKey: string, kind: DiscoveryPseudonymKind, displayName: string): Promise<DerivedPseudonym> {
   const name = displayName.trim().slice(0, DISPLAY_NAME_MAX);
   if (!name) throw new Error("a pseudonym needs a display name");
   const key = await pseudonymKey(db, dataKey);
   const pseudonym = DISCOVERY_PSEUDONYM_PREFIX + createHmac("sha256", key).update(`${kind}\u0000${name}`).digest("hex").slice(0, 24);
-  await db
-    .insert(discoveryPseudonyms)
-    .values({ kind, pseudonym, displayNameCiphertext: encryptSecret(dataKey, name) })
-    .onConflictDoUpdate({ target: discoveryPseudonyms.pseudonym, set: { lastSeenAt: sql`now()` } });
-  return pseudonym;
+  return { kind, pseudonym, name };
+}
+
+/** store derived pseudonyms (display name enveloped on first sight; last seen stamped) */
+export async function recordPseudonyms(db: Db, dataKey: string, items: readonly DerivedPseudonym[]): Promise<void> {
+  for (const d of items) {
+    await db
+      .insert(discoveryPseudonyms)
+      .values({ kind: d.kind, pseudonym: d.pseudonym, displayNameCiphertext: encryptSecret(dataKey, d.name) })
+      .onConflictDoUpdate({ target: discoveryPseudonyms.pseudonym, set: { lastSeenAt: sql`now()` } });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +694,8 @@ export async function applyDiscoveryRunObservations(
   digest: string,
   catalogue: readonly AiSignature[],
   readOutcomes: DiscoveryReadOutcome[] = [],
+  /** SD3: writes that must commit with the findings (and not happen without them), run inside the fenced transaction */
+  inCommit?: (t: Db) => Promise<void>,
 ): Promise<RunVerdict> {
   const pairs = observations.map((observation) => ({ observation, classification: classifyObservation(observation, catalogue) }));
   const matched = pairs.filter((p) => p.classification.matched);
@@ -702,6 +724,7 @@ export async function applyDiscoveryRunObservations(
     const fence = await t.execute(sql`
       SELECT id FROM discovery_runs WHERE id = ${run.id} AND status = 'running' AND lease_owner = ${owner} FOR UPDATE`);
     if (fence.rows.length !== 1) return null;
+    if (inCommit) await inCommit(t);
     for (const [kind, group] of byEvidence) {
       const findings = correlateObservations(group);
       const [imp] = await t

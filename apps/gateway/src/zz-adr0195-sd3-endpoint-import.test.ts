@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   aiEndpointSignatures,
+  auditLog,
   createDb,
   discoveryPseudonyms,
   discoveryRuns,
@@ -191,6 +192,22 @@ describe("ADR-0195 SD3 endpoint imports into SD0", () => {
     expect(psn[0]!.kind).toBe("device");
     const all = JSON.stringify(await db.select().from(discoveryPseudonyms));
     expect(all.includes(USERNAME)).toBe(false);
+  });
+
+  it("an unmatched-only import records a catalogue gap and creates no pseudonym at all", async () => {
+    const id = await endpointSource("endpoint_osquery");
+    const lonely = `sd3-lonely-${RUN}`;
+    const file = JSON.stringify({ name: "ai_apps_macos", hostIdentifier: lonely, unixTime: 1790000000, columns: { name: `Nothing-${RUN}.app`, bundle_identifier: `org.example.nothing.${RUN}` } });
+    const before = (await db.select({ id: discoveryPseudonyms.id }).from(discoveryPseudonyms)).length;
+    const r = await inject("POST", `/v1/discovery/sources/${id}/endpoint-imports`, AUTH, { content: file, mode: "apply", source: `${USERNAME}-export.log` });
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json().findingsCreated).toBe(0);
+    expect((await db.select({ id: discoveryPseudonyms.id }).from(discoveryPseudonyms)).length).toBe(before);
+    const [run] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, r.json().runId));
+    expect((run?.catalogueGaps as Array<{ value: string }>).some((g) => g.value === `Nothing-${RUN}.app`)).toBe(true);
+    // the uploaded file's name is kept only as a digest
+    const audits = await db.select().from(auditLog).where(eq(auditLog.objectId, run!.id));
+    expect(JSON.stringify(audits).includes(USERNAME)).toBe(false);
   });
 
   it("refuses a file with an unreadable row as a whole by default, and writes nothing", async () => {

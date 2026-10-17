@@ -141,25 +141,25 @@ const KINDS_FOR: Readonly<Record<EndpointMatchType, readonly EndpointSignatureKi
 /** every (kind, identifier) an observation could be matched as. Traits yield each non-empty subset of the observed set. */
 export function endpointArtifactCandidates(
   obs: Pick<EndpointObservation, "keys" | "traits">,
-): Array<{ kind: ArtifactSignatureKind; value: string; ecosystem: string | null }> {
-  const out: Array<{ kind: ArtifactSignatureKind; value: string; ecosystem: string | null }> = [];
+): Array<{ kind: ArtifactSignatureKind; value: string; ecosystem: string | null; from: EndpointMatchType }> {
+  const out: Array<{ kind: ArtifactSignatureKind; value: string; ecosystem: string | null; from: EndpointMatchType }> = [];
   const seen = new Set<string>();
-  const push = (kind: ArtifactSignatureKind, value: string, ecosystem: string | null = null) => {
+  const push = (kind: ArtifactSignatureKind, value: string, from: EndpointMatchType, ecosystem: string | null = null) => {
     const k = `${kind}\u0000${value.toLowerCase()}\u0000${ecosystem ?? ""}`;
     if (!seen.has(k)) {
       seen.add(k);
-      out.push({ kind, value, ecosystem });
+      out.push({ kind, value, ecosystem, from });
     }
   };
   for (const key of obs.keys) {
     const value = endpointIdentifier(key.matchType, key.value);
-    for (const kind of KINDS_FOR[key.matchType]) push(kind, value, endpointEcosystemToSignature(key.ecosystem));
+    for (const kind of KINDS_FOR[key.matchType]) push(kind, value, key.matchType, endpointEcosystemToSignature(key.ecosystem));
   }
   const traits = [...new Set(obs.traits)].sort();
   // the trait vocabulary is closed (4 traits), so at most 15 subsets
   for (let mask = 1; mask < 1 << traits.length; mask++) {
     const subset = traits.filter((_, i) => (mask & (1 << i)) !== 0);
-    for (const kind of KINDS_FOR.trait_set) push(kind, `${ENDPOINT_TRAIT_IDENTIFIER_PREFIX}${subset.join("+")}`);
+    for (const kind of KINDS_FOR.trait_set) push(kind, `${ENDPOINT_TRAIT_IDENTIFIER_PREFIX}${subset.join("+")}`, "trait_set");
   }
   return out;
 }
@@ -241,7 +241,8 @@ export function reduceEndpointObservations(
     }
     if (providers.size === 0) {
       unmatchedCount += 1;
-      const first = candidates[0];
+      // an environment variable name is never recorded as a gap: an unmatched "name" may be a value someone aliased
+      const first = candidates.find((c) => c.from !== "env_var_name");
       if (first && unmatched.length < sample) {
         const k = `${first.kind}\u0000${first.value.toLowerCase()}`;
         if (!unmatchedSeen.has(k)) {

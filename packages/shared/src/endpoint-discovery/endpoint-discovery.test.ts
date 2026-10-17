@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   ENDPOINT_EVIDENCE_DEFAULT_RETENTION_DAYS,
+  ENDPOINT_IMPORT_MAX_CELL,
   ENDPOINT_IMPORT_MAX_ROWS,
   ENDPOINT_PACK_FILE,
   ENDPOINT_PACK_QUERIES,
@@ -299,7 +300,7 @@ describe("osquery results importer", () => {
     expect(matchEndpointObservation(claude!, ENDPOINT_SIGNATURE_SEED).map((s) => s.tool)).toEqual(["claude", "claude"]);
     expect(hider!.traits).toEqual(["background_agent", "user_writable_path"]);
     expect(matchEndpointObservation(hider!, ENDPOINT_SIGNATURE_SEED).map((s) => s.id)).toEqual(["rgl.hidden-assistant.trait_set.windowless-user-app"]);
-    expect(endpointArtifactCandidates(hider!)).toContainEqual({ kind: "desktop_app", value: "trait:background_agent+user_writable_path", ecosystem: null });
+    expect(endpointArtifactCandidates(hider!)).toContainEqual({ kind: "desktop_app", value: "trait:background_agent+user_writable_path", ecosystem: null, from: "trait_set" });
     expect(ext!.user).toMatch(/^p_/);
     expect(ext!.observedAt).toBe(new Date(1790000100 * 1000).toISOString());
     expect(matchEndpointObservation(ext!, ENDPOINT_SIGNATURE_SEED).map((s) => s.tool)).toEqual(["claude-code"]);
@@ -502,5 +503,62 @@ describe("SD0 catalogue bridge (phase B)", () => {
     expect(reduceEndpointObservations(asWindows, catalogue).matched.some((m) => m.value === "Claude.app")).toBe(false);
     expect(claude[0]!.os).toBe("macos");
     expect(reduceEndpointObservations(imported, catalogue.map((c) => ({ ...c, enabled: false }))).matched).toEqual([]);
+  });
+});
+
+describe("review fixes (#401)", () => {
+  const hook = testHook();
+
+  it("never resolves a prototype member from an item-type cell", () => {
+    for (const t of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      const r = importEndpointInventory({ content: `device,software,type\nlaptop-1,Cursor,${t}\n`, format: "csv", pseudonymise: hook });
+      expect(r.observations, t).toEqual([]);
+      expect(r.refusals.map((x) => x.line), t).toEqual([2]);
+      expect(identity(r)).toBe(true);
+    }
+    // a configured word still works, including one an attacker might hope collides
+    const ok = importEndpointInventory({
+      content: "device,software,type\nlaptop-1,Cursor,constructor\n",
+      format: "csv",
+      pseudonymise: hook,
+      config: { itemTypeValues: { constructor: "application" } },
+    });
+    expect(ok.observations).toHaveLength(1);
+  });
+
+  it("refuses rows that fill a value-bearing column, mapped or not, in both importers", () => {
+    const inv = importEndpointInventory({ content: "device,software,cmd\nd1,Cursor,\nd2,Cursor,run --token=x\n", format: "csv", pseudonymise: hook });
+    expect(inv.observations).toHaveLength(1);
+    expect(inv.refusals).toEqual([expect.objectContaining({ line: 3, field: "cmd" })]);
+    expect(JSON.stringify(inv)).not.toContain("--token");
+    for (const col of ["commandline", "args", "argv", "environment_variables", "env_values"]) {
+      const line = JSON.stringify({ name: "ai_running_processes", hostIdentifier: "h", columns: { name: "ollama", [col]: "synthetic" } });
+      const r = importOsqueryResults({ content: line, pseudonymise: hook });
+      expect(r.refusals.map((x) => x.field), col).toEqual([col]);
+    }
+  });
+
+  it("refuses an environment variable 'name' that is not a name, and never records an env-var gap", () => {
+    const line = JSON.stringify({
+      name: "pack/regulait_ai_discovery/ai_env_var_names_posix",
+      hostIdentifier: "h1",
+      unixTime: 1790000000,
+      action: "snapshot",
+      snapshot: [
+        { process_name: "node", key: "sk-live-SYNTHETIC123" },
+        { process_name: "node", key: "SYNTHETICVALUE123" },
+      ],
+    });
+    const r = importOsqueryResults({ content: line, pseudonymise: hook });
+    expect(r.refusals).toHaveLength(1);
+    expect(JSON.stringify(r)).not.toContain("sk-live");
+    const red = reduceEndpointObservations(r, endpointCatalogueSignatures().map(({ seedIds: _s, ...sig }) => sig));
+    expect(red.unmatched.map((u) => u.value)).not.toContain("SYNTHETICVALUE123");
+  });
+
+  it("bounds a kept cell at SD0's 512-character value bound", () => {
+    expect(ENDPOINT_IMPORT_MAX_CELL).toBe(512);
+    const r = importEndpointInventory({ content: `device,software\nd1,${"x".repeat(513)}\n`, format: "csv", pseudonymise: hook });
+    expect(r.refusals).toHaveLength(1);
   });
 });

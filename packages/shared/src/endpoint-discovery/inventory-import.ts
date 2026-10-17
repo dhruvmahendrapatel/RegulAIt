@@ -17,7 +17,7 @@ import { parseEvidenceTimestamp } from "../evidence-adapters.js";
 import { guardPseudonymHook, type EndpointPseudonymHook } from "./pseudonym.js";
 import type { EndpointObservationKey, EndpointOs, EndpointSignatureKind } from "./endpoint-signatures.js";
 import {
-  ENDPOINT_FORBIDDEN_COLUMNS,
+  isForbiddenColumn,
   ENDPOINT_IMPORT_MAX_BYTES,
   ENDPOINT_IMPORT_MAX_CELL,
   ENDPOINT_IMPORT_MAX_ROWS,
@@ -48,7 +48,7 @@ const ALIASES: Record<InventoryField, readonly string[]> = {
 };
 
 /** built-in item type words (lower-case); an operator's `itemTypeValues` overrides and extends them */
-const DEFAULT_ITEM_TYPE_VALUES: Record<string, InventoryItemClass> = {
+const DEFAULT_ITEM_TYPE_VALUES: Readonly<Record<string, InventoryItemClass>> = {
   application: "application",
   app: "application",
   "ide extension": "ide_extension",
@@ -206,14 +206,17 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
     if (!inferred.ok) throw new EndpointImportFormatError(inferred.reason, { importer: "endpoint_inventory", found: table.headers });
     mapping = inferred.mapping;
   }
-  const forbiddenTarget = Object.values(mapping).find((c) => (ENDPOINT_FORBIDDEN_COLUMNS as readonly string[]).includes(norm(String(c))));
+  const forbiddenTarget = Object.values(mapping).find((c) => isForbiddenColumn(String(c)));
   if (forbiddenTarget) {
     throw new EndpointImportFormatError(`the column '${forbiddenTarget}' may not be mapped: values, command lines and contents are never imported`, {
       importer: "endpoint_inventory",
     });
   }
-  const typeValues: Record<string, InventoryItemClass> = { ...DEFAULT_ITEM_TYPE_VALUES };
-  for (const [k, v] of Object.entries(cfg.itemTypeValues ?? {})) typeValues[k.trim().toLowerCase()] = v;
+  // a Map, never an object: a cell reading `constructor` or `__proto__` must not resolve a prototype member
+  const typeValues = new Map<string, InventoryItemClass>(Object.entries(DEFAULT_ITEM_TYPE_VALUES));
+  for (const [k, v] of Object.entries(cfg.itemTypeValues ?? {})) typeValues.set(k.trim().toLowerCase(), v);
+  // a value-bearing column is refused on every row that fills it, mapped or not (as the osquery importer does)
+  const forbiddenHeaders = table.headers.filter((h) => isForbiddenColumn(h));
 
   const observations: EndpointObservation[] = [];
   const refusals: EndpointRowRefusal[] = [];
@@ -231,6 +234,15 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
     };
     const values: Partial<Record<InventoryField, string | null>> = {};
     let refusal: EndpointRowRefusal | null = null;
+    const filledForbidden = forbiddenHeaders.find((h) => (rec.get(h) ?? "").trim().length > 0);
+    if (filledForbidden) {
+      refusals.push({
+        line: rec.line,
+        reason: `the row carries the column '${filledForbidden}' — values, command lines and contents are never imported; the row is refused and the cell discarded`,
+        field: filledForbidden,
+      });
+      continue;
+    }
     for (const f of INVENTORY_FIELDS) {
       const c = cell(f);
       if (!c.ok) {
@@ -254,7 +266,7 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
     let cls: InventoryItemClass = cfg.defaultItemClass;
     if (!refusal && mapping.itemType) {
       const t = values.itemType?.toLowerCase() ?? null;
-      const mapped = t === null ? undefined : typeValues[t];
+      const mapped = t === null ? undefined : typeValues.get(t);
       if (!mapped) {
         refusal = {
           line: rec.line,
