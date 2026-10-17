@@ -25,7 +25,7 @@
  * Run on its own scratch database (the evidence tables are append-only); the
  * runner drops it afterwards.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -1303,6 +1303,32 @@ describe("review round 2", () => {
     expect(s!.lastSkip).toMatch(/could not be created/);
     const audits = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "engine-schedule-skipped"), eq(auditLog.objectId, id)));
     expect(audits).toHaveLength(1);
+  });
+});
+
+describe("N11: the lease is admitted and stamped on the database clock (M-075)", () => {
+  it("a gateway clock two days ahead neither refuses a fresh self-test nor dates the lease", async () => {
+    const s = await startRun({});
+    expect(s.statusCode, s.body).toBe(202);
+    // the process clock jumps once the runner is authenticated and the fast path has passed: from here on a
+    // decision taken on it would read every self-test as two days old
+    engineRunTestHooks.beforeLeaseTx = async () => {
+      vi.useFakeTimers({ toFake: ["Date"], now: new Date(Date.now() + 2 * 86_400_000) });
+    };
+    let l: Awaited<ReturnType<typeof lease>>;
+    try {
+      l = await lease();
+    } finally {
+      vi.useRealTimers();
+      engineRunTestHooks.beforeLeaseTx = undefined;
+    }
+    expect(l.statusCode, l.body).toBe(200);
+    expect(l.json().runId).toBe(s.json().run.id);
+    const [stamps] = await db
+      .execute(sql`SELECT abs(extract(epoch from (now() - leased_at))) < 3600 AS leased, abs(extract(epoch from (now() - heartbeat_at))) < 3600 AS beat FROM engine_runs WHERE id = ${s.json().run.id}`)
+      .then((r) => (r as unknown as { rows: Array<{ leased: boolean; beat: boolean }> }).rows);
+    expect(stamps).toEqual({ leased: true, beat: true });
+    await inject("POST", `/v1/engine-runs/${s.json().run.id}/cancel`, alice.key, {});
   });
 });
 

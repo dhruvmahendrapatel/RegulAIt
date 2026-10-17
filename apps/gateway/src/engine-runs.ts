@@ -117,6 +117,7 @@ import { encryptSecret } from "./secrets.js";
 import { engineKeyName, generateVirtualKeyToken } from "./virtual-keys.js";
 import { AGENT_HEADER, COMPAT_MODE, PROJECT_HEADER } from "./compat-core.js";
 import { DelegationRefusedError, revokeDelegationGrant } from "./delegation.js";
+import { databaseNow, databaseWallNow } from "./db-clock.js";
 import { agentScopeItem, ensureIdentityFor, startInProcessChain, usdToMicros } from "./in-process-delegation.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
@@ -1627,7 +1628,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     if (!runner) return reply.status(401).send({ error: "engine_runner_token_required", next: "revoked" satisfies EngineRunnerNext });
     const [engine] = await db.select().from(engines).where(eq(engines.id, engineId));
     const m = manifest[engineId];
-    const now = new Date();
+    // N11 (M-075): the fast path judges self-test freshness by the database clock, as the rows were stamped
+    const now = await databaseNow(db);
     // the order and meaning of each refusal: `leaseAdmission` (ADR-0187 decisions 67, 69 and 71)
     // ADR-0190 I5 (recheck L4): the executor attestation the worker switches may rest on, read ONCE per poll, named
     // on every refusal (attested and why) and recorded whole on the lease's audit row
@@ -1661,6 +1663,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
       const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
+      // N11 (M-075): every admission, deadline and lease stamp in this transaction is the database's wall clock,
+      // sampled once the runner and engine locks are held (a wait on a lock must not leave `now()` behind)
+      const now = await databaseWallNow(tx);
       const workerAttested = workerBasis.attested;
       // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
       // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
@@ -1680,7 +1685,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
           .for("update");
         if (prior) {
-          const at = new Date();
+          const at = now;
           // the run already ended (cancelled, disabled, timed out): nothing to re-issue. The runner is told
           // why, if the lease would be refused now, else there is no work (its next attempt is a new one)
           if (prior.status !== "leased") {
@@ -1717,7 +1722,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
         }
       }
-      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date(), workerAttested);
+      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, now, workerAttested);
       if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
       const engine = lockedEngine!;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
