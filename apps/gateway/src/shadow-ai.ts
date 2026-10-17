@@ -90,7 +90,9 @@ import {
 } from "@regulait/db";
 import {
   DEFAULT_AI_SIGNATURES,
+  DISCOVERY_PSEUDONYM_PATTERN,
   DiscoveryParseError,
+  PSEUDONYMISED_SUBJECT_KINDS,
   EVIDENCE_ADAPTER_POSTURE,
   EVIDENCE_KINDS,
   EVIDENCE_MAX_BYTES,
@@ -115,6 +117,7 @@ import {
   MCP_DISCOVERY_POSTURE,
   rawEvidenceImportRequestSchema,
   screenEvidencePayload,
+  scrubAuditText,
   type AiSignature,
   type CorrelatedFinding,
   type EvidenceImport,
@@ -128,6 +131,15 @@ import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 import { activeDiscoverySources, activeDiscoveryStatement } from "./discovery-posture.js";
 import { CLOUD_AI_SERVICE_SEED } from "@regulait/cloud-discovery";
+import {
+  REMEDIATION_ENVIRONMENT_PATTERN,
+  SHADOW_AI_REMEDIATION_CHANGE_TYPE,
+  SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
+  SHADOW_AI_REMEDIATION_TEMPLATE_NAME,
+  allowedRemediationEnvironments,
+  remediationReference,
+  shadowAiRemediationDefaultState,
+} from "./shadow-ai-remediation.js";
 
 /**
  * Everything the shipped seed installs: the default signatures, plus each discovery slice's own artifact seed rows
@@ -247,30 +259,58 @@ function toSignature(r: typeof aiEndpointSignatures.$inferSelect): AiSignature {
   };
 }
 
-/** the change type a shadow-AI remediation workflow is started under (an admin assigns a template to it) */
-export const SHADOW_AI_REMEDIATION_CHANGE_TYPE = "shadow-ai-remediation";
-/** the environment the plan body carries until the person states where the usage runs (`needsInput`) */
-export const SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED = "unstated";
+export { SHADOW_AI_REMEDIATION_CHANGE_TYPE, SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED };
+
+/** at most this many evidence paths ride the plan body (a finding keeps at most 20 sightings) */
+const REMEDIATION_PATHS_MAX = 20;
+
+/** a subject that names a person or a device by pseudonym (ADR-0195 decision 20) never leaves the finding */
+function subjectIsPseudonymised(row: { subject: string; subjectKind: string }): boolean {
+  return (
+    (PSEUDONYMISED_SUBJECT_KINDS as readonly string[]).includes(row.subjectKind) ||
+    DISCOVERY_PSEUDONYM_PATTERN.test(row.subject.trim()) ||
+    row.subject.includes("psn:")
+  );
+}
+
+/** text that may ride a workflow body: no pseudonym, and nothing the audit scrubber would change (a credential) */
+const bodySafe = (v: string): boolean => !v.includes("psn:") && scrubAuditText(v) === v;
 
 /**
  * The `POST /v1/workflows/instances` body for a finding's remediation, shaped to `startInstanceSchema` (pure;
- * pinned by a test that parses it with that schema). The server knows the subject and the provider, not where the
- * ungoverned usage runs, so `environment` is a stated placeholder the screen replaces with what the person types.
- * A repo finding's subject is its path (so a path-scoped assignment rule can match it), as before.
+ * pinned by tests that parse it with that schema and post it to the route). ADR-0195 A4:
+ *  - the description names the subject and provider, or only the subject KIND when the subject is a pseudonym, and
+ *    always carries `remediationReference` (how an unlinked start is found again);
+ *  - `paths` are the repo and the repo-relative locations its sightings were found at (ADR-0195 decision 6: a path,
+ *    never contents). A device's config path is not a repo path and is never copied; nor is a pseudonym or anything
+ *    credential-shaped;
+ *  - `environment` is the stated one, or the explicit `unstated` placeholder the start route refuses.
  */
-export function remediationStartBody(row: {
-  id: string;
-  subject: string;
-  subjectKind: string;
-  provider: string;
-}): { change: { description: string; paths: string[]; changeType: string; environment: string; targetSystem?: string } } {
-  const targetSystem = row.subject.trim().slice(0, 200);
+export function remediationStartBody(
+  row: { id: string; subject: string; subjectKind: string; provider: string; evidence?: ReadonlyArray<Record<string, unknown>> | null },
+  environment?: string,
+): { change: { description: string; paths: string[]; changeType: string; environment: string; targetSystem?: string } } {
+  const pseudonymised = subjectIsPseudonymised(row);
+  const subject = row.subject.trim();
+  const safeSubject = !pseudonymised && subject && bodySafe(subject) ? subject : "";
+  const label = safeSubject || `a ${row.subjectKind.replace(/_/g, " ")} (pseudonymised)`;
+  const paths: string[] = [];
+  if (row.subjectKind === "repo" && safeSubject) {
+    paths.push(safeSubject);
+    for (const e of row.evidence ?? []) {
+      const loc = e.location as { path?: unknown } | undefined;
+      const path = typeof loc?.path === "string" ? loc.path.trim() : "";
+      if (path && path.length <= 500 && !path.includes("..") && bodySafe(path) && !paths.includes(path)) paths.push(path);
+      if (paths.length >= REMEDIATION_PATHS_MAX) break;
+    }
+  }
+  const targetSystem = safeSubject.slice(0, 200);
   return {
     change: {
-      description: `Pull ${row.subject} (${row.provider}) into governance — shadow-AI finding ${row.id}`,
-      paths: row.subjectKind === "repo" && row.subject.trim() ? [row.subject] : [],
+      description: `Pull ${label} (${row.provider}) into governance — ${remediationReference(row.id)}`,
+      paths,
       changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE,
-      environment: SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
+      environment: environment ?? SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
       ...(targetSystem ? { targetSystem } : {}),
     },
   };
@@ -1316,8 +1356,27 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
    */
   app.get("/v1/shadow-ai/findings/:findingId/remediation-plan", async (req, reply) => {
     const { findingId } = z.object({ findingId: z.string().uuid() }).parse(req.params);
+    const { environment } = z.object({ environment: z.string().optional() }).parse(req.query ?? {});
     const [row] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.id, findingId));
     if (!row) return reply.status(404).send({ error: "unknown_finding" });
+    // ADR-0195 A4: an optional stated environment, only one an admin has given a meaning to. Without it the body
+    // keeps the explicit `unstated` placeholder, which the start route refuses: never a silent default
+    let statedEnvironment: string | undefined;
+    if (environment !== undefined) {
+      const env = environment.trim();
+      const allowed = await allowedRemediationEnvironments(db);
+      if (!REMEDIATION_ENVIRONMENT_PATTERN.test(env) || env === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED || !allowed.includes(env)) {
+        return reply.status(400).send({
+          error: "environment_not_allowed",
+          allowed,
+          detail:
+            allowed.length > 0
+              ? "name one of the environments a deploy target or workflow assignment rule already uses, or leave it out and state it when starting"
+              : "no deploy target or workflow assignment rule names an environment yet, so none can be stated here; leave it out and state it when starting",
+        });
+      }
+      statedEnvironment = env;
+    }
     const [agent] = row.replacementAgentId
       ? await db.select().from(agents).where(eq(agents.id, row.replacementAgentId))
       : [];
@@ -1328,6 +1387,22 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       .where(eq(workflowAssignmentRules.changeType, SHADOW_AI_REMEDIATION_CHANGE_TYPE))
       .limit(1);
     const assignmentRuleExists = rule !== undefined;
+    const defaultTemplate = await shadowAiRemediationDefaultState(db);
+    // a workflow started for this finding whose link never landed (the screen retries the LINK, never a second start)
+    const [pendingLink] = row.remediationInstanceId
+      ? []
+      : await db
+          .select({ id: workflowInstances.id, createdAt: workflowInstances.createdAt })
+          .from(workflowInstances)
+          .where(
+            and(
+              sql`${workflowInstances.change}->>'changeType' = ${SHADOW_AI_REMEDIATION_CHANGE_TYPE}`,
+              sql`strpos(${workflowInstances.change}->>'description', ${remediationReference(row.id)}) > 0`,
+              sql`not exists (select 1 from ${shadowAiFindings} f where f.remediation_instance_id = ${workflowInstances.id})`,
+            ),
+          )
+          .orderBy(desc(workflowInstances.createdAt))
+          .limit(1);
 
     const steps: Array<{ step: string; why: string; blocked?: string }> = [];
     if (row.severity === "critical") {
@@ -1364,26 +1439,31 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       replacementAgent: agent ? { id: agent.id, name: agent.name, provider: agent.provider, enabled: agent.enabled } : null,
       steps,
       /** post THIS to the existing workflow route — there is no second one. It validates against that route's
-       * `startInstanceSchema`; `needsInput` names what only the person can state (where the usage runs). */
+       * `startInstanceSchema`; `needsInput` names what only the person can state (where the usage runs), unless
+       * `?environment=` stated it. */
       workflowRequest: {
         route: "POST /v1/workflows/instances",
-        body: remediationStartBody(row),
-        needsInput: ["change.environment"],
+        body: remediationStartBody(row, statedEnvironment),
+        needsInput: statedEnvironment ? [] : ["change.environment"],
       },
-      /** no workflow is shipped for this change type (secure by default: nothing is assigned on anyone's behalf);
-       * until an admin assigns one, starting answers 422 `no_workflow_matches_change` */
+      /** ADR-0195 A4: a strict default workflow ships for this change type (plan-only, then a human sign-off). It is
+       * installed the first time a remediation workflow starts; an admin relaxes it by retiring the template */
       assignment: {
         changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE,
         ruleConfigured: assignmentRuleExists,
-        ...(assignmentRuleExists
+        defaultTemplate: { name: SHADOW_AI_REMEDIATION_TEMPLATE_NAME, state: defaultTemplate },
+        ...(assignmentRuleExists || defaultTemplate === "not_installed"
           ? {}
           : {
               detail:
-                `no workflow assignment rule names the change type '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}': an admin must ` +
-                "assign a workflow template to it (Workflow templates, assignment rules) before a remediation workflow " +
-                "can be started, or link a workflow started another way",
+                `no workflow assignment rule names the change type '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}' and its default ` +
+                `workflow is ${defaultTemplate === "retired" ? "retired" : "unassigned"}: an admin must assign a workflow ` +
+                "template to it (Workflow templates, assignment rules) before a remediation workflow can be started, or " +
+                "link a workflow started another way",
             }),
       },
+      /** a workflow started for this finding but never linked to it; the screen offers to link it, never to start another */
+      pendingLink: pendingLink ? { instanceId: pendingLink.id, startedAt: pendingLink.createdAt } : null,
       note:
         "This module does not start workflows. It composes the plan and hands back the request body for the ONE " +
         "instantiation route, so assignment rules, the compliance cascade and the retired-template refusal all still apply.",

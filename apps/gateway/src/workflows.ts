@@ -69,6 +69,11 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import {
+  SHADOW_AI_REMEDIATION_CHANGE_TYPE,
+  SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
+  ensureShadowAiRemediationDefault,
+} from "./shadow-ai-remediation.js";
 import { networkFacingSignal } from "./dev-secrets.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
@@ -2967,6 +2972,20 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // accepts neither — but rebuild explicitly.
     const change = { ...body.change, initiatorRoles, dataSensitivities };
 
+    // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
+    // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
+    if (change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
+      if (change.environment.trim() === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED) {
+        return reply.status(422).send({
+          error: "environment_unstated",
+          detail:
+            "the remediation plan's environment is a placeholder: state where the ungoverned usage runs " +
+            "(change.environment) before starting the workflow",
+        });
+      }
+      if (!body.templateId) await ensureShadowAiRemediationDefault(db, userId);
+    }
+
     let templateIds: string[];
     if (body.templateId) {
       if (!req.authCtx.isAdmin) {
@@ -2989,7 +3008,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
     }
     if (templateIds.length === 0) {
-      // no workflow is ever assigned on an admin's behalf (no shipped default rules): say who can fix it
+      // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
+      // rule, installed above): say who can fix it
       return reply.status(422).send({
         error: "no_workflow_matches_change",
         changeType: change.changeType,

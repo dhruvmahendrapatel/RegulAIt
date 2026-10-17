@@ -580,3 +580,50 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   OS-scoped row matches only a sighting whose OS is known and equal, so an inventory export without an OS column
   matches only the OS-neutral rows.
 
+
+## As built: A4 remediation plan start (2026-10-17, no migration)
+
+Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section records how the remediation plan
+(decision 5a: "the remediation plan works unchanged") was made to start a workflow with the discovery subject kinds.
+
+1. **The plan body is the start body.** `GET /v1/shadow-ai/findings/:id/remediation-plan` returns a
+   `workflowRequest.body` that `startInstanceSchema` (and the strict change descriptor) accepts as it stands; a gateway
+   test posts it to `POST /v1/workflows/instances` unchanged and gets 201. The old `repoPath` shape was already gone
+   (#378); A4 completes it:
+   - the description names the subject and provider, or only the subject kind ("a device (pseudonymised)") when the
+     subject is a pseudonym (`device`, `cloud_principal`, or any `psn:` value), and always ends with the finding
+     reference `shadow-AI finding <id>`;
+   - `paths` are the repo and the repo-relative `location.path` values of its sightings (decision 6), at most 20. A
+     path that climbs (`..`), carries a pseudonym, or that the audit scrubber would change (credential-shaped) is
+     dropped. Non-repo findings have no paths: a device's home-relative config path is not a repo path and is personal;
+   - `targetSystem` is the subject only when it is not pseudonymised.
+2. **Environment, fail closed.** `?environment=` is optional. It must match `^[a-z0-9][a-z0-9_.-]{0,63}$` and be one an
+   admin has already given a meaning to: an environment named on a deploy target or a workflow assignment rule. There
+   is no shipped list, so with none configured every stated value is refused (400 `environment_not_allowed`, with the
+   allowed list). Without it the body keeps `unstated` and `needsInput: ["change.environment"]`, and the start route
+   now refuses a `shadow-ai-remediation` change whose environment is `unstated` (422 `environment_unstated`) instead
+   of starting a workflow in the placeholder.
+3. **A strict default workflow ships.** `apps/gateway/src/shadow-ai-remediation.ts` holds the template
+   `shadow-ai-remediation`: intake, the ADR-0079 plan-only stage, a `shadow_ai_remediation_plan` artifact and a human
+   sign-off. The start route installs it, with a rule on the change type, the first time a remediation starts (the
+   ADR-0080 "minted on first use" pattern, so no migration; race-safe on the unique template name; audited once as
+   `shadow-ai-remediation-default-installed`). It is never installed again once the name exists:
+   - an admin relaxes it by retiring the template (`POST /v1/workflows/templates/:id/retire`, audited as
+     `workflow-template-retired`) and assigning their own; a start against the retired default answers 422
+     `template_retired` until they do;
+   - deleting the rule while the template stays active only makes starting fail again (stricter, not looser).
+   The plan reports `assignment.defaultTemplate.state` (`not_installed`, `active`, `retired`).
+4. **The unlinked start is server state.** The plan returns `pendingLink`: the newest `shadow-ai-remediation`
+   instance whose description carries the finding reference and that no finding links yet. The screen seeds its
+   "started but not linked" state from it, so after a reload it still offers only "Retry linking this workflow"; the
+   start button and the "link an existing workflow" form stay disabled until the link lands. The screen keeps the
+   finding reference on the description whatever the person types. Browser storage is not used.
+5. **Open-source check (ADR-0176).** Nothing new to adopt: validation is zod, queries are drizzle, both already pinned.
+
+**Limits and open points (A4):**
+- The default sign-off approver is `requesting_user`, as for the other built-in shapes (the person who started the
+  remediation signs off its plan). A named or second approver needs an admin-authored template; whether the default
+  should require a second person is an owner question.
+- `pendingLink` matches on the description text, which the initiator controls. A description that names another
+  finding can only make that finding's screen offer a link, which still needs confirmation and is audited.
+- The gateway tests for 1 to 4 run against Postgres in CI only (typechecked locally).

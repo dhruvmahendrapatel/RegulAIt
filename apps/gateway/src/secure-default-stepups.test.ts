@@ -120,6 +120,37 @@ describe("shadow-AI remediation plan body", () => {
     expect(changeDescriptorSchema.strict().safeParse(body.change).success).toBe(true);
   });
 
+  it("paths come from the repo's evidence locations; nothing pseudonymised or credential-shaped rides along", () => {
+    const evidence = [
+      { location: { path: "src/llm.ts", line: 3 }, actor: "psn:0123456789abcdef01234567" },
+      { location: { path: "src/llm.ts" } },
+      { location: { path: "../outside.ts" } },
+      { location: { path: "psn:0123456789abcdef01234567/x.ts" } },
+      { location: { path: `config/${"sk-" + "a".repeat(40)}` } },
+    ];
+    const body = remediationStartBody({ ...finding, evidence }, "staging");
+    expect(body.change.paths).toEqual(["acme/billing", "src/llm.ts"]);
+    expect(body.change.environment).toBe("staging");
+    expect(JSON.stringify(body)).not.toContain("psn:");
+    expect(changeDescriptorSchema.strict().safeParse(body.change).success).toBe(true);
+  });
+
+  it("a pseudonymised subject is named only by its kind", () => {
+    for (const row of [
+      { ...finding, subjectKind: "device", subject: "psn:0123456789abcdef01234567" },
+      { ...finding, subjectKind: "cloud_principal", subject: "psn:0123456789abcdef01234567" },
+      { ...finding, subjectKind: "host", subject: "psn:0123456789abcdef01234567" },
+    ]) {
+      const body = remediationStartBody({ ...row, evidence: [{ location: { path: "~/.config/app.json" } }] });
+      expect(JSON.stringify(body)).not.toContain("psn:");
+      expect(body.change.paths).toEqual([]);
+      expect(body.change).not.toHaveProperty("targetSystem");
+      expect(body.change.description).toContain("(pseudonymised)");
+      expect(body.change.description).toContain(finding.id);
+      expect(startInstanceSchema.safeParse(body).success).toBe(true);
+    }
+  });
+
   it("the negative control: the old body shape does not validate", () => {
     const old = { change: { targetSystem: "acme/billing", changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE, repoPath: "acme/billing" } };
     expect(startInstanceSchema.safeParse(old).success).toBe(false);
