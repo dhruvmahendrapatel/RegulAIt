@@ -291,8 +291,12 @@ export function credentialTargetMatch(
     // A match is certain; a different project is NOT a mismatch, because a central project may hold the service
     // account and the pool while it reads other projects. So: match, or unverifiable.
     const want = t("projectId");
-    const home = config.serviceAccountEmail.toLowerCase().split("@")[1]?.split(".")[0] ?? "";
-    return want && home === want ? "match" : "unverifiable";
+    const SUFFIX = ".iam.gserviceaccount.com";
+    const domain = config.serviceAccountEmail.toLowerCase().split("@")[1] ?? "";
+    // only a real service-account address names a project: the domain must be exactly <project> + the suffix
+    if (!domain.endsWith(SUFFIX)) return "unverifiable";
+    const home = domain.slice(0, -SUFFIX.length);
+    return want && home.length > 0 && !home.includes(".") && home === want ? "match" : "unverifiable";
   }
   if ((kind === "cloud_azure" || kind === "repo_azure_devops") && config.tenantId) {
     const want = t("tenantId");
