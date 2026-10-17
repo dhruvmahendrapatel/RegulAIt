@@ -872,3 +872,21 @@ relaxation since PR #378 (As built 2026-10-12 above; ADR-0101 As built 2026-10-1
 nothing. `zz-secure-default-stepups.test.ts` covers them. The web views (`McpRegistriesPanel`,
 `ExpectedServedModelCard`) send these writes through `withStepUp`. No demo seeder creates a registry or sets an
 expected served model, so the demo seed needs no change for them. Nothing further was built for this item.
+
+## As built — 2026-10-17: the owner-change grant is claimed after the compare-and-set (N12)
+
+`PUT /v1/servers/:serverId/owner` and `PUT /v1/connectors/:connectorId/owner` (`changeOwner` in `ownership.ts`) used
+to spend the `owner_change` grant on the root handle before the Class A compare-and-set. A compare-and-set lost to a
+concurrent owner change answered 409 `changed_concurrently` with the grant already burned. They now follow the
+pattern the egress allow-list writer uses: the grant is looked at (`spend: false`) before the write, so a request
+without one is answered at once; it is spent inside the write's own transaction, on its connection, after the
+compare-and-set, and before the `*-owner-changed` audit row (now written in the same transaction). A lost
+compare-and-set returns 409 and leaves the grant unspent. A refused claim rolls the write back, and a second look
+records the `step-up-grant-refused` row again outside the rolled-back transaction. `ownerChangeGate` takes
+`{ db, spend }`; without it, it spends on the root handle as before.
+
+`zz-owner-change-claim-in-tx.test.ts` covers three cases. A lost compare-and-set leaves the grant unspent, and the same
+grant then completes the change. A success spends the grant once, and a replay is refused. Four concurrent requests
+with one grant make one transition. Not changed here: `POST /v1/agents/:id/owner` (`agents-connectors.ts`) still
+spends on the root handle before its compare-and-set. It is outside this slice's file surface and is listed as a
+follow-up.

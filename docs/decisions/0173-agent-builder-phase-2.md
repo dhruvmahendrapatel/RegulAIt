@@ -319,3 +319,17 @@ The full local gate also caught four new free-text columns missing from the cred
 - Three more hand-written CSV writers (projects, cost import, billing statement) for the open-source replacement
   programme.
 
+
+## As built — 2026-10-17: builder runtime timestamps on the database clock (N13, M-075)
+
+`builder-runtime.ts` now uses the database clock for every timestamp it writes to a row or compares with one:
+- the seven `updatedAt` writes on `builder_threads` and `builder_tool_steps` use `sql\`now()\``;
+- the lapsed-approval check reads `expires_at <= now()` from the database instead of comparing with `Date.now()`;
+- the monthly spend window (`monthStartUtc`) is taken from `databaseNow` at both call sites;
+- the schedule sweep's default `now` (due-ness, `lastRunAt`, `updatedAt`, next run) comes from `databaseNow`.
+
+The process clock stays where it measures this process's own time: the lease-wait deadline, call latency, and a
+policy span's start (`recordSpan` timing). `monthStartUtc` keeps its `new Date()` default because `builder.ts` (the
+usage route) still calls it without an argument. That caller is outside this slice and is listed as a follow-up.
+`builder-runtime-db-clock.test.ts` is a static guard: every process-clock use in the file must be on its allow-list
+with a reason, and no row timestamp may be written from `new Date()`.
