@@ -34,6 +34,7 @@
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
 import type { DiscoveryCredentialMode } from "@regulait/shared";
+import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
 
 /** the source as a scanner sees it */
 export interface ScanSource {
@@ -118,10 +119,13 @@ export function scannerRegistry(scanners: readonly Scanner[]): ScannerRegistry {
 }
 
 /**
- * THE PRODUCTION REGISTRY. Empty in SD0: SD1 to SD4 add their scanners here
+ * THE PRODUCTION REGISTRY. SD0 shipped it empty; SD1 to SD4 add their scanners here
  * (one line each), and the admin page and `POST /v1/discovery/sources` read it.
  */
-export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([]);
+export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
+  // SD1: repo_github, repo_gitlab, repo_bitbucket, repo_azure_devops
+  ...REPO_SCANNERS,
+]);
 
 /**
  * TEST ONLY: a scanner that calls nothing and reports the observations it was

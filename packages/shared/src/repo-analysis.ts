@@ -429,7 +429,7 @@ function mcpServers(doc: unknown, max: number): RepoMcpServer[] | null {
   return out;
 }
 
-const MCP_CONFIG_IDS = new Set(["cfg-mcp-json", "cfg-vscode-mcp-json", "cfg-gemini-settings"]);
+const MCP_CONFIG_IDS = new Set(["cfg-mcp-json", "cfg-vscode-mcp-json", "cfg-gemini-settings", "cfg-cursor-mcp-json"]);
 
 // ===========================================================================
 // THE ANALYSER

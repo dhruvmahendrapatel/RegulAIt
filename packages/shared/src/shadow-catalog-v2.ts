@@ -180,6 +180,14 @@ export const SHADOW_AI_CATALOG_V2: ReadonlyArray<ShadowCatalogV2Entry> = deepFre
   N({ id: "cfg-continue-rules", kind: "assistant_config", pattern: ".continue/rules/", provider: "continue", notes: "Continue workspace rules folder at the top level of the workspace.", verified: registry("https://docs.continue.dev/customize/deep-dives/rules") }),
   N({ id: "cfg-aider-conf", kind: "assistant_config", pattern: ".aider.conf.yml", provider: "aider", notes: "aider configuration file at the git repo root.", verified: registry("https://aider.chat/docs/config/aider_conf.html") }),
 
+  N({ id: "ep-cursor-api", kind: "endpoint", pattern: "*.cursor.sh", provider: "cursor", notes: "Cursor editor API hosts (api2.cursor.sh and others), per the vendor's network configuration page.", verified: { url: "https://cursor.com/docs/enterprise/network-configuration", checkedOn: on } }),
+  N({ id: "ep-cursor-marketplace", kind: "endpoint", pattern: "*.cursorapi.com", provider: "cursor", notes: "Cursor editor service hosts (marketplace.cursorapi.com and others), per the vendor's network configuration page.", verified: { url: "https://cursor.com/docs/enterprise/network-configuration", checkedOn: on } }),
+  N({ id: "cfg-cursor-rules", kind: "assistant_config", pattern: ".cursor/rules/", provider: "cursor", notes: "Cursor project rules folder (.mdc files) at the project root.", verified: { url: "https://cursor.com/docs/rules", checkedOn: on } }),
+  N({ id: "cfg-cursor-rules-legacy", kind: "assistant_config", pattern: ".cursorrules", provider: "cursor", notes: "Legacy single-file Cursor project rules at the project root.", verified: { url: "https://cursor.com/docs/rules", checkedOn: on } }),
+  N({ id: "cfg-cursor-mcp-json", kind: "assistant_config", pattern: ".cursor/mcp.json", provider: "cursor", notes: "Cursor project MCP server definitions (mcpServers).", verified: { url: "https://cursor.com/docs/mcp", checkedOn: on } }),
+  N({ id: "ep-lovable-app", kind: "endpoint", pattern: "lovable.dev", provider: "lovable", notes: "Lovable AI app builder web app.", verified: { url: "https://docs.lovable.dev/introduction", checkedOn: on } }),
+  N({ id: "ep-lovable-published", kind: "endpoint", pattern: "*.lovable.app", provider: "lovable", notes: "Default domain of apps published from the Lovable AI app builder (<subdomain>.lovable.app).", verified: { url: "https://docs.lovable.dev/features/publish", checkedOn: on } }),
+
   // --- coding assistants: IDE extension ids (seen in .vscode/extensions.json) ---
   N({ id: "ext-github-copilot", kind: "ide_extension", pattern: "github.copilot", provider: "github-copilot", notes: "GitHub Copilot VS Code extension id.", source: PATRONAI_SOURCE, verified: marketplace("GitHub.copilot") }),
   N({ id: "ext-github-copilot-chat", kind: "ide_extension", pattern: "github.copilot-chat", provider: "github-copilot", notes: "GitHub Copilot Chat VS Code extension id.", source: PATRONAI_SOURCE, verified: marketplace("GitHub.copilot-chat") }),
@@ -278,7 +286,18 @@ export const SHADOW_AI_CATALOG_V2_NOTE =
 // MATCHING — literal comparisons, most specific wins (as v1)
 // ===========================================================================
 
-const literalLength = (pattern: string): number => pattern.replace("**/", "").replace("*", "").length;
+/**
+ * The specificity a tie is broken on: the literal characters of a pattern. A
+ * leading any-depth prefix and every `*` are excluded, counted character by
+ * character (no string replacement, so no occurrence can be missed).
+ */
+export function catalogPatternLiteralLength(pattern: string): number {
+  const body = pattern.startsWith("**/") ? pattern.slice(3) : pattern;
+  let n = 0;
+  for (const c of body) if (c !== "*") n++;
+  return n;
+}
+const literalLength = catalogPatternLiteralLength;
 
 const asV1 = (e: ShadowCatalogV2Entry): ShadowCatalogEntry | null =>
   e.kind === "endpoint" || e.kind === "sdk" ? { id: e.id, kind: e.kind, pattern: e.pattern, provider: e.provider, notes: e.notes } : null;
@@ -332,15 +351,17 @@ export function matchCatalogV2EnvVar(name: string, catalog = SHADOW_AI_CATALOG_V
 /**
  * A seed row for the admin catalogue. `kind`/`matchType` use the names the
  * existing table takes (`hostname`/`exact_host`/`host_suffix`,
- * `sdk_package`/`package`) and, for the SD0 kinds, `assistant_config` and
- * `ide_extension` (matchers defined by SD0). Rows whose kind SD0 has not yet
- * landed are installed only once SD0's kinds exist; nothing here writes them.
+ * `sdk_package`/`package`) and, for SD0's artifact kinds `assistant_config` and
+ * `ide_extension`, the `identifier` match type. The repo scanner reports an
+ * assistant config as the catalogue pattern it matched, so the identifier
+ * equality lines up with these rows.
  */
 export interface DiscoverySeedRow {
   provider: string;
   kind: "hostname" | "sdk_package" | "assistant_config" | "ide_extension";
   value: string;
-  matchType: "exact_host" | "host_suffix" | "package" | "path" | "extension_id";
+  /** `identifier`: SD0's whole-identifier, case-insensitive match for the artifact kinds */
+  matchType: "exact_host" | "host_suffix" | "package" | "identifier";
   provenance: string;
   /** the v2 catalogue entry this row was derived from */
   catalogEntryId: string;
@@ -365,9 +386,9 @@ function seedFor(e: ShadowCatalogV2Entry): DiscoverySeedRow | null {
       // the table's package match is exact; a family wildcard stays compiled-only (reported as a gap)
       return e.pattern.includes("*") ? null : { ...base, kind: "sdk_package", value: e.pattern, matchType: "package" };
     case "assistant_config":
-      return { ...base, kind: "assistant_config", value: e.pattern, matchType: "path" };
+      return { ...base, kind: "assistant_config", value: e.pattern, matchType: "identifier" };
     case "ide_extension":
-      return { ...base, kind: "ide_extension", value: e.pattern, matchType: "extension_id" };
+      return { ...base, kind: "ide_extension", value: e.pattern, matchType: "identifier" };
     case "env_var":
       return null;
   }

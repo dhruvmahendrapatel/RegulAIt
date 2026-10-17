@@ -132,7 +132,10 @@ export class ReadClient {
     this.base = trimTrailingSlashes(init.baseUrl);
     this.origin = new URL(this.base).origin;
     this.fetchImpl = init.opts.fetchImpl;
-    this.maxRetries = clampLimit(init.opts.maxRetries, REPO_READ_DEFAULTS.maxRetries, 10);
+    // 0 is meaningful: the caller (SD0's ctx.backoff) does the waiting itself
+    const retries = init.opts.maxRetries;
+    this.maxRetries =
+      retries === undefined || !Number.isFinite(retries) ? REPO_READ_DEFAULTS.maxRetries : Math.max(0, Math.min(Math.floor(retries), 10));
     this.maxWaitMs = clampLimit(init.opts.maxWaitMs, REPO_READ_DEFAULTS.maxWaitMs, 15 * 60_000);
     this.maxPages = clampLimit(init.opts.maxPages, REPO_READ_DEFAULTS.maxPages, 10_000);
     this.sleep = init.opts.sleep ?? defaultSleep;

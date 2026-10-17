@@ -327,6 +327,14 @@ template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" sta
   an injected fetch, and the readers extend that pattern so every call stays on the guarded fetch.
 - **JSONC.** No maintained JSONC parser meets ADR-0176's maintenance window; a `.vscode/*.json` file with comments
   is reported by its path and its contents are counted as unparsed.
-- **Catalogue v2.** 173 entries (v1's 81 unchanged first); coding-assistant entries were checked against vendor
+- **Catalogue v2.** 180 entries (v1's 81 unchanged first); coding-assistant entries were checked against vendor
   documentation or the VS Code marketplace on 2026-10-17. One PatronAI extension id no longer resolves and was left
-  out.
+  out. Seed rows for the artifact kinds use SD0's `identifier` match type.
+- **Repo scanners (SD1 Phase B).** `discovery-repo-scanner.ts` registers `repo_github`, `repo_gitlab`,
+  `repo_bitbucket` and `repo_azure_devops`. A source's target takes `namespace`, `baseUrl`, `history` and
+  `historyDepth`; history is scanned only when `history = true`, and because the target is bound to SD0's enable
+  step-up, turning history on for an enabled source is that step-up (decision 14). Requests go through `ctx.fetch`
+  after `ctx.throttle()`; 429 and 503 waits are `ctx.backoff`'s, and a limit still in force afterwards fails the run
+  as `rate_limited` (the next scheduled run retries). Commit authors go only to `ctx.pseudonymise("commit_author")`.
+  An SD0 observation has no field for a sighting's path, line or commit, for `.env.example` names or for a stdio MCP
+  server's command, so those are not reported (open question for SD0).

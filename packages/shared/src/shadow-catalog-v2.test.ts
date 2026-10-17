@@ -7,6 +7,7 @@ import {
   SHADOW_AI_CATALOG_V2_VERSION,
   SHADOW_AI_SEED_ROWS_SD1,
   assistantConfigMatches,
+  catalogPatternLiteralLength,
   matchCatalogV2AssistantConfig,
   matchCatalogV2Endpoint,
   matchCatalogV2EnvVar,
@@ -18,9 +19,9 @@ import {
 describe("SHADOW_AI_CATALOG_V2 (ADR-0195 decision 15)", () => {
   it("pins version, entry count and content hash — v2 can never drift silently", () => {
     expect(SHADOW_AI_CATALOG_V2_VERSION).toBe(2);
-    expect(SHADOW_AI_CATALOG_V2).toHaveLength(173);
+    expect(SHADOW_AI_CATALOG_V2).toHaveLength(180);
     const hash = createHash("sha256").update(JSON.stringify(SHADOW_AI_CATALOG_V2)).digest("hex");
-    expect(hash).toBe("13f125cdf6775f16ace3858ec34c8514f628cdf978c23455d3e51daaa6929d17");
+    expect(hash).toBe("8cc76d3a0f7f13846ae0a50ff512c0563e9ca34b2faadfc90b1a3353aad06c8a");
     expect(Object.isFrozen(SHADOW_AI_CATALOG_V2)).toBe(true);
     expect(Object.isFrozen(SHADOW_AI_CATALOG_V2[100])).toBe(true);
   });
@@ -72,6 +73,21 @@ describe("SHADOW_AI_CATALOG_V2 (ADR-0195 decision 15)", () => {
     expect(matchCatalogV2EnvVar("anthropic_api_key")).toBeNull();
   });
 
+  it("specificity counts every literal character and excludes EVERY wildcard (two-star pattern)", () => {
+    // a single-occurrence replace would count the second `*` as a literal (CodeQL js/incomplete-sanitization)
+    expect(catalogPatternLiteralLength("a*b*c")).toBe(3);
+    expect(catalogPatternLiteralLength("**/AGENTS.md")).toBe(9);
+    expect(catalogPatternLiteralLength("**/x*y")).toBe(2);
+    expect(catalogPatternLiteralLength("*.githubcopilot.com")).toBe(18);
+  });
+
+  it("carries AI IDE and app-builder signatures as data, verified like the rest", () => {
+    expect(matchCatalogV2Endpoint("api2.cursor.sh")?.provider).toBe("cursor");
+    expect(matchCatalogV2Endpoint("my-app.lovable.app")?.provider).toBe("lovable");
+    expect(matchCatalogV2AssistantConfig(".cursor/rules/style.mdc")?.id).toBe("cfg-cursor-rules");
+    expect(matchCatalogV2AssistantConfig(".cursor/mcp.json")?.id).toBe("cfg-cursor-mcp-json");
+  });
+
   it("assistant_config path patterns are literal", () => {
     expect(matchCatalogV2AssistantConfig("services/api/AGENTS.md")?.id).toBe("cfg-agents-md");
     expect(matchCatalogV2AssistantConfig("NOTAGENTS.md")).toBeNull();
@@ -83,12 +99,15 @@ describe("SHADOW_AI_CATALOG_V2 (ADR-0195 decision 15)", () => {
   });
 
   it("seed rows are data for the admin catalogue: only v2 additions, no regex, no wildcard the table cannot express", () => {
-    expect(SHADOW_AI_SEED_ROWS_SD1.length).toBe(66);
+    expect(SHADOW_AI_SEED_ROWS_SD1.length).toBe(73);
     const v1Ids = new Set(SHADOW_AI_CATALOG_V1.map((e) => e.id));
     for (const r of SHADOW_AI_SEED_ROWS_SD1) {
       expect(v1Ids.has(r.catalogEntryId)).toBe(false);
       if (r.kind === "hostname" || r.kind === "sdk_package") expect(r.value.includes("*"), r.catalogEntryId).toBe(false);
       expect(r.provenance.startsWith("regulait-seed catalog-v2 ")).toBe(true);
+    }
+    for (const r of SHADOW_AI_SEED_ROWS_SD1) {
+      if (r.kind === "assistant_config" || r.kind === "ide_extension") expect(r.matchType).toBe("identifier");
     }
     expect(SHADOW_AI_SEED_ROWS_SD1.find((r) => r.catalogEntryId === "ep-github-copilot-api")).toMatchObject({
       kind: "hostname",

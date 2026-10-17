@@ -173,6 +173,13 @@ describe("repo readers (ADR-0195 SD1)", () => {
       expect(upstream.requests).toHaveLength(3);
     });
 
+    it("maxRetries 0 gives up at once without sleeping (the caller owns the waiting)", async () => {
+      upstream.route("GET", "/repos/acme/one", { status: 429, body: {}, headers: { "retry-after": "1" } });
+      await expect(reader("github", { maxRetries: 0 }).getTree("acme/one")).rejects.toBeInstanceOf(GitProviderRateLimitError);
+      expect(sleeps).toEqual([]);
+      expect(upstream.requests).toHaveLength(1);
+    });
+
     it("scrubs the token out of an upstream error", async () => {
       upstream.route("GET", "/repos/acme/one", { status: 500, body: { echoed: token } });
       const err = (await reader("github").getTree("acme/one").catch((e: unknown) => e)) as Error;
