@@ -93,6 +93,7 @@ import {
 import { identityServiceFailure } from "./delegation.js";
 import { auditExecutor, freshAttestation, quarantineExecutor, executorView } from "./executor-channel.js";
 import { databaseNow } from "./delegation.js";
+import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { CHANGED_CONCURRENTLY, requireStepUp } from "./step-up.js";
 import { registerIsolationSubjectRoutes } from "./isolation-subject-routes.js";
@@ -625,7 +626,15 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
   });
   const placementSelect = () =>
     db
-      .select({ placement: executionPlacements, report: executionPlacementReports, profileName: executionProfiles.name, profileVersion: executionProfiles.version, executorName: executors.name })
+      .select({
+        placement: executionPlacements,
+        report: executionPlacementReports,
+        profileName: executionProfiles.name,
+        profileVersion: executionProfiles.version,
+        executorName: executors.name,
+        // the keyset cursor's microsecond-exact instant (pagination.ts)
+        atText: atTextSql(executionPlacements.createdAt),
+      })
       .from(executionPlacements)
       .leftJoin(executionPlacementReports, eq(executionPlacementReports.placementId, executionPlacements.id))
       .leftJoin(executionProfiles, eq(executionProfiles.digest, executionPlacements.profileDigest))
@@ -635,24 +644,36 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     const q = executionPlacementsQuerySchema.safeParse(req.query ?? {});
     if (!q.success) return reply.status(400).send({ error: "invalid_query", issues: q.error.issues });
     const { limit, outcome, workloadKind, reason, before } = q.data;
+    // N11: an `(at, id)` keyset cursor per list, so rows sharing the last row's instant are never skipped
+    const cursor = q.data.cursor ? decodeCursor(q.data.cursor) : null;
+    const refusalsCursor = q.data.refusalsCursor ? decodeCursor(q.data.refusalsCursor) : null;
+    if ((q.data.cursor && !cursor) || (q.data.refusalsCursor && !refusalsCursor)) return reply.status(400).send({ error: "invalid_cursor" });
+    const continuing = cursor !== null || refusalsCursor !== null;
     const conds = [
       // the effective outcome: a linked report's, else the row's own
       outcome ? sql`coalesce(${executionPlacementReports.outcome}, ${executionPlacements.outcome}) = ${outcome}` : undefined,
       workloadKind ? eq(executionPlacements.workloadKind, workloadKind) : undefined,
       reason ? sql`coalesce(${executionPlacementReports.refusalCode}, ${executionPlacements.refusalCode}) = ${reason}` : undefined,
       before ? lt(executionPlacements.createdAt, new Date(before)) : undefined,
+      cursor ? afterCursorDesc(executionPlacements.createdAt, executionPlacements.id, cursor) : undefined,
     ].filter((c) => c !== undefined);
-    const rows = await placementSelect()
-      .where(conds.length ? and(...conds) : undefined)
-      .orderBy(desc(executionPlacements.createdAt))
-      .limit(limit);
+    // one extra row decides whether there is a next page
+    const fetched =
+      !continuing || cursor
+        ? await placementSelect()
+            .where(conds.length ? and(...conds) : undefined)
+            .orderBy(desc(executionPlacements.createdAt), desc(executionPlacements.id))
+            .limit(limit + 1)
+        : [];
+    const rows = fetched.slice(0, limit);
+    const lastRow = fetched.length > limit ? rows[rows.length - 1] : undefined;
     // refusals decided before any placement row could be written (policy_unresolved; a digest no profile names):
     // they exist only as audit rows, and are listed so none is hidden (owner decision B)
-    const showUnrecorded = !outcome || outcome === "refused";
-    const unrecorded =
+    const showUnrecorded = (!continuing || refusalsCursor !== null) && (!outcome || outcome === "refused");
+    const unrecordedFetched =
       showUnrecorded && !workloadKind && (!reason || reason === "policy_unresolved" || reason === "profile_retired")
         ? await db
-            .select({ id: auditLog.id, at: auditLog.at, detail: auditLog.detail, reason: auditLog.reason })
+            .select({ id: auditLog.id, at: auditLog.at, detail: auditLog.detail, reason: auditLog.reason, atText: atTextSql(auditLog.at) })
             .from(auditLog)
             .where(
               and(
@@ -661,11 +682,14 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
                 isNull(auditLog.objectId),
                 ...(reason ? [sql`${auditLog.detail} ->> 'code' = ${reason}`] : []),
                 ...(before ? [lt(auditLog.at, new Date(before))] : []),
+                ...(refusalsCursor ? [afterCursorDesc(auditLog.at, auditLog.id, refusalsCursor)] : []),
               ),
             )
-            .orderBy(desc(auditLog.at))
-            .limit(limit)
+            .orderBy(desc(auditLog.at), desc(auditLog.id))
+            .limit(limit + 1)
         : [];
+    const unrecorded = unrecordedFetched.slice(0, limit);
+    const lastUnrecorded = unrecordedFetched.length > limit ? unrecorded[unrecorded.length - 1] : undefined;
     return reply.send({
       placements: rows.map(placementView),
       refusalsWithoutPlacement: unrecorded.map((a) => {
@@ -679,6 +703,8 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
           reason: a.reason,
         };
       }),
+      nextCursor: lastRow ? encodeCursor({ at: lastRow.atText, id: lastRow.placement.id }) : null,
+      refusalsNextCursor: lastUnrecorded ? encodeCursor({ at: lastUnrecorded.atText, id: lastUnrecorded.id }) : null,
       attestationStrength: "software_attested",
     });
   });
