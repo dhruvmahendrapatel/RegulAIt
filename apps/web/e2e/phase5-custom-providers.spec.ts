@@ -226,8 +226,9 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     const plain = page.getByLabel("Allow plaintext HTTP", { exact: true });
     if ((await priv.isChecked()) !== opts.privateRanges) await priv.setChecked(opts.privateRanges);
     if ((await plain.isChecked()) !== opts.plaintext) await plain.setChecked(opts.plaintext);
-    // the answer that writes the row: an opt-in turned on is first refused for a step-up (ADR-0186 A), and the
-    // retry carrying the grant is the one that lands
+    // the answer that writes the row: adding the host or turning an opt-in on is first refused for a step-up
+    // (ADR-0186 A, ADR-0034 owner amendment 2026-10-16), and the retry carrying the grant is the one that lands;
+    // an upsert that turns nothing on asks for nothing
     const done = page.waitForResponse(
       (r) => r.url().includes("/v1/egress-allow-hosts") && r.request().method() === "POST" && r.status() !== 403,
     );
@@ -296,10 +297,16 @@ test.describe("ADR-0034 custom LLM providers — the admin surface", () => {
     //     is still default-deny, and the reason now names the resolved address.
     await page.getByTestId("allow-host-input").fill(IMDS);
     await page.getByTestId("allow-host-note").fill("e2e: proving an allow-list row is not a bypass");
+    // adding any entry is a relaxation (ADR-0034 owner amendment 2026-10-16): the first POST is refused for a
+    // step-up, and the retry carrying Ada's grant is the one that lands
     const added = page.waitForResponse(
-      (r) => r.url().includes("/v1/egress-allow-hosts") && r.request().method() === "POST",
+      (r) => r.url().includes("/v1/egress-allow-hosts") && r.request().method() === "POST" && r.status() !== 403,
     );
     await page.getByTestId("add-allow-host").click();
+    const addPrompt = page.getByRole("dialog", { name: "Confirm it's you" });
+    await addPrompt.waitFor({ state: "visible", timeout: 5_000 });
+    await addPrompt.getByLabel("Authenticator code").fill(await nextCode(ADMIN_EMAIL));
+    await addPrompt.getByRole("button", { name: "Confirm with code" }).click();
     expect((await added).status()).toBe(201);
 
     // https, so the scheme rule is satisfied and the check reaches the address
