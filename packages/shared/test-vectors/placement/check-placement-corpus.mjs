@@ -15,7 +15,10 @@ const fixedReasons = [...brokerReasons, 'policy_unresolved'];
 // Owner decision A (2026-10-11): warn is retired; the only mode a stored value reads as is enforce.
 const ENFORCEMENT_MODES = ['enforce'];
 const ORIGINS = ['X50', 'X50-revised', 'claude-new'];
-const SECTION_RE = /^(Decision (1|2|3|4|6|7|8|11|14)(\b| )|Test strategy: |Amendment [A-W]$)/;
+const SECTION_RE = /^(Decision (1|2|3|4|6|7|8|11|14)(\b| )|Test strategy: |Amendment [A-W]$|Owner decision C$)/;
+// Owner decision C (2026-10-15): who made a call with no agent, and where a "person's own stdio call" relaxation is set
+const CALLERS = ['interactive_person', 'api_key', 'workload_token'];
+const RELAXATION_SCOPES = ['mcp_server', 'project'];
 const PENDING_SECTION_RE = /^Amendment [K-W]$/;
 const ID_RE = /^[A-Za-z0-9_-]+$/;
 const DOTTED_QUAD_127_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
@@ -39,7 +42,10 @@ function workloadFloor(q) {
 function requiredClassOf(q) {
   const inputs = [workloadFloor(q), q.sensitivityFloor, q.autonomyFloor, q.ownProfileFloor,
     ...q.complianceFloors.filter((x) => x !== null), q.parentRequiredClass].filter((x) => x !== null && x !== undefined);
-  if (q.agentAssurance !== 'known') inputs.push('L3');
+  // decision 7 item 5 as amended by owner decision C: L2 only for an mcp_stdio call with no agent, from a person in an
+  // interactive session, where a relaxation is set (server or project); every other unknown or low-assurance case L3
+  const relaxed = q.workloadKind === 'mcp_stdio' && q.agentAssurance === 'unknown' && q.caller === 'interactive_person' && RELAXATION_SCOPES.includes(q.personStdioRelaxation);
+  if (q.agentAssurance !== 'known') inputs.push(relaxed ? 'L2' : 'L3');
   assert(inputs.every((x) => x in ranks));
   return Object.keys(ranks)[Math.max(...inputs.map((x) => ranks[x]))];
 }
@@ -95,6 +101,10 @@ export function checkPlacementCorpus(c) {
     const e = v.expectedProjection;
     assert(q && e && typeof v.note === 'string', v.id);
     if (typeof q.proofJti === 'string') assert(q.proofJti.includes('CANARY'), `${v.id}: secret-shaped jti without CANARY`);
+    if (q.caller !== undefined) assert(CALLERS.includes(q.caller), `${v.id}: caller`);
+    if (q.personStdioRelaxation !== undefined && q.personStdioRelaxation !== null) assert(RELAXATION_SCOPES.includes(q.personStdioRelaxation), `${v.id}: relaxation scope (never org-wide)`);
+    // owner decision C: a caller other than an interactive person is never relaxed
+    if (v.id.startsWith('person-stdio-') && q.caller !== 'interactive_person') assert.equal(e.requiredClass, 'L3', v.id);
     if (e.requiredClass) {
       assert(e.requiredClass in ranks);
       assert.equal(e.minimumSelectableClass, e.requiredClass, v.id);
@@ -222,6 +232,10 @@ export function checkPlacementCorpus(c) {
   assert.equal(get('selftest-while-quarantined').error, 'executor_quarantined');
   assert.equal(get('channel-unproven-large-body').bodyBytesRead, 0);
   for (const id of ['profile-schema-omits-runtime_identity', 'profile-schema-omits-runtime_config']) assert.equal(get(id).outcome, 'refuse');
+  // owner decision C: the API-key case is pinned at L3, refused on an L2-only host
+  assert.equal(get('person-stdio-api-key-stays-L3').requiredClass, 'L3');
+  assert.equal(get('person-stdio-api-key-stays-L3').outcome, 'refuse');
+  assert.equal(get('person-stdio-interactive-relaxed-L2').requiredClass, 'L2');
   return { vectors: c.vectors.length, pending: c.vectors.filter((v) => v.pendingBranch).length };
 }
 
@@ -253,6 +267,11 @@ export const PLACEMENT_MUTATIONS = [
   ['live-chain refusal under another rule', (c) => { find(c, 'middle-actor-executor-stale').expectedProjection.ruleId = 'execution-profile'; }],
   ['child inherits a lower class', (c) => { find(c, 'delegation-L3-inherit').expectedProjection.storedChildClass = 'L2'; }],
   ['placement class ignored at use', (c) => { const e = find(c, 'middle-actor-attested-below-placement').expectedProjection; e.outcome = 'live'; e.liveFailure = null; }],
+  // owner decision C (2026-10-15)
+  ['api key relaxed to L2', (c) => { const e = find(c, 'person-stdio-api-key-stays-L3').expectedProjection; e.outcome = 'placement_eligible'; e.requiredClass = 'L2'; e.minimumSelectableClass = 'L2'; e.selectedClassAtLeast = 'L2'; e.notAnAuthorizationGrant = true; }],
+  ['api key treated as interactive', (c) => { find(c, 'person-stdio-api-key-stays-L3').semanticRequest.caller = 'interactive_person'; }],
+  ['low-assurance agent relaxed', (c) => { const e = find(c, 'person-stdio-low-assurance-stays-L3').expectedProjection; e.requiredClass = 'L2'; e.minimumSelectableClass = 'L2'; }],
+  ['org-wide relaxation', (c) => { find(c, 'person-stdio-interactive-relaxed-L2').semanticRequest.personStdioRelaxation = 'org'; }],
   ['relaxed sensitivity lowers code_exec', (c) => { const e = find(c, 'code_exec-relaxed-sensitivity-keeps-L3').expectedProjection; e.requiredClass = 'L1'; e.minimumSelectableClass = 'L1'; e.selectedClassAtLeast = 'L1'; }],
 ];
 

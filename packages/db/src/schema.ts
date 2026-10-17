@@ -3190,7 +3190,17 @@ export const projects = pgTable("projects", {
    * review — never applied silently */
   pendingClassifications: jsonb("pending_classifications").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+  /** ADR-0190 owner decision D (migration 0201): the admin-set project sensitivity for isolation. The project's
+   * sensitivity is MAX(its use cases' strictest, this), so it can only raise. NULL = not set (with no use case the
+   * fact does not resolve: `policy_unresolved`). Set only by `PUT /v1/execution-project-sensitivities/:projectId`
+   * (a `settings_relax` step-up, audited). */
+  isolationSensitivity: text("isolation_sensitivity"),
+}, (t) => [
+  check(
+    "projects_isolation_sensitivity_check",
+    sql`${t.isolationSensitivity} IS NULL OR ${t.isolationSensitivity} IN ('public', 'internal', 'confidential', 'regulated')`,
+  ),
+]);
 
 // MULTI-TURN CONVERSATIONS: a personal (per-user) thread of governed
 // dispatches against one agent. FK-free ids on purpose, like the ledgers —
@@ -13556,6 +13566,33 @@ export const executionPlacements = pgTable(
   ],
 );
 export type ExecutionPlacementRow = typeof executionPlacements.$inferSelect;
+
+/**
+ * ADR-0190 owner decision C (migration 0201): "a person's own stdio call". An active row (`cleared_at` NULL) lowers
+ * the unknown-agent floor for an `mcp_stdio` call with NO agent, made by a person in an interactive session, from L3
+ * to L2, for one stdio MCP server or one project (never org-wide; at most one active row per scope). Set with a
+ * `settings_relax` step-up, cleared without one; both audited. A row is never deleted and only gains its clearing,
+ * once (guard trigger), so the evidence of which relaxation a call relied on stays. `scope_id` carries no foreign
+ * key on purpose: a relaxation row is evidence and must not block (or vanish with) the server or project.
+ */
+export const executionPersonStdioRelaxations = pgTable(
+  "execution_person_stdio_relaxations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKind: text("scope_kind", { enum: ["mcp_server", "project"] }).notNull(),
+    scopeId: uuid("scope_id").notNull(),
+    createdByUserId: uuid("created_by_user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    clearedByUserId: uuid("cleared_by_user_id"),
+  },
+  (t) => [
+    check("execution_person_stdio_relaxations_scope_kind_check", sql`${t.scopeKind} IN ('mcp_server', 'project')`),
+    check("execution_person_stdio_relaxations_cleared_check", sql`(${t.clearedAt} IS NULL) = (${t.clearedByUserId} IS NULL)`),
+    uniqueIndex("execution_person_stdio_relaxations_active_uq").on(t.scopeKind, t.scopeId).where(sql`${t.clearedAt} IS NULL`),
+  ],
+);
+export type ExecutionPersonStdioRelaxationRow = typeof executionPersonStdioRelaxations.$inferSelect;
 
 /**
  * ADR-0190 I4 (migration 0198): how an `offered` placement ended — the
