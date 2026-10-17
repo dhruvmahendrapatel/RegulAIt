@@ -142,7 +142,7 @@
   color: var(--text-faint);
 }
 .input:focus-visible,
-.select:focus-visible,
+.select:focus,
 .textarea:focus-visible {
   box-shadow: var(--focus-ring);
   border-color: var(--primary);

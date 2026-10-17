@@ -199,3 +199,36 @@ These add to the subsection above; where they differ, this one ships.
 4. **Census gaps closed.** An index route is tested to throw. A splat route (`path="/x/*"`) whose element renders no
    inline `<Routes>` now throws, because its screens would live in a file the census never reads; the top-level
    catch-all and a splat `<Navigate>` redirect are exempt.
+
+### As built: lane U1, accessibility and keyboard fixes
+
+The first fix lane against the bar 1 baselines. Nothing in the harness changed: no constant, gate, tag list or budget.
+Fixes went into the shared kit and the global styles, so each fix covers every screen that uses them.
+
+1. **A dialog hands focus back to a trigger that is busy** (`dialog-focus-not-restored`, all three browsers, settings
+   step-up). A dialog's confirm usually starts work that disables the control which opened it (a page's `busy`), and
+   a disabled control cannot take focus, so `Modal` dropped focus on `<body>`. The step-up dialog, opened by that
+   same work, then recorded `<body>` as its trigger. `Modal` now parks focus on the trigger's `<main>` (the skip-link
+   target, `tabindex="-1"`) and hands it back to the trigger once the trigger is enabled, which it watches with a
+   `MutationObserver` on `disabled`. The hand-back is dropped if focus moves anywhere else first, or after 60 s. A
+   dialog opened while focus is parked returns focus to the original trigger. Checked in Chromium: after Escape on the
+   step-up, focus is on the page's Resume button.
+2. **`<select>`, checkbox, radio and date fields show the ring on `:focus`** (`focus-not-visible`, WebKit: 7 on
+   approvals, 1 on intake, 4 on the step-up journey). WebKit does not match `:focus-visible` on these controls when
+   they are reached with Option+Tab, so the global ring never drew. `global.css` adds `select:focus, input:focus`
+   with the same `--focus-ring`. The kit's `.select` and the three tiles that draw the ring for an inner input
+   (`.providerTile`, `.outcome`, `.choice`) use `:focus` as well. A text field matches `:focus-visible` on any focus,
+   so for it nothing changes. A mouse-focused select or checkbox now also shows the ring, which is acceptable under
+   WCAG 2.4.7 and 2.4.11.
+3. **axe stays at 0** serious or critical on every screen in both themes. Its baseline was already empty, so U1
+   had nothing there to shrink.
+
+Open-source search (ADR-0176): `focus-trap` and `focus-trap-react` (MIT) manage focus inside a container. Their
+`returnFocusOnDeactivate` focuses the saved element or skips it when it is disabled; neither waits for the element to
+be enabled again. Native `<dialog>` (already used) restores focus to the previously focused element and does the same.
+No package covers "hand back once enabled", so the hand-back is about 40 lines in `kit.tsx`. The `:focus-visible`
+polyfill (W3C/WICG, MIT) changes how `:focus-visible` matches with a class, not which controls it covers, so it would
+not fix the WebKit gap. A plain CSS selector does.
+
+Not in U1: the 29 `states` findings (loading and error announcements) and the design-token ratchet belong to bar 3,
+and responsive belongs to U2.
