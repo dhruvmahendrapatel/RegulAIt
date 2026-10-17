@@ -234,8 +234,11 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
 **Technical calls recorded with them (master, 2026-10-17).**
 
 - **The agent runs only as the logged-in user.** There is no root/SYSTEM component in v1. The package's one-time
-  install step, which runs as root under MDM, redeems the bulk token for a device-bound enrolment ticket, so the fleet
-  token is never readable by ordinary users.
+  install step, which runs as root under MDM, redeems the bulk token for a per-device enrolment ticket (only when the
+  device holds no valid one, and never failing an MDM install because redemption failed). The fleet token is never
+  readable by ordinary users. The ticket file is readable only by the agent's group, and every registration is
+  audited against the ticket id. A leaked ticket is usable from any machine until it expires; hardware-binding it is
+  a later slice.
 - **Endpoint findings record key presence only.** A finding carries the provider, the file or variable, and the key
   name. It carries no 8-character prefix: decision 18's "names (never values)" governs endpoints.
 - **Key patterns are compiled into the agent** from the gitleaks-derived `dlp.secret.*` set (Go RE2). The collection
@@ -248,7 +251,9 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   separate from the ADR-0041 control-plane release key. Decision 18's query pack and collection manifest use the same
   format under a further key id of their own. A customer-side verify step ships with every pack, and the gateway
   verifies the pack manifest when it serves or accepts it. SD3's signer hook calls the same signing stage.
-  `infra/release-keys/` is not reused. Self-update stays a relaxation; MDM is the default update channel.
+  `infra/release-keys/` is not reused. MDM is the only install channel. In v1, self-update (a relaxation, off by
+  default) only downloads, verifies and notifies the user and the admin. A privileged install helper is out of
+  scope, because it would bring back a resident root component.
 - **Bulk token defaults.** The admin must set the device cap (there is no unlimited default). Expiry defaults to 30
   days, and lengthening it is a relaxation. The admin is alerted as the cap is approached. Rotation is by MDM
   re-push.
@@ -256,5 +261,8 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   the unmet requirement stated in R15 §4.4: no permissively licensed tool builds an MSI, or signs and notarises Mach-O
   from Linux. Both are build tools only; their output is not covered by their licences and nothing of them is
   shipped.
+- **Linux TPM.** The agent uses the TPM only where `/dev/tpmrm0` is already reachable by the user. Adding console
+  users to the `tss` group is an audited admin opt-in (a relaxation), because it grants raw TPM access. Otherwise the
+  software fallback applies and posture flags it.
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.

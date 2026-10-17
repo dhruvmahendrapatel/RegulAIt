@@ -4,9 +4,10 @@ Checked 2026-10-17 UTC against `main` @ `3698f3f` with the ADR-0195 branch (`8a6
 review against `main` @ `12c2497`, where ADR-0195 has landed. This is research only: no product code, no migration.
 It answers the SD4 design spike that ADR-0195 asks for before the endpoint agent is built (owner decision 2(b),
 decisions 5, 18 to 20). The owner's answers of 2026-10-17 and the master's technical calls are recorded in §0 and
-appended to ADR-0195 ("Owner decisions (2026-10-17): endpoint agent and detection data"). Throwaway size probes and the scripts that built them are in
-[`spikes/sd4-endpoint-agent/`](../../spikes/sd4-endpoint-agent/README.md). Every number below was measured in this
-container unless it is marked **pending**. Sizes use MiB (2^20 bytes) and KiB.
+appended to ADR-0195 ("Owner decisions (2026-10-17): endpoint agent and detection data"). Throwaway size probes
+and the scripts that built them are in [`spikes/sd4-endpoint-agent/`](../../spikes/sd4-endpoint-agent/README.md).
+Every number below was measured in this container unless it is marked **pending**. Sizes use MiB (2^20 bytes) and
+KiB.
 
 ## 0. Owner decisions and technical calls (2026-10-17)
 
@@ -69,7 +70,8 @@ uses cgo on a macOS runner for the Secure Enclave. Use our own small collectors,
    - The OS signature (Developer ID plus notarisation, OV Authenticode, a signed Linux package) is what MDM and the OS
      check.
    - A RegulAIt Ed25519 release manifest in the ADR-0041 bundle format, checked against an agent keyring compiled into
-     the agent, is what the agent checks before any update it applies itself. Self-update is off by default.
+     the agent, is what the agent checks before it offers a downloaded update. Self-update is off by default, and in
+     v1 it only downloads, verifies and notifies; installing always goes through MDM (§4.1).
    - The SD3 query pack and the collection manifest are signed in the same ADR-0041 format under their own key id. A
      customer-side verify step ships with the pack, and the gateway also verifies the manifest when it serves or
      accepts it (§4.3).
@@ -284,7 +286,7 @@ became an osquery extension, which it does not.
 |---|---|---|
 | macOS | A **P-256** key created in the Secure Enclave, so `ES256`. Not exportable. Needs cgo and a Developer ID-signed binary, built on the macOS runner | A key in the user's login keychain |
 | Windows | A **P-256** key in the TPM 2.0 through the Platform Crypto Provider (NCrypt), so `ES256`. Not exportable. Reachable through `golang.org/x/sys/windows` syscalls without cgo; **pending** a proof | A key protected with DPAPI (`CryptProtectData`, user scope), blob in `%LOCALAPPDATA%\RegulAIt\agent\` |
-| Linux | A **P-256** key in the TPM through `google/go-tpm` against `/dev/tpmrm0`. That device needs the `tss` group, so the package adds the group rule; where the user cannot reach it, the fallback applies | Secret Service over D-Bus (`godbus/dbus`) when a desktop session offers it; otherwise a file opened `O_NOFOLLOW`, created exclusively with mode 0600 in `$XDG_STATE_HOME/regulait-agent/` (the S7 runner's `runner-key` pattern and `ensureInstallKeyFile` semantics) |
+| Linux | A **P-256** key in the TPM through `google/go-tpm` against `/dev/tpmrm0`, **only where the user can already reach that device**. Most distributions limit it to root and the `tss` group, so the default is the software fallback. An admin may opt in to a package rule that adds console users to `tss` (an audited relaxation). That rule grants every member raw access to the TPM resource manager: creating and using keys, and reading PCRs and other TPM state, not only the agent's key | Secret Service over D-Bus (`godbus/dbus`) when a desktop session offers it; otherwise a file opened `O_NOFOLLOW`, created exclusively with mode 0600 in `$XDG_STATE_HOME/regulait-agent/` (the S7 runner's `runner-key` pattern and `ensureInstallKeyFile` semantics) |
 
 **One algorithm for the kind.** Secure Enclave and TPM keys are P-256, not Ed25519, so the agent uses `ES256` for
 both the hardware key and the fallback, keeping one signing path.
@@ -328,18 +330,45 @@ delivered to a root-only location:
 The user-context agent cannot read it either. So the package's install-time step, which runs once as root under the
 MDM installer, does the redemption:
 
-1. It reads the bulk token and calls `POST /v1/endpoint-agent/enrolment-tickets` with the token, a device hostname
-   (sent only to be keyed-hashed and encrypted server-side, call 3) and the OS/arch.
-2. The gateway checks the token and the cap, counts one device, and returns a **device-bound enrolment ticket**:
-   - single device;
-   - a small identity cap per device (for example 8 users);
+1. **Redeem only when needed.** If the device already holds a valid, unexpired ticket, the step does nothing more.
+   Otherwise it reads the bulk token and calls `POST /v1/endpoint-agent/enrolment-tickets` with the token, a device
+   hostname (sent only to be keyed-hashed and encrypted server-side, call 3) and the OS/arch.
+2. The gateway checks the token and the cap, counts one device, and returns an **enrolment ticket for this device**:
+   - one device record;
+   - a small identity cap (for example 8 users);
    - expiring in 7 days.
-3. The install step writes the ticket readable by local users. It never writes the bulk token anywhere else.
-4. If the gateway is unreachable, the install step exits non-zero so MDM retries the install. It does not leave a
-   resident retry component (call 1).
+3. **The ticket file is restricted, not world-readable.**
+   - Linux and macOS: root-owned, mode 0640, group `regulait-agent`, which the package creates and fills with the
+     console users present at install (plus any users the admin adds through MDM).
+   - Windows: an ACL granting SYSTEM full control and `INTERACTIVE` (console users) read.
+   - The bulk token is never written anywhere else.
+4. **An MDM install or upgrade never fails because redemption failed.** If the gateway is unreachable or refuses, the
+   step logs the reason, writes a local status the agent reports, and exits 0. Posture shows the device as "not
+   enrolled: ticket redemption failed (<reason>)". A failed redemption must not block a security upgrade of the agent
+   itself. There is no resident retry component (call 1).
 
-A device ticket that leaks can enrol identities only on that device, up to its small cap. That is a much smaller
-blast radius than the fleet token.
+**What a leaked ticket allows, stated plainly.** The ticket is a bearer secret readable by every member of the
+agent's group on that device, and it is not hardware-bound. Anyone who copies it can, from **any** machine and until
+it expires (7 days) or is revoked, register up to the identity cap (8) as identities of that device. Those identities
+can then submit or suppress that device's reports. That is a much smaller blast radius than the fleet token (one
+device, not the fleet), but it is not "only on that device". The controls:
+
+- every registration is audited against the ticket id;
+- the admin is alerted when a ticket is redeemed or used to register from a network origin not seen before for that
+  ticket (the source address seen at the gateway, after the trusted-proxy rules);
+- a ticket, or every identity it registered, is revocable in one action;
+- binding the ticket to the device's hardware (a TPM- or Secure Enclave-attested ticket) is an open question for a
+  later slice (SD4n).
+
+**New tickets after expiry or rotation.**
+- A ticket that expires unused, or that is exhausted, is replaced at the next install-step run. That happens when MDM
+  re-pushes the package or the admin re-pushes a fresh bulk token (the rotation path, call 6). It redeems a new
+  ticket only if the device holds no valid one.
+- **Late first login.** A user who first logs in after the ticket expired, or who was not a console user at install
+  and so is not in the group, cannot enrol yet. The agent says so locally and records "waiting for enrolment ticket".
+  The next MDM re-push adds current console users to the group and redeems a fresh ticket.
+- Posture lists devices whose ticket expired with fewer identities than console users, so the admin knows a re-push
+  is due.
 
 **Registration.** On first run as each user, the agent creates its key (§3.1) and sends `POST
 /v1/endpoint-agent/register` with `{ticket, jwk (public), agentVersion, os, arch, deviceUser}`.
@@ -397,7 +426,13 @@ The rest need the `via: "endpoint-agent"` token and are rate-limited in the `cre
   snapshot does not restate.
 - **Buffer.**
   - Up to 7 snapshots or 1 MiB on disk, whichever comes first.
-  - Encrypted under the device key's protection, and written with the same 0600 and no-follow rules.
+  - Encrypted with a **separate storage key**, never with the signing key: a signing key cannot encrypt, and keeping
+    the two apart limits each key's use. The storage key is:
+    - on macOS, a Secure Enclave P-256 key-agreement key used for ECIES
+      (`SecKeyCreateEncryptedData` with an `eciesEncryption…AESGCM` algorithm);
+    - on Windows, a TPM storage key, or DPAPI where there is no TPM;
+    - on Linux, a TPM storage key where the TPM is reachable, otherwise a key held in Secret Service or a 0600 file.
+  - The buffer file is written with the same 0600 and no-follow rules.
   - When it is full, the oldest snapshot is dropped and a drop counter goes with the next report, so the gap is
     visible rather than silent.
   - Snapshots are already redacted (§2.3), so the buffer holds no value.
@@ -428,8 +463,12 @@ The rest need the `via: "endpoint-agent"` token and are rate-limited in the `cre
    - downgrades refused, a minimum version enforced, and unknown files refused.
 
    The agent fetches the update only from its own gateway (`/v1/endpoint-agent/releases/current`), never from the
-   internet, so air-gapped installs work. It verifies the manifest and every digest, then hands the OS-signed package
-   to the OS installer, which checks the OS signature again.
+   internet, so air-gapped installs work. **In v1 self-update only downloads, verifies and notifies.**
+   - It verifies the manifest and every digest.
+   - It keeps the verified, OS-signed package in its own directory.
+   - It tells the user (a local notice) and the admin (posture: "update downloaded and verified, waiting for MDM").
+   - Installing always goes through MDM. A user-context agent cannot install a per-machine package, and a privileged
+     helper that could is out of scope: it would bring back the resident root component that call 1 rules out.
 
 ### 4.2 Why this scheme, and what was compared
 
@@ -452,8 +491,9 @@ The rest need the `via: "endpoint-agent"` token and are rate-limited in the `cre
 ADR-0041's caveats carry over unchanged. There is no revocation list (air-gapped boxes cannot check one), and a signed
 old release is still old, which is why downgrades are refused.
 
-**Self-update** is off by default. Enabling it is a `settings_relax` step-up per org, audited. With it off, the agent
-only reports its version, and posture shows devices behind the current release.
+**Self-update** is off by default. Enabling it, which in v1 means download, verify and notify, is a `settings_relax`
+step-up per org, and it is audited. With it off, the agent only reports its version, and posture shows devices
+behind the current release.
 
 ### 4.3 The query pack and collection manifest (decision 18 deliverable)
 
@@ -482,7 +522,7 @@ Decision 18 leaves the pack's signing mechanism to this spike. Decided:
 |---|---|---|---|
 | macOS | Signed, notarised flat `.pkg` installing the binary and a LaunchAgent plist; its install step redeems the enrolment token (§3.2) | A configuration profile (`.mobileconfig`) with managed preferences (issuer, CA bundle); the bulk token in a root-only payload or file | `pkgbuild`/`productbuild`/`productsign` and `notarytool` on the macOS runner (needed anyway for the cgo darwin build). `rcodesign` (in `indygreg/apple-platform-rs`, MPL-2.0) can sign and notarise Mach-O binaries from Linux; whether it signs a flat `.pkg` was **pending** |
 | Windows | OV Authenticode-signed `.msi`, a per-machine install that registers the per-user logon task and redeems the token | MSI public properties or registry policy (`HKLM\SOFTWARE\Policies\RegulAIt\Agent`) for the issuer and CA bundle; the bulk token ACL'd to SYSTEM and Administrators | WiX Toolset (MS-RL) builds the `.msi`. Authenticode signing: **`jsign`** (Apache-2.0, Java), which can sign with a cloud HSM-backed key. Its latest release date was not retrieved here; SD4h checks it against the 12-month rule before pinning. `sassoftware/relic` 8.2.0 (Apache-2.0) was considered and **fails** the rule: its last release is 2025-01-17, about 21 months ago. `osslsigncode` is GPL-3.0 and is not used |
-| Linux | `.deb` and `.rpm` with a systemd user unit and the `tss` group rule | `/etc/regulait-agent/config.json` (0644, no secrets) and `/etc/regulait-agent/enrol.json` (root:root 0600, the bulk token) | `goreleaser/nfpm/v2` 2.48.0 (MIT, 2026-10-12), which builds and signs both. `goreleaser` 2.18.3 (MIT) can drive the whole release |
+| Linux | `.deb` and `.rpm` with a systemd user unit; the `tss` group rule only when the admin opts in (§3.1) | `/etc/regulait-agent/config.json` (0644, no secrets) and `/etc/regulait-agent/enrol.json` (root:root 0600, the bulk token) | `goreleaser/nfpm/v2` 2.48.0 (MIT, 2026-10-12), which builds and signs both. `goreleaser` 2.18.3 (MIT) can drive the whole release |
 
 **ADR-0176 build-tool exceptions (call 5).** Two tools are accepted as written exceptions:
 - **WiX Toolset.** MS-RL, and its project announced a maintenance-fee condition for commercial use of recent major
@@ -514,8 +554,9 @@ store that only release jobs can read.
 | **SD4f** Buffering and schedule | §3.4: snapshot buffer, drop counter, jitter, backoff, manifest-delivered limits | SD4c | none |
 | **SD4g** Release and pack signing pipeline | Reproducible `-trimpath` builds for six targets; a CycloneDX SBOM; a Go licence check (allow-list as ADR-0176); the `sign-manifest` stage producing ADR-0041 manifests under the agent release key id **and** the pack key id; the customer-side pack verify binary; gateway-side pack verification on serve and on import; the hook SD3 calls. Signing stays pending until the keys exist | SD4c (verifier code), SD3 (the pack) | none |
 | **SD4h** Packages and OS signing | `.pkg` + configuration profile on the macOS runner, `.msi` with WiX, `.deb`/`.rpm` with nfpm; install-time token redemption; Developer ID signing and notarisation from the CI secret store; OV Authenticode through `jsign` and the cloud HSM key service | SD4g | none (decisions a, b) |
-| **SD4i** Self-update | The optional, step-up-gated self-update path of §4.1: fetch from the gateway, verify the manifest, refuse downgrades, hand off to the OS installer | SD4g, SD4h | none |
-| **SD4j** Hardware-bound keys | `ES256` keys in the Secure Enclave (cgo, macOS runner), the Windows TPM (NCrypt) and the Linux TPM as the default; the software fallback flagged in posture. Built with SD4c, not after it, because hardware binding is the default | SD4c | none (decision d) |
+| **SD4i** Self-update (download, verify, notify) | The optional, step-up-gated path of §4.1: fetch from the gateway, verify the manifest, refuse downgrades, keep the verified package, notify the user and the admin. Installs stay with MDM; no privileged helper | SD4g, SD4h | none |
+| **SD4j** Hardware-bound keys | `ES256` signing keys and separate storage keys in the Secure Enclave (cgo, macOS runner) and the Windows TPM (NCrypt) as the default; the Linux TPM where `/dev/tpmrm0` is already reachable, and the audited `tss` opt-in; the software fallback flagged in posture. Built with SD4c, not after it, because hardware binding is the default | SD4c | none (decision d) |
+| **SD4n** Hardware-bound enrolment tickets | Bind the device ticket to the device's TPM or Secure Enclave (an attested ticket), so a copied ticket is useless off the device | SD4b, SD4j | open question: attestation formats per OS, and whether it is worth the complexity given the controls in §3.2 |
 | **SD4k** Admin UI | A devices page (pseudonymous, key protection, version), revoke device, revoke bulk token or ticket, cap alerts, reveal under step-up; KNOWN_UI_GAPS stays 0 | SD4b, SD4e | none |
 | **SD4l** Security review and support policy | An external review of the agent, enrolment and update path; a supported OS version matrix; a vulnerability response process (the ADR's "long-term commitment") | SD4h | supported OS matrix |
 
@@ -527,7 +568,8 @@ store that only release jobs can read.
 **Still open (not blocking the build):**
 - the supported OS version matrix (SD4l);
 - whether `cli` and `env_name` become signature kinds (coordinated with SD3);
-- the `jsign` release date and the WiX licence terms, checked before pinning (SD4h).
+- the `jsign` release date and the WiX licence terms, checked before pinning (SD4h);
+- hardware binding of the enrolment ticket (SD4n).
 
 ## 6. What was not verified here
 
