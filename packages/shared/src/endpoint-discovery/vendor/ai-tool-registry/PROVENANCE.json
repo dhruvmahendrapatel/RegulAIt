@@ -1,0 +1,31 @@
+{
+  "repo": "https://github.com/AmanSK5/shadow-ai-guard",
+  "commit": "12b7bbf733032d7822b2fb16e88b0f7a1399d1da",
+  "commitDate": "2026-10-12T19:07:33+01:00",
+  "retrievedAt": "2026-10-17T01:50:56Z",
+  "licence": "Apache-2.0",
+  "use": "Detection data only (endpoint signature seed rows). No upstream code is shipped or run.",
+  "trademarkPolicy": "The upstream project's name is not used in RegulAIt product UI (see TRADEMARKS.md); it appears only in attribution files.",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "spdx": "Apache-2.0"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "8be53bbe9c6257b87b90fba953a4a8201c2ac7d35bed1d1d32172d09c732c45f",
+      "spdx": "Apache-2.0"
+    },
+    {
+      "path": "TRADEMARKS.md",
+      "sha256": "393a308a18ccf7f232e72981f1bac0ccc4a3e5ed9c302d6ec924944b23233cef",
+      "spdx": "Apache-2.0"
+    },
+    {
+      "path": "registry/registry.yaml",
+      "sha256": "94bb061fa84025e8f08d7cc4f141d3b3b2a073ddb06d65285ecaef5471150fa9",
+      "spdx": "Apache-2.0"
+    }
+  ]
+}
