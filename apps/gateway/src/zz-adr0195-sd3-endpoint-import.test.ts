@@ -71,8 +71,10 @@ async function mkUser(label: string, isAdmin: boolean) {
   return { id, key: { authorization: `Bearer ${k.json().token}` } };
 }
 
+/** per-run counter: SD0 refuses a duplicate source name (409 name_taken), so every source gets its own */
+let sourceSeq = 0;
 async function endpointSource(kind: "endpoint_osquery" | "endpoint_inventory", enabled = true) {
-  const r = await inject("POST", "/v1/discovery/sources", AUTH, { name: `sd3-${kind}-${enabled}-${RUN}`, kind, target: { fleet: `fleet-${RUN}` }, scope: { orgLevel: true, include: [] } });
+  const r = await inject("POST", "/v1/discovery/sources", AUTH, { name: `sd3-${kind}-${enabled}-${RUN}-${++sourceSeq}`, kind, target: { fleet: `fleet-${RUN}` }, scope: { orgLevel: true, include: [] } });
   expect(r.statusCode, r.body).toBe(201);
   const id = r.json().id as string;
   sourceIds.push(id);
