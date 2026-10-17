@@ -31,6 +31,18 @@
 # (scripts/install.sh says where the ids come from). Re-pin
 # docker-compose.yml, this file and scripts/install.sh together.
 #
+# ENGINE IMAGES (opt-in, ENG-IMG): `--with-engines` also saves the three engine
+# images the lock records (engines/images.lock.json), pulled from GHCR by their
+# manifest digest. The packages are private: `docker login ghcr.io` first, with a
+# token that can read them. Each image's id is checked against the lock before
+# saving (the config digest on the classic image store, the manifest digest on
+# the containerd store), and each is saved under its digest reference AND the
+# fixed tag `regulait/engine-<engine>:bundled`, which the air-gapped install
+# runs (a digest reference does not survive save/load on the classic store,
+# the same reason as Caddy). `docker load` keeps each image's id, the config
+# digest the executor starts a task by (the manifest's `taskImage`). An engine
+# the lock has no published image for stops the bundle (nothing is guessed).
+#
 # The tag matters: install.sh pins the gateway to `regulait/gateway:<version>`
 # with `pull_policy: never`, so the tag written here and the --version passed
 # to the installer must be the same string.
@@ -47,14 +59,16 @@ ok()   { printf '  [ok]   %s\n' "$*"; }
 VERSION=""
 OUT=""
 SKIP_BUILD=0
+WITH_ENGINES=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --version)    VERSION="${2:-}"; shift 2 ;;
     --out)        OUT="${2:-}"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
+    --with-engines) WITH_ENGINES=1; shift ;;
     -h|--help)
-      printf 'Usage: scripts/build-image-bundle.sh --version <v> [--out <tar>] [--skip-build]\n'
+      printf 'Usage: scripts/build-image-bundle.sh --version <v> [--out <tar>] [--skip-build] [--with-engines]\n'
       exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -93,9 +107,35 @@ case " $CADDY_IMAGE_IDS " in
   *) die "$CADDY_TAG has image id $CADDY_ID, which is not pinned (allowed: $CADDY_IMAGE_IDS)" ;;
 esac
 
+ENGINE_REFS=()
+if [ "$WITH_ENGINES" = "1" ]; then
+  step "Fetching the engine images the lock records (engines/images.lock.json)"
+  command -v node >/dev/null 2>&1 || die "--with-engines needs node to read engines/images.lock.json"
+  for engine in promptfoo modelscan garak; do
+    # one line: <repository> <manifestDigest> <imageId>, or nothing when the engine was never published
+    entry="$(node -e '
+      const l = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+      const e = l.engines[process.argv[2]];
+      if (e && e.repository && e.manifestDigest && e.imageId) console.log(`${e.repository} ${e.manifestDigest} ${e.imageId}`);
+    ' "$REPO_ROOT/engines/images.lock.json" "$engine")"
+    [ -n "$entry" ] || die "engine $engine has no published image in engines/images.lock.json: publish it (the engine-images workflow) and record it first"
+    read -r repo digest image_id <<<"$entry"
+    ref="${repo}@${digest}"
+    tag="regulait/engine-${engine}:bundled"
+    docker image inspect "$ref" >/dev/null 2>&1 || docker pull "$ref" || die "could not pull $ref (the package is private: docker login ghcr.io first)"
+    docker tag "$ref" "$tag"
+    id="$(docker image inspect --format '{{.Id}}' "$tag")"
+    case "$id" in
+      "$image_id" | "$digest") ok "$tag is $ref (image id $id)" ;;
+      *) die "$tag has image id $id, which is neither the lock's image id ($image_id) nor its manifest digest ($digest)" ;;
+    esac
+    ENGINE_REFS+=("$ref" "$tag")
+  done
+fi
+
 step "Saving the bundle"
 mkdir -p "$(dirname "$OUT")"
-docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 "$CADDY_IMAGE" "$CADDY_TAG"
+docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 "$CADDY_IMAGE" "$CADDY_TAG" ${ENGINE_REFS[@]+"${ENGINE_REFS[@]}"}
 ok "$OUT ($(du -h "$OUT" | cut -f1))"
 
 cat <<NEXT

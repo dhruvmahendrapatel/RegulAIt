@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import {
@@ -33,9 +33,9 @@ import {
   sql,
   type Db,
 } from "@regulait/db";
-import { ARTIFACT_SCAN_CHIP, BATCH5_STRICT_DEFAULTS, ENGINE_MANIFEST, ENGINE_RESULT_VERSION, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
-import { buildSelfTest, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
-import { modelscanAdapter, type ScanExecutor, type ScanOutcome, type ScanJob } from "@regulait/engine-modelscan";
+import { ARTIFACT_FORMAT_PLANS, ARTIFACT_SCAN_CHIP, BATCH5_STRICT_DEFAULTS, detectArtifactFormat, ENGINE_MANIFEST, modelscanArtifactName, type ArtifactFormat, ENGINE_RESULT_VERSION, STEP_UP_HEADER, type EngineId, type EngineManifestEntry } from "@regulait/shared";
+import { buildSelfTest, downloadArtifact, generateRunnerSecret, runOnce, RunnerClient, type RunnerHttp } from "@regulait/engine-runner";
+import { modelscanAdapter, type ScanExecutor, type ScanJob, type ScannerOutcome } from "@regulait/engine-modelscan";
 import { cleanPickle, legacyTorchFile, maliciousPickle, nestedZip, safetensorsFile, truncatedMaliciousPickle } from "@regulait/engine-modelscan/fixtures";
 import { buildApp } from "./app.js";
 import { TestWorkloadClient, useTestIssuerKey } from "./testing/workload-client.js";
@@ -127,17 +127,32 @@ async function startScan(artifactId: string, who: { key: { authorization: string
   return r.json().run.id as string;
 }
 
-/** an executor answering what the pinned 0.8.8 answered for the fixture (measured; see the package tests) */
-function answering(a: { exitCode: number | null; report?: unknown; timedOut?: boolean }, onScan?: (job: ScanJob) => Promise<void>): ScanExecutor & { jobs: ScanJob[] } {
-  const jobs: ScanJob[] = [];
+/**
+ * an executor answering what the pinned 0.8.8 answered for the fixture (measured; see the package tests). Like the
+ * real scanner (ENG-IMG), it reads the format from the placed artifact's bytes and starts "modelscan" only for a
+ * format it scans.
+ */
+type AnsweredJob = ScanJob & { format: ArtifactFormat; scannedAs: string };
+function answering(a: { exitCode: number | null; report?: unknown; timedOut?: boolean }, onScan?: (job: ScanJob) => Promise<void>): ScanExecutor & { jobs: AnsweredJob[] } {
+  const jobs: AnsweredJob[] = [];
+  const staged = new Map<string, string>();
   return {
     jobs,
-    stage: async () => mkdtemp(path.join(tmpdir(), "b5m-gw-")),
-    async scan(job): Promise<ScanOutcome> {
-      jobs.push(job);
+    stage: async (runId: string) => {
+      const dir = await mkdtemp(path.join(tmpdir(), "b5m-gw-"));
+      staged.set(runId, dir);
+      return dir;
+    },
+    async scan(job): Promise<ScannerOutcome> {
+      const placed = await readFile(path.join(staged.get(job.runId)!, job.artifactName));
+      const d = await detectArtifactFormat({ size: placed.length, read: async (o, l) => new Uint8Array(placed.subarray(o, Math.min(placed.length, o + l))) });
+      const detection = { format: d.format, evidence: d.evidence };
+      const name = modelscanArtifactName(d.format);
+      if (!ARTIFACT_FORMAT_PLANS[d.format].scanAs || !name) return { detection, exitCode: null, timedOut: false, cancelled: false, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null };
+      jobs.push({ ...job, format: d.format, scannedAs: name });
       await onScan?.(job);
       const bytes = a.report === undefined ? null : Buffer.from(JSON.stringify(a.report));
-      return { exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false, npy: null, npz: null };
+      return { detection, exitCode: a.exitCode, timedOut: a.timedOut ?? false, cancelled: false, report: bytes, reportSha256: bytes ? createHash("sha256").update(bytes).digest("hex") : null, reportTooLarge: false, npy: null, npz: null };
     },
     async release() {},
     async reconcile() {
@@ -160,7 +175,14 @@ function report(p: { scanned?: string[]; issues?: Array<{ module: string; operat
 const osSystem = report({ scanned: ["artifact.pkl"], issues: [{ module: "os", operator: "system", source: "artifact.pkl" }] });
 
 async function once(executor: ScanExecutor) {
-  const adapter = modelscanAdapter({ artifacts: client, executor });
+  // ENG-IMG: the stock runner fetches nothing (the gateway streams the artifact to the executor). Here the runner
+  // route stands in for that stream, so this suite still proves the route's lease rules.
+  const adapter = modelscanAdapter({
+    executor,
+    artifactInput: async (lease, placePath, signal) => {
+      await downloadArtifact({ source: client, artifact: lease.artifacts[0]!, destPath: placePath, deadlineAt: lease.deadlineAt, signal });
+    },
+  });
   return runOnce(client, adapter, { ...MS_BUILD, engineId: "modelscan", workRoot: await mkdtemp(path.join(tmpdir(), "b5m-w-")), heartbeatMs: 25, retryBaseMs: 10 });
 }
 async function scanOf(runId: string) {
@@ -330,7 +352,7 @@ describe("B5-M through the real gateway: the lease, the stream, the scan record"
     expect(out).toMatchObject({ outcome: "posted", status: 200 });
     // no model access: no key was ever minted
     expect(run).toMatchObject({ status: "completed", virtualKeyId: null });
-    expect(exec.jobs[0]).toMatchObject({ format: "pickle", artifactName: "artifact.pkl" });
+    expect(exec.jobs[0]).toMatchObject({ format: "pickle", artifactName: "artifact.bin", scannedAs: "artifact.pkl" });
     expect(scan).toMatchObject({ verdict: "unsafe", format: "pickle", artifactSha256: artifact.sha256, scannerVersion: "0.8.8" });
     const streamed = await db.select().from(auditLog).where(eq(auditLog.objectId, run.id));
     expect(streamed.map((x) => x.ruleId)).toContain("engine-run-artifact-streamed");

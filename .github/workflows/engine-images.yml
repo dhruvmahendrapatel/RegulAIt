@@ -1,0 +1,154 @@
+name: Engine images
+
+# ENG-IMG (ADR-0190 "As built: engine task images") — builds the three engine
+# images (engines/<engine>/Dockerfile: the runner and the task, one image per
+# engine) and pushes them to GitHub Container Registry under this repository's
+# owner, as `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`.
+#
+# ── Triggers ─────────────────────────────────────────────────────────────────
+# Push to main (only when an engine's own files change, so the Actions budget
+# in ci.yml stays true) and workflow_dispatch (for anything else that lands in
+# an image, such as packages/shared). NEVER pull_request: a PR run cannot hold
+# a token that writes packages. The pull_request check that only BUILDS lives
+# in engine-images-build.yml.
+#
+# ── Permissions ──────────────────────────────────────────────────────────────
+# The workflow grants contents: read. Only the `publish` job gets
+# packages: write, through GITHUB_TOKEN; no other secret is used. Actions are
+# pinned by commit sha; builds use the Docker CLI and its buildx plugin on the
+# runner (no third-party action holds the token).
+#
+# ── Visibility ───────────────────────────────────────────────────────────────
+# A container package scoped to a personal account is PRIVATE when first
+# published (GitHub docs, "Configuring a package's access control and
+# visibility", read 2026-10-17). The images carry no
+# `org.opencontainers.image.source` label, so they are not linked to this
+# (public) repository and do not inherit its read access. Making a package
+# public is a disclosure decision for the owner, never automated here.
+#
+# ── Signing ──────────────────────────────────────────────────────────────────
+# Not done, on purpose, and said so in the log. GitHub artifact attestations
+# from a PUBLIC repository use the Sigstore public-good instance and are
+# written to its public transparency log; a private repository needs GitHub
+# Enterprise Cloud for them (GitHub docs, "Artifact attestations" and "Using
+# artifact attestations", read 2026-10-17). This repository is public and
+# user-owned, and public-good keyless signing is not approved by the owner, so
+# the `sign` step logs that reason and signs nothing. ADR-0190 marks it pending.
+#
+# ── Output ───────────────────────────────────────────────────────────────────
+# The `record` job uploads `engine-images-publish.json` (the artifact
+# `engine-images-publish`). Nothing is committed by this workflow: someone
+# downloads it, runs `node scripts/engine-images-lock.mjs --apply <file>`, and
+# opens a PR with the lock, the generated module and docker-compose.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - engines/**
+      - packages/engine-garak/**
+      - packages/engine-modelscan/**
+      - packages/engine-promptfoo/**
+      - packages/engine-runner/**
+      - scripts/build-engine-image.sh
+      - .github/workflows/engine-images.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [promptfoo, modelscan, garak]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve the repository
+        id: ref
+        run: |
+          set -euo pipefail
+          # GHCR requires a lowercase path; the owner login is not guaranteed to be.
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "repository=ghcr.io/${owner}/regulait-engine-${{ matrix.engine }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and push
+        run: scripts/build-engine-image.sh "${{ matrix.engine }}" push "${{ steps.ref.outputs.repository }}" "${RUNNER_TEMP}/${{ matrix.engine }}.json"
+
+      - name: Sign (skipped, with the reason)
+        run: |
+          msg="${{ matrix.engine }}: NOT SIGNED. GitHub artifact attestations from a public repository go to the Sigstore public-good transparency log, and private-repository attestations need GitHub Enterprise Cloud; public-good keyless signing is not approved by the owner. ADR-0190 (As built: engine task images) marks signing pending."
+          echo "::notice title=engine image not signed::${msg}"
+          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-image-${{ matrix.engine }}
+          path: ${{ runner.temp }}/${{ matrix.engine }}.json
+          retention-days: 30
+
+  record:
+    name: record the publish
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: engine-image-*
+          path: images
+          merge-multiple: true
+
+      - name: Write engine-images-publish.json
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const engines = {};
+            for (const f of fs.readdirSync("images").sort()) {
+              const e = JSON.parse(fs.readFileSync(`images/${f}`, "utf8"));
+              engines[e.engine] = { repository: e.repository, manifestDigest: e.manifestDigest, imageId: e.imageId };
+            }
+            const out = { sourceCommit: process.env.GITHUB_SHA, publishedAt: new Date().toISOString(), engines };
+            fs.writeFileSync("engine-images-publish.json", JSON.stringify(out, null, 2) + "\n");
+          '
+          {
+            echo "### Engine images pushed (private on GHCR, not signed)"
+            echo ""
+            echo '```json'
+            cat engine-images-publish.json
+            echo '```'
+            echo ""
+            echo "To record them: download the \`engine-images-publish\` artifact, run \`node scripts/engine-images-lock.mjs --apply engine-images-publish.json\`, and open a PR with the three files it changes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engine-images-publish
+          path: engine-images-publish.json
+          retention-days: 90
