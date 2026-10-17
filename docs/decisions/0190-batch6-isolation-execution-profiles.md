@@ -1517,7 +1517,9 @@ settle what the decisions above leave open:
 12. **A result needs a placed task** (review HIGH-1). In the result transaction, on the locked run, any status but
     `not_run` is accepted only when `task_placement_id` is set and that placement's linked report is `placed`.
     Otherwise the run ends `not_run` (`isolation_unavailable`, cause `engine_task_not_placed`) and the route answers
-    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested.
+    `409 engine_task_not_placed`. A result that no placed sandbox produced is never ingested. A `not_run` envelope
+    of an unplaced task is accepted as the run's end but its content is dropped too (no items, raw report or scan
+    record; recheck L1, `engine-runs.ts`).
 13. **First enable** (review; was open question 1). The manifest names each engine's `workerAttestedSwitches`
     (promptfoo `REGULAIT_PROMPTFOO_WORKER_ISOLATED`, modelscan `REGULAIT_MODELSCAN_SCANNER_ISOLATED`, garak its
     worker switches and `REGULAIT_GARAK_WORKER_SELFTEST`). The runner's report meets them, or a fresh, passing
@@ -1525,7 +1527,9 @@ settle what the decisions above leave open:
     (the org floor raised to the profile's `minClass`; a customer plane through the admin's mapping), found by
     `engine-worker-attestation.ts`. Without one they fail `executor_attestation_missing:<switch>` (fail closed). The
     basis is recorded whole in the self-test verdict and its audit row (`executorAttestation`), on the admin
-    self-test, the registration and the runner's report; the lease admission reads it again in its transaction.
+    self-test, the registration and the runner's report. The lease reads it ONCE per poll, before its transaction
+    (recheck L4), records it on the lease's audit row and names it on every refusal; the admission inside the
+    transaction uses that one reading, it does not read the basis again.
     An executor never self-tests, so never attests, a profile its backend cannot serve on this host (runsc without
     an input volume for `engine-worker`); no offer of it ever reaches that executor.
 14. **The engine-worker floor setting** (review LOW-1). For an agent-null engine run whose configured profile is the
@@ -1546,8 +1550,10 @@ settle what the decisions above leave open:
     executor's attestation of the profile, which does not read the task's environment. The real control is the
     sandbox's network denial (`--network=none`, the gateway channel only), as decision 19 of ADR-0187 already says.
 18. **Review round 1, the rest.** The task start re-runs the lease's own checks (the run-as person; an agent run's
-    entitlement and project attribution; an artifact scan's artifact access) and ends the run `not_run` with the
-    lease's code. A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
+    entitlement to the target and judge, a judge that is gone, the manifest's required judge (`judge_required`),
+    an agent with no provider model (`agent_not_dispatchable`) and project attribution; an artifact scan's artifact
+    access) and ends the run `not_run` with the lease's code. (The two dispatch checks were added on 2026-10-17;
+    until then this point overstated them.) A lease retry for a run whose task started ends it `not_run` (`engine_task_lease_reissued`) rather
     than rotating the key the sandbox holds. One gateway process holds at most 512 MiB of unacknowledged task output
     across every task (`output_overflow` past it). A `not_run` envelope of an unplaced task is dropped too (no items,
     raw report or scan record). The result route also refuses on a task refusal held in memory before the watchdog
@@ -1707,6 +1713,145 @@ gateway, the executor's runtime backends or the engine code changed.
        as the target (`docker info` on each host reports which store it uses). The installer still refuses any loaded
        Caddy image whose id is not pinned.
    - **Real gVisor** still waits on the `runsc` re-pin (I5 "Not verified").
+
+
+## As built: engine task images (ENG-IMG, 2026-10-17)
+
+What makes an engine runnable end to end in a stock install, apart from the gVisor re-pin (PR #385, untouched here). No
+migration; the gateway's only change is that its manifest reads the lock (below).
+
+1. **The images.** The three `engines/<engine>/Dockerfile`s are the task images (one image per engine: the runner
+   at `/app/dist/main.js`, the task at the manifest's `taskEntry`). Checked again and unchanged: every `FROM` is
+   pinned by digest, the runtime stage runs as uid 10001 with `HOME=/work`, nothing writes outside `/work` and
+   `/jobs` (read-only root friendly), garak's Hugging Face switches are offline and its assets are pre-seeded in a
+   `--network=none` stage, and no package installer runs at task time.
+2. **The modelscan artifact arrives through the executor's input volume** (resolves I5 open question 2). The runner
+   no longer downloads it:
+   - the job places the artifact at the fixed name `artifact.bin`, written empty in the runner's job directory. The
+     task bridge only PLACES it, the gateway streams it from its store to the executor, and the executor writes and
+     checks it (size and sha256) in the sandbox's read-only input (I5 point 5);
+   - so the format is now decided IN THE SANDBOX, from the bytes (G19 2). `scanPlacedArtifact`
+     (`packages/engine-modelscan/src/worker.ts`) detects it. A format modelscan does not scan is answered with its
+     detection alone, and modelscan never starts. A scannable one is handed to modelscan through a symlink named
+     for its extension, in the task's scratch space (the input is read-only, and a copy would double a large
+     artifact). modelscan 0.8.8 uses `Path.absolute()`, never `resolve()`, on the path (`modelscan/modelscan.py`
+     at tag v0.8.8, read 2026-10-17), so the report still names `artifact.<ext>`;
+   - `done.json` gains `detection` (`{format, evidence}` or null). The adapter maps a null detection to `failed`:
+     `artifact_unread`, or `engine_timeout` past the limit. It is never clean;
+   - the runner makes no request for a scan. **The runner artifact route (`GET /v1/engine-runner/artifacts/:id`) is
+     removed** (review fix, secure by default): nothing called it any more, so it is gone rather than kept behind a
+     setting. It is out of `ENGINE_RUNNER_ROUTES`, the OpenAPI registry and the runner client, and
+     `RunnerClient.artifact` with `downloadArtifact` (`packages/engine-runner/src/artifact.ts`) are deleted with it,
+     as is the refusal code `engine_artifact_not_leased`. `zz-b5-modelscan` now places the bytes from the gateway's
+     store and asserts the route is gone (no route registered; a human key gets 404, the runner's token its scope
+     refusal). The gateway's only artifact stream is the executor input (`engine-tasks.ts`, audited phase
+     `task_input`, proven in `zz-adr0190-i5-engines`).
+3. **The publish workflow** (`.github/workflows/engine-images.yml`):
+   - it runs on push to `main` (only when an engine's own files change) and on `workflow_dispatch`, never on
+     `pull_request`. The `publish` job carries `if: github.ref == 'refs/heads/main'` (as `security.yml`'s sign
+     job does), so a manual dispatch started on any other branch publishes nothing, and `record` is skipped with it;
+   - the workflow grants `contents: read`, and only the `publish` job gets `packages: write`, through `GITHUB_TOKEN`;
+   - every action is pinned by commit sha, and the build is the runner's Docker CLI with its buildx plugin
+     (`scripts/build-engine-image.sh`). It builds linux/amd64 with provenance and SBOM attestations off, so each
+     push is one single-platform image manifest, and it reads both digests from buildx's metadata file, not the
+     local store: `containerimage.digest` is the manifest digest and `containerimage.config.digest` is the image id;
+   - it pushes `ghcr.io/<owner>/regulait-engine-<engine>:sha-<commit>`, and the `record` job uploads
+     `engine-images-publish.json`. The workflow commits nothing.
+   - **Visibility.** A package scoped to a personal account is **private** when first published. A package linked to
+     a repository inherits the repository's access permissions but not its visibility (GitHub docs, "Configuring a
+     package's access control and visibility", read 2026-10-17). This repository is public, so the images carry no
+     `org.opencontainers.image.source` label: they are not linked and do not inherit the repository's read access.
+     Making them public is the owner's decision.
+   - **The pull_request check** is a separate workflow (`engine-images-build.yml`): it builds each image and pushes
+     nothing, with `contents: read` only and no registry login.
+4. **Signing: PENDING (skipped with its reason logged).** Two GitHub docs pages ("Artifact attestations" and "Using
+   artifact attestations", read 2026-10-17) settle it:
+   - Attestations from a **public** repository use the Sigstore public-good instance and are written to its
+     publicly readable transparency log.
+   - **Private** repositories use GitHub's own instance, which has no transparency log, but only on GitHub
+     Enterprise Cloud. On Free, Pro and Team plans, attestations work for public repositories only.
+   - This repository is **public** and owned by a personal account (checked 2026-10-17 through the GitHub API). So an
+     attestation would go to the public log, which the task forbids (public-good keyless signing is not approved).
+   - The `sign` step therefore signs nothing. It logs a `::notice` with the reason and writes it to the step summary.
+   - The existing gateway image workflow (`publish-image.yml`, ADR-0184) does sign keylessly through public-good
+     Sigstore. That workflow is unchanged here and is an open question for the owner (below).
+5. **Digest plumbing: the lock.** `engines/images.lock.json` (schema `regulait.engine-images-lock.v1`) holds, per
+   engine: `repository`, `manifestDigest`, `imageId`, `publishGeneration`, `sourceCommit` and `publishedAt`. Every
+   value is null (and the generation 0) until the first publish. `scripts/engine-images-lock.mjs`:
+   - `--apply <publish.json>` validates the workflow's output. The repository must be
+     `ghcr.io/<owner>/regulait-engine-<engine>` where `<owner>` is **pinned to this repository's owner**, read from
+     the root `package.json` `repository` URL and lowercased (`GHCR_OWNER`; `validateLock` applies it, so `--check`
+     refuses another namespace too). Both digests must be `sha256:<64 hex>` and not the zero digest.
+     It bumps an engine's `publishGeneration` only when the build changes, then regenerates the derived files;
+   - `--apply` also refuses a publish file whose `sourceCommit` is not reachable from `origin/main`
+     (`git merge-base --is-ancestor`, against the local clone, so `origin/main` must be fetched first; a commit the
+     clone does not have is refused too). **Limit:** the publish file is unsigned workflow output, so this proves the
+     named commit is on main, not that the digests were built from it. The workflow's main-only guard is what ties
+     the two; whoever runs `--apply` must take the file from a run on `main`;
+   - `--write` regenerates them, and `--check` fails when they are stale. `scripts/engine-images-lock.test.mjs`
+     runs in CI's `vitest --dir scripts` step and does the same check.
+   - The derived files are `packages/shared/src/engines/images-lock.ts` (generated), which the manifest reads, and
+     the compose defaults.
+   - **In the manifest,** `imageDigest` is the lock's `manifestDigest` (what a runner reports and the gateway
+     admits), `taskImage` is its `imageId`, and `generation` is the base plus `publishGeneration`, so it moves with
+     every recorded build (ADR-0187 decision 95). Pinned by `images-lock.test.ts`.
+   - **Deviation from the task text:** the task asked for `taskImage` as a digest-pinned reference. It stays the
+     bare content digest (`sha256:<hex>`), because the executor channel (`channel.ts`) and `dockerRunArgs` accept
+     only that and changing them is out of scope. The pull reference `repository@manifestDigest` is in the lock and
+     the compose defaults.
+   - **Compose.** The script writes the lock's repository and digest as the defaults of
+     `REGULAIT_ENGINE_<ENGINE>_REPOSITORY` and `REGULAIT_ENGINE_<ENGINE>_DIGEST`. With a publish recorded, a stock
+     install needs neither variable. The variable stays as an override (it existed already), and the gateway
+     refuses and audits a runner whose digest is not the manifest's (`engine-runner-register-obsolete-build`).
+     Without a publish the default stays the zero digest and placement keeps refusing (`policy_unresolved`).
+6. **Compose and the bundle.**
+   - The executor input volume (owner 10001, mode 0711) and the Caddy digest pins were already on main (I5
+     follow-up items 2 and 3), so nothing changed for them.
+   - `scripts/build-image-bundle.sh --with-engines` (opt-in) adds the three locked engine images. It refuses an
+     unpublished engine and pulls each image by `repository@manifestDigest` (the packages are private, so
+     `docker login ghcr.io` comes first). It checks the image id against the lock (`imageId` on the classic store,
+     `manifestDigest` on the containerd store) and saves the digest reference plus the fixed tag
+     `regulait/engine-<engine>:bundled`.
+   - `docker load` keeps the image id, which is the `taskImage` the executor runs by. The air-gapped install's
+     override runs the three runner services from the `:bundled` tags (`pull_policy: never`), because a digest
+     reference does not survive save/load on the classic store (as with Caddy). After loading a bundle, the installer
+     checks each present `:bundled` tag's id against that engine's lock entry, read as JSON with `node` (as
+     `build-image-bundle.sh` does, review fix replacing a `grep -A8` line read). Without `node` on the target the
+     check fails closed and the install stops; it applies only when the bundle carries engine images.
+7. **ADR-0176 (search first).** The digests come from BuildKit's own metadata file, and the pushes use the Docker CLI
+   with no new dependency. For the lock, the digest-update bots and pinning tools that were considered track
+   UPSTREAM images by tag. None records our own build's output and writes it into a TypeScript manifest and compose
+   defaults, so the about-150-line script is ours: it is a RegulAIt evidence format. Nothing is added to any
+   `THIRD_PARTY.md`.
+8. **Checked here:**
+   - the engine-modelscan unit tests: 88 passed, 7 skipped (the opt-in real-engine suite);
+   - the shared engine tests;
+   - `scripts/engine-images-lock.test.mjs`;
+   - the gateway file guards `zz-eng-img-engine-images.test.ts`, `zz-b7-compose-engine-images.test.ts` and
+     `zz-b5-compose.test.ts`;
+   - `node scripts/engine-images-lock.mjs --check`;
+   - `bash -n` on the three scripts;
+   - the full workspace build.
+   The installer's lock-block check was run against a lock generated by `--apply` from a synthetic publish: each
+   engine matched only its own ids.
+9. **Not verified (pending execution, M-041).** No Docker daemon or registry was available here.
+   - **Not run anywhere:** building any engine image (the PR's build-only workflow is the first real build, and its
+     result is in the PR); the publish workflow; a GHCR push and the package's actual visibility; buildx metadata
+     keys on GitHub's runners; `--apply` with a real publish; the bundle with `--with-engines` and its load round trip
+     on each image store; an engine task end to end.
+   - The DB suites changed here (`zz-b5-modelscan`, `zz-adr0190-i5-engines`) were typechecked only; CI runs them.
+   - On Docker's containerd image store, a pulled image's `.Id` is the manifest digest, not the config digest the
+     manifest's `taskImage` names. Whether `docker run sha256:<config digest>` resolves there is unverified, so run
+     executors on the classic store until it is checked.
+
+**Open questions for the owner.**
+1. **Signing.** Should the engine images be signed with a key the owner holds (cosign key pair, no transparency log
+   upload)? Or should the repository move to a plan with private attestations? Until then they are unsigned, and
+   ADR-0187 decision 55's "admission is the signature verification at deploy time" stays open.
+2. **The gateway image.** `publish-image.yml` signs keylessly through public-good Sigstore (ADR-0184), which is the
+   opposite of the rule given for the engine images. Should it change to match?
+3. **Who records a publish.** The workflow leaves `--apply` and its PR to a person, so it never holds
+   `contents: write`. Should a bot open that PR instead? That needs `pull-requests: write` in a separate job.
 
 ## As built: owner decisions C and D (2026-10-17)
 
@@ -1957,3 +2102,26 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
   executor switch) is added only if a customer needs it.
 - **Follow-ups after #385 verifies L2:** apply the outside `HostConfig` check to the gVisor backend too, and pass
   `--cgroupns private` on the gVisor line.
+
+## I5 follow-up: refusal ordering (2026-10-17)
+
+No migration. CI gateway shard 4 (run 38991262736) saw "an executor that reports another input digest" read the
+task's refusal as `session_lost` instead of `execution_profile_mismatch`. The mismatch, the offer's `mismatch`
+status and its report row commit in one transaction, before the quarantine. The stdio watchdog then sees the offer
+ended and calls `lose()` on the session, and the task's end hook stamped `session_lost` in memory before any read of
+the committed report.
+
+1. **A lost session is no longer a refusal by itself.** The task records only that its session was lost
+   (`sessionLost`). Reading the task's state resolves the refusal in order: a refusal already held, then the
+   placement's linked report (`mismatch` reads `execution_profile_mismatch`; a `session_lost` row reads
+   `session_lost`), then the offer's own end (`offer_<status>`), and only then the lost session. The result route's
+   in-memory check (`engineTaskRefusalOf`) still refuses a lost session before it is resolved (fail closed).
+2. **Point 18's dispatch checks** (`judge_required`, `agent_not_dispatchable`, a judge that is gone) now run at the
+   task start, as at the lease (pinned in `zz-adr0190-i5-engines.test.ts`).
+3. **Points 12 and 13** were corrected above: the dropped `not_run` envelope of an unplaced task, and the attestation
+   basis read once per poll, outside the lease transaction.
+4. The "a refusal holds no task of its own" test now asks about its own run (`engineTaskHeldFor(runId)`) rather than
+   comparing the process-wide task count, which other tests' tasks could change.
+
+**Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
+database shards run it.

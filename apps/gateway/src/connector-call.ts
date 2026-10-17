@@ -369,6 +369,21 @@ export async function executeGovernedConnectorCall(
   const policyChangedBody = () => ({ error: "connector_policy_changed", detail: "Connector policy changed; result withheld. Review external effects before retrying.",
     externalRequests, mayHaveExecuted: externalRequests > 0, retrySafe: externalRequests === 0,
     costUsd: sink.costUsd ?? null, withheld: true });
+  /** a `connector_policy_changed` refusal after the decision committed (at execution, at the trace commit or at
+   * release) writes ONE deny audit row, not only a trace span; the decision-commit refusal and the billed-and-withheld
+   * output check write their own rows and set this too, so no refusal is recorded twice. */
+  let policyChangedAudited = false;
+  const auditPolicyChangedAfterDecision = async (conn: Db, phase: "execution" | "trace-commit" | "release") => {
+    if (policyChangedAudited) return;
+    policyChangedAudited = true;
+    await conn.insert(auditLog).values({ userId, objectType: "connector", objectId: connectorId,
+      detail: { phase, operation: body.operation, ...(projectId ? { projectId } : {}), ...(args.detail ?? {}),
+        decidedPolicyEpoch: admissionGeneration?.epoch ?? null, externalRequests, mayHaveExecuted: externalRequests > 0,
+        withheld: true, receiptClass: "decision" },
+      effect: "deny", ruleId: "connector-policy-changed", ruleChain: [],
+      reason: `Connector policy changed at ${phase}; result withheld` +
+        (externalRequests > 0 ? " (the call may have executed: review its external effects before retrying)" : " (nothing was sent)") });
+  };
   /** filled at the ONE place the ledger row is written, so the span
    * REFERENCES that row rather than recomputing its figures (rule 1). */
   const sink: { usageEventId?: string | null; costUsd?: number | null } = {};
@@ -549,6 +564,7 @@ export async function executeGovernedConnectorCall(
         decidedPolicyEpoch: admissionGeneration?.epoch ?? null,
         detail: { operation: body.operation, ...(body.object ? { object: body.object } : {}), projectId: projectId ?? null, ...(args.detail ?? {}) },
       });
+      policyChangedAudited = true;
       policyChanged = true;
       return out.status(409).send(policyChangedBody());
     }
@@ -1035,6 +1051,7 @@ export async function executeGovernedConnectorCall(
     } catch (err) {
       if (err instanceof ConnectorPolicyChangedError || !await generationCurrent()) {
         policyChanged = true;
+        await auditPolicyChangedAfterDecision(db, "execution");
         return out.status(409).send(policyChangedBody());
       }
       // ADR-0034 amendment #2 — a refusal raised by the GUARDED FETCH itself
@@ -1227,6 +1244,7 @@ export async function executeGovernedConnectorCall(
             ? "Connector output transformation refused; billed and withheld"
             : `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
         });
+        if (policyChanged) policyChangedAudited = true;
       } else if (piiMode === "warn" && anyHits) {
         await evidenceDb.insert(auditLog).values({
           userId,
@@ -1296,6 +1314,7 @@ export async function executeGovernedConnectorCall(
     if (!admissionGeneration || traceGeneration?.epoch !== admissionGeneration.epoch) {
       policyChanged = true;
       outcome = { status: 409, body: policyChangedBody() };
+      await auditPolicyChangedAfterDecision(tx as unknown as Db, "trace-commit");
     }
     const errCode =
       typeof outcome.body["error"] === "string" ? (outcome.body["error"] as string) : null;
@@ -1351,6 +1370,7 @@ export async function executeGovernedConnectorCall(
     await recordSpan(db, traceCtx, { kind: "connector", name: `${connector.name}.response-policy`,
       status: "denied", statusReason: "Connector policy changed before response release", startedAt: spanStartedAt,
       connectorId, contentWithheld: true, attributes: { operation: body.operation, error: "connector_policy_changed" } });
+    await auditPolicyChangedAfterDecision(db, "release");
     if (ownTrace) await finishTrace(db, traceCtx, "denied", spanStartedAt);
     return { status: 409, body: policyChangedBody() };
   }

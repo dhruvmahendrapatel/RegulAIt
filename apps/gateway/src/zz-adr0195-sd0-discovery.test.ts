@@ -189,11 +189,11 @@ afterAll(async () => {
 });
 
 describe("ADR-0195 SD0 discovery foundation", () => {
-  it("the production registry holds only SD3's upload-fed endpoint kinds: no other source can be created", async () => {
+  it("the production registry holds only the built scanners (SD2: the three clouds; SD3: the two upload-fed endpoint kinds); any other kind cannot be created", async () => {
     const k = await inject("GET", "/v1/discovery/scanners", AUTH, undefined, bare);
     expect(k.statusCode).toBe(200);
     const kinds = k.json().kinds as Array<{ kind: string; built: boolean }>;
-    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["endpoint_inventory", "endpoint_osquery"]);
+    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["cloud_aws", "cloud_azure", "cloud_gcp", "endpoint_inventory", "endpoint_osquery"]);
     const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "repo_github", target: { org: "x" }, scope: { orgLevel: true, include: [] } }, bare);
     expect(c.statusCode).toBe(409);
     expect(c.json().error).toBe("scanner_not_built");

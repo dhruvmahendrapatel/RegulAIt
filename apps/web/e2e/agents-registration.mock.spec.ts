@@ -87,6 +87,9 @@ test("UX-AG-3: unpriced is explicit, does not submit staged prices, and recorded
   await expect.poll(() => st.registrations.length).toBe(1);
   expect(st.registrations[0]).not.toHaveProperty("costPerMTokIn");
   expect(st.registrations[0]).not.toHaveProperty("costPerMTokOut");
+  // the card resets its draft only once the register has resolved; wait for that reset before typing the next one,
+  // or it can land after the fills below and wipe them
+  await expect(card.getByLabel("Name", { exact: true })).toHaveValue("");
   await card.getByLabel("Name", { exact: true }).fill("Recorded free model");
   await card.getByRole("radio", { name: "Custom endpoint", exact: true }).check();
   await card.getByTestId("agent-custom-endpoint").selectOption(ALTERNATIVE);

@@ -94,7 +94,7 @@ export const MACHINE_ONLY = new Map([
   ["POST /v1/gates/deploy", "CI gate: the deploy gate a customer's pipeline calls before it ships"],
 
   // ---- runner and executor channels (credentialed machines) ----------------
-  ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes)", matches: 10 }],
+  ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
   // ---- inbound callbacks and provisioning -----------------------------------
@@ -224,6 +224,21 @@ export function validatePattern(key) {
 /** where the scheduler job names a SUPERSEDED `job` must appear live */
 const SCHEDULER_JOBS_FILE = "apps/gateway/src/scheduler-jobs.ts";
 
+/**
+ * The job names `SCHEDULER_JOB_NAMES` defines in scheduler-jobs.ts: its `key: "name"` entries, read with comments
+ * removed. A real match, not a substring search: a name only in a comment, or in a string outside the constant, is
+ * not a job. Null when the file or the constant is missing (every superseded `job` is then stale).
+ */
+export function schedulerJobNames(text) {
+  if (typeof text !== "string") return null;
+  const block = /export const SCHEDULER_JOB_NAMES = \{([\s\S]*?)\n\} as const;/.exec(text);
+  if (!block) return null;
+  const body = block[1].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const names = new Set();
+  for (const m of body.matchAll(/^\s*[A-Za-z_$][\w$]*\s*:\s*"([^"\n]+)"\s*,?\s*$/gm)) names.add(m[1]);
+  return names;
+}
+
 /** is a MACHINE_ONLY key a prefix pattern (rather than one exact route)? */
 const isPattern = (key) => key.endsWith("/*");
 
@@ -346,7 +361,7 @@ export function census({
       const { replacement, job } = superseded.get(key);
       if (!all.has(replacement)) fail("stale", key, `superseded by ${replacement}, which the gateway does not serve`);
       else if (!reached.has(replacement)) fail("stale", key, `superseded by ${replacement}, which the UI does not call either`);
-      if (job !== undefined && !(fileText(SCHEDULER_JOBS_FILE) ?? "").includes(`"${job}"`)) {
+      if (job !== undefined && !(schedulerJobNames(fileText(SCHEDULER_JOBS_FILE))?.has(job) ?? false)) {
         fail("stale", key, `superseded by scheduler job '${job}', which ${SCHEDULER_JOBS_FILE} no longer names`);
       }
       continue;

@@ -81,7 +81,7 @@ import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { deploymentEnvironment } from "./oauth/common.js";
 import { resolveRequirement } from "./execution-placement.js";
-import { engineTaskInputDigestFor, liveEngineTasks, setEngineTaskPlacementAffinityForTest, startEngineTask } from "./engine-tasks.js";
+import { engineTaskHeldFor, engineTaskInputDigestFor, readEngineTaskStateForTest, setEngineTaskPlacementAffinityForTest, startEngineTask } from "./engine-tasks.js";
 import { engineWorkerAttestationBasis } from "./engine-worker-attestation.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -209,7 +209,17 @@ async function scannerTask(ctx: { files: ReadonlyMap<string, Buffer>; secret: st
       await writeFile(path.join(t.resultsRoot, t.runId, "report.json"), bytes);
       await writeFile(
         path.join(t.resultsRoot, t.runId, "done.json"),
-        JSON.stringify({ exitCode: 1, timedOut: false, cancelled: false, reportSha256: createHash("sha256").update(bytes).digest("hex"), reportTooLarge: false, npy: null, npz: null }),
+        JSON.stringify({
+          // ENG-IMG: the scanner reads the format from the placed bytes (the gateway streamed them; the executor wrote them)
+          detection: { format: "pickle", evidence: "pickle PROTO opcode, protocol 4" },
+          exitCode: 1,
+          timedOut: false,
+          cancelled: false,
+          reportSha256: createHash("sha256").update(bytes).digest("hex"),
+          reportTooLarge: false,
+          npy: null,
+          npz: null,
+        }),
       );
     },
   });
@@ -525,8 +535,6 @@ describe("recheck L6: the watchdog ends a run whose offer is refused while nobod
 
 describe("the task start is the decision; fail closed, no fallback", () => {
   it("no project: refused policy_unresolved WITH a refused placement row keyed to the decision; the run ends not_run", async () => {
-    // earlier tests may still hold a task their watchdog has not closed yet: a refusal holds none of its own
-    const held = liveEngineTasks();
     const art = await uploadedAs(alice, maliciousPickle());
     const runId = await startScan(art.id, null);
     const lease = await client.lease(MS_BUILD);
@@ -538,7 +546,8 @@ describe("the task start is the decision; fail closed, no fallback", () => {
     const p = await placementOf(d!.id);
     expect(p).toMatchObject({ workloadKind: "engine_worker", outcome: "refused", refusalCode: "policy_unresolved", requiredClass: null, executorId: null, imageDigest: TASK_IMAGE });
     expect(await runRow(runId)).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable", taskPlacementId: null });
-    expect(liveEngineTasks()).toBeLessThanOrEqual(held);
+    // a refusal holds no task of its own (asked of THIS run: earlier tests may still hold theirs)
+    expect(engineTaskHeldFor(runId)).toBe(false);
   });
 
   it("no executor that can take it: refused no_executor with the L2 requirement; the run ends not_run; a second start is refused", async () => {
@@ -597,7 +606,8 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
       const abort = new AbortController();
       const bridge = new ExecutorTaskBridge({ client, jobsRoot, resultsRoot, gatewayBaseUrl: "http://gateway.test/v1", isArtifact: (n) => ARTIFACT_NAME.test(n), pollMs: 25 });
       const bridging = bridge.run(abort.signal);
-      const adapter = modelscanAdapter({ artifacts: client, executor: new ExchangeScanExecutor(jobsRoot, resultsRoot, { pollMs: 25 }) });
+      // ENG-IMG: the runner fetches nothing; the job only places the artifact
+      const adapter = modelscanAdapter({ executor: new ExchangeScanExecutor(jobsRoot, resultsRoot, { pollMs: 25 }) });
       const out = await runOnce(client, adapter, { ...MS_BUILD, engineId: "modelscan", workRoot: await mkdtemp(path.join(tmpdir(), "i5-w-")), heartbeatMs: 200, retryBaseMs: 10 });
       abort.abort();
       await bridging;
@@ -615,13 +625,18 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
       expect(run.taskPlacementId).toBe(p!.id);
       const [report] = await db.select().from(executionPlacementReports).where(eq(executionPlacementReports.placementId, p!.id));
       expect(report).toMatchObject({ outcome: "placed", appliedClass: "user_space_kernel" });
+      // refusal ORDER, directly: on a placed row (no refusal on record) a lost session IS the refusal; without one the
+      // task reads on
+      const placedRead = { runId, placementId: p!.id, offerId: p!.offerId! };
+      expect(await readEngineTaskStateForTest(db, { ...placedRead, sessionLost: true })).toEqual({ state: "refused", refusal: "session_lost" });
+      expect(await readEngineTaskStateForTest(db, { ...placedRead, sessionLost: false, eof: true })).toEqual({ state: "ended", refusal: null });
       const [offer] = await db.select().from(executionOffers).where(eq(executionOffers.id, p!.offerId!));
       expect(offer).toMatchObject({ workloadKind: "engine_worker", imageDigest: TASK_IMAGE, status: "ended" });
       // the sandbox's input: the job inline, the artifact streamed by the gateway; its digest is the one decided
       const [sb] = ex.backend.sandboxes.filter((s) => s.kind === "placement");
       expect(sb).toMatchObject({ probed: true, released: true, secretSha256: null, workload: { command: MANIFEST.modelscan.taskEntry.command, args: [...MANIFEST.modelscan.taskEntry.args] } });
       expect(sb!.inputSha256).toBe((d!.detail as { inputDigest: string }).inputDigest);
-      expect(seenInputs.at(-1)).toEqual({ files: [`${runId}/artifact.pkl`, `${runId}/job.json`], artifactSha256: art.sha256, secret: undefined });
+      expect(seenInputs.at(-1)).toEqual({ files: [`${runId}/artifact.bin`, `${runId}/job.json`], artifactSha256: art.sha256, secret: undefined });
       const streamed = await db.select().from(auditLog).where(and(eq(auditLog.objectId, runId), eq(auditLog.ruleId, "engine-run-artifact-streamed")));
       expect(streamed.map((s) => (s.detail as { phase: string }).phase)).toContain("task_input");
     } finally {
@@ -649,6 +664,13 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
       const ended = await runRow(runId);
       expect(ended).toMatchObject({ status: "not_run", errorCode: "isolation_unavailable" });
       expect((ended.summary as { cause: string }).cause).toBe("engine_task_execution_profile_mismatch");
+      // refusal ORDER, directly: a lost session plus the committed mismatch reads the mismatch, never session_lost
+      // (CI run 38991262736: the watchdog's session end was stamped before the mismatch was read)
+      const [mp] = await db.select().from(executionPlacements).where(eq(executionPlacements.id, ended.taskPlacementId!));
+      expect(await readEngineTaskStateForTest(db, { runId, placementId: mp!.id, offerId: mp!.offerId!, sessionLost: true })).toEqual({
+        state: "refused",
+        refusal: "execution_profile_mismatch",
+      });
       expect((await client.heartbeat(runId, "running", 0.5)).cancel).toBe(true);
       await loop;
       const [mismatch] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-profile-mismatch"), sql`${auditLog.detail}->>'executorId' = ${ex.executorId}`));
@@ -674,10 +696,11 @@ describe("I8: an agent run's task start is an entitlement decision whose facts n
       const agentId = ag.json().id as string;
       const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId });
       expect(g.statusCode, g.body).toBeLessThan(300);
-      // a promptfoo run leased to this suite's runner (seeded: the B5-P suite pins the lease itself)
+      // a promptfoo run leased to this suite's runner (seeded: the B5-P suite pins the lease itself); promptfoo
+      // grades with a judge, so the run names one (the task start refuses judge_required otherwise, as the lease does)
       const runId = rows<{ id: string }>(
-        await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
-          values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
+        await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, judge_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
+          values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
       )[0]!.id;
       const keyMaterial = `run-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}`;
       const r = await startEngineTask(
@@ -706,5 +729,86 @@ describe("I8: an agent run's task start is an entitlement decision whose facts n
     } finally {
       setEngineTaskPlacementAffinityForTest(null);
     }
+  }, 60_000);
+});
+
+describe("I5 point 18: the task start re-runs the lease's dispatch checks", () => {
+  it("a target agent that lost its provider model since the lease is refused agent_not_dispatchable at the task start; the run ends not_run", async () => {
+    const ag = await inject("POST", "/v1/agents", AUTH, { name: `i5-nodispatch-${RUN}`, provider: "mock", tier: 1, costPerMTokIn: 1, costPerMTokOut: 2, model: "mock-i5" });
+    expect(ag.statusCode, ag.body).toBe(201);
+    const agentId = ag.json().id as string;
+    const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId });
+    expect(g.statusCode, g.body).toBeLessThan(300);
+    const runId = rows<{ id: string }>(
+      await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, judge_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
+        values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
+    )[0]!.id;
+    // after the lease: the agent's provider model is gone
+    await db.update(agents).set({ model: null }).where(eq(agents.id, agentId));
+    const r = await startEngineTask(
+      db,
+      { manifest: () => MANIFEST, artifactStore: () => null, endRunTx: async () => null, notifyEnded: async () => undefined },
+      runnerId,
+      runId,
+      { files: [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }], artifact: null, secret: `run-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}` },
+    );
+    expect(r, JSON.stringify(r)).toMatchObject({ kind: "not_entitled", code: "agent_not_dispatchable" });
+    expect(engineTaskHeldFor(runId)).toBe(false);
+    const d = await taskDecision(runId);
+    expect(d).toMatchObject({ objectType: "agent", objectId: agentId, effect: "deny" });
+    expect((d!.detail as { code: string }).code).toBe("agent_not_dispatchable");
+    await endRun(runId);
+    await db.delete(agents).where(eq(agents.id, agentId)).catch(() => undefined);
+  }, 60_000);
+
+  /** a promptfoo run leased to this suite's runner, targeting `agentId`, with `judgeId` (or none) as its judge */
+  async function leasedPromptfooRun(agentId: string, judgeId: string | null): Promise<string> {
+    return rows<{ id: string }>(
+      await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, judge_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
+        values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${judgeId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
+    )[0]!.id;
+  }
+  async function grantedAgent(name: string): Promise<string> {
+    const ag = await inject("POST", "/v1/agents", AUTH, { name, provider: "mock", tier: 1, costPerMTokIn: 1, costPerMTokOut: 2, model: "mock-i5" });
+    expect(ag.statusCode, ag.body).toBe(201);
+    const id = ag.json().id as string;
+    const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId: id });
+    expect(g.statusCode, g.body).toBeLessThan(300);
+    return id;
+  }
+  async function startAgentTask(runId: string) {
+    return startEngineTask(
+      db,
+      { manifest: () => MANIFEST, artifactStore: () => null, endRunTx: async () => null, notifyEnded: async () => undefined },
+      runnerId,
+      runId,
+      { files: [{ path: `${runId}/job.json`, data: Buffer.from(JSON.stringify({ runId })).toString("base64") }], artifact: null, secret: `run-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}` },
+    );
+  }
+
+  it("a run whose engine grades with a judge but names none is refused judge_required at the task start", async () => {
+    expect(MANIFEST.promptfoo.requiresJudge || MANIFEST.promptfoo.judgeSets.includes("basic")).toBe(true);
+    const agentId = await grantedAgent(`i5-nojudge-${RUN}`);
+    const runId = await leasedPromptfooRun(agentId, null);
+    const r = await startAgentTask(runId);
+    expect(r, JSON.stringify(r)).toMatchObject({ kind: "not_entitled", code: "judge_required" });
+    expect(engineTaskHeldFor(runId)).toBe(false);
+    expect(((await taskDecision(runId))!.detail as { code: string }).code).toBe("judge_required");
+    await endRun(runId);
+    await db.delete(agents).where(eq(agents.id, agentId)).catch(() => undefined);
+  }, 60_000);
+
+  it("a judge deleted since the lease (the run's judge_agent_id nulled) is refused judge_required at the task start", async () => {
+    const agentId = await grantedAgent(`i5-judgegone-t-${RUN}`);
+    const judgeId = await grantedAgent(`i5-judgegone-j-${RUN}`);
+    const runId = await leasedPromptfooRun(agentId, judgeId);
+    // after the lease: the judge agent is deleted (the foreign key sets the run's judge_agent_id to null)
+    await db.delete(agents).where(eq(agents.id, judgeId));
+    expect((await runRow(runId)).judgeAgentId).toBeNull();
+    const r = await startAgentTask(runId);
+    expect(r, JSON.stringify(r)).toMatchObject({ kind: "not_entitled", code: "judge_required" });
+    expect(engineTaskHeldFor(runId)).toBe(false);
+    await endRun(runId);
+    await db.delete(agents).where(eq(agents.id, agentId)).catch(() => undefined);
   }, 60_000);
 });

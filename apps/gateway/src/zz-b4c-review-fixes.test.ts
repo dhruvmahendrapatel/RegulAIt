@@ -51,6 +51,7 @@ import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { totpCode, totpStep } from "./totp.js";
+import { awaitTotpHeadroom } from "./testing/totp-window.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -241,7 +242,7 @@ beforeAll(async () => {
   await relaxStrictAdmissionForTest(db);
   await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required', approval_delegation_enabled = true,
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -450,6 +451,7 @@ describe("F6: step-up ceremonies ride the strict auth-tier rate limit", () => {
     const enrolled = await as(u.s, "POST", "/auth/totp/enroll");
     expect(enrolled.statusCode, enrolled.body).toBe(200);
     const secret = enrolled.json().secret as string;
+    await awaitTotpHeadroom();
     expect((await as(u.s, "POST", "/auth/totp/activate", { code: totpCode(secret, totpStep() - 1) })).statusCode).toBe(200);
     return { ...u, secret };
   }
