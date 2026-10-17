@@ -199,3 +199,56 @@ These add to the subsection above; where they differ, this one ships.
 4. **Census gaps closed.** An index route is tested to throw. A splat route (`path="/x/*"`) whose element renders no
    inline `<Routes>` now throws, because its screens would live in a file the census never reads; the top-level
    catch-all and a splat `<Navigate>` redirect are exempt.
+
+### As built: U4 performance (route-level code splitting)
+
+Bar 4 says "JS bundle-size ceilings per entry, enforced in CI". U4 shrinks what the entry loads and then lowers the
+ceilings to the new sizes. No ceiling was raised and no harness constant or gate changed.
+
+- **Screens load on demand.** `apps/web/src/App.tsx` declares every screen with `React.lazy`. The router is the
+  repo's own (react-router 7, `createBrowserRouter`), so no dependency was added (ADR-0176). Its default wraps every
+  navigation in a React transition, so the screen being left stays up until the next one has loaded, and focus does
+  not move. The router's own `lazy` route property was not used: the screens are declared as JSX `<Route>`s, and the
+  route census (`scripts/ui-spa-routes.mjs`) reads them there.
+- **One chunk per console section, not per screen.** `apps/web/src/screens/*.ts` re-export the screens of one admin
+  section (the groups in `shell/suites.tsx`) or one workspace area. Each module is the dynamic-import target for its
+  screens, so a section's shared code ships once, and code shared between sections stays in the entry or in a shared
+  chunk. A chunk per screen (174 files) measured 1,144.8 kB on the "all JS" entry, over its 1,020 kB ceiling. Gzip
+  loses its dictionary at each file boundary, and that entry adds up per-file sizes. One chunk per source directory
+  measured 1,000.7 kB, but its governance chunk was 201 kB. The section grouping measures 1,010.1 kB, and its largest
+  screen chunk is 86.7 kB (AI Governance). A single-screen area (home, chat, models, spend, account, the two
+  single-file admin areas) imports its file directly.
+- **Loading fallback.** `apps/web/src/shell/RouteFallback.tsx` renders only on a first load. It sits in the same box as
+  the auth probe's skeleton in `Protected`, so nothing moves when one hands over to the other. It is one polite
+  `role="status"` region with the text "Loading page", and its skeleton bars are hidden from assistive technology. It
+  takes no focus. Signed-in screens suspend inside `AppShell` (a boundary around `<Outlet />`), so the shell and the
+  skip link stay mounted. The screens outside the shell (sign-in, the public feedback link, the forced gates) suspend
+  to a boundary around the router element.
+- **Logos are files, not script.** `vite.config.ts` sets `assetsInlineLimit` so `.svg` files are never inlined. The
+  72 vendored logos (`src/ui/logos/svg`, loaded by `Logo.tsx` with `?url`) had been inlined into a shared chunk as
+  `data:` URIs (43.8 kB gzip of script). They are now hashed files under `/ui/assets`. The gateway already serves
+  `.svg` as `image/svg+xml` with immutable caching, and they stay air-gapped. A screen fetches only the marks it
+  draws.
+- **Heavy libraries.** recharts (`SeriesLineChart`) and @xyflow/dagre (`RunGraphCanvas`) were already lazy, behind
+  their own boundaries. They stay separate chunks, so the two `lazy:` entries keep matching their files. The
+  react-router package exports only its development build. Its production build has the same size, so aliasing it
+  was not worth a resolver override.
+
+Bundle (gzip, size-limit 14.2.0, `pnpm --filter @regulait/web size`), main at 71d0aff and then this branch:
+
+| entry | before | after | ceiling before | ceiling after |
+|---|---|---|---|---|
+| entry JS (index) | 804.1 kB | 133.4 kB | 817 kB | 137.5 kB |
+| entry CSS (index) | 28.6 kB | 10.2 kB | 30 kB | 10.6 kB |
+| lazy: SeriesLineChart | 106.1 kB | 106.1 kB | 110 kB | 109 kB |
+| lazy: RunGraphCanvas | 75.9 kB | 75.9 kB | 79 kB | 78 kB |
+| all JS | 1,001.3 kB | 1,010.1 kB | 1,020 kB | 1,020 kB (unchanged) |
+
+The new ceilings are the measured size plus about 3 %, the margin the harness first set. Entry CSS gets about 4 %
+(10.6 kB), because lane U1 (#423) adds a focus-ring rule of about 0.6 kB raw to `global.css`. "All JS" stays at 1,020 kB:
+it grew by 8.8 kB (the per-file gzip cost of 64 files instead of 7), and 1,020 kB is already within 1 % of it. A
+first visit now downloads the entry plus one section chunk instead of all 804 kB.
+
+Performance (`perf.ent.spec.ts`, Chromium, all 113 screens, this container, mocked API): LCP median 1,248 to
+1,180 ms, p90 1,312 to 1,248 ms, highest 1,368 to 1,300 ms; highest INP 16 ms both times. No screen was over a budget
+before or after, so `baselines/perf.json` stays empty: `--update` rewrote it with 0 keys and no diff.
