@@ -23,6 +23,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
+import FederationCard from "./FederationCard";
 import {
   couldNotRead,
   describeSchedule,
@@ -387,6 +388,8 @@ export default function DiscoverySourcesPage() {
               ]}
             />
           </Card>
+
+          <FederationCard />
 
           <Card title="Settings">
             <div className={v.stack}>

@@ -85,6 +85,19 @@ export interface ScanContext {
   signal: AbortSignal;
   /** read-only: the enabled admin catalogue (see ScanCatalogue) */
   catalogue: ScanCatalogue;
+  /**
+   * ADR-0195 SD2b: RegulAIt's federation issuer, for a FEDERATED credential only (absent otherwise). Each call mints
+   * a fresh RS256 token of at most 5 minutes; it fails when federation is off.
+   */
+  federation?: ScanFederation;
+}
+
+/** ADR-0195 SD2b: the federation tokens a run may mint (built by the worker from the source and its credential) */
+export interface ScanFederation {
+  /** a token whose `sub` is this source (`regulait:discovery-source:<id>`), only for an audience its credential names */
+  sourceToken: (audience: string) => Promise<string>;
+  /** RegulAIt's own AWS principal, when the deployment configures one: its role and a token for it (aud sts.amazonaws.com) */
+  awsPrincipal: { roleArn: string; token: (audience: string) => Promise<string> } | null;
 }
 
 /** one thing a scanner saw. Classified by the worker against the admin catalogue; it is not yet a finding. */

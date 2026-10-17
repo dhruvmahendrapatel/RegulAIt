@@ -7,6 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { captureSentSecrets } from "@regulait/cloud-discovery";
+import { FEDERATION_AWS_PRINCIPAL_SUBJECT } from "@regulait/shared";
 import { cloudScanner, capabilitySummary, dedupedSecretSink, digestBounded, scannerFetch } from "./discovery-cloud-scanners.js";
 import type { ScanContext } from "./discovery-scanners.js";
 import { checkObservations } from "./discovery-worker.js";
@@ -114,13 +115,13 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
     expect(outcomes.slice(firstRead).every((o) => o.status === "read")).toBe(true);
   });
 
-  it("a federated credential fails with the pending-federation reason, before any request", async () => {
+  it("a federated credential with no federation hook (federation off) fails with that reason, before any request", async () => {
     const cloud = fakeAws();
     const { ctx } = ctxFor({
       fetch: cloud.f,
       credential: { mode: "federated", publicConfig: { roleArn: `arn:aws:iam::${ACCOUNT}:role/r`, externalId: "regulait-x" }, secret: null },
     });
-    await expect(cloudScanner("cloud_aws").run(ctx)).rejects.toThrow(/RS256 federation token/);
+    await expect(cloudScanner("cloud_aws").run(ctx)).rejects.toThrow(/federation issuer/);
     expect(cloud.hosts).toEqual([]);
   });
 
@@ -262,5 +263,195 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
       { capability: "a", scope: null, status: "read", items: 1 },
       { capability: "b", scope: "r", status: "denied", detail: "AccessDenied" },
     ])).toBe("b@r: denied (AccessDenied)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0195 SD2b: federation (source tokens, RegulAIt's own AWS principal) and AWS Organizations
+// ---------------------------------------------------------------------------
+
+const MEMBER_A = "444455556666";
+const MEMBER_B = "777788889999";
+const SUSPENDED = "123412341234";
+
+const bodyText = (init?: RequestInit): string => {
+  const raw = init?.body;
+  return typeof raw === "string" ? raw : raw ? new TextDecoder().decode(raw as ArrayBuffer) : "";
+};
+const stsCreds = (tag: string, accessKeyId: string) => {
+  const exp = new Date(Date.now() + 3_600_000).toISOString();
+  return new Response(
+    `<${tag}Response><${tag}Result><Credentials><AccessKeyId>${accessKeyId}</AccessKeyId><SecretAccessKey>${synthetic("sk")}</SecretAccessKey><SessionToken>${synthetic("st")}</SessionToken><Expiration>${exp}</Expiration></Credentials></${tag}Result></${tag}Response>`,
+    { headers: { "content-type": "text/xml" } },
+  );
+};
+
+/**
+ * A fake AWS for federated runs. STS answers AssumeRoleWithWebIdentity and AssumeRole with session credentials whose
+ * access key id names the account they belong to (`ASIA<account>`), and GetCallerIdentity reads that id back from
+ * the request's signature, so a member account's scanner sees its own account. Organizations answers ListAccounts in
+ * two pages.
+ */
+function fakeFederatedAws() {
+  const hosts: string[] = [];
+  const sts: Array<Record<string, string>> = [];
+  const orgPages: Array<string | null> = [];
+  const f = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    hosts.push(url.hostname);
+    if (url.hostname.startsWith("sts.")) {
+      const form = Object.fromEntries(new URLSearchParams(bodyText(init)));
+      sts.push(form);
+      if (form.Action === "AssumeRoleWithWebIdentity") return stsCreds("AssumeRoleWithWebIdentity", `ASIA${form.RoleArn!.split(":")[4]}`);
+      if (form.Action === "AssumeRole") return stsCreds("AssumeRole", `ASIA${form.RoleArn!.split(":")[4]}`);
+      const auth = new Headers(init?.headers).get("authorization") ?? "";
+      const account = /Credential=ASIA([0-9]{12})\//.exec(auth)?.[1] ?? "000000000000";
+      return new Response(`<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:sts::${account}:assumed-role/r/s</Arn><UserId>U</UserId><Account>${account}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`, { headers: { "content-type": "text/xml" } });
+    }
+    if (url.hostname.startsWith("organizations.")) {
+      const body = JSON.parse(bodyText(init) || "{}") as { NextToken?: string };
+      orgPages.push(body.NextToken ?? null);
+      if (!body.NextToken) return json({ Accounts: [{ Id: ACCOUNT, State: "ACTIVE" }, { Id: MEMBER_A, State: "ACTIVE" }], NextToken: "page-2" });
+      return json({ Accounts: [{ Id: MEMBER_B, Status: "ACTIVE" }, { Id: SUSPENDED, State: "SUSPENDED" }] });
+    }
+    if (url.hostname.startsWith("account.")) return json({ Regions: [{ RegionName: "us-east-1", RegionOptStatus: "ENABLED_BY_DEFAULT" }] });
+    if (url.hostname.startsWith("cloudtrail.")) return json({ Events: [] });
+    return json({});
+  }) as typeof fetch;
+  return { f, hosts, sts, orgPages };
+}
+
+function federationHook(minted: Array<{ subject: string; audience: string; token: string }>, principalRoleArn: string | null = null) {
+  const mint = (subject: string, allowed: string[]) => async (audience: string) => {
+    if (!allowed.includes(audience)) throw new Error(`audience refused: ${audience}`);
+    const token = synthetic(`fed-${subject.length}`);
+    minted.push({ subject, audience, token });
+    return token;
+  };
+  return {
+    sourceToken: mint("regulait:discovery-source:s1", ["sts.amazonaws.com"]),
+    awsPrincipal: principalRoleArn ? { roleArn: principalRoleArn, token: mint(FEDERATION_AWS_PRINCIPAL_SUBJECT, ["sts.amazonaws.com"]) } : null,
+  };
+}
+
+describe("ADR-0195 SD2b: federated cloud credentials and AWS Organizations", () => {
+  const roleArn = `arn:aws:iam::${ACCOUNT}:role/regulait-reader`;
+  const externalId = "regulait-00000000-0000-4000-8000-000000000009";
+
+  it("AWS oidc: AssumeRoleWithWebIdentity with a source token for sts.amazonaws.com, through ctx.fetch, the token registered", async () => {
+    const cloud = fakeFederatedAws();
+    const minted: Array<{ subject: string; audience: string; token: string }> = [];
+    const { ctx, calls } = ctxFor({ fetch: cloud.f, credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null }, federation: federationHook(minted) });
+    const res = await cloudScanner("cloud_aws").run(ctx);
+    expect(minted.map((m) => [m.subject, m.audience])).toEqual([["regulait:discovery-source:s1", "sts.amazonaws.com"]]);
+    const exchange = cloud.sts.find((r) => r.Action === "AssumeRoleWithWebIdentity")!;
+    expect(exchange).toMatchObject({ RoleArn: roleArn, WebIdentityToken: minted[0]!.token });
+    expect(calls.secrets).toContain(minted[0]!.token);
+    // the exchange response (it carries credentials) is never digested, and the token never is either
+    expect(calls.chunks.join("\n")).not.toContain(minted[0]!.token);
+    expect(calls.throttle).toBe(cloud.hosts.length); // every request, the exchange included, went through ctx.fetch
+    expect(res.readOutcomes?.find((o) => o.read === "aws.sts.caller_identity")?.status).toBe("read");
+  });
+
+  it("AWS principal: RegulAIt's own principal by web identity, then AssumeRole into the customer's role with the external id", async () => {
+    const cloud = fakeFederatedAws();
+    const minted: Array<{ subject: string; audience: string; token: string }> = [];
+    const principal = "arn:aws:iam::999999999999:role/regulait-principal";
+    const { ctx } = ctxFor({
+      fetch: cloud.f,
+      source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT, federation: "principal" }, scope: { orgLevel: false, include: ["us-east-1"] } },
+      credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null },
+      federation: federationHook(minted, principal),
+    });
+    await cloudScanner("cloud_aws").run(ctx);
+    expect(cloud.sts.filter((r) => r.Action !== "GetCallerIdentity").map((r) => [r.Action, r.RoleArn, r.ExternalId ?? null])).toEqual([
+      ["AssumeRoleWithWebIdentity", principal, null],
+      ["AssumeRole", roleArn, externalId],
+    ]);
+    expect(minted.map((m) => m.subject)).toEqual([FEDERATION_AWS_PRINCIPAL_SUBJECT]);
+  });
+
+  it("AWS principal without a configured principal is refused before any request", async () => {
+    const cloud = fakeFederatedAws();
+    const { ctx } = ctxFor({
+      fetch: cloud.f,
+      source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT, federation: "principal" }, scope: { orgLevel: false, include: ["us-east-1"] } },
+      credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null },
+      federation: federationHook([]),
+    });
+    await expect(cloudScanner("cloud_aws").run(ctx)).rejects.toThrow(/own AWS principal/);
+    expect(cloud.hosts).toEqual([]);
+  });
+
+  it("Organizations: ListAccounts is paginated, active members are scanned through AssumeRole with the external id", async () => {
+    const cloud = fakeFederatedAws();
+    const { ctx } = ctxFor({
+      fetch: cloud.f,
+      source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT, organizationAccounts: "true", memberRoleName: "RegulaitReader" }, scope: { orgLevel: false, include: ["us-east-1"] } },
+      credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null },
+      federation: federationHook([]),
+    });
+    const res = await cloudScanner("cloud_aws").run(ctx);
+    expect(cloud.orgPages).toEqual([null, "page-2"]);
+    const assumed = cloud.sts.filter((r) => r.Action === "AssumeRole").map((r) => [r.RoleArn, r.ExternalId]);
+    expect(assumed).toEqual([
+      [`arn:aws:iam::${MEMBER_A}:role/RegulaitReader`, externalId],
+      [`arn:aws:iam::${MEMBER_B}:role/RegulaitReader`, externalId],
+    ]);
+    const outcomes = res.readOutcomes ?? [];
+    expect(outcomes.find((o) => o.read === "aws.organizations.accounts")).toMatchObject({ status: "read", detail: "4 account(s) listed, 3 active" });
+    expect(outcomes.find((o) => o.read === `aws.sts.caller_identity@${MEMBER_A}:account`)?.status).toBe("read");
+    expect(outcomes.some((o) => o.read.includes(SUSPENDED))).toBe(false);
+    expect(cloud.hosts.filter((h) => h.startsWith("organizations."))).toHaveLength(2);
+  });
+
+  it("Organizations without a member role lists the accounts and says they were not scanned", async () => {
+    const cloud = fakeFederatedAws();
+    const { ctx } = ctxFor({
+      fetch: cloud.f,
+      source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT, organizationAccounts: "true" }, scope: { orgLevel: false, include: ["us-east-1"] } },
+      credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null },
+      federation: federationHook([]),
+    });
+    const res = await cloudScanner("cloud_aws").run(ctx);
+    expect(res.readOutcomes?.find((o) => o.read === "aws.organizations.member_scan")).toMatchObject({ status: "skipped" });
+    expect(cloud.sts.filter((r) => r.Action === "AssumeRole")).toEqual([]);
+  });
+
+  it("Organizations through the egress guard: a refused host is reported unreachable, the account scan still stands", async () => {
+    const cloud = fakeFederatedAws();
+    const guarded = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname.startsWith("organizations.")) throw Object.assign(new Error("egress blocked (host_not_allowlisted): host not allowed"), { name: "EgressBlockedError" });
+      return cloud.f(input, init);
+    }) as typeof fetch;
+    const { ctx } = ctxFor({
+      fetch: guarded,
+      source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT, organizationAccounts: "true", memberRoleName: "RegulaitReader" }, scope: { orgLevel: false, include: ["us-east-1"] } },
+      credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null },
+      federation: federationHook([]),
+    });
+    const res = await cloudScanner("cloud_aws").run(ctx);
+    expect(res.readOutcomes?.find((o) => o.read === "aws.organizations.accounts")?.status).toBe("unreachable");
+    expect(cloud.sts.filter((r) => r.Action === "AssumeRole")).toEqual([]);
+  });
+
+  it("a malformed organisation target is refused before any request", async () => {
+    for (const target of <Array<Record<string, string>>>[
+      { accountId: ACCOUNT, organizationAccounts: "yes" },
+      { accountId: ACCOUNT, organizationAccounts: "true", memberRoleName: "role/with/path" },
+      { accountId: ACCOUNT, memberRoleName: "RegulaitReader" },
+      { accountId: ACCOUNT, federation: "something" },
+    ]) {
+      const cloud = fakeFederatedAws();
+      const { ctx } = ctxFor({
+        fetch: cloud.f,
+        source: { id: "s1", name: "aws", kind: "cloud_aws", target, scope: { orgLevel: false, include: ["us-east-1"] } },
+        credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null },
+        federation: federationHook([]),
+      });
+      await expect(cloudScanner("cloud_aws").run(ctx), JSON.stringify(target)).rejects.toThrow(/cloud_aws/);
+      expect(cloud.hosts).toEqual([]);
+    }
   });
 });
