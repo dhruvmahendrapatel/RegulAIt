@@ -260,6 +260,19 @@ export function engineTaskRefusalOf(runId: string): string | null {
   return t.refusal ?? (t.sessionLost ? "session_lost" : null);
 }
 
+/**
+ * tests only: the state a task on this placement reads (the runner's frames read), with its session lost or not. Lets a
+ * suite pin the refusal ORDER directly: a refusal the database holds wins over a lost session, which is the refusal
+ * only when the placement's linked report names none.
+ */
+export async function readEngineTaskStateForTest(
+  db: Db,
+  t: { runId: string; placementId: string; offerId: string; sessionLost: boolean; eof?: boolean },
+): Promise<{ state: EngineTaskState; refusal: string | null }> {
+  const task = { runId: t.runId, placementId: t.placementId, offerId: t.offerId, refusal: null, sessionLost: t.sessionLost, eof: t.eof ?? false } as unknown as EngineTask;
+  return readTaskState(db, task);
+}
+
 /** tests only: whether this process holds a task for the run */
 export function engineTaskHeldFor(runId: string): boolean {
   return tasksByRun.has(runId);

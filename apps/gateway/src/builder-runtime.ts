@@ -1236,7 +1236,7 @@ async function runQueue(seg: Segment, state: LoopState, box: Toolbox): Promise<T
       if (call.stepId) {
         await db
           .update(builderToolSteps)
-          .set({ status: "refused", outcomeCode: gate.error, outcomeDetail: gate.detail ?? null, updatedAt: new Date(), finishedAt: new Date() })
+          .set({ status: "refused", outcomeCode: gate.error, outcomeDetail: gate.detail ?? null, updatedAt: sql`now()`, finishedAt: sql`now()` })
           .where(eq(builderToolSteps.id, call.stepId));
       }
       return stopWithRefusal(seg, state, gate);
@@ -1597,7 +1597,7 @@ export async function resumeBuilderStep(db: Db, dataKey: string | undefined, arg
     const code = args.via === "confirmation" ? "declined_by_user" : "approval_denied";
     const detail =
       args.via === "confirmation" ? "the person declined this call" : `denied by ${approverName}${args.reason ? `: ${args.reason}` : ""}`;
-    const now = new Date();
+    const now = sql`now()`; // the database clock, as the turn-end write does
     const claimed = await db
       .update(builderToolSteps)
       .set({ status: "denied", outcomeCode: code, outcomeDetail: detail.slice(0, 1000), decidedByUserId: args.deciderUserId, updatedAt: now, finishedAt: now })
@@ -1733,7 +1733,7 @@ async function resumeUnderGate(
       const msg = (err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err))
         .replace(/\s+/g, " ")
         .slice(0, 300);
-      const now = new Date();
+      const now = sql`now()`; // the database clock
       await db
         .update(builderToolSteps)
         .set({ status: "error", outcomeCode: "resume_failed", outcomeDetail: msg.slice(0, 300), updatedAt: now, finishedAt: now })
@@ -1778,7 +1778,7 @@ async function endPausedStep(
     decidedByUserId?: string | null;
   },
 ): Promise<BuilderMessageRow | null> {
-  const now = new Date();
+  const now = sql`now()`; // the database clock, as the turn-end write does
   return db.transaction(async (tx) => {
     const moved = opts.from === null ? [{ id: stepId }] : await tx
       .update(builderToolSteps)

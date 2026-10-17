@@ -365,6 +365,9 @@ export async function runAuditPruneOnce(
   // (`trace_retention_holds`, at most 2x this floor and 3 years) is skipped
   // while its hold is live and unreleased, and deleted by the first pass after
   // the hold expires. A hold an erasure request released protects nothing.
+  // A hold's expiry is compared with the DATABASE clock (`now()`, in the same
+  // statement), never the gateway's: a fast gateway clock must not delete a held
+  // trace early.
   let tracesDeleted = 0;
   try {
     const removed = await db
@@ -372,7 +375,7 @@ export async function runAuditPruneOnce(
       .where(
         and(
           lt(traces.startedAt, f.cutoff),
-          sql`not exists (select 1 from ${traceRetentionHolds} where ${traceRetentionHolds.traceId} = ${traces.id} and ${traceRetentionHolds.releasedAt} is null and ${traceRetentionHolds.holdUntil} > ${new Date().toISOString()}::timestamptz)`,
+          sql`not exists (select 1 from ${traceRetentionHolds} where ${traceRetentionHolds.traceId} = ${traces.id} and ${traceRetentionHolds.releasedAt} is null and ${traceRetentionHolds.holdUntil} > now())`,
         ),
       )
       .returning({ id: traces.id });

@@ -37,7 +37,7 @@ import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { Webhook } from "standardwebhooks";
 import {
@@ -534,6 +534,26 @@ describe("A8: retention holds", () => {
     });
     await runAuditPruneOnce(db, admin.id, false);
     expect(await left()).toEqual([]);
+  });
+
+  it("a hold expiring seconds from now (by the database clock) survives a prune on a gateway whose clock runs fast", async () => {
+    const old = new Date(Date.now() - (floorDays + 30) * DAY);
+    const held = await makeTrace("i", old, { startedAt: old });
+    await db.insert(traceRetentionHolds).values({ traceId: held, holdUntil: sql`now() + interval '30 seconds'`, createdByUserId: admin.id });
+    // the process clock an hour ahead: a hold compared against it would read expired and its trace be deleted
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 3_600_000);
+      await runAuditPruneOnce(db, admin.id, false);
+    } finally {
+      vi.useRealTimers();
+    }
+    const [still] = await db.select({ id: traces.id }).from(traces).where(eq(traces.id, held));
+    expect(still?.id).toBe(held);
+    // positive control: once the hold has expired by the database clock, the next prune deletes the trace
+    await db.update(traceRetentionHolds).set({ holdUntil: sql`now() - interval '1 second'` }).where(eq(traceRetentionHolds.traceId, held));
+    await runAuditPruneOnce(db, admin.id, false);
+    expect(await db.select({ id: traces.id }).from(traces).where(eq(traces.id, held))).toEqual([]);
   });
 });
 

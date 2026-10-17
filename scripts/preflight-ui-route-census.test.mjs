@@ -309,6 +309,9 @@ describe("route census: lists cannot rot", () => {
     expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(names('  ySweep: "y-sweep",')) }))).toEqual(["stale POST /v1/x/sweep"]);
     // a real match: the name in a comment, or in a string outside the constant, is not a job
     expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(names('  // xSweep: "x-sweep", (removed)\n  ySweep: "y-sweep",')) }))).toEqual(["stale POST /v1/x/sweep"]);
+    // a block comment spanning lines hides an entry just as a line comment does
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(names('/*\n  xSweep: "x-sweep",\n*/\n  ySweep: "y-sweep",')) }))).toEqual(["stale POST /v1/x/sweep"]);
+    expect(schedulerJobNames(names('/*\n  xSweep: "x-sweep",\n*/\n  ySweep: "y-sweep",'))).toEqual(new Set(["y-sweep"]));
     expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(`${names('  ySweep: "y-sweep",')}const legacy = "x-sweep";\n`) }))).toEqual(["stale POST /v1/x/sweep"]);
     expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs('xSweep: "x-sweep",') }))).toEqual(["stale POST /v1/x/sweep"]);
   });
