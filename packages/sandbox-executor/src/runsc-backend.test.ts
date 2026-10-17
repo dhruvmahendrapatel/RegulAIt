@@ -42,17 +42,15 @@ import {
 } from "@regulait/shared";
 import {
   dockerRunArgs,
-  probesFrom,
   readLines,
-  RunscBackendError,
   STDIO_SANDBOX_BLANKED_ENV,
-  RunscDockerBackend,
   runtimeFromInfo,
   unsupportedProfileFeature,
   type DockerChild,
   type ExecutorSideObservation,
   type InitObservation,
-} from "./runsc-backend.js";
+} from "./docker-backend.js";
+import { probesFrom, RunscBackendError, RunscDockerBackend } from "./runsc-backend.js";
 import { buildReport } from "./report.js";
 import { RUNSC_RELEASES, SANDBOX_INIT_SHA256 } from "./init-pin.js";
 

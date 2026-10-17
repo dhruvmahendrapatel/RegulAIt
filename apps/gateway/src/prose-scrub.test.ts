@@ -514,6 +514,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     "agents.halted_reason",
     "agents.lifecycle_reason",
     "ai_endpoint_signatures.replacement_note",
+    // ADR-0195 SD0 (migration 0202): an admin's note on a catalogue row
+    "ai_endpoint_signatures.note",
     "ai_risks.acceptance_note",
     "ai_use_cases.retired_reason",
     "ai_vendors.retired_reason",

@@ -350,9 +350,21 @@ test("settings: a failed read after a write locks the form", async ({ page }) =>
   expect(m.writes).toEqual([{ executorAttestationMaxAgeMinutes: 60 }]);
 });
 
-test("settings: malformed envelopes and a retired warn keep Engines usable and every isolation control unmeasured", async ({ page }) => {
-  const m = await setup(page);
-  for (const envelope of [{}, null, false, 0, "", [], { settings: null }, { settings: [] }, { settings: { ...strict, isolationEnforcement: "warn" } }]) {
+// one test per envelope (was one test of nine page loads, ~1-1.4 min in CI): each has its own budget and shards apart
+const MALFORMED_ENVELOPES: Array<[string, unknown]> = [
+  ["an empty object", {}],
+  ["null", null],
+  ["false", false],
+  ["zero", 0],
+  ["an empty string", ""],
+  ["an array", []],
+  ["settings null", { settings: null }],
+  ["settings an array", { settings: [] }],
+  ["a retired warn", { settings: { ...strict, isolationEnforcement: "warn" } }],
+];
+for (const [label, envelope] of MALFORMED_ENVELOPES) {
+  test(`settings: ${label} keeps Engines usable and every isolation control unmeasured`, async ({ page }) => {
+    const m = await setup(page);
     m.envelope = envelope;
     await openEngines(page);
     await expect(page.getByTestId("engine-promptfoo").getByText("On — self-test passed")).toBeVisible();
@@ -368,10 +380,10 @@ test("settings: malformed envelopes and a retired warn keep Engines usable and e
     await expect(floor(page)).toHaveValue("");
     await expect(page.getByText("At least as strict as the default", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Always on", { exact: true })).toHaveCount(0);
-  }
-  expect(m.writes).toEqual([]);
-  await axe(page);
-});
+    expect(m.writes).toEqual([]);
+    if (label === "a retired warn") await axe(page);
+  });
+}
 
 test("Engines: an unreadable placement list and a refused profile read are unavailable, never empty", async ({ page }) => {
   const m = await setup(page, { placementsBody: { placements: "none" } });
@@ -476,11 +488,14 @@ test("Engines: a new profile starts from a live version, renamed, at the chosen 
   expect(m.profileCreates).toEqual([{ body: { schema: "regulait.execution-profile.v1", name: "team-new", minClass: "microvm", secrets: "none" } }]);
 });
 
-test("Engines: a custom profile gets a new version or is retired; shipped ones offer neither; a placement shows its evidence", async ({ page }) => {
+test("Engines: a custom profile gets a new version or is retired; the shipped references offer neither, engine-worker only a new version; a placement shows its evidence", async ({ page }) => {
   const m = await setup(page);
   await openEngines(page);
   await expect(page.getByRole("button", { name: "New version of restricted", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Retire team-old", exact: true })).toHaveCount(0);
+  // ADR-0190 I5 follow-up: engine-worker is versioned like a custom profile, and never retired
+  await expect(page.getByRole("button", { name: "New version of engine-worker", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Retire engine-worker", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "New version of team-loose", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "New version of team-loose" });
   // no class is preselected, and the current class is refused here rather than sent for a 409 "unchanged"

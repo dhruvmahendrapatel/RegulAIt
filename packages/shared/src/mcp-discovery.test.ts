@@ -96,7 +96,7 @@ describe("finding MCP endpoints in supplied evidence", () => {
   });
 
   it("states its own posture rather than leaving it to be inferred", () => {
-    expect(MCP_DISCOVERY_POSTURE).toMatch(/Nothing is scanned, resolved, crawled or connected to/);
+    expect(MCP_DISCOVERY_POSTURE).toMatch(/scans, resolves, crawls and connects to nothing/);
     expect(MCP_DISCOVERY_POSTURE).toMatch(/not a\s+claim to have searched your estate/);
   });
 });

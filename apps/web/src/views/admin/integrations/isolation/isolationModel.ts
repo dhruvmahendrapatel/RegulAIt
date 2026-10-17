@@ -455,6 +455,39 @@ export function parseProfileVersion(raw: unknown): ProfileVersion | null {
   };
 }
 
+/**
+ * The shipped profiles an admin may version but never retire (ADR-0190 I5 follow-up; mirrors
+ * `VERSIONABLE_SHIPPED_EXECUTION_PROFILES` in @regulait/shared, checked by the model test). `restricted` and
+ * `restricted-microvm` are the strict references: neither versioned nor retired.
+ */
+export const VERSIONABLE_SHIPPED_PROFILES: readonly string[] = ["engine-worker"];
+
+/** which admin actions a profile version offers (the caller also requires it to be the live latest version) */
+export function profileActions(p: Pick<ProfileVersion, "name" | "shipped">): { version: boolean; retire: boolean } {
+  const versionedShipped = VERSIONABLE_SHIPPED_PROFILES.includes(p.name);
+  return { version: !p.shipped || versionedShipped, retire: !p.shipped && !versionedShipped };
+}
+
+type VersionRow = Pick<ProfileVersion, "name" | "version">;
+const readable = (rows: readonly unknown[]): VersionRow[] =>
+  rows.filter((r): r is VersionRow => r !== null && typeof r === "object" && !("unreadable" in r) && "version" in r);
+
+/** the number a new version of `name` gets: the newest version + 1 (a revert is a new version too, with an earlier version's controls) */
+export function nextVersionOf(name: string, rows: readonly unknown[]): number {
+  return Math.max(0, ...readable(rows).filter((r) => r.name === name).map((r) => r.version)) + 1;
+}
+
+/**
+ * What the version route answered, in words. A body equal to an earlier version is a REVERT: a new version carrying
+ * the gateway's `revertOf` marker (the earlier version it copies).
+ */
+export function versionOutcomeText(name: string, out: unknown): string {
+  const o = out !== null && typeof out === "object" ? (out as { version?: unknown; revertOf?: { version?: unknown } | null }) : {};
+  const v = typeof o.version === "number" ? ` v${o.version}` : "";
+  if (o.revertOf && typeof o.revertOf.version === "number") return `Execution profile ${name} reverted to the controls of v${o.revertOf.version}${v ? ` (new version${v})` : ""}`;
+  return `Execution profile ${name} versioned${v ? ` as${v}` : ""}`;
+}
+
 /** `{profiles: [...]}`; null when the envelope is malformed; a malformed row is kept as `unreadable`, never dropped */
 export function parseProfiles(value: unknown): Array<ProfileVersion | { unreadable: true; index: number }> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "profiles")) return null;
