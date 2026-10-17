@@ -1648,7 +1648,9 @@ gateway, the executor's runtime backends or the engine code changed.
    these files: the `apps/gateway/src/hsts.ts` comment, ADR-0029, ADR-0032 (and its index row), `docs/ops/TLS.md`,
    `docs/ops/POWER_SCHEDULE.md` and `docs/product/ROADMAP.md`. The Caddy `REGULAIT_TLS_HOST` default was already the
    neutral `set-regulait-tls-host.invalid` (#387).
-   - Still left: the dev instance id in `docs/ops/DB_BACKUP.md` and ADR-0035. These are outside this slice.
+   - The dev instance id in `docs/ops/DB_BACKUP.md` and ADR-0035 is replaced too. A repo-wide grep (excluding
+     `project-state/` and `node_modules`) finds none of the host names, addresses or the instance id left.
+   - The air-gapped bundle does not carry the engine images (master, 2026-10-17); an opt-in flag is a logged follow-up.
    - `project-state/` was not touched, because the master owns it and the session records are immutable.
 5. **Checked here:**
    - `docker compose config --quiet` with no profile; with `--profile engine-images --profile isolation --profile
