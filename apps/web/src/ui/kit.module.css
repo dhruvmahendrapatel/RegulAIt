@@ -142,9 +142,12 @@
   color: var(--text-faint);
 }
 .input:focus-visible,
-.select:focus,
 .textarea:focus-visible {
   box-shadow: var(--focus-ring);
+  border-color: var(--primary);
+}
+/* its ring is the outline in global.css (WebKit drops box-shadow on a native select) */
+.select:focus {
   border-color: var(--primary);
 }
 .textarea {

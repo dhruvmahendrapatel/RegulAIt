@@ -213,13 +213,16 @@ Fixes went into the shared kit and the global styles, so each fix covers every s
    `MutationObserver` on `disabled`. The hand-back is dropped if focus moves anywhere else first, or after 60 s. A
    dialog opened while focus is parked returns focus to the original trigger. Checked in Chromium: after Escape on the
    step-up, focus is on the page's Resume button.
-2. **`<select>`, checkbox, radio and date fields show the ring on `:focus`** (`focus-not-visible`, WebKit: 7 on
-   approvals, 1 on intake, 4 on the step-up journey). WebKit does not match `:focus-visible` on these controls when
-   they are reached with Option+Tab, so the global ring never drew. `global.css` adds `select:focus, input:focus`
-   with the same `--focus-ring`. The kit's `.select` and the three tiles that draw the ring for an inner input
-   (`.providerTile`, `.outcome`, `.choice`) use `:focus` as well. A text field matches `:focus-visible` on any focus,
-   so for it nothing changes. A mouse-focused select or checkbox now also shows the ring, which is acceptable under
-   WCAG 2.4.7 and 2.4.11.
+2. **`<select>`, checkbox, radio and date fields show an outline ring on `:focus`** (`focus-not-visible`, WebKit: 7
+   on approvals, 1 on intake, 4 on the step-up journey; all of them selects plus one non-text input). WebKit does not
+   match `:focus-visible` on these controls when they are reached with Option+Tab. It also drops `box-shadow` on a
+   control drawn with its native appearance: a first fix that only switched them to `:focus` with the box-shadow
+   ring still read `none` in the WebKit run, so that is inferred from the result. `global.css` therefore gives
+   `select:focus` and the non-text input types `outline: 2px solid var(--rg-signal-ring)` with `box-shadow: none`,
+   so Chromium and Firefox do not draw two rings. The kit's `.select` keeps only its border colour on focus, and the
+   three tiles that draw the ring for an inner input (`.providerTile`, `.outcome`, `.choice`) use `:focus`. Text
+   fields keep the box-shadow ring. A mouse-focused select or checkbox now also shows the ring, which is acceptable
+   under WCAG 2.4.7 and 2.4.11.
 3. **axe stays at 0** serious or critical on every screen in both themes. Its baseline was already empty, so U1
    had nothing there to shrink.
 

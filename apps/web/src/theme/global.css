@@ -178,12 +178,15 @@ pre code {
 }
 
 /* A <select>, checkbox, radio or date/time field shows the ring on :focus, not only :focus-visible: WebKit does not
-   match :focus-visible on them when they are reached with Option+Tab (Safari's key for every control), so they had
-   no indicator there (ADR-0196 U1). A text field matches :focus-visible on any focus, so for it nothing changes. */
+   match :focus-visible on them when they are reached with Option+Tab (Safari's key for every control), and it drops
+   box-shadow on controls drawn with their native appearance, so they had no indicator there (ADR-0196 U1). The ring
+   is an outline in the same Signal colour; text fields keep the box-shadow ring above. */
 select:focus,
-input:focus {
-  outline: none;
-  box-shadow: var(--focus-ring);
+input:is([type="checkbox"], [type="radio"], [type="date"], [type="datetime-local"], [type="time"], [type="month"],
+  [type="week"], [type="range"], [type="color"], [type="file"]):focus {
+  outline: 2px solid var(--rg-signal-ring);
+  outline-offset: 2px;
+  box-shadow: none;
 }
 
 ::selection {
