@@ -151,3 +151,19 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
 - Air-gapped installs get repo and endpoint discovery, and cloud discovery only through private endpoints.
 - Follow-ups: browser-extension and SaaS OAuth-grant discovery through IdP APIs remain out of scope here; IGA-owned
   identity discovery stays refused (PENDING).
+
+## Open-source evaluation (ADR-0176, 2026-10-17)
+
+The owner asked for six existing projects to be checked for reuse. None is fit to ship as a dependency or binary;
+two contribute detection data under their licences.
+
+| Project | Licence | Finding |
+|---|---|---|
+| knostic/AgentSonar | No licence file (all rights reserved) | Endpoint network sensor (packet capture, SNI/DNS, process pairing, traffic-shape scoring). Cannot be reused; the traffic-shape idea informs SD4. |
+| AmanSK5/shadow-ai-guard | Apache-2.0 (with NOTICE and a trademark policy) | Its `registry/registry.yaml` (31 tools: env-var names, bundle ids, executables, per-OS MCP config paths, inference domains) is imported into the catalogue with NOTICE and per-entry provenance, for SD3 and SD4. Its endpoint collector scripts and MDM importers are reference designs only. Not taken as a dependency: Python, and its registry loader and classifier make network calls, so it is not air-gap safe. Its name is not used (trademark policy). |
+| giggsoinc/PatronAI | Apache-2.0 (repo level) | Its provider and detector data files cross-check and extend the catalogue for SD1 and SD2, pinned by commit (no release tags). |
+| transilienceai/shasta | MIT | Snapshot of a hosted product; detector regexes used only to compare coverage for SD1. |
+| datacline/open-threat-detector | MIT | One detector, inactive; not used. |
+| HEUDavid/shadow-ai | No licence file | Not a detector: a hidden assistant built to evade monitoring. Not used; its traits (no visible window, LAN remote control) become SD3/SD4 detection signatures written by us. |
+
+Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
