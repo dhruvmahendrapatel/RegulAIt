@@ -50,7 +50,8 @@ describe("1. the scheduler says whether its clock was injected", () => {
     const plain = mk(`test-clock-plain-${k.RUN}`);
     await syncSchedulerJobs(k.db, plain);
     await new Scheduler(k.db, { registry: plain, instanceId: `clock-plain-${k.RUN}` }).tick();
-    const skewed = new Date(Date.now() - 2 * DAY_MS);
+    // ahead, so the freshly synced job is due by the injected clock too
+    const skewed = new Date(Date.now() + 2 * DAY_MS);
     const injected = mk(`test-clock-injected-${k.RUN}`);
     await syncSchedulerJobs(k.db, injected);
     await new Scheduler(k.db, { registry: injected, instanceId: `clock-inj-${k.RUN}`, now: () => skewed }).tick();
@@ -76,8 +77,9 @@ describe("2. the scheduled sweep decides due-ness on the database clock", () => 
     });
     expect(made.statusCode, made.body).toBe(201);
     const id = made.json().id as string;
-    // due a minute ago by the DATABASE's clock
-    await k.db.update(builderAgentSchedules).set({ nextRunAt: sql`now() - interval '60 seconds'` }).where(eq(builderAgentSchedules.id, id));
+    // due a minute ago by the DATABASE's clock; millisecond precision, as every writer stores it (the sweep's
+    // claim compares `next_run_at` with the value it read back into a JS Date)
+    await k.db.update(builderAgentSchedules).set({ nextRunAt: sql`date_trunc('milliseconds', now() - interval '60 seconds')` }).where(eq(builderAgentSchedules.id, id));
     const row = async () => (await k.db.select().from(builderAgentSchedules).where(eq(builderAgentSchedules.id, id)))[0]!;
 
     const def = schedulerJobRegistry({ dataKey: "a".repeat(64) }).get(SCHEDULER_JOB_NAMES.builderAgentSchedules)!;

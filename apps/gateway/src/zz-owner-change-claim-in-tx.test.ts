@@ -226,7 +226,11 @@ describe("N12: the owner_change grant is claimed inside the owner write's transa
         // the grant expires after the look passed and the compare-and-set landed, just before the claim
         if (opts?.spend) {
           claims += 1;
-          await db.update(stepUpGrants).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(stepUpGrants.id, s.grantId));
+          // both moved back, so the row keeps `expires_at > created_at` within 900s (step_up_grants_expiry_check)
+          await db
+            .update(stepUpGrants)
+            .set({ createdAt: new Date(Date.now() - 10 * 60_000), expiresAt: new Date(Date.now() - 5 * 60_000) })
+            .where(eq(stepUpGrants.id, s.grantId));
         }
         return inner(change, opts);
       },
