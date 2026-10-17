@@ -110,6 +110,8 @@ is refused with its line number; nothing is dropped silently.
 
 ## Limits
 
+- Some signatures apply to one operating system only (a macOS app bundle name, a Windows executable). Include an OS
+  column in an inventory export, or those signatures cannot match its rows.
 - osquery reports what its tables see. An app installed outside the locations a table reads, or a Windows program whose
   display name carries a version number, is not matched.
 - The `jetbrains_plugins` query matches the catalogue's JetBrains id against the plugin name; the two may differ for a

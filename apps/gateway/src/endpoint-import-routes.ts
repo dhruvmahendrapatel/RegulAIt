@@ -21,16 +21,13 @@
  * (SHA-256) and discarded (decision 6). Device findings and device pseudonyms
  * fall under SD0's endpoint retention (90 days default).
  *
- * SD0 has no `device` pseudonym kind yet (its kinds are device_user,
- * commit_author, cloud_principal), so device names use `device_user` until
- * SD0 adds one; `DEVICE_PSEUDONYM_KIND` switches automatically when it does.
+ * Device names use SD0's `device` pseudonym kind; device users `device_user`.
  */
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { aiEndpointSignatures, and, auditLog, discoveryRuns, discoverySources, eq, sql, type Db } from "@regulait/db";
 import {
-  DISCOVERY_PSEUDONYM_KINDS,
   ENDPOINT_IMPORT_MAX_BYTES,
   EVIDENCE_MAX_ROWS,
   EndpointImportFormatError,
@@ -49,10 +46,8 @@ import { applyDiscoveryRunObservations, checkObservations, failRun, loadEnabledC
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const REFUSALS_SHOWN = 200;
 
-/** SD0's device pseudonym kind when it exists, else device_user (see the header) */
-export const DEVICE_PSEUDONYM_KIND: DiscoveryPseudonymKind = ((DISCOVERY_PSEUDONYM_KINDS as readonly string[]).includes("device")
-  ? "device"
-  : "device_user") as DiscoveryPseudonymKind;
+/** device names are pseudonymised under SD0's `device` kind (decision 20) */
+export const DEVICE_PSEUDONYM_KIND: DiscoveryPseudonymKind = "device";
 
 const IMPORT_KINDS = ["endpoint_osquery", "endpoint_inventory"] as const;
 type ImportKind = (typeof IMPORT_KINDS)[number];
@@ -251,12 +246,20 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
           ...(m.observedAt ? { observedAt: m.observedAt } : {}),
           count: m.count,
           artifact: { kind: m.kind, value: m.value },
+          ...(m.os ? { os: m.os } : {}),
+          ...(m.ecosystem ? { ecosystem: m.ecosystem } : {}),
           ...(m.user ? { actorPseudonym: await pseudonymOf("device_user", m.user) } : {}),
         });
       }
       // unmatched sightings go through the same classification, so the run records them as catalogue gaps
       for (const u of reduction.unmatched) {
-        scan.push({ evidenceKind, subjectKind: "device", subject: await deviceOf(u.device), artifact: { kind: u.kind, value: u.value } });
+        scan.push({
+          evidenceKind,
+          subjectKind: "device",
+          subject: await deviceOf(u.device),
+          artifact: { kind: u.kind, value: u.value },
+          ...(u.os ? { os: u.os } : {}),
+        });
       }
       const checked = checkObservations(source.kind, scan, new Date().toISOString());
       const verdict = await applyDiscoveryRunObservations(db, run, owner, source, checked, digest, catalogue);
@@ -287,6 +290,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
     let refreshed = 0;
     let lowConfidence = 0;
     for (const s of endpointCatalogueSignatures()) {
+      const scoped = { os: s.os, ecosystem: s.ecosystem, toolId: s.toolId, note: s.note, confidence: s.confidence };
       if (s.confidence === "low") lowConfidence += 1;
       const [existing] = await db
         .select()
@@ -300,6 +304,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
           matchType: "identifier",
           provenance: s.provenance,
           enabled: s.enabled,
+          ...scoped,
           updatedByUserId: req.authCtx.userId ?? null,
         });
         inserted += 1;
@@ -309,7 +314,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
       if (isShippedEndpointProvenance(existing.provenance)) {
         await db
           .update(aiEndpointSignatures)
-          .set({ provider: s.provider, matchType: "identifier", provenance: s.provenance, lastUpdatedAt: new Date() })
+          .set({ provider: s.provider, matchType: "identifier", provenance: s.provenance, ...scoped, lastUpdatedAt: new Date() })
           .where(eq(aiEndpointSignatures.id, existing.id));
         refreshed += 1;
       }
@@ -322,9 +327,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
       inserted,
       refreshed,
       lowConfidenceRows: lowConfidence,
-      note:
-        "Rows marked low confidence in the seed (the LAN-listener trait rows) are leads, not proof of AI use. " +
-        "The catalogue has no confidence column yet, so the mark is not stored on the row.",
+      note: "Rows marked low confidence (the LAN-listener trait rows) are leads, not proof of AI use; their findings say so.",
     });
   });
 }

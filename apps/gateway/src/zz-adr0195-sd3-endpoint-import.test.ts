@@ -139,6 +139,12 @@ describe("ADR-0195 SD3 endpoint imports into SD0", () => {
     const [row] = await db.select().from(aiEndpointSignatures).where(eq(aiEndpointSignatures.value, "com.anthropic.claudefordesktop"));
     expect(row?.kind).toBe("desktop_app");
     expect(row?.matchType).toBe("identifier");
+    expect(row?.os).toBe("macos");
+    expect(row?.toolId).toBe("claude");
+    expect(row?.confidence).toBe("high");
+    const lan = await db.select().from(aiEndpointSignatures).where(eq(aiEndpointSignatures.value, "trait:hidden_path+listen_all_interfaces"));
+    expect(lan[0]?.confidence).toBe("low");
+    expect(lan[0]?.enabled).toBe(true);
   });
 
   it("refuses a disabled source", async () => {
@@ -182,6 +188,7 @@ describe("ADR-0195 SD3 endpoint imports into SD0", () => {
     // the device has an SD0 pseudonym row; the username is held only as an enveloped display name, never in clear
     const psn = await db.select().from(discoveryPseudonyms).where(eq(discoveryPseudonyms.pseudonym, findings[0]!.subject));
     expect(psn).toHaveLength(1);
+    expect(psn[0]!.kind).toBe("device");
     const all = JSON.stringify(await db.select().from(discoveryPseudonyms));
     expect(all.includes(USERNAME)).toBe(false);
   });
@@ -198,7 +205,7 @@ describe("ADR-0195 SD3 endpoint imports into SD0", () => {
 
   it("imports an MDM/EDR inventory export into an inventory source", async () => {
     const id = await endpointSource("endpoint_inventory");
-    const csv = `Computer Name,Software,Bundle ID,User\n${HOST}-inv,ChatGPT.app,com.openai.chat,${USERNAME}`;
+    const csv = `Computer Name,Software,Bundle ID,User,OS\n${HOST}-inv,ChatGPT.app,com.openai.chat,${USERNAME},macOS 15`;
     const r = await inject("POST", `/v1/discovery/sources/${id}/endpoint-imports`, AUTH, { content: csv, format: "csv", mode: "apply" });
     expect(r.statusCode, r.body).toBe(201);
     expect(r.json().findingsCreated).toBeGreaterThanOrEqual(1);

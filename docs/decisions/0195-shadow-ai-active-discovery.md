@@ -407,8 +407,10 @@ template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" sta
   commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only the devices
   and device users of committed sightings get SD0 pseudonyms; the user travels as `actorPseudonym`. `POST /v1/discovery/endpoint-signatures/seed` installs the
   seed as `identifier` rows (ports as `port:<n>`, trait sets as `trait:<sorted set>`). Endpoint retention is SD0's.
-- What SD0 still lacks for SD3 (reported, not changed here): a `device` pseudonym kind (device names use
-  `device_user` until it exists, switching automatically); catalogue columns for a row's OS, extension ecosystem, tool
-  id, note and confidence (the LAN-listener rows' low confidence is not stored yet); and a way to keep upload-fed
-  sources off the schedule. The device user now uses SD0's `actorPseudonym`.
+- With SD0's follow-up columns (migration 0203): device names use the `device` pseudonym kind and device users
+  `device_user` (sent as `actorPseudonym`); seed rows carry `os` (one OS, or any when SD3 scoped a row to two),
+  `ecosystem` (`vscode`, `jetbrains`, `firefox`, `safari`, and `chromium` for Chrome and Edge), `tool_id`, `note` and
+  `confidence` (`high`, and `low` on the two LAN-listener trait rows); upload-fed sources are never scheduled. An
+  OS-scoped row matches only a sighting whose OS is known and equal, so an inventory export without an OS column
+  matches only the OS-neutral rows.
 

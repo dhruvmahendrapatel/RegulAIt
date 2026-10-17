@@ -20,6 +20,7 @@
  */
 import { z } from "zod";
 import { DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS } from "../discovery/index.js";
+import { SIGNATURE_CONFIDENCES, type SignatureConfidence } from "../shadow-ai.js";
 import { ENDPOINT_REGISTRY_SIGNATURE_ROWS, ENDPOINT_REGISTRY_SOURCE_COMMIT } from "./registry-signatures.generated.js";
 
 /** ADR-0195 decision 5: the five endpoint kinds SD0 adds to `ai_endpoint_signatures.kind`. */
@@ -99,8 +100,9 @@ export interface EndpointRegistrySignatureRow {
   entry: string;
 }
 
-export const ENDPOINT_SIGNATURE_CONFIDENCES = ["normal", "low"] as const;
-export type EndpointSignatureConfidence = (typeof ENDPOINT_SIGNATURE_CONFIDENCES)[number];
+/** SD0's catalogue confidence vocabulary (`ai_endpoint_signatures.confidence`, default high) */
+export const ENDPOINT_SIGNATURE_CONFIDENCES = SIGNATURE_CONFIDENCES;
+export type EndpointSignatureConfidence = SignatureConfidence;
 
 export type EndpointSignatureSource =
   | { origin: "regulait" }
@@ -122,8 +124,7 @@ export interface EndpointSignatureSeed {
   enabled: boolean;
   /**
    * `low` marks a lead rather than a detection (the LAN-listener trait rows,
-   * coordinator decision 2026-10-17). SD0's catalogue has no column for it yet;
-   * see `endpointCatalogueSignatures`.
+   * coordinator decision 2026-10-17); stored in SD0's `confidence` column.
    */
   confidence: EndpointSignatureConfidence;
   note: string | null;
@@ -165,7 +166,7 @@ function registryRowToSeed(r: EndpointRegistrySignatureRow): EndpointSignatureSe
     os: r.os,
     ecosystem: r.ecosystem,
     enabled: r.enabled,
-    confidence: "normal",
+    confidence: "high",
     note: r.note,
     source: {
       origin: "third_party",
@@ -190,7 +191,7 @@ const deepFreeze = <T>(o: T): T => {
 /** The complete SD3 seed: imported rows first, then ours. Frozen. */
 export const ENDPOINT_SIGNATURE_SEED: ReadonlyArray<EndpointSignatureSeed> = deepFreeze([
   ...ENDPOINT_REGISTRY_SIGNATURE_ROWS.map(registryRowToSeed),
-  ...OWN_ROWS.map((r) => ({ ...r, confidence: r.confidence ?? "normal", source: { origin: "regulait" } as const, provenance: "regulait-seed" })),
+  ...OWN_ROWS.map((r) => ({ ...r, confidence: r.confidence ?? "high", source: { origin: "regulait" } as const, provenance: "regulait-seed" })),
 ]);
 
 /** characters a value may hold: printable ASCII minus quote and backslash, so it is safe in SQL literals */

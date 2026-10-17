@@ -13,21 +13,25 @@
  *   listening_port                     `port:<n>`
  *   trait_set                          `trait:<canonical sorted set>`
  *
- * What SD0's columns cannot carry (reported to SD0, not worked around): a
- * row's OS restriction, extension ecosystem, tool id, note and confidence.
- * Dropping the OS and ecosystem only widens a match where values are already
- * OS-specific (`Claude.app`) or shared across ecosystems (chromium ids).
+ * SD0's catalogue columns carry the rest: `os` (one OS, or null for any; a row
+ * that SD3 scopes to two OSes is stored as any), `ecosystem` (extension rows:
+ * `vscode`, `jetbrains`, `firefox`, `safari`, and `chromium` for Chrome and Edge,
+ * which share one id space), `tool_id`, `note` and `confidence`. SD0's matcher
+ * applies os/ecosystem: a scoped row matches only an observation that carries
+ * the same OS or ecosystem, so this module scopes the same way.
  */
 import {
   artifactMatchesSignature,
   type AiSignature,
   type ArtifactSignatureKind,
+  type SignatureOs,
 } from "../shadow-ai.js";
 import {
   ENDPOINT_SIGNATURE_SEED,
   canonicalTraitSet,
+  type EndpointExtensionEcosystem,
   type EndpointMatchType,
-  type EndpointSignatureConfidence,
+  type EndpointOs,
   type EndpointSignatureKind,
   type EndpointSignatureSeed,
 } from "./endpoint-signatures.js";
@@ -51,31 +55,51 @@ export function endpointIdentifier(matchType: EndpointMatchType, value: string):
   return value;
 }
 
-/** a seed row as an `ai_endpoint_signatures` row (SD0's `identifier` match type), plus what SD0 cannot store yet */
+/** SD3's OS name -> SD0's */
+export function endpointOsToSignatureOs(os: EndpointOs | null): SignatureOs | null {
+  if (os === null) return null;
+  return os === "darwin" ? "macos" : os;
+}
+
+/** SD3's extension ecosystem -> SD0's ecosystem column (Chrome and Edge share one id space) */
+export function endpointEcosystemToSignature(eco: EndpointExtensionEcosystem | null | undefined): string | null {
+  if (!eco) return null;
+  return eco === "chrome" || eco === "edge" ? "chromium" : eco;
+}
+
+/** a seed row as an `ai_endpoint_signatures` row (SD0's `identifier` match type and columns) */
 export interface EndpointCatalogueSignature extends AiSignature {
   kind: ArtifactSignatureKind;
   matchType: "identifier";
-  /** carried for SD0; no column exists for it yet */
-  confidence: EndpointSignatureConfidence;
+  os: SignatureOs | null;
+  ecosystem: string | null;
+  toolId: string;
+  note: string | null;
+  confidence: NonNullable<AiSignature["confidence"]>;
   seedIds: string[];
 }
 
 /**
  * The SD3 seed as SD0 catalogue rows, de-duplicated on (kind, lower(value))
  * the way the seed route keys rows. A collision keeps the first row's
- * provider (the suite asserts no collision crosses providers) and the
- * lowest confidence of the merged rows.
+ * provider, tool and note (the suite asserts no collision crosses providers),
+ * widens os/ecosystem to "any" where the merged rows differ, and keeps the
+ * lowest confidence.
  */
 export function endpointCatalogueSignatures(seed: readonly EndpointSignatureSeed[] = ENDPOINT_SIGNATURE_SEED): EndpointCatalogueSignature[] {
   const out = new Map<string, EndpointCatalogueSignature>();
   for (const s of seed) {
     const value = endpointIdentifier(s.matchType, s.value);
     const key = `${s.kind}\u0000${value.toLowerCase()}`;
+    const os = s.os !== null && s.os.length === 1 ? endpointOsToSignatureOs(s.os[0]!) : null;
+    const ecosystem = endpointEcosystemToSignature(s.ecosystem);
     const have = out.get(key);
     if (have) {
       have.seedIds.push(s.id);
-      if (s.confidence === "low") have.confidence = "low";
+      if (CONFIDENCE_RANK[s.confidence] < CONFIDENCE_RANK[have.confidence]) have.confidence = s.confidence;
       if (s.enabled) have.enabled = true;
+      if (have.os !== os) have.os = null;
+      if (have.ecosystem !== ecosystem) have.ecosystem = null;
       continue;
     }
     out.set(key, {
@@ -85,12 +109,18 @@ export function endpointCatalogueSignatures(seed: readonly EndpointSignatureSeed
       matchType: "identifier",
       provenance: s.provenance,
       enabled: s.enabled,
+      os,
+      ecosystem,
+      toolId: s.tool,
+      note: s.note,
       confidence: s.confidence,
       seedIds: [s.id],
     });
   }
   return [...out.values()];
 }
+
+const CONFIDENCE_RANK: Readonly<Record<NonNullable<AiSignature["confidence"]>, number>> = { low: 0, medium: 1, high: 2 };
 
 /** which artifact kinds a key of each SD3 match type may be compared against */
 const KINDS_FOR: Readonly<Record<EndpointMatchType, readonly EndpointSignatureKind[]>> = {
@@ -109,19 +139,21 @@ const KINDS_FOR: Readonly<Record<EndpointMatchType, readonly EndpointSignatureKi
 };
 
 /** every (kind, identifier) an observation could be matched as. Traits yield each non-empty subset of the observed set. */
-export function endpointArtifactCandidates(obs: Pick<EndpointObservation, "keys" | "traits">): Array<{ kind: ArtifactSignatureKind; value: string }> {
-  const out: Array<{ kind: ArtifactSignatureKind; value: string }> = [];
+export function endpointArtifactCandidates(
+  obs: Pick<EndpointObservation, "keys" | "traits">,
+): Array<{ kind: ArtifactSignatureKind; value: string; ecosystem: string | null }> {
+  const out: Array<{ kind: ArtifactSignatureKind; value: string; ecosystem: string | null }> = [];
   const seen = new Set<string>();
-  const push = (kind: ArtifactSignatureKind, value: string) => {
-    const k = `${kind}\u0000${value.toLowerCase()}`;
+  const push = (kind: ArtifactSignatureKind, value: string, ecosystem: string | null = null) => {
+    const k = `${kind}\u0000${value.toLowerCase()}\u0000${ecosystem ?? ""}`;
     if (!seen.has(k)) {
       seen.add(k);
-      out.push({ kind, value });
+      out.push({ kind, value, ecosystem });
     }
   };
   for (const key of obs.keys) {
     const value = endpointIdentifier(key.matchType, key.value);
-    for (const kind of KINDS_FOR[key.matchType]) push(kind, value);
+    for (const kind of KINDS_FOR[key.matchType]) push(kind, value, endpointEcosystemToSignature(key.ecosystem));
   }
   const traits = [...new Set(obs.traits)].sort();
   // the trait vocabulary is closed (4 traits), so at most 15 subsets
@@ -137,6 +169,10 @@ export interface EndpointArtifactSighting {
   device: string;
   /** the device-user reference the importer produced, when the row named one */
   user: string | null;
+  /** SD0's OS name, when the observation's OS is known */
+  os: SignatureOs | null;
+  /** SD0's ecosystem, for an extension sighting */
+  ecosystem: string | null;
   kind: ArtifactSignatureKind;
   value: string;
   provider: string;
@@ -148,7 +184,7 @@ export interface EndpointReduction {
   /** one entry per (device, kind, identifier) that matched an enabled catalogue row */
   matched: EndpointArtifactSighting[];
   /** observations no enabled row matched: a bounded sample, for the run's catalogue gaps */
-  unmatched: Array<{ device: string; kind: ArtifactSignatureKind; value: string }>;
+  unmatched: Array<{ device: string; os: SignatureOs | null; kind: ArtifactSignatureKind; value: string }>;
   unmatchedCount: number;
 }
 
@@ -156,7 +192,9 @@ export interface EndpointReduction {
  * Match an import's observations against the ENABLED admin catalogue (detection
  * is data: the catalogue decides, not this code) and collapse them to one
  * sighting per device, device user and artifact. Each observation contributes
- * its first matching candidate per provider.
+ * its first matching candidate per provider. A row scoped to an OS or an
+ * ecosystem matches only a sighting with the same one, exactly as SD0's
+ * classifier decides (`classifyObservation`).
  */
 export function reduceEndpointObservations(
   result: Pick<EndpointImportResult, "observations">,
@@ -171,18 +209,34 @@ export function reduceEndpointObservations(
   let unmatchedCount = 0;
   for (const obs of result.observations) {
     const providers = new Set<string>();
+    const os = endpointOsToSignatureOs(obs.os);
     const candidates = endpointArtifactCandidates(obs);
     for (const c of candidates) {
-      const sig = enabled.find((s) => artifactMatchesSignature(c.kind, c.value, s));
+      const sig = enabled.find(
+        (s) =>
+          (s.os == null || s.os === os) &&
+          (s.ecosystem == null || s.ecosystem.toLowerCase() === c.ecosystem) &&
+          artifactMatchesSignature(c.kind, c.value, s),
+      );
       if (!sig || providers.has(sig.provider)) continue;
       providers.add(sig.provider);
-      const key = `${obs.device}\u0000${obs.user ?? ""}\u0000${c.kind}\u0000${sig.value.toLowerCase()}`;
+      const key = `${obs.device}\u0000${obs.user ?? ""}\u0000${os ?? ""}\u0000${c.ecosystem ?? ""}\u0000${c.kind}\u0000${sig.value.toLowerCase()}`;
       const have = matched.get(key);
       if (have) {
         have.count += 1;
         if (obs.observedAt && (!have.observedAt || obs.observedAt > have.observedAt)) have.observedAt = obs.observedAt;
       } else {
-        matched.set(key, { device: obs.device, user: obs.user, kind: c.kind, value: sig.value, provider: sig.provider, count: 1, observedAt: obs.observedAt });
+        matched.set(key, {
+          device: obs.device,
+          user: obs.user,
+          os,
+          ecosystem: c.ecosystem,
+          kind: c.kind,
+          value: sig.value,
+          provider: sig.provider,
+          count: 1,
+          observedAt: obs.observedAt,
+        });
       }
     }
     if (providers.size === 0) {
@@ -192,7 +246,7 @@ export function reduceEndpointObservations(
         const k = `${first.kind}\u0000${first.value.toLowerCase()}`;
         if (!unmatchedSeen.has(k)) {
           unmatchedSeen.add(k);
-          unmatched.push({ device: obs.device, kind: first.kind, value: first.value });
+          unmatched.push({ device: obs.device, os, kind: first.kind, value: first.value });
         }
       }
     }

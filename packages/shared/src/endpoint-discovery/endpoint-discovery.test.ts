@@ -299,7 +299,7 @@ describe("osquery results importer", () => {
     expect(matchEndpointObservation(claude!, ENDPOINT_SIGNATURE_SEED).map((s) => s.tool)).toEqual(["claude", "claude"]);
     expect(hider!.traits).toEqual(["background_agent", "user_writable_path"]);
     expect(matchEndpointObservation(hider!, ENDPOINT_SIGNATURE_SEED).map((s) => s.id)).toEqual(["rgl.hidden-assistant.trait_set.windowless-user-app"]);
-    expect(endpointArtifactCandidates(hider!)).toContainEqual({ kind: "desktop_app", value: "trait:background_agent+user_writable_path" });
+    expect(endpointArtifactCandidates(hider!)).toContainEqual({ kind: "desktop_app", value: "trait:background_agent+user_writable_path", ecosystem: null });
     expect(ext!.user).toMatch(/^p_/);
     expect(ext!.observedAt).toBe(new Date(1790000100 * 1000).toISOString());
     expect(matchEndpointObservation(ext!, ENDPOINT_SIGNATURE_SEED).map((s) => s.tool)).toEqual(["claude-code"]);
@@ -437,7 +437,7 @@ describe("SD0 catalogue bridge (phase B)", () => {
 
   it("every seed row becomes a valid SD0 `identifier` catalogue row", () => {
     for (const r of rows) {
-      const { confidence: _c, seedIds: _s, ...sig } = r;
+      const { seedIds: _s, ...sig } = r;
       const parsed = catalogueSignatureSchema.safeParse(sig);
       expect(parsed.success, `${r.kind} ${r.value}: ${parsed.success ? "" : parsed.error.issues[0]?.message}`).toBe(true);
       expect(isShippedEndpointProvenance(r.provenance)).toBe(true);
@@ -462,6 +462,20 @@ describe("SD0 catalogue bridge (phase B)", () => {
     expect(lan.every((r) => r.confidence === "low" && r.enabled)).toBe(true);
     expect(rows.filter((r) => r.value.startsWith("trait:")).every((r) => r.provenance === "regulait-seed")).toBe(true);
     expect(isShippedEndpointProvenance("admin")).toBe(false);
+    expect(rows.filter((r) => r.confidence !== "low").every((r) => r.confidence === "high")).toBe(true);
+  });
+
+  it("scopes rows by OS and ecosystem in SD0's vocabulary", () => {
+    expect(rows.find((r) => r.value === "Claude.app")?.os).toBe("macos");
+    expect(rows.find((r) => r.value === "claude.exe")?.os).toBe("windows");
+    // a row SD3 scopes to two OSes is stored as any
+    expect(rows.find((r) => r.kind === "desktop_app" && r.value.toLowerCase() === "claude")?.os).toBeNull();
+    // Chrome and Edge share one id space
+    const grammarly = rows.filter((r) => r.value === "kbfnbcaeplbcioakkpcpgfkobkghlhen");
+    expect(grammarly).toHaveLength(1);
+    expect(grammarly[0]!.ecosystem).toBe("chromium");
+    expect(rows.find((r) => r.value === "anthropic.claude-code")?.ecosystem).toBe("vscode");
+    expect(rows.find((r) => r.value === "anthropic.claude-code")?.toolId).toBe("claude-code");
   });
 
   it("reduces observations against the enabled catalogue only, one sighting per device and artifact", () => {
@@ -472,7 +486,7 @@ describe("SD0 catalogue bridge (phase B)", () => {
       JSON.stringify({ name: "hidden_assistant_lan_listeners", hostIdentifier: "m2", columns: { name: "h", path: "/Users/x/.h/h", port: "4000", address: "0.0.0.0" } }),
     ].join("\n");
     const imported = importOsqueryResults({ content, pseudonymise: hook });
-    const catalogue: AiSignature[] = rows.map(({ confidence: _c, seedIds: _s, ...sig }) => sig);
+    const catalogue: AiSignature[] = rows.map(({ seedIds: _s, ...sig }) => sig);
     const red = reduceEndpointObservations(imported, catalogue);
     const claude = red.matched.filter((m) => m.provider === "anthropic");
     expect(claude).toHaveLength(1);
@@ -483,6 +497,10 @@ describe("SD0 catalogue bridge (phase B)", () => {
     expect(red.unmatched[0]!.value).toBe("Unknown.app");
     // detection is data: with the catalogue empty or disabled nothing matches
     expect(reduceEndpointObservations(imported, []).matched).toEqual([]);
+    // an OS-scoped row does not match a sighting from another OS
+    const asWindows = { observations: imported.observations.map((o) => ({ ...o, os: "windows" as const })) };
+    expect(reduceEndpointObservations(asWindows, catalogue).matched.some((m) => m.value === "Claude.app")).toBe(false);
+    expect(claude[0]!.os).toBe("macos");
     expect(reduceEndpointObservations(imported, catalogue.map((c) => ({ ...c, enabled: false }))).matched).toEqual([]);
   });
 });
