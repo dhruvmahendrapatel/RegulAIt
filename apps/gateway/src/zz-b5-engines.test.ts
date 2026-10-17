@@ -56,6 +56,7 @@ import {
 } from "@regulait/db";
 import {
   BATCH5_STRICT_DEFAULTS,
+  ENGINE_LEASE_TTL_SECONDS,
   ENGINE_MANIFEST,
   ENGINE_RESULT_VERSION,
   STEP_UP_HEADER,
@@ -1306,29 +1307,88 @@ describe("review round 2", () => {
   });
 });
 
-describe("N11: the lease is admitted and stamped on the database clock (M-075)", () => {
-  it("a gateway clock two days ahead neither refuses a fresh self-test nor dates the lease", async () => {
-    const s = await startRun({});
-    expect(s.statusCode, s.body).toBe(202);
-    // the process clock jumps once the runner is authenticated and the fast path has passed: from here on a
-    // decision taken on it would read every self-test as two days old
-    engineRunTestHooks.beforeLeaseTx = async () => {
-      vi.useFakeTimers({ toFake: ["Date"], now: new Date(Date.now() + 2 * 86_400_000) });
-    };
-    let l: Awaited<ReturnType<typeof lease>>;
+describe("N11: the lease is admitted, stamped, renewed and expired on the database clock (M-075)", () => {
+  const DAY_MS = 86_400_000;
+  /** the gateway's process clock moves by `ms` (only `Date`; the database's clock is untouched) */
+  const skew = (ms: number) => () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date(Date.now() + ms) });
+  };
+  /** run `f` with the process clock skewed from inside a route hook (after the runner's request is authenticated) */
+  async function skewedFrom<T>(hook: "beforeLeaseAdmission" | "beforeHeartbeatTx", ms: number, f: () => Promise<T>): Promise<T> {
+    engineRunTestHooks[hook] = skew(ms);
     try {
-      l = await lease();
+      return await f();
     } finally {
       vi.useRealTimers();
-      engineRunTestHooks.beforeLeaseTx = undefined;
+      engineRunTestHooks[hook] = undefined;
     }
-    expect(l.statusCode, l.body).toBe(200);
-    expect(l.json().runId).toBe(s.json().run.id);
-    const [stamps] = await db
-      .execute(sql`SELECT abs(extract(epoch from (now() - leased_at))) < 3600 AS leased, abs(extract(epoch from (now() - heartbeat_at))) < 3600 AS beat FROM engine_runs WHERE id = ${s.json().run.id}`)
-      .then((r) => (r as unknown as { rows: Array<{ leased: boolean; beat: boolean }> }).rows);
-    expect(stamps).toEqual({ leased: true, beat: true });
-    await inject("POST", `/v1/engine-runs/${s.json().run.id}/cancel`, alice.key, {});
+  }
+  async function skewedSweep(ms: number) {
+    skew(ms)();
+    try {
+      return await runEngineRunSweep(db);
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+  /** the run's stamps against the database's own `now()` */
+  async function stampsOf(runId: string) {
+    const [r] = await db
+      .execute(
+        sql`SELECT abs(extract(epoch from (now() - leased_at))) < 3600 AS leased, abs(extract(epoch from (now() - heartbeat_at))) < 3600 AS beat,
+          lease_expires_at > now() AND lease_expires_at <= now() + make_interval(secs => ${ENGINE_LEASE_TTL_SECONDS + 60}) AS lease
+          FROM engine_runs WHERE id = ${runId}`,
+      )
+      .then((x) => (x as unknown as { rows: Array<{ leased: boolean; beat: boolean; lease: boolean }> }).rows);
+    return r;
+  }
+
+  for (const [label, ms] of [
+    ["ahead", 2 * DAY_MS],
+    ["behind", -2 * DAY_MS],
+  ] as const) {
+    it(`a gateway clock two days ${label}: the lease, its heartbeat and the sweep all judge by the database clock`, async () => {
+      const s = await startRun({});
+      expect(s.statusCode, s.body).toBe(202);
+      const runId = s.json().run.id as string;
+      // skewed BEFORE the fast path: a fast path on the process clock would read every self-test as two days old
+      const l = await skewedFrom("beforeLeaseAdmission", ms, () => lease());
+      expect(l.statusCode, l.body).toBe(200);
+      expect(l.json().runId).toBe(runId);
+      expect(await stampsOf(runId)).toEqual({ leased: true, beat: true, lease: true });
+
+      // a heartbeat while still skewed renews the lease from the database's now (ahead would read it as expired,
+      // behind would stretch it by the skew)
+      const hb = await skewedFrom("beforeHeartbeatTx", ms, () => inject("POST", `/v1/engine-runner/runs/${runId}/heartbeat`, pfRunner.auth, { phase: "running", progress: 0.4 }));
+      expect(hb.statusCode, hb.body).toBe(200);
+      expect(hb.json()).toMatchObject({ cancel: false, status: "leased" });
+      expect(await stampsOf(runId)).toEqual({ leased: true, beat: true, lease: true });
+
+      // a sweep while skewed ends nothing live on the database clock ...
+      await skewedSweep(ms);
+      expect((await runRow(runId)).status).toBe("leased");
+      // ... and ends the run once its lease has passed on it
+      await db.execute(sql`UPDATE engine_runs SET lease_expires_at = now() - interval '1 second' WHERE id = ${runId}`);
+      await skewedSweep(ms);
+      expect(await runRow(runId)).toMatchObject({ status: "timeout", errorCode: "lease_expired" });
+      expect((await keyOf(runId)).revokedAt).not.toBeNull();
+    });
+  }
+
+  it("a retried lease (the same request id) under a clock two days ahead re-issues the run, stamped on the database clock", async () => {
+    const s = await startRun({});
+    expect(s.statusCode, s.body).toBe(202);
+    const runId = s.json().run.id as string;
+    const requestId = randomUUID();
+    const first = await inject("POST", "/v1/engine-runner/lease", pfRunner.auth, { ...PF_BUILD(), requestId });
+    expect(first.statusCode, first.body).toBe(200);
+    expect(first.json().runId).toBe(runId);
+    const retry = await skewedFrom("beforeLeaseAdmission", 2 * DAY_MS, () => inject("POST", "/v1/engine-runner/lease", pfRunner.auth, { ...PF_BUILD(), requestId }));
+    expect(retry.statusCode, retry.body).toBe(200);
+    expect(retry.json().runId).toBe(runId);
+    expect((await runRow(runId)).status).toBe("leased");
+    expect(await stampsOf(runId)).toEqual({ leased: true, beat: true, lease: true });
+    await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, {});
   });
 });
 

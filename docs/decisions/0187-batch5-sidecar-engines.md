@@ -2730,3 +2730,36 @@ real gateway). Each guard was shown red by breaking it (named with each decision
      The evidence is in each engine's `THIRD_PARTY.md`. Re-check at each garak, nltk, promptfoo, jks-js, nunjucks,
      node-forge or braces release, and by 2026-11-16 at the latest. That date governs: the fsspec image allow-list entry
      (decision 160) runs to 2026-12-09, but this acceptance, fsspec included, ends on 2026-11-16 and is re-checked then.
+
+## As built: N11, every lease time on the database clock (2026-10-17, PR #416)
+
+M-075 applies to the engine run's lease. A replica's process clock running ahead or behind no longer changes a lease
+decision. All of these are stamped and judged on the database clock:
+
+- **Lease route.** The fast path reads `databaseNow`. The transaction reads `databaseWallNow` once, after the runner
+  and engine locks are held. That one reading serves the admission, the deadline, the lease, the heartbeat stamp and
+  an idempotent re-issue.
+- **Heartbeat.** The run row is locked first, then the wall clock is read. "Deadline passed", "lease gone" and the
+  renewed `lease_expires_at` all use that reading. Before this fix the heartbeat used the process clock. A gateway
+  two days ahead then ended every freshly leased run as `lease_expired` on its first heartbeat. A gateway behind
+  kept leases alive for the length of the skew.
+- **Sweep.** `runEngineRunSweep` no longer takes a `now`. Its reads compare the deadline, lease, queue expiry and
+  raw-report retention with SQL `now()`. The re-check on the locked row (`finishEngineRun`'s `stillApplies`)
+  receives the wall clock read under that lock. `finishEngineRun` ends the run with that same reading, so a late
+  result is judged on it too.
+- **Run creation and approval.** `created_at` and `queue_expires_at` are stamped from the wall clock, read under
+  the run's locks. A lease compares `queue_expires_at` with SQL `now()`.
+- **Self-test stamps.** The engine self-test routes and the engine PATCH judge and stamp `selfTestPassedAt` with
+  `databaseNow`. The registration route already did. A lease judges that stamp's age on the database clock.
+
+Tests (`zz-b5-engines`, "N11"):
+
+- The process clock is skewed two days ahead, and in a second case two days behind. The skew is applied from
+  hooks that run once the runner's request is authenticated: `beforeLeaseAdmission`, before the fast path, and
+  `beforeHeartbeatTx`.
+- Each case leases a run, heartbeats it and sweeps twice while the clock is still skewed. The run must stay
+  leased while its lease is live on the database clock. It must end as `lease_expired` once the lease has passed.
+- A retried lease with the same request id under the forward skew re-issues the same run, stamped on the
+  database clock.
+
+**Not verified here:** these tests need Postgres and have run only in CI.

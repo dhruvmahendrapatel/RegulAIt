@@ -1986,3 +1986,24 @@ the committed report.
 
 **Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
 database shards run it.
+
+## As built: N11, keyset pages for the placements list (2026-10-17, PR #416)
+
+`GET /v1/execution-placements` pages each of its two lists with an `(at, id)` keyset cursor. The placements list
+uses `nextCursor` and the list of refusals that never got a placement row uses `refusalsNextCursor`. The older
+`before` parameter is still accepted.
+
+- **One row per placement.** Under 0198 a placement can have up to three report rows: one end report, one
+  `cancelled` and one `session_lost`. The list used to join reports, which gave one result row per report. Several
+  rows then shared one `(created_at, id)`, so a page boundary between them hid the rest. The list now selects
+  placements only and reads the reports of each page in a second query.
+- **Which report counts.** The effective outcome is the report `pickLinkedReport` chooses, the same choice as
+  `executor-channel.ts`. A `placed` report always wins, so a later `cancelled` or `session_lost` row never hides
+  that the call ran. Every report row is still listed, oldest first, in a new `reports` field of the list and the
+  detail route, so no evidence is hidden.
+- **Filters.** `outcome` and `reason` match a placement when any of its report rows matches. A placement with no
+  report row matches on its own decision. The filters therefore find the same placements as before, each once.
+- **Caveat: transaction start time.** `created_at` is the inserting transaction's start time (`now()`). Suppose a
+  transaction starts before a page is read but commits after it. Its rows then land behind the cursor, and that
+  walk never shows them; a new walk from the top does. Every timestamp keyset has this gap; the ordering is
+  otherwise total. A complete export has to order by a commit-ordered key instead. The keyset is not one.

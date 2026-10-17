@@ -712,4 +712,54 @@ describe("ADR-0190 I2 routes: profiles, assignments, placements", () => {
     expect((await inject("GET", "/v1/execution-placements?cursor=not-a-cursor", adminAuth)).json()).toEqual({ error: "invalid_cursor" });
     expect((await inject("GET", "/v1/execution-placements?refusalsCursor=not-a-cursor", adminAuth)).statusCode).toBe(400);
   });
+
+  it("N11 fix round B2: a placement with several report rows is ONE row; limit=1 walks every placement once, its reports listed", async () => {
+    // two offered placements, each later carrying a `placed` report AND a `cancelled` row (0198 allows both)
+    const ex = await newExecutor("l2-reports", "gvisor", [{ digest: RESTRICTED_DIGEST, cls: "user_space_kernel" }]);
+    const { agentId } = await newAgent("reports");
+    const projectId = await newProject("public");
+    const mine: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const d = await decidePlacement(db, { workloadKind: "mcp_stdio", mcpServerId: stdioId, projectId, agent: { kind: "agent", id: agentId }, imageDigest: IMAGE, onlyExecutorIds: [ex], ttlSeconds: 600 });
+      expect(d.kind).toBe("offered");
+      if (d.kind !== "offered") return;
+      // (a ten-minute offer: no expiry sweep writes its own end report while this test runs)
+      const [p] = await db.select({ id: executionPlacements.id }).from(executionPlacements).where(eq(executionPlacements.offerId, d.offerId));
+      await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, applied_class, report_sha256)
+        VALUES (${p!.id}, ${d.offerId}, ${randomUUID()}, 'placed', 'user_space_kernel', ${"a".repeat(64)})`);
+      await db.execute(sql`INSERT INTO execution_placement_reports (placement_id, offer_id, audit_id, outcome, end_code)
+        VALUES (${p!.id}, ${d.offerId}, ${randomUUID()}, 'cancelled', 'later_gate')`);
+      mine.push(p!.id);
+    }
+    type Listed = { id: string; outcome: string; reports: Array<{ outcome: string }> };
+    const seen: Listed[] = [];
+    let cursor: string | null = null;
+    for (let pages = 0; pages < 2000; pages++) {
+      const r = await inject("GET", `/v1/execution-placements?limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, adminAuth);
+      expect(r.statusCode, r.body).toBe(200);
+      const page = r.json() as { placements: Listed[]; nextCursor: string | null };
+      expect(page.placements.length).toBeLessThanOrEqual(1);
+      seen.push(...page.placements);
+      cursor = page.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull();
+    expect(new Set(seen.map((p) => p.id)).size).toBe(seen.length);
+    const total = rows<{ n: number }>(await db.execute(sql`select count(*)::int as n from execution_placements`))[0]!.n;
+    expect(seen).toHaveLength(total);
+    for (const id of mine) {
+      const listed = seen.find((p) => p.id === id)!;
+      // the `placed` report is the effective one (a later cancellation never hides that the call ran); both are listed
+      expect(listed.outcome).toBe("placed");
+      expect(listed.reports.map((x) => x.outcome).sort()).toEqual(["cancelled", "placed"]);
+    }
+    // a filter on either report's outcome finds the placement, once
+    for (const outcome of ["placed", "cancelled"]) {
+      const found = (await inject("GET", `/v1/execution-placements?outcome=${outcome}&limit=200`, adminAuth)).json() as { placements: Listed[] };
+      for (const id of mine) expect(found.placements.filter((p) => p.id === id)).toHaveLength(1);
+    }
+    // the detail route lists them too
+    const one = (await inject("GET", `/v1/execution-placements/${mine[0]}`, adminAuth)).json() as Listed;
+    expect(one.reports).toHaveLength(2);
+  });
 });

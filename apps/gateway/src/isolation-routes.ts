@@ -54,6 +54,7 @@ import { z } from "zod";
 import {
   agents,
   and,
+  asc,
   auditLog,
   builderAgents,
   desc,
@@ -99,7 +100,7 @@ import {
   type RequirableIsolationClass,
 } from "@regulait/shared";
 import { identityServiceFailure } from "./delegation.js";
-import { auditExecutor, freshAttestation, quarantineExecutor, executorView } from "./executor-channel.js";
+import { auditExecutor, freshAttestation, quarantineExecutor, executorView, pickLinkedReport } from "./executor-channel.js";
 import { databaseNow } from "./delegation.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { deploymentEnvironment } from "./oauth/common.js";
@@ -665,13 +666,19 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
   // I4 (migration 0198): a governed stdio decision's row is `offered`; how it ended is its linked report row. The
   // view shows the EFFECTIVE outcome (the report's, else `offered`: still awaiting the sandbox's report), and names
   // the decision-time evidence (image, runtime flags hash, attestation) beside it.
+  // N11 fix round B2: ONE row per placement (a placement may carry up to three report rows, 0198), so the
+  // `(at, id)` keyset is unique per row; the effective report is `pickLinkedReport`'s, and every report row is
+  // listed beside it (`reports`, oldest first) so none is hidden.
+  type ReportRow = typeof executionPlacementReports.$inferSelect;
   const placementView = (r: {
     placement: typeof executionPlacements.$inferSelect;
-    report: typeof executionPlacementReports.$inferSelect | null;
+    reports: readonly ReportRow[];
     profileName: string | null;
     profileVersion: number | null;
     executorName: string | null;
-  }) => ({
+  }) => {
+    const report = pickLinkedReport(r.reports);
+    return {
     id: r.placement.id,
     auditId: r.placement.auditId,
     workloadKind: r.placement.workloadKind,
@@ -683,21 +690,52 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     profileVersion: r.profileVersion,
     executorId: r.placement.executorId,
     executorName: r.executorName,
-    appliedClass: r.report?.appliedClass ?? r.placement.appliedClass,
-    reportSha256: r.report?.reportSha256 ?? r.placement.reportSha256,
-    outcome: r.report?.outcome ?? r.placement.outcome,
-    refusalCode: r.report?.refusalCode ?? r.placement.refusalCode,
+    appliedClass: report?.appliedClass ?? r.placement.appliedClass,
+    reportSha256: report?.reportSha256 ?? r.placement.reportSha256,
+    outcome: report?.outcome ?? r.placement.outcome,
+    refusalCode: report?.refusalCode ?? r.placement.refusalCode,
     imageDigest: r.placement.imageDigest,
     runtimeFlagsSha256: r.placement.runtimeFlagsSha256,
     attestationId: r.placement.attestationId,
     decidedAs: r.placement.outcome,
     createdAt: r.placement.createdAt.toISOString(),
-  });
+    reports: r.reports.map((x) => ({
+      id: x.id,
+      auditId: x.auditId,
+      outcome: x.outcome,
+      appliedClass: x.appliedClass,
+      reportSha256: x.reportSha256,
+      refusalCode: x.refusalCode,
+      endCode: x.endCode,
+      createdAt: x.createdAt.toISOString(),
+    })),
+    };
+  };
+  /** the report rows of these placements, oldest first, grouped by placement */
+  const reportsOf = async (placementIds: readonly string[]): Promise<Map<string, ReportRow[]>> => {
+    const out = new Map<string, ReportRow[]>();
+    if (placementIds.length === 0) return out;
+    const rows = await db
+      .select()
+      .from(executionPlacementReports)
+      .where(inArray(executionPlacementReports.placementId, [...placementIds]))
+      .orderBy(asc(executionPlacementReports.createdAt), asc(executionPlacementReports.id));
+    for (const r of rows) out.set(r.placementId, [...(out.get(r.placementId) ?? []), r]);
+    return out;
+  };
+  // a placement matches an outcome (or a refusal code) when one of its report rows does, or, with no report row,
+  // when its own decision does: the same placements the earlier per-report join listed, each once
+  const anyReportOr = (
+    reportCol: typeof executionPlacementReports.outcome | typeof executionPlacementReports.refusalCode,
+    placementCol: typeof executionPlacements.outcome | typeof executionPlacements.refusalCode,
+    value: string,
+  ) =>
+    sql`(exists (select 1 from ${executionPlacementReports} where ${executionPlacementReports.placementId} = ${executionPlacements.id} and ${reportCol} = ${value})
+      or (not exists (select 1 from ${executionPlacementReports} where ${executionPlacementReports.placementId} = ${executionPlacements.id}) and ${placementCol} = ${value}))`;
   const placementSelect = () =>
     db
       .select({
         placement: executionPlacements,
-        report: executionPlacementReports,
         profileName: executionProfiles.name,
         profileVersion: executionProfiles.version,
         executorName: executors.name,
@@ -705,7 +743,6 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
         atText: atTextSql(executionPlacements.createdAt),
       })
       .from(executionPlacements)
-      .leftJoin(executionPlacementReports, eq(executionPlacementReports.placementId, executionPlacements.id))
       .leftJoin(executionProfiles, eq(executionProfiles.digest, executionPlacements.profileDigest))
       .leftJoin(executors, eq(executors.id, executionPlacements.executorId));
 
@@ -719,10 +756,9 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
     if ((q.data.cursor && !cursor) || (q.data.refusalsCursor && !refusalsCursor)) return reply.status(400).send({ error: "invalid_cursor" });
     const continuing = cursor !== null || refusalsCursor !== null;
     const conds = [
-      // the effective outcome: a linked report's, else the row's own
-      outcome ? sql`coalesce(${executionPlacementReports.outcome}, ${executionPlacements.outcome}) = ${outcome}` : undefined,
+      outcome ? anyReportOr(executionPlacementReports.outcome, executionPlacements.outcome, outcome) : undefined,
       workloadKind ? eq(executionPlacements.workloadKind, workloadKind) : undefined,
-      reason ? sql`coalesce(${executionPlacementReports.refusalCode}, ${executionPlacements.refusalCode}) = ${reason}` : undefined,
+      reason ? anyReportOr(executionPlacementReports.refusalCode, executionPlacements.refusalCode, reason) : undefined,
       before ? lt(executionPlacements.createdAt, new Date(before)) : undefined,
       cursor ? afterCursorDesc(executionPlacements.createdAt, executionPlacements.id, cursor) : undefined,
     ].filter((c) => c !== undefined);
@@ -734,7 +770,9 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
             .orderBy(desc(executionPlacements.createdAt), desc(executionPlacements.id))
             .limit(limit + 1)
         : [];
-    const rows = fetched.slice(0, limit);
+    const page = fetched.slice(0, limit);
+    const reports = await reportsOf(page.map((r) => r.placement.id));
+    const rows = page.map((r) => ({ ...r, reports: reports.get(r.placement.id) ?? [] }));
     const lastRow = fetched.length > limit ? rows[rows.length - 1] : undefined;
     // refusals decided before any placement row could be written (policy_unresolved; a digest no profile names):
     // they exist only as audit rows, and are listed so none is hidden (owner decision B)
@@ -781,8 +819,9 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
   app.get("/v1/execution-placements/:placementId", async (req, reply) => {
     const p = placementParam.safeParse(req.params);
     if (!p.success) return reply.status(400).send({ error: "invalid_placement_id" });
-    const [row] = await placementSelect().where(eq(executionPlacements.id, p.data.placementId));
-    if (!row) return reply.status(404).send({ error: "placement_not_found" });
+    const [found] = await placementSelect().where(eq(executionPlacements.id, p.data.placementId));
+    if (!found) return reply.status(404).send({ error: "placement_not_found" });
+    const row = { ...found, reports: (await reportsOf([found.placement.id])).get(found.placement.id) ?? [] };
     const [audit] = await db
       .select({ id: auditLog.id, at: auditLog.at, ruleId: auditLog.ruleId, effect: auditLog.effect, reason: auditLog.reason, detail: auditLog.detail })
       .from(auditLog)
