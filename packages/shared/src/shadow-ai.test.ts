@@ -267,7 +267,7 @@ describe("the coverage scorecard states the gap rather than a score", () => {
     const card = coverageScorecard([{ kind: "egress_log", imports: 2, rows: 900, lastImportedAt: "2026-08-01T00:00:00.000Z" }]);
     expect(card.sourcesOn).toBe(1);
     expect(card.sourcesPossible).toBe(4);
-    expect(card.statement).toMatch(/ships no collector/);
+    expect(card.statement).toMatch(/No active discovery source is enabled, so nothing is scanned/);
     expect(card.statement).toMatch(/does not prove its absence/);
     expect(card.sources.find((s) => s.kind === "code_scan")!.on).toBe(false);
   });

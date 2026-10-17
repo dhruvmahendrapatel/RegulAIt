@@ -12,10 +12,13 @@
  *
  * WHAT THIS DEPLOYMENT ACTUALLY DOES — SAY IT BEFORE ANYTHING ELSE
  * ----------------------------------------------------------------
- * ADR-0055 §2 describes three "collectors". THERE IS NO COLLECTOR IN THIS
- * REPOSITORY AND NONE SHIPS. This control plane does not sit on a customer's
- * network, does not hold their DNS resolver, does not run on their laptops, and
- * has no browser extension. Every route below operates on evidence the CUSTOMER
+ * ADR-0055 §2 describes three "collectors". The routes IN THIS FILE collect
+ * nothing: they do not sit on a customer's network, hold their DNS resolver,
+ * run on their laptops, or ship a browser extension. ADR-0195 adds ACTIVE,
+ * read-only discovery in `discovery-*.ts` (admin-enabled sources, off by
+ * default), whose scan runs write findings through `upsertFindings` below; every
+ * posture sentence these routes return names the enabled sources, or says
+ * nothing is scanned. Every route below operates on evidence the CUSTOMER
  * exports and uploads:
  *
  *   egress_log    a forward-proxy / firewall / DNS-resolver / SIEM export
@@ -89,6 +92,7 @@ import {
   DEFAULT_AI_SIGNATURES,
   DiscoveryParseError,
   EVIDENCE_ADAPTER_POSTURE,
+  EVIDENCE_KINDS,
   EVIDENCE_MAX_BYTES,
   EVIDENCE_MAX_ROWS,
   EvidenceFormatError,
@@ -122,6 +126,9 @@ import {
 import { defaultBaseUrlFor } from "@regulait/model-provider";
 import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
 import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
+import { activeDiscoverySources, activeDiscoveryStatement } from "./discovery-posture.js";
+
+const isImportKind = (k: string): k is EvidenceKind => (EVIDENCE_KINDS as readonly string[]).includes(k);
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -209,6 +216,11 @@ function toSignature(r: typeof aiEndpointSignatures.$inferSelect): AiSignature {
     replacementAgentId: r.replacementAgentId,
     replacementNote: r.replacementNote,
     provenance: r.provenance,
+    os: r.os,
+    ecosystem: r.ecosystem,
+    toolId: r.toolId,
+    note: r.note,
+    confidence: r.confidence,
     lastUpdatedAt: r.lastUpdatedAt,
     enabled: r.enabled,
   };
@@ -396,6 +408,11 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           minLength: s.minLength ?? null,
           provenance: s.provenance,
           enabled: s.enabled,
+          os: s.os ?? null,
+          ecosystem: s.ecosystem ?? null,
+          toolId: s.toolId ?? null,
+          note: s.note ?? null,
+          confidence: s.confidence ?? "high",
           updatedByUserId: req.authCtx.userId ?? null,
         });
         inserted += 1;
@@ -440,6 +457,11 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       // an admin touching a row TAKES OWNERSHIP of it — see the seed above
       provenance: body.provenance === "admin" ? "admin" : body.provenance,
       enabled: body.enabled,
+      os: body.os ?? null,
+      ecosystem: body.ecosystem ?? null,
+      toolId: body.toolId ?? null,
+      note: body.note ?? null,
+      confidence: body.confidence,
       lastUpdatedAt: new Date(),
       updatedByUserId: req.authCtx.userId ?? null,
     };
@@ -572,7 +594,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
 
   app.get("/v1/shadow-ai/adapters", async () => ({
     adapters: describeEvidenceAdapters(),
-    posture: EVIDENCE_ADAPTER_POSTURE,
+    posture: `${EVIDENCE_ADAPTER_POSTURE} ${await activeDiscoveryStatement(db)}`,
     pipeline:
       "An adapter turns a raw file into the same evidence rows the standard import accepts, and hands them to the " +
       "same preview-then-apply pipeline. It is a layer, not a second importer: it cannot reach a code path the " +
@@ -791,7 +813,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       fieldsUsed: parsed.fieldsUsed,
       limits: adapter.limits,
       verification: adapter.verification,
-      posture: EVIDENCE_ADAPTER_POSTURE,
+      posture: `${EVIDENCE_ADAPTER_POSTURE} ${await activeDiscoveryStatement(db)}`,
     });
   });
 
@@ -862,7 +884,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       governedHosts: [...governed.entries()]
         .map(([host, reason]) => ({ host, reason }))
         .sort((a, b) => a.host.localeCompare(b.host)),
-      posture: SHADOW_DISCOVERY_POSTURE,
+      posture: `${SHADOW_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
       limits: SHADOW_DISCOVERY_LIMITS,
     };
   });
@@ -956,7 +978,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     }
 
     return {
-      posture: MCP_DISCOVERY_POSTURE,
+      posture: `${MCP_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
       observed: results.length,
       unregistered: unregistered.length,
       registryCount: registered.size,
@@ -1086,7 +1108,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         ingest: null,
         rawContentStored: false,
         retention,
-        posture: SHADOW_DISCOVERY_POSTURE,
+        posture: `${SHADOW_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
       });
     }
 
@@ -1153,7 +1175,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       ingest: result,
       rawContentStored: false,
       retention,
-      posture: SHADOW_DISCOVERY_POSTURE,
+      posture: `${SHADOW_DISCOVERY_POSTURE} ${await activeDiscoveryStatement(db)}`,
     });
   });
 
@@ -1197,6 +1219,8 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       .where(eq(shadowAiImports.status, "applied"));
     const byKind = new Map<EvidenceKind, { kind: EvidenceKind; imports: number; rows: number; lastImportedAt: string | null }>();
     for (const r of importRows) {
+      // ADR-0195: the coverage scorecard counts the four IMPORT kinds; scan runs are named in its statement instead
+      if (!isImportKind(r.kind)) continue;
       const cur = byKind.get(r.kind) ?? { kind: r.kind, imports: 0, rows: 0, lastImportedAt: null };
       cur.imports += 1;
       cur.rows += r.rowCount;
@@ -1220,7 +1244,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         dispositionStale:
           r.disposition !== "open" && r.dispositionAt !== null && r.lastSeenAt > r.dispositionAt,
       })),
-      coverage: coverageScorecard([...byKind.values()]),
+      coverage: coverageScorecard([...byKind.values()], await activeDiscoverySources(db)),
       posture:
         "Detection is a signal, not proof of misuse. An SDK dependency is a capability, not a violation; an endpoint " +
         "hit may be a sanctioned integration. Every row is a lead for human triage — hence the disposition states.",

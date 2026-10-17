@@ -218,7 +218,7 @@ export const SHADOW_AI_CATALOG_V1: ReadonlyArray<ShadowCatalogEntry> = deepFreez
 export const SHADOW_DISCOVERY_POSTURE =
   "First-party discovery classifies text YOU paste against a catalogue COMPILED INTO THIS BUILD (version " +
   SHADOW_AI_CATALOG_VERSION +
-  ", frozen — inherently incomplete and dated). Nothing runs continuously, nothing is scraped, no network call is made, " +
+  ", frozen — inherently incomplete and dated). This classifier runs only on what you paste: it scrapes nothing and makes no network call, " +
   "and the pasted content is not stored — only the classification summary and any ingested evidence rows are. " +
   "A hit proves an artifact MENTIONED a provider (a resolved name, a declared dependency), never that traffic flowed; " +
   "encrypted or DoH traffic that bypasses your log is invisible here. Findings are still computed by this deployment's " +
