@@ -60,7 +60,7 @@ import {
   type StdioWorkload,
 } from "@regulait/shared";
 import { awaitPlacement, cancelOffer, offerLinkedPlacement, recordSessionLost, refusedLinkedPlacement } from "./executor-channel.js";
-import { decidePlacement, resolveRequirement, type PlacementRequest } from "./execution-placement.js";
+import { decidePlacement, interactivePersonCaller, resolveRequirement, type PersonStdioRelaxationUse, type PlacementRequest } from "./execution-placement.js";
 import { stdioSessionLostError, stdioSessionLostResponse } from "./stdio-session-loss.js";
 
 // ---------------------------------------------------------------------------
@@ -379,6 +379,8 @@ export interface StdioPlacementInput {
   projectId: string | null;
   agent: PlacementRequest["agent"];
   parentGrantId?: string | null;
+  /** owner decision C: an interactive person's own call (`interactivePersonCaller`); absent = not interactive */
+  interactivePerson?: boolean;
   mcpServerId: string;
   imageDigest: string;
   workload: StdioWorkload;
@@ -391,11 +393,15 @@ export interface StdioPlacementInput {
  * — on a delegated call — the grant and the agent that is its actor (read
  * from the grant's actor identity, never from the request). A call with no
  * grant names no agent: decision 7 item 5 then places it as an unknown agent.
+ *
+ * Owner decision C: `principal` is the request's SERVER-DERIVED session facts (`abacPrincipalFromRequest`). Only a
+ * person's interactive session with no grant is `interactivePerson`; a caller that supplies none (a worker loop,
+ * a builder agent) never is.
  */
 export async function stdioPlacementContext(
   db: Db,
-  call: { userId: string; projectId: string | null; delegationGrantId?: string | null },
-): Promise<Pick<StdioPlacementInput, "userId" | "projectId" | "agent" | "parentGrantId">> {
+  call: { userId: string; projectId: string | null; delegationGrantId?: string | null; principal?: { sessionOrigin?: string | null } | null },
+): Promise<Pick<StdioPlacementInput, "userId" | "projectId" | "agent" | "parentGrantId" | "interactivePerson">> {
   let agent: PlacementRequest["agent"] = null;
   if (call.delegationGrantId) {
     const [g] = await db
@@ -406,7 +412,13 @@ export async function stdioPlacementContext(
     if (g?.agentId) agent = { kind: "agent", id: g.agentId };
     else if (g?.builderAgentId) agent = { kind: "builder_agent", id: g.builderAgentId };
   }
-  return { userId: call.userId, projectId: call.projectId, agent, parentGrantId: call.delegationGrantId ?? null };
+  return {
+    userId: call.userId,
+    projectId: call.projectId,
+    agent,
+    parentGrantId: call.delegationGrantId ?? null,
+    interactivePerson: agent === null && interactivePersonCaller(call.principal, call.delegationGrantId),
+  };
 }
 
 /** I4 (review lows): the session failures that are not decision 7 refusals, each with its own label (never no_executor) */
@@ -447,6 +459,7 @@ export async function placeStdioSession(db: Db, input: StdioPlacementInput): Pro
     agent: input.agent,
     mcpServerId: input.mcpServerId,
     parentGrantId: input.parentGrantId ?? null,
+    interactivePerson: input.interactivePerson === true,
     imageDigest: input.imageDigest,
     actorUserId: input.userId,
   });
@@ -473,9 +486,10 @@ export async function placeStdioSession(db: Db, input: StdioPlacementInput): Pro
 /** how long a decision-time session waits for its call to connect before it is abandoned (closed, offer withdrawn) */
 export const LINKED_SESSION_ATTACH_MS = 60_000;
 
+/** owner decision C: each outcome names the relaxation its requirement relied on (null = none), for the decision row */
 export type GovernedStdioPlacement =
-  | { kind: "offered"; placementId: string; offerId: string; executorId: string }
-  | { kind: "refused"; code: ExecutionRefusalReason; placementId: string | null };
+  | { kind: "offered"; placementId: string; offerId: string; executorId: string; relaxation: PersonStdioRelaxationUse | null }
+  | { kind: "refused"; code: ExecutionRefusalReason; placementId: string | null; relaxation: PersonStdioRelaxationUse | null };
 
 /**
  * Decision 7 for one governed `tools/call` on a stdio server, INSIDE the transaction that writes the call's
@@ -487,7 +501,7 @@ export type GovernedStdioPlacement =
 export async function placeGovernedStdio(
   tx: Db,
   decisionAuditId: string,
-  call: Pick<StdioPlacementInput, "userId" | "projectId" | "agent" | "parentGrantId" | "mcpServerId" | "imageDigest">,
+  call: Pick<StdioPlacementInput, "userId" | "projectId" | "agent" | "parentGrantId" | "interactivePerson" | "mcpServerId" | "imageDigest">,
 ): Promise<GovernedStdioPlacement> {
   const requirement = await resolveRequirement(tx, {
     workloadKind: "mcp_stdio",
@@ -495,12 +509,14 @@ export async function placeGovernedStdio(
     agent: call.agent,
     mcpServerId: call.mcpServerId,
     parentGrantId: call.parentGrantId ?? null,
+    interactivePerson: call.interactivePerson === true,
   });
   if (requirement.kind !== "required") {
     // review M2: a refused row keyed to the decision even here; its requirement columns are NULL (nothing resolved)
     const placementId = await refusedLinkedPlacement(tx, decisionAuditId, { workloadKind: "mcp_stdio", imageDigest: call.imageDigest }, "policy_unresolved");
-    return { kind: "refused", code: "policy_unresolved", placementId };
+    return { kind: "refused", code: "policy_unresolved", placementId, relaxation: null };
   }
+  const relaxation = requirement.relaxation;
   if (stdioSessions.size >= STDIO_MAX_LIVE_SESSIONS) {
     // review low: this process holds as many live sessions as it may; no executor can be given another one from here
     const placementId = await refusedLinkedPlacement(
@@ -509,7 +525,7 @@ export async function placeGovernedStdio(
       { workloadKind: requirement.workloadKind, requiredClass: requirement.requiredClass, requiredBy: requirement.requiredBy, profileDigest: requirement.profile.digest, imageDigest: call.imageDigest },
       "no_executor",
     );
-    return { kind: "refused", code: "no_executor", placementId };
+    return { kind: "refused", code: "no_executor", placementId, relaxation };
   }
   const out = await offerLinkedPlacement(tx, decisionAuditId, {
     workloadKind: requirement.workloadKind,
@@ -519,7 +535,9 @@ export async function placeGovernedStdio(
     imageDigest: call.imageDigest,
     ...(testAffinity ? { onlyExecutorIds: testAffinity } : {}),
   });
-  return out.kind === "offered" ? { kind: "offered", placementId: out.placementId, offerId: out.offerId, executorId: out.executorId } : out;
+  return out.kind === "offered"
+    ? { kind: "offered", placementId: out.placementId, offerId: out.offerId, executorId: out.executorId, relaxation }
+    : { kind: "refused", code: out.code, placementId: out.placementId, relaxation };
 }
 
 /**

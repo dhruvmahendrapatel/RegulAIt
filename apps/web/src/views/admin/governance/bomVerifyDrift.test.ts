@@ -7,7 +7,9 @@
  * finality and receipt version, a set of rule-breaking mutations, and each
  * outcome) and asserts that the browser and the shared schema agree on accept
  * or refuse for every one. A rule added to either side without the other fails
- * here.
+ * here. The mutations include the section list, unknown body versions and the
+ * nested shapes the browser mirrors (`manifestOk` names what it leaves to the
+ * gateway).
  */
 import { describe, expect, it } from "vitest";
 import * as m from "./bomModel";
@@ -164,6 +166,38 @@ describe("drift: readVerifyReport accepts exactly what the shared bomVerifyRespo
       ["no identity, a failing check", (r) => setCheck(noIdentity(r), "body_schema", bad("body_schema", "schema_violation"))],
       ["no identity, only the failing check", (r) => ({ ...noIdentity(r), sections: [], checks: [bad("bundle_manifest_signature", "bundle_unreadable")] })],
       ["no identity, only an unverifiable check", (r) => ({ ...noIdentity(r), sections: [], checks: [unv("bundle_manifest_signature", "not_a_bundle")] })],
+      // the section list itself
+      ["sections reversed", (r) => ({ ...r, sections: [...r.sections].reverse() })],
+      ["a section dropped", (r) => ({ ...r, sections: r.sections.slice(1) })],
+      ["a section repeated", (r) => ({ ...r, sections: r.sections.length ? [...r.sections, r.sections[0]] : r.sections })],
+      ["sections emptied", (r) => ({ ...r, sections: [] })],
+      ["a section added to an AI BOM", (r) => (r.sections.length ? r : { ...r, sections: [{ section: s.DECISION_BOM_SECTIONS[0], status: "valid", completeness: "recorded", notRecordedReason: null }] })],
+      ["a section of an unknown name", (r) => (r.sections.length ? firstSection(r, { section: "not_a_section" }) : r)],
+      ["a not-recorded section without its reason", (r) => (r.sections.length ? firstSection(r, { completeness: "not_recorded", notRecordedReason: null }) : r)],
+      ["a section with an extra key", (r) => (r.sections.length ? firstSection(r, { extra: 1 }) : r)],
+      // body versions this build does not know
+      ["bodyVersion unknown", (r) => ({ ...r, bodyVersion: "regulait.decision-bom/99" })],
+      ["bodyVersion empty", (r) => ({ ...r, bodyVersion: "" })],
+      ["bodyVersion a number", (r) => ({ ...r, bodyVersion: 1 })],
+      // nested shapes
+      ["manifest not an object", (r) => (r.manifest ? { ...r, manifest: "manifest.json" } : r)],
+      ["manifest an array", (r) => (r.manifest ? { ...r, manifest: [] } : r)],
+      ["manifest of another schema", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, schema: "regulait.export-bundle/99" } } : r)],
+      ["manifest without files", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: undefined } } : r)],
+      ["manifest files unsorted", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: [...r.manifest.files].reverse() } } : r)],
+      ["manifest files emptied", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: [] } } : r)],
+      ["manifest file without a digest", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: [{ path: "README.txt" }] } } : r)],
+      ["manifest file digest not hex", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, files: r.manifest.files.map((f: Any, i: number) => (i === 0 ? { ...f, sha256: "Z".repeat(64) } : f)) } } : r)],
+      ["manifest chain segment dropped", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, audit: null } } : r)],
+      ["manifest subject of an unknown kind", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, subject: { ...r.manifest.subject, kind: "other-bom" } } } : r)],
+      ["manifest with an extra key", (r) => (r.manifest ? { ...r, manifest: { ...r.manifest, extra: true } } : r)],
+      ["a check with an extra key", (r) => ({ ...r, checks: r.checks.map((c: Check, i: number) => (i === 0 ? { ...c, extra: 1 } : c)) })],
+      ["a check ref with a space", (r) => ({ ...r, checks: r.checks.map((c: Check, i: number) => (i === 0 ? { ...c, ref: "a b" } : c)) })],
+      ["identity with an extra key", (r) => (r.identity ? { ...r, identity: { ...r.identity, extra: 1 } } : r)],
+      ["capabilities missing", (r) => ({ ...r, capabilities: undefined })],
+      ["capabilities with a wrong access", (r) => ({ ...r, capabilities: { ...r.capabilities, access: "owner" } })],
+      ["report with an extra key", (r) => ({ ...r, extra: 1 })],
+      ["verifiedAt not a time", (r) => ({ ...r, verifiedAt: "yesterday" })],
     ];
     let accepted = 0;
     let refused = 0;
@@ -190,4 +224,20 @@ describe("drift: readVerifyReport accepts exactly what the shared bomVerifyRespo
     expect(refused).toBeGreaterThan(500);
     // the matrix is a few thousand parses and runs near vitest's 5s default under load: an explicit bound
   }, 30_000);
+
+  it("an unreadable subject without its failing check is named as what was verified: a bundle, or a stored BOM", async () => {
+    const s = await sharedBom();
+    const refusal = (r: Any) => {
+      try {
+        m.readVerifyReport(r, expectationFor(r));
+      } catch (err) {
+        return (err as Error).message;
+      }
+      return null;
+    };
+    const unreadable = (source: string) => ({ ...verifyBase(s, { subject: "decision-bom", source }), identity: null, cannotProve: [], outcome: "invalid" });
+    expect(refusal(unreadable("bundle"))).toContain("an unreadable bundle is reported as more than invalid");
+    expect(refusal(unreadable("decision_bom"))).toContain("an unreadable stored BOM is reported as more than invalid");
+    expect(refusal(unreadable("decision_bom"))).not.toContain("bundle");
+  });
 });

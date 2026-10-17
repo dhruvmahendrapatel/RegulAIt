@@ -7,7 +7,7 @@
 import { useId, useState, type ReactNode } from "react";
 import { Button, Field, Fieldset, Input, Modal, Select, Textarea } from "../../ui/kit";
 import v from "../views.module.css";
-import { draftFromRecord, patchBody, type PatchDraft, type PatchField } from "./patchForm";
+import { draftFromRecord, multiChoices, patchBody, type PatchDraft, type PatchField } from "./patchForm";
 
 export function PatchFormModal(props: {
   title: string;
@@ -123,10 +123,10 @@ export function PatchFormModal(props: {
                   <Fieldset legend={f.label}>
                     {f.loading ? (
                       <p className={v.faint} role="status">Loading the choices…</p>
-                    ) : f.options.length === 0 ? (
+                    ) : multiChoices(f, props.record).length === 0 ? (
                       <p className={v.faint}>Nothing to choose from.</p>
                     ) : null}
-                    {f.options.map((o) => {
+                    {(f.loading ? f.options : multiChoices(f, props.record)).map((o) => {
                       const optionId = `${id}-${o.value}`;
                       const on = (draft.set[f.key] ?? []).includes(o.value);
                       return (
@@ -148,9 +148,12 @@ export function PatchFormModal(props: {
                       );
                     })}
                     {(() => {
-                      const unlisted = (draft.set[f.key] ?? []).filter((x) => !f.options.some((o) => o.value === x));
-                      return unlisted.length > 0 && !f.loading ? (
-                        <p className={v.faint}>{unlisted.length} stored entr{unlisted.length === 1 ? "y" : "ies"} not in this list {unlisted.length === 1 ? "is" : "are"} kept as {unlisted.length === 1 ? "it is" : "they are"}.</p>
+                      const unlisted = f.loading ? 0 : multiChoices(f, props.record).filter((o) => o.unlisted).length;
+                      return unlisted > 0 ? (
+                        <p className={v.faint}>
+                          {unlisted === 1 ? "A stored entry is" : `${unlisted} stored entries are`} not in the list above and shown by id: a ticked one is kept
+                          {f.max !== undefined ? ` and counts toward the limit of ${f.max}` : ""}; untick it to remove it.
+                        </p>
                       ) : null;
                     })()}
                   </Fieldset>

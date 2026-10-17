@@ -255,6 +255,31 @@ describe("ADR-0190 I8: capture (buildExecutionFacts)", () => {
     const unknownFloor = reads({ placements: new Map([[U(100), placedRead({}, { requiredBy: "a_floor_nobody_named" })]]) });
     expect(() => buildDecisionFacts(row(), unknownFloor)).toThrow(/regulait\.decision-facts\.v2/);
   });
+
+  // ADR-0190 owner decision C: each use of "a person's own stdio call" is recorded in the decision's facts
+  const RELAXATION = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId: U(950), scopeKind: "mcp_server", scopeId: U(2) } as const;
+  const relaxedRow = (relaxation: unknown) => row({ detail: { receiptClass: "decision", execution: { placementId: PLACEMENT, offerId: U(906), relaxation } } });
+  const offeredPlacement = () => reads({ placements: new Map([[U(100), placedRead({}, { outcome: "offered", reportSha256: null, offerId: U(906), attestationId: ATTESTATION, imageDigest: `sha256:${D("e")}`, runtimeFlagsSha256: D("f") })]]) });
+  it("owner decision C: the relaxation on the decision row is captured (subject kind and relaxation id), and the v2 facts parse", () => {
+    const f = buildDecisionFacts(relaxedRow(RELAXATION), offeredPlacement());
+    expect(f.v === "regulait.decision-facts.v2" && f.execution).toEqual({ ...OFFERED, relaxation: RELAXATION });
+    // none used: the key is absent, so such facts stay byte-identical to a capture before 0201
+    const plain = buildExecutionFacts(row(), offeredPlacement());
+    expect(plain).toEqual(OFFERED);
+    expect(plain && "relaxation" in plain).toBe(false);
+  });
+  it("owner decision C: a malformed relaxation fails the capture (never dropped); the contract confines it to a resolved stdio requirement", () => {
+    for (const bad of [{ ...RELAXATION, kind: "person_stdio_l1" }, { ...RELAXATION, subjectKind: "api_key" }, { ...RELAXATION, scopeKind: "org" }, { ...RELAXATION, relaxationId: "r1" }, { ...RELAXATION, extra: 1 }, "yes"]) {
+      expect(() => buildDecisionFacts(relaxedRow(bad), offeredPlacement()), JSON.stringify(bad)).toThrow(DecisionFactsCaptureError);
+    }
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, relaxation: RELAXATION }).success).toBe(true);
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, relaxation: null }).success).toBe(true);
+    expect(decisionExecutionFactsSchema.safeParse({ ...PLACED, workloadKind: "code_exec", relaxation: RELAXATION }).success).toBe(false);
+    expect(decisionExecutionFactsSchema.safeParse({ ...EXTERNAL, relaxation: RELAXATION }).success).toBe(false);
+    expect(
+      decisionExecutionFactsSchema.safeParse({ ...PLACED, placement: "refused", executor: null, appliedClass: null, attestation: null, refusalCode: "policy_unresolved", requiredClass: null, requiredBy: null, profile: null, relaxation: RELAXATION }).success,
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

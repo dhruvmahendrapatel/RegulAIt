@@ -384,11 +384,17 @@ const hex = (c: string) => digit(c) || (c >= "a" && c <= "f") || (c >= "A" && c 
 export const uuidOk = (s: string) =>
   s.length === 36 && [...s].every((c, i) => ([8, 13, 18, 23].includes(i) ? c === "-" : hex(c)));
 
+/** `IDENTITY_PICKER_MAX` (packages/shared identity contract, mirrored; pinned by isolationPlacementModel.test.ts): each picker list's cap */
+export const IDENTITY_PICKER_MAX = 1000;
+
 /**
  * `GET /v1/identity/picker-sources` `workerIdentities` (ADR-0188 S6): the active worker_runtime identities an
  * executor may be registered against, as `{id, label}` (the label is the SPIFFE identifier). Null when the answer
- * cannot be read; a malformed option is dropped from the choices (it could not be sent anyway), and `truncated`
- * says when the gateway capped the list.
+ * cannot be read; a malformed option is dropped from the choices (it could not be sent anyway).
+ *
+ * `truncated` is per list here, though the gateway's flag is one for every list it returns: it is true only when
+ * the gateway says something was cut AND this list is at the cap. A shorter list was not cut, whatever another list
+ * did. (A per-list flag from the gateway would make this exact: a backend follow-up.)
  */
 export function parseWorkerIdentities(value: unknown): { options: Array<{ id: string; label: string }>; truncated: boolean } | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
@@ -397,7 +403,7 @@ export function parseWorkerIdentities(value: unknown): { options: Array<{ id: st
   const options = v.workerIdentities
     .filter((o): o is { id: string; label: string } => o !== null && typeof o === "object" && uuidOk(String((o as { id?: unknown }).id ?? "")) && str((o as { label?: unknown }).label))
     .map((o) => ({ id: o.id, label: o.label }));
-  return { options, truncated: v.truncated === true };
+  return { options, truncated: v.truncated === true && v.workerIdentities.length >= IDENTITY_PICKER_MAX };
 }
 
 /** the body to post, or what is wrong with the draft. The gateway re-checks all of it. */
@@ -588,8 +594,20 @@ export function parsePlacements(
   };
 }
 
-/** `GET /v1/execution-placements/:placementId`: the decision with the audit row it was recorded under; null when unreadable */
-export function parsePlacementDetail(value: unknown): { id: string; auditId: string | null; auditRuleId: string | null; auditReason: string | null; reportSha256: string | null } | null {
+/**
+ * `GET /v1/execution-placements/:placementId`: the decision with the audit row it was recorded under; null when
+ * unreadable. `report` tells apart no report (a null hash: nothing was started) from a hash that is there but is
+ * not a SHA-256, which is never shown as "none". `attestationStrength` is the gateway's own word for the evidence,
+ * null when it is missing or not one this build knows.
+ */
+export function parsePlacementDetail(value: unknown): {
+  id: string;
+  auditId: string | null;
+  auditRuleId: string | null;
+  auditReason: string | null;
+  report: { kind: "none" } | { kind: "hash"; sha256: string } | { kind: "unreadable" };
+  attestationStrength: AttestationStrength | null;
+} | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
   if (!str(v.id)) return null;
@@ -600,9 +618,22 @@ export function parsePlacementDetail(value: unknown): { id: string; auditId: str
     auditId: audit ? text(audit.id) : null,
     auditRuleId: audit ? text(audit.ruleId) : null,
     auditReason: audit ? text(audit.reason) : null,
-    reportSha256: typeof v.reportSha256 === "string" && /^[0-9a-f]{64}$/.test(v.reportSha256) ? v.reportSha256 : null,
+    report:
+      v.reportSha256 === null
+        ? { kind: "none" }
+        : typeof v.reportSha256 === "string" && /^[0-9a-f]{64}$/.test(v.reportSha256)
+          ? { kind: "hash", sha256: v.reportSha256 }
+          : { kind: "unreadable" },
+    attestationStrength: oneOfStrength(v.attestationStrength),
   };
 }
+
+/** contract `ATTESTATION_STRENGTH` (mirrored; pinned by isolationPlacementModel.test.ts): the only strength a report has today */
+export const ATTESTATION_STRENGTHS = ["software_attested"] as const;
+export type AttestationStrength = (typeof ATTESTATION_STRENGTHS)[number];
+const oneOfStrength = (x: unknown): AttestationStrength | null => ((ATTESTATION_STRENGTHS as readonly unknown[]).includes(x) ? (x as AttestationStrength) : null);
+/** an attestation strength in words; null (missing or unknown) is said, never assumed */
+export const strengthText = (s: AttestationStrength | null): string => (s === "software_attested" ? "software-attested" : "attestation strength not reported");
 
 /** a refusal code in words: decision 7's reasons, or the mismatch */
 export const refusalText = (code: string | null): string =>
@@ -704,4 +735,140 @@ export function executorRefusal(error: unknown): string | null {
   if (!(error instanceof ApiError)) return null;
   const code = error.payload.error;
   return typeof code === "string" && Object.hasOwn(EXECUTOR_REFUSALS, code) ? EXECUTOR_REFUSALS[code]! : null;
+}
+
+// ---------------------------------------------------------------------------
+// owner decision C: a person's own stdio call, `GET /v1/execution-person-stdio-relaxations` and
+// `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId` (built)
+// ---------------------------------------------------------------------------
+
+/** where the relaxation is set (mirrors `PERSON_STDIO_RELAXATION_SCOPES`): never org-wide */
+export const PERSON_STDIO_SCOPES = ["mcp_server", "project"] as const;
+export type PersonStdioScope = (typeof PERSON_STDIO_SCOPES)[number];
+
+export interface PersonStdioRelaxation {
+  id: string;
+  scopeKind: PersonStdioScope;
+  scopeId: string;
+  scopeName: string | null;
+  createdAt: number;
+}
+
+/**
+ * The active relaxations. The answer must say it lowers L3 to L2 and nothing else (owner decision C); any other
+ * shape, or a row that cannot be read, makes the whole list unmeasured (null), never "none relaxed".
+ */
+export function parsePersonStdioRelaxations(value: unknown): PersonStdioRelaxation[] | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (v.default !== "microvm" || v.relaxedTo !== "user_space_kernel" || !Array.isArray(v.relaxations)) return null;
+  const out: PersonStdioRelaxation[] = [];
+  for (const raw of v.relaxations) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const r = raw as Record<string, unknown>;
+    const createdAt = isoMs(r.createdAt);
+    if (!str(r.id) || !str(r.scopeId) || createdAt === null) return null;
+    if (typeof r.scopeKind !== "string" || !(PERSON_STDIO_SCOPES as readonly string[]).includes(r.scopeKind)) return null;
+    if (r.from !== "microvm" || r.to !== "user_space_kernel") return null;
+    if (r.scopeName !== null && !str(r.scopeName)) return null;
+    out.push({ id: r.id, scopeKind: r.scopeKind as PersonStdioScope, scopeId: r.scopeId, scopeName: r.scopeName as string | null, createdAt });
+  }
+  return out;
+}
+
+/** the relaxation in force for one scope: undefined when the list is unmeasured, null when none */
+export function relaxationFor(list: PersonStdioRelaxation[] | null, scopeKind: PersonStdioScope, scopeId: string): PersonStdioRelaxation | null | undefined {
+  if (list === null) return undefined;
+  return list.find((r) => r.scopeKind === scopeKind && r.scopeId === scopeId) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// owner decision D: the admin-set project sensitivity, `GET /v1/execution-project-sensitivities` and
+// `PUT /v1/execution-project-sensitivities/:projectId` (built)
+// ---------------------------------------------------------------------------
+
+/** mirrors `PLACEMENT_SENSITIVITIES`, least to most strict */
+export const SENSITIVITIES = ["public", "internal", "confidential", "regulated"] as const;
+export type Sensitivity = (typeof SENSITIVITIES)[number];
+export const SENSITIVITY_LABEL: Readonly<Record<Sensitivity, string>> = {
+  public: "Public",
+  internal: "Internal",
+  confidential: "Confidential",
+  regulated: "Regulated",
+};
+const isSensitivity = (v: unknown): v is Sensitivity => typeof v === "string" && (SENSITIVITIES as readonly string[]).includes(v);
+
+export interface ProjectSensitivity {
+  projectId: string;
+  name: string;
+  useCaseCount: number;
+  useCaseSensitivity: Sensitivity | null;
+  adminSensitivity: Sensitivity | null;
+  /** null = the fact does not resolve: isolable calls in this project are refused (policy unresolved) */
+  effectiveSensitivity: Sensitivity | null;
+  personStdioRelaxationId: string | null;
+}
+
+function parseProjectSensitivity(raw: unknown): ProjectSensitivity | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const p = raw as Record<string, unknown>;
+  if (!str(p.projectId) || !str(p.name) || typeof p.useCaseCount !== "number" || !Number.isInteger(p.useCaseCount) || p.useCaseCount < 0) return null;
+  const opt = (v: unknown): Sensitivity | null | false => (v === null ? null : isSensitivity(v) ? v : false);
+  const uc = opt(p.useCaseSensitivity);
+  const admin = opt(p.adminSensitivity);
+  const eff = opt(p.effectiveSensitivity);
+  if (uc === false || admin === false || eff === false) return null;
+  if (p.personStdioRelaxationId !== null && !str(p.personStdioRelaxationId)) return null;
+  return {
+    projectId: p.projectId,
+    name: p.name,
+    useCaseCount: p.useCaseCount,
+    useCaseSensitivity: uc,
+    adminSensitivity: admin,
+    effectiveSensitivity: eff,
+    personStdioRelaxationId: p.personStdioRelaxationId as string | null,
+  };
+}
+
+/** every project, or null when the answer cannot be read (unmeasured, never an empty list) */
+export function parseProjectSensitivities(value: unknown): ProjectSensitivity[] | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const list = (value as { projects?: unknown }).projects;
+  if (!Array.isArray(list)) return null;
+  const out: ProjectSensitivity[] = [];
+  for (const raw of list) {
+    const p = parseProjectSensitivity(raw);
+    if (!p) return null;
+    out.push(p);
+  }
+  return out;
+}
+
+/** the PUT body for a select value: "" clears the field (null) */
+export function projectSensitivityBody(value: string): { sensitivity: Sensitivity | null } | null {
+  if (value === "") return { sensitivity: null };
+  return isSensitivity(value) ? { sensitivity: value } : null;
+}
+
+/** does the admin field raise the project above its use cases? (owner decision D: below them it has no effect) */
+export function adminFieldRaises(p: Pick<ProjectSensitivity, "useCaseSensitivity" | "adminSensitivity">): boolean {
+  if (p.adminSensitivity === null) return false;
+  if (p.useCaseSensitivity === null) return true;
+  return SENSITIVITIES.indexOf(p.adminSensitivity) > SENSITIVITIES.indexOf(p.useCaseSensitivity);
+}
+
+/** the owner decision C and D routes' refusal codes, in words (pinned to isolation-subject-routes.ts by the test) */
+export const SUBJECT_REFUSALS: Readonly<Record<string, string>> = {
+  invalid_scope: "That server or project could not be read. Refresh the page.",
+  scope_not_found: "That server or project no longer exists. Refresh the page.",
+  not_a_stdio_server: "Only a local (stdio) MCP server has an isolation floor to relax.",
+  invalid_project_id: "That project id could not be read. Refresh the list.",
+  project_not_found: "That project no longer exists. Refresh the list.",
+  changed_concurrently: "This changed while your request was being checked, so nothing was saved. Reload and try again.",
+};
+
+export function subjectRefusal(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  const code = error.payload.error;
+  return typeof code === "string" && Object.hasOwn(SUBJECT_REFUSALS, code) ? SUBJECT_REFUSALS[code]! : null;
 }

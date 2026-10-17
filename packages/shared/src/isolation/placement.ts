@@ -76,6 +76,46 @@ export type AgentAssurance = (typeof AGENT_ASSURANCE_LEVELS)[number];
 /** the class the most restrictive shipped profile requires (L3) */
 export const UNKNOWN_AGENT_FLOOR: RequirableIsolationClass = SHIPPED_EXECUTION_PROFILES[MOST_RESTRICTIVE_EXECUTION_PROFILE].minClass;
 
+/**
+ * ADR-0190 OWNER DECISION C (2026-10-15): "a person's own stdio call". An admin may lower the unknown-agent floor
+ * to L2, and ONLY for an `mcp_stdio` call with NO agent identity whose caller is a person in an interactive session
+ * (never an API key, a workload token, an engine or a low-assurance agent), scoped per MCP server or per project,
+ * never org-wide. The gateway decides the interactive and scope conditions from the database and the request;
+ * `computeRequiredClass` re-checks the kind and the assurance, so the relaxation can never lower any other floor.
+ */
+export const PERSON_STDIO_RELAXED_FLOOR: RequirableIsolationClass = "user_space_kernel";
+/** where the relaxation is set: per stdio MCP server or per project (never org-wide) */
+export const PERSON_STDIO_RELAXATION_SCOPES = ["mcp_server", "project"] as const;
+export type PersonStdioRelaxationScope = (typeof PERSON_STDIO_RELAXATION_SCOPES)[number];
+/** the relaxation's kind, as the evidence names it */
+export const PERSON_STDIO_RELAXATION_KIND = "person_stdio_l2" as const;
+/** the subject kind it applies to, as the evidence names it */
+export const PERSON_STDIO_SUBJECT_KIND = "interactive_person" as const;
+
+/**
+ * The session origins of a person in an INTERACTIVE session (owner decision C). A mirror of the gateway's
+ * `HUMAN_SESSION_ORIGINS` (auth.ts, ADR-0039): a password, OIDC or SAML sign-in. `api_key` (a session exchanged
+ * from an API key), `bootstrap` and `unknown` are not, and a non-session credential reports no session origin
+ * at all (`abacPrincipalFromRequest`). A gateway test holds the two lists equal.
+ */
+export const INTERACTIVE_SESSION_ORIGINS: readonly string[] = Object.freeze(["password", "oidc", "saml"]);
+
+/**
+ * ADR-0190 OWNER DECISION D (2026-10-16): a project's sensitivity for isolation is the strictest sensitivity among
+ * its AI use cases, MAX'd with the admin-set project field, which can therefore only raise it. Neither present, or
+ * any value outside the vocabulary, does NOT resolve (undefined; the caller refuses `policy_unresolved`).
+ */
+export function projectIsolationSensitivity(useCaseSensitivities: readonly unknown[], adminField: unknown): PlacementSensitivity | undefined {
+  const rank = (s: PlacementSensitivity) => PLACEMENT_SENSITIVITIES.indexOf(s);
+  const all = adminField === null || adminField === undefined ? [...useCaseSensitivities] : [...useCaseSensitivities, adminField];
+  let out: PlacementSensitivity | undefined;
+  for (const s of all) {
+    if (!isIn(PLACEMENT_SENSITIVITIES, s)) return undefined;
+    if (out === undefined || rank(s) > rank(out)) out = s;
+  }
+  return out;
+}
+
 /** the shipped profile a workload kind runs under when nothing is configured (decision 2) */
 export function defaultProfileFor(kind: IsolableWorkloadKind, assurance: AgentAssurance): ShippedExecutionProfileName {
   if (assurance !== "known") return MOST_RESTRICTIVE_EXECUTION_PROFILE;
@@ -129,8 +169,15 @@ export interface RequirementFacts {
   configuredProfileFloor: unknown;
   /** the parent grant's class on a delegated call, or null for none */
   parentRequiredClass: unknown;
+  /**
+   * Owner decision C: `true` only when the gateway found an active "person's own stdio call" relaxation in scope
+   * (the server or the project) for an interactive person's call with no agent. Anything else, absent included,
+   * is no relaxation: the strict floor stands. It is not a fact that can be unresolved, because its absence is
+   * the strict default.
+   */
+  personStdioRelaxed?: unknown;
 }
-export type RequirementFact = keyof RequirementFacts;
+export type RequirementFact = Exclude<keyof RequirementFacts, "personStdioRelaxed">;
 
 /** the order unresolved facts are reported in (the first one names the refusal) */
 export const REQUIREMENT_FACTS: readonly RequirementFact[] = [
@@ -181,6 +228,15 @@ export function unresolvedRequirementFact(f: RequirementFacts): RequirementFact 
 }
 
 /**
+ * The unknown-agent floor (decision 7 item 5 as amended by owner decision C): L3, or L2 only for an `mcp_stdio`
+ * call with no agent (`unknown`, never `no_identity` or `observed_autonomy_above_declared`) that the gateway found
+ * relaxed. It is still one floor in the MAX, so every other floor still wins over it.
+ */
+export function unknownAgentFloor(f: Pick<RequirementFacts, "workloadKind" | "agentAssurance" | "personStdioRelaxed">): RequirableIsolationClass {
+  return f.personStdioRelaxed === true && f.agentAssurance === "unknown" && f.workloadKind === "mcp_stdio" ? PERSON_STDIO_RELAXED_FLOOR : UNKNOWN_AGENT_FLOOR;
+}
+
+/**
  * Decision 7: the required class for one isolable call, or the first fact
  * that does not resolve. A class is a floor: the result is the MAX, so a tag,
  * an autonomy class or a parent can only raise it.
@@ -197,7 +253,7 @@ export function computeRequiredClass(f: RequirementFacts): RequiredClassResult {
   for (const c of f.complianceFloors as unknown[]) add("compliance_tag", c);
   add("autonomy_class", f.autonomyFloor);
   add("configured_profile", f.configuredProfileFloor);
-  if (f.agentAssurance !== "known") add("unknown_agent", UNKNOWN_AGENT_FLOOR);
+  if (f.agentAssurance !== "known") add("unknown_agent", unknownAgentFloor(f));
   add("parent_grant", f.parentRequiredClass);
   // the sensitivity floor and the configured profile always resolve to a class, so `floors` is never empty
   let winner = floors[0]!;
@@ -293,6 +349,19 @@ export type ExecutionProfileTargetKind = (typeof EXECUTION_PROFILE_TARGET_KINDS)
 
 /** PUT /v1/execution-profile-assignments/:targetKind/:targetId — a version id, or null for the shipped default */
 export const setExecutionProfileAssignmentSchema = z.object({ profileId: z.string().uuid().nullable() }).strict();
+
+/**
+ * PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId (owner decision C): `true` sets the relaxation
+ * (a `settings_relax` step-up, audited), `false` clears it (a tightening: audited, no step-up).
+ */
+export const setPersonStdioRelaxationSchema = z.object({ relaxed: z.boolean() }).strict();
+
+/**
+ * PUT /v1/execution-project-sensitivities/:projectId (owner decision D): the admin-set project sensitivity, or null
+ * to clear it. Every change is audited and needs a `settings_relax` step-up; the field can only raise the
+ * sensitivity the project's use cases give.
+ */
+export const setProjectIsolationSensitivitySchema = z.object({ sensitivity: z.enum(PLACEMENT_SENSITIVITIES).nullable() }).strict();
 
 /** what the profile list and the assignment views carry for one profile version */
 export interface ExecutionProfileVersionView {
