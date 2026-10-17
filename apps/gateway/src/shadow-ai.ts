@@ -142,6 +142,8 @@ export const SHIPPED_SIGNATURE_SEED: ReadonlyArray<Omit<AiSignature, "lastUpdate
     matchType: r.matchType,
     minLength: null,
     replacementNote: r.replacementNote,
+    // the row's documentation reference (staleness disclosure) is kept in the row's note
+    note: `documented at ${r.reference}`,
     provenance: r.provenance,
     enabled: r.enabled,
   })),
@@ -425,6 +427,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           value: s.value,
           matchType: s.matchType,
           minLength: s.minLength ?? null,
+          replacementNote: s.replacementNote ?? null,
           provenance: s.provenance,
           enabled: s.enabled,
           os: s.os ?? null,
@@ -444,7 +447,15 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       if (existing.provenance === "regulait-seed") {
         await db
           .update(aiEndpointSignatures)
-          .set({ provider: s.provider, matchType: s.matchType, minLength: s.minLength ?? null, lastUpdatedAt: new Date() })
+          .set({
+            provider: s.provider,
+            matchType: s.matchType,
+            minLength: s.minLength ?? null,
+            // still a seed row, so the shipped note and reference are ours to refresh
+            ...(s.replacementNote !== undefined ? { replacementNote: s.replacementNote } : {}),
+            ...(s.note !== undefined ? { note: s.note } : {}),
+            lastUpdatedAt: new Date(),
+          })
           .where(eq(aiEndpointSignatures.id, existing.id));
         refreshed += 1;
       }

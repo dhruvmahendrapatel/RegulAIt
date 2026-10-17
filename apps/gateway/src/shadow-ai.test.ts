@@ -126,7 +126,10 @@ describe("the signature catalogue is data, not code", () => {
     // the default signatures plus the discovery slices' artifact seed rows (ADR-0195 SD2: cloud_ai_service)
     expect(body.total).toBe(SHIPPED_SIGNATURE_SEED.length);
     expect(SHIPPED_SIGNATURE_SEED.length).toBeGreaterThan(DEFAULT_AI_SIGNATURES.length);
-    expect(body.signatures.filter((s: { kind: string }) => s.kind === "cloud_ai_service").length).toBe(SHIPPED_SIGNATURE_SEED.length - DEFAULT_AI_SIGNATURES.length);
+    const cloudRows = body.signatures.filter((s: { kind: string }) => s.kind === "cloud_ai_service") as Array<{ replacementNote: string | null; note: string | null }>;
+    expect(cloudRows.length).toBe(SHIPPED_SIGNATURE_SEED.length - DEFAULT_AI_SIGNATURES.length);
+    // the seed's replacement note and documentation reference are carried into the row
+    expect(cloudRows.every((r) => !!r.replacementNote && (r.note ?? "").startsWith("documented at https://"))).toBe(true);
     expect(body.oldestEntryAt).toBeTruthy();
     expect(body.posture).toMatch(/never a release/);
   });
