@@ -25,6 +25,7 @@ import {
   runMigrations,
   shadowAiFindings,
   workflowAssignmentRules,
+  workflowInstances,
   workflowTemplates,
   type Db,
 } from "@regulait/db";
@@ -191,7 +192,8 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
     expect(start.json().status).toBe("blocked_on_plan");
     const [tpl] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.name, SHADOW_AI_REMEDIATION_TEMPLATE_NAME));
     expect(tpl).toBeDefined();
-    expect(start.json().templateIds).toEqual([tpl!.id]);
+    const [instance] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, start.json().id));
+    expect(instance!.templateIds).toEqual([tpl!.id]);
     const types = (tpl!.definition as { stages: Array<{ type: string }> }).stages.map((s) => s.type);
     expect(types).toEqual(["trigger", "planning", "artifact_generation", "human_approval"]);
     const rules = await db.select().from(workflowAssignmentRules).where(eq(workflowAssignmentRules.templateId, tpl!.id));
