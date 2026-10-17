@@ -45,6 +45,8 @@ import {
   type RequirementFacts,
 } from "@regulait/shared";
 import { DelegationRefusedError } from "./delegation.js";
+import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { interactivePersonCaller } from "./execution-placement.js";
 import { mapDelegationRefusal } from "./oauth/token-endpoint.js";
 
 const L = { L1: "hardened_container", L2: "user_space_kernel", L3: "microvm" } as const satisfies Record<string, RequirableIsolationClass>;
@@ -231,6 +233,17 @@ const corpus = JSON.parse(readFileSync(new URL("../../../packages/shared/test-ve
 const toClass = (v: unknown): unknown => (typeof v === "string" && v in L ? L[v as keyof typeof L] : v);
 const has = (q: Record<string, unknown>, k: string) => Object.hasOwn(q, k);
 
+/** the request credential each vector caller stands for (owner decision C); an unknown caller is no credential */
+const CALLER_CREDENTIAL: Record<string, Parameters<typeof abacPrincipalFromRequest>[0]> = {
+  interactive_person: { authCtx: { via: "session" }, sessionAuth: { origin: "password" } },
+  api_key: { authCtx: { via: "api-key" } },
+  workload_token: { authCtx: { via: "workload" } },
+};
+function callerIsInteractive(caller: unknown): boolean {
+  const credential = typeof caller === "string" ? CALLER_CREDENTIAL[caller] : undefined;
+  return credential !== undefined && interactivePersonCaller(abacPrincipalFromRequest(credential), null);
+}
+
 /** the vector's semantic request as the gateway's resolved facts (a missing key stays missing) */
 function factsOf(q: Record<string, unknown>): RequirementFacts {
   const kind = q.workloadKind;
@@ -251,9 +264,10 @@ function factsOf(q: Record<string, unknown>): RequirementFacts {
     agentAssurance: q.agentAssurance,
     configuredProfileFloor: has(q, "ownProfileFloor") ? toClass(q.ownProfileFloor) : undefined,
     parentRequiredClass: has(q, "parentRequiredClass") ? toClass(q.parentRequiredClass) : undefined,
-    // owner decision C: the gateway finds a relaxation only for an interactive person's call (`interactivePersonCaller`
-    // and `personStdioRelaxation`); an API key or a workload token never reaches the pure function as relaxed
-    personStdioRelaxed: q.caller === "interactive_person" && (q.personStdioRelaxation === "mcp_server" || q.personStdioRelaxation === "project"),
+    // owner decision C: the vector's caller becomes the credential the request would carry, through the product's
+    // own derivation (`abacPrincipalFromRequest`) and predicate (`interactivePersonCaller`); only then can a
+    // relaxation in scope reach the pure function, so the API-key vector pins the product predicate
+    personStdioRelaxed: callerIsInteractive(q.caller) && (q.personStdioRelaxation === "mcp_server" || q.personStdioRelaxation === "project"),
   };
   // a named lookup that did not resolve (owner decision B's vector)
   const lookup = q.unresolvedPolicyLookup;

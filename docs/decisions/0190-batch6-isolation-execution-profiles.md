@@ -315,8 +315,7 @@ Then:
 | `isolation_enforcement` | `enforce` | none: `enforce` is the only value (owner decision A, 2026-10-11). To run where a class is unavailable, an admin lowers the requirement itself through the floor relaxations below | not relaxable; a request to set any other value is refused 400 |
 | Sensitivity floors | public/internal/confidential L2, regulated L3 | down to L1 per sensitivity, never below | audited, step-up |
 | `mcp_stdio` floor | L2 | L1 | audited, step-up |
-| Unknown-agent floor for `mcp_stdio`, "a person's own call" (owner decision C) | L3 | L2, only for a call with no agent from a person in an interactive session, per stdio server or project, never org-wide | setting audited, step-up; clearing audited, no step-up (built 2026-10-17, migration 0201) |
-| Project sensitivity (owner decision D) | the strictest use case; neither = `policy_unresolved` | an admin field that can only raise it | every change audited, step-up (built 2026-10-17, migration 0201) |
+| Unknown-agent floor for `mcp_stdio`, "a person's own call" (owner decision C) | L3 | L2, only for a call with no agent from a person in an interactive session, per stdio server or project, never org-wide | audited, step-up (`settings_relax`) |
 | `engine_worker` floor | L2 | L1 (OWNER DECISION 4) | audited, step-up |
 | `executor_attestation_max_age` | 2 h | up to 24 h | audited |
 | Profile `network` | `gateway_only` | `allow_list` entries, each exact host:port and on the egress allow-list | each entry audited |
@@ -1600,6 +1599,14 @@ Migration **0201** (`0201_isolation_person_stdio_and_project_sensitivity.sql`, h
 `search_path = pg_catalog, public, pg_temp`, and the table it guards refuses TRUNCATE (migration 0185's invariants).
 These points settle the build-time choices both decisions left open.
 
+**Decision 11, as built.** Owner decision C added the "person's own call" row to decision 11's table. As built,
+setting the relaxation is audited and needs the `settings_relax` step-up; clearing it is audited and needs none,
+because it tightens. Owner decision D's project sensitivity is not a decision 11 row; it works like one:
+- default: the strictest use case; with neither the use case nor the field, `policy_unresolved`;
+- relaxation: none, because an admin field can only raise it;
+- every change is audited and needs a step-up.
+Both were built 2026-10-17 in migration 0201.
+
 **Owner decision C: a person's own stdio call.**
 1. **Storage.** An `execution_person_stdio_relaxations` row, with `scope_kind` (`mcp_server` or `project`, no org
    scope), `scope_id`, who set it and when, and who cleared it and when. A partial unique index allows one active row
@@ -1652,6 +1659,14 @@ These points settle the build-time choices both decisions left open.
      `cleared_by` = the actor. It is audited `execution-person-stdio-relaxation-cleared` with
      `cause: stdio_program_changed`. This follows ADR-0188 S8, where an identity opt-in does not follow a url move.
      A rename or an unchanged program keeps it. A project-scope relaxation is untouched.
+   - **A set is bound to the program** (review fix). For server scope, the set's step-up facts include the server's
+     `stdioCommandDigest`, and the audit row records it. The insert transaction re-reads that digest under the
+     server row's lock (`FOR UPDATE`, the row a program-change PATCH also locks). A digest that moved answers
+     `409 changed_concurrently` and writes nothing. In either order, no relaxation survives on a new program. The
+     test holds the server row in a second connection, moves the digest while the set waits, and expects the 409.
+   - **The vector runner** (review fix) maps each vector's `caller` to the credential it stands for and passes it
+     through `abacPrincipalFromRequest` and `interactivePersonCaller`. The API-key vector therefore pins the product
+     predicate, not a test-side rule.
 
 **Owner decision D: the project's sensitivity.**
 6. **Storage and rule.** The column is `projects.isolation_sensitivity` (nullable, CHECKed to the four values).

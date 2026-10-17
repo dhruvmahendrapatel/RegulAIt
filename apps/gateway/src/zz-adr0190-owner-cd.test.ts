@@ -318,6 +318,41 @@ describe("ADR-0190 owner decision C: the routes", () => {
     expect(twice.json()).toEqual({ relaxation: null, changed: false });
   });
 
+  it("review: a set racing a program change never lands on the new program (409, nothing written; the step-up names the digest)", async () => {
+    const server = await newStdioServer("race");
+    const restore = await relaxStepUpForTest(db);
+    const client = await db.$client.connect();
+    try {
+      // a program-change PATCH in flight: it holds the server row and is about to move its digest
+      await client.query("BEGIN");
+      await client.query("SELECT id FROM mcp_servers WHERE id = $1 FOR UPDATE", [server]);
+      const put = inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: true });
+      // wait until the set is blocked on the server row (it read the old digest and passed its step-up)
+      let blocked = false;
+      for (let i = 0; i < 100 && !blocked; i++) {
+        const r = await db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%stdio_command_digest%FOR UPDATE%'`);
+        blocked = rows<{ n: number }>(r)[0]!.n > 0;
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(blocked, "the set waited on the server row").toBe(true);
+      await client.query("UPDATE mcp_servers SET stdio_command_digest = $1 WHERE id = $2", ["1".repeat(64), server]);
+      await client.query("COMMIT");
+      const res = await put;
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("changed_concurrently");
+      expect((await db.select().from(executionPersonStdioRelaxations).where(eq(executionPersonStdioRelaxations.scopeId, server))).length).toBe(0);
+      // the control: with the program unchanged, the set lands and its audit names the program it was decided on
+      const ok = await inject("PUT", `/v1/execution-person-stdio-relaxations/mcp_server/${server}`, adminAuth, { relaxed: true });
+      expect(ok.statusCode, ok.body).toBe(200);
+      const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-person-stdio-relaxed"), eq(auditLog.objectId, server)));
+      expect(audit!.detail).toMatchObject({ stdioCommandDigest: "1".repeat(64) });
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+      await restore();
+    }
+  });
+
   it("review LOW: an active relaxation whose server was deleted can still be cleared; nothing can be set on it", async () => {
     const server = await newStdioServer("gone");
     const set = await relaxWithStepUpOff("mcp_server", server);

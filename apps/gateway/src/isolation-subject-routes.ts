@@ -122,7 +122,7 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
   const actor = (req: FastifyRequest) => req.authCtx?.userId ?? NO_IDENTITY;
 
   /** the scope a relaxation is set on: an existing STDIO server (a remote one runs `external`) or an existing project */
-  async function loadScope(req: FastifyRequest, reply: FastifyReply): Promise<{ kind: PersonStdioRelaxationScope; id: string; name: string } | null> {
+  async function loadScope(req: FastifyRequest, reply: FastifyReply): Promise<{ kind: PersonStdioRelaxationScope; id: string; name: string; programDigest?: string | null } | null> {
     const p = scopeParam.safeParse(req.params);
     if (!p.success) {
       await reply.status(400).send({ error: "invalid_scope", detail: "the scope is an MCP server or a project, by id; there is no org-wide scope (ADR-0190 owner decision C)" });
@@ -130,7 +130,10 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
     }
     const { scopeKind, scopeId } = p.data;
     if (scopeKind === "mcp_server") {
-      const [srv] = await db.select({ id: mcpServers.id, name: mcpServers.name, transport: mcpServers.transport }).from(mcpServers).where(eq(mcpServers.id, scopeId));
+      const [srv] = await db
+        .select({ id: mcpServers.id, name: mcpServers.name, transport: mcpServers.transport, digest: mcpServers.stdioCommandDigest })
+        .from(mcpServers)
+        .where(eq(mcpServers.id, scopeId));
       if (!srv) {
         await reply.status(404).send({ error: "scope_not_found" });
         return null;
@@ -139,7 +142,7 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
         await reply.status(409).send({ error: "not_a_stdio_server", detail: "a remote MCP server runs on its own host; it has no isolation floor to relax (ADR-0190 decision 3)" });
         return null;
       }
-      return { kind: "mcp_server", id: srv.id, name: srv.name };
+      return { kind: "mcp_server", id: srv.id, name: srv.name, programDigest: srv.digest };
     }
     const [proj] = await db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.id, scopeId));
     if (!proj) {
@@ -172,19 +175,31 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
         ? ((await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, id)))[0]?.name ?? null)
         : ((await db.select({ name: projects.name }).from(projects).where(eq(projects.id, id)))[0]?.name ?? null);
     const scope = orphan
-      ? { kind: orphan.scopeKind, id: orphan.scopeId, name: (await scopeNameOf(orphan.scopeKind, orphan.scopeId)) ?? `${orphan.scopeId} (deleted)` }
+      ? { kind: orphan.scopeKind, id: orphan.scopeId, name: (await scopeNameOf(orphan.scopeKind, orphan.scopeId)) ?? `${orphan.scopeId} (deleted)`, programDigest: undefined as string | null | undefined }
       : await loadScope(req, reply);
     if (!scope) return reply;
     if (!b.success) return reply.status(400).send({ error: "invalid_body", issues: b.error.issues });
     const current = orphan ?? (await activeRelaxation(db, scope.kind, scope.id));
     if (b.data.relaxed) {
       if (current) return reply.send({ relaxation: relaxationView(current, scope.name), changed: false });
-      // the relaxation: a fresh step-up bound to this scope (ADR-0180; owner decision C)
-      const su = await requireStepUp(db, req, reply, { kind: "settings_relax", facts: { op: "person_stdio_relax", scopeKind: scope.kind, scopeId: scope.id } });
+      // the relaxation: a fresh step-up bound to this scope (ADR-0180; owner decision C) and, for a server, to the
+      // stdio program it was decided on (review: a set racing a program change never lands on the new program)
+      const programDigest = scope.kind === "mcp_server" ? (scope.programDigest ?? null) : undefined;
+      const su = await requireStepUp(db, req, reply, {
+        kind: "settings_relax",
+        facts: { op: "person_stdio_relax", scopeKind: scope.kind, scopeId: scope.id, ...(programDigest !== undefined ? { stdioCommandDigest: programDigest } : {}) },
+      });
       if (!su.ok) return reply;
-      let row: ExecutionPersonStdioRelaxationRow;
+      let row: ExecutionPersonStdioRelaxationRow | "program_changed";
       try {
         row = await db.transaction(async (tx) => {
+          if (programDigest !== undefined) {
+            // compare-and-set on the program, under the server row's lock: a program-change PATCH holds the same lock
+            // and clears any active relaxation in its own transaction, so neither order leaves one on the new program
+            const locked = await tx.execute(sql`SELECT stdio_command_digest AS d FROM mcp_servers WHERE id = ${scope.id} FOR UPDATE`);
+            const now = (locked as unknown as { rows: Array<{ d: string | null }> }).rows[0];
+            if (!now || now.d !== programDigest) return "program_changed" as const;
+          }
           // compare-and-set: the partial unique index admits one active row per scope, so a racing set fails here
           const [inserted] = await tx.insert(executionPersonStdioRelaxations).values({ scopeKind: scope.kind, scopeId: scope.id, createdByUserId: actor(req) }).returning();
           await auditExecutor(tx as unknown as Db, {
@@ -198,6 +213,7 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
               subjectKind: PERSON_STDIO_SUBJECT_KIND,
               scopeKind: scope.kind,
               scopeId: scope.id,
+              ...(programDigest !== undefined ? { stdioCommandDigest: programDigest } : {}),
               from: UNKNOWN_AGENT_FLOOR,
               to: PERSON_STDIO_RELAXED_FLOOR,
               relaxation: true,
@@ -213,6 +229,7 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
         if (uniqueViolation(e)) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
         throw e;
       }
+      if (row === "program_changed") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
       return reply.send({ relaxation: relaxationView(row, scope.name), changed: true });
     }
     if (!current) return reply.send({ relaxation: null, changed: false });
