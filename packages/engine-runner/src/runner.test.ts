@@ -320,10 +320,14 @@ describe("PR #203 review round 2", () => {
       signal = init.signal;
       return new Promise(() => {}); // never settles, never honours the signal
     };
-    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(hang), requestTimeoutMs: 20 });
+    // 250ms, not a few ms: the timer is per request, and under CI load a tighter
+    // bound could fire on the token request before the hanging lease request is issued
+    const client = new RunnerClient({ gatewayUrl: "http://gateway.test", http: withTokenEndpoint(hang), requestTimeoutMs: 250 });
     client.useKey(TEST_KEY);
     const t0 = Date.now();
     await expect(client.lease({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1" })).rejects.toBeInstanceOf(RunnerTimeoutError);
+    // the rejection comes from the 250ms timer, not from anything earlier
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(200);
     expect(Date.now() - t0).toBeLessThan(2000);
     expect(signal?.aborted).toBe(true);
   });

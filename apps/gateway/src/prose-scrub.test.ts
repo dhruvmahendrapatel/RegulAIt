@@ -64,6 +64,7 @@ import {
 import { CREDENTIAL_MATERIAL_RULES, scrubAuditText } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { relaxStepUpAround } from "./testing/step-up-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -380,13 +381,14 @@ describe("3. the siting: no route, no helper, and a third write shape", () => {
   it("scrubs the UPSERT branch — onConflictDoUpdate({ set }) writes the same columns", async () => {
     const host = `ps-upsert-${randomUUID().slice(0, 8)}.example.com`;
     // egress-allow-cleanup: afterAll — the first POST's id is recorded in upsertAllowHostId, which afterAll removes
+    // ADR-0034 owner amendment 2026-10-16: adding an entry is a stepped-up relaxation; this suite is about the scrub
     const post = (note: string) =>
-      app.inject({
+      relaxStepUpAround(db, () => app.inject({
         method: "POST",
         headers: AUTH,
         url: "/v1/egress-allow-hosts",
         payload: { host, note },
-      });
+      }));
 
     const first = await post("initial registration, reviewed by security");
     expect(first.statusCode).toBeLessThan(300);
