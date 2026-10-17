@@ -513,7 +513,10 @@ or web code is touched, and there is no migration.
     Only `NTE_DEVICE_NOT_FOUND` (0x80090035), `NTE_PROV_DLL_NOT_FOUND` (0x8009001E) or a missing `ncrypt.dll` count
     as "no hardware"; every other status from opening the provider (access denied, a TPM present but not ready, a
     failing provider DLL) is an error and the agent refuses, never falling back to DPAPI (security review M2;
-    `classifyProviderOpen`, unit-tested on every OS).
+    `classifyProviderOpen`, unit-tested on every OS). One exception, observed on the CI Windows runner: a machine
+    with no TPM answers `NTE_DEVICE_NOT_READY` (0x80090030), the same status as a TPM that is present but not
+    ready. That status counts as "no hardware" only when TBS (`Tbsi_GetDeviceInfo`) answers `TBS_E_TPM_NOT_FOUND`
+    (0x8028400F); any other TBS answer, or no `tbs.dll`, keeps it a refusal.
   - macOS: **refuses to create a key.** The Secure Enclave store needs the cgo build on the macOS runner (SD4j), and
     falling back to software on hardware every supported Mac has would break decision d.
 - **Tokens and upload** (ADR-0188 S7 reused; `internal/auth`, `internal/transport`): `client_credentials` with an
