@@ -489,6 +489,7 @@ import { registerBomRoutes } from "./bom-routes.js";
 import { registerAiBomSpdxFieldRoutes } from "./ai-bom-spdx-fields.js";
 // ADR-0190 (batch 6 item 3) I1 — every isolation route, a 501 stub until its slice lands
 import { registerIsolationRoutes } from "./isolation-routes.js";
+import { clearServerRelaxationOnProgramChange } from "./isolation-subject-routes.js";
 // ADR-0190 I3 — the executor channel (in-route ADR-0188 proof) and the placement broker
 import { registerExecutorChannelRoutes, type ExecutorChannelOptions } from "./executor-channel.js";
 import { engineTaskChannelHooks } from "./engine-tasks.js";
@@ -2380,6 +2381,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               `${label}: stdio command changed to ${written.stdioCommand} in closure image ${written.stdioCommandDigest} (pinned); ` +
               `admission reset to 'unscanned' — the next manifest is adjudicated from scratch`,
           });
+          // ADR-0190 owner decision C: an L2 relaxation for a person's own calls was about the old program; it does not
+          // follow the change (cleared and audited in this transaction, like an S8 opt-in on a url move)
+          await clearServerRelaxationOnProgramChange(tx as unknown as Db, { serverId, actorUserId: req.authCtx.userId ?? null, label });
         }
         return { row: written };
       }).catch(async (err: unknown) => {

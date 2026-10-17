@@ -626,6 +626,18 @@ export type DecisionExecutionPlacement = (typeof DECISION_EXECUTION_PLACEMENTS)[
 export const DECISION_EXECUTION_APPLIED = ["in_gateway", "external", ...APPLIED_ISOLATION_KINDS] as const;
 export const DECISION_EXECUTION_REFUSAL_CODES = [...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"] as const;
 
+/** ADR-0190 owner decision C: the relaxation one decision used (mirrors `PERSON_STDIO_RELAXATION_*`, isolation/placement.ts) */
+export const decisionExecutionRelaxationSchema = z
+  .object({
+    kind: z.literal("person_stdio_l2"),
+    subjectKind: z.literal("interactive_person"),
+    relaxationId: bomUuidSchema,
+    scopeKind: z.enum(["mcp_server", "project"]),
+    scopeId: bomUuidSchema,
+  })
+  .strict();
+export type DecisionExecutionRelaxation = z.infer<typeof decisionExecutionRelaxationSchema>;
+
 export const decisionExecutionFactsSchema = z
   .object({
     workloadKind: z.enum(WORKLOAD_KINDS),
@@ -653,6 +665,12 @@ export const decisionExecutionFactsSchema = z
     imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).nullable().optional(),
     /** ADR-0190 I4: the SHA-256 of the runtime flags the broker's attestation reported, as stamped on the row */
     runtimeFlagsSha256: bomDigestSchema.nullable().optional(),
+    /**
+     * ADR-0190 owner decision C: the "person's own stdio call" relaxation this decision's requirement relied on
+     * (the subject kind and the relaxation row's id). Optional, like the I4 fields, so v2 facts captured before it
+     * still parse and verify unchanged; a capture writes it only when a relaxation was used (absent = none).
+     */
+    relaxation: decisionExecutionRelaxationSchema.nullable().optional(),
     attestation: z
       .object({
         /** decision 6: the SHA-256 of the per-placement report the gateway compared before delivering the call */
@@ -673,12 +691,14 @@ export const decisionExecutionFactsSchema = z
       const want = isolable ? null : NON_ISOLABLE_EXECUTION[e.workloadKind as keyof typeof NON_ISOLABLE_EXECUTION];
       if (want !== e.placement) issue(`${e.workloadKind} is not recorded as ${e.placement} (decision 9)`);
       if (e.appliedClass !== e.placement) issue("a non-isolable call's applied class is its placement");
-      if (e.placementId !== null || e.requiredClass !== null || e.requiredBy !== null || e.refusalCode !== null || e.profile !== null || e.executor !== null || e.attestation !== null) {
+      if (e.placementId !== null || e.requiredClass !== null || e.requiredBy !== null || e.refusalCode !== null || e.profile !== null || e.executor !== null || e.attestation !== null || e.relaxation) {
         issue("a call no executor places has no placement facts");
       }
       return;
     }
     if (!isolable) issue(`${e.workloadKind} is never placed by an executor (decision 3)`);
+    // owner decision C: the relaxation exists only for a stdio call whose requirement resolved (it lowered a floor in it)
+    if (e.relaxation && (e.workloadKind !== "mcp_stdio" || e.requiredClass === null)) issue("only a resolved mcp_stdio requirement names a person's own stdio relaxation");
     // I4 review M2: an unresolved policy fact is exactly a requirement that did not resolve
     const unresolved = e.placement === "refused" && e.refusalCode === "policy_unresolved";
     if (e.placementId === null) issue("a placement names its row");

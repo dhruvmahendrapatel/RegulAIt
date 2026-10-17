@@ -2,8 +2,10 @@
  * ADR-0190 I3 (stdio added by I4) — THE BACKEND INTERFACE: what starts sandboxes under an
  * execution profile and runs decision 6's probes inside them. The executor
  * core (loop, offers, self-test, quarantine) is written against this; slice
- * I4 adds the gVisor backend (`runsc-backend.ts`), I6 Kata, I7 OpenShell. The
- * fake backend for tests is `./testing`.
+ * I4 adds the gVisor backend (`runsc-backend.ts`, L2), the I5 follow-up the runc
+ * backend (`runc-backend.ts`, L1 only; both on the Docker core in
+ * `docker-backend.ts`), I6 Kata, I7 OpenShell. The fake backend for tests is
+ * `./testing`.
  *
  * Two uses of one probe set:
  *  - the SELF-TEST: a canary sandbox under the profile under test, probed and
