@@ -7,7 +7,9 @@
  * when the digest it reports equals the manifest's.
  *
  * FOUNDATION STATE (2026-10-08). No engine image is built yet (B5-P, B5-M and
- * B5-G build and sign them from pinned upstream source). Until then every
+ * B5-G build them from pinned upstream source). ENG-IMG: each image's digests come
+ * from `engines/images.lock.json` (via the generated `images-lock.ts`), which the
+ * publish workflow's output updates. Until a publish is recorded every
  * `imageDigest` is null, so no runner can pass the self-test and no engine can
  * be enabled: the secure default holds by construction, not by a flag. The
  * usage-data switches below are the documented ones from the R9 source review
@@ -15,6 +17,7 @@
  * them per engine, and network denial stays the real control either way.
  */
 import { GARAK_ENGINE_VERSION, GARAK_USAGE_DATA_ENV, GARAK_WORKER_SELF_TEST_SWITCH, garakJudgeSets, garakManifestSets, garakReducedSet } from "./garak.js";
+import { ENGINE_IMAGES_LOCK } from "./images-lock.js";
 import { MODELSCAN_ENGINE_VERSION, modelscanReducedSet } from "./modelscan.js";
 import { PROMPTFOO_ENGINE_VERSION, PROMPTFOO_USAGE_DATA_ENV, promptfooManifestSets, promptfooReducedSet } from "./promptfoo.js";
 import { ENGINE_SELF_TEST_FUTURE_SKEW_MS, ENGINE_SELF_TEST_MAX_AGE_SECONDS, type EngineId, type EngineKind, type EngineNotRunReason, type RunnerSelfTest } from "./contract.js";
@@ -103,10 +106,11 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // pinned to the release the vendored OWASP mapping tables come from (ADR-0187: one moves to match the other)
     version: PROMPTFOO_ENGINE_VERSION,
     // round 13 [95]: bump with every build change (version or digest)
-    generation: 2, // B5-P2: 0.123.1 → 0.124.1 (decision 176)
-    // B5-P: the image (engines/promptfoo/Dockerfile) has not been built anywhere that could
-    // report a real digest, so this stays null and the engine cannot be enabled (secure default)
-    imageDigest: null,
+    // B5-P2: 0.123.1 → 0.124.1 (decision 176); ENG-IMG: plus one per recorded publish (the lock moves it)
+    generation: 2 + ENGINE_IMAGES_LOCK.promptfoo.publishGeneration,
+    // ENG-IMG: the published image's registry digest from engines/images.lock.json; null until the
+    // first publish, so the engine cannot be enabled (secure default)
+    imageDigest: ENGINE_IMAGES_LOCK.promptfoo.manifestDigest,
     licence: "MIT",
     maintainerCount: null,
     // the documented switches, plus (B5-P2) the WORKER container's own self-test: the runner reports
@@ -126,8 +130,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // virtual key. The runner key stays in the runner container, which never runs promptfoo. The
     // worker proves it at run time (the switch above), so decision 79's gate no longer applies.
     credentialIsolation: true,
-    // ADR-0190 I5: the task image is built with the engine image; until then nothing can be placed (fail closed)
-    taskImage: null,
+    // ADR-0190 I5 / ENG-IMG: the published image's id (config digest) from engines/images.lock.json; null until
+    // the first publish, and then nothing can be placed (fail closed)
+    taskImage: ENGINE_IMAGES_LOCK.promptfoo.imageId,
     taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
     // every set that runs here, by class; a set not listed is offensive (fail closed)
     sets: promptfooManifestSets(),
@@ -149,10 +154,11 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     displayName: "modelscan",
     // B5-M: pinned by hash in engines/modelscan/requirements.txt (image.test.ts keeps them in lockstep)
     version: MODELSCAN_ENGINE_VERSION,
-    generation: 1,
-    // B5-M: the image (engines/modelscan/Dockerfile) has not been built anywhere that could report a
-    // real digest, so this stays null and the engine cannot be enabled (secure default)
-    imageDigest: null,
+    // ENG-IMG: plus one per recorded publish (the lock moves it)
+    generation: 1 + ENGINE_IMAGES_LOCK.modelscan.publishGeneration,
+    // ENG-IMG: the published image's registry digest from engines/images.lock.json; null until the
+    // first publish, so the engine cannot be enabled (secure default)
+    imageDigest: ENGINE_IMAGES_LOCK.modelscan.manifestDigest,
     licence: "Apache-2.0",
     maintainerCount: null,
     // modelscan has no telemetry, update check or download (R10: measured under strace and with no
@@ -169,8 +175,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // (ADR-0187 decision 104), but the flag stays false until the built image is verified, so
     // decision 79's gate applies: enabling needs the audited, stepped-up acceptance
     credentialIsolation: false,
-    // ADR-0190 I5: the task image is built with the engine image; until then nothing can be placed (fail closed)
-    taskImage: null,
+    // ADR-0190 I5 / ENG-IMG: the published image's id (config digest) from engines/images.lock.json; null until
+    // the first publish, and then nothing can be placed (fail closed)
+    taskImage: ENGINE_IMAGES_LOCK.modelscan.imageId,
     taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
     // one set: scan the target artifact. Any other set is unclassified (offensive: approval first).
     sets: { scan: "standard" },
@@ -194,10 +201,11 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // B5-G: pinned by hash in engines/garak/requirements.txt (image.test.ts keeps them in lockstep)
     version: GARAK_ENGINE_VERSION,
     // 2: the image changed (decisions 193-202: probes admitted, data restored, Hub assets pre-seeded)
-    generation: 2,
-    // B5-G: the image (engines/garak/Dockerfile) has not been built anywhere that could report a real
-    // digest, so this stays null and the engine cannot be enabled (secure default)
-    imageDigest: null,
+    // ENG-IMG: plus one per recorded publish (the lock moves it)
+    generation: 2 + ENGINE_IMAGES_LOCK.garak.publishGeneration,
+    // ENG-IMG: the published image's registry digest from engines/images.lock.json; null until the
+    // first publish, so the engine cannot be enabled (secure default)
+    imageDigest: ENGINE_IMAGES_LOCK.garak.manifestDigest,
     licence: "Apache-2.0",
     // R10: about monthly releases and many contributors, but the merge-right count is unverified
     maintainerCount: null,
@@ -217,8 +225,9 @@ export const ENGINE_MANIFEST: Readonly<Record<EngineId, EngineManifestEntry>> = 
     // runs garak; the worker runs garak with no runner key and no state volume, and holds only the
     // run's own virtual key for the run's lifetime. Decision 79's acceptance therefore does not apply.
     credentialIsolation: true,
-    // ADR-0190 I5: the task image is built with the engine image; until then nothing can be placed (fail closed)
-    taskImage: null,
+    // ADR-0190 I5 / ENG-IMG: the published image's id (config digest) from engines/images.lock.json; null until
+    // the first publish, and then nothing can be placed (fail closed)
+    taskImage: ENGINE_IMAGES_LOCK.garak.imageId,
     taskEntry: { command: "/usr/local/bin/node", args: ["/app/dist/task-main.js"] },
     // every probe that runs, by class; a probe not listed is offensive (fail closed)
     sets: garakManifestSets(),

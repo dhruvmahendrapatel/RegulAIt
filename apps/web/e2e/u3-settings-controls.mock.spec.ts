@@ -30,7 +30,7 @@ export const STRICT_SETTINGS: Record<string, unknown> = {
   approvalSignatureMode: "passkey",
   stepUpMode: "required",
   stepUpMaxAgeSeconds: 120,
-  stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"],
+  stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"],
   toolApprovalSensitiveQuorum: 2,
   decisionReceiptsMode: "on",
   auditAnchorTimestampMode: "required",
@@ -272,7 +272,7 @@ test.describe("U3: each page carries its settings", () => {
     await expect(dialog).toContainText("Each action removed from the list can be done with the session alone.");
     await dialog.getByRole("button", { name: "Relax setting" }).click();
     await expect(dialog).toBeHidden();
-    expect(puts(st)).toEqual([{ stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "owner_change", "identity_manage", "pseudonym_reveal"] }]);
+    expect(puts(st)).toEqual([{ stepUpActions: ["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"] }]);
   });
 
   test("audit retention per mode: an override is sent as a map; empty modes are left out", async ({ page }) => {

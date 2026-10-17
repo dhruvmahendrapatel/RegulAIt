@@ -214,6 +214,72 @@ two contribute detection data under their licences.
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
 
+## Implementation notes: SD2 cloud scanners (2026-10-17)
+
+Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 registration).
+
+- **Open source first (decision 11).** The official SDKs are used as published: AWS SDK for JavaScript v3
+  `3.1152.0`, `@google-cloud/service-usage` `5.2.0`, `@google-cloud/asset` `7.2.0`, `@google-cloud/resource-manager`
+  `7.2.0`, `google-auth-library` `11.3.1`, and `@azure/identity` `4.14.0` with the Resource Graph, Cognitive
+  Services, Monitor and `@azure/monitor-query-logs` clients. The whole production tree is Apache-2.0, MIT,
+  BSD-3-Clause, ISC or 0BSD. Two pieces are ours, recorded in the package's `THIRD_PARTY.md`: an Azure `HttpClient`
+  over the guarded fetch (the pipeline package exports no fetch-based client for Node), and a small credential
+  memo. The AWS transport is the SDK's own `FetchHttpHandler` with `customFetch`. Audit-log entries are read through
+  the Logging REST API with the guarded auth client, because the Logging GAPIC client's REST fallback cannot decode
+  the `AuditLog` payload (no AuditLog type is bundled).
+- **Decision 8 found a real bypass.** `google-auth-library` 11.3.1 builds the external-account client's STS client
+  without the transporter it was given, so the workload identity token exchange left on global fetch: the first
+  fake-cloud test run received a live response from Google's STS endpoint. The package re-points it and fails
+  closed if the library's internal shape changes; a negative control shows the egress test fails without the fix.
+  To be reported upstream.
+- **Retries against a refusal.** google-gax reports a fetch that failed before any response, an egress refusal
+  included, as UNAVAILABLE and retries it for up to a minute. Calls pass `maxRetries: 2`. MSAL replaces any transport
+  failure with `network_error`; both are reported as `unreachable`.
+- **Federation signing algorithm (decision 3 check, 2026-10-17).** AWS IAM OIDC providers accept RS256, RS384,
+  RS512, ES256, ES384 and ES512 (IAM user guide, "Create an OpenID Connect (OIDC) identity provider"). GCP workload
+  identity federation accepts tokens "signed using the RS256 or ES256 algorithm" (IAM docs, "Configure Workload
+  Identity Federation with other identity providers"; an uploaded JWKS holds at most 8 keys). Microsoft Entra
+  supports only issuers whose tokens are signed with RS256; other algorithms "may work, but haven't been tested"
+  (Entra Workload ID, "Important considerations and restrictions for federated identity credentials"). The one
+  algorithm all three accept is **RS256**, so the federation key beside the issuer's Ed25519 keys is RS256.
+- **Not supported:** instance-metadata credentials (AWS default chain, Azure managed identity, GCP metadata server).
+  The guard refuses the metadata address unconditionally and a source must name its principal. Decision 3's
+  "managed identity" is therefore not offered.
+- **Phase B: registered with SD0.** `apps/gateway/src/discovery-cloud-scanners.ts` adds `cloud_aws`, `cloud_gcp` and
+  `cloud_azure` to `DISCOVERY_SCANNERS`. It maps a source's target, scope and credential onto the adapters (fields
+  listed in that file and in `docs/deployment/CLOUD_DISCOVERY.md`), wraps `ctx.fetch` so every request awaits
+  `ctx.throttle()`, a 429 or 503 is retried only when `ctx.backoff()` agrees, and every body goes to `ctx.recordRaw()`,
+  pseudonymises principals as `cloud_principal`, calls `ctx.heartbeat()` between regions, projects and subscriptions,
+  and returns observations with `artifact: { kind: "cloud_ai_service", value: <service key> }` (matched by
+  `identifier`). AWS scope `include` is regions and an organisation-level AWS scope means every enabled region of the
+  one target account; GCP `include` is projects (organisation level needs `assetScope`); Azure `include` is
+  subscriptions (organisation level needs `managementGroupId`). The AWS static secret is a JSON object holding the key
+  id too, because SD0 refuses key-shaped names in public config.
+- **What could not be read, at run level.** Every read's status goes to SD0's `readOutcomes` (`<capability>@<scope>`,
+  problems first, at most 100). When no read succeeds at all the run also fails (`scanner_error`) with the summary.
+- **Credential fields follow SD0's allowlist** (`DISCOVERY_PUBLIC_CONFIG`): AWS federated `roleArn`; GCP federated
+  `projectNumber`, `workloadIdentityPool`, `workloadIdentityProvider` and `serviceAccountEmail`, from which the pool
+  provider audience is built; Azure `tenantId` and `clientId`. `credentialTargetMatch` gains GCP: the impersonated
+  service account's home project equal to the target `projectId` is a match; anything else is unverifiable, never a
+  mismatch, because a central project may hold the service account and pool.
+- **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated. A
+  federated credential fails its run with an explicit reason until the ADR-0188 issuer has an RS256 federation key
+  and a mint path for these audiences (key material and schema outside this slice); AWS `assume_role` needs
+  RegulAIt's own AWS principal and fails the same way. Organisation-level AWS account enumeration is not built.
+- **Scrubbing and account binding (SD0 final push).** Every short-lived credential an adapter obtains or sends is
+  passed to `ctx.registerSecret` before use: the OIDC assertion, AWS STS session credentials (and a static key's
+  parts), Google STS and IAM Credentials tokens, the Entra access token, and any bearer token on an API call. The AWS
+  scanner calls `sts:GetCallerIdentity` (no IAM permission needed) in every mode and reads nothing unless the
+  credential's account equals `target.accountId`.
+- **Seed.** The catalogue seed route installs `CLOUD_AI_SERVICE_SEED` with the default signatures
+  (`SHIPPED_SIGNATURE_SEED` in `shadow-ai.ts`; SD1 and SD3 add theirs the same way); admin-edited rows stay untouched.
+- **Review of #404 (fixed).** Endpoints are pinned against ambient SDK configuration (AWS endpoint URLs, shared-config
+  profiles, FIPS and dual-stack; `GOOGLE_CLOUD_UNIVERSE_DOMAIN`; `AZURE_AUTHORITY_HOST`), with an env-poisoning test.
+  `@azure/identity` also reads `AZURE_REGIONAL_AUTHORITY_NAME` with no override; it only selects a regional Microsoft
+  host, which still needs an allow entry. Trail-bucket objects are capped (8 MB read, 64 MB inflated) and response
+  digests at 4 MB; token-exchange responses go through an undigested credential fetch; Azure audit evidence is
+  attributed only to discovered AI resources; error details redact `key=`/`token=`-style values.
+
 ## As built: SD0 foundation (2026-10-17, migration 0202)
 
 **Status: built on branch `sd0-discovery-foundation`; migration 0202 with its journal entry (idx 202) after 0201.** No
@@ -394,6 +460,40 @@ kind as "not built yet" with the slice that builds it.
 read methods (SD1); `SHADOW_AI_CATALOG_V2` and seed rows for the artifact kinds (SD1/SD3); the endpoint-notice
 template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" state for cloud sources (SD2).
 
+### SD1 builder findings (decision 11, 2026-10-17)
+
+- **Dependency inventory.** syft was not adopted: it catalogues a checked-out filesystem or image, while the repo
+  scanner never clones (it reads a bounded set of files through the provider API and keeps no content), and it would
+  add a binary to the image. Manifests are parsed with `smol-toml` (BSD-3-Clause, already pinned in the repo) and
+  `fast-xml-parser` (MIT, entity processing off); npm, requirements.txt and go.mod reuse the ADR-0083 readers.
+  Gradle scripts and Gemfiles are programs and are read by a bounded literal line scan.
+- **Key detection.** The compiled gitleaks-derived `dlp.secret.*` rules are reused in JavaScript (they are compiled,
+  not data, and linear by construction); the gitleaks binary was not needed.
+- **Git provider clients.** No provider SDK is used: the existing adapters already call the four REST APIs through
+  an injected fetch, and the readers extend that pattern so every call stays on the guarded fetch.
+- **JSONC.** No maintained JSONC parser meets ADR-0176's maintenance window; a `.vscode/*.json` file with comments
+  is reported by its path and its contents are counted as unparsed.
+- **Catalogue v2.** 180 entries (v1's 81 unchanged first); coding-assistant entries were checked against vendor
+  documentation or the VS Code marketplace on 2026-10-17. One PatronAI extension id no longer resolves and was left
+  out. Seed rows for the artifact kinds use SD0's `identifier` match type.
+- **Repo scanners (SD1 Phase B).** `discovery-repo-scanner.ts` registers `repo_github`, `repo_gitlab`,
+  `repo_bitbucket` and `repo_azure_devops`. A source's target takes `namespace`, `baseUrl`, `history` and
+  `historyDepth`; history is scanned only when `history = true`, and because the target is bound to SD0's enable
+  step-up, turning history on for an enabled source is that step-up (decision 14). Requests go through `ctx.fetch`
+  after `ctx.throttle()`; 429 and 503 waits are `ctx.backoff`'s, and a limit still in force afterwards fails the run
+  as `rate_limited` (the next scheduled run retries). Commit authors go only to `ctx.pseudonymise("commit_author")`.
+  Every observation carries SD0's `location` (path, line, commit); `.env.example` variable names and a stdio MCP
+  server's command basename travel as `names` (names only, never values); `actorPseudonym` is the pseudonym of the
+  author of the commit the tree was read at (not a per-line blame). `ctx.catalogue.matches()` keeps a package, host
+  or extension id that only an admin-added row knows. Partial reads, empty repos and the repo-list cap are reported
+  as `readOutcomes`.
+- **Follow-up: federated git credentials.** The repo scanners accept only a static read-only token; a federated
+  credential is refused with `credential_unusable`. GitHub App installation tokens and OIDC federation (GitLab,
+  Azure DevOps workload identity) are later work.
+- **Save-time validation.** SD1 added an optional `validateTarget(target, scope)` to SD0's `Scanner`; the source
+  create and PATCH routes call it and refuse a malformed target or repo address with 400 `target_invalid` before
+  anything is written or a step-up grant is spent.
+
 ## Owner decisions (2026-10-17): endpoint agent and detection data
 
 Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-spike.md)). Nothing above is changed.
@@ -446,6 +546,39 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   software fallback applies and posture flags it.
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
+
+## SD3 build notes (2026-10-17)
+
+- The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
+  device filters to what the catalogue can match instead of shipping its whole software inventory; each query's
+  definition also carries the importer's column allowlist. `scripts/endpoint-pack-build.mjs` writes
+  `endpoint-discovery/osquery/`, and the shared suite fails on drift. Execution under osquery is pending (M-041).
+- Endpoint match types are exact, case-insensitive comparisons (`app_name`, `bundle_id`, `executable_name`,
+  `cli_binary`, `npm_package`, `process_name`, `ide_extension_id`, `browser_extension_id`, `env_var_name`), a
+  home-relative `config_path`, a decimal `listening_port`, and a `trait_set` over a closed trait vocabulary
+  (`listen_all_interfaces`, `user_writable_path`, `hidden_path`, `background_agent`). SD0 aligns its matcher columns
+  to these.
+- Seed: 90 rows derived from the pinned registry (commit `12b7bbf7`), 12 written by us (local runtime names and default
+  ports, AI CLI npm packages, three hidden-assistant trait rows). Rows for a general-purpose desktop app are imported
+  disabled: its presence is not AI use. The two LAN-listener trait rows stay enabled and are marked low confidence
+  (coordinator, 2026-10-17).
+- Importers bound each file at 5,000,000 bytes and 20,000 rows (one osquery line at 262,144 characters, one cell at
+  512); every row not imported is refused with its line and counted. A row with a value, command-line or contents
+  column is refused. Decorations are discarded. Device names are pseudonymised as well as device users, because host
+  names often carry a person's name. There is no default pseudonym hook; a missing hook refuses the import.
+- The pack is unsigned until SD4; the manifest carries its SHA-256 and a signer seam.
+- Phase B (wired into SD0): `endpoint_osquery` and `endpoint_inventory` are registered as upload-fed scanners (a
+  scheduled run observes nothing). `POST /v1/discovery/sources/:sourceId/endpoint-imports` parses the file with a
+  request-local keyed hash, matches it against the enabled catalogue, opens a run on the source holding its lease, and
+  commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only the devices
+  and device users of committed sightings get SD0 pseudonyms; the user travels as `actorPseudonym`. `POST /v1/discovery/endpoint-signatures/seed` installs the
+  seed as `identifier` rows (ports as `port:<n>`, trait sets as `trait:<sorted set>`). Endpoint retention is SD0's.
+- With SD0's follow-up columns (migration 0202): device names use the `device` pseudonym kind and device users
+  `device_user` (sent as `actorPseudonym`); seed rows carry `os` (one OS, or any when SD3 scoped a row to two),
+  `ecosystem` (`vscode`, `jetbrains`, `firefox`, `safari`, and `chromium` for Chrome and Edge), `tool_id`, `note` and
+  `confidence` (`high`, and `low` on the two LAN-listener trait rows); upload-fed sources are never scheduled. An
+  OS-scoped row matches only a sighting whose OS is known and equal, so an inventory export without an OS column
+  matches only the OS-neutral rows.
 
 ## As built: SD4a (endpoint agent, agent side)
 

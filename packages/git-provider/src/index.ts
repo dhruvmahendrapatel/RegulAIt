@@ -25,6 +25,8 @@ import { BitbucketProvider } from "./bitbucket.js";
 import { AzureDevOpsProvider } from "./azure-devops.js";
 
 export * from "./types.js";
+// ADR-0195 SD1: read-only repo readers for the repo scanner (no write method exists on them)
+export * from "./read/index.js";
 
 /**
  * #79b honesty: the kinds resolveProvider() can actually construct an adapter
