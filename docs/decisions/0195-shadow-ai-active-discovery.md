@@ -357,6 +357,20 @@ kind as "not built yet" with the slice that builds it.
       length) frozen. A scanner may use it to keep observations only an admin-added row would match; it never decides a
       finding.
 
+13. **Additions for SD3:**
+    - Pseudonym kind `device` (a device's own name), beside `device_user`, `commit_author` and `cloud_principal`; same
+      per-tenant HMAC, enveloped name and `pseudonym_reveal` step-up. Retention deletes `device` and `device_user`
+      pseudonyms alike. The device user rides on a sighting as `actorPseudonym` and shows pseudonymous in the findings.
+    - Catalogue columns on `ai_endpoint_signatures`: `os` (macos, windows, linux, or null), `ecosystem` (bounded name),
+      `tool_id` (bounded id), `note` (at most 500, registered for the ADR-0102 prose scrub) and `confidence` (high,
+      medium, low; default high), all CHECKed. A row with `os` or `ecosystem` set matches only an observation that
+      carries the same value (an observation without one does not match it). A medium- or low-confidence match is
+      recorded on the sighting and shown in the findings. The seed and the catalogue route accept the columns, and the
+      admin catalogue screen shows and sets them (and offers the artifact kinds).
+    - Upload-fed kinds (`endpoint_osquery`, `endpoint_inventory`, `uploadFed` in `DISCOVERY_KIND_SPECS`) have no
+      schedule: enabling sets no `next_run_at`, the worker never queues a scheduled run for them, and the UI hides the
+      schedule field ("fed by uploads").
+
 **Not built in SD0 (left to the slices):** any scanner; cloud SDK transports over `ctx.fetch` (SD2); the git-provider
 read methods (SD1); `SHADOW_AI_CATALOG_V2` and seed rows for the artifact kinds (SD1/SD3); the endpoint-notice
 template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" state for cloud sources (SD2).

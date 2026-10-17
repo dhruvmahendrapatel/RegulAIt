@@ -316,6 +316,7 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
         label: spec.label,
         family: spec.family,
         slice: spec.slice,
+        uploadFed: spec.uploadFed === true,
         evidenceKinds: spec.evidenceKinds,
         subjectKinds: spec.subjectKinds,
         built: scanner !== undefined,
@@ -466,7 +467,8 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
       if (r) return r;
       const [row] = await t
         .update(discoverySources)
-        .set({ enabled: true, enabledAt: sql`now()`, enabledBy: actor(req), nextRunAt: sql`now()`, version: s.version + 1, updatedAt: sql`now()` })
+        // an upload-fed kind (osquery results, MDM/EDR exports) has no schedule: it is never queued by time
+        .set({ enabled: true, enabledAt: sql`now()`, enabledBy: actor(req), nextRunAt: DISCOVERY_KIND_SPECS[s.kind].uploadFed ? null : sql`now()`, version: s.version + 1, updatedAt: sql`now()` })
         .where(eq(discoverySources.id, s.id))
         .returning();
       await audit(t, req, "discovery_source", s.id, "discovery-source-enabled", "allow",
