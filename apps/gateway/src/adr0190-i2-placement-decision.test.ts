@@ -266,8 +266,10 @@ function factsOf(q: Record<string, unknown>): RequirementFacts {
     parentRequiredClass: has(q, "parentRequiredClass") ? toClass(q.parentRequiredClass) : undefined,
     // owner decision C: the vector's caller becomes the credential the request would carry, through the product's
     // own derivation (`abacPrincipalFromRequest`) and predicate (`interactivePersonCaller`); only then can a
-    // relaxation in scope reach the pure function, so the API-key vector pins the product predicate
-    personStdioRelaxed: callerIsInteractive(q.caller) && (q.personStdioRelaxation === "mcp_server" || q.personStdioRelaxation === "project"),
+    // relaxation in scope reach the pure function, so the API-key vector pins the product predicate. Slice A1: only an
+    // active row is in scope (`personStdioRelaxation` reads `cleared_at IS NULL`); a cleared one is no relaxation
+    personStdioRelaxed:
+      callerIsInteractive(q.caller) && (q.personStdioRelaxation === "mcp_server" || q.personStdioRelaxation === "project") && q.personStdioRelaxationState === "active",
   };
   // a named lookup that did not resolve (owner decision B's vector)
   const lookup = q.unresolvedPolicyLookup;

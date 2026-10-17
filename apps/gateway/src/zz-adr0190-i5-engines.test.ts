@@ -209,7 +209,17 @@ async function scannerTask(ctx: { files: ReadonlyMap<string, Buffer>; secret: st
       await writeFile(path.join(t.resultsRoot, t.runId, "report.json"), bytes);
       await writeFile(
         path.join(t.resultsRoot, t.runId, "done.json"),
-        JSON.stringify({ exitCode: 1, timedOut: false, cancelled: false, reportSha256: createHash("sha256").update(bytes).digest("hex"), reportTooLarge: false, npy: null, npz: null }),
+        JSON.stringify({
+          // ENG-IMG: the scanner reads the format from the placed bytes (the gateway streamed them; the executor wrote them)
+          detection: { format: "pickle", evidence: "pickle PROTO opcode, protocol 4" },
+          exitCode: 1,
+          timedOut: false,
+          cancelled: false,
+          reportSha256: createHash("sha256").update(bytes).digest("hex"),
+          reportTooLarge: false,
+          npy: null,
+          npz: null,
+        }),
       );
     },
   });
@@ -596,7 +606,8 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
       const abort = new AbortController();
       const bridge = new ExecutorTaskBridge({ client, jobsRoot, resultsRoot, gatewayBaseUrl: "http://gateway.test/v1", isArtifact: (n) => ARTIFACT_NAME.test(n), pollMs: 25 });
       const bridging = bridge.run(abort.signal);
-      const adapter = modelscanAdapter({ artifacts: client, executor: new ExchangeScanExecutor(jobsRoot, resultsRoot, { pollMs: 25 }) });
+      // ENG-IMG: the runner fetches nothing; the job only places the artifact
+      const adapter = modelscanAdapter({ executor: new ExchangeScanExecutor(jobsRoot, resultsRoot, { pollMs: 25 }) });
       const out = await runOnce(client, adapter, { ...MS_BUILD, engineId: "modelscan", workRoot: await mkdtemp(path.join(tmpdir(), "i5-w-")), heartbeatMs: 200, retryBaseMs: 10 });
       abort.abort();
       await bridging;
@@ -625,7 +636,7 @@ describe("end to end: the scan runs in the executor's sandbox, on a verified rea
       const [sb] = ex.backend.sandboxes.filter((s) => s.kind === "placement");
       expect(sb).toMatchObject({ probed: true, released: true, secretSha256: null, workload: { command: MANIFEST.modelscan.taskEntry.command, args: [...MANIFEST.modelscan.taskEntry.args] } });
       expect(sb!.inputSha256).toBe((d!.detail as { inputDigest: string }).inputDigest);
-      expect(seenInputs.at(-1)).toEqual({ files: [`${runId}/artifact.pkl`, `${runId}/job.json`], artifactSha256: art.sha256, secret: undefined });
+      expect(seenInputs.at(-1)).toEqual({ files: [`${runId}/artifact.bin`, `${runId}/job.json`], artifactSha256: art.sha256, secret: undefined });
       const streamed = await db.select().from(auditLog).where(and(eq(auditLog.objectId, runId), eq(auditLog.ruleId, "engine-run-artifact-streamed")));
       expect(streamed.map((s) => (s.detail as { phase: string }).phase)).toContain("task_input");
     } finally {
