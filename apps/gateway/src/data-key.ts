@@ -282,6 +282,8 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "discovery_credentials", column: "secret_ciphertext", what: "discovery scanner credentials" },
   { table: "discovery_pseudonym_keys", column: "key_ciphertext", what: "the discovery pseudonym key" },
   { table: "discovery_pseudonyms", column: "display_name_ciphertext", what: "discovery pseudonym display names" },
+  // ADR-0193 decision 3 (migration 0206): the per-tenant HMAC key of keyed (pii) content digests
+  { table: "content_digest_keys", column: "key_ciphertext", what: "the content digest key" },
 ];
 
 export interface CiphertextProbe {

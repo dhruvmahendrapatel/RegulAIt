@@ -54,6 +54,7 @@ import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
 import SimulationPage from "./views/admin/governance/SimulationPage";
 import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
 import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
+import ContentTrustPage from "./views/admin/governance/ContentTrustPage";
 import ModelPolicyPage from "./views/admin/governance/ModelPolicyPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
@@ -230,6 +231,8 @@ function ApplicationRoutes() {
                 <Route path="simulation" element={<SimulationPage />} />
                 <Route path="abac-policies" element={<AbacPoliciesPage />} />
                 <Route path="guardrails" element={<GuardrailsPage />} />
+                {/* ADR-0193 (I4) P0/P1 */}
+                <Route path="content-trust" element={<ContentTrustPage />} />
                 {/* ADR-0173 §3 */}
                 <Route path="model-policy" element={<ModelPolicyPage />} />
                 <Route path="evals" element={<EvalsPage />} />

@@ -76,6 +76,7 @@ import {
   createRunSchema,
   dispatchNodeSchema,
   runEventSchema,
+  runContextId,
 } from "@regulait/shared";
 import {
   acceptsBufferedStream,
@@ -1152,6 +1153,8 @@ async function dispatchRunNodeInner(
           projectId: run.projectId ?? null,
           trace: turnTrace,
           toolCallId: tc.id,
+          // ADR-0193 P1: the run is the causal context its tool results flow into
+          contextId: runContextId(run.id),
         });
         switch (toolOut.kind) {
           case "allowed":

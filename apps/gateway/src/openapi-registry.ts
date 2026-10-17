@@ -771,6 +771,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0195 SD3: endpoint evidence imports and the endpoint signature seed
   "POST /v1/discovery/sources/:sourceId/endpoint-imports": "internal",
   "POST /v1/discovery/endpoint-signatures/seed": "internal",
+  // ADR-0193 (I4) P1: content source trust tiers, the write floor, and the P0 provenance evidence view
+  "GET /v1/content-trust": "internal",
+  "PUT /v1/content-trust/sources/:sourceKind/:sourceId": "internal",
+  "PUT /v1/content-trust/settings": "internal",
+  "GET /v1/content-provenance/records": "internal",
   "GET /v1/spend/anomalies": "public-beta",
   "PATCH /v1/spend/anomalies/:id": "internal",
   "POST /v1/spend/anomalies/evaluate": "internal",
@@ -1766,6 +1771,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/discovery/pseudonyms/:pseudonym/reveal": "shadow-ai",
   "POST /v1/discovery/sources/:sourceId/endpoint-imports": "shadow-ai",
   "POST /v1/discovery/endpoint-signatures/seed": "shadow-ai",
+  "GET /v1/content-trust": "content-provenance",
+  "PUT /v1/content-trust/sources/:sourceKind/:sourceId": "content-provenance",
+  "PUT /v1/content-trust/settings": "content-provenance",
+  "GET /v1/content-provenance/records": "content-provenance",
   "GET /v1/spend/anomalies": "spend",
   "PATCH /v1/spend/anomalies/:id": "spend",
   "POST /v1/spend/anomalies/evaluate": "spend",
