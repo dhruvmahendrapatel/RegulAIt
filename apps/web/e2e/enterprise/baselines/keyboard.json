@@ -4,6 +4,9 @@
     "chromium|settings-step-up": {
       "dialog-focus-not-restored": 1
     },
+    "firefox|settings-step-up": {
+      "dialog-focus-not-restored": 1
+    },
     "webkit|approvals": {
       "focus-not-visible": 7
     },
