@@ -1,0 +1,163 @@
+name: UI enterprise harness
+
+# ADR-0196. The owner's four "enterprise grade" UI bars, as ratchets in the import-cycle job's model (#387): today's
+# violations are in committed baselines that may only shrink; a new violation fails here.
+#
+#   static       design tokens (scripts/preflight-ui-tokens.mjs, a postcss parse of the CSS + a TSX scan), the
+#                baseline guard (no baseline file may grow against the base branch, and no bundle ceiling in
+#                apps/web/.size-limit.json may rise, go or change its files), and the JS/CSS bundle ceilings
+#                themselves (size-limit, pinned to `--config .size-limit.json`) on the production build; the guard
+#                also refuses any other place size-limit could read ceilings from (a package.json key, a second file).
+#   browsers     apps/web/playwright.enterprise.config.ts, one job per browser. Chromium runs every check (axe on
+#                every screen in both themes, keyboard journeys, the five viewports, loading/error states, table
+#                density, LCP/INP); Firefox and WebKit run the keyboard journeys and the viewports. The browsers
+#                are installed here with the Playwright version the lockfile pins.
+#   screenshots  the screenshot pack (screen x viewport x theme) and its index.html, uploaded as an artifact for
+#                the owner to scan. It asserts nothing.
+#
+# Everything runs against the built SPA (`vite preview`) and the harness's mocked API: no gateway, database or seed.
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'project-state/**'
+      - '.gitignore'
+      - 'LICENSE'
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ui-enterprise-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: ui enterprise / tokens, baseline guard, bundle size
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Compared with the PR's base branch; on a schedule or manual run there is nothing to compare with.
+      - name: No enterprise baseline grew
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          node scripts/ui-enterprise-baseline.mjs --guard "origin/$BASE_REF"
+
+      - name: No new hard-coded colour or spacing in apps/web (design-token ratchet)
+        if: success() || failure()
+        run: node scripts/preflight-ui-tokens.mjs
+
+      - name: Build the web app
+        if: success() || failure()
+        run: pnpm --filter @regulait/web build
+
+      - name: Bundle-size ceilings (size-limit)
+        if: success() || failure()
+        run: pnpm --filter @regulait/web exec size-limit --config .size-limit.json
+
+  browsers:
+    name: ui enterprise / ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @regulait/web exec playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Enterprise harness on ${{ matrix.browser }}
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.enterprise.config.ts --project=${{ matrix.browser }} --reporter=list,github
+
+      # What the run found, written as the baseline it would need: the diff in the log shows every new finding,
+      # and the artifact holds the raw findings and the measured LCP / INP of every screen.
+      - name: Findings as a baseline diff
+        if: ${{ !cancelled() }}
+        run: |
+          node scripts/ui-enterprise-baseline.mjs --stale
+          node scripts/ui-enterprise-baseline.mjs --update
+          git --no-pager diff --stat -- apps/web/e2e/enterprise/baselines
+          git --no-pager diff -- apps/web/e2e/enterprise/baselines
+
+      - name: Findings and measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-enterprise-findings-${{ matrix.browser }}
+          path: |
+            apps/web/test-results/enterprise-findings
+            apps/web/test-results/enterprise-perf.*.jsonl
+            apps/web/e2e/enterprise/baselines
+          if-no-files-found: warn
+          retention-days: 14
+
+  screenshots:
+    name: ui enterprise / screenshot pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
+
+      - name: Screenshot pack (every screen x viewport x theme)
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.enterprise.config.ts --project=screenshots --reporter=list
+
+      - name: Index page
+        if: ${{ !cancelled() }}
+        run: node scripts/ui-screenshot-index.mjs
+
+      - name: Upload the pack
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-screenshot-pack
+          path: apps/web/test-results/screenshot-pack
+          if-no-files-found: error
+          retention-days: 30

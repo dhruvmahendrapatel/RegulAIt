@@ -176,6 +176,193 @@ describe("scripts/lib/first-admin.sh — the interactive prompt loop", () => {
     for (const out of [problem(), problem(link)]) expect(out).not.toContain(pw);
   });
 
+  it.runIf(posix)("the password file must be valid UTF-8", () => {
+    const dir = freshDir("pwutf8");
+    const f = path.join(dir, "pw");
+    const problem = () =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" }).trim();
+    const put = (content: Buffer) => {
+      rmSync(f, { force: true });
+      writeFileSync(f, content, { mode: 0o600 });
+      chmodSync(f, 0o600);
+    };
+    const pw = Buffer.from(strong());
+    put(Buffer.concat([pw, Buffer.from("-pässwörd-\u{1F600}\n")]));
+    expect(problem()).toBe("");
+    for (const bad of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xe2, 0x82], [0x80]]) {
+      put(Buffer.concat([pw, Buffer.from(bad)]));
+      const out = problem();
+      expect(out, bad.join(",")).toContain("not valid UTF-8");
+      expect(out).not.toContain(pw.toString());
+    }
+  });
+
+  it.runIf(posix && process.platform === "linux")("from a file: opened once, re-checked on that descriptor, and the runner reads that same descriptor", () => {
+    const dir = freshDir("pwfd");
+    const f = path.join(dir, "pw");
+    const pw = strong();
+    writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+    chmodSync(f, 0o600);
+    // the descriptor's file is no longer the one at the path: refused, whatever the path now holds
+    const swapped = path.join(dir, "swapped");
+    writeFileSync(swapped, strong(), { mode: 0o600 });
+    const swapCheck = execFileSync(
+      "bash",
+      ["-c", `. "${LIB}"; exec 9<"$1"; mv "$2" "$1"; fa_password_file_problem "$1" 9`, "x", f, swapped],
+      { encoding: "utf8" },
+    ).trim();
+    expect(swapCheck).toContain("changed while it was being opened");
+    expect(swapCheck).not.toContain(pw);
+    // a good file: the stub runner receives exactly its content, on stdin, once
+    writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+    chmodSync(f, 0o600);
+    const stubDir = freshDir("pwfd-stub");
+    const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc"\n`;
+    const r = spawnSync("bash", ["-c", script, "x", f], { encoding: "utf8", env: { ...process.env, STUB_DIR: stubDir } });
+    expect(r.stdout.trim(), r.stderr).toBe("RC=0");
+    expect(readFileSync(path.join(stubDir, "stdin.log"), "utf8")).toBe(`${pw}\n`);
+    expect(`${r.stdout}${r.stderr}`).not.toContain(pw);
+  });
+
+  // A swap BEFORE the open is not a race: descriptor 9 then opens the new file, which the path names and which is
+  // checked in full. The window the descriptor closes is the one after the open, so the hook is the re-check on fd 9.
+  it.runIf(posix && process.platform === "linux")("from a file: a swap after the open is refused, or never reaches the runner", () => {
+    const run = (when: "before" | "after") => {
+      const dir = freshDir(`pwrace-${when}`);
+      const f = path.join(dir, "pw");
+      const pw = strong();
+      writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+      chmodSync(f, 0o600);
+      const swapped = path.join(dir, "swapped");
+      const other = strong();
+      writeFileSync(swapped, `${other}\n`, { mode: 0o600 });
+      chmodSync(swapped, 0o600);
+      const stubDir = freshDir(`pwrace-${when}-stub`);
+      // the file at the path is replaced just before, or just after, the re-check of the open descriptor
+      const wrap = String.raw`
+eval "fa_real_problem() $(declare -f fa_password_file_problem | tail -n +2)"
+fa_password_file_problem() {
+  if [ "$#" -eq 2 ] && [ "$SWAP_WHEN" = before ]; then mv "$SWAPPED" "$1"; fi
+  fa_real_problem "$@"
+  if [ "$#" -eq 2 ] && [ "$SWAP_WHEN" = after ]; then mv "$SWAPPED" "$1"; fi
+}
+`;
+      const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\n${wrap}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc OUT=$FA_OUTPUT"\n`;
+      const r = spawnSync("bash", ["-c", script, "x", f], {
+        encoding: "utf8",
+        env: { ...process.env, STUB_DIR: stubDir, SWAPPED: swapped, SWAP_WHEN: when },
+      });
+      const log = path.join(stubDir, "stdin.log");
+      return { r, pw, other, swapped, stdinLog: existsSync(log) ? readFileSync(log, "utf8") : null };
+    };
+    const before = run("before");
+    expect(before.r.stdout, before.r.stderr).toContain("RC=2 ");
+    expect(before.r.stdout).toContain("changed while it was being opened");
+    expect(before.stdinLog).toBeNull();
+    expect(existsSync(before.swapped)).toBe(false); // the swap really happened
+    const after = run("after");
+    expect(after.r.stdout.trim(), after.r.stderr).toBe("RC=0 OUT=first admin created: (stub)");
+    expect(after.stdinLog).toBe(`${after.pw}\n`); // what was checked, not what the path now holds
+    expect(existsSync(after.swapped)).toBe(false);
+    for (const x of [before, after]) {
+      expect(`${x.r.stdout}${x.r.stderr}`).not.toContain(x.pw);
+      expect(`${x.r.stdout}${x.r.stderr}`).not.toContain(x.other);
+    }
+  });
+
+  it.runIf(posix)("the password file's directory must not be writable by anyone but its owner", () => {
+    const dir = freshDir("pwdir");
+    const f = path.join(dir, "pw");
+    writeFileSync(f, strong(), { mode: 0o600 });
+    chmodSync(f, 0o600);
+    const problem = () =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" }).trim();
+    chmodSync(dir, 0o700);
+    expect(problem()).toBe("");
+    for (const mode of [0o770, 0o707, 0o1777, 0o722]) {
+      chmodSync(dir, mode);
+      expect(problem(), mode.toString(8)).toContain("no one but its owner may write to it");
+    }
+    chmodSync(dir, 0o755);
+    expect(problem()).toBe("");
+  });
+
+  it.runIf(posix && process.platform === "linux")("from a file: a bad file swapped in after the path check is refused by first_admin_from_file, nothing sent", () => {
+    // review L1: the race itself, through first_admin_from_file. The path-only check passes on the good file; the file
+    // is then swapped for one the checks refuse (group-readable, or a symlink to such a file) before it is opened.
+    // Re-checking what was opened refuses it; the old check-then-redirect sent the swapped content to the runner.
+    const race = [
+      `eval "$(declare -f fa_password_file_problem | sed '1s/fa_password_file_problem/fa_real_problem/')"`,
+      "fa_password_file_problem() {",
+      '  fa_real_problem "$@"',
+      '  if [ "$#" -lt 2 ]; then rm -f "$1"; if [ "$SWAP_KIND" = link ]; then ln -s "$SWAP_FROM" "$1"; else mv "$SWAP_FROM" "$1"; fi; fi',
+      "}",
+    ].join("\n");
+    for (const kind of ["group-readable", "link"] as const) {
+      const dir = freshDir(`pwrace-${kind}`);
+      const f = path.join(dir, "pw");
+      const swapped = path.join(dir, "swapped");
+      const pw = strong();
+      const intruder = `CANARY-intruder-${randomBytes(6).toString("hex")}`;
+      writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+      chmodSync(f, 0o600);
+      writeFileSync(swapped, `${intruder}\n`, { mode: 0o644 });
+      chmodSync(swapped, 0o644);
+      const stubDir = freshDir(`pwrace-${kind}-stub`);
+      const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\n${race}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc"\necho "OUT=$FA_OUTPUT"\n`;
+      const r = spawnSync("bash", ["-c", script, "x", f], {
+        encoding: "utf8",
+        env: { ...process.env, STUB_DIR: stubDir, SWAP_FROM: swapped, SWAP_KIND: kind === "link" ? "link" : "file" },
+      });
+      expect(r.stdout, `${kind}: ${r.stderr}`).toContain("RC=2");
+      expect(r.stdout, kind).toContain("OUT=password file refused:");
+      expect(existsSync(path.join(stubDir, "stdin.log")), `${kind}: the runner was called`).toBe(false);
+      expect(`${r.stdout}${r.stderr}`).not.toContain(intruder);
+      expect(`${r.stdout}${r.stderr}`).not.toContain(pw);
+    }
+  });
+
+  it.runIf(posix && process.getuid?.() === 0)("the password file's directory must be owned by the installing user or root", () => {
+    // review R2: a directory another user owns can be re-moded by them, so the file in it could be swapped
+    const dir = freshDir("pwdirowner");
+    const f = path.join(dir, "pw");
+    writeFileSync(f, strong(), { mode: 0o600 });
+    chmodSync(f, 0o600);
+    chmodSync(dir, 0o755);
+    const problem = () =>
+      execFileSync("bash", ["-c", `. "${LIB}"; fa_password_file_problem "$1"`, "x", f], { encoding: "utf8" }).trim();
+    expect(problem()).toBe(""); // live control: root's own 0755 directory
+    chownSync(dir, 12345, 12345);
+    expect(problem()).toContain("is owned by uid 12345");
+    chownSync(dir, 0, 0);
+    expect(problem()).toBe("");
+  });
+
+  it.runIf(posix && process.platform === "linux")("from a file: refused outside Linux, before anything is opened or sent", () => {
+    // review R3: a bash function shadows the uname binary inside $(...), so the gate sees another kernel
+    const dir = freshDir("pwdarwin");
+    const f = path.join(dir, "pw");
+    const pw = strong();
+    writeFileSync(f, `${pw}\n`, { mode: 0o600 });
+    chmodSync(f, 0o600);
+    const run = (kernel: string) => {
+      const stubDir = freshDir(`pwdarwin-stub-${kernel}`);
+      const shim = kernel === "Linux" ? "" : `uname() { echo ${kernel}; }`;
+      const script = `set -euo pipefail\n. "${LIB}"\n${STUB}\n${shim}\nFA_USERNAME=admin; FA_EMAIL=ops@acme.example\nrc=0\nfirst_admin_from_file "$1" || rc=$?\necho "RC=$rc"\necho "OUT=$FA_OUTPUT"\n`;
+      const r = spawnSync("bash", ["-c", script, "x", f], { encoding: "utf8", env: { ...process.env, STUB_DIR: stubDir } });
+      return { out: `${r.stdout}${r.stderr}`, sent: existsSync(path.join(stubDir, "stdin.log")) };
+    };
+    const darwin = run("Darwin");
+    expect(darwin.out).toContain("RC=2");
+    expect(darwin.out).toContain("supported on Linux only");
+    expect(darwin.sent, "the runner was called").toBe(false);
+    expect(darwin.out).not.toContain(pw);
+    // live control: on Linux the same file reaches the runner
+    const linux = run("Linux");
+    expect(linux.out).not.toContain("supported on Linux only");
+    expect(linux.sent).toBe(true);
+  });
+
   it.runIf(posix && process.getuid?.() === 0)("the password file must be owned by the installing user or root", () => {
     const f = path.join(freshDir("pwowner"), "pw");
     writeFileSync(f, strong(), { mode: 0o600 });
@@ -204,7 +391,10 @@ esac
 case "$*" in
   *receipt-key-init.js*) echo "receipt signing key: install-generated install-ed25519-fake"; exit 0 ;;
   *first-admin.js*--status*)
-    if [ -f "$FAKE_DOCKER_DIR/admin-exists" ]; then echo "first admin: an active admin already exists — nothing to do"; exit 3; fi
+    if [ -f "$FAKE_DOCKER_DIR/admin-exists" ]; then
+      if [ "$(cat "$FAKE_DOCKER_DIR/admin-exists")" = "demo" ]; then echo "first admin: only the demo seed's personas are admins — nothing to do"; exit 3; fi
+      echo "first admin: an active admin already exists — nothing to do"; exit 3
+    fi
     echo "first admin: none yet"; exit 0 ;;
   *first-admin.js*)
     pw="$(cat)"
@@ -347,6 +537,24 @@ describe("scripts/install.sh — the first-admin step and token retirement (fake
     expect(noEmail.out).toContain("REGULAIT_FIRST_ADMIN_EMAIL is not");
   });
 
+  it.runIf(hasOpenssl && posix)("--check refuses a password file outside Linux, before rendering", () => {
+    // review R3: a fake uname on PATH reports another kernel for -s
+    const fakes = setupFakes();
+    writeFileSync(path.join(fakes.bin, "uname"), '#!/bin/sh\nif [ "$1" = "-s" ]; then echo Darwin; exit 0; fi\nexec /usr/bin/env PATH=/usr/bin:/bin uname "$@"\n', { mode: 0o755 });
+    const pwFile = path.join(freshDir("secret"), "pw");
+    writeFileSync(pwFile, `${strong()}\n`, { mode: 0o600 });
+    chmodSync(pwFile, 0o600);
+    const dir = freshDir("check-darwin");
+    const env = { REGULAIT_FIRST_ADMIN_PASSWORD_FILE: pwFile, REGULAIT_FIRST_ADMIN_EMAIL: "ops@acme.example" };
+    const r = install(dir, fakes, env, ["--check"]);
+    expect(r.status).not.toBe(0);
+    expect(r.out).toContain("supported on Linux only");
+    expect(existsSync(path.join(dir, ".env"))).toBe(false);
+    // live control: without the fake, the same file passes the gate
+    rmSync(path.join(fakes.bin, "uname"));
+    expect(install(freshDir("check-linux"), fakes, env, ["--check"]).out).not.toContain("supported on Linux only");
+  });
+
   it.runIf(hasOpenssl && posix)("a retired token stays retired on re-render; an exported token is ignored; only --admin-token re-opens it", () => {
     const fakes = setupFakes();
     const dir = freshDir("retired");
@@ -415,12 +623,25 @@ describe("scripts/install.sh — the first-admin step and token retirement (fake
   it.runIf(hasOpenssl && posix)("--seed-demo: the summary says the demo personas are the admins and how to replace them", () => {
     const dir = freshDir("seed-demo");
     const fakes = setupFakes();
-    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    writeFileSync(path.join(fakes.state, "admin-exists"), "demo");
     const r = install(dir, fakes, {}, ["--seed-demo"]);
     expect(r.status, r.out.slice(-3000)).toBe(0);
     expect(r.out).toContain("its personas are the admins");
     expect(r.out).toContain("admin@regulait.local");
     expect(r.out).toContain("create your admin under Admin -> Users");
+    expect(r.out).toContain("The bootstrap token is retired: removed from");
+  });
+
+  it.runIf(hasOpenssl && posix)("--seed-demo with a real admin already there: the summary says the seed loaded nothing, not that the demo admin is the admin", () => {
+    const dir = freshDir("seed-demo-real");
+    const fakes = setupFakes();
+    writeFileSync(path.join(fakes.state, "admin-exists"), "");
+    const r = install(dir, fakes, {}, ["--seed-demo"]);
+    expect(r.status, r.out.slice(-3000)).toBe(0);
+    expect(r.out).toContain("An admin of your own already exists, so --seed-demo loaded nothing");
+    expect(r.out).not.toContain("its personas are the admins");
+    expect(r.out).not.toContain("admin@regulait.local");
+    expect(r.out).not.toContain("still live");
   });
 });
 
