@@ -51,4 +51,12 @@ describe("no two tracked files differ only by case or extension (G10-G15-VERIFY)
     expect(findBasenameCollisions(["apps\\web\\Foo.tsx", "apps/web/foo.ts"])).toEqual([["apps/web/foo.ts", "apps\\web\\Foo.tsx"]]);
     expect(findBasenameCollisions(["apps\\web\\Foo.tsx", "apps\\other\\foo.ts"])).toEqual([]);
   });
+
+  it("lets a Go module's go.mod and go.sum stand together, but nothing else with their stem", () => {
+    expect(findBasenameCollisions(["agents/endpoint/go.mod", "agents/endpoint/go.sum"])).toEqual([]);
+    expect(findBasenameCollisions(["agents/endpoint/go.mod", "agents/endpoint/go.sum", "agents/endpoint/Go.ts"])).toEqual([
+      ["agents/endpoint/Go.ts", "agents/endpoint/go.mod", "agents/endpoint/go.sum"],
+    ]);
+    expect(findBasenameCollisions(["x/go.mod", "x/GO.mod"])).toEqual([["x/GO.mod", "x/go.mod"]]);
+  });
 });

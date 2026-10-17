@@ -1,0 +1,16 @@
+#!/bin/sh
+# RegulAIt endpoint agent install step on macOS (R15 §3.2), run once as root by the installer under MDM. It never
+# fails the install: every step tolerates failure and the script exits 0.
+set -u
+GROUP=regulait-agent
+BIN="/Library/Application Support/RegulAIt/Agent/bin/regulait-agent"
+if ! dscl . -read "/Groups/$GROUP" >/dev/null 2>&1; then
+  dseditgroup -o create -r "RegulAIt endpoint agent" "$GROUP" >/dev/null 2>&1 || true
+fi
+# the console user present now joins the group that may read the device ticket
+CONSOLE_USER="$(stat -f %Su /dev/console 2>/dev/null || true)"
+case "$CONSOLE_USER" in ''|root|loginwindow|*[!A-Za-z0-9._-]*) ;; *) dseditgroup -o edit -a "$CONSOLE_USER" -t user "$GROUP" >/dev/null 2>&1 || true ;; esac
+GID="$(dscl . -read "/Groups/$GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}')"
+case "$GID" in ''|*[!0-9]*) GID=-1 ;; esac
+"$BIN" redeem-ticket -ticket-gid "$GID" || true
+exit 0

@@ -139,6 +139,13 @@ Successfully installed attrs-26.1.0 colorama-0.4.6 halo-0.0.31 html5rdf-1.2.1 im
 with no index, fails (`pip subprocess to install build dependencies did not run successfully`; executed). Hashes
 are still enforced for every package in the lock.
 
+**Why not a prebuilt `halo` wheel (checked on PyPI 2026-10-17).** Dropping `--no-build-isolation` and the
+Python 3.11 `setuptools` dependency needs a pinned, prebuilt Python 3 wheel of `halo` from a trusted source, and none
+exists. `halo` 0.0.31 publishes only `halo-0.0.31-py2-none-any.whl` (tagged Python 2, which pip on CPython 3 never
+selects) and its source archive. `halo` 0.0.30 has a `py3` wheel, but `spdx3-validate` 0.0.7 requires
+`halo>=0.0.31`. Retagging the Python 2 wheel, or building one ourselves and shipping it, would make the kit depend on
+an artifact that is not the publisher's. Re-check when `halo` or `spdx3-validate` publishes a new release.
+
 ### Step 2. Prove the toolchain on known answers before trusting it
 
 A verifier that accepts everything would also "verify" a forgery. Run it first on bundles whose answer is fixed by

@@ -260,8 +260,10 @@ shred -u /root/first-admin-password
 
 The file must be a regular file (not a symbolic link) owned by you or root, with mode `0600` or
 stricter, holding one line: no control characters except one trailing newline, and no UTF-8
-byte-order mark. Anything else is refused before anything renders, and checked again just before
-use. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
+byte-order mark. Its directory must be owned by you or root, and no one else may write to it (so
+the file cannot be swapped between the check and the open). Anything else is refused before
+anything renders, and checked again just before use. The password file works on Linux only; on
+other systems run the installer interactively. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
 three. Without the file, a non-interactive install skips the step and says so.
 
 **The bootstrap door closes itself.** `REGULAIT_BOOTSTRAP_TOKEN` authenticates as an admin **with
