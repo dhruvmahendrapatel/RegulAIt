@@ -8,9 +8,15 @@ scanner needs and gives Terraform you apply in your own account. **RegulAIt neve
 > **Status: pending real-cloud execution (M-041).** The scanners are tested against the real cloud SDKs with a fake
 > network, not against a live AWS, GCP or Azure account. The Terraform files in
 > [`cloud-discovery/`](cloud-discovery/) have not been run through `terraform validate` or applied. The federation
-> token itself (RegulAIt's ADR-0188 issuer minting a token for these audiences) is wired when the scanners are
-> registered with the discovery-source framework (SD0); until then only the static-credential relaxation can run
-> end to end. Treat every step below as pending execution.
+> token itself (RegulAIt's ADR-0188 issuer minting an RS256 token for these audiences) is not built yet: a source
+> with a federated credential fails its run with that reason, and only the static-credential relaxation runs end
+> to end.
+>
+> Source fields (one `key=value` per line on the Discovery sources page): AWS target `accountId`, optional
+> `stsRegion`, `trailBucket`, `trailBucketRegion`, `trailPrefix`; scope = regions. GCP target `projectId` or
+> `assetScope`; scope = projects. Azure target `tenantId`, optional `managementGroupId`, `logAnalyticsWorkspaceIds`
+> (comma-separated); scope = subscriptions; credential public config `clientId`. Static secrets: AWS a JSON object
+> `{"accessKeyId": ..., "secretAccessKey": ...}`, GCP the key file JSON, Azure the client secret. Treat every step below as pending execution.
 
 ## What every scanner does and does not do
 
