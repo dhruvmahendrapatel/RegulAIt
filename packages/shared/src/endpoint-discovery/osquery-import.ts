@@ -26,6 +26,7 @@ import type { EndpointExtensionEcosystem, EndpointObservationKey, EndpointOs, En
 import {
   isEnvVarName,
   isForbiddenColumn,
+  normaliseColumnName,
   ENDPOINT_IMPORT_MAX_BYTES,
   ENDPOINT_IMPORT_MAX_CELL,
   ENDPOINT_IMPORT_MAX_LINE_BYTES,
@@ -110,7 +111,9 @@ function splitRecords(content: string): LineRecord[] {
     try {
       doc = JSON.parse(content);
     } catch (e) {
-      throw new EndpointImportFormatError(`the file starts like a JSON array but is not valid JSON: ${(e as Error).message}`, {
+      // the parser's message quotes a snippet of the file: never repeated
+      void e;
+      throw new EndpointImportFormatError("the file starts like a JSON array but is not valid JSON", {
         importer: "endpoint_osquery",
       });
     }
@@ -219,7 +222,7 @@ export function importOsqueryResults(opts: OsqueryImportOptions): EndpointImport
     const queryName = resolveOsqueryResultName(r.name, packName);
     const query = resolve(queryName);
     if (!query) {
-      refuseAll(`'${queryName}' is not a query of the RegulAIt pack — results of other queries are not imported`, "name");
+      refuseAll("the record's query is not one of the RegulAIt pack — results of other queries are not imported", "name");
       continue;
     }
     const device = pseudonymise({ kind: "device", value: host.trim() });
@@ -230,9 +233,10 @@ export function importOsqueryResults(opts: OsqueryImportOptions): EndpointImport
       const refuse = (reason: string, field?: string) => refusals.push({ line, ...item, reason, ...(field ? { field } : {}) });
       if (typeof row !== "object" || row === null || Array.isArray(row)) return refuse("a result row is a JSON object of column values");
       const cols = row as Record<string, unknown>;
-      const forbidden = Object.keys(cols).find((k) => isForbiddenColumn(k));
-      if (forbidden) {
-        return refuse(`the row carries the column '${forbidden}' — values, command lines and contents are never imported; the row is refused and the cell discarded`, forbidden);
+      const forbiddenKey = Object.keys(cols).find((k) => isForbiddenColumn(k));
+      if (forbiddenKey) {
+        const forbidden = normaliseColumnName(forbiddenKey);
+        return refuse(`the row carries the value-bearing column '${forbidden}' — values, command lines and contents are never imported; the row is refused and the cell discarded`, forbidden);
       }
       const cells = new Map<string, string>();
       for (const col of Object.keys(query.columns)) {
@@ -344,7 +348,7 @@ function buildObservation(query: EndpointPackQuery, cells: Map<string, string>, 
         user = pseudonymise({ kind: "device_user", value });
         break;
       case "port":
-        if (!isPort(value)) return { ok: false, reason: `the port '${value.slice(0, 20)}' is not 1..65535`, field: col };
+        if (!isPort(value)) return { ok: false, reason: `the ${col} column is not a port number 1..65535`, field: col };
         addKey({ matchType: "listening_port", value: String(Number(value)) });
         break;
       case "address":

@@ -95,10 +95,10 @@ export function inferInventoryMapping(
     const candidates = [...new Set(ALIASES[field].filter((a) => byNorm.has(a)).map((a) => byNorm.get(a)!))].filter((c) => !used.has(c));
     if (REQUIRED.includes(field)) {
       if (candidates.length === 0) {
-        return { ok: false, reason: `no '${field}' column could be inferred from headers [${headers.join(", ")}] — supply \`config.mapping\`` };
+        return { ok: false, reason: `no '${field}' column could be inferred from the file's ${headers.length} header(s) — supply \`config.mapping\`` };
       }
       if (candidates.length > 1) {
-        return { ok: false, reason: `the '${field}' column is ambiguous (${candidates.join(", ")} all match) — supply \`config.mapping\` rather than have RegulAIt guess` };
+        return { ok: false, reason: `the '${field}' column is ambiguous (${candidates.length} headers match) — supply \`config.mapping\` rather than have RegulAIt guess` };
       }
     } else if (candidates.length !== 1) {
       continue; // an ambiguous optional column is simply not mapped
@@ -173,7 +173,8 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
     table = readSourceTable({ content: opts.content, format: opts.format }, "endpoint_inventory");
   } catch (e) {
     if (e instanceof CostImportFormatError) {
-      throw new EndpointImportFormatError(e.message, { importer: "endpoint_inventory", ...(e.detail.headersFound ? { found: e.detail.headersFound } : {}) });
+      // the reader's own message can quote a parse snippet or the header row (cell text): give a fixed one
+      throw new EndpointImportFormatError(`the file could not be read as ${opts.format === "json" ? "JSON rows" : "CSV with a header row"}`, { importer: "endpoint_inventory" });
     }
     throw e;
   }
@@ -193,22 +194,21 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
     const known = new Set(table.headers.map((h) => h.trim().toLowerCase()));
     const missing = Object.entries(mapping)
       .filter(([, col]) => !known.has(String(col).trim().toLowerCase()))
-      .map(([f, col]) => `${f} -> '${col}'`);
+      .map(([f]) => f);
     if (missing.length > 0) {
-      throw new EndpointImportFormatError(`the file does not carry the mapped column(s) ${missing.join(", ")}`, {
+      throw new EndpointImportFormatError(`the file does not carry the column(s) mapped to ${missing.join(", ")} (it has ${table.headers.length} header(s))`, {
         importer: "endpoint_inventory",
         missing,
-        found: table.headers,
       });
     }
   } else {
     const inferred = inferInventoryMapping(table.headers);
-    if (!inferred.ok) throw new EndpointImportFormatError(inferred.reason, { importer: "endpoint_inventory", found: table.headers });
+    if (!inferred.ok) throw new EndpointImportFormatError(inferred.reason, { importer: "endpoint_inventory" });
     mapping = inferred.mapping;
   }
-  const forbiddenTarget = Object.values(mapping).find((c) => isForbiddenColumn(String(c)));
+  const forbiddenTarget = Object.entries(mapping).find(([, c]) => isForbiddenColumn(String(c)));
   if (forbiddenTarget) {
-    throw new EndpointImportFormatError(`the column '${forbiddenTarget}' may not be mapped: values, command lines and contents are never imported`, {
+    throw new EndpointImportFormatError(`the column mapped to ${forbiddenTarget[0]} is a value-bearing column and may not be mapped: values, command lines and contents are never imported`, {
       importer: "endpoint_inventory",
     });
   }
@@ -216,7 +216,7 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
   const typeValues = new Map<string, InventoryItemClass>(Object.entries(DEFAULT_ITEM_TYPE_VALUES));
   for (const [k, v] of Object.entries(cfg.itemTypeValues ?? {})) typeValues.set(k.trim().toLowerCase(), v);
   // a value-bearing column is refused on every row that fills it, mapped or not (as the osquery importer does)
-  const forbiddenHeaders = table.headers.filter((h) => isForbiddenColumn(h));
+  const forbiddenHeaders = table.headers.map((h, i) => ({ h, position: i + 1 })).filter((x) => isForbiddenColumn(x.h));
 
   const observations: EndpointObservation[] = [];
   const refusals: EndpointRowRefusal[] = [];
@@ -229,24 +229,24 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
       if (!col) return { ok: true, value: null };
       const raw = (rec.get(col) ?? "").trim();
       if (raw.length === 0 || raw === "-") return { ok: true, value: null };
-      if (raw.length > ENDPOINT_IMPORT_MAX_CELL) return { ok: false, reason: `the '${col}' cell is over ${ENDPOINT_IMPORT_MAX_CELL} characters` };
+      if (raw.length > ENDPOINT_IMPORT_MAX_CELL) return { ok: false, reason: `the ${f} cell is over ${ENDPOINT_IMPORT_MAX_CELL} characters` };
       return { ok: true, value: raw };
     };
     const values: Partial<Record<InventoryField, string | null>> = {};
     let refusal: EndpointRowRefusal | null = null;
-    const filledForbidden = forbiddenHeaders.find((h) => (rec.get(h) ?? "").trim().length > 0);
+    const filledForbidden = forbiddenHeaders.find((x) => (rec.get(x.h) ?? "").trim().length > 0);
     if (filledForbidden) {
       refusals.push({
         line: rec.line,
-        reason: `the row carries the column '${filledForbidden}' — values, command lines and contents are never imported; the row is refused and the cell discarded`,
-        field: filledForbidden,
+        reason: `the row fills a value-bearing column (column ${filledForbidden.position}) — values, command lines and contents are never imported; the row is refused and the cell discarded`,
+        field: `column ${filledForbidden.position}`,
       });
       continue;
     }
     for (const f of INVENTORY_FIELDS) {
       const c = cell(f);
       if (!c.ok) {
-        refusal = { line: rec.line, reason: c.reason, field: mapping[f]! };
+        refusal = { line: rec.line, reason: c.reason, field: f };
         break;
       }
       values[f] = c.value;
@@ -256,8 +256,8 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
         if (!values[f]) {
           refusal = {
             line: rec.line,
-            reason: `the required '${f}' column '${mapping[f]}' is empty on this row — defaulting it would invent an observation`,
-            field: mapping[f]!,
+            reason: `the required ${f} cell is empty on this row — defaulting it would invent an observation`,
+            field: f,
           };
           break;
         }
@@ -270,15 +270,15 @@ export function importEndpointInventory(opts: InventoryImportOptions): EndpointI
       if (!mapped) {
         refusal = {
           line: rec.line,
-          reason: `the item type '${(values.itemType ?? "").slice(0, 60)}' is not one RegulAIt knows — map it with \`config.itemTypeValues\``,
-          field: mapping.itemType,
+          reason: "the item type on this row is not one RegulAIt knows — map it with `config.itemTypeValues`",
+          field: "itemType",
         };
       } else cls = mapped;
     }
     let observedAt: string | null = null;
     if (!refusal && values.observedAt) {
       const ts = parseEvidenceTimestamp(values.observedAt);
-      if (!ts.ok) refusal = { line: rec.line, reason: `'${mapping.observedAt}': ${ts.reason}`, field: mapping.observedAt! };
+      if (!ts.ok) refusal = { line: rec.line, reason: "the observedAt cell is not a readable timestamp", field: "observedAt" };
       else observedAt = ts.value;
     }
     if (refusal) {

@@ -26,6 +26,7 @@ import {
   verifyEndpointPack,
   endpointArtifactCandidates,
   endpointCatalogueSignatures,
+  isForbiddenColumn,
   isShippedEndpointProvenance,
   reduceEndpointObservations,
   type EndpointImportResult,
@@ -529,7 +530,7 @@ describe("review fixes (#401)", () => {
   it("refuses rows that fill a value-bearing column, mapped or not, in both importers", () => {
     const inv = importEndpointInventory({ content: "device,software,cmd\nd1,Cursor,\nd2,Cursor,run --token=x\n", format: "csv", pseudonymise: hook });
     expect(inv.observations).toHaveLength(1);
-    expect(inv.refusals).toEqual([expect.objectContaining({ line: 3, field: "cmd" })]);
+    expect(inv.refusals).toEqual([expect.objectContaining({ line: 3, field: "column 3" })]);
     expect(JSON.stringify(inv)).not.toContain("--token");
     for (const col of ["commandline", "args", "argv", "environment_variables", "env_values"]) {
       const line = JSON.stringify({ name: "ai_running_processes", hostIdentifier: "h", columns: { name: "ollama", [col]: "synthetic" } });
@@ -571,7 +572,77 @@ describe("credential-shaped values (SD0 scrubber parity)", () => {
     const content = JSON.stringify({ name: "ai_running_processes", hostIdentifier: "h", columns: { name: keyShaped } });
     const r = importOsqueryResults({ content, pseudonymise: hook });
     const red = reduceEndpointObservations(r, endpointCatalogueSignatures().map(({ seedIds: _s, ...sig }) => sig));
-    expect(red.credentialShapedDropped).toBeGreaterThan(0);
+    // one value tried as several artifact kinds counts once
+    expect(red.credentialShapedDropped).toBe(1);
     expect(JSON.stringify(red)).not.toContain(keyShaped);
+  });
+});
+
+describe("recheck fixes (#401)", () => {
+  const hook = testHook();
+
+  it("a headerless CSV's refusal quotes no cell text", () => {
+    const csv = "laptop-alice,alice@example.test,Cursor\nlaptop-bob,bob@example.test,Claude\n";
+    let msg = "";
+    try {
+      importEndpointInventory({ content: csv, format: "csv", pseudonymise: hook });
+    } catch (e) {
+      expect(e).toBeInstanceOf(EndpointImportFormatError);
+      msg = JSON.stringify({ m: (e as EndpointImportFormatError).message, d: (e as EndpointImportFormatError).detail });
+    }
+    expect(msg.length).toBeGreaterThan(0);
+    for (const cell of ["alice", "bob", "Cursor", "laptop"]) expect(msg.includes(cell), cell).toBe(false);
+    // an explicit mapping naming columns the file lacks: field names only
+    try {
+      importEndpointInventory({ content: csv, format: "csv", pseudonymise: hook, config: { mapping: { device: "Device", itemName: "App" } } });
+    } catch (e) {
+      msg = JSON.stringify({ m: (e as Error).message, d: (e as EndpointImportFormatError).detail });
+    }
+    for (const cell of ["alice", "bob", "Cursor"]) expect(msg.includes(cell), cell).toBe(false);
+  });
+
+  it("malformed osquery JSON and unparseable JSON rows quote no snippet", () => {
+    let msg = "";
+    try {
+      importOsqueryResults({ content: '[{"hostIdentifier": "alice-macbook", "name": ', pseudonymise: hook });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/not valid JSON/);
+    expect(msg.includes("alice")).toBe(false);
+    let msg2 = "";
+    try {
+      importEndpointInventory({ content: '[{"device": "alice-macbook", ', format: "json", pseudonymise: hook });
+    } catch (e) {
+      msg2 = (e as Error).message;
+    }
+    expect(msg2.length).toBeGreaterThan(0);
+    expect(msg2.includes("alice")).toBe(false);
+  });
+
+  it("row refusals name fields and positions, never cell or header text", () => {
+    const csv = "device,software,type,Command-Line\nd1,Cursor,firmware-alice,\nd2,Cursor,app,run --as alice\n";
+    const r = importEndpointInventory({ content: csv, format: "csv", pseudonymise: hook });
+    const dump = JSON.stringify(r.refusals);
+    expect(r.refusals.map((x) => x.line)).toEqual([2, 3]);
+    expect(dump.includes("alice")).toBe(false);
+    expect(dump.includes("Command-Line")).toBe(false);
+  });
+
+  it("normalises header spelling before the forbidden-column check", () => {
+    for (const h of ["Command-Line", "ENV VALUES", "env.values", " Args ", "ENVIRONMENT_VARIABLES"]) expect(isForbiddenColumn(h), h).toBe(true);
+    for (const h of ["device", "Software", "Bundle ID"]) expect(isForbiddenColumn(h), h).toBe(false);
+    const r = importEndpointInventory({ content: "device,software,ENV VALUES\nd1,Cursor,X=1\n", format: "csv", pseudonymise: hook });
+    expect(r.observations).toEqual([]);
+    expect(r.refusals).toHaveLength(1);
+  });
+
+  it("never records an env-var gap even when the process name is empty", () => {
+    const line = JSON.stringify({ name: "ai_env_var_names_posix", hostIdentifier: "h", columns: { process_name: "", key: "UNMATCHED_SYNTHETIC_NAME" } });
+    const r = importOsqueryResults({ content: line, pseudonymise: hook });
+    expect(r.observations).toHaveLength(1);
+    const red = reduceEndpointObservations(r, endpointCatalogueSignatures().map(({ seedIds: _s, ...sig }) => sig));
+    expect(red.unmatchedCount).toBe(1);
+    expect(red.unmatched).toEqual([]);
   });
 });

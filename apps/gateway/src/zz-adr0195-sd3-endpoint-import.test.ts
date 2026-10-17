@@ -32,7 +32,10 @@ import {
   users,
   type Db,
 } from "@regulait/db";
+import Fastify from "fastify";
 import { buildApp } from "./app.js";
+import { ObservationRefused } from "./discovery-worker.js";
+import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -218,6 +221,54 @@ describe("ADR-0195 SD3 endpoint imports into SD0", () => {
     expect(r.json().error).toBe("rows_refused");
     expect(r.json().refusals[0].line).toBe(3);
     expect((await db.select({ id: discoveryRuns.id }).from(discoveryRuns).where(eq(discoveryRuns.sourceId, id))).length).toBe(runsBefore);
+  });
+
+  it("audits every refusal with a fixed reason: no cell text from a headerless CSV or malformed JSON reaches the audit log", async () => {
+    const inv = await endpointSource("endpoint_inventory");
+    const osq = await endpointSource("endpoint_osquery");
+    const disabled = await endpointSource("endpoint_osquery", false);
+    const secretish = `cellmark${RUN}`;
+    const headerless = await inject("POST", `/v1/discovery/sources/${inv}/endpoint-imports`, AUTH, { content: `${HOST}-a,${secretish}@example.test,Cursor\n${HOST}-b,x@example.test,Claude`, format: "csv" });
+    expect(headerless.statusCode).toBe(400);
+    expect(headerless.body.includes(secretish)).toBe(false);
+    const badJson = await inject("POST", `/v1/discovery/sources/${osq}/endpoint-imports`, AUTH, { content: `[{"hostIdentifier": "${secretish}", "name": ` });
+    expect(badJson.statusCode).toBe(400);
+    expect(badJson.body.includes(secretish)).toBe(false);
+    const rows = await inject("POST", `/v1/discovery/sources/${osq}/endpoint-imports`, AUTH, { content: `${osqueryFile}\nnot json ${secretish}` });
+    expect(rows.statusCode).toBe(422);
+    const off = await inject("POST", `/v1/discovery/sources/${disabled}/endpoint-imports`, AUTH, { content: osqueryFile });
+    expect(off.statusCode).toBe(409);
+    const audits = await db.select().from(auditLog).where(inArray(auditLog.objectId, [inv, osq, disabled]));
+    const refused = audits.filter((a) => a.ruleId === "discovery-endpoint-import-refused");
+    expect(refused.length).toBeGreaterThanOrEqual(4);
+    expect(JSON.stringify(refused).includes(secretish)).toBe(false);
+    expect(JSON.stringify(refused).includes(HOST)).toBe(false);
+  });
+
+  it("an ObservationRefused gives an audited 422 and a failed run", async () => {
+    const id = await endpointSource("endpoint_osquery");
+    const forced = Fastify();
+    forced.addHook("onRequest", async (req) => {
+      (req as unknown as { authCtx: { userId: string } }).authCtx = { userId: adminId };
+    });
+    registerEndpointImportRoutes(forced, db, {
+      dataKey: DATA_KEY,
+      checkObservations: () => {
+        throw new ObservationRefused(`observation 0: '${HOST}' forced by the test`);
+      },
+    });
+    await forced.ready();
+    const r = await forced.inject({ method: "POST", url: `/v1/discovery/sources/${id}/endpoint-imports`, payload: { content: osqueryFile, mode: "apply" } });
+    await forced.close();
+    expect(r.statusCode, r.body).toBe(422);
+    expect(r.json().error).toBe("observation_refused");
+    expect(r.body.includes(HOST)).toBe(false);
+    const [run] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, r.json().runId));
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("observation_refused");
+    expect((run?.errorDetail ?? "").includes(HOST)).toBe(false);
+    const audits = await db.select().from(auditLog).where(eq(auditLog.objectId, id));
+    expect(audits.some((a) => a.ruleId === "discovery-endpoint-import-refused" && a.reason.includes("observation_refused"))).toBe(true);
   });
 
   it("imports an MDM/EDR inventory export into an inventory source", async () => {

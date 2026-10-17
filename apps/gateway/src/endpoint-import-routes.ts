@@ -111,7 +111,16 @@ function summarise(result: EndpointImportResult, matched: number, unmatched: num
   };
 }
 
-export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined; registry?: ScannerRegistry } = {}): void {
+export function registerEndpointImportRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: {
+    dataKey?: string | undefined;
+    registry?: ScannerRegistry;
+    /** tests only: replaces SD0's observation check, to drive the refusal path */
+    checkObservations?: typeof checkObservations;
+  } = {},
+): void {
   const registry = opts.registry ?? DISCOVERY_SCANNERS;
   const actor = (req: FastifyRequest) => req.authCtx.userId ?? NIL_UUID;
   const audit = (req: FastifyRequest, objectType: "discovery_source" | "discovery_run" | "ai_endpoint_signature", objectId: string | null, ruleId: string, effect: "allow" | "deny", reason: string, detail: Record<string, unknown>) =>
@@ -140,9 +149,12 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
     const fileSource = body.source ? { fileSourceSha256: createHash("sha256").update(body.source, "utf8").digest("hex") } : {};
     const [source] = await db.select().from(discoverySources).where(eq(discoverySources.id, p.data.sourceId));
     if (!source) return refuse(reply, 404, "not_found", "no such discovery source");
-    /** every refusal once the source is known is audited (with the outcome code and the file digest when there is one) */
+    /**
+     * Every refusal once the source is known is audited. The audit log is append-only, so its row holds only the
+     * outcome code, a fixed sentence and digests and counts: never the detail, which may describe the file.
+     */
     const refuseAudited = async (status: number, error: string, detail: string, extra: Record<string, unknown> = {}, auditDetail: Record<string, unknown> = {}) => {
-      await audit(req, "discovery_source", source.id, "discovery-endpoint-import-refused", "deny", `endpoint import into '${source.name}' refused (${error}): ${detail.slice(0, 300)}`, {
+      await audit(req, "discovery_source", source.id, "discovery-endpoint-import-refused", "deny", `endpoint import into '${source.name}' refused: ${error}`, {
         sourceId: source.id,
         kind: source.kind,
         error,
@@ -167,13 +179,8 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
           : importEndpointInventory({ content: body.content, format: body.format ?? "csv", config: body.config, pseudonymise: local.hook });
     } catch (e) {
       if (e instanceof EndpointImportFormatError) {
-        return refuseAudited(
-          400,
-          e.code,
-          e.message,
-          { importer: e.detail.importer, ...(e.detail.found ? { found: e.detail.found } : {}), ...(e.detail.missing ? { missing: e.detail.missing } : {}) },
-          { payloadSha256: digest },
-        );
+        // the importers' messages give counts, positions and field names only, never cell or header text
+        return refuseAudited(400, e.code, e.message, { importer: e.detail.importer, ...(e.detail.missing ? { missing: e.detail.missing } : {}) }, { payloadSha256: digest });
       }
       throw e;
     }
@@ -195,7 +202,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
       return refuseAudited(
         422,
         "too_many_sightings",
-        `the file yields ${reduction.matched.length} matched sightings; at most ${EVIDENCE_MAX_ROWS} are applied per import — split the file`,
+        `the file yields ${reduction.matched.length + reduction.unmatched.length} sightings to apply (${reduction.matched.length} matched, ${reduction.unmatched.length} gap samples); at most ${EVIDENCE_MAX_ROWS} are applied per import — split the file`,
         { summary },
         { payloadSha256: digest, ...summary },
       );
@@ -287,7 +294,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
       for (const u of reduction.unmatched) {
         scan.push({ evidenceKind, subjectKind: "device", subject: GAP_PLACEHOLDER_SUBJECT, artifact: { kind: u.kind, value: u.value }, ...(u.os ? { os: u.os } : {}) });
       }
-      const checked = checkObservations(source.kind, scan, new Date().toISOString(), catalogue);
+      const checked = (opts.checkObservations ?? checkObservations)(source.kind, scan, new Date().toISOString(), catalogue);
       const verdict = await applyDiscoveryRunObservations(db, run, owner, source, checked, digest, catalogue, [], (t) => recordPseudonyms(t, dataKey, [...derived.values()]));
       if (verdict !== "succeeded") {
         return refuseAudited(409, "run_lost", "the import's run lost its lease before it committed; nothing was imported", { runId: run.id }, { payloadSha256: digest, runId: run.id });
@@ -308,13 +315,14 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
         ...view,
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      // SD0's refusal text can quote an observation value: the run and the reply get a fixed sentence instead
       if (e instanceof ObservationRefused) {
-        await failRun(db, run, owner, "observation_refused", message, { payloadSha256: digest });
-        return refuseAudited(422, "observation_refused", message, { runId: run.id }, { payloadSha256: digest, runId: run.id });
+        const fixed = "an observation from this file was refused by the discovery checks; nothing was imported";
+        await failRun(db, run, owner, "observation_refused", fixed, { payloadSha256: digest });
+        return refuseAudited(422, "observation_refused", fixed, { runId: run.id }, { payloadSha256: digest, runId: run.id });
       }
-      await failRun(db, run, owner, "endpoint_import_error", message, { payloadSha256: digest });
-      await audit(req, "discovery_run", run.id, "discovery-endpoint-import-failed", "deny", `endpoint import into '${source.name}' failed: ${message.slice(0, 300)}`, {
+      await failRun(db, run, owner, "endpoint_import_error", "the import failed before it committed; nothing was imported", { payloadSha256: digest });
+      await audit(req, "discovery_run", run.id, "discovery-endpoint-import-failed", "deny", `endpoint import into '${source.name}' failed before it committed`, {
         sourceId: source.id,
         kind: source.kind,
         payloadSha256: digest,
