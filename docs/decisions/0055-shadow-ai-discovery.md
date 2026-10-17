@@ -1,6 +1,6 @@
 # ADR-0055: Shadow-AI Discovery — inventory ungoverned LLM usage and pull it into governance
 
-- **Status**: Accepted
+- **Status**: Accepted; amended by ADR-0195 (2026-10-17)
 - **Date**: 2026-08-01
 
 ## Context
@@ -289,3 +289,11 @@ No default assignment rule ships for change type `shadow-ai-remediation`. No mig
 or templates (only the demo seeder makes them, through the API), and assigning a workflow on an admin's behalf is
 not secure by default. The plan reports `assignment.ruleConfigured`, the panel says an admin must assign a workflow,
 and the 422 `no_workflow_matches_change` now names the change type and says so.
+
+## Amended by ADR-0195 (2026-10-17)
+
+The owner decided on 2026-10-17 that RegulAIt may actively scan customer systems, read-only: code repos, AWS, GCP and
+Azure accounts, and user machines (through a no-agent osquery pack and importers, or a RegulAIt endpoint agent).
+Where this ADR says discovery uses only customer-supplied evidence, or refuses collectors or endpoint collection,
+[ADR-0195](0195-shadow-ai-active-discovery.md) supersedes it. Everything built under this ADR stays and the new
+scanners write into the same findings model.
