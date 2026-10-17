@@ -66,6 +66,7 @@ import {
   SIGNATURE_OSES,
   UPLOAD_FED_SOURCE_KINDS,
   isArtifactSignatureKind,
+  keyMatchesSignature,
   redactKeyFragment,
   scrubAuditText,
   scrubSecrets,
@@ -407,7 +408,14 @@ export async function recordPseudonyms(db: Db, dataKey: string, items: readonly 
 export class ObservationRefused extends Error {}
 
 /** hold a scanner's observations to its source kind's contract (decision 5a, 6) */
-export function checkObservations(kind: DiscoverySourceRow["kind"], observations: readonly ScanObservation[], nowIso: string): Observation[] {
+export function checkObservations(
+  kind: DiscoverySourceRow["kind"],
+  observations: readonly ScanObservation[],
+  nowIso: string,
+  /** the enabled catalogue: a name matching one of its api_key_prefix rows is a key value, refused */
+  catalogue: readonly AiSignature[] = [],
+): Observation[] {
+  const keyRows = catalogue.filter((s) => s.enabled && s.kind === "api_key_prefix");
   const spec = DISCOVERY_KIND_SPECS[kind];
   if (observations.length > EVIDENCE_MAX_ROWS) {
     throw new ObservationRefused(`the scanner reported ${observations.length} observations; at most ${EVIDENCE_MAX_ROWS} are accepted per run`);
@@ -421,6 +429,12 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
     }
     const subject = typeof o.subject === "string" ? o.subject.trim() : "";
     if (!subject || subject.length > SUBJECT_MAX) throw new ObservationRefused(`observation ${i}: the subject must be 1 to ${SUBJECT_MAX} characters`);
+    // review of #403: nothing a scanner sends may carry a credential in clear. Any text field the audit scrubber
+    // would change (a credential shape) refuses the observation; it is never stored or shown
+    const clean = (v: string, what: string) => {
+      if (scrubAuditText(v) !== v) throw new ObservationRefused(`observation ${i}: ${what} looks like it carries a credential; it was refused, not stored`);
+    };
+    if (!DISCOVERY_PSEUDONYM_PATTERN.test(subject)) clean(subject, "the subject");
     // decision 20: a person or a device is named only by its pseudonym (ctx.pseudonymise)
     if (PSEUDONYMISED_SUBJECT_KINDS.includes(o.subjectKind) && !DISCOVERY_PSEUDONYM_PATTERN.test(subject)) {
       throw new ObservationRefused(`observation ${i}: a ${o.subjectKind} subject must be a pseudonym (psn:…) from ctx.pseudonymise`);
@@ -428,6 +442,7 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
     const bounded = (v: string | undefined, what: string) => {
       if (v === undefined) return null;
       if (typeof v !== "string" || v.length === 0 || v.length > VALUE_MAX) throw new ObservationRefused(`observation ${i}: ${what} must be 1 to ${VALUE_MAX} characters`);
+      clean(v, what);
       return v;
     };
     let artifact: Observation["artifact"] = null;
@@ -437,19 +452,27 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
     }
     const observedAt = o.observedAt && Number.isFinite(Date.parse(o.observedAt)) ? new Date(o.observedAt).toISOString() : nowIso;
     const location = o.location === undefined ? null : checkLocation(o.location, i);
+    if (location) clean(location.path, "location.path");
     let names: string[] | null = null;
     if (o.names !== undefined) {
       if (!Array.isArray(o.names) || o.names.length > NAMES_MAX) throw new ObservationRefused(`observation ${i}: at most ${NAMES_MAX} names`);
       names = o.names.map((n) => {
         if (typeof n !== "string" || !NAME_PATTERN.test(n)) throw new ObservationRefused(`observation ${i}: '${String(n).slice(0, 40)}' is not a name (names only, never values)`);
+        // a "name" that is a key (matches an enabled api_key_prefix row, or a credential shape) is a value: refused
+        if (keyRows.some((sig) => keyMatchesSignature(n, n.length, sig))) {
+          throw new ObservationRefused(`observation ${i}: a name matches an API key signature; names only, never values (refused, not stored)`);
+        }
+        clean(n, "a name");
         return n;
       });
     }
-    if (o.os !== undefined && !(SIGNATURE_OSES as readonly string[]).includes(o.os)) throw new ObservationRefused(`observation ${i}: os must be macos, windows or linux`);
-    if (o.ecosystem !== undefined && !SIGNATURE_ECOSYSTEM_PATTERN.test(o.ecosystem.trim().toLowerCase())) {
+    if (o.os !== undefined && (typeof o.os !== "string" || !(SIGNATURE_OSES as readonly string[]).includes(o.os))) {
+      throw new ObservationRefused(`observation ${i}: os must be macos, windows or linux`);
+    }
+    if (o.ecosystem !== undefined && (typeof o.ecosystem !== "string" || !SIGNATURE_ECOSYSTEM_PATTERN.test(o.ecosystem.trim().toLowerCase()))) {
       throw new ObservationRefused(`observation ${i}: '${String(o.ecosystem).slice(0, 40)}' is not an ecosystem name`);
     }
-    if (o.actorPseudonym !== undefined && !DISCOVERY_PSEUDONYM_PATTERN.test(o.actorPseudonym)) {
+    if (o.actorPseudonym !== undefined && (typeof o.actorPseudonym !== "string" || !DISCOVERY_PSEUDONYM_PATTERN.test(o.actorPseudonym))) {
       throw new ObservationRefused(`observation ${i}: actorPseudonym must be a pseudonym (psn:…) from ctx.pseudonymise`);
     }
     const count = Number.isInteger(o.count) && (o.count as number) > 0 ? Math.min(o.count as number, 1_000_000_000) : 1;
@@ -595,7 +618,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
   const scanCatalogue = {
     matches: (o: ScanObservation): boolean => {
       try {
-        const [probe] = checkObservations(source.kind, [o], nowForProbe);
+        const [probe] = checkObservations(source.kind, [o], nowForProbe, catalogue);
         return probe ? classifyObservation(probe, catalogue).matched : false;
       } catch {
         return false;
@@ -626,6 +649,9 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
         backoffs += 1;
         await sleep(retryAfterMs(res) ?? Math.min(1000 * 2 ** backoffs, DISCOVERY_BACKOFF_MAX_MS), deadline);
         return true;
+      },
+      registerSecret: (value: string) => {
+        if (typeof value === "string" && value.length > 0 && secrets.length < 64) secrets.push(value);
       },
       recordRaw: (chunk) => {
         rawSeen = true;
@@ -664,19 +690,22 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     await db.update(discoveryCredentials).set({ writeScope: "read_only" }).where(eq(discoveryCredentials.id, cred.id));
   }
 
+  // review of #403: classify against the catalogue as it is NOW (a row an admin disabled during a long scan no longer
+  // mints a finding); the copy read before the scan served only ctx.catalogue
+  const classifyCatalogue = await loadEnabledCatalogue(db);
   // M-075: the database clock stamps observations a scanner did not date
   const nowIso = new Date((await db.execute<{ now: string }>(sql`SELECT now()::text AS now`)).rows[0]!.now).toISOString();
   let observations: Observation[];
   let readOutcomes: DiscoveryReadOutcome[];
   try {
-    observations = checkObservations(source.kind, result.observations ?? [], nowIso);
+    observations = checkObservations(source.kind, result.observations ?? [], nowIso, classifyCatalogue);
     readOutcomes = checkReadOutcomes(result.readOutcomes, secrets);
   } catch (err) {
     if (err instanceof ObservationRefused) return fail("observation_refused", err.message);
     throw err;
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
-  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, catalogue, readOutcomes);
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, classifyCatalogue, readOutcomes);
 }
 
 /**
@@ -692,12 +721,12 @@ export async function applyDiscoveryRunObservations(
   source: DiscoverySourceRow,
   observations: Observation[],
   digest: string,
-  catalogue: readonly AiSignature[],
+  classifyCatalogue: readonly AiSignature[],
   readOutcomes: DiscoveryReadOutcome[] = [],
   /** SD3: writes that must commit with the findings (and not happen without them), run inside the fenced transaction */
   inCommit?: (t: Db) => Promise<void>,
 ): Promise<RunVerdict> {
-  const pairs = observations.map((observation) => ({ observation, classification: classifyObservation(observation, catalogue) }));
+  const pairs = observations.map((observation) => ({ observation, classification: classifyObservation(observation, classifyCatalogue) }));
   const matched = pairs.filter((p) => p.classification.matched);
   const gapKeys = new Set<string>();
   const gaps: Array<{ kind: string; value: string }> = [];

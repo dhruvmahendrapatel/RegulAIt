@@ -77,6 +77,9 @@ describe("credential public config: an allowlist per kind and mode (review of #4
     }
     expect(publicConfigProblem("repo_gitlab", "federated", { audience: "https://a.example.test/?token=x" })).toMatch(/not a valid/);
     expect(publicConfigProblem("repo_gitlab", "federated", { audience: "http://a.example.test/" })).toMatch(/not a valid/);
+    for (const k of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      expect(publicConfigProblem("repo_gitlab", "static", JSON.parse(`{"${k}": "x"}`) as Record<string, string>)).toMatch(/not a public config field/);
+    }
   });
   it("matches a credential's account or tenant to the target", () => {
     const arn = "arn:aws:iam::000000000000:role/reader";

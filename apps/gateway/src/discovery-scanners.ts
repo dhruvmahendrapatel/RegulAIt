@@ -68,6 +68,12 @@ export interface ScanContext {
   throttle: () => Promise<void>;
   /** on 429/503: waits the bounded Retry-After and answers true when the caller should retry, false to give up */
   backoff: (res: Response) => Promise<boolean>;
+  /**
+   * register a short-lived secret the scanner obtained (a federated access token, a signed URL) so that any error
+   * text or read-outcome detail carrying it is scrubbed before it is stored. The source's own secret is registered
+   * already.
+   */
+  registerSecret: (value: string) => void;
   /** digest raw output (it is hashed, never kept) */
   recordRaw: (chunk: string | Uint8Array) => void;
   /** a person's display name → the per-tenant pseudonym findings carry (`psn:` + 24 hex) */
