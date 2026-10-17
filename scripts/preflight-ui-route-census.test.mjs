@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { globalPathDefs, globalWrappers, parse, uiCalls, wrappers } from "./preflight-ui-affordances.mjs";
 import {
@@ -10,6 +11,7 @@ import {
   keyCovers,
   reachedRoutes,
   registryRoutes,
+  schedulerJobNames,
   validatePattern,
 } from "./preflight-ui-route-census.mjs";
 
@@ -302,8 +304,22 @@ describe("route census: lists cannot rot", () => {
     const u = { get: new Set(), post: new Set(["/v1/scheduler/jobs/:x/run"]), put: new Set(), patch: new Set(), del: new Set() };
     const superseded = new Map([["POST /v1/x/sweep", { replacement: "POST /v1/scheduler/jobs/:name/run", job: "x-sweep", reason: "same function" }]]);
     const jobs = (text) => (f) => (f === "apps/gateway/src/scheduler-jobs.ts" ? text : null);
-    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs('xSweep: "x-sweep",') }))).toEqual([]);
-    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs('ySweep: "y-sweep",') }))).toEqual(["stale POST /v1/x/sweep"]);
+    const names = (entries) => `export const SCHEDULER_JOB_NAMES = {\n${entries}\n} as const;\n`;
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(names('  xSweep: "x-sweep",')) }))).toEqual([]);
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(names('  ySweep: "y-sweep",')) }))).toEqual(["stale POST /v1/x/sweep"]);
+    // a real match: the name in a comment, or in a string outside the constant, is not a job
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(names('  // xSweep: "x-sweep", (removed)\n  ySweep: "y-sweep",')) }))).toEqual(["stale POST /v1/x/sweep"]);
+    // a block comment spanning lines hides an entry just as a line comment does
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(names('/*\n  xSweep: "x-sweep",\n*/\n  ySweep: "y-sweep",')) }))).toEqual(["stale POST /v1/x/sweep"]);
+    expect(schedulerJobNames(names('/*\n  xSweep: "x-sweep",\n*/\n  ySweep: "y-sweep",'))).toEqual(new Set(["y-sweep"]));
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs(`${names('  ySweep: "y-sweep",')}const legacy = "x-sweep";\n`) }))).toEqual(["stale POST /v1/x/sweep"]);
+    expect(kinds(census({ routes: r, ui: u, ...empty, superseded, fileText: jobs('xSweep: "x-sweep",') }))).toEqual(["stale POST /v1/x/sweep"]);
+  });
+
+  it("schedulerJobNames reads the shipped scheduler-jobs.ts", () => {
+    const names = schedulerJobNames(readFileSync(new URL("../apps/gateway/src/scheduler-jobs.ts", import.meta.url), "utf8"));
+    expect(names?.has("redteam-sweep")).toBe(true);
+    expect(names?.size).toBeGreaterThan(20);
   });
 
   it("a 501 stub on any list is stale, and a route on two lists is refused", () => {
