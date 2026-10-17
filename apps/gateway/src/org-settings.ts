@@ -77,6 +77,7 @@ import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
 import { signInInvariantChecked, signInInvariantWritten, withSignInInvariant } from "./break-glass.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { databaseNow } from "./db-clock.js";
 import {
   breakGlassChange,
   CHANGED_CONCURRENTLY,
@@ -271,10 +272,13 @@ export async function retentionFloor(db: Db): Promise<RetentionFloor> {
     .filter((p) => p.auditRetentionDays === retainedDays)
     .map((p) => p.tag);
   if (orgDays != null && orgDays === retainedDays) floorSource.push("org_default");
-  const cutoff = new Date(Date.now() - retainedDays * 24 * 3600 * 1000);
+  // M-075: the cutoff is compared with audit_log.at (database clock): a process
+  // clock running ahead would otherwise prune audit rows before their floor
+  const nowMs = (await databaseNow(db)).getTime();
+  const cutoff = new Date(nowMs - retainedDays * 24 * 3600 * 1000);
   // A4: MAX-only per-mode overrides — rows of an overridden mode stay retained
   // for the longer window; everything else prunes under the global floor.
-  const modeOverrides = effectiveModeOverrides(org.modeAuditRetention, retainedDays);
+  const modeOverrides = effectiveModeOverrides(org.modeAuditRetention, retainedDays, nowMs);
   const [row] = await db
     .select({ n: count() })
     .from(auditLog)
@@ -361,6 +365,9 @@ export async function runAuditPruneOnce(
   // (`trace_retention_holds`, at most 2x this floor and 3 years) is skipped
   // while its hold is live and unreleased, and deleted by the first pass after
   // the hold expires. A hold an erasure request released protects nothing.
+  // A hold's expiry is compared with the DATABASE clock (`now()`, in the same
+  // statement), never the gateway's: a fast gateway clock must not delete a held
+  // trace early.
   let tracesDeleted = 0;
   try {
     const removed = await db
@@ -368,7 +375,7 @@ export async function runAuditPruneOnce(
       .where(
         and(
           lt(traces.startedAt, f.cutoff),
-          sql`not exists (select 1 from ${traceRetentionHolds} where ${traceRetentionHolds.traceId} = ${traces.id} and ${traceRetentionHolds.releasedAt} is null and ${traceRetentionHolds.holdUntil} > ${new Date().toISOString()}::timestamptz)`,
+          sql`not exists (select 1 from ${traceRetentionHolds} where ${traceRetentionHolds.traceId} = ${traces.id} and ${traceRetentionHolds.releasedAt} is null and ${traceRetentionHolds.holdUntil} > now())`,
         ),
       )
       .returning({ id: traces.id });

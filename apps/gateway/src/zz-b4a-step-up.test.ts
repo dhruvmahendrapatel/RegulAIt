@@ -66,6 +66,7 @@ import { buildApp } from "./app.js";
 import { checkStepUp, relyingParty } from "./step-up.js";
 import { EVIDENCE_HOLD_OVERRIDE_HEADER, incidentEvidenceHoldRefused } from "./incidents.js";
 import { totpCode, totpStep } from "./totp.js";
+import { awaitTotpHeadroom } from "./testing/totp-window.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
@@ -753,6 +754,7 @@ describe("TOTP step-up and step_up_unavailable", () => {
     });
     expect(enrolled.statusCode, enrolled.body).toBe(200);
     const secret = enrolled.json().secret as string;
+    await awaitTotpHeadroom();
     expect((await as(s, "POST", "/auth/totp/activate", { code: totpCode(secret, totpStep() - 1) })).statusCode).toBe(200);
     const action = { kind: "owner_change", body: { objectType: "mcp_server", objectId: randomUUID(), ownerUserId: null } };
     const o1 = await as(s, "POST", "/v1/auth/step-up/options", { action });
