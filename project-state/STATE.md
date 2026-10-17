@@ -5011,6 +5011,12 @@ Batch 6 status (2026-10-16): ADR-0188 is built through S9 (#389, 0199), the last
 as-built sections for the I4 follow-ups (#387) and I5 (#390, 0200); L2 (gVisor) stays unverified while #385 waits
 for a gVisor release. No new ADR was written: the index still ends at 0194, with 189 files and 189 rows.
 
+Owner decision (2026-10-17): ADR-0195 (shadow AI active discovery) is accepted. It amends ADR-0055, ADR-0071, ADR-0083 and ADR-0122 so
+RegulAIt may actively scan, read-only, code repos (GitHub, GitLab, Bitbucket, Azure DevOps), AWS, GCP and Azure
+accounts, and user machines (both a no-agent osquery pack with importers and a RegulAIt endpoint agent). Federated
+cloud credentials are the default and static keys are an audited step-up relaxation. Slices SD0 (foundation,
+migration 0202) then SD1-SD4; SD4 starts with a spike. The index now ends at 0195, with 190 files and 190 rows.
+
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
 (b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to

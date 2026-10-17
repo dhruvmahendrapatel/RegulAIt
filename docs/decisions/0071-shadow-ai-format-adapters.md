@@ -1,6 +1,6 @@
 # ADR-0071: Shadow-AI evidence format adapters — read the customer's file, refuse the line you cannot
 
-- **Status**: Accepted
+- **Status**: Accepted; amended by ADR-0195 (2026-10-17)
 - **Date**: 2026-08-07
 - **Migration**: **none, and that is a decision** — see §6
 - **Slice**: [COMPETITIVE_PARITY_PLAN.md](../product/COMPETITIVE_PARITY_PLAN.md) §1 Slice E (the
@@ -379,3 +379,11 @@ that visible, it does not make it untrue.
 Evidence: `apps/web/src/views/admin/governance/ShadowAiPage.tsx`, driven in Chromium by
 `apps/web/e2e/phase6-parity-ui.spec.ts` (four tests, zero console errors, screenshots
 `phase6-12`…`phase6-15`).
+
+## Amended by ADR-0195 (2026-10-17)
+
+The owner decided on 2026-10-17 that RegulAIt may actively scan customer systems, read-only: code repos, AWS, GCP and
+Azure accounts, and user machines. Where this ADR says RegulAIt ships no collector or scans nothing, or a payload
+states so, [ADR-0195](0195-shadow-ai-active-discovery.md) supersedes it: the posture sentences are rewritten to list
+the active sources enabled for the org, and still say nothing is scanned when none is enabled. Everything built
+under this ADR stays.

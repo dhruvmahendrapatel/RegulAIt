@@ -1,6 +1,6 @@
 # ADR-0122 — MCP discovery: detection is half a capability, the registry diff is the other half
 
-- **Status**: Accepted
+- **Status**: Accepted; amended by ADR-0195 (2026-10-17)
 - **Date**: 2026-09-24
 - **Relates to**: [ADR-0055](0055-shadow-ai-discovery.md) (shadow-AI discovery from
   customer-supplied evidence — the posture this ADR inherits, and the frozen catalogue it could not
@@ -120,3 +120,11 @@ cleaner would lose the self-hosted servers that have no other signature.
 - No UI. This is an API-only capability today.
 - `mcpServers` is diffed by host, so two servers on one host are indistinguishable to the diff.
   Fine for "is this governed at all", wrong if the question ever becomes "which one".
+
+## Amended by ADR-0195 (2026-10-17)
+
+The owner decided on 2026-10-17 that RegulAIt may actively scan customer systems, read-only: code repos, AWS, GCP and
+Azure accounts, and user machines. Where this ADR says RegulAIt ships no collector or scans nothing, or a payload
+states so, [ADR-0195](0195-shadow-ai-active-discovery.md) supersedes it: the posture sentences are rewritten to list
+the active sources enabled for the org, and still say nothing is scanned when none is enabled. Everything built
+under this ADR stays.
