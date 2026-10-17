@@ -185,7 +185,7 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       const h = url.hostname;
       if (h === "sts.googleapis.com") return json({ access_token: token("gsts"), issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: 3600 });
-      if (h === "iamcredentials.googleapis.com") return json({ accessToken: token("gimp"), expireTime: "2026-10-17T13:00:00Z" });
+      if (h === "iamcredentials.googleapis.com") return json({ accessToken: token("gimp"), expireTime: new Date(Date.now() + 3_600_000).toISOString() });
       if (h === "login.microsoftonline.com") {
         const tenant = url.pathname.split("/")[1];
         const base = `https://login.microsoftonline.com/${tenant}`;
