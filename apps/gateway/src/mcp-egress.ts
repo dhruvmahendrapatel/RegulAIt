@@ -94,7 +94,7 @@ export interface McpEgressDeps {
    * refused `policy_unresolved` and nothing starts (fail closed, never
    * defaulted).
    */
-  placement?: (Pick<StdioPlacementInput, "userId" | "projectId" | "agent" | "parentGrantId"> & {
+  placement?: (Pick<StdioPlacementInput, "userId" | "projectId" | "agent" | "parentGrantId" | "interactivePerson"> & {
     /** the offer the governed decision already made (its placement row is keyed to that decision, I4/I8) */
     linkedOfferId?: string | null;
   }) | null;
@@ -542,6 +542,8 @@ export async function guardedMcpConnect(
       projectId: ctx?.projectId ?? null,
       agent: ctx?.agent ?? null,
       parentGrantId: ctx?.parentGrantId ?? null,
+      // ADR-0190 owner decision C: only an interactive person's own call may use a relaxation (absent = never)
+      interactivePerson: ctx?.interactivePerson === true,
       mcpServerId: dest.row.id,
       imageDigest: dest.image,
       workload: { command: dest.command, args: dest.args },

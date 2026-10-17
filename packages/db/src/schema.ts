@@ -127,7 +127,7 @@ import {
   EXECUTION_OFFER_STATUSES,
   EXECUTION_OFFER_DECLINE_REASONS,
   EXECUTION_OFFER_END_OUTCOMES,
-  // ADR-0195 SD0 (migration 0203): shadow-AI active discovery
+  // ADR-0195 SD0 (migration 0202): shadow-AI active discovery
   DISCOVERY_CREDENTIAL_MODES,
   DISCOVERY_RUN_STATUSES,
   DISCOVERY_RUN_TRIGGERS,
@@ -3213,7 +3213,17 @@ export const projects = pgTable("projects", {
    * review — never applied silently */
   pendingClassifications: jsonb("pending_classifications").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+  /** ADR-0190 owner decision D (migration 0201): the admin-set project sensitivity for isolation. The project's
+   * sensitivity is MAX(its use cases' strictest, this), so it can only raise. NULL = not set (with no use case the
+   * fact does not resolve: `policy_unresolved`). Set only by `PUT /v1/execution-project-sensitivities/:projectId`
+   * (a `settings_relax` step-up, audited). */
+  isolationSensitivity: text("isolation_sensitivity"),
+}, (t) => [
+  check(
+    "projects_isolation_sensitivity_check",
+    sql`${t.isolationSensitivity} IS NULL OR ${t.isolationSensitivity} IN ('public', 'internal', 'confidential', 'regulated')`,
+  ),
+]);
 
 // MULTI-TURN CONVERSATIONS: a personal (per-user) thread of governed
 // dispatches against one agent. FK-free ids on purpose, like the ledgers —
@@ -6825,7 +6835,7 @@ export const aiEndpointSignatures = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     lastUpdatedAt: timestamp("last_updated_at", { withTimezone: true }).notNull().defaultNow(),
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    // ADR-0195 SD0 (migration 0203): OS / ecosystem scope, a tool id, an admin note, a confidence
+    // ADR-0195 SD0 (migration 0202): OS / ecosystem scope, a tool id, an admin note, a confidence
     os: text("os", { enum: SIGNATURE_OSES }),
     ecosystem: text("ecosystem"),
     toolId: text("tool_id"),
@@ -6835,7 +6845,7 @@ export const aiEndpointSignatures = pgTable(
   },
   (t) => [
     index("ai_endpoint_signatures_provider_idx").on(t.provider),
-    // ADR-0195 SD0 (migration 0203): declared for parity with the migration
+    // ADR-0195 SD0 (migration 0202): declared for parity with the migration
     check("ai_endpoint_signatures_os_ck", sql`${t.os} IS NULL OR ${t.os} IN ('macos', 'windows', 'linux')`),
     check("ai_endpoint_signatures_ecosystem_ck", sql`${t.ecosystem} IS NULL OR ${t.ecosystem} ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'`),
     check("ai_endpoint_signatures_tool_id_ck", sql`${t.toolId} IS NULL OR ${t.toolId} ~ '^[a-z0-9][a-z0-9_.-]{0,127}$'`),
@@ -6857,7 +6867,7 @@ export const shadowAiImports = pgTable(
   "shadow_ai_imports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    // ADR-0195 SD0 (migration 0203): the import kinds plus the scanner evidence kinds, one path for both
+    // ADR-0195 SD0 (migration 0202): the import kinds plus the scanner evidence kinds, one path for both
     kind: text("kind", { enum: [...EVIDENCE_KINDS, ...DISCOVERY_EVIDENCE_KINDS] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
@@ -6870,7 +6880,7 @@ export const shadowAiImports = pgTable(
     requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
-    /** ADR-0195 SD0 (migration 0203): the scan run this import row came from; NULL for an uploaded file */
+    /** ADR-0195 SD0 (migration 0202): the scan run this import row came from; NULL for an uploaded file */
     discoveryRunId: uuid("discovery_run_id").references((): AnyPgColumn => discoveryRuns.id, { onDelete: "set null" }),
   },
   (t) => [
@@ -6935,7 +6945,7 @@ export type ShadowAiImportRow = typeof shadowAiImports.$inferSelect;
 export type ShadowAiFindingRow = typeof shadowAiFindings.$inferSelect;
 
 // ===========================================================================
-// ADR-0195 SD0 — SHADOW-AI ACTIVE DISCOVERY (migration 0203)
+// ADR-0195 SD0 — SHADOW-AI ACTIVE DISCOVERY (migration 0202)
 //
 // A source is off until an admin enables it (a `settings_relax` step-up bound
 // to its kind, target and scope). Its credential is a data-key envelope that
@@ -13790,6 +13800,33 @@ export const executionPlacements = pgTable(
   ],
 );
 export type ExecutionPlacementRow = typeof executionPlacements.$inferSelect;
+
+/**
+ * ADR-0190 owner decision C (migration 0201): "a person's own stdio call". An active row (`cleared_at` NULL) lowers
+ * the unknown-agent floor for an `mcp_stdio` call with NO agent, made by a person in an interactive session, from L3
+ * to L2, for one stdio MCP server or one project (never org-wide; at most one active row per scope). Set with a
+ * `settings_relax` step-up, cleared without one; both audited. A row is never deleted and only gains its clearing,
+ * once (guard trigger), so the evidence of which relaxation a call relied on stays. `scope_id` carries no foreign
+ * key on purpose: a relaxation row is evidence and must not block (or vanish with) the server or project.
+ */
+export const executionPersonStdioRelaxations = pgTable(
+  "execution_person_stdio_relaxations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKind: text("scope_kind", { enum: ["mcp_server", "project"] }).notNull(),
+    scopeId: uuid("scope_id").notNull(),
+    createdByUserId: uuid("created_by_user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    clearedByUserId: uuid("cleared_by_user_id"),
+  },
+  (t) => [
+    check("execution_person_stdio_relaxations_scope_kind_check", sql`${t.scopeKind} IN ('mcp_server', 'project')`),
+    check("execution_person_stdio_relaxations_cleared_check", sql`(${t.clearedAt} IS NULL) = (${t.clearedByUserId} IS NULL)`),
+    uniqueIndex("execution_person_stdio_relaxations_active_uq").on(t.scopeKind, t.scopeId).where(sql`${t.clearedAt} IS NULL`),
+  ],
+);
+export type ExecutionPersonStdioRelaxationRow = typeof executionPersonStdioRelaxations.$inferSelect;
 
 /**
  * ADR-0190 I4 (migration 0198): how an `offered` placement ended — the

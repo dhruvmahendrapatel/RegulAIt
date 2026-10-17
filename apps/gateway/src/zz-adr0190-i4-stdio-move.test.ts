@@ -248,6 +248,35 @@ describe("no in-gateway spawn, no fallback: refused with decision 7's envelope (
     expect(liveStdioSessions()).toBe(0);
   });
 
+  it("ADR-0190 owner decision C: an interactive person's governed call on a relaxed server records the relaxation on its decision row and in its facts; the same call without a session does not", async () => {
+    setStdioPlacementAffinityForTest([randomUUID()]);
+    const relaxationId = rows<{ id: string }>(
+      await db.execute(sql`insert into execution_person_stdio_relaxations (scope_kind, scope_id, created_by_user_id) values ('mcp_server', ${serverId}, ${adminId}) returning id`),
+    )[0]!.id;
+    try {
+      // the session facts the MCP proxy route derives from a person's password sign-in
+      const out = await executeGovernedToolCall(db, undefined, { userId: memberId, serverId, toolName: "where_am_i", projectId, arguments: {}, principal: { sessionOrigin: "password", mfaCompleted: false, clientIp: null } });
+      expect(out).toMatchObject({ kind: "denied", decision: { ruleId: "execution-profile" } });
+      const relaxed = await lastDecision();
+      const relaxation = { kind: "person_stdio_l2", subjectKind: "interactive_person", relaxationId, scopeKind: "mcp_server", scopeId: serverId };
+      expect(relaxed!.detail).toMatchObject({ execution: { refusal: "execution_profile_unavailable", reason: "no_executor", relaxation } });
+      const p = await placementOfDecision(relaxed!.id);
+      expect(p).toMatchObject({ outcome: "refused", requiredClass: "user_space_kernel" });
+      const [f] = await db.select().from(decisionFacts).where(eq(decisionFacts.auditId, relaxed!.id));
+      expect((f!.facts as { execution?: { relaxation?: unknown } }).execution?.relaxation).toEqual(relaxation);
+      expect(decisionFactsSchema.safeParse(f!.facts).success).toBe(true);
+
+      // the negative control: the same call with an API key's session facts stays the unknown agent at L3, unrecorded
+      await executeGovernedToolCall(db, undefined, { userId: memberId, serverId, toolName: "where_am_i", projectId, arguments: {}, principal: { sessionOrigin: "api_key", mfaCompleted: false, clientIp: null } });
+      const plain = await lastDecision();
+      expect(plain!.id).not.toBe(relaxed!.id);
+      expect((plain!.detail as { execution: Record<string, unknown> }).execution.relaxation).toBeUndefined();
+      expect(await placementOfDecision(plain!.id)).toMatchObject({ requiredClass: "microvm" });
+    } finally {
+      await db.execute(sql`update execution_person_stdio_relaxations set cleared_at = now(), cleared_by_user_id = ${adminId} where id = ${relaxationId}`);
+    }
+  });
+
   it("the HTTP route answers 409 with the same envelope (a tools/list that needs the manifest)", async () => {
     setStdioPlacementAffinityForTest([randomUUID()]);
     const fresh = await inject("POST", "/v1/servers", adminAuth, { name: `i4-http-${RUN}`, transport: "stdio", stdio: { image: IMAGE, command: COMMAND, args: [] } });

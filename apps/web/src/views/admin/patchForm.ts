@@ -26,7 +26,8 @@ export type PatchField = {
   /**
    * a subset of `options`; `min`/`max` entries; `emptyAs` is what an empty selection sends.
    * `loading`: the options are still being read, so the field cannot be judged and Save waits.
-   * A stored id that is not among the options is kept as it is, never dropped.
+   * A stored id that is not among the options is kept as it is, never dropped silently: it is shown by id
+   * (`multiChoices`) and can be unticked like any other.
    */
   | { kind: "multi"; options: readonly Choice[]; min?: number; max?: number; emptyAs?: null | []; loading?: boolean }
   /** a comma-separated list of short strings */
@@ -42,6 +43,17 @@ export interface PatchDraft {
 }
 
 const encodeSelect = (f: Extract<PatchField, { kind: "select" }>, v: unknown) => (f.encode ? f.encode(v) : v == null ? "" : String(v));
+
+/**
+ * The boxes a multi field shows: its options, then each stored id the options do not list, by its id. A stored
+ * entry that is not listed still counts toward `max` and is still sent, so it gets a box to untick; the list comes
+ * from the record, not the draft, so an unticked one stays on screen to tick again.
+ */
+export function multiChoices(f: Extract<PatchField, { kind: "multi" }>, record: Record<string, unknown>): Array<Choice & { unlisted: boolean }> {
+  const stored = record[f.key];
+  const unlisted = (Array.isArray(stored) ? stored.map(String) : []).filter((x, i, all) => all.indexOf(x) === i && !f.options.some((o) => o.value === x));
+  return [...f.options.map((o) => ({ ...o, unlisted: false })), ...unlisted.map((x) => ({ value: x, label: `${x} (not in this list)`, unlisted: true }))];
+}
 
 /** the draft a record opens with */
 export function draftFromRecord(fields: readonly PatchField[], record: Record<string, unknown>): PatchDraft {

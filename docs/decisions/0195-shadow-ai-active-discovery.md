@@ -170,7 +170,7 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
 
 ### Slices
 
-- **SD0 Foundation** (migration 0203; 0201 and 0202 are claimed by builds in flight): discovery
+- **SD0 Foundation** (migration 0202; 0201 is claimed by the ADR-0190 isolation-admin build in flight): discovery
   sources, scanner credentials, scan runs and schedules; the new signature kinds, subject kinds and signal sources;
   the pseudonym table; enable, widen and credential step-ups; posture rows and the rewritten posture sentences; an
   admin "Discovery sources" page; the scan worker with leased runs. Depends on #395 (egress step-up).
@@ -280,13 +280,13 @@ Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 regis
   digests at 4 MB; token-exchange responses go through an undigested credential fetch; Azure audit evidence is
   attributed only to discovered AI resources; error details redact `key=`/`token=`-style values.
 
-## As built: SD0 foundation (2026-10-17, migration 0203)
+## As built: SD0 foundation (2026-10-17, migration 0202)
 
-**Status: built on branch `sd0-discovery-foundation`; the migration journal entry waits for 0202 to merge.** No
+**Status: built on branch `sd0-discovery-foundation`; migration 0202 with its journal entry (idx 202) after 0201.** No
 scanner ships: the production registry is empty, so no source can be created yet and the admin page shows every
 kind as "not built yet" with the slice that builds it.
 
-1. **Migration 0203** (hand-written; no function and no trigger, so the 0185 guard has nothing new to check):
+1. **Migration 0202** (hand-written; no function and no trigger, so the 0185 guard has nothing new to check):
    - `discovery_sources`: `kind` (the ten kinds), `target` (a JSON object), `scope` (`{orgLevel, include[]}`, CHECKed),
      `enabled` default false, `schedule_interval_seconds` (3600 to 30 days, default daily), `version` for
      compare-and-set, `next_run_at`/`last_run_at`, who enabled and disabled it. Unique by `lower(name)`.
@@ -332,7 +332,7 @@ kind as "not built yet" with the slice that builds it.
      one sent by the admin. Revoking is free and destroys the secret. No view selects the ciphertext.
    - Settings: lengthening the warning age or the endpoint retention is a `settings_relax` step-up; shortening is free.
    - Reveal: its own step-up kind `pseudonym_reveal` (master decision on #403: revealing a name is not a settings
-     relaxation), facts `{op: "pseudonym_reveal", pseudonym}`. Migration 0203 adds the kind to the `step_up_grants`,
+     relaxation), facts `{op: "pseudonym_reveal", pseudonym}`. Migration 0202 adds the kind to the `step_up_grants`,
      `webauthn_challenges` and `org_settings.step_up_actions` CHECKs, to the column default and to the existing org row
      (first load); `STEP_UP_ACTION_KINDS` has eight kinds and the dialog says "revealing a person's name". A
      `settings_relax` grant does not reveal. The audit names the pseudonym, never the name.

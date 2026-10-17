@@ -13,7 +13,7 @@
  * path as evidence imports, under one of the evidence kinds below.
  */
 
-/** every kind of discovery source (migration 0203 `discovery_sources_kind_check`) */
+/** every kind of discovery source (migration 0202 `discovery_sources_kind_check`) */
 export const DISCOVERY_SOURCE_KINDS = [
   "repo_github",
   "repo_gitlab",
