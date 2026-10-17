@@ -1642,3 +1642,17 @@ to "clarify", replaces the owner's words with ours.
 
 Rule: never edit owner text in an ADR. Record deviations and details in an "As built" section that quotes the decision
 it refers to. Reviewers diff the owner sections of every touched ADR, and both builder briefs say so.
+
+### M-086 (2026-10-17) - A test-only switch changed product CSS behaviour, and only CI found it
+
+On #414 (N9) every e2e config was switched to emulate reduced motion, on the reasoning that `global.css` already cut
+transitions to 0.01 ms under that setting, so axe would stop racing theme transitions. Only the one touched spec ran
+locally. CI then failed all five mocked-UI shards: a 0.01 ms transition still starts from the old value until the next
+frame, so axe read the pre-flip colour; a 0.01 ms infinite animation never finishes, which hung a fixture waiting on
+`getAnimations()`; and a spec asserting no running animations failed. The fix (`animation: none; transition: none` under
+reduced motion) also changes the product for real users.
+
+Rule: a change to a global test setting (emulation, viewport, locale, a shared fixture) is a change to every spec. Before
+pushing, run the whole affected suite locally or reason through every product path the setting activates, and treat any
+CSS or code it switches on as product behaviour that needs its own check. Assert that the setting is live (the
+reduced-motion assertion is what showed that a top-level Playwright `reducedMotion` option has no effect).

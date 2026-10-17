@@ -1,10 +1,10 @@
 ---
-phase: batch-6-s9-i5-b8-merged-engine-images-next
-last_updated: 2026-10-16
+phase: batch-7-shadow-ai-sd0-sd3-merged-builder-wave-in-review
+last_updated: 2026-10-17
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-16-session-01.md
+last_session: sessions/2026-10-17-session-02.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,47 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-17 (evening) - the first ADR-0195 slices, the server secure-by-default and reliability batches, engine task
+images, the enterprise UI harness (ADR-0196) and the N5-N9 ops tail are merged.** Full record:
+[sessions/2026-10-17-session-02.md](sessions/2026-10-17-session-02.md). This paragraph supersedes the "Last migration"
+and "in review" lists of the 2026-10-17 paragraph below; its owner decisions stand.
+- **Merged (UTC 2026-10-17)**, after #409 (the morning STATE PR):
+  - 07:26 #406, UI review lows;
+  - 07:32 #397, runc L1 backend and a versioned engine-worker profile. **No migration**: it withdrew its 0202 (a revert
+    is a new profile version, and retirement stays terminal);
+  - 08:14 #403, ADR-0195 SD0 discovery foundation, **migration 0202**;
+  - 08:43 #408, server secure-by-default gaps (SEC-DEFAULTS); it used no migration;
+  - 08:48 #407, reliability: I5 refusal ordering, the M-075 clock sweep, the TOTP window, e2e races, census CI;
+  - 10:21 #404, ADR-0195 SD2 cloud scanners (AWS, GCP, Azure) over guarded transports;
+  - 10:23 #415, the `key_management` step-up kind for signing-key operations (N3), **migration 0203**;
+  - 10:36 #405, the engine task image pipeline and image lock (ENG-IMG);
+  - 11:15 #402, ADR-0195 SD1 repo scanners, read-only repo readers, catalogue v2;
+  - 11:47 #401, ADR-0195 SD3 endpoint discovery without an agent;
+  - 12:06 #412, ADR-0190 A1: the person-stdio relaxation is recorded in the Decision BOM;
+  - 12:55 #410, the enterprise UI harness, **ADR-0196** (four bars as ratchets);
+  - 19:54 #414, N5-N9 ops tail (B8 tail, installer lows, isolation test gaps, e2e reduced motion), merged by the owner's
+    instruction.
+- **Last migration on main: 0203.** The ADR index ends at 0196 (191 files, 191 rows).
+- **Open, all HOLD:**
+  - #413, N8 request-body log leak + N1 SPIFFE follow-ups;
+  - #416, N4 Hugging Face DLP rule + N11 lease DB clock and placements keyset cursor;
+  - #417, N2 multi-replica stdio sessions, migration **0206** (journal entry not added);
+  - #418, N12 owner-change grant claimed after the compare-and-set + N13(b) builder runtime on the DB clock;
+  - #419, ADR-0195 A6 env-name and CLI presence signatures (BLOCKED: its catalogue rows need a migration number);
+  - #420, ADR-0195 SD2b federation signer, migration **0205** (journal entry not added);
+  - #421, ADR-0195 A4 remediation plan body starts a workflow;
+  - #411, ADR-0195 SD4a Go endpoint agent;
+  - #385, the gVisor CI job (waits on an upstream runsc release; check on 2026-10-20).
+- **Migration numbering needs the master:** #420's body says 0204 belongs to #417, but #417 ships 0206, and 0204 is not
+  on main (#408 merged without it). Settle the order before adding journal entries (0204 unused or reassigned, then
+  0205 #420, 0206 #417, and a number for #419).
+- **Owner items from #414:**
+  - confirm that under reduced motion real users now get no transitions or animations at all (`global.css`);
+  - two builders were dispatched on the same #414 review round; both sets of fixes were merged together, but the
+    dispatch should be checked on the coordinating side;
+  - `zz-secure-default-stepups.test.ts` (around line 578) carries an `afterAll` egress marker on a POST that expects
+    403; it probably should say `refused` (left to that file's owner).
 
 **2026-10-17 - shadow-AI active discovery designed and building, the egress step-up, compose engines, and a parallel
 cloud-builder wave.** Full record: [sessions/2026-10-17-session-01.md](sessions/2026-10-17-session-01.md). This
@@ -5067,6 +5108,11 @@ RegulAIt may actively scan, read-only, code repos (GitHub, GitLab, Bitbucket, Az
 accounts, and user machines (both a no-agent osquery pack with importers and a RegulAIt endpoint agent). Federated
 cloud credentials are the default and static keys are an audited step-up relaxation. Slices SD0 (foundation,
 migration 0202) then SD1-SD4; SD4 starts with a spike. The index now ends at 0195, with 190 files and 190 rows.
+
+Owner decision (2026-10-17): ADR-0196 (the enterprise UI harness) is accepted and built (#410): WCAG 2.2 AA via axe on
+every SPA screen in both themes plus keyboard journeys, three browsers at five viewports, a visual-consistency audit, and
+performance budgets, each a committed baseline that may only shrink. ADR-0195 has SD0 (#403, 0202), SD1 (#402), SD2
+(#404) and SD3 (#401) merged. The index now ends at 0196, with 191 files and 191 rows.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
