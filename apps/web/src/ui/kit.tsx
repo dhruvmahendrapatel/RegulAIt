@@ -949,7 +949,7 @@ export function IdChip(props: { id: string | null | undefined }) {
   return (
     <button
       className={s.idChip}
-      // a stable hook for tests (a CSS-module class name is hashed); e.g. the logged target-size axe exclusion
+      // a stable hook for tests (a CSS-module class name is hashed)
       data-id-chip=""
       title={`${id} — click to copy`}
       onClick={async (e) => {

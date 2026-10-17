@@ -188,5 +188,6 @@ describe("drift: readVerifyReport accepts exactly what the shared bomVerifyRespo
     // both sides are exercised, so a reader that refused (or accepted) everything would not pass
     expect(accepted).toBeGreaterThan(50);
     expect(refused).toBeGreaterThan(500);
-  });
+    // the matrix is a few thousand parses and runs near vitest's 5s default under load: an explicit bound
+  }, 30_000);
 });
