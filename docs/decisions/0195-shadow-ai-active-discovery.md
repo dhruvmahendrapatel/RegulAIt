@@ -207,3 +207,31 @@ two contribute detection data under their licences.
 | HEUDavid/shadow-ai | No licence file | Not a detector: a hidden assistant built to evade monitoring. Not used; its traits (no visible window, LAN remote control) become SD3/SD4 detection signatures written by us. |
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
+
+## Implementation notes: SD2 cloud scanners (2026-10-17)
+
+Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 registration).
+
+- **Open source first (decision 11).** The official SDKs are used as published: AWS SDK for JavaScript v3
+  `3.1152.0`, `@google-cloud/service-usage` `5.2.0`, `@google-cloud/asset` `7.2.0`, `@google-cloud/resource-manager`
+  `7.2.0`, `google-auth-library` `11.3.1`, and `@azure/identity` `4.14.0` with the Resource Graph, Cognitive
+  Services, Monitor and `@azure/monitor-query-logs` clients. The whole production tree is Apache-2.0, MIT,
+  BSD-3-Clause, ISC or 0BSD. Two pieces are ours, recorded in the package's `THIRD_PARTY.md`: an Azure `HttpClient`
+  over the guarded fetch (the pipeline package exports no fetch-based client for Node), and a small credential
+  memo. The AWS transport is the SDK's own `FetchHttpHandler` with `customFetch`. Audit-log entries are read through
+  the Logging REST API with the guarded auth client, because the Logging GAPIC client's REST fallback cannot decode
+  the `AuditLog` payload (no AuditLog type is bundled).
+- **Decision 8 found a real bypass.** `google-auth-library` 11.3.1 builds the external-account client's STS client
+  without the transporter it was given, so the workload identity token exchange left on global fetch: the first
+  fake-cloud test run received a live response from Google's STS endpoint. The package re-points it and fails
+  closed if the library's internal shape changes; a negative control shows the egress test fails without the fix.
+  To be reported upstream.
+- **Retries against a refusal.** google-gax reports a fetch that failed before any response, an egress refusal
+  included, as UNAVAILABLE and retries it for up to a minute. Calls pass `maxRetries: 2`. MSAL replaces any transport
+  failure with `network_error`; both are reported as `unreachable`.
+- **Not supported:** instance-metadata credentials (AWS default chain, Azure managed identity, GCP metadata server).
+  The guard refuses the metadata address unconditionally and a source must name its principal. Decision 3's
+  "managed identity" is therefore not offered.
+- **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated; minting
+  the federation token from the ADR-0188 issuer, organisation-level AWS account enumeration, and the scanner
+  registration with SD0 are Phase B.
