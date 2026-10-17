@@ -59,7 +59,11 @@ beforeAll(async () => {
     return reply.status(500).send({ error: "internal" });
   });
   app.post("/json", async () => ({ ok: true }));
-  app.post("/handler-parse", async (req) => JSON.parse(String((req.body as { raw?: string }).raw)));
+  app.post("/handler-parse", async (req) => {
+    // parsed and discarded: the route answers nothing of what it read
+    JSON.parse(String((req.body as { raw?: string }).raw));
+    return { ok: true };
+  });
   app.post("/db-fail", async () => {
     // the shape drizzle-orm's DrizzleQueryError has (message, query, params, cause)
     const cause = Object.assign(new Error(`invalid input syntax for type uuid: "${MARKER}"`), {
