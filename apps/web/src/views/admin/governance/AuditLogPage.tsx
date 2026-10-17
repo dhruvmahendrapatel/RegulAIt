@@ -18,6 +18,7 @@ import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import type { AuditEntry } from "../../../api/types";
 import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
@@ -69,14 +70,19 @@ export default function AuditLogPage() {
   const [deployMode, setDeployMode] = useState("");
   const [confirmPrune, setConfirmPrune] = useState(false);
   const [bomAuditId, setBomAuditId] = useState<string | null>(null);
+  // ADR-0190 owner decision C (A1): `?id=<audit row>` shows that one row (an evidence link, e.g. from a Decision BOM)
+  const [search, setSearch] = useSearchParams();
+  const rowParam = search.get("id");
+  const onlyRow = rowParam !== null && UUID_RE.test(rowParam) ? rowParam.toLowerCase() : null;
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
+    if (onlyRow) p.set("id", onlyRow);
     if (userId) p.set("userId", userId);
     if (deployMode) p.set("deployMode", deployMode);
     const s = p.toString();
     return s ? `?${s}` : "";
-  }, [userId, deployMode]);
+  }, [onlyRow, userId, deployMode]);
 
   const retention = useQuery({
     queryKey: ["admin", "audit-retention"],
@@ -87,7 +93,7 @@ export default function AuditLogPage() {
   // older rows existed (UIA-02); now it says how many are shown and loads
   // older pages on request.
   const audit = useInfiniteQuery({
-    queryKey: ["admin", "audit", userId, deployMode],
+    queryKey: ["admin", "audit", onlyRow, userId, deployMode],
     queryFn: ({ pageParam }) =>
       api.get<AuditPage>(`/v1/audit${qs}${pageParam ? `${qs ? "&" : "?"}cursor=${encodeURIComponent(pageParam)}` : ""}`),
     initialPageParam: null as string | null,
@@ -172,6 +178,14 @@ export default function AuditLogPage() {
         <ChainIntegrityCard />
 
         <Card>
+          {onlyRow && (
+            <p role="status" data-testid="audit-only-row">
+              Showing one audit row, <code className={v.mono}>{onlyRow}</code>.{" "}
+              <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("id"); return n; })}>
+                Show every row
+              </Button>
+            </p>
+          )}
           <div className={a.formRow}>
             <Field label="Filter by user">
               <Select value={userId} onChange={(e) => setUserId(e.target.value)}>

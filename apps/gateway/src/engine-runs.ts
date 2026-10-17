@@ -1612,8 +1612,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     return { schedule: out.after };
   });
 
-  // POST /v1/model-artifacts and the runner's GET /v1/engine-runner/artifacts/:artifactId are B5-M's
-  // (model-artifacts.ts)
+  // POST /v1/model-artifacts is B5-M's (model-artifacts.ts). The runner's artifact route was removed (ENG-IMG
+  // review): the gateway streams an artifact only to the executor sandbox's input (engine-tasks.ts)
 
   // ===== runner routes (runner key only; the scope hook enforces it) ==========
 
