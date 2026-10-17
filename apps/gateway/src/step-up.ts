@@ -50,7 +50,7 @@
  *
  * POLICY: `org_settings.step_up_mode` (`required` strict; `off` is a relaxation
  * and itself needs a `settings_relax` step-up) and `step_up_actions` (every
- * kind in `STEP_UP_ACTION_KINDS` strict, seven today; removing one is a
+ * kind in `STEP_UP_ACTION_KINDS` strict, eight today; removing one is a
  * relaxation), read on every check.
  *
  * `settings_relax` OUTSIDE PUT /v1/org/settings: a relaxation through its own

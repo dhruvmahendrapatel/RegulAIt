@@ -112,7 +112,7 @@ async function lastAudit(ruleId: string, objectId: string) {
 }
 
 const STRICT_SQL = sql`UPDATE org_settings SET step_up_mode = 'required',
-  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb
+  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb
   WHERE id = ${ORG_SETTINGS_ID}`;
 
 beforeAll(async () => {

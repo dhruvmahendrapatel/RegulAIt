@@ -16,7 +16,7 @@
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
@@ -24,8 +24,10 @@ import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea 
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import {
+  couldNotRead,
   describeSchedule,
   describeScope,
+  editablePublicConfig,
   formatKeyValues,
   parseIncludeList,
   parseKeyValueLines,
@@ -74,7 +76,9 @@ export default function DiscoverySourcesPage() {
   const [credError, setCredError] = useState<string | null>(null);
   const [warnDays, setWarnDays] = useState("");
   const [retentionDays, setRetentionDays] = useState("");
-  const [pseudonym, setPseudonym] = useState("");
+  // a finding's sighting links here with ?pseudonym=… (revealing still needs the step-up)
+  const [params] = useSearchParams();
+  const [pseudonym, setPseudonym] = useState(params.get("pseudonym") ?? "");
   const [revealed, setRevealed] = useState<{ pseudonym: string; kind: string; displayName: string } | null>(null);
 
   const kinds = scanners.data?.kinds ?? [];
@@ -284,6 +288,7 @@ export default function DiscoverySourcesPage() {
                         <Badge tone={s.credential.mode === "static" ? "warn" : "ok"}>{s.credential.mode}</Badge>{" "}
                         {s.credential.ageWarning && <Badge tone="danger">{`${s.credential.ageDays} days old`}</Badge>}
                         {s.credential.writeScope === "unverified" && <div className={v.faint}>write scope unverified</div>}
+                        {s.credential.writeScope === "refused" && <Badge tone="danger">refused: grants write access</Badge>}
                       </>
                     ) : (
                       <span className={v.faint}>none</span>
@@ -322,7 +327,7 @@ export default function DiscoverySourcesPage() {
                       >
                         Edit
                       </Button>
-                      <Button size="sm" disabled={act.busy} onClick={() => setCred({ source: s, mode: "federated", publicConfig: s.credential ? formatKeyValues(s.credential.publicConfig) : "", secret: "" })}>
+                      <Button size="sm" disabled={act.busy} onClick={() => setCred({ source: s, mode: "federated", publicConfig: s.credential ? formatKeyValues(editablePublicConfig(s.credential.publicConfig)) : "", secret: "" })}>
                         {s.credential ? "Replace credential" : "Add credential"}
                       </Button>
                       {s.credential && <Button size="sm" variant="danger" disabled={act.busy} onClick={() => revoke(s)}>Revoke credential</Button>}
@@ -375,6 +380,7 @@ export default function DiscoverySourcesPage() {
                 { key: "counts", header: "Observed / matched", render: (r) => `${r.observed} / ${r.matched}` },
                 { key: "findings", header: "Findings", render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
                 { key: "gaps", header: "Catalogue gaps", render: (r) => (r.catalogueGaps.length ? r.catalogueGaps.map((g) => `${g.kind}:${g.value}`).join(", ") : "none") },
+                { key: "reads", header: "Reads", render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint}>all read</span> },
               ]}
             />
           </Card>

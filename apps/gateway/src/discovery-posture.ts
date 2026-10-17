@@ -71,6 +71,8 @@ export interface DiscoveryPosture {
   staleCredentials: Array<SourceRef & { ageDays: number }>;
   /** live credentials no scanner has verified as read-only (decision 7: "write scope unverified") */
   writeScopeUnverified: SourceRef[];
+  /** credentials a scanner found to grant write access: refused, the source blocked until replaced */
+  credentialsRefused: SourceRef[];
   credentialWarningAgeDays: number;
   endpointRetentionDays: number;
   statement: string;
@@ -95,11 +97,13 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
   const byId = new Map(sources.map((s) => [s.sourceId, s]));
   const staticCredentials: DiscoveryPosture["staticCredentials"] = [];
   const writeScopeUnverified: SourceRef[] = [];
+  const credentialsRefused: SourceRef[] = [];
   for (const c of creds) {
     const s = byId.get(c.sourceId);
     if (!s) continue;
     if (c.mode === "static") staticCredentials.push({ ...s, ageDays: Number(c.ageDays) });
     if (c.writeScope === "unverified") writeScopeUnverified.push(s);
+    if (c.writeScope === "refused") credentialsRefused.push(s);
   }
   const staleCredentials = staticCredentials.filter((c) => c.ageDays >= settings.credentialWarningAgeDays);
   const enabled = sources.filter((s) => s.enabled);
@@ -109,6 +113,7 @@ export async function discoveryPosture(db: Db): Promise<DiscoveryPosture> {
     staticCredentials,
     staleCredentials,
     writeScopeUnverified,
+    credentialsRefused,
     credentialWarningAgeDays: settings.credentialWarningAgeDays,
     endpointRetentionDays: settings.endpointRetentionDays,
     statement: activeDiscoveryPosture(enabled),

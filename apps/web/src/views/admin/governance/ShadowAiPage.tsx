@@ -52,6 +52,8 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
+import { DiscoverySightings } from "./DiscoverySightings";
+import type { SightingView } from "./discoverySourcesModel";
 import v from "../../views.module.css";
 
 interface Signature {
@@ -89,6 +91,8 @@ interface Finding {
   replacementAgent: { id: string; name: string; provider: string; enabled: boolean } | null;
   replacementNote: string | null;
   dispositionStale: boolean;
+  /** ADR-0195: the bounded sightings (location, names, actor pseudonym) */
+  evidence?: SightingView[];
 }
 interface FindingsResponse {
   findings: Finding[];
@@ -460,6 +464,8 @@ export default function ShadowAiPage() {
                 { key: "sources", header: "Sources", render: (r) => r.signalSources.map(evidenceLabel).join(", ") },
                 { key: "confidence", header: "Confidence", render: (r) => r.confidence },
                 { key: "observations", header: "Observations", render: (r) => r.observationCount },
+                // ADR-0195 SD0: where scanners saw it (path, line, commit), names seen, and who (as a pseudonym)
+                { key: "sightings", header: "Sightings", render: (r) => <DiscoverySightings evidence={r.evidence} /> },
                 { key: "last_seen", header: "Last seen", render: (r) => ago(r.lastSeenAt) },
                 {
                   key: "replacement",
