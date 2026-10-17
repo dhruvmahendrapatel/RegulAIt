@@ -512,6 +512,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -609,6 +610,8 @@ const auditFilterQuery = z.object({
   effect: z.enum(["allow", "deny", "require_approval"]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
+  /** ADR-0190 owner decision C (A1): one row by id, the target of an evidence link (the Decision BOM's relaxation) */
+  id: z.string().uuid().optional(),
 });
 type AuditFilterInput = z.infer<typeof auditFilterQuery>;
 
@@ -660,6 +663,7 @@ const auditLogColumns = {
  */
 function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): SQL[] {
   const out: SQL[] = [];
+  if (q.id) out.push(eq(auditLog.id, q.id));
   if (q.userId) out.push(eq(auditLog.userId, q.userId));
   if (q.deployMode) {
     // 'unknown' is deploy_mode IS NULL — an explicit, equal bucket, never an
@@ -5479,6 +5483,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0195 SD0 — shadow-AI ACTIVE discovery: sources (off until enabled with a step-up), scanner credentials
   // (never returned), scan runs and settings. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
   registerDiscoveryRoutes(app, db, {
+    dataKey: opts.dataKey,
+    ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+  });
+  // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
+  // and the endpoint signature seed. Admin-only by default.
+  registerEndpointImportRoutes(app, db, {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });

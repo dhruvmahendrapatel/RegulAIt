@@ -1,0 +1,43 @@
+name: Engine images (build only)
+
+# ENG-IMG — the pull_request check for the engine images: it BUILDS each image
+# (scripts/build-engine-image.sh <engine> build) and pushes nothing. It holds
+# no packages permission and logs in to no registry. Publishing is
+# engine-images.yml (push to main and workflow_dispatch only).
+# Runs only when an engine's own files change, so the Actions budget in ci.yml
+# stays true.
+
+on:
+  pull_request:
+    paths:
+      - engines/**
+      - packages/engine-garak/**
+      - packages/engine-modelscan/**
+      - packages/engine-promptfoo/**
+      - packages/engine-runner/**
+      - scripts/build-engine-image.sh
+      - .github/workflows/engine-images.yml
+      - .github/workflows/engine-images-build.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-images-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [promptfoo, modelscan, garak]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build (no push)
+        run: scripts/build-engine-image.sh "${{ matrix.engine }}" build

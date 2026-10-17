@@ -7,10 +7,12 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { runScanJob, type ModelscanRunnerOptions, type ScanOutcome } from "./scan.js";
-import { scanJobSchema, type ScanExecutor, type ScanJob } from "./exchange.js";
+import { ARTIFACT_FORMAT_PLANS, detectArtifactFormat, modelscanArtifactName, type ArtifactReader } from "@regulait/shared";
+import { runScanJob, type ModelscanRunnerOptions } from "./scan.js";
+import { scanJobSchema, type ScanDetection, type ScanExecutor, type ScanJob, type ScannerOutcome } from "./exchange.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -18,6 +20,63 @@ async function writeAtomic(file: string, content: string): Promise<void> {
   const tmp = `${file}.${randomUUID()}.tmp`;
   await writeFile(tmp, content, { mode: 0o640 });
   await rename(tmp, file);
+}
+
+/** a reader over a local file (for format detection) */
+export async function fileReader(file: string): Promise<{ reader: ArtifactReader; close: () => Promise<void> }> {
+  const fh = await open(file, "r");
+  const size = (await fh.stat()).size;
+  return {
+    reader: {
+      size,
+      async read(offset, length) {
+        const n = Math.max(0, Math.min(length, size - offset));
+        const buf = Buffer.alloc(n);
+        if (n > 0) await fh.read(buf, 0, n, offset);
+        return new Uint8Array(buf.buffer, buf.byteOffset, n);
+      },
+    },
+    close: () => fh.close(),
+  };
+}
+
+const UNREAD: ScannerOutcome = { detection: null, exitCode: null, timedOut: false, cancelled: false, report: null, reportSha256: null, reportTooLarge: false, npy: null, npz: null };
+
+/**
+ * ENG-IMG — scan the PLACED artifact (`artifact.bin`, written and verified by the executor in the read-only input).
+ * THE FORMAT IS DECIDED FROM THE BYTES (G19 2), here, by the code that reads them: a format modelscan does not scan
+ * is answered with its detection alone (modelscan never starts); a scannable one is handed to modelscan through a
+ * symlink named for its format's extension, in scratch space (the input is read-only, and a copy would double a large
+ * artifact). modelscan 0.8.8 takes the path as given (`Path.absolute()`, never `resolve()`), so its report names
+ * the extension's name, as before.
+ */
+export async function scanPlacedArtifact(
+  inv: { artifactPath: string; outDir: string; scratchRoot?: string; timeoutMs: number; signal?: AbortSignal },
+  opts: ModelscanRunnerOptions = {},
+): Promise<ScannerOutcome> {
+  let detection: ScanDetection;
+  try {
+    const { reader, close } = await fileReader(inv.artifactPath);
+    try {
+      const d = await detectArtifactFormat(reader);
+      detection = { format: d.format, evidence: d.evidence.slice(0, 500) };
+    } finally {
+      await close();
+    }
+  } catch {
+    return UNREAD;
+  }
+  const name = modelscanArtifactName(detection.format);
+  if (!ARTIFACT_FORMAT_PLANS[detection.format].scanAs || !name) return { ...UNREAD, detection };
+  const scratch = await mkdtemp(path.join(inv.scratchRoot ?? tmpdir(), "modelscan-in-"));
+  try {
+    const named = path.join(scratch, name);
+    await symlink(path.resolve(inv.artifactPath), named);
+    const outcome = await runScanJob({ format: detection.format, artifactPath: named, outDir: inv.outDir, timeoutMs: inv.timeoutMs, ...(inv.signal ? { signal: inv.signal } : {}) }, opts);
+    return { ...outcome, detection };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
 
 /** runs modelscan in this process's container (no isolation of its own: for tests and the opt-in real test) */
@@ -33,10 +92,10 @@ export class LocalScanExecutor implements ScanExecutor {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     return dir;
   }
-  async scan(job: ScanJob, signal: AbortSignal): Promise<ScanOutcome> {
+  async scan(job: ScanJob, signal: AbortSignal): Promise<ScannerOutcome> {
     const outDir = path.join(this.root, job.runId, "out");
     await mkdir(outDir, { recursive: true, mode: 0o700 });
-    return runScanJob({ format: job.format, artifactPath: path.join(this.root, job.runId, "in", job.artifactName), outDir, timeoutMs: job.timeoutMs, signal }, this.opts);
+    return scanPlacedArtifact({ artifactPath: path.join(this.root, job.runId, "in", job.artifactName), outDir, scratchRoot: path.join(this.root, job.runId), timeoutMs: job.timeoutMs, signal }, this.opts);
   }
   async release(runId: string): Promise<void> {
     if (UUID.test(runId)) await rm(path.join(this.root, runId), { recursive: true, force: true });
@@ -58,6 +117,7 @@ export class LocalScanExecutor implements ScanExecutor {
 export async function runScannerLoop(opts: {
   jobsRoot: string;
   resultsRoot: string;
+  scratchRoot?: string;
   pollMs?: number;
   modelscan?: ModelscanRunnerOptions;
   signal?: AbortSignal;
@@ -76,7 +136,7 @@ export async function runScannerLoop(opts: {
 
 /** one pass: run every waiting job, then drop results whose job is gone */
 export async function scannerTick(
-  opts: { jobsRoot: string; resultsRoot: string; pollMs?: number; modelscan?: ModelscanRunnerOptions },
+  opts: { jobsRoot: string; resultsRoot: string; scratchRoot?: string; pollMs?: number; modelscan?: ModelscanRunnerOptions },
   log: (m: string) => void = () => undefined,
 ): Promise<number> {
   let ran = 0;
@@ -92,7 +152,7 @@ export async function scannerTick(
     } catch {
       // an unreadable job is answered (exit unknown), so the runner is not left waiting
       await mkdir(outDir, { recursive: true, mode: 0o750 });
-      await writeAtomic(path.join(outDir, "done.json"), JSON.stringify({ exitCode: null, timedOut: false, cancelled: false, reportSha256: null, reportTooLarge: false, npy: null, npz: null }));
+      await writeAtomic(path.join(outDir, "done.json"), JSON.stringify({ detection: null, exitCode: null, timedOut: false, cancelled: false, reportSha256: null, reportTooLarge: false, npy: null, npz: null }));
       log(`scanner: job ${runId} is invalid; answered without scanning`);
       continue;
     }
@@ -102,15 +162,19 @@ export async function scannerTick(
     const watch = setInterval(() => {
       if (existsSync(cancelFile) || !existsSync(path.join(opts.jobsRoot, runId))) abort.abort();
     }, opts.pollMs ?? 250);
-    let outcome: ScanOutcome;
+    let outcome: ScannerOutcome;
     try {
-      outcome = await runScanJob({ format: job.format, artifactPath: path.join(opts.jobsRoot, runId, job.artifactName), outDir, timeoutMs: job.timeoutMs, signal: abort.signal }, opts.modelscan);
+      outcome = await scanPlacedArtifact(
+        { artifactPath: path.join(opts.jobsRoot, runId, job.artifactName), outDir, ...(opts.scratchRoot ? { scratchRoot: opts.scratchRoot } : {}), timeoutMs: job.timeoutMs, signal: abort.signal },
+        opts.modelscan,
+      );
     } finally {
       clearInterval(watch);
     }
     await writeAtomic(
       path.join(outDir, "done.json"),
       JSON.stringify({
+        detection: outcome.detection,
         exitCode: outcome.exitCode,
         timedOut: outcome.timedOut,
         cancelled: outcome.cancelled,

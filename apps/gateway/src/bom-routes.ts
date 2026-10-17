@@ -35,7 +35,7 @@
  * (`scripts/preflight-ui-affordances.mjs`) sees every route.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { aiBomSnapshots, and, asc, auditLog, bomRenderings, eq, executionPlacementReports, executionPlacements, sql, type Db } from "@regulait/db";
+import { aiBomSnapshots, and, asc, auditLog, bomRenderings, eq, executionPersonStdioRelaxations, executionPlacementReports, executionPlacements, sql, type Db } from "@regulait/db";
 import {
   AI_BOM_DOWNLOAD_FORMATS,
   AI_BOM_INSTALL_SUBJECT_ID,
@@ -62,6 +62,7 @@ import {
   type AiBomDownloadFormat,
   type AiBomSubjectKind,
   type BomVerifyReport,
+  type DecisionExecutionRelaxationRecord,
   type DecisionPlacementReport,
 } from "@regulait/shared";
 import { AI_BOM_SNAPSHOTS_RELEASED, AiBomError, aiBomDrift, aiBomInstallId, listAiBomSnapshots, loadAiBomSettings, takeAiBomSnapshot, type AiBomSubject } from "./ai-bom.js";
@@ -118,6 +119,46 @@ export async function decisionPlacementReports(db: Db, auditId: string): Promise
     endCode: r.endCode,
     createdAt: r.createdAt.toISOString(),
   }));
+}
+
+/**
+ * ADR-0190 owner decision C (slice A1): the relaxation row a decision's signed facts name (`execution.relaxation`),
+ * with who set it, when, whether it was cleared since, and the audit row that set it. Live and unsigned, shown beside
+ * the body. Null when the body names none. The audit row is the `execution-person-stdio-relaxed` row the set wrote in
+ * its own transaction (same actor, same `now()`), found through the (user_id, at) index; null when it is no longer
+ * there (audit retention) or is not exactly one row. A named relaxation whose row is missing is a broken invariant
+ * (rows are never deleted), so the read refuses rather than show the facts without it.
+ */
+export async function decisionExecutionRelaxationRecord(db: Db, document: unknown): Promise<DecisionExecutionRelaxationRecord | null> {
+  const execution = (document as { execution?: { relaxation?: { relaxationId?: unknown } | null } | null } | null)?.execution;
+  const relaxationId = execution?.relaxation?.relaxationId;
+  if (typeof relaxationId !== "string") return null;
+  const [row] = await db.select().from(executionPersonStdioRelaxations).where(eq(executionPersonStdioRelaxations.id, relaxationId));
+  if (!row) {
+    throw new BomRouteError(500, { error: "bom_relaxation_missing", detail: "The Decision BOM names a person-stdio relaxation that does not exist (ADR-0190 owner decision C)." });
+  }
+  const audits = await db
+    .select({ id: auditLog.id })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.userId, row.createdByUserId),
+        sql`${auditLog.at} >= ${row.createdAt} AND ${auditLog.at} <= ${row.createdAt}::timestamptz + interval '1 minute'`,
+        eq(auditLog.ruleId, "execution-person-stdio-relaxed"),
+        sql`${auditLog.detail} ->> 'relaxationId' = ${row.id}`,
+      ),
+    )
+    .limit(2);
+  return {
+    id: row.id,
+    scopeKind: row.scopeKind,
+    scopeId: row.scopeId,
+    setBy: row.createdByUserId,
+    setAt: row.createdAt.toISOString(),
+    clearedBy: row.clearedByUserId,
+    clearedAt: row.clearedAt ? row.clearedAt.toISOString() : null,
+    setAuditId: audits.length === 1 ? audits[0]!.id : null,
+  };
 }
 
 export function registerBomRoutes(app: FastifyInstance, db: Db): void {
@@ -257,6 +298,7 @@ export function registerBomRoutes(app: FastifyInstance, db: Db): void {
         bundle: { schema: EXPORT_BUNDLE_V3_SCHEMA, subject: "decision-bom", href: decisionBomBundleHref(params.auditId, row.version) },
         capabilities: bomCapabilitiesOf(access),
         placementReports: await decisionPlacementReports(db, params.auditId),
+        executionRelaxation: await decisionExecutionRelaxationRecord(db, JSON.parse(row.body) as unknown),
       };
     } catch (e) {
       return b4Refuse(reply, e);
