@@ -27,6 +27,12 @@ export function discoveryPostureRows(p: DiscoveryPostureView): Row[] {
       tone: p.staleCredentials.length ? "danger" : "ok",
     },
     { key: "write", label: "Credentials with write scope unverified", names: p.writeScopeUnverified.map((s) => s.name), tone: p.writeScopeUnverified.length ? "warn" : "ok" },
+    {
+      key: "refused",
+      label: "Credentials refused (grant write access)",
+      names: (p.credentialsRefused ?? []).map((s) => s.name),
+      tone: (p.credentialsRefused ?? []).length ? "danger" : "ok",
+    },
   ];
 }
 

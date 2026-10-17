@@ -127,7 +127,7 @@ import {
   EXECUTION_OFFER_STATUSES,
   EXECUTION_OFFER_DECLINE_REASONS,
   EXECUTION_OFFER_END_OUTCOMES,
-  // ADR-0195 SD0 (migration 0202): shadow-AI active discovery
+  // ADR-0195 SD0 (migration 0203): shadow-AI active discovery
   DISCOVERY_CREDENTIAL_MODES,
   DISCOVERY_RUN_STATUSES,
   DISCOVERY_RUN_TRIGGERS,
@@ -139,6 +139,7 @@ import {
   AI_MATCH_TYPES,
   EVIDENCE_KINDS,
   SHADOW_AI_SUBJECT_KINDS,
+  type DiscoveryReadOutcome,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -4659,7 +4660,7 @@ export const orgSettings = pgTable(
     check("org_settings_step_up_max_age_seconds_check", sql`${t.stepUpMaxAgeSeconds} BETWEEN 30 AND 900`),
     check(
       "org_settings_step_up_actions_check",
-      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb`,
+      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb`,
     ),
     check(
       "org_settings_tool_approval_sensitive_quorum_check",
@@ -6840,7 +6841,7 @@ export const shadowAiImports = pgTable(
   "shadow_ai_imports",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    // ADR-0195 SD0 (migration 0202): the import kinds plus the scanner evidence kinds, one path for both
+    // ADR-0195 SD0 (migration 0203): the import kinds plus the scanner evidence kinds, one path for both
     kind: text("kind", { enum: [...EVIDENCE_KINDS, ...DISCOVERY_EVIDENCE_KINDS] }).notNull(),
     mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
     status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
@@ -6853,7 +6854,7 @@ export const shadowAiImports = pgTable(
     requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
-    /** ADR-0195 SD0 (migration 0202): the scan run this import row came from; NULL for an uploaded file */
+    /** ADR-0195 SD0 (migration 0203): the scan run this import row came from; NULL for an uploaded file */
     discoveryRunId: uuid("discovery_run_id").references((): AnyPgColumn => discoveryRuns.id, { onDelete: "set null" }),
   },
   (t) => [
@@ -6918,7 +6919,7 @@ export type ShadowAiImportRow = typeof shadowAiImports.$inferSelect;
 export type ShadowAiFindingRow = typeof shadowAiFindings.$inferSelect;
 
 // ===========================================================================
-// ADR-0195 SD0 — SHADOW-AI ACTIVE DISCOVERY (migration 0202)
+// ADR-0195 SD0 — SHADOW-AI ACTIVE DISCOVERY (migration 0203)
 //
 // A source is off until an admin enables it (a `settings_relax` step-up bound
 // to its kind, target and scope). Its credential is a data-key envelope that
@@ -6987,7 +6988,7 @@ export const discoveryCredentials = pgTable(
   },
   (t) => [
     check("discovery_credentials_mode_check", sql`${t.credentialMode} IN ('federated', 'static')`),
-    check("discovery_credentials_write_scope_check", sql`${t.writeScope} IN ('unverified', 'read_only')`),
+    check("discovery_credentials_write_scope_check", sql`${t.writeScope} IN ('unverified', 'read_only', 'refused')`),
     check("discovery_credentials_public_config_check", sql`jsonb_typeof(${t.publicConfig}) = 'object'`),
     check(
       "discovery_credentials_static_secret_check",
@@ -7023,6 +7024,8 @@ export const discoveryRuns = pgTable(
     findingsUpdated: integer("findings_updated").notNull().default(0),
     /** observations no enabled admin catalogue row matched (ADR-0195 decision 5), at most 50 */
     catalogueGaps: jsonb("catalogue_gaps").$type<Array<{ kind: string; value: string }>>().notNull().default(sql`'[]'::jsonb`),
+    /** what the scanner could and could not read (SD2), at most 100, details scrubbed */
+    readOutcomes: jsonb("read_outcomes").$type<DiscoveryReadOutcome[]>().notNull().default(sql`'[]'::jsonb`),
     rawOutputSha256: text("raw_output_sha256"),
     errorCode: text("error_code"),
     errorDetail: text("error_detail"),
@@ -7037,6 +7040,7 @@ export const discoveryRuns = pgTable(
     ),
     check("discovery_runs_attempt_check", sql`${t.attempt} BETWEEN 0 AND 3`),
     check("discovery_runs_gaps_check", sql`jsonb_typeof(${t.catalogueGaps}) = 'array' AND jsonb_array_length(${t.catalogueGaps}) <= 50`),
+    check("discovery_runs_read_outcomes_check", sql`jsonb_typeof(${t.readOutcomes}) = 'array' AND jsonb_array_length(${t.readOutcomes}) <= 100`),
     check(
       "discovery_runs_counts_check",
       sql`${t.observed} >= 0 AND ${t.matched} >= 0 AND ${t.findingsCreated} >= 0 AND ${t.findingsUpdated} >= 0`,
@@ -12017,7 +12021,7 @@ export const webauthnChallenges = pgTable(
     check("webauthn_challenges_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
     check(
       "webauthn_challenges_action_kind_check",
-      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
+      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal')`,
     ),
     check(
       "webauthn_challenges_action_digest_check",
@@ -12062,7 +12066,7 @@ export const stepUpGrants = pgTable(
     check("step_up_grants_method_check", sql`${t.method} IN ('passkey', 'totp', 'sso')`),
     check(
       "step_up_grants_action_kind_check",
-      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
+      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'pseudonym_reveal')`,
     ),
     check("step_up_grants_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
     check(

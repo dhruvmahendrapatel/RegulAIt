@@ -135,6 +135,8 @@ export function endpointArtifactCandidates(obs: Pick<EndpointObservation, "keys"
 export interface EndpointArtifactSighting {
   /** the device reference the importer produced (a pseudonym, or a request-local token the caller swaps) */
   device: string;
+  /** the device-user reference the importer produced, when the row named one */
+  user: string | null;
   kind: ArtifactSignatureKind;
   value: string;
   provider: string;
@@ -153,8 +155,8 @@ export interface EndpointReduction {
 /**
  * Match an import's observations against the ENABLED admin catalogue (detection
  * is data: the catalogue decides, not this code) and collapse them to one
- * sighting per device and artifact. Each observation contributes its first
- * matching candidate per provider.
+ * sighting per device, device user and artifact. Each observation contributes
+ * its first matching candidate per provider.
  */
 export function reduceEndpointObservations(
   result: Pick<EndpointImportResult, "observations">,
@@ -174,13 +176,13 @@ export function reduceEndpointObservations(
       const sig = enabled.find((s) => artifactMatchesSignature(c.kind, c.value, s));
       if (!sig || providers.has(sig.provider)) continue;
       providers.add(sig.provider);
-      const key = `${obs.device}\u0000${c.kind}\u0000${sig.value.toLowerCase()}`;
+      const key = `${obs.device}\u0000${obs.user ?? ""}\u0000${c.kind}\u0000${sig.value.toLowerCase()}`;
       const have = matched.get(key);
       if (have) {
         have.count += 1;
         if (obs.observedAt && (!have.observedAt || obs.observedAt > have.observedAt)) have.observedAt = obs.observedAt;
       } else {
-        matched.set(key, { device: obs.device, kind: c.kind, value: sig.value, provider: sig.provider, count: 1, observedAt: obs.observedAt });
+        matched.set(key, { device: obs.device, user: obs.user, kind: c.kind, value: sig.value, provider: sig.provider, count: 1, observedAt: obs.observedAt });
       }
     }
     if (providers.size === 0) {

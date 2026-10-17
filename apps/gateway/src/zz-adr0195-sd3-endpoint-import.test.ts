@@ -179,7 +179,7 @@ describe("ADR-0195 SD3 endpoint imports into SD0", () => {
       expect(dump.includes(HOST)).toBe(false);
       expect(dump.includes(USERNAME)).toBe(false);
     }
-    // the device has an SD0 pseudonym row; the username was never pseudonymised or stored
+    // the device has an SD0 pseudonym row; the username is held only as an enveloped display name, never in clear
     const psn = await db.select().from(discoveryPseudonyms).where(eq(discoveryPseudonyms.pseudonym, findings[0]!.subject));
     expect(psn).toHaveLength(1);
     const all = JSON.stringify(await db.select().from(discoveryPseudonyms));

@@ -14,11 +14,12 @@
  *        an admin-edited row is never touched.
  *
  * PRIVACY (decision 20). The importer runs with a REQUEST-LOCAL keyed hash, so
- * usernames, SIDs and home paths never leave this request and are never stored
- * in any form. Only the device of a sighting that is committed gets an SD0
- * pseudonym (`pseudonymise`, display name enveloped under the data key). The
- * raw file is digested (SHA-256) and discarded (decision 6). Device findings
- * and device pseudonyms fall under SD0's endpoint retention (90 days default).
+ * home paths, SIDs and every name in the file stay inside this request. Only
+ * the device and the device user of a sighting that is committed get SD0
+ * pseudonyms (`pseudonymise`, display name enveloped under the data key); the
+ * user travels as the observation's `actorPseudonym`. The raw file is digested
+ * (SHA-256) and discarded (decision 6). Device findings and device pseudonyms
+ * fall under SD0's endpoint retention (90 days default).
  *
  * SD0 has no `device` pseudonym kind yet (its kinds are device_user,
  * commit_author, cloud_principal), so device names use `device_user` until
@@ -74,14 +75,14 @@ const bodySchema = z
   .strict();
 const uuidParam = z.object({ sourceId: z.string().uuid() });
 
-/** a request-local keyed hash that remembers clear values for this request only */
+/** a request-local keyed hash that remembers clear values (devices, users, SIDs) for this request only */
 function requestLocalHook(): { hook: EndpointPseudonymHook; clearOf: (token: string) => string | undefined } {
   const key = randomBytes(32);
   const clear = new Map<string, string>();
   return {
     hook: ({ kind, value }) => {
       const token = `tmp_${createHmac("sha256", key).update(`${kind}\u0000${value}`).digest("hex").slice(0, 24)}`;
-      if (kind === "device") clear.set(token, value);
+      clear.set(token, value);
       return token;
     },
     clearOf: (token) => clear.get(token),
@@ -228,17 +229,18 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
     if (!run) return refuse(reply, 409, "run_in_progress", "a run of this source is queued or running; import again when it has finished");
 
     try {
-      const deviceKind = DEVICE_PSEUDONYM_KIND;
       const psn = new Map<string, string>();
-      const deviceOf = async (token: string) => {
-        const hit = psn.get(token);
+      const pseudonymOf = async (kind: DiscoveryPseudonymKind, token: string) => {
+        const k = `${kind}\u0000${token}`;
+        const hit = psn.get(k);
         if (hit) return hit;
         const clear = local.clearOf(token);
-        if (!clear) throw new Error("an observation named a device the importer did not report");
-        const out = await pseudonymise(db, opts.dataKey!, deviceKind, clear);
-        psn.set(token, out);
+        if (!clear) throw new Error("an observation named a device or user the importer did not report");
+        const out = await pseudonymise(db, opts.dataKey!, kind, clear);
+        psn.set(k, out);
         return out;
       };
+      const deviceOf = (token: string) => pseudonymOf(DEVICE_PSEUDONYM_KIND, token);
       const evidenceKind = source.kind;
       const scan: ScanObservation[] = [];
       for (const m of reduction.matched) {
@@ -249,6 +251,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
           ...(m.observedAt ? { observedAt: m.observedAt } : {}),
           count: m.count,
           artifact: { kind: m.kind, value: m.value },
+          ...(m.user ? { actorPseudonym: await pseudonymOf("device_user", m.user) } : {}),
         });
       }
       // unmatched sightings go through the same classification, so the run records them as catalogue gaps
@@ -256,7 +259,7 @@ export function registerEndpointImportRoutes(app: FastifyInstance, db: Db, opts:
         scan.push({ evidenceKind, subjectKind: "device", subject: await deviceOf(u.device), artifact: { kind: u.kind, value: u.value } });
       }
       const checked = checkObservations(source.kind, scan, new Date().toISOString());
-      const verdict = await applyDiscoveryRunObservations(db, run, owner, source, checked, digest);
+      const verdict = await applyDiscoveryRunObservations(db, run, owner, source, checked, digest, catalogue);
       if (verdict !== "succeeded") return refuse(reply, 409, "run_lost", "the import's run lost its lease before it committed; nothing was imported", { runId: run.id });
       await audit(req, "discovery_run", run.id, "discovery-endpoint-import-applied", "allow", `endpoint import into '${source.name}' applied: ${summary.sightingsMatched} matched sighting(s) on ${summary.devices} device(s)`, {
         sourceId: source.id,

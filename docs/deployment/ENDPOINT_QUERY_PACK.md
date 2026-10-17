@@ -100,9 +100,10 @@ is refused with its line number; nothing is dropped silently.
 
 ## Privacy defaults
 
-- Usernames, Windows SIDs and home paths are used only inside the import request, under a key made for that request,
-  and are not stored in any form. A finding names its device by a keyed hash (one key per tenant); the device name is
-  kept encrypted in a separate table and is revealed only under step-up, with an audit record.
+- Home paths and Windows SIDs are used only inside the import request, under a key made for that request, and are not
+  stored. A finding names its device, and the device user behind each sighting, by a keyed hash (one key per tenant);
+  the device name and user name are kept encrypted in a separate table and are revealed only under step-up, with an
+  audit record.
 - The file itself is not kept: only its SHA-256 digest is recorded on the run.
 - Endpoint evidence is kept for 90 days by default. Lengthening that is a relaxation an admin makes and is audited.
 - RegulAIt never contacts a device and never tests a key it learns about.

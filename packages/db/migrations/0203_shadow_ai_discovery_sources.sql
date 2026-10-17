@@ -1,4 +1,4 @@
--- ADR-0195 slice SD0: shadow-AI ACTIVE discovery, the foundation. Hand-authored (never drizzle-kit generate).
+-- Migration 0203. ADR-0195 slice SD0: shadow-AI ACTIVE discovery, the foundation. Hand-authored (never drizzle-kit generate).
 -- Re-runnable: every statement is idempotent.
 --
 -- ADR-0195 supersedes ADR-0055's and ADR-0083's "evidence only, no collectors" stance: RegulAIt may now call
@@ -13,7 +13,8 @@
 --                            gateway's CIPHERTEXT_COLUMNS). Never returned by any route. At most one live credential
 --                            per source; replacing one revokes the old row, and a revoked row has its ciphertext
 --                            destroyed (CHECK). `created_at` drives the static-credential age warning;
---                            `write_scope` says whether a scanner has verified the credential is read-only.
+--                            `write_scope` says whether a scanner has verified the credential is read-only, or found
+--                            it grants write access (`refused`: never used again; the source is blocked until replaced).
 --   discovery_runs           one scan, leased with an expiry like the workflow engine's execution claim (REL-06): a
 --                            crashed worker's run is re-claimed after the lease lapses, never lost and never doubled
 --                            (one live run per source, partial unique index). Raw scanner output is never stored:
@@ -25,6 +26,8 @@
 --                            commit author, a cloud calling principal), a data-key envelope, keyed by the per-tenant
 --                            HMAC pseudonym findings carry instead. Revealing one is a step-up and audited.
 --   discovery_pseudonym_keys the per-tenant HMAC key, a data-key envelope, created on first use (one live row).
+--   step-up kind             `pseudonym_reveal` (master decision on #403): revealing a name is its own step-up kind,
+--                            required on the existing org row as on a first load.
 --
 -- Findings (decisions 5 and 5a): a scanner observation becomes a finding only when it matches an enabled
 -- `ai_endpoint_signatures` row. The signature kinds gain the six ARTIFACT kinds, matched only by whole-identifier
@@ -122,7 +125,7 @@ CREATE TABLE IF NOT EXISTS "discovery_credentials" (
   "revoked_at" timestamp with time zone,
   "revoked_by" uuid,
   CONSTRAINT "discovery_credentials_mode_check" CHECK ("credential_mode" IN ('federated', 'static')),
-  CONSTRAINT "discovery_credentials_write_scope_check" CHECK ("write_scope" IN ('unverified', 'read_only')),
+  CONSTRAINT "discovery_credentials_write_scope_check" CHECK ("write_scope" IN ('unverified', 'read_only', 'refused')),
   CONSTRAINT "discovery_credentials_public_config_check" CHECK (jsonb_typeof("public_config") = 'object'),
   -- a live static credential holds its secret
   CONSTRAINT "discovery_credentials_static_secret_check"
@@ -154,6 +157,8 @@ CREATE TABLE IF NOT EXISTS "discovery_runs" (
   "findings_updated" integer DEFAULT 0 NOT NULL,
   -- observations no enabled admin catalogue row matched: [{kind, value}], at most 50
   "catalogue_gaps" jsonb DEFAULT '[]'::jsonb NOT NULL,
+  -- what the scanner could and could not read: [{read, status, detail?}], at most 100, details scrubbed
+  "read_outcomes" jsonb DEFAULT '[]'::jsonb NOT NULL,
   -- SHA-256 of the raw scanner output; the output itself is discarded
   "raw_output_sha256" text,
   "error_code" text,
@@ -170,6 +175,8 @@ CREATE TABLE IF NOT EXISTS "discovery_runs" (
     CHECK ("observed" >= 0 AND "matched" >= 0 AND "findings_created" >= 0 AND "findings_updated" >= 0),
   CONSTRAINT "discovery_runs_gaps_check"
     CHECK (jsonb_typeof("catalogue_gaps") = 'array' AND jsonb_array_length("catalogue_gaps") <= 50),
+  CONSTRAINT "discovery_runs_read_outcomes_check"
+    CHECK (jsonb_typeof("read_outcomes") = 'array' AND jsonb_array_length("read_outcomes") <= 100),
   CONSTRAINT "discovery_runs_digest_check" CHECK ("raw_output_sha256" IS NULL OR "raw_output_sha256" ~ '^[0-9a-f]{64}$'),
   CONSTRAINT "discovery_runs_error_code_check" CHECK ("error_code" IS NULL OR "error_code" ~ '^[a-z0-9_]{1,64}$'),
   CONSTRAINT "discovery_runs_error_detail_check" CHECK ("error_detail" IS NULL OR char_length("error_detail") <= 1000),
@@ -232,3 +239,29 @@ CREATE TABLE IF NOT EXISTS "discovery_pseudonyms" (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "discovery_pseudonyms_pseudonym_uq" ON "discovery_pseudonyms" ("pseudonym");
 CREATE INDEX IF NOT EXISTS "discovery_pseudonyms_last_seen_idx" ON "discovery_pseudonyms" ("kind", "last_seen_at");
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- the step-up kind `pseudonym_reveal`: revealing a person's name is its own action, not a settings relaxation
+-- ---------------------------------------------------------------------------------------------------------------
+
+ALTER TABLE "step_up_grants" DROP CONSTRAINT IF EXISTS "step_up_grants_action_kind_check";
+ALTER TABLE "step_up_grants" ADD CONSTRAINT "step_up_grants_action_kind_check" CHECK (
+  "action_kind" IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage',
+                    'owner_change', 'identity_manage', 'pseudonym_reveal')
+);
+ALTER TABLE "webauthn_challenges" DROP CONSTRAINT IF EXISTS "webauthn_challenges_action_kind_check";
+ALTER TABLE "webauthn_challenges" ADD CONSTRAINT "webauthn_challenges_action_kind_check" CHECK (
+  "action_kind" IS NULL
+  OR "action_kind" IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage',
+                       'owner_change', 'identity_manage', 'pseudonym_reveal')
+);
+ALTER TABLE "org_settings" DROP CONSTRAINT IF EXISTS "org_settings_step_up_actions_check";
+ALTER TABLE "org_settings" ADD CONSTRAINT "org_settings_step_up_actions_check" CHECK (
+  jsonb_typeof("step_up_actions") = 'array'
+  AND "step_up_actions" <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb
+);
+ALTER TABLE "org_settings" ALTER COLUMN "step_up_actions"
+  SET DEFAULT '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb;
+-- first load (ADR-0180): the existing row requires the new kind too
+UPDATE "org_settings" SET "step_up_actions" = "step_up_actions" || '["pseudonym_reveal"]'::jsonb
+  WHERE NOT ("step_up_actions" ? 'pseudonym_reveal');

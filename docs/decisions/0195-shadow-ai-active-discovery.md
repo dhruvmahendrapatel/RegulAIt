@@ -170,7 +170,7 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
 
 ### Slices
 
-- **SD0 Foundation** (migration 0202; 0201 is claimed by the ADR-0190 isolation-admin build in flight): discovery
+- **SD0 Foundation** (migration 0203; 0201 and 0202 are claimed by builds in flight): discovery
   sources, scanner credentials, scan runs and schedules; the new signature kinds, subject kinds and signal sources;
   the pseudonym table; enable, widen and credential step-ups; posture rows and the rewritten posture sentences; an
   admin "Discovery sources" page; the scan worker with leased runs. Depends on #395 (egress step-up).
@@ -214,13 +214,13 @@ two contribute detection data under their licences.
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
 
-## As built: SD0 foundation (2026-10-17, migration 0202)
+## As built: SD0 foundation (2026-10-17, migration 0203)
 
-**Status: built on branch `sd0-discovery-foundation`; the migration journal entry waits for 0201 to merge.** No
+**Status: built on branch `sd0-discovery-foundation`; the migration journal entry waits for 0202 to merge.** No
 scanner ships: the production registry is empty, so no source can be created yet and the admin page shows every
 kind as "not built yet" with the slice that builds it.
 
-1. **Migration 0202** (hand-written; no function and no trigger, so the 0185 guard has nothing new to check):
+1. **Migration 0203** (hand-written; no function and no trigger, so the 0185 guard has nothing new to check):
    - `discovery_sources`: `kind` (the ten kinds), `target` (a JSON object), `scope` (`{orgLevel, include[]}`, CHECKed),
      `enabled` default false, `schedule_interval_seconds` (3600 to 30 days, default daily), `version` for
      compare-and-set, `next_run_at`/`last_run_at`, who enabled and disabled it. Unique by `lower(name)`.
@@ -265,8 +265,11 @@ kind as "not built yet" with the slice that builds it.
      `cloud_aws` federated, RegulAIt generates `externalId` (`regulait-<uuid>`, kept across replacements) and refuses
      one sent by the admin. Revoking is free and destroys the secret. No view selects the ciphertext.
    - Settings: lengthening the warning age or the endpoint retention is a `settings_relax` step-up; shortening is free.
-   - Reveal: a `settings_relax` step-up (`discoveryPseudonymReveal: {pseudonym}`); the audit names the pseudonym, never
-     the name.
+   - Reveal: its own step-up kind `pseudonym_reveal` (master decision on #403: revealing a name is not a settings
+     relaxation), facts `{op: "pseudonym_reveal", pseudonym}`. Migration 0203 adds the kind to the `step_up_grants`,
+     `webauthn_challenges` and `org_settings.step_up_actions` CHECKs, to the column default and to the existing org row
+     (first load); `STEP_UP_ACTION_KINDS` has eight kinds and the dialog says "revealing a person's name". A
+     `settings_relax` grant does not reveal. The audit names the pseudonym, never the name.
 6. **The scanner interface** (`discovery-scanners.ts`), for SD1 to SD4:
    ```ts
    interface Scanner { kind: DiscoverySourceKind; requiresCredential: boolean; run(ctx: ScanContext): Promise<ScanResult> }
@@ -278,8 +281,8 @@ kind as "not built yet" with the slice that builds it.
      backoff(res): Promise<boolean>; // 429/503: waits the bounded Retry-After (at most 60 s, 5 times); false = give up
      recordRaw(chunk): void;         // digested (SHA-256), never kept
      pseudonymise(kind, displayName): Promise<string>;  // device_user | commit_author | cloud_principal -> psn:…
-     heartbeat(): Promise<boolean>;  // extends the lease; false = lost, stop
-     signal: AbortSignal;            // the lease deadline
+     heartbeat(): Promise<boolean>;  // renews the lease now; false = lost, stop (the worker also renews it on its own)
+     signal: AbortSignal;            // aborted at the run's maximum duration or when the lease is lost
    }
    interface ScanResult { observations: ScanObservation[]; credentialWriteScope?: "read_only" | "write" | "unverified" }
    // ScanObservation: { evidenceKind, subjectKind, subject, observedAt?, count?, host?, packageName?, keyFragment?, keyLength?, artifact?: { kind, value } }
@@ -293,8 +296,18 @@ kind as "not built yet" with the slice that builds it.
 7. **The worker** (`discovery-worker.ts`, scheduler job `discovery-scan-sweep`, every 60 s): enqueue due enabled sources
    (one `INSERT … ON CONFLICT` against the live-run index, `next_run_at` moved on in the same statement); fail runs whose
    lease lapsed on attempt 3 (`lease_expired`); claim with `FOR UPDATE SKIP LOCKED` a queued run or a lapsed lease with
-   attempts left (re-take audited `discovery-run-lease-retaken`); run it (15-minute lease); delete device findings and
-   device-user pseudonyms not seen within the endpoint retention (audited). All lease times use the database clock.
+   attempts left (re-take audited `discovery-run-lease-retaken`); run it; delete device findings and device-user
+   pseudonyms not seen within the endpoint retention (audited). All lease times use the database clock.
+   - **The run lease is the worker's, not the scanner's or the scheduler's** (master decision on #403). The lease is 5
+     minutes; while `run` is pending the worker renews it every third of that on its own timer, independent of the
+     scheduler job's lease and of whether the scanner calls `heartbeat`, so a long scan is not re-taken while its
+     worker lives (tested: a 3-second scan under a 1-second lease, with a rival worker claiming half-way, finishes on
+     attempt 1 with no re-take). A crashed worker stops renewing, and its run is re-taken one lease later. A lost
+     lease aborts `ctx.signal` and nothing the scan returns is written. A scan is cut off at 2 hours
+     (`DISCOVERY_RUN_MAX_SECONDS`, `timed_out`).
+   - **Endpoint retention deletes even dispositioned evidence** (master decision on #403): a `device` finding not
+     seen within the retention window is deleted whatever its disposition, and so is a device-user pseudonym. The
+     audit log keeps the disposition event (it never held the name) and a retention row with the counts.
    The default rate limiter spaces one source's requests 100 ms apart in this process. Open source first: the
    maintained candidates were concurrency limiters (`p-limit`), not per-key spacing, and `bottleneck` has had no
    release since 2019; none was adopted.
@@ -309,6 +322,46 @@ kind as "not built yet" with the slice that builds it.
     every step-up (no grant, an API key, a grant for another scope that is not spent) and for the secret never being
     returned (every read route's body checked for the secret and its ciphertext); `discovery-scanners.test.ts`
     (contract, no database); shared `discovery/discovery.test.ts` (scope widening, posture sentence, artifact matching).
+
+11. **Review of #403 (fixed before merge):**
+    - **Public config is an allowlist.** `DISCOVERY_PUBLIC_CONFIG` names the identifier fields each kind accepts per
+      mode, each with a shape check (numeric id, GUID, AWS role ARN, GCP id, GCP service-account email, an https
+      audience with no query or credentials). Any other key is refused, so a key, token or service-account file cannot
+      be stored as "federated" public config; the generated AWS `externalId` is refused in any spelling. The web
+      "Replace credential" form leaves server-generated keys out of its pre-fill.
+    - **A credential cannot widen an enabled source.** `credentialTargetMatch` compares the AWS role's account with
+      `target.accountId` and the Azure tenant with `target.tenantId`: a mismatch is refused. Where it cannot be checked,
+      storing or replacing a credential on an ENABLED source is the enable step-up, bound to the source and the new
+      config (a static secret on an enabled source needs both step-ups).
+    - **Stored text is scrubbed.** Every run error detail, audit reason and read-outcome detail goes through
+      `scrubRunText`: the run's decrypted secret in each encoding (`scrubSecrets`), credential shapes (`scrubAuditText`,
+      the `dlp.secret.*` patterns), URL query strings, then a length cap.
+    - **A write-scope credential is refused, not reused.** When a scanner reports write scope, the credential is set
+      `write_scope = 'refused'` (audited `discovery-credential-refused`); it is never used again, and enable and run-now
+      refuse until it is replaced. Posture lists refused credentials.
+    - **People and devices are pseudonyms.** A `cloud_principal` or `device` subject must match `^psn:[0-9a-f]{24}$`
+      (device subjects use `pseudonymise("device_user", …)`); anything else refuses the run.
+    - **Read outcomes** (for SD2): `ScanResult.readOutcomes?` (`{read, status: read|denied|not_enabled|unreachable|
+      skipped|error, detail?}`, at most 100, optional so SD1/SD3 compile unchanged) are scrubbed, stored in
+      `discovery_runs.read_outcomes` and shown on the run list as "could not read: …".
+    - **Retention is batched** (1000 per pass). A sanctioned device whose finding was deleted by retention and is seen
+      again comes back as a new, OPEN finding: the earlier disposition survives only in the audit log.
+    - **Database clock** for a credential's age, an undated observation and an import's `applied_at` (M-075).
+    - Reveal decrypts under the row lock before the grant is spent; a duplicate name on PATCH is refused before any
+      grant is spent; the decision 8 spy test proves a call to a host that is not allow-listed reaches no transport and
+      fails the run `egress_blocked`.
+
+12. **Additions for SD1 (all optional, so other scanners compile unchanged):**
+    - `ScanObservation.location?: {path, line?, commit?}` (path normalised to forward slashes with no leading `./` or
+      `/`, no `..` segment, no control character, at most 512; line 1 to 10,000,000; commit 7 to 64 hex),
+      `names?: string[]` (at most 50 identifier-like NAMES, never values: `NAME=value` is refused) and
+      `actorPseudonym?` (`psn:` + 24 hex). They ride on the sighting kept in the finding's evidence
+      (`FindingEvidence.location`, `.names`, `.actor`) and show in the Shadow-AI findings table's "Sightings" column; an
+      actor links to the reveal card on Discovery sources (prefilled; the step-up still applies).
+    - `ScanContext.catalogue` (read-only): `matches(observation)` runs the worker's own checks and matcher against the
+      enabled admin catalogue, and `rows(kinds?)` returns the enabled rows (provider, kind, value, match type, min
+      length) frozen. A scanner may use it to keep observations only an admin-added row would match; it never decides a
+      finding.
 
 **Not built in SD0 (left to the slices):** any scanner; cloud SDK transports over `ctx.fetch` (SD2); the git-provider
 read methods (SD1); `SHADOW_AI_CATALOG_V2` and seed rows for the artifact kinds (SD1/SD3); the endpoint-notice
@@ -337,11 +390,11 @@ template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" sta
 - Phase B (wired into SD0): `endpoint_osquery` and `endpoint_inventory` are registered as upload-fed scanners (a
   scheduled run observes nothing). `POST /v1/discovery/sources/:sourceId/endpoint-imports` parses the file with a
   request-local keyed hash, matches it against the enabled catalogue, opens a run on the source holding its lease, and
-  commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only committed
-  devices get an SD0 pseudonym; usernames are never stored. `POST /v1/discovery/endpoint-signatures/seed` installs the
+  commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only the devices
+  and device users of committed sightings get SD0 pseudonyms; the user travels as `actorPseudonym`. `POST /v1/discovery/endpoint-signatures/seed` installs the
   seed as `identifier` rows (ports as `port:<n>`, trait sets as `trait:<sorted set>`). Endpoint retention is SD0's.
-- What SD0 lacks for SD3 (reported, not changed here): a `device` pseudonym kind (device names use `device_user`
-  until it exists); a place on an observation or finding for the device user; catalogue columns for a row's OS,
-  extension ecosystem, tool id, note and confidence (the LAN-listener rows' low confidence is not stored); and a way
-  to keep upload-fed sources off the schedule.
+- What SD0 still lacks for SD3 (reported, not changed here): a `device` pseudonym kind (device names use
+  `device_user` until it exists, switching automatically); catalogue columns for a row's OS, extension ecosystem, tool
+  id, note and confidence (the LAN-listener rows' low confidence is not stored yet); and a way to keep upload-fed
+  sources off the schedule. The device user now uses SD0's `actorPseudonym`.
 

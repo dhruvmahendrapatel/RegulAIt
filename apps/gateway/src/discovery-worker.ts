@@ -11,7 +11,10 @@
  *  3. CLAIM runs one at a time (`FOR UPDATE SKIP LOCKED`): a queued run, or a
  *     running run whose lease lapsed with attempts left (REL-06: a crashed
  *     worker's run is re-taken, audited, never lost and never doubled). The
- *     lease uses the database clock (M-075).
+ *     lease uses the database clock (M-075). While a scan runs, the worker
+ *     renews its lease every third of the lease period on its own (not tied to
+ *     the scheduler job's lease or to the scanner calling `heartbeat`), so a
+ *     long scan is not re-taken; a scan is cut off at DISCOVERY_RUN_MAX_SECONDS.
  *  4. RUN the source's registered scanner with only the guarded fetch, the
  *     rate-limit hook, the raw-output digest, the pseudonymiser and a
  *     heartbeat. Its observations are checked (evidence and subject kinds its
@@ -55,8 +58,15 @@ import {
   DISCOVERY_PSEUDONYM_PREFIX,
   DISCOVERY_RUN_MAX_ATTEMPTS,
   EVIDENCE_MAX_ROWS,
+  DISCOVERY_PSEUDONYM_PATTERN,
+  DISCOVERY_READ_OUTCOMES_MAX,
+  DISCOVERY_READ_STATUSES,
+  PSEUDONYMISED_SUBJECT_KINDS,
   isArtifactSignatureKind,
   redactKeyFragment,
+  scrubAuditText,
+  scrubSecrets,
+  type DiscoveryReadOutcome,
   type AiSignature,
   type DiscoveryEvidenceKind,
   type DiscoveryPseudonymKind,
@@ -73,8 +83,16 @@ import type { SchedulerJobDefinition } from "./scheduler.js";
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 export const DISCOVERY_SCAN_JOB_NAME = "discovery-scan-sweep";
-/** how long a claimed run is held before another worker may re-take it */
-export const DISCOVERY_LEASE_SECONDS = 15 * 60;
+/**
+ * How long a claimed run is held before another worker may re-take it. The
+ * worker RENEWS the lease itself every third of this while the scan runs
+ * (independently of the scheduler job's own lease and of the scanner), so a
+ * long scan is never re-taken while its worker is alive; a crashed worker
+ * stops renewing and its run is re-taken one lease later.
+ */
+export const DISCOVERY_LEASE_SECONDS = 5 * 60;
+/** the longest one scan may run, however often its lease is renewed */
+export const DISCOVERY_RUN_MAX_SECONDS = 2 * 3600;
 /** at most this many runs are processed per pass */
 export const DISCOVERY_RUNS_PER_PASS = 5;
 /** the longest a Retry-After is honoured, and how many times per run */
@@ -87,6 +105,46 @@ const SUBJECT_MAX = 512;
 const VALUE_MAX = 512;
 const DISPLAY_NAME_MAX = 256;
 const GAPS_MAX = 50;
+const PATH_MAX = 512;
+const NAMES_MAX = 50;
+/** a name, never a value: an identifier-like token (linear, one bounded class) */
+const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/;
+const DETAIL_MAX = 1000;
+const READ_DETAIL_MAX = 500;
+const READ_NAME_MAX = 200;
+/** a URL's query string, where a token or signature may ride (linear: one negated class each side) */
+const URL_QUERY = /(https?:\/\/[^\s?#]{1,2048})\?[^\s#]{0,4096}/g;
+
+/**
+ * Scrub text a scanner, an SDK or the egress guard produced before it is
+ * stored, returned or audited (review of #403): the run's own decrypted secret
+ * in every encoding it can take (`scrubSecrets`), credential shapes
+ * (`scrubAuditText`, the `dlp.secret.*` patterns), URL query strings; then
+ * capped.
+ */
+export function scrubRunText(text: string, secrets: readonly string[], max = DETAIL_MAX): string {
+  const noQuery = text.slice(0, 16_384).replace(URL_QUERY, "$1?[redacted]");
+  return scrubAuditText(scrubSecrets(noQuery, secrets.filter((s) => s.length > 0))).slice(0, max);
+}
+
+/** hold a scanner's read outcomes to their bounds, scrubbed */
+export function checkReadOutcomes(outcomes: readonly DiscoveryReadOutcome[] | undefined, secrets: readonly string[]): DiscoveryReadOutcome[] {
+  if (!outcomes) return [];
+  if (outcomes.length > DISCOVERY_READ_OUTCOMES_MAX) {
+    throw new ObservationRefused(`the scanner reported ${outcomes.length} read outcomes; at most ${DISCOVERY_READ_OUTCOMES_MAX} are accepted`);
+  }
+  return outcomes.map((o, i) => {
+    if (typeof o.read !== "string" || !o.read.trim() || o.read.length > READ_NAME_MAX) {
+      throw new ObservationRefused(`read outcome ${i}: 'read' must be 1 to ${READ_NAME_MAX} characters`);
+    }
+    if (!(DISCOVERY_READ_STATUSES as readonly string[]).includes(o.status)) throw new ObservationRefused(`read outcome ${i}: '${String(o.status)}' is not a read status`);
+    return {
+      read: scrubRunText(o.read.trim(), secrets, READ_NAME_MAX),
+      status: o.status,
+      ...(typeof o.detail === "string" && o.detail ? { detail: scrubRunText(o.detail, secrets, READ_DETAIL_MAX) } : {}),
+    };
+  });
+}
 
 /**
  * THE PER-SOURCE RATE-LIMIT HOOK. `acquire` resolves when the source may send
@@ -145,6 +203,8 @@ export interface DiscoveryWorkerOptions {
   /** this worker's lease owner id (default: host and pid) */
   owner?: string;
   leaseSeconds?: number;
+  /** the longest one scan may run (default DISCOVERY_RUN_MAX_SECONDS) */
+  maxRunSeconds?: number;
   limit?: number;
   /** TEST SEAMS for the guarded fetch (never set in production) */
   fetchImpl?: typeof fetch;
@@ -266,7 +326,8 @@ async function renewLease(db: Db, runId: string, owner: string, leaseSeconds: nu
 }
 
 /** fail a run this owner holds (fenced); false when the lease was lost */
-export async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code: string, detail: string, extra: Record<string, unknown> = {}): Promise<boolean> {
+export async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code: string, rawDetail: string, extra: Record<string, unknown> = {}, secrets: readonly string[] = []): Promise<boolean> {
+  const detail = scrubRunText(rawDetail, secrets);
   const res = await db.execute(sql`
     UPDATE discovery_runs
        SET status = 'failed', error_code = ${code}, error_detail = ${detail.slice(0, 1000)}, finished_at = now(),
@@ -336,6 +397,10 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
     }
     const subject = typeof o.subject === "string" ? o.subject.trim() : "";
     if (!subject || subject.length > SUBJECT_MAX) throw new ObservationRefused(`observation ${i}: the subject must be 1 to ${SUBJECT_MAX} characters`);
+    // decision 20: a person or a device is named only by its pseudonym (ctx.pseudonymise)
+    if (PSEUDONYMISED_SUBJECT_KINDS.includes(o.subjectKind) && !DISCOVERY_PSEUDONYM_PATTERN.test(subject)) {
+      throw new ObservationRefused(`observation ${i}: a ${o.subjectKind} subject must be a pseudonym (psn:…) from ctx.pseudonymise`);
+    }
     const bounded = (v: string | undefined, what: string) => {
       if (v === undefined) return null;
       if (typeof v !== "string" || v.length === 0 || v.length > VALUE_MAX) throw new ObservationRefused(`observation ${i}: ${what} must be 1 to ${VALUE_MAX} characters`);
@@ -347,6 +412,18 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
       artifact = { kind: o.artifact.kind, value: bounded(o.artifact.value, "the artifact value")! };
     }
     const observedAt = o.observedAt && Number.isFinite(Date.parse(o.observedAt)) ? new Date(o.observedAt).toISOString() : nowIso;
+    const location = o.location === undefined ? null : checkLocation(o.location, i);
+    let names: string[] | null = null;
+    if (o.names !== undefined) {
+      if (!Array.isArray(o.names) || o.names.length > NAMES_MAX) throw new ObservationRefused(`observation ${i}: at most ${NAMES_MAX} names`);
+      names = o.names.map((n) => {
+        if (typeof n !== "string" || !NAME_PATTERN.test(n)) throw new ObservationRefused(`observation ${i}: '${String(n).slice(0, 40)}' is not a name (names only, never values)`);
+        return n;
+      });
+    }
+    if (o.actorPseudonym !== undefined && !DISCOVERY_PSEUDONYM_PATTERN.test(o.actorPseudonym)) {
+      throw new ObservationRefused(`observation ${i}: actorPseudonym must be a pseudonym (psn:…) from ctx.pseudonymise`);
+    }
     const count = Number.isInteger(o.count) && (o.count as number) > 0 ? Math.min(o.count as number, 1_000_000_000) : 1;
     return {
       subjectKind: o.subjectKind,
@@ -360,8 +437,30 @@ export function checkObservations(kind: DiscoverySourceRow["kind"], observations
       keyFragment: o.keyFragment ? redactKeyFragment(o.keyFragment) : null,
       keyLength: o.keyFragment && Number.isInteger(o.keyLength) ? (o.keyLength as number) : null,
       artifact,
+      location,
+      names,
+      actorPseudonym: o.actorPseudonym ?? null,
     };
   });
+}
+
+/** a sighting location: a normalised relative path (no `..`), a line, a commit; never contents (decision 6) */
+function checkLocation(loc: { path: string; line?: number; commit?: string }, i: number): { path: string; line?: number; commit?: string } {
+  if (typeof loc !== "object" || loc === null || typeof loc.path !== "string") throw new ObservationRefused(`observation ${i}: location.path is required`);
+  const path = loc.path.replace(/\\/g, "/").replace(/^(?:\.\/|\/)+/, "").replace(/\/{2,}/g, "/");
+  if (!path || path.length > PATH_MAX) throw new ObservationRefused(`observation ${i}: location.path must be 1 to ${PATH_MAX} characters`);
+  if (path.split("/").some((seg) => seg === "..")) throw new ObservationRefused(`observation ${i}: location.path may not contain '..'`);
+  if ([...path].some((ch) => ch.charCodeAt(0) < 32)) throw new ObservationRefused(`observation ${i}: location.path has a control character`);
+  const out: { path: string; line?: number; commit?: string } = { path };
+  if (loc.line !== undefined) {
+    if (!Number.isInteger(loc.line) || loc.line < 1 || loc.line > 10_000_000) throw new ObservationRefused(`observation ${i}: location.line must be 1 to 10,000,000`);
+    out.line = loc.line;
+  }
+  if (loc.commit !== undefined) {
+    if (typeof loc.commit !== "string" || !/^[0-9a-f]{7,64}$/.test(loc.commit)) throw new ObservationRefused(`observation ${i}: location.commit must be 7 to 64 hex characters`);
+    out.commit = loc.commit;
+  }
+  return out;
 }
 
 /** an unmatched observation as a catalogue gap: never a key fragment */
@@ -392,8 +491,9 @@ export const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
 export type RunVerdict = "succeeded" | "failed" | "lease_lost";
 
 async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Required<Pick<DiscoveryWorkerOptions, "registry" | "rateLimiter" | "leaseSeconds">> & DiscoveryWorkerOptions): Promise<RunVerdict> {
+  const secrets: string[] = [];
   const fail = async (code: string, detail: string, extra: Record<string, unknown> = {}): Promise<RunVerdict> =>
-    (await failRun(db, run, owner, code, detail, extra)) ? "failed" : "lease_lost";
+    (await failRun(db, run, owner, code, detail, extra, secrets)) ? "failed" : "lease_lost";
 
   if (run.attempt > 1) {
     await audit(db, "discovery_run", run.id, "discovery-run-lease-retaken", "allow", `discovery run re-taken on attempt ${run.attempt} after its lease lapsed`, {
@@ -412,11 +512,16 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     .from(discoveryCredentials)
     .where(and(eq(discoveryCredentials.sourceId, source.id), isNull(discoveryCredentials.revokedAt)));
   if (scanner.requiresCredential && !cred) return fail("credential_missing", "this source has no live credential");
+  // decision 7 (review of #403): a credential found to grant write access is never used again
+  if (cred?.writeScope === "refused") {
+    return fail("credential_refused", "this source's credential was found to grant write access and is refused; replace it with a read-only credential");
+  }
   let secret: string | null = null;
   if (cred?.secretCiphertext) {
     if (!opts.dataKey) return fail("data_key_unavailable", "the data key is not configured, so the credential cannot be read");
     try {
       secret = decryptSecret(opts.dataKey, cred.secretCiphertext);
+      secrets.push(secret);
     } catch {
       return fail("credential_unreadable", "the credential does not decrypt under the current data key");
     }
@@ -424,13 +529,48 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
 
   const hash = createHash("sha256");
   let rawSeen = false;
-  const deadline = AbortSignal.timeout(opts.leaseSeconds * 1000);
+  const maxRunSeconds = opts.maxRunSeconds ?? DISCOVERY_RUN_MAX_SECONDS;
+  const maxRun = AbortSignal.timeout(maxRunSeconds * 1000);
+  const leaseGone = new AbortController();
+  const deadline = AbortSignal.any([maxRun, leaseGone.signal]);
+  // the worker keeps the run's lease alive on its own, every third of the lease, for as long as the scan runs
+  // (decision on #403): a long scan is never re-taken while this worker lives, whatever the scanner does
+  const renew = async (): Promise<boolean> => {
+    if (leaseGone.signal.aborted) return false;
+    let held: boolean;
+    try {
+      held = await renewLease(db, run.id, owner, opts.leaseSeconds);
+    } catch {
+      return true; // a transient database error: the next tick tries again, and the lease has slack
+    }
+    if (!held) leaseGone.abort(new Error("the run's lease was lost"));
+    return held;
+  };
+  const renewTimer = setInterval(() => void renew(), Math.max(200, Math.floor((opts.leaseSeconds * 1000) / 3)));
+  renewTimer.unref?.();
   const guarded = createGuardedFetch({
     allowList: await loadEgressAllowList(db),
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
     ...(opts.resolve ? { resolve: opts.resolve } : {}),
   });
   let backoffs = 0;
+  // the enabled admin catalogue, read once per run; scanners get a read-only view (decision 5)
+  const catalogue = await loadEnabledCatalogue(db);
+  const nowForProbe = new Date().toISOString();
+  const scanCatalogue = {
+    matches: (o: ScanObservation): boolean => {
+      try {
+        const [probe] = checkObservations(source.kind, [o], nowForProbe);
+        return probe ? classifyObservation(probe, catalogue).matched : false;
+      } catch {
+        return false;
+      }
+    },
+    rows: (kinds?: readonly string[]) =>
+      catalogue
+        .filter((r) => !kinds || kinds.includes(r.kind))
+        .map((r) => Object.freeze({ provider: r.provider, kind: r.kind, value: r.value, matchType: r.matchType, minLength: r.minLength ?? null })),
+  };
   let result: ScanResult;
   try {
     result = await scanner.run({
@@ -460,16 +600,28 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
         if (!opts.dataKey) throw new Error("the data key is not configured, so a display name cannot be pseudonymised");
         return pseudonymise(db, opts.dataKey, kind, displayName);
       },
-      heartbeat: () => renewLease(db, run.id, owner, opts.leaseSeconds),
+      heartbeat: renew,
       signal: deadline,
+      catalogue: scanCatalogue,
     });
   } catch (err) {
+    if (leaseGone.signal.aborted) return "lease_lost";
     if (err instanceof EgressBlockedError || err instanceof EgressRedirectError) return fail("egress_blocked", err.message);
-    if (deadline.aborted) return fail("timed_out", `the scan did not finish within its ${opts.leaseSeconds} s lease`);
+    if (maxRun.aborted) return fail("timed_out", `the scan did not finish within ${maxRunSeconds} s`);
     // a scanner's error text is bounded and kept as a record; it must never carry a secret (scanner contract)
     return fail("scanner_error", err instanceof Error ? err.message : String(err));
+  } finally {
+    clearInterval(renewTimer);
   }
+  if (leaseGone.signal.aborted) return "lease_lost";
 
+  if (result.credentialWriteScope === "write" && cred) {
+    // record the refusal on the credential (audited), so the source is blocked until it is replaced
+    await db.update(discoveryCredentials).set({ writeScope: "refused" }).where(eq(discoveryCredentials.id, cred.id));
+    await audit(db, "discovery_source", source.id, "discovery-credential-refused", "deny",
+      `the credential of discovery source '${source.name}' grants write access: refused, never used again; the source cannot be enabled or run until it is replaced`,
+      { sourceId: source.id, credentialId: cred.id, kind: source.kind });
+  }
   if (result.credentialWriteScope === "write") {
     return fail("credential_has_write_scope", "the credential grants write access; a discovery credential must be read-only (ADR-0195 decision 7). Replace it.");
   }
@@ -477,16 +629,19 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     await db.update(discoveryCredentials).set({ writeScope: "read_only" }).where(eq(discoveryCredentials.id, cred.id));
   }
 
-  const nowIso = new Date().toISOString();
+  // M-075: the database clock stamps observations a scanner did not date
+  const nowIso = new Date((await db.execute<{ now: string }>(sql`SELECT now()::text AS now`)).rows[0]!.now).toISOString();
   let observations: Observation[];
+  let readOutcomes: DiscoveryReadOutcome[];
   try {
     observations = checkObservations(source.kind, result.observations ?? [], nowIso);
+    readOutcomes = checkReadOutcomes(result.readOutcomes, secrets);
   } catch (err) {
     if (err instanceof ObservationRefused) return fail("observation_refused", err.message);
     throw err;
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
-  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest);
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest, catalogue, readOutcomes);
 }
 
 /**
@@ -502,8 +657,9 @@ export async function applyDiscoveryRunObservations(
   source: DiscoverySourceRow,
   observations: Observation[],
   digest: string,
+  catalogue: readonly AiSignature[],
+  readOutcomes: DiscoveryReadOutcome[] = [],
 ): Promise<RunVerdict> {
-  const catalogue = await loadEnabledCatalogue(db);
   const pairs = observations.map((observation) => ({ observation, classification: classifyObservation(observation, catalogue) }));
   const matched = pairs.filter((p) => p.classification.matched);
   const gapKeys = new Set<string>();
@@ -546,7 +702,7 @@ export async function applyDiscoveryRunObservations(
           ruleId: "discovery-scan-applied",
           reason: `discovery run ${run.id} (${source.kind}): ${group.length} matched ${kind} observation(s), ${findings.length} correlated finding(s)`,
           requestedByUserId: null,
-          appliedAt: new Date(),
+          appliedAt: sql`now()`,
           discoveryRunId: run.id,
         })
         .returning({ id: shadowAiImports.id });
@@ -566,6 +722,7 @@ export async function applyDiscoveryRunObservations(
         findingsCreated: created,
         findingsUpdated: updated,
         catalogueGaps: gaps,
+        readOutcomes,
         rawOutputSha256: digest,
       })
       .where(eq(discoveryRuns.id, run.id));
@@ -588,15 +745,27 @@ export async function applyDiscoveryRunObservations(
 // retention (ADR-0195 decision 20)
 // ---------------------------------------------------------------------------
 
+/** at most this many device findings (and pseudonyms) are deleted per pass; the next pass takes the rest */
+export const RETENTION_BATCH = 1000;
+
+/**
+ * Decision 20 and the master decision on #403: a device finding not seen within the retention window is deleted
+ * WHATEVER its disposition (the audit log keeps the disposition event, which never held a name). A sanctioned device
+ * seen again after its finding was deleted comes back as a new, open finding.
+ */
 export async function runEndpointRetention(db: Db): Promise<{ findingsDeleted: number; pseudonymsDeleted: number }> {
   const { endpointRetentionDays } = await loadDiscoverySettings(db);
   const findings = await db.execute(sql`
     DELETE FROM shadow_ai_findings
-     WHERE subject_kind = 'device' AND last_seen_at < now() - make_interval(days => ${endpointRetentionDays})
+     WHERE id IN (SELECT id FROM shadow_ai_findings
+                   WHERE subject_kind = 'device' AND last_seen_at < now() - make_interval(days => ${endpointRetentionDays})
+                   LIMIT ${RETENTION_BATCH})
      RETURNING id`);
   const pseudonyms = await db.execute(sql`
     DELETE FROM discovery_pseudonyms
-     WHERE kind = 'device_user' AND last_seen_at < now() - make_interval(days => ${endpointRetentionDays})
+     WHERE id IN (SELECT id FROM discovery_pseudonyms
+                   WHERE kind = 'device_user' AND last_seen_at < now() - make_interval(days => ${endpointRetentionDays})
+                   LIMIT ${RETENTION_BATCH})
      RETURNING id`);
   const out = { findingsDeleted: findings.rows.length, pseudonymsDeleted: pseudonyms.rows.length };
   if (out.findingsDeleted + out.pseudonymsDeleted > 0) {
@@ -650,7 +819,7 @@ export function discoveryJobDefinitions(opts: { dataKey?: string | undefined } =
       name: DISCOVERY_SCAN_JOB_NAME,
       description:
         "Queue a scan for every enabled discovery source whose schedule is due, run up to 5 queued scans (leased; a " +
-        "crashed worker's scan is re-taken after its lease lapses), merge matched observations into the shadow-AI " +
+        "crashed worker's scan is re-taken after its lease lapses; a live worker renews it), merge matched observations into the shadow-AI " +
         "findings, and delete endpoint evidence past its retention. With no source enabled it scans nothing.",
       adr: "ADR-0195",
       defaultIntervalSeconds: 60,

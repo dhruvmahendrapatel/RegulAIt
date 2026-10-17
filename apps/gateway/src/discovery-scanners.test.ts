@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { DISCOVERY_SCANNERS, noopTestScanner, scannerRegistry } from "./discovery-scanners.js";
-import { checkObservations, ObservationRefused, retryAfterMs, spacingRateLimiter } from "./discovery-worker.js";
+import { checkObservations, checkReadOutcomes, ObservationRefused, retryAfterMs, scrubRunText, spacingRateLimiter } from "./discovery-worker.js";
 
 const NOW = "2026-10-17T00:00:00.000Z";
 
@@ -19,7 +19,11 @@ describe("ADR-0195 SD0 scanner contract", () => {
   it("refuses an evidence or subject kind the source kind does not report", () => {
     expect(() => checkObservations("repo_github", [{ evidenceKind: "cloud_inventory", subjectKind: "repo", subject: "r" }], NOW)).toThrow(ObservationRefused);
     expect(() => checkObservations("repo_github", [{ evidenceKind: "repo_scan", subjectKind: "device", subject: "r" }], NOW)).toThrow(ObservationRefused);
-    expect(() => checkObservations("cloud_aws", [{ evidenceKind: "cloud_audit_log", subjectKind: "cloud_principal", subject: "psn:x" }], NOW)).not.toThrow();
+    const psn = `psn:${"0a".repeat(12)}`;
+    expect(() => checkObservations("cloud_aws", [{ evidenceKind: "cloud_audit_log", subjectKind: "cloud_principal", subject: psn }], NOW)).not.toThrow();
+    // decision 20: a principal or a device is named only by its pseudonym
+    expect(() => checkObservations("cloud_aws", [{ evidenceKind: "cloud_audit_log", subjectKind: "cloud_principal", subject: "arn:aws:iam::000000000000:user/jane" }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("endpoint_agent", [{ evidenceKind: "endpoint_agent", subjectKind: "device", subject: "janes-laptop" }], NOW)).toThrow(ObservationRefused);
   });
 
   it("bounds subjects and values, and keeps only 8 characters of a key", () => {
@@ -31,8 +35,33 @@ describe("ADR-0195 SD0 scanner contract", () => {
     expect(o!.keyLength).toBe(key.length);
     expect(o!.observedAt).toBe(NOW);
     expect(() =>
-      checkObservations("endpoint_agent", [{ evidenceKind: "endpoint_agent", subjectKind: "device", subject: "d", artifact: { kind: "nope" as never, value: "x" } }], NOW),
+      checkObservations("endpoint_agent", [{ evidenceKind: "endpoint_agent", subjectKind: "device", subject: `psn:${"0b".repeat(12)}`, artifact: { kind: "nope" as never, value: "x" } }], NOW),
     ).toThrow(ObservationRefused);
+  });
+
+  it("sighting location, names and actor: normalised, bounded, names never values, actor a pseudonym", () => {
+    const base = { evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject: "r" };
+    const [o] = checkObservations("repo_github", [{ ...base, location: { path: ".\\src\\a.ts", line: 4, commit: "0123abc" }, names: ["OPENAI_API_KEY"] }], NOW);
+    expect(o!.location).toEqual({ path: "src/a.ts", line: 4, commit: "0123abc" });
+    expect(o!.names).toEqual(["OPENAI_API_KEY"]);
+    expect(() => checkObservations("repo_github", [{ ...base, location: { path: "a/../../etc/passwd" } }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, location: { path: "a", commit: "zz" } }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, names: ["OPENAI_API_KEY=abc123"] }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, actorPseudonym: "jane@example.com" }], NOW)).toThrow(ObservationRefused);
+    expect(checkObservations("repo_github", [{ ...base, actorPseudonym: `psn:${"cd".repeat(12)}` }], NOW)[0]!.actorPseudonym).toBe(`psn:${"cd".repeat(12)}`);
+  });
+
+  it("scrubs the run's secret, URL query strings and credential shapes from stored text, and caps it", () => {
+    const secret = "sd0-unit-" + "q7".repeat(16);
+    const out = scrubRunText(`denied for ${secret} at https://h.example.test/a/b?token=${secret}&x=1 then ${JSON.stringify(secret)}`, [secret]);
+    expect(out).not.toContain(secret);
+    expect(out).not.toContain("token=");
+    expect(out).toContain("https://h.example.test/a/b?[redacted]");
+    expect(scrubRunText("x".repeat(5000), []).length).toBe(1000);
+    const reads = checkReadOutcomes([{ read: "trail", status: "not_enabled", detail: `see https://x.example.test/?sig=${secret}` }], [secret]);
+    expect(JSON.stringify(reads)).not.toContain(secret);
+    expect(() => checkReadOutcomes([{ read: "x", status: "bogus" as never }], [])).toThrow(ObservationRefused);
+    expect(checkReadOutcomes(undefined, [])).toEqual([]);
   });
 
   it("reads Retry-After in seconds or as a date, bounded to 60 s", () => {

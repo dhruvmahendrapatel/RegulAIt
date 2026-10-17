@@ -20,8 +20,13 @@
  *    it (SHA-256); raw output is never stored (decision 6);
  *  - turn any person's display name into a pseudonym with `ctx.pseudonymise()`
  *    before it goes anywhere near an observation (decision 20);
- *  - call `ctx.heartbeat()` during a long scan to keep its lease, and stop when
- *    it answers false (the lease was lost; another worker owns the run);
+ *  - rely on the worker for its lease: the worker renews the run's lease on
+ *    its own every third of the lease period for as long as `run` is pending,
+ *    independently of the scheduler job's lease, so a long scan is never
+ *    re-taken while its worker lives. `ctx.heartbeat()` renews it at once and
+ *    answers false when the lease was lost; on that, or when `ctx.signal`
+ *    aborts (lease lost, or the run's maximum duration), stop: another worker
+ *    owns the run and nothing this one returns is written;
  *  - return OBSERVATIONS. It never writes a finding, never names a provider as
  *    a verdict, and never decides severity: the worker classifies each
  *    observation against this deployment's enabled admin catalogue (detection
@@ -33,7 +38,7 @@
  * prefix and length); or call a provider to test a key it found (decision 6).
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
-import type { DiscoveryCredentialMode } from "@regulait/shared";
+import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome } from "@regulait/shared";
 import { ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
 
 /** the source as a scanner sees it */
@@ -69,15 +74,21 @@ export interface ScanContext {
   pseudonymise: (kind: DiscoveryPseudonymKind, displayName: string) => Promise<string>;
   /** extends the run's lease; false = the lease was lost, stop now */
   heartbeat: () => Promise<boolean>;
-  /** aborted when the run's time is up */
+  /** aborted when the run's maximum duration is reached or its lease was lost */
   signal: AbortSignal;
+  /** read-only: the enabled admin catalogue (see ScanCatalogue) */
+  catalogue: ScanCatalogue;
 }
 
 /** one thing a scanner saw. Classified by the worker against the admin catalogue; it is not yet a finding. */
 export interface ScanObservation {
   evidenceKind: DiscoveryEvidenceKind;
   subjectKind: DiscoverySubjectKind;
-  /** the thing that would be remediated: a repo, a cloud resource or principal (pseudonymised), a device */
+  /**
+   * the thing that would be remediated: a repo, a cloud resource, a cloud principal or a device. A
+   * `cloud_principal` or `device` subject MUST be a pseudonym from `ctx.pseudonymise` (`psn:` + 24 hex); anything
+   * else is refused
+   */
   subject: string;
   /** ISO time it was seen (default: now) */
   observedAt?: string;
@@ -88,16 +99,49 @@ export interface ScanObservation {
   keyFragment?: string;
   keyLength?: number;
   artifact?: { kind: ArtifactSignatureKind; value: string };
+  /**
+   * Optional (decision 6): where it was found. `path` at most 512 characters, normalised (forward slashes, no
+   * leading `./` or `/`, no `..` segment); `line` 1 to 10,000,000; `commit` 7 to 64 hex. Never file contents.
+   */
+  location?: { path: string; line?: number; commit?: string };
+  /**
+   * Optional (decision 6): NAMES only, never values: `.env.example` variable names, an MCP server's command
+   * basename. At most 50, each at most 128 characters of `[A-Za-z0-9_.-]` starting with a letter or `_`.
+   */
+  names?: string[];
+  /** Optional (decision 20): the person behind the sighting, from `ctx.pseudonymise` (`psn:` + 24 hex) */
+  actorPseudonym?: string;
+}
+
+/**
+ * Read-only access to this deployment's ENABLED admin catalogue (decision 5). A scanner may use it to keep an
+ * observation only an admin-added row would match (for example an in-house package name); detection itself still
+ * happens in the worker's matcher, and a scanner never decides a finding.
+ */
+export interface ScanCatalogue {
+  /** would this observation match an enabled catalogue row? */
+  matches: (observation: ScanObservation) => boolean;
+  /** the enabled rows of the given signature kinds (provider, kind, value, match type), read-only */
+  rows: (kinds?: readonly AiSignatureKind[]) => ReadonlyArray<Readonly<Pick<AiSignature, "provider" | "kind" | "value" | "matchType" | "minLength">>>;
 }
 
 export interface ScanResult {
   observations: ScanObservation[];
   /**
    * What the scanner could learn about its credential's scope (decision 7):
-   * `write` refuses the run (and the credential should be replaced), `read_only`
-   * clears the posture row, `unverified` (or absent) leaves it.
+   * `write` refuses the run and marks the credential `refused` (never used
+   * again; the source cannot be enabled or run until it is replaced),
+   * `read_only` clears the posture row, `unverified` (or absent) leaves it.
    */
   credentialWriteScope?: "read_only" | "write" | "unverified";
+  /**
+   * Optional: each read the scanner attempted and what came of it (for
+   * example "CloudTrail data events: not_enabled"), stored with the run and
+   * shown on the run list as "could not read: …". At most 100; `read` at most
+   * 200 characters, `detail` at most 500, and `detail` is scrubbed (known
+   * secrets, credential shapes, URL query strings) before it is stored.
+   */
+  readOutcomes?: DiscoveryReadOutcome[];
 }
 
 export interface Scanner {
