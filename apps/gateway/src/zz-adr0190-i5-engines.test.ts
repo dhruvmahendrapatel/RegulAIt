@@ -673,10 +673,11 @@ describe("I8: an agent run's task start is an entitlement decision whose facts n
       const agentId = ag.json().id as string;
       const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId });
       expect(g.statusCode, g.body).toBeLessThan(300);
-      // a promptfoo run leased to this suite's runner (seeded: the B5-P suite pins the lease itself)
+      // a promptfoo run leased to this suite's runner (seeded: the B5-P suite pins the lease itself); promptfoo
+      // grades with a judge, so the run names one (the task start refuses judge_required otherwise, as the lease does)
       const runId = rows<{ id: string }>(
-        await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
-          values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
+        await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, judge_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
+          values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
       )[0]!.id;
       const keyMaterial = `run-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}`;
       const r = await startEngineTask(
@@ -716,8 +717,8 @@ describe("I5 point 18: the task start re-runs the lease's dispatch checks", () =
     const g = await inject("POST", "/v1/grants/agents", AUTH, { userId: alice.id, agentId });
     expect(g.statusCode, g.body).toBeLessThan(300);
     const runId = rows<{ id: string }>(
-      await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
-        values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
+      await db.execute(sql`insert into engine_runs (engine_id, engine_version, status, trigger, run_as_user_id, project_id, target_kind, target_agent_id, judge_agent_id, config, config_hash, trials, budget_usd, timeout_seconds, created_at, queue_expires_at, runner_id, leased_at, lease_expires_at, deadline_at)
+        values ('promptfoo', ${MANIFEST.promptfoo.version}, 'leased', 'manual', ${alice.id}, ${projectId}, 'agent', ${agentId}, ${agentId}, ${JSON.stringify({ sets: ["basic"] })}::jsonb, ${"a".repeat(64)}, 1, 1, 600, now(), now() + interval '1 hour', ${runnerId}, now(), now() + interval '10 minutes', now() + interval '10 minutes') returning id`),
     )[0]!.id;
     // after the lease: the agent's provider model is gone
     await db.update(agents).set({ model: null }).where(eq(agents.id, agentId));
