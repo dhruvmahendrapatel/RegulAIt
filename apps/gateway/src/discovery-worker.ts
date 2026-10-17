@@ -631,7 +631,8 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
         return true;
       },
       registerSecret: (value: string) => {
-        if (typeof value === "string" && value.length > 0 && secrets.length < 64) secrets.push(value);
+        // deduplicated, so a scanner re-sending one token cannot fill the cap before a refreshed token arrives
+        if (typeof value === "string" && value.length > 0 && secrets.length < 64 && !secrets.includes(value)) secrets.push(value);
       },
       recordRaw: (chunk) => {
         rawSeen = true;

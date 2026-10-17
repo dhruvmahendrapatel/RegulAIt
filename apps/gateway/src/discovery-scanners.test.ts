@@ -11,8 +11,8 @@ import { checkObservations, checkReadOutcomes, ObservationRefused, retryAfterMs,
 const NOW = "2026-10-17T00:00:00.000Z";
 
 describe("ADR-0195 SD0 scanner contract", () => {
-  it("registers exactly the SD1 repo scanners, and a registry refuses two scanners for one kind", () => {
-    expect([...DISCOVERY_SCANNERS.keys()].sort()).toEqual(["repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab"]);
+  it("ships only the built scanners (SD1: the four repo kinds; SD2: the three clouds), and a registry refuses two scanners for one kind", () => {
+    expect([...DISCOVERY_SCANNERS.keys()].sort()).toEqual(["cloud_aws", "cloud_azure", "cloud_gcp", "repo_azure_devops", "repo_bitbucket", "repo_github", "repo_gitlab"]);
     expect(() => scannerRegistry([noopTestScanner("repo_github"), noopTestScanner("repo_github")])).toThrow(/duplicate/);
   });
 

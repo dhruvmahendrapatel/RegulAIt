@@ -70,6 +70,7 @@ import { buildApp } from "./app.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { totpCode, totpStep } from "./totp.js";
+import { awaitTotpHeadroom } from "./testing/totp-window.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
@@ -260,7 +261,7 @@ beforeAll(async () => {
   await relaxStrictAdmissionForTest(db);
   await relaxGovernanceGatesForTest(db, { requirePreviewBeforeActivate: false });
   await db.execute(sql`UPDATE org_settings SET step_up_mode = 'required', approval_delegation_enabled = true,
-    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb
+    step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
     WHERE id = ${ORG_SETTINGS_ID}`);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -464,6 +465,7 @@ describe("F23: an admin's own password and second factor are not reset without a
     await db.update(usersTable).set({ isAdmin: true }).where(eq(usersTable.id, u.id));
     const enrolled = await as(u.s, "POST", "/auth/totp/enroll");
     expect(enrolled.statusCode, enrolled.body).toBe(200);
+    await awaitTotpHeadroom();
     expect((await as(u.s, "POST", "/auth/totp/activate", { code: totpCode(enrolled.json().secret as string, totpStep() - 1) })).statusCode).toBe(200);
     const self = await as(u.s, "POST", `/v1/users/${u.id}/mfa/clear`, { reason: "b4c5 self clear" });
     expect(self.statusCode, self.body).toBe(403);
@@ -478,6 +480,7 @@ describe("F24: a TOTP step-up never burns a code against an authenticator cleare
     const enrolled = await as(u.s, "POST", "/auth/totp/enroll");
     expect(enrolled.statusCode, enrolled.body).toBe(200);
     const secret = enrolled.json().secret as string;
+    await awaitTotpHeadroom();
     expect((await as(u.s, "POST", "/auth/totp/activate", { code: totpCode(secret, totpStep() - 1) })).statusCode).toBe(200);
     const action = { kind: "owner_change", body: { objectType: "mcp_server", objectId: "00000000-0000-4000-8000-0000000b4c05", ownerUserId: null } };
     const o = await as(u.s, "POST", "/v1/auth/step-up/options", { action });

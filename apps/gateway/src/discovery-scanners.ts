@@ -40,6 +40,7 @@
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
 import type { AiSignature, AiSignatureKind, DiscoveryCredentialMode, DiscoveryReadOutcome } from "@regulait/shared";
 import { REPO_SCANNERS } from "./discovery-repo-scanner.js";
+import { cloudDiscoveryScanners } from "./discovery-cloud-scanners.js";
 
 /** the source as a scanner sees it */
 export interface ScanSource {
@@ -185,6 +186,8 @@ export function scannerRegistry(scanners: readonly Scanner[]): ScannerRegistry {
 export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
   // SD1: repo_github, repo_gitlab, repo_bitbucket, repo_azure_devops
   ...REPO_SCANNERS,
+  // SD2: cloud_aws, cloud_gcp, cloud_azure
+  ...cloudDiscoveryScanners(),
 ]);
 
 /**

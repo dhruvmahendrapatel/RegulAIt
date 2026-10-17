@@ -86,6 +86,13 @@ async function grantFor(action: { kind: string; body: Record<string, unknown> })
   return v.json().stepUpToken as string;
 }
 
+/** the same change's facts with a different value: a grant for it must be refused for `facts`, and not spent */
+function differentValue(facts: Record<string, unknown>): Record<string, unknown> {
+  if ("expectedServedModel" in facts) return { ...facts, expectedServedModel: `${String(facts.expectedServedModel)}-other` };
+  if (facts.values && typeof facts.values === "object") return { ...facts, values: { ...(facts.values as object), otherValue: true } };
+  return { ...facts, otherValue: true };
+}
+
 /** a relaxing write: refused to an API key; a prompt bound to exactly `facts` for a person; refused with a grant
  * for other facts; done with a grant for exactly these. Returns the successful response. */
 async function relaxThroughStepUp(method: Method, url: string, payload: unknown, facts: Record<string, unknown>) {
@@ -96,8 +103,11 @@ async function relaxThroughStepUp(method: Method, url: string, payload: unknown,
   expect(asked.statusCode, asked.body).toBe(403);
   expect(asked.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", methods: ["passkey"] });
   expect(asked.json().action).toEqual({ kind: "settings_relax", body: facts });
-  const other = await grantFor({ kind: "settings_relax", body: { op: "some_other_relaxation" } });
+  const other = await grantFor({ kind: "settings_relax", body: differentValue(facts) });
   expect((await asAdmin(method, url, payload, { [STEP_UP_HEADER]: other })).statusCode).toBe(403);
+  // refused, and not spent: the grant made for other facts is still unused
+  const [otherGrant] = await db.select({ usedAt: stepUpGrants.usedAt }).from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(other).digest("hex")));
+  expect(otherGrant!.usedAt).toBeNull();
   const token = await grantFor(asked.json().action);
   return asAdmin(method, url, payload, { [STEP_UP_HEADER]: token });
 }
@@ -113,7 +123,7 @@ async function lastAudit(ruleId: string, objectId: string) {
 }
 
 const STRICT_SQL = sql`UPDATE org_settings SET step_up_mode = 'required',
-  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal"]'::jsonb
+  step_up_actions = '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "pseudonym_reveal", "key_management"]'::jsonb
   WHERE id = ${ORG_SETTINGS_ID}`;
 
 beforeAll(async () => {
@@ -663,6 +673,40 @@ describe("recheck: spellings, fail-closed import, concurrency and url binding", 
     expect(grant!.usedAt).toBeNull();
   });
 
+  it("a writer outside the route adds the host after the re-decision: the insert-conflict 409 leaves the grant unspent", async () => {
+    const host = `sds-outside-${RUN}.example.test`;
+    const action = { kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true } } };
+    const token = await grantFor(action);
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    // the other writer takes NO per-host lock (as a writer outside this route would not): its uncommitted row is
+    // invisible to the route's re-decision ("added" still holds), and the route's insert waits on it
+    const other = await db.$client.connect();
+    try {
+      await other.query("begin");
+      await other.query("insert into egress_allow_hosts (host, allow_private_ranges, allow_plaintext_http, note) values ($1, false, false, $2)", [host, "outside the route"]);
+      // egress-allow-cleanup: refused — the row the other writer committed is removed below
+      const pending = asAdmin("POST", "/v1/egress-allow-hosts", { host, note: "mine" }, { [STEP_UP_HEADER]: token });
+      for (let i = 0; i < 100; i += 1) {
+        const r = await db.execute(sql`select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock' and query ilike '%insert into "egress_allow_hosts"%'`);
+        if ((r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n > 0) break;
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      await other.query("commit");
+      const res = await pending;
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("changed_concurrently");
+    } finally {
+      await other.query("rollback").catch(() => undefined);
+      other.release();
+    }
+    const [row] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, host));
+    expect(row).toMatchObject({ note: "outside the route" });
+    created.allowHosts.push(row!.id);
+    // insert first, then spend: the grant is still good
+    const [grant] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, tokenHash));
+    expect(grant!.usedAt).toBeNull();
+  });
+
   it("importRegistryEntry with no step-up check refuses an import that opens private ranges", async () => {
     const name = `sds-noop-reg-${RUN}`;
     const reg = await relaxThroughStepUp("POST", "/v1/mcp-registries", { name, url: REGISTRY_URL, allowPrivateRanges: true }, {
@@ -722,6 +766,85 @@ describe("recheck: spellings, fail-closed import, concurrency and url binding", 
       ownerUserId: before!.ownerUserId,
       allowPrivateRanges: before!.allowPrivateRanges,
     });
+  });
+});
+
+describe("PATCH /v1/servers/:serverId: the columns and the owner are one conditional write", () => {
+  it("an owner changed concurrently between the check and the write: 409, no column written, the grant unspent", async () => {
+    const srv = await asAdmin("POST", "/v1/servers", { name: `sds-srv-cas-${RUN}`, url: `${REGISTRY_URL}cas`, ownerUserId: null });
+    expect(srv.statusCode, srv.body).toBe(201);
+    const serverId = srv.json().id as string;
+    created.servers.push(serverId);
+    const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    expect(before!.ownerUserId).toBeNull();
+    const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email: `sds-cas-${RUN}@example.com`, displayName: "sds cas owner" } });
+    expect(u.statusCode, u.body).toBe(201);
+    const otherOwner = u.json().id as string;
+    created.users.push(otherOwner);
+    const token = await grantFor({ kind: "owner_change", body: { objectType: "mcp_server", objectId: serverId, ownerUserId: admin.id } });
+    // another admin's owner change, held open: the PATCH reads the old owner, then waits on the row lock
+    const other = await db.$client.connect();
+    try {
+      await other.query("begin");
+      await other.query("update mcp_servers set owner_user_id = $1 where id = $2", [otherOwner, serverId]);
+      const pending = asAdmin("PATCH", `/v1/servers/${serverId}`, { name: `sds-srv-cas-renamed-${RUN}`, ownerUserId: admin.id }, { [STEP_UP_HEADER]: token });
+      for (let i = 0; i < 100; i += 1) {
+        const r = await db.execute(sql`select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock' and query ilike '%update "mcp_servers"%'`);
+        if ((r as unknown as { rows: Array<{ n: number }> }).rows[0]!.n > 0) break;
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      await other.query("commit");
+      const res = await pending;
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error).toBe("changed_concurrently");
+    } finally {
+      await other.query("rollback").catch(() => undefined);
+      other.release();
+    }
+    const [after] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    // the rename was NOT written without the owner change: the other writer's owner stands, the name is unchanged
+    expect({ name: after!.name, ownerUserId: after!.ownerUserId }).toEqual({ name: before!.name, ownerUserId: otherOwner });
+    const [grant] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(token).digest("hex")));
+    expect(grant!.usedAt).toBeNull();
+    // positive control: with the owner it was decided on, the rename and the owner change land together, audited
+    await db.update(mcpServers).set({ ownerUserId: null }).where(eq(mcpServers.id, serverId));
+    const ok = await asAdmin("PATCH", `/v1/servers/${serverId}`, { name: `sds-srv-cas-renamed-${RUN}`, ownerUserId: admin.id }, { [STEP_UP_HEADER]: token });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({ name: `sds-srv-cas-renamed-${RUN}`, ownerUserId: admin.id });
+    expect((await lastAudit("mcp-server-owner-changed", serverId))!.detail).toMatchObject({ transitions: { ownerUserId: { from: null, to: admin.id } } });
+    const [spent] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(token).digest("hex")));
+    expect(spent!.usedAt).not.toBeNull();
+  });
+});
+
+describe("PATCH /v1/servers/:serverId: an owner id in another case is the same owner", () => {
+  it("an uppercase owner id asks for and accepts the grant of the stored (lowercase) id; restating it is no change", async () => {
+    const srv = await asAdmin("POST", "/v1/servers", { name: `sds-srv-case-${RUN}`, url: `${REGISTRY_URL}case`, ownerUserId: null });
+    expect(srv.statusCode, srv.body).toBe(201);
+    const serverId = srv.json().id as string;
+    created.servers.push(serverId);
+    const upper = admin.id.toUpperCase();
+    expect(upper).not.toBe(admin.id);
+    // the prompt's facts name the id as the database returns it, so a grant for them is the one the claim accepts
+    const asked = await asAdmin("PATCH", `/v1/servers/${serverId}`, { ownerUserId: upper });
+    expect(asked.statusCode, asked.body).toBe(403);
+    expect(asked.json()).toMatchObject({ error: "step_up_required" });
+    expect(asked.json().action).toEqual({ kind: "owner_change", body: { objectType: "mcp_server", objectId: serverId, ownerUserId: admin.id } });
+    const token = await grantFor(asked.json().action);
+    const ok = await asAdmin("PATCH", `/v1/servers/${serverId}`, { ownerUserId: upper }, { [STEP_UP_HEADER]: token });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({ ownerUserId: admin.id });
+    expect((await lastAudit("mcp-server-owner-changed", serverId))!.detail).toMatchObject({ transitions: { ownerUserId: { from: null, to: admin.id } } });
+    const [spent] = await db.select().from(stepUpGrants).where(eq(stepUpGrants.tokenHash, createHash("sha256").update(token).digest("hex")));
+    expect(spent!.usedAt).not.toBeNull();
+    // the current owner in uppercase: no change, so no step-up is asked and the owner stays as stored
+    const again = await asAdmin("PATCH", `/v1/servers/${serverId}`, { ownerUserId: upper });
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json()).toMatchObject({ ownerUserId: admin.id });
+    const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    expect(row!.ownerUserId).toBe(admin.id);
+    // the restatement names the stored id on both sides (the same row an exact spelling writes), never a case change
+    expect((await lastAudit("mcp-server-owner-changed", serverId))!.detail).toMatchObject({ transitions: { ownerUserId: { from: admin.id, to: admin.id } } });
   });
 });
 

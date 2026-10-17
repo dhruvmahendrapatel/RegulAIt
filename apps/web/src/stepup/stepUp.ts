@@ -99,7 +99,7 @@ export function stepUpRefusalOf(err: unknown): { action: StepUpAction; methods: 
   return { action, methods };
 }
 
-/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, eight today) */
+/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, nine today) */
 /** one per action kind the copy table knows (it names every kind; orgSettingSpecs.test pins that), read at call time */
 const maxStepUps = (): number => Object.keys(STEP_UP_ACTION_COPY).length;
 
@@ -195,6 +195,7 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   owner_change: "changing who owns this",
   identity_manage: "changing an agent identity",
   pseudonym_reveal: "revealing a person's name",
+  key_management: "changing a signing key",
 };
 
 export const STEP_UP_METHOD_COPY: Readonly<Record<string, string>> = {

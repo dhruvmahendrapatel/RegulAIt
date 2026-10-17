@@ -214,6 +214,72 @@ two contribute detection data under their licences.
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
 
+## Implementation notes: SD2 cloud scanners (2026-10-17)
+
+Built in `packages/cloud-discovery` (Phase A: the scanners without the SD0 registration).
+
+- **Open source first (decision 11).** The official SDKs are used as published: AWS SDK for JavaScript v3
+  `3.1152.0`, `@google-cloud/service-usage` `5.2.0`, `@google-cloud/asset` `7.2.0`, `@google-cloud/resource-manager`
+  `7.2.0`, `google-auth-library` `11.3.1`, and `@azure/identity` `4.14.0` with the Resource Graph, Cognitive
+  Services, Monitor and `@azure/monitor-query-logs` clients. The whole production tree is Apache-2.0, MIT,
+  BSD-3-Clause, ISC or 0BSD. Two pieces are ours, recorded in the package's `THIRD_PARTY.md`: an Azure `HttpClient`
+  over the guarded fetch (the pipeline package exports no fetch-based client for Node), and a small credential
+  memo. The AWS transport is the SDK's own `FetchHttpHandler` with `customFetch`. Audit-log entries are read through
+  the Logging REST API with the guarded auth client, because the Logging GAPIC client's REST fallback cannot decode
+  the `AuditLog` payload (no AuditLog type is bundled).
+- **Decision 8 found a real bypass.** `google-auth-library` 11.3.1 builds the external-account client's STS client
+  without the transporter it was given, so the workload identity token exchange left on global fetch: the first
+  fake-cloud test run received a live response from Google's STS endpoint. The package re-points it and fails
+  closed if the library's internal shape changes; a negative control shows the egress test fails without the fix.
+  To be reported upstream.
+- **Retries against a refusal.** google-gax reports a fetch that failed before any response, an egress refusal
+  included, as UNAVAILABLE and retries it for up to a minute. Calls pass `maxRetries: 2`. MSAL replaces any transport
+  failure with `network_error`; both are reported as `unreachable`.
+- **Federation signing algorithm (decision 3 check, 2026-10-17).** AWS IAM OIDC providers accept RS256, RS384,
+  RS512, ES256, ES384 and ES512 (IAM user guide, "Create an OpenID Connect (OIDC) identity provider"). GCP workload
+  identity federation accepts tokens "signed using the RS256 or ES256 algorithm" (IAM docs, "Configure Workload
+  Identity Federation with other identity providers"; an uploaded JWKS holds at most 8 keys). Microsoft Entra
+  supports only issuers whose tokens are signed with RS256; other algorithms "may work, but haven't been tested"
+  (Entra Workload ID, "Important considerations and restrictions for federated identity credentials"). The one
+  algorithm all three accept is **RS256**, so the federation key beside the issuer's Ed25519 keys is RS256.
+- **Not supported:** instance-metadata credentials (AWS default chain, Azure managed identity, GCP metadata server).
+  The guard refuses the metadata address unconditionally and a source must name its principal. Decision 3's
+  "managed identity" is therefore not offered.
+- **Phase B: registered with SD0.** `apps/gateway/src/discovery-cloud-scanners.ts` adds `cloud_aws`, `cloud_gcp` and
+  `cloud_azure` to `DISCOVERY_SCANNERS`. It maps a source's target, scope and credential onto the adapters (fields
+  listed in that file and in `docs/deployment/CLOUD_DISCOVERY.md`), wraps `ctx.fetch` so every request awaits
+  `ctx.throttle()`, a 429 or 503 is retried only when `ctx.backoff()` agrees, and every body goes to `ctx.recordRaw()`,
+  pseudonymises principals as `cloud_principal`, calls `ctx.heartbeat()` between regions, projects and subscriptions,
+  and returns observations with `artifact: { kind: "cloud_ai_service", value: <service key> }` (matched by
+  `identifier`). AWS scope `include` is regions and an organisation-level AWS scope means every enabled region of the
+  one target account; GCP `include` is projects (organisation level needs `assetScope`); Azure `include` is
+  subscriptions (organisation level needs `managementGroupId`). The AWS static secret is a JSON object holding the key
+  id too, because SD0 refuses key-shaped names in public config.
+- **What could not be read, at run level.** Every read's status goes to SD0's `readOutcomes` (`<capability>@<scope>`,
+  problems first, at most 100). When no read succeeds at all the run also fails (`scanner_error`) with the summary.
+- **Credential fields follow SD0's allowlist** (`DISCOVERY_PUBLIC_CONFIG`): AWS federated `roleArn`; GCP federated
+  `projectNumber`, `workloadIdentityPool`, `workloadIdentityProvider` and `serviceAccountEmail`, from which the pool
+  provider audience is built; Azure `tenantId` and `clientId`. `credentialTargetMatch` gains GCP: the impersonated
+  service account's home project equal to the target `projectId` is a match; anything else is unverifiable, never a
+  mismatch, because a central project may hold the service account and pool.
+- **Pending (M-041):** nothing has run against a real cloud account; the published Terraform is unvalidated. A
+  federated credential fails its run with an explicit reason until the ADR-0188 issuer has an RS256 federation key
+  and a mint path for these audiences (key material and schema outside this slice); AWS `assume_role` needs
+  RegulAIt's own AWS principal and fails the same way. Organisation-level AWS account enumeration is not built.
+- **Scrubbing and account binding (SD0 final push).** Every short-lived credential an adapter obtains or sends is
+  passed to `ctx.registerSecret` before use: the OIDC assertion, AWS STS session credentials (and a static key's
+  parts), Google STS and IAM Credentials tokens, the Entra access token, and any bearer token on an API call. The AWS
+  scanner calls `sts:GetCallerIdentity` (no IAM permission needed) in every mode and reads nothing unless the
+  credential's account equals `target.accountId`.
+- **Seed.** The catalogue seed route installs `CLOUD_AI_SERVICE_SEED` with the default signatures
+  (`SHIPPED_SIGNATURE_SEED` in `shadow-ai.ts`; SD1 and SD3 add theirs the same way); admin-edited rows stay untouched.
+- **Review of #404 (fixed).** Endpoints are pinned against ambient SDK configuration (AWS endpoint URLs, shared-config
+  profiles, FIPS and dual-stack; `GOOGLE_CLOUD_UNIVERSE_DOMAIN`; `AZURE_AUTHORITY_HOST`), with an env-poisoning test.
+  `@azure/identity` also reads `AZURE_REGIONAL_AUTHORITY_NAME` with no override; it only selects a regional Microsoft
+  host, which still needs an allow entry. Trail-bucket objects are capped (8 MB read, 64 MB inflated) and response
+  digests at 4 MB; token-exchange responses go through an undigested credential fetch; Azure audit evidence is
+  attributed only to discovered AI resources; error details redact `key=`/`token=`-style values.
+
 ## As built: SD0 foundation (2026-10-17, migration 0202)
 
 **Status: built on branch `sd0-discovery-foundation`; migration 0202 with its journal entry (idx 202) after 0201.** No
