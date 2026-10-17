@@ -170,6 +170,15 @@ func validNames(list []string) error {
 	return nil
 }
 
+// absoluteOnAnyOS: a path rooted on Unix (`/x`), on Windows (`\x`, `C:…`, `\\server\share`), so a locator cannot
+// leave its root on the OS it names, whichever that is.
+func absoluteOnAnyOS(p string) bool {
+	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) {
+		return true
+	}
+	return len(p) >= 2 && p[1] == ':' && (p[0] >= 'a' && p[0] <= 'z' || p[0] >= 'A' && p[0] <= 'Z')
+}
+
 // validLocator accepts a relative, forward-slash path whose segments may hold `*` or `?` globs.
 func validLocator(l Locator) error {
 	if !knownOS[l.OS] {
@@ -182,8 +191,11 @@ func validLocator(l Locator) error {
 		return fieldErr("root " + string(l.Root) + " does not exist on " + l.OS)
 	}
 	p := l.Path
-	if p == "" || len(p) > maxPathLen || !utf8.ValidString(p) || strings.HasPrefix(p, "/") || strings.ContainsAny(p, patternChars) {
-		return fieldErr("path is empty, absolute, too long or contains a pattern character: " + p)
+	if absoluteOnAnyOS(p) {
+		return fieldErr("path is absolute: " + p)
+	}
+	if p == "" || len(p) > maxPathLen || !utf8.ValidString(p) || strings.ContainsAny(p, patternChars) {
+		return fieldErr("path is empty, too long or contains a pattern character: " + p)
 	}
 	for _, seg := range strings.Split(p, "/") {
 		if seg == "" || seg == "." || seg == ".." || strings.Contains(seg, "**") {

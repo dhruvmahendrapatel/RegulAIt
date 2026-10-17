@@ -70,13 +70,14 @@ func (NCryptStore) Protection() contract.KeyProtection { return contract.KeyHard
 
 func openProvider() (uintptr, error) {
 	if err := procNCryptOpenStorageProvider.Find(); err != nil {
+		// ncrypt.dll (or its export) is missing: this Windows has no CNG key storage at all
 		return 0, fmt.Errorf("%w: ncrypt.dll is not available", ErrNoHardware)
 	}
 	var h uintptr
 	r, _, _ := procNCryptOpenStorageProvider.Call(uintptr(unsafe.Pointer(&h)), uintptr(unsafe.Pointer(utf16(platformProvider))), 0)
-	if err := status(r); err != nil {
-		// the provider does not open on a machine with no usable TPM
-		return 0, fmt.Errorf("%w: the Platform Crypto Provider did not open (%v)", ErrNoHardware, err)
+	if err := classifyProviderOpen(uint32(r)); err != nil {
+		// only "no TPM" statuses wrap ErrNoHardware (ncrypt_status.go); anything else is refused, never a fallback
+		return 0, err
 	}
 	return h, nil
 }

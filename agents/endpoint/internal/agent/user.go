@@ -6,10 +6,10 @@ import (
 	"runtime"
 )
 
-// ownUID is the uid the user's own state files must belong to (-1 on Windows).
+// ownUID is the uid the user's own state files must belong to (ownerCurrentUser on Windows, checked by SID).
 func ownUID() int {
 	if runtime.GOOS == "windows" {
-		return -1
+		return ownerCurrentUser
 	}
 	return os.Getuid()
 }

@@ -82,6 +82,14 @@ func TestVerifyRefusals(t *testing.T) {
 		_, err := Verify(good, s.Keyring(), "2.0.1")
 		mustRefuse(t, err, "downgrade refused")
 	})
+	t.Run("older than the compiled minimum, with no per-user floor", func(t *testing.T) {
+		// a new user, or one whose state was deleted, has no floor; the compiled minimum still refuses
+		_, err := Verify(s.Pack("0.9.9", []byte(goodCollection)), s.Keyring(), "")
+		mustRefuse(t, err, "this build's minimum "+MinimumVersion)
+		if _, err := Verify(s.Pack(MinimumVersion, []byte(goodCollection)), s.Keyring(), ""); err != nil {
+			t.Fatalf("the minimum itself: %v", err)
+		}
+	})
 	t.Run("same version is not a downgrade", func(t *testing.T) {
 		if _, err := Verify(good, s.Keyring(), "2.0.0"); err != nil {
 			t.Fatal(err)
@@ -136,4 +144,16 @@ func TestCollectionRefusals(t *testing.T) {
 		_, err := ParseCollection([]byte(`{"schema":"other/1","entries":[]}`))
 		mustRefuse(t, err, "unknown collection schema")
 	})
+	// the absolute-path guard itself: each is refused as absolute (the drive-letter forms pass every other check)
+	for _, l := range []string{
+		`{"os":"linux","root":"home","path":"/etc/shadow"}`,
+		`{"os":"windows","root":"appdata","path":"C:/Windows/System32/config/SAM"}`,
+		`{"os":"windows","root":"localappdata","path":"d:x"}`,
+	} {
+		t.Run("absolute "+l, func(t *testing.T) {
+			e := `{"signatureId":"a","kind":"assistant_config","provider":"p","files":[` + l + `]}`
+			_, err := ParseCollection([]byte(`{"schema":"regulait.endpoint-collection/1","entries":[` + e + `]}`))
+			mustRefuse(t, err, "path is absolute")
+		})
+	}
 }

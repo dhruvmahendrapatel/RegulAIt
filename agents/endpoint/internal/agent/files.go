@@ -27,11 +27,21 @@ var ErrUnsafeFile = errors.New("unsafe file")
 
 const maxFileBytes = 64 << 10
 
-// readChecked reads a small file after checking it is a regular file (never a symlink) owned by owner with no more
-// access than a allows. owner < 0 skips the owner check (Windows, where ACLs apply instead).
+// ownerCurrentUser, as readChecked's owner, means "the user this agent runs as". Windows uses it for the user's own
+// state (checked by SID); on Unix ownUID passes the real uid instead.
+const ownerCurrentUser = -2
+
+// readChecked reads a small file after checking it is a regular file (never a symlink or reparse point) owned by
+// owner with no more access than a allows. On Unix owner is a uid (< 0 skips the uid check, tests only); on Windows
+// owner is ownerCurrentUser for the user's own file and anything else for a system file, and the owner SID and DACL
+// are checked instead (files_windows.go, winacl.go).
 func readChecked(path string, owner int, a Access) ([]byte, error) {
 	f, err := openNoFollow(path)
 	if err != nil {
+		if isUnsafeOpen(err) {
+			// a symlink (ELOOP under O_NOFOLLOW) or a reparse point is an unsafe file, not an unreadable one
+			return nil, fmt.Errorf("%w: %s: %v", ErrUnsafeFile, filepath.Base(path), err)
+		}
 		return nil, err
 	}
 	defer f.Close()
@@ -39,7 +49,7 @@ func readChecked(path string, owner int, a Access) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkMode(st, owner, a); err != nil {
+	if err := checkMode(f, st, owner, a); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrUnsafeFile, filepath.Base(path), err)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
@@ -69,7 +79,7 @@ func strictJSON(b []byte, v any) error {
 func writeAtomic(path string, data []byte, mode os.FileMode, gid int) error {
 	dir := filepath.Dir(path)
 	tmp := filepath.Join(dir, "."+filepath.Base(path)+"."+randomHex(8)+".tmp")
-	f, err := createExclusive(tmp)
+	f, err := createExclusive(tmp, mode)
 	if err != nil {
 		return err
 	}

@@ -273,6 +273,80 @@ func TestBoundedReads(t *testing.T) {
 	}
 }
 
+// A file that is not regular (a named pipe here) is never read, even when its name matches a locator.
+func TestIrregularFileIsNotRead(t *testing.T) {
+	env := linuxEnv()
+	home := linuxHome()
+	home[".config/example/pipe.json"] = &fstest.MapFile{Data: []byte(`{"EXAMPLE_API_KEY":"` + fakeKey() + `"}`), Mode: fs.ModeNamedPipe}
+	env.Roots[contract.RootHome] = home
+	facts, _ := Collect(env, mustCollection(t), nil)
+	for _, f := range find(facts, "sig.config") {
+		if f.Location.Path == ".config/example/pipe.json" {
+			t.Errorf("a named pipe was read: %+v", f)
+		}
+	}
+}
+
+// A version field holding free text is dropped, never reported.
+func TestCleanVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"1.2.3":                             "1.2.3",
+		" 4.5.6_0 ":                         "4.5.6_0",
+		"2026.1+build-7":                    "2026.1+build-7",
+		"1.0 by Alice Smith":                "",
+		"1.0; rm -rf ~":                     "",
+		"/home/alice/1.0":                   "",
+		"":                                  "",
+		strings.Repeat("1", 65):             "",
+		"1.0\nsecond line":                  "",
+		"version " + strings.Repeat("x", 3): "",
+	} {
+		if got := cleanVersion(in); got != want {
+			t.Errorf("cleanVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// and through a collector: an extension whose package.json version is free text has no version
+	env := linuxEnv()
+	home := linuxHome()
+	home[".example-editor/extensions/examplepub.example-helper-1.2.3/package.json"] = &fstest.MapFile{Data: []byte(`{"publisher":"ExamplePub","name":"example-helper","version":"1.2.3 alice.smith@corp"}`)}
+	env.Roots[contract.RootHome] = home
+	facts, _ := Collect(env, mustCollection(t), nil)
+	ide := find(facts, "sig.ide")
+	if len(ide) == 0 || ide[0].Version != "" {
+		t.Errorf("free-text version reported: %+v", ide)
+	}
+}
+
+// Unlisted key names leave the device only when env-style; a listed name is reported in the manifest's spelling.
+func TestKeyNamesAreEnvStyleOrUnnamed(t *testing.T) {
+	k := fakeKey()
+	got := keysIn([]assignment{
+		{name: "alice.smith", value: k},
+		{name: "apiKey", value: k},
+		{name: "Alice-Token", value: k},
+		{name: "_HIDDEN", value: k},
+		{name: "OPENAPI_TOKEN_2", value: k},
+		{name: "example_api_key", value: "listed and non-empty"},
+	}, []string{"EXAMPLE_API_KEY"})
+	names := map[string]bool{}
+	for _, kf := range got {
+		names[kf.KeyName] = true
+	}
+	for _, want := range []string{"(unnamed)", "OPENAPI_TOKEN_2", "EXAMPLE_API_KEY"} {
+		if !names[want] {
+			t.Errorf("missing %q in %+v", want, got)
+		}
+	}
+	for _, leaked := range []string{"alice.smith", "apiKey", "Alice-Token", "_HIDDEN", "example_api_key"} {
+		if names[leaked] {
+			t.Errorf("name %q left the device: %+v", leaked, got)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("want 3 names, got %+v", got)
+	}
+}
+
 func TestParseLine(t *testing.T) {
 	cases := map[string]assignment{
 		`export A_B="v"`:        {name: "A_B", value: "v"},

@@ -31,6 +31,11 @@ type Keyring map[string]ed25519.PublicKey
 // is added here, every pack is refused as signed by an unknown key, which is the strict default.
 var CompiledKeyring = Keyring{}
 
+// MinimumVersion is the oldest pack this build accepts, compiled in. The per-user floor (the last version accepted,
+// in the user's state) is checked as well, but it is empty for a new user and lost with deleted state; this floor
+// still refuses a replayed older signed pack then. A release that retires a pack version raises it.
+const MinimumVersion = "1.0.0"
+
 // Manifest is the ADR-0041 manifest. Unknown members are refused.
 type Manifest struct {
 	Schema              string `json:"schema"`
@@ -121,6 +126,9 @@ func Verify(p contract.SignedPack, keys Keyring, installedVersion string) (*Veri
 	}
 	if _, err := parseVersion(m.Version); err != nil {
 		return nil, refuse("version %q: %v", m.Version, err)
+	}
+	if c, err := compareVersions(m.Version, MinimumVersion); err != nil || c < 0 {
+		return nil, refuse("downgrade refused: pack %s is older than this build's minimum %s", m.Version, MinimumVersion)
 	}
 	if installedVersion != "" {
 		if c, err := compareVersions(m.Version, installedVersion); err != nil || c < 0 {

@@ -14,11 +14,15 @@ func openNoFollow(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
-func createExclusive(path string) (*os.File, error) {
+// isUnsafeOpen: O_NOFOLLOW on a symlink fails with ELOOP.
+func isUnsafeOpen(err error) bool { return errors.Is(err, syscall.ELOOP) }
+
+// createExclusive creates the file 0600; writeAtomic sets the final mode before the rename.
+func createExclusive(path string, _ os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 }
 
-func checkMode(st fs.FileInfo, owner int, a Access) error {
+func checkMode(_ *os.File, st fs.FileInfo, owner int, a Access) error {
 	if !st.Mode().IsRegular() {
 		return errors.New("not a regular file")
 	}

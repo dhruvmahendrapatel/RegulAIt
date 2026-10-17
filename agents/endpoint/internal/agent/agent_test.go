@@ -473,3 +473,141 @@ func (l loseRotationAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	return res, err
 }
+
+// A kind turned off in the machine's config is reported as turned off locally, even when the org also turned it
+// off; a kind only the org turned off says so.
+func TestLocalDisabledKindsNarrowCollection(t *testing.T) {
+	f := newFixture(t, 5)
+	cfg := fmt.Sprintf(`{"schema":"regulait.endpoint-agent-config/1","issuer":%q,"caBundleFile":%q,"disabledKinds":["env_name"]}`,
+		f.gw.Issuer, filepath.Join(f.dir, "sys", "ca.pem"))
+	if err := os.WriteFile(f.opts.Paths.ConfigFile, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.gw.Lock()
+	f.gw.Config.OrgPolicy.DisabledKinds = []contract.Kind{contract.KindEnvName, contract.KindAssistantConfig}
+	f.gw.Unlock()
+	Redeem(context.Background(), f.opts)
+	r, err := f.cycle().RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("%v\n%s", err, f.logs)
+	}
+	reasons := map[contract.Kind]string{}
+	for _, g := range r.Report.Gaps {
+		reasons[g.Kind] = g.Reason
+	}
+	if reasons[contract.KindEnvName] != collect.GapDisabledByLocalPolicy || reasons[contract.KindAssistantConfig] != collect.GapDisabledByOrgPolicy {
+		t.Fatalf("gaps: %+v", r.Report.Gaps)
+	}
+	if len(r.Report.Facts) != 0 {
+		t.Fatalf("a turned-off kind was collected: %+v", r.Report.Facts)
+	}
+}
+
+// A system file owned by another uid is an unsafe file, and a bulk token file so owned is never used.
+func TestFileOwnedByAnotherUIDIsUnsafe(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("needs root to give a file to another uid")
+	}
+	f := newFixture(t, 5)
+	if err := os.Chown(f.opts.Paths.EnrolFile, 4242, -1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readChecked(f.opts.Paths.EnrolFile, 0, OwnerOnly); !errors.Is(err, ErrUnsafeFile) || !strings.Contains(err.Error(), "owned by uid 4242") {
+		t.Fatalf("another uid's file: %v", err)
+	}
+	if st := Redeem(context.Background(), f.opts); st.Outcome != OutcomeTokenFileUnsafe {
+		t.Fatalf("%+v", st)
+	}
+	f.gw.Lock()
+	defer f.gw.Unlock()
+	if len(f.gw.Requests) != 0 {
+		t.Fatal("a token owned by another uid was sent")
+	}
+}
+
+// A symlink where a file is expected (ELOOP under O_NOFOLLOW) is an unsafe file: token_file_unsafe, nothing sent.
+func TestSymlinkIsAnUnsafeFile(t *testing.T) {
+	f := newFixture(t, 5)
+	real := filepath.Join(f.dir, "elsewhere.json")
+	if err := os.Rename(f.opts.Paths.EnrolFile, real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, f.opts.Paths.EnrolFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readChecked(f.opts.Paths.EnrolFile, os.Getuid(), OwnerOnly); !errors.Is(err, ErrUnsafeFile) {
+		t.Fatalf("symlink: %v", err)
+	}
+	if st := Redeem(context.Background(), f.opts); st.Outcome != OutcomeTokenFileUnsafe {
+		t.Fatalf("%+v", st)
+	}
+	f.gw.Lock()
+	defer f.gw.Unlock()
+	if len(f.gw.Requests) != 0 {
+		t.Fatal("a token behind a symlink was sent")
+	}
+}
+
+// Neither the bulk token nor the device ticket appears in anything the agent logs or returns as an error, on the
+// happy path or on any of the refusals below.
+func TestSecretsNeverReachLogsOrErrors(t *testing.T) {
+	f := newFixture(t, 5)
+	var errs []string
+	note := func(err error) {
+		if err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	st := Redeem(context.Background(), f.opts)
+	if st.Outcome != OutcomeRedeemed {
+		t.Fatalf("%+v", st)
+	}
+	raw, err := os.ReadFile(f.opts.Paths.TicketFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tf TicketFile
+	if err := json.Unmarshal(raw, &tf); err != nil || !validSecret(tf.Ticket) {
+		t.Fatalf("ticket file: %v", err)
+	}
+	c := f.cycle()
+	_, err = c.RunOnce(context.Background())
+	note(err)
+	// refusals: an untrusted pack, a failing report route, a gateway that no longer knows the ticket, a refused token
+	c.Keyring = packtest.NewSigner().Keyring()
+	_, err = c.RunOnce(context.Background())
+	note(err)
+	c.Keyring = f.signer.Keyring()
+	working := c.HTTP
+	c.HTTP = func(issuer string, ca []byte) (*http.Client, error) {
+		cl, err := working(issuer, ca)
+		if err != nil {
+			return nil, err
+		}
+		cl.Transport = failReports{cl.Transport}
+		return cl, nil
+	}
+	_, err = c.RunOnce(context.Background())
+	note(err)
+	c.HTTP = working
+	f.gw.Lock()
+	f.gw.Tickets = map[string]time.Time{}
+	f.gw.Unlock()
+	os.RemoveAll(f.opts.Paths.StateDir)
+	_, err = Register(context.Background(), f.opts)
+	note(err)
+	os.Remove(f.opts.Paths.TicketFile)
+	f.gw.Lock()
+	f.gw.TokenExpired = true
+	f.gw.Unlock()
+	st2 := Redeem(context.Background(), f.opts)
+	if len(errs) < 3 || st2.Outcome != OutcomeRefused {
+		t.Fatalf("the refusals did not fail: %q %+v", errs, st2)
+	}
+	everything := f.logs.String() + "\n" + strings.Join(errs, "\n") + "\n" + fmt.Sprintf("%+v %+v", st, st2)
+	for name, secret := range map[string]string{"bulk token": bulkToken(), "ticket": tf.Ticket} {
+		if strings.Contains(everything, secret) {
+			t.Errorf("the %s appears in logs or errors:\n%s", name, everything)
+		}
+	}
+}

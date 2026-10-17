@@ -46,13 +46,17 @@ func keysIn(as []assignment, listed []string) []contract.KeyFound {
 	byName := map[string]contract.KeyFound{}
 	for _, a := range as {
 		rule := secrets.Match(a.value)
-		_, isListed := matchFold(a.name, listed)
+		canonical, isListed := matchFold(a.name, listed)
 		if rule == "" && !(isListed && strings.TrimSpace(a.value) != "") {
 			continue
 		}
-		name := a.name
-		if !reportableName(name) {
-			name = "(unnamed)"
+		// a listed name is reported in the signed manifest's own spelling; any other name only when env-style
+		name := canonical
+		if !isListed {
+			name = a.name
+			if !reportableName(name) {
+				name = "(unnamed)"
+			}
 		}
 		prev, had := byName[name]
 		if had && prev.RuleID != "" {
@@ -71,9 +75,24 @@ func keysIn(as []assignment, listed []string) []contract.KeyFound {
 	return out
 }
 
-// reportableName admits a field or variable name that is a plain identifier: a name made of anything else (a
-// JSON key holding free text, say) is reported as "(unnamed)" so the report cannot carry it.
+// reportableName admits a name the manifest does not list only when it is an environment-variable-style
+// identifier, `^[A-Z][A-Z0-9_]*$` (at most 128 characters). Anything else (a JSON key holding free text, a
+// lower-case or dotted name such as a person's login) is reported as "(unnamed)" so it never leaves the device.
 func reportableName(s string) bool {
+	if s == "" || len(s) > 128 || s[0] < 'A' || s[0] > 'Z' {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// plainIdentifier is what parseLine accepts as the name side of `name = value`, so a listed name in any case
+// (`api_key: …`) still matches the manifest. It only splits a line; reporting a name needs reportableName.
+func plainIdentifier(s string) bool {
 	if s == "" || len(s) > 128 {
 		return false
 	}
@@ -152,7 +171,7 @@ func parseLine(line string) (assignment, bool) {
 		return assignment{value: s}, true
 	}
 	name := strings.TrimSpace(strings.Trim(strings.TrimSpace(s[:i]), `"'`))
-	if !reportableName(name) {
+	if !plainIdentifier(name) {
 		return assignment{value: s}, true
 	}
 	return assignment{name: name, value: unquote(strings.TrimSpace(s[i+1:]))}, true
