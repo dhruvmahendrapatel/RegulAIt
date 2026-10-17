@@ -40,6 +40,9 @@ import {
   strengthText,
   parsePlacements,
   parseProfiles,
+  nextVersionOf,
+  profileActions,
+  versionOutcomeText,
   profileText,
   registerBody,
   REFUSAL_REASONS,
@@ -143,7 +146,7 @@ function ProfilesCard() {
           </p>
         )}
         {creating && rows && <NewProfileDialog profiles={assignableProfiles(rows)} onClose={() => setCreating(false)} />}
-        {versioning && <NewVersionDialog profile={versioning} onClose={() => setVersioning(null)} />}
+        {versioning && <NewVersionDialog profile={versioning} nextVersion={nextVersionOf(versioning.name, rows ?? [])} onClose={() => setVersioning(null)} />}
         {retiring && <RetireProfileDialog profile={retiring} onClose={() => setRetiring(null)} />}
         {failed ? (
           <ReadFailure what="execution profiles" q={q} parsed={rows} />
@@ -170,7 +173,13 @@ function ProfilesCard() {
                 key: "status",
                 header: "Status",
                 render: (r) =>
-                  isUnreadable(r) ? <Badge tone="neutral">Unmeasured</Badge> : r.retiredAt !== null ? <Badge tone="danger">Retired</Badge> : <Badge tone="ok">Live</Badge>,
+                  isUnreadable(r) ? (
+                    <Badge tone="neutral">Unmeasured</Badge>
+                  ) : r.retiredAt !== null ? (
+                    <Badge tone="danger">Retired</Badge>
+                  ) : (
+                    <Badge tone="ok">Live</Badge>
+                  ),
               },
               {
                 key: "relaxed",
@@ -179,21 +188,30 @@ function ProfilesCard() {
               },
               { key: "digest", header: "Digest", render: (r) => (isUnreadable(r) ? "Not reported" : <code title={r.digest}>{r.digest.slice(0, 12)}</code>) },
               {
-                // a live custom profile's latest version: a new version, or retirement (shipped profiles are the strict reference)
+                // a live custom profile's latest version: a new version, or retirement. restricted and restricted-microvm
+                // are the strict references; engine-worker is versioned, never retired (profileActions)
                 key: "manage",
                 header: "Manage",
                 align: "right",
-                render: (r) =>
-                  isUnreadable(r) || r.shipped || r.retiredAt !== null || !isLatestVersion(r, rows ?? []) ? null : (
+                render: (r) => {
+                  if (isUnreadable(r) || r.retiredAt !== null || !isLatestVersion(r, rows ?? [])) return null;
+                  const actions = profileActions(r);
+                  if (!actions.version && !actions.retire) return null;
+                  return (
                     <span>
-                      <Button size="sm" variant="ghost" aria-label={`New version of ${r.name}`} onClick={() => setVersioning(r)}>
-                        New version
-                      </Button>
-                      <Button size="sm" variant="ghost" aria-label={`Retire ${r.name}`} onClick={() => setRetiring(r)}>
-                        Retire
-                      </Button>
+                      {actions.version && (
+                        <Button size="sm" variant="ghost" aria-label={`New version of ${r.name}`} onClick={() => setVersioning(r)}>
+                          New version
+                        </Button>
+                      )}
+                      {actions.retire && (
+                        <Button size="sm" variant="ghost" aria-label={`Retire ${r.name}`} onClick={() => setRetiring(r)}>
+                          Retire
+                        </Button>
+                      )}
                     </span>
-                  ),
+                  );
+                },
               },
             ]}
             empty={<EmptyState title="No execution profiles" body="The gateway reported no profiles, so every isolable call is refused." />}
@@ -284,15 +302,16 @@ function NewProfileDialog(props: { profiles: ProfileVersion[]; onClose: () => vo
   );
 }
 
-/** is this the newest version of its profile in the list? */
+/** is this the newest version of its profile in the list? (a revert is a new version too) */
 const isLatestVersion = (p: ProfileVersion, rows: ProfileRow[]) =>
   !rows.some((o) => !isUnreadable(o) && o.name === p.name && o.version > p.version);
 
 /**
- * `POST /v1/execution-profiles/:name/versions`: version n+1 of a custom profile, from its current body, at a chosen
- * class. Looser than the version it replaces (or than `restricted`) is a relaxation: step-up, audited.
+ * `POST /v1/execution-profiles/:name/versions`: version n+1 of a custom profile or of `engine-worker`, from its current
+ * body, at a chosen class. Looser than the version it replaces (or than its strict reference: `restricted`, or the
+ * shipped engine-worker body) is a relaxation: step-up, audited.
  */
-function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void }) {
+function NewVersionDialog(props: { profile: ProfileVersion; nextVersion: number; onClose: () => void }) {
   const act = useAction();
   const formId = useId();
   // no class is preselected: a version at the current class copies version n exactly, and the gateway refuses it 409
@@ -309,8 +328,9 @@ function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void 
       const detail = await api.get<unknown>(`/v1/execution-profiles/${encodeURIComponent(name)}`);
       const body = newProfileBody(versionBody(detail, props.profile.id), name, minClass);
       if (!body) throw new Error("The profile's current body could not be read. Nothing was created.");
-      return withStepUp((h) => stepUpApi.post(`/v1/execution-profiles/${encodeURIComponent(name)}/versions`, { body }, h));
-    }, `Execution profile ${name} versioned`);
+      // controls equal to an earlier version make a revert (a new version with that version's controls): the toast says so
+      return versionOutcomeText(name, await withStepUp((h) => stepUpApi.post(`/v1/execution-profiles/${encodeURIComponent(name)}/versions`, { body }, h)));
+    });
     if (ok) props.onClose();
   };
   return (
@@ -336,8 +356,10 @@ function NewVersionDialog(props: { profile: ProfileVersion; onClose: () => void 
         }}
       >
         <p className={v.dim}>
-          Version {props.profile.version + 1} copies every control of version {props.profile.version}. Running workloads keep the version they
-          started with. A lower class is an audited relaxation and needs a step-up.
+          Version {props.nextVersion} copies every control of version {props.profile.version}. Running workloads keep the version they
+          started with. A lower class is an audited relaxation and needs a step-up. If the result equals an earlier version, the new version
+          is recorded as a revert to it; no version is retired. Agents and servers assigned to an older version keep that version: a revert
+          does not move them.
         </p>
         <Field label="Minimum isolation class">
           <Select value={minClass} onChange={(e) => { setProblem(null); setMinClass(e.target.value); }}>
