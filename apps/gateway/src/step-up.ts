@@ -50,10 +50,10 @@
  *
  * POLICY: `org_settings.step_up_mode` (`required` strict; `off` is a relaxation
  * and itself needs a `settings_relax` step-up) and `step_up_actions` (every
- * kind in `STEP_UP_ACTION_KINDS` strict, eight today; removing one is a
+ * kind in `STEP_UP_ACTION_KINDS` strict, nine today; removing one is a
  * relaxation), read on every check.
  *
- * `key_management` (migration 0207): every signing-key operation, bound to
+ * `key_management` (migration 0203): every signing-key operation, bound to
  * `{op, keyId}` naming the exact act and key: `receipt_key_retire`
  * (decision-receipts.ts), `signing_key_rotate` (the key rotated TO, resolved
  * before the step-up) and `signing_key_revoke` (identity-routes.ts). A grant

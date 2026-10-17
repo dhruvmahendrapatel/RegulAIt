@@ -31,7 +31,7 @@
  *   /v1/delegation-grants[...]              list (a run's tree with ?runId=), inspect, cascade-revoke (S6 UI)
  *   /v1/identity/picker-sources             the options the identity forms offer (S6 UI)
  *   /v1/identity/signing-keys[...]          issuer key list, rotate, revoke (S3, built; the writes need a
- *                                           `key_management` step-up instead, migration 0207)
+ *                                           `key_management` step-up instead, migration 0203)
  *   /v1/identity/spiffe-trust-bundles[...]  SPIFFE trust bundles: list, upload, revoke (S9, `oauth/spiffe-bundles.ts`)
  *
  * The routes are written out literally (not looped over IDENTITY_ROUTES) so the
@@ -112,7 +112,7 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   app.post("/v1/identity/spiffe-trust-bundles", s9.set);
   app.post("/v1/identity/spiffe-trust-bundles/:bundleId/revoke", s9.revoke);
   // admin: the issuer's signing keys (public halves only; every write needs a
-  // `key_management` step-up bound to the op and the exact key, migration 0207,
+  // `key_management` step-up bound to the op and the exact key, migration 0203,
   // and is audited inside identity-signing-keys.ts)
   app.get("/v1/identity/signing-keys", async (_req, reply) => {
     // ADR-0188 S7: and where the private halves come from (install-generated, operator-managed, missing)

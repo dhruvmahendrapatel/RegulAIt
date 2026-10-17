@@ -131,7 +131,7 @@ describe("the registry diff — what makes detection an answer", () => {
 
   it("carries its own posture on the payload, so the limit travels with the answer", async () => {
     const body = (await discover()).json();
-    expect(body.posture).toMatch(/Nothing is scanned, resolved, crawled or connected to/);
+    expect(body.posture).toMatch(/No active discovery source is enabled, so nothing is scanned/);
   });
 
   it("preview writes NOTHING; apply writes one audited record", async () => {

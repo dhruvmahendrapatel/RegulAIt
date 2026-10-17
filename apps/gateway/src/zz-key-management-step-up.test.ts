@@ -1,5 +1,5 @@
 /**
- * Migration 0207 — the `key_management` step-up kind, on a real database,
+ * Migration 0203 — the `key_management` step-up kind, on a real database,
  * through the real app (`buildApp`) and its hooks:
  *
  *  - THE KIND: every signing-key operation (retire a receipt key, rotate or
@@ -167,7 +167,7 @@ afterAll(async () => {
   delete process.env[IDENTITY_SIGNING_KEY_ENV];
 });
 
-describe("migration 0207: the key_management step-up kind", () => {
+describe("migration 0203: the key_management step-up kind", () => {
   it("is strict by default, required on the existing row, and accepted by all three CHECKs", async () => {
     expect(BATCH4_STRICT_DEFAULTS.stepUpActions).toContain("key_management");
     const def = await db.execute(sql`select column_default as d from information_schema.columns where table_name = 'org_settings' and column_name = 'step_up_actions'`);
@@ -181,7 +181,7 @@ describe("migration 0207: the key_management step-up kind", () => {
 
   it("retiring a receipt key: a settings_relax grant or a key_management grant for another key or op is refused and not spent", async () => {
     const url = `/v1/receipts/keys/${RK_A}/retire`;
-    // the pre-0207 shape: settings_relax with the very same facts
+    // the pre-0203 shape: settings_relax with the very same facts
     await expectRefusedUnspent(url, { kind: "settings_relax", facts: { op: "receipt_key_retire", keyId: RK_A } });
     await expectRefusedUnspent(url, { kind: "identity_manage", facts: { op: "receipt_key_retire", keyId: RK_A } });
     // the right kind for the wrong key, and for the wrong op on the right key
@@ -206,7 +206,7 @@ describe("migration 0207: the key_management step-up kind", () => {
     // no kid: the gateway resolves B before asking, so only a grant naming B is valid
     await expectRefusedUnspent(url, { kind: "settings_relax", facts: { op: "signing_key_rotate", keyId: kidB } });
     await expectRefusedUnspent(url, { kind: "identity_manage", facts: { op: "signing_key_rotate", keyId: kidB } });
-    // the pre-0207 facts (kid: null) bind nothing exact
+    // the pre-0203 facts (kid: null) bind nothing exact
     await expectRefusedUnspent(url, { kind: "key_management", facts: { op: "signing_key_rotate", kid: null } });
     await expectRefusedUnspent(url, signingKeyRotateStepUp(kidA));
     await expectRefusedUnspent(url, signingKeyRevokeStepUp(kidB));

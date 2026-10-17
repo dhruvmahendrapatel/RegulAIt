@@ -114,6 +114,7 @@ import { assembleAbacRequest, loadActiveAbacPolicies } from "./abac.js";
 import { loadComplianceProfileCanaryDivergence } from "./config-versions.js";
 import { governedEvaluate, type ReplayCountQuery } from "./governed-evaluate.js";
 import { settingTransitions } from "./setting-transitions.js";
+import { databaseNow } from "./db-clock.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const SINGLETON = "singleton";
@@ -573,7 +574,8 @@ export async function runRuleSimulation(
   // count against it, and the whole read runs in one transaction whose
   // statement_timeout is the time left (`inSimulationTransaction`).
   const deadline = opts.deadline ?? runDeadline(opts);
-  const now = opts.now ?? new Date();
+  // M-075: the window is compared with audit_log.at and usage rows (database clock)
+  const now = opts.now ?? (await databaseNow(db));
   const windowStart = new Date(now.getTime() - opts.windowDays * 24 * 60 * 60 * 1000);
   const scoped = opts.scope.userIds;
   const progress = {
@@ -975,7 +977,8 @@ export async function runPolicySimulation(
   // below runs in one transaction under a statement_timeout of the time left,
   // exactly as the rule replay does.
   const deadline = opts.deadline ?? runDeadline(opts);
-  const now = opts.now ?? new Date();
+  // M-075: the window is compared with audit_log.at and usage rows (database clock)
+  const now = opts.now ?? (await databaseNow(db));
   const windowStart = new Date(now.getTime() - opts.windowDays * 24 * 60 * 60 * 1000);
   const scoped = opts.scope.userIds;
   const progress = {

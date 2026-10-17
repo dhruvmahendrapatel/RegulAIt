@@ -2974,6 +2974,17 @@ export { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
 export {
   AI_MATCH_TYPES,
   AI_SIGNATURE_KINDS,
+  ARTIFACT_SIGNATURE_KINDS,
+  SHADOW_AI_SUBJECT_KINDS,
+  SIGNATURE_CONFIDENCES,
+  SIGNATURE_ECOSYSTEM_PATTERN,
+  SIGNATURE_OSES,
+  SIGNATURE_TOOL_ID_PATTERN,
+  type SignatureConfidence,
+  type SignatureOs,
+  artifactMatchesSignature,
+  isArtifactSignatureKind,
+  type ArtifactSignatureKind,
   DEFAULT_AI_SIGNATURES,
   EVIDENCE_KINDS,
   EVIDENCE_MAX_BYTES,
@@ -3015,6 +3026,9 @@ export {
   type EvidenceImport,
   type EvidenceKind,
   type EvidenceScreenFinding,
+  type FindingSignalSource,
+  type FindingEvidence,
+  type SightingLocation,
   type Observation,
   type ShadowAiConfidence,
   type ShadowAiDisposition,
@@ -4669,3 +4683,5 @@ export * from "./receipts/verify.js";
 export * from "./eval-datasets/cyberseceval.js";
 // ADR-0188 S7: REGULAIT_PUBLIC_URL parsed one way, by the gateway and by engine runners
 export * from "./public-url.js";
+// ADR-0195 SD0: shadow-AI active discovery (sources, credentials, runs, evidence kinds)
+export * from "./discovery/index.js";

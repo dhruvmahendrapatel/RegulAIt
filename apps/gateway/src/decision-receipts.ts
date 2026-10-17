@@ -28,7 +28,7 @@ function signingKey(): SigningKey | null {
 export const RECEIPT_KEY_REGISTERED_RULE_ID = "receipt-signing-key-registered";
 export const RECEIPT_KEY_RETIRED_RULE_ID = "receipt-signing-key-retired";
 export const RECEIPT_KEY_RETIRE_REFUSED_RULE_ID = "receipt-signing-key-retire-refused";
-/** migration 0207: retiring a receipt key is a `key_management` step-up bound to the op and the exact key */
+/** migration 0203: retiring a receipt key is a `key_management` step-up bound to the op and the exact key */
 export const receiptKeyRetireStepUp = (keyId: string): StepUpCheckArgs => ({ kind: "key_management", facts: { op: "receipt_key_retire", keyId } });
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 /**
@@ -235,7 +235,7 @@ export function registerDecisionReceiptRoutes(app: FastifyInstance, db: Db, _opt
   app.get("/v1/receipts/keys", async () => ({ keys: await publicKeys(db) }));
   /**
    * #353 follow-up: RETIRE a receipt signing key. Admin-only (the default route class), a `key_management`
-   * step-up bound to the op and this key (migration 0207), audited. Retiring sets `retired_at` (database clock) and nothing else: the public key stays
+   * step-up bound to the op and this key (migration 0203), audited. Retiring sets `retired_at` (database clock) and nothing else: the public key stays
    * recorded, so receipts it signed keep verifying (packages/shared/src/receipts/README.md), and no writer
    * signs with it again (every signer refuses a retired key). One-way: there is no un-retire.
    *

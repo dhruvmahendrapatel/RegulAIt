@@ -178,6 +178,7 @@ import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { createApprovalRuleRow } from "./rule-creates.js";
 import { applyProjectPatch } from "./projects.js";
 import { loadRuleRow } from "./config-versions.js";
+import { databaseNow } from "./db-clock.js";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -1626,7 +1627,8 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
       });
     }
 
-    const now = new Date();
+    // M-075: the evidence window is compared with audit_log.at (database clock)
+    const now = await databaseNow(db);
     const plan = planCopilotQuery(body.question);
     const scope = await resolveCopilotScope(db, { userId, isAdmin: req.authCtx.isAdmin });
 

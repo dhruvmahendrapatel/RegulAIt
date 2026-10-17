@@ -190,7 +190,7 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.compliancePackControls, ["ownerNote"]],
   [s.shadowAiImports, ["reason"]],
   [s.shadowAiFindings, ["replacementNote", "dispositionReason"]],
-  [s.aiEndpointSignatures, ["replacementNote"]],
+  [s.aiEndpointSignatures, ["replacementNote", "note"]],
   [s.aiUseCases, ["retiredReason"]],
   [s.aiVendors, ["retiredReason"]],
   [s.aiRisks, ["acceptanceNote"]],

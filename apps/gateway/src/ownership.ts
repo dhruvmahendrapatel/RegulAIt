@@ -163,16 +163,46 @@ export async function changeOwner(
           .where(and(eq(connectors.id, before.id), sql`${connectors.ownerUserId} IS NOT DISTINCT FROM ${before.ownerUserId}`))
           .returning({ id: connectors.id, ownerUserId: connectors.ownerUserId });
   if (!after) return { ok: false, status: CHANGED_CONCURRENTLY.status, body: { ...CHANGED_CONCURRENTLY.body } };
-  const toOwnership: OwnershipState = after!.ownerUserId ? "owned" : "unowned";
+  const toOwnership = await auditOwnerChanged(db, {
+    kind: args.kind,
+    id: before.id,
+    name: before.name,
+    from: before.ownerUserId,
+    to: after!.ownerUserId,
+    fromOwnership,
+    actorUserId: args.actorUserId,
+  });
+  return { ok: true, body: { id: after!.id, ownerUserId: after!.ownerUserId, ownership: toOwnership } };
+}
+
+/**
+ * The `*-owner-changed` audit row of one owner change, written on `db` (a write's own transaction when the owner is
+ * changed together with other columns, as `PATCH /v1/servers/:serverId` does). `fromOwnership` is read before the
+ * write (`ownershipStateOf`). Answers the new ownership state.
+ */
+export async function auditOwnerChanged(
+  db: Db,
+  args: {
+    kind: OwnedKind;
+    id: string;
+    name: string;
+    from: string | null;
+    to: string | null;
+    fromOwnership: OwnershipState;
+    actorUserId: string | null | undefined;
+  },
+): Promise<OwnershipState> {
+  const label = args.kind === "mcp_server" ? "MCP server" : "connector";
+  const toOwnership: OwnershipState = args.to ? "owned" : "unowned";
   await db.insert(auditLog).values({
     userId: args.actorUserId ?? NIL,
     objectType: args.kind,
-    objectId: before.id,
+    objectId: args.id,
     detail: {
       subsystem: "ownership",
       transitions: {
-        ownerUserId: { from: before.ownerUserId, to: after!.ownerUserId },
-        ownership: { from: fromOwnership, to: toOwnership },
+        ownerUserId: { from: args.from, to: args.to },
+        ownership: { from: args.fromOwnership, to: toOwnership },
       },
       receiptClass: "configuration",
     },
@@ -180,11 +210,14 @@ export async function changeOwner(
     ruleId: OWNERSHIP_RULE_IDS.changed[args.kind],
     ruleChain: [],
     reason:
-      `${label} '${before.name}': owner ${before.ownerUserId ? `a user (id ${before.ownerUserId})` : "none"} → ` +
-      `${after!.ownerUserId ? `a user (id ${after!.ownerUserId})` : "none (unowned)"}`,
+      `${label} '${args.name}': owner ${args.from ? `a user (id ${args.from})` : "none"} → ` +
+      `${args.to ? `a user (id ${args.to})` : "none (unowned)"}`,
   });
-  return { ok: true, body: { id: after!.id, ownerUserId: after!.ownerUserId, ownership: toOwnership } };
+  return toOwnership;
 }
+
+/** the ownership state an owner id stands for now (owned, orphaned by a deactivated user, or unowned) */
+export const ownershipStateOf = ownershipOf;
 
 /** ADR-0186 A: the `owner_change` step-up, bound to the object and the new owner */
 export function ownerChangeGate(db: Db, req: FastifyRequest, objectType: OwnedKind | "agent", objectId: string) {

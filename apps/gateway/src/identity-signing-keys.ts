@@ -306,7 +306,7 @@ async function auditSigningKey(
     kid: string;
     previousKid?: string | null;
     tokensRevoked?: number;
-    /** migration 0207: the step-up an admin gave for a rotate or revoke (its kind is always `key_management`) */
+    /** migration 0203: the step-up an admin gave for a rotate or revoke (its kind is always `key_management`) */
     stepUp?: string;
     stepUpKind?: "key_management";
   },
@@ -431,9 +431,9 @@ export async function revokeRefusal(db: Db, kid: string): Promise<IdentitySignin
   return null;
 }
 
-/** migration 0207: an issuer-key rotation is a `key_management` step-up bound to the key rotated TO */
+/** migration 0203: an issuer-key rotation is a `key_management` step-up bound to the key rotated TO */
 export const signingKeyRotateStepUp = (kid: string) => ({ kind: "key_management" as const, facts: { op: "signing_key_rotate", keyId: kid } });
-/** migration 0207: an issuer-key revocation is a `key_management` step-up bound to the key revoked */
+/** migration 0203: an issuer-key revocation is a `key_management` step-up bound to the key revoked */
 export const signingKeyRevokeStepUp = (kid: string) => ({ kind: "key_management" as const, facts: { op: "signing_key_revoke", keyId: kid } });
 
 export async function rotateIdentitySigningKey(

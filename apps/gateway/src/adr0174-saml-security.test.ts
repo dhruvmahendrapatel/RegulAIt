@@ -40,6 +40,7 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { hashToken, totpCode, totpStep } from "./auth.js";
+import { awaitTotpHeadroom } from "./testing/totp-window.js";
 import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { spEntityId } from "./saml.js";
 
@@ -209,6 +210,7 @@ const userWithTotp = async (address: string, providerId: string) => {
   const c2 = cookieOf(login2)!;
   const enroll = await app.inject({ method: "POST", url: "/auth/totp/enroll", headers: CSRF, cookies: { regulait_session: c2 } });
   const secret = enroll.json().secret as string;
+  await awaitTotpHeadroom();
   expect((await app.inject({ method: "POST", url: "/auth/totp/activate", headers: CSRF, cookies: { regulait_session: c2 }, payload: { code: totpCode(secret, totpStep() - 1) } })).statusCode).toBe(200);
   await db.insert(federatedIdentities).values({ userId: uid, samlProviderId: providerId, issuer: IDP_ENTITY, subjectFormat: EMAIL_FMT, subject: address, linkedVia: "admin" });
   return { uid, secret };
