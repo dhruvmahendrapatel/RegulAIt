@@ -28,12 +28,13 @@
 # --- the Caddy image, pinned by digest (ADR-0190 I4 follow-ups) ---------------
 #
 # ONE reference for every Caddy service (the public `caddy` front, the
-# executor's `executor-front` and its `executor-front-ca` copier) and for
-# scripts/build-image-bundle.sh and scripts/install.sh, which must name the
-# same string. The tag is the Caddy release the digest was read from (the
-# `2-alpine` and `2.11.7-alpine` tags named this same OCI index on 2026-10-17,
-# resolved against the Docker Hub registry API); the digest is what is run.
-# Re-pin all four places together.
+# executor's `executor-front` and its `executor-front-ca` copier).
+# scripts/build-image-bundle.sh and scripts/install.sh name the same string.
+# The tag is the Caddy release the digest was read from (the `2-alpine` and
+# `2.11.7-alpine` tags named this same OCI index on 2026-10-17, resolved
+# against the Docker Hub registry API); the digest is what is run. An
+# air-gapped install runs the plain tag instead, checked against pinned image
+# ids (scripts/install.sh). Re-pin the three files together.
 x-caddy-image: &caddy-image caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
 
 # --- Sidecar engine runners (profile: engines) — ADR-0187 --------------------

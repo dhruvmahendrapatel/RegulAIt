@@ -365,9 +365,29 @@ volume_exists() {
   docker volume inspect "${PROJECT}_$1" >/dev/null 2>&1
 }
 
+# ADR-0190 I5 follow-up: the Caddy image. ONLINE, compose runs docker-compose.yml's `x-caddy-image`, this digest
+# reference. AIR-GAPPED, a digest reference does not survive `docker save`/`docker load` on Docker's classic image
+# store (the image arrives untagged, with no repository digest), so the bundle also carries the plain tag, the
+# air-gapped override runs the tag, and the loaded image's id must be one of CADDY_IMAGE_IDS. The ids, read from the
+# Docker Hub registry API on 2026-10-17 for the index below: on the classic store an image's id is its platform's
+# config digest (linux/amd64 sha256:f77f856a..., linux/arm64 sha256:f6a22072...); on the containerd image store it
+# is the index digest (sha256:d8542f48...). Re-pin with docker-compose.yml and scripts/build-image-bundle.sh together.
+CADDY_IMAGE="caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
+CADDY_TAG="caddy:2.11.7-alpine"
+CADDY_IMAGE_IDS="sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77 sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71 sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
+
 image_present() {
   docker_up || return 1
   docker image inspect "$1" >/dev/null 2>&1
+}
+
+# the loaded Caddy tag is the pinned image (air-gapped: the tag is what runs)
+caddy_image_id_ok() {
+  local id
+  docker_up || return 1
+  id="$(docker image inspect --format '{{.Id}}' "$CADDY_TAG" 2>/dev/null)" || return 1
+  case " $CADDY_IMAGE_IDS " in *" $id "*) return 0 ;; esac
+  return 1
 }
 
 # ===========================================================================
@@ -752,10 +772,13 @@ if [ "$MODE" = "air_gapped" ]; then
   fi
   if [ "$DAEMON_OK" = "1" ] && [ -z "$IMAGE_BUNDLE" ]; then
     missing=""
-    # the Caddy reference is docker-compose.yml's `x-caddy-image` (pinned by digest; re-pin both together)
-    for img in "$GATEWAY_IMAGE" postgres:16 caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f; do
+    # air-gapped runs the Caddy TAG (see CADDY_IMAGE_IDS), and only when its image id is a pinned one
+    for img in "$GATEWAY_IMAGE" postgres:16 "$CADDY_TAG"; do
       image_present "$img" || missing="$missing $img"
     done
+    if image_present "$CADDY_TAG" && ! caddy_image_id_ok; then
+      missing="$missing $CADDY_TAG(image-id-not-pinned)"
+    fi
     # In --check mode this is a finding, not a refusal: the point of check mode
     # is to exercise preflight + render, and an operator planning an air-gapped
     # install on a connected workstation legitimately has no images yet.
@@ -982,6 +1005,13 @@ YML
   db:
     pull_policy: never
   caddy:
+    image: $CADDY_TAG
+    pull_policy: never
+  executor-front:
+    image: $CADDY_TAG
+    pull_policy: never
+  executor-front-ca:
+    image: $CADDY_TAG
     pull_policy: never
 YML
   fi
@@ -1036,6 +1066,10 @@ if [ -n "$IMAGE_BUNDLE" ]; then
   step "Loading pre-seeded images (air-gapped path — nothing is pulled)"
   docker load -i "$IMAGE_BUNDLE"
   ok "images loaded"
+  if [ "$MODE" = "air_gapped" ]; then
+    caddy_image_id_ok || die "the bundle's $CADDY_TAG is missing or is not the pinned image (allowed ids: $CADDY_IMAGE_IDS)"
+    ok "$CADDY_TAG is the pinned image"
+  fi
 fi
 
 step "Bringing the stack up"

@@ -24,8 +24,12 @@
 # sandbox executor's internal TLS front and CA copy (`isolation` profile,
 # ADR-0190 I4 follow-ups). Every Caddy service names ONE reference, pinned by
 # digest (docker-compose.yml `x-caddy-image`), and CADDY_IMAGE below must be
-# that same string (scripts/install.sh checks for it too), so one saved image
-# covers both. Re-pin the three places together.
+# that same string, so one saved image covers both. The bundle saves the image
+# under the digest reference AND the plain tag (CADDY_TAG): on Docker's classic
+# image store a digest reference does not survive save/load, so the air-gapped
+# install runs the tag and checks the loaded image id against CADDY_IMAGE_IDS
+# (scripts/install.sh says where the ids come from). Re-pin
+# docker-compose.yml, this file and scripts/install.sh together.
 #
 # The tag matters: install.sh pins the gateway to `regulait/gateway:<version>`
 # with `pull_policy: never`, so the tag written here and the --version passed
@@ -67,6 +71,8 @@ docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
 
 GATEWAY_IMAGE="regulait/gateway:$VERSION"
 CADDY_IMAGE="caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
+CADDY_TAG="caddy:2.11.7-alpine"
+CADDY_IMAGE_IDS="sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77 sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71 sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
 
 if [ "$SKIP_BUILD" = "0" ]; then
   step "Building $GATEWAY_IMAGE (this pulls node:22-trixie-slim and runs pnpm install — internet required)"
@@ -79,10 +85,17 @@ for img in postgres:16 "$CADDY_IMAGE"; do
   docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
   ok "$img"
 done
+# the plain tag on the digest-pulled image, checked against the pinned ids (see scripts/install.sh)
+docker tag "$CADDY_IMAGE" "$CADDY_TAG"
+CADDY_ID="$(docker image inspect --format '{{.Id}}' "$CADDY_TAG")"
+case " $CADDY_IMAGE_IDS " in
+  *" $CADDY_ID "*) ok "$CADDY_TAG is the pinned image ($CADDY_ID)" ;;
+  *) die "$CADDY_TAG has image id $CADDY_ID, which is not pinned (allowed: $CADDY_IMAGE_IDS)" ;;
+esac
 
 step "Saving the bundle"
 mkdir -p "$(dirname "$OUT")"
-docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 "$CADDY_IMAGE"
+docker save -o "$OUT" "$GATEWAY_IMAGE" postgres:16 "$CADDY_IMAGE" "$CADDY_TAG"
 ok "$OUT ($(du -h "$OUT" | cut -f1))"
 
 cat <<NEXT

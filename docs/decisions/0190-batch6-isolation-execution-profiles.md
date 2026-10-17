@@ -1644,6 +1644,27 @@ gateway, the executor's runtime backends or the engine code changed.
    - the Hub tags API lists `2.11.7-alpine` with the same digest.
 
    This also answers the I4 follow-ups' question about the Caddy version: it is 2.11.7, no longer an unknown tag.
+
+   **Air-gapped (review of #396).** On Docker's classic image store, `docker save` of a digest reference writes the
+   image untagged, so after `docker load` neither the tag nor the repository digest exists. The installer would then
+   report Caddy missing, and compose (`pull_policy: never`, digest reference) would find nothing. So:
+   - The online path keeps the digest reference (`x-caddy-image`).
+   - The bundle pulls by digest, tags that image `caddy:2.11.7-alpine` (`CADDY_TAG`) and saves both references. Before
+     saving, it checks the tagged image's id against `CADDY_IMAGE_IDS`.
+   - The air-gapped install looks for the tag, and runs the tag for all three Caddy services in its generated override
+     (`pull_policy: never`).
+   - The installer refuses an image whose id is not pinned. It checks in the preflight when the images are already
+     loaded, and again right after `docker load` of a bundle.
+   - **The pinned ids** were read from the Docker Hub registry API on 2026-10-17 for this index:
+     - On the classic store, an image's id is its platform's config digest: linux/amd64
+       `sha256:f77f856a30f0004200b36b322d61da17fade31e24875699d77fb968399b9eb77` (manifest `sha256:173b2630…`) and
+       linux/arm64 `sha256:f6a2207268b0f0914df9d3569e1824d6adcfa7b59fbffe0f3cbc5d2d60423f71` (manifest
+       `sha256:84058f1a…`).
+     - On the containerd image store, the id is expected to be the index digest
+       `sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f`.
+     - Both scripts carry the same three ids, and the compose test pins them.
+   - Checked here: `install.sh --check --mode air_gapped` rendered the override, and `docker compose config` with it
+     shows `caddy:2.11.7-alpine` on all three Caddy services.
 4. **Repository hygiene.** The owner's development host names and addresses are replaced by neutral placeholders in
    these files: the `apps/gateway/src/hsts.ts` comment, ADR-0029, ADR-0032 (and its index row), `docs/ops/TLS.md`,
    `docs/ops/POWER_SCHEDULE.md` and `docs/product/ROADMAP.md`. The Caddy `REGULAIT_TLS_HOST` default was already the
@@ -1671,9 +1692,11 @@ gateway, the executor's runtime backends or the engine code changed.
      - `volume-subpath` on the target Engine (26 or later);
      - a sandbox reading its input under gVisor's gofer through a 0711 parent;
      - an engine task end to end.
-   - **The air-gapped bundle by digest.** It is unverified whether `docker load` of a bundle saved by digest reference
-     keeps the repository digest on the target's image store. If it does not, the digest reference finds nothing
-     locally (`pull_policy: never`), and the installer's image check reports Caddy missing. Run the bundle round trip
-     once on each image store, the containerd store and the classic one, and record the result here.
+   - **The air-gapped Caddy round trip.** Building the bundle, then `docker load` and the installer's image-id check,
+     have not run on either image store.
+     - Still to confirm: the tag survives the round trip, and the loaded image's `.Id` is one of the pinned ids.
+     - The id values were read from registry metadata, not from a Docker daemon. The containerd store's id being the
+       index digest is an expectation, not an observation.
+     - Run the round trip once on each store, on amd64 and arm64, and record the result here.
    - **Real gVisor** still waits on the `runsc` re-pin (I5 "Not verified").
 

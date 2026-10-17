@@ -69,6 +69,13 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
     expect(ex).toMatch(/\n {6}REGULAIT_EXECUTOR_INPUT_DIR: \/executor-input\n/);
     expect(ex).toMatch(/\n {6}REGULAIT_EXECUTOR_INPUT_VOLUME: regulait-executor-input\n/);
     expect(compose.split("- executor-input:").length - 1).toBe(1);
+    // no other service mounts it, in the short or the long form
+    const services = block("services", "");
+    for (const m of services.matchAll(/\n {2}([a-z0-9-]+):\n/g)) {
+      if (m[1] === "sandbox-executor") continue;
+      const svc = block(m[1]!);
+      expect(svc, m[1]).not.toMatch(/executor-input|regulait-executor-input/);
+    }
     const vols = block("volumes", "");
     expect(vols).toMatch(/\n {2}executor-input:\n {4}name: regulait-executor-input\n/);
     // the executor image owns the mount point, so a fresh named volume is writable by the executor
@@ -83,11 +90,34 @@ describe("ADR-0190 I5 follow-up: engines in compose", () => {
     expect(ref).toMatch(CADDY_RE);
     for (const svc of ["caddy", "executor-front", "executor-front-ca"]) expect(block(svc), svc).toMatch(/\n {4}image: \*caddy-image\n/);
     expect(compose).not.toMatch(/image: caddy:/);
+    const tag = ref.slice(0, ref.indexOf("@"));
     const bundle = readFileSync(path.join(root, "scripts/build-image-bundle.sh"), "utf8");
-    expect(bundle).toContain(`CADDY_IMAGE="${ref}"`);
-    expect(bundle).not.toMatch(/caddy:2-alpine(?!@)/);
     const install = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
-    expect(install).toContain(` ${ref}; do`);
-    expect(install).not.toMatch(/caddy:2-alpine/);
+    for (const [name, text] of [["bundle", bundle], ["install", install]] as const) {
+      expect(text, name).toContain(`CADDY_IMAGE="${ref}"`);
+      expect(text, name).toContain(`CADDY_TAG="${tag}"`);
+      expect(text, name).not.toMatch(/caddy:2-alpine/);
+    }
+    // the same pinned image ids in both scripts: two platform config digests (classic store) and the index digest
+    const ids = (text: string) => text.match(/\nCADDY_IMAGE_IDS="([^"]+)"\n/)?.[1]?.split(" ");
+    expect(ids(bundle)).toEqual(ids(install));
+    expect(ids(install)).toHaveLength(3);
+    for (const id of ids(install)!) expect(id).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(ids(install)).toContain(ref.slice(ref.indexOf("@") + 1));
+  });
+
+  it("air-gapped: the bundle saves the digest and the plain tag; the install runs the tag and checks its image id", () => {
+    const bundle = readFileSync(path.join(root, "scripts/build-image-bundle.sh"), "utf8");
+    expect(bundle).toMatch(/\ndocker tag "\$CADDY_IMAGE" "\$CADDY_TAG"\n/);
+    expect(bundle).toMatch(/\ndocker save -o "\$OUT" "\$GATEWAY_IMAGE" postgres:16 "\$CADDY_IMAGE" "\$CADDY_TAG"\n/);
+    const install = readFileSync(path.join(root, "scripts/install.sh"), "utf8");
+    // the preflight looks for the tag and refuses an unpinned image id; the load step checks it again
+    expect(install).toMatch(/for img in "\$GATEWAY_IMAGE" postgres:16 "\$CADDY_TAG"; do/);
+    expect(install).toMatch(/image_present "\$CADDY_TAG" && ! caddy_image_id_ok/);
+    expect(install).toMatch(/docker load -i "\$IMAGE_BUNDLE"\n {2}ok "images loaded"\n {2}if \[ "\$MODE" = "air_gapped" \]; then\n {4}caddy_image_id_ok \|\| die/);
+    // every Caddy service runs the tag in the air-gapped override, never pulled
+    for (const svc of ["caddy", "executor-front", "executor-front-ca"]) {
+      expect(install).toContain(`\n  ${svc}:\n    image: $CADDY_TAG\n    pull_policy: never\n`);
+    }
   });
 });
