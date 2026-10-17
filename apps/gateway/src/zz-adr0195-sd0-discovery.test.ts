@@ -169,10 +169,15 @@ beforeAll(async () => {
   adminId = admin.id;
   adminKey = admin.key;
   memberKey = (await mkUser("member", false)).key;
+  // an enrolled authenticator, so a missing or mismatched grant is answered `step_up_required` (403) and not
+  // `step_up_unavailable` (422, "no way to step up"): the refusal under test is the step-up itself. ORG-GLOBAL state
+  // (an admin who can step up ends the bootstrap credential's step-up), undone in afterAll (M-040, M-068)
+  await db.update(users).set({ totpEnabled: true }).where(eq(users.id, adminId));
   await db.insert(aiEndpointSignatures).values({ provider: PROVIDER, kind: "sdk_package", value: PKG, matchType: "package", provenance: "admin" });
 }, 120_000);
 
 afterAll(async () => {
+  if (adminId) await db.update(users).set({ totpEnabled: false }).where(eq(users.id, adminId));
   if (createdIds.length) {
     await db.update(discoverySources).set({ enabled: false }).where(inArray(discoverySources.id, createdIds));
     await db.delete(discoverySources).where(inArray(discoverySources.id, createdIds));
@@ -238,7 +243,8 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     // NEGATIVE CONTROL 1: a session with no step-up
     const none = await session();
     const r1 = await none.send("POST", `/v1/discovery/sources/${s.id}/enable`, { version: s.version });
-    expect([403, 422]).toContain(r1.statusCode);
+    expect(r1.statusCode, r1.body).toBe(403);
+    expect(r1.json().error).toBe("step_up_required");
     expect((await sourceRow(s.id)).enabled).toBe(false);
     // NEGATIVE CONTROL 2: an API key can never step up
     const r2 = await inject("POST", `/v1/discovery/sources/${s.id}/enable`, adminKey, { version: s.version });
@@ -248,7 +254,8 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     const credId = (await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id)))[0]!.id;
     const wrong = await session(enableStepUpArgs(s.id, s.kind, s.target, { orgLevel: true, include: [] }, credId));
     const r3 = await wrong.send("POST", `/v1/discovery/sources/${s.id}/enable`, { version: s.version });
-    expect(r3.statusCode).toBe(403);
+    expect(r3.statusCode, r3.body).toBe(403);
+    expect(r3.json().error).toBe("step_up_required");
     expect(await wrong.grantUsed()).toBe(false);
     expect((await sourceRow(s.id)).enabled).toBe(false);
 
@@ -643,7 +650,8 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     // NEGATIVE CONTROL: a settings_relax grant is not a reveal grant
     const relax = await session({ kind: "settings_relax", facts: { values: { discoveryPseudonymReveal: { pseudonym: psn } } } });
     const r0 = await relax.send("POST", `/v1/discovery/pseudonyms/${psn}/reveal`, {});
-    expect(r0.statusCode).toBe(403);
+    expect(r0.statusCode, r0.body).toBe(403);
+    expect(r0.json().error).toBe("step_up_required");
     expect(r0.body).not.toContain(name);
     expect(await relax.grantUsed()).toBe(false);
     const ok = await session(pseudonymRevealStepUpArgs(psn));

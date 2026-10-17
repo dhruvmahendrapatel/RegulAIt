@@ -221,6 +221,8 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-profile-versioned",
   "execution-profile-retired",
   "execution-profile-relaxed",
+  // ADR-0190 I5 follow-up: a revert, written as a new version with an earlier version's controls (nothing retired)
+  "execution-profile-reverted",
   "executor-registered",
   // I3: the executor's own announce over its channel (what it is, what runtime it runs)
   "executor-announced",
@@ -241,6 +243,11 @@ export const ISOLATION_AUDIT_ACTIONS = [
   "execution-cancelled",
   // I4 (review M3): a stdio window reached a gateway process that does not hold the session (our own refusal)
   "execution-session-lost",
+  // owner decision C: a person's own stdio call relaxed to L2 for a server or a project (step-up), and cleared
+  "execution-person-stdio-relaxed",
+  "execution-person-stdio-relaxation-cleared",
+  // owner decision D: the admin-set project sensitivity set, changed or cleared (step-up)
+  "execution-project-sensitivity-set",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -493,6 +500,20 @@ export const executionProfileBodySchema = z
         perPlacement: z.literal(true),
       })
       .strict(),
+    /**
+     * ADR-0190 I5 follow-up (review of #397): set ONLY by the gateway on a REVERT, a new version whose controls equal
+     * an earlier version's. It names that version and the one it replaced, so the new version's canonical body (and
+     * digest, unique per row) differs from the earlier one while every control is the same. No control reads it, and
+     * the gateway strips any value a client sends. Absent on every other body (existing digests are unchanged).
+     */
+    revertOf: z
+      .object({
+        version: z.number().int().min(1),
+        digest: z.string().regex(/^[0-9a-f]{64}$/),
+        replacing: z.number().int().min(1),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((b, ctx) => {
@@ -713,4 +734,10 @@ export const ISOLATION_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT"; p
   { method: "PUT", path: "/v1/executors/:executorId/declared-class", cls: "admin", slice: "I3", built: true },
   { method: "GET", path: "/v1/execution-placements", cls: "admin", slice: "I2", built: true },
   { method: "GET", path: "/v1/execution-placements/:placementId", cls: "admin", slice: "I2", built: true },
+  // owner decision C: a person's own stdio call, relaxed to L2 per MCP server or per project
+  { method: "GET", path: "/v1/execution-person-stdio-relaxations", cls: "admin", slice: "owner-C", built: true },
+  { method: "PUT", path: "/v1/execution-person-stdio-relaxations/:scopeKind/:scopeId", cls: "admin", slice: "owner-C", built: true },
+  // owner decision D: the admin-set project sensitivity (it can only raise the use cases' strictest)
+  { method: "GET", path: "/v1/execution-project-sensitivities", cls: "admin", slice: "owner-D", built: true },
+  { method: "PUT", path: "/v1/execution-project-sensitivities/:projectId", cls: "admin", slice: "owner-D", built: true },
 ];
