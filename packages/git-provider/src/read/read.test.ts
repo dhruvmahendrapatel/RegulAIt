@@ -410,10 +410,10 @@ describe("repo readers (ADR-0195 SD1)", () => {
       expect((await readCapped(res(b.stream), 2_500)).text).toBe("a".repeat(2_000));
     });
 
-    it("an empty scope list is unverified, never read_only (Bitbucket empty header, GitLab {} and {scopes: []})", async () => {
+    it("an empty or malformed scope list is unverified, never read_only (Bitbucket empty header; GitLab {}, [], non-string entries)", async () => {
       upstream.route("GET", "/user", { status: 200, body: {}, headers: { "x-oauth-scopes": "" } });
       expect((await reader("bitbucket").inspectCredential()).status).toBe("unverified");
-      for (const body of [{}, { scopes: [] }]) {
+      for (const body of [{}, { scopes: [] }, { scopes: ["read_api", 42] }, { scopes: ["read_api", null] }]) {
         upstream.reset();
         upstream.route("GET", "/api/v4/personal_access_tokens/self", { status: 200, body });
         expect((await reader("gitlab").inspectCredential()).status, JSON.stringify(body)).toBe("unverified");

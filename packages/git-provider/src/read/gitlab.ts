@@ -173,7 +173,12 @@ export class GitLabRepoReader implements RepoReader {
     }
     if (res.status >= 400) await this.http.fail(res, hint);
     const body = await this.http.metadataJson<{ scopes?: unknown }>(res);
-    const scopes = Array.isArray(body.scopes) ? body.scopes.filter((s): s is string => typeof s === "string") : [];
+    const rawScopes: unknown[] = Array.isArray(body.scopes) ? body.scopes : [];
+    // a non-string entry is a response we do not understand: never read_only on it (secure by default)
+    if (rawScopes.some((s) => typeof s !== "string")) {
+      return { status: "unverified", scopes: [], detail: "GitLab returned a scope list this reader does not understand; write scope unverified" };
+    }
+    const scopes = rawScopes as string[];
     const write = scopes.filter((s) => !GITLAB_READ_ONLY_SCOPES.has(s));
     if (write.length > 0) return { status: "write_scope", scopes, detail: `the token grants write scope(s): ${write.join(", ")}` };
     // no scopes array, or an empty one, proves nothing: it must not clear the "write scope unverified" posture row
