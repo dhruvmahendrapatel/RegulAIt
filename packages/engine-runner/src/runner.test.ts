@@ -326,6 +326,8 @@ describe("PR #203 review round 2", () => {
     client.useKey(TEST_KEY);
     const t0 = Date.now();
     await expect(client.lease({ imageDigest: `sha256:${"a".repeat(64)}`, engineVersion: "1" })).rejects.toBeInstanceOf(RunnerTimeoutError);
+    // the rejection comes from the 250ms timer, not from anything earlier
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(200);
     expect(Date.now() - t0).toBeLessThan(2000);
     expect(signal?.aborted).toBe(true);
   });
