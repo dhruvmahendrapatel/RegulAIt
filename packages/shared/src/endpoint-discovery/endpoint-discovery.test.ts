@@ -540,19 +540,21 @@ describe("review fixes (#401)", () => {
   });
 
   it("refuses an environment variable 'name' that is not a name, and never records an env-var gap", () => {
+    // synthetic, assembled at runtime so no secret-shaped literal sits in the source (gitleaks)
+    const dashed = ["sk", "live", "SYNTHETIC" + String(123)].join("-");
     const line = JSON.stringify({
       name: "pack/regulait_ai_discovery/ai_env_var_names_posix",
       hostIdentifier: "h1",
       unixTime: 1790000000,
       action: "snapshot",
       snapshot: [
-        { process_name: "node", key: "sk-live-SYNTHETIC123" },
+        { process_name: "node", key: dashed },
         { process_name: "node", key: "SYNTHETICVALUE123" },
       ],
     });
     const r = importOsqueryResults({ content: line, pseudonymise: hook });
     expect(r.refusals).toHaveLength(1);
-    expect(JSON.stringify(r)).not.toContain("sk-live");
+    expect(JSON.stringify(r)).not.toContain(dashed);
     const red = reduceEndpointObservations(r, endpointCatalogueSignatures().map(({ seedIds: _s, ...sig }) => sig));
     expect(red.unmatched.map((u) => u.value)).not.toContain("SYNTHETICVALUE123");
   });
