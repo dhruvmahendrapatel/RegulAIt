@@ -140,6 +140,8 @@ import {
   EVIDENCE_KINDS,
   SHADOW_AI_SUBJECT_KINDS,
   type DiscoveryReadOutcome,
+  SIGNATURE_OSES,
+  SIGNATURE_CONFIDENCES,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -6823,6 +6825,12 @@ export const aiEndpointSignatures = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     lastUpdatedAt: timestamp("last_updated_at", { withTimezone: true }).notNull().defaultNow(),
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    // ADR-0195 SD0 (migration 0203): OS / ecosystem scope, a tool id, an admin note, a confidence
+    os: text("os", { enum: SIGNATURE_OSES }),
+    ecosystem: text("ecosystem"),
+    toolId: text("tool_id"),
+    note: text("note"),
+    confidence: text("confidence", { enum: SIGNATURE_CONFIDENCES }).notNull().default("high"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("ai_endpoint_signatures_provider_idx").on(t.provider)],
@@ -7103,7 +7111,7 @@ export const discoveryPseudonyms = pgTable(
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check("discovery_pseudonyms_kind_check", sql`${t.kind} IN ('device_user', 'commit_author', 'cloud_principal')`),
+    check("discovery_pseudonyms_kind_check", sql`${t.kind} IN ('device_user', 'commit_author', 'cloud_principal', 'device')`),
     check("discovery_pseudonyms_pseudonym_check", sql`${t.pseudonym} ~ '^psn:[0-9a-f]{24}$'`),
     check("discovery_pseudonyms_seen_check", sql`${t.firstSeenAt} <= ${t.lastSeenAt}`),
     uniqueIndex("discovery_pseudonyms_pseudonym_uq").on(t.pseudonym),

@@ -191,7 +191,26 @@ export interface AiSignature {
   provenance: string;
   lastUpdatedAt?: string | Date | null;
   enabled: boolean;
+  /** ADR-0195 SD0: matches only an observation from this OS (null = any) */
+  os?: SignatureOs | null;
+  /** ADR-0195 SD0: matches only an observation from this package ecosystem, e.g. npm, pypi (null = any) */
+  ecosystem?: string | null;
+  /** ADR-0195 SD0: the catalogue's own id for the tool this row detects (provenance, grouping) */
+  toolId?: string | null;
+  /** ADR-0195 SD0: an admin's note about the row */
+  note?: string | null;
+  /** ADR-0195 SD0: how sure the row is (default high); a low-confidence match is shown as such on the finding */
+  confidence?: SignatureConfidence;
 }
+
+export const SIGNATURE_OSES = ["macos", "windows", "linux"] as const;
+export type SignatureOs = (typeof SIGNATURE_OSES)[number];
+export const SIGNATURE_CONFIDENCES = ["high", "medium", "low"] as const;
+export type SignatureConfidence = (typeof SIGNATURE_CONFIDENCES)[number];
+/** a package ecosystem name (npm, pypi, maven…): linear, one bounded class */
+export const SIGNATURE_ECOSYSTEM_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+/** a catalogue tool id: linear, one bounded class */
+export const SIGNATURE_TOOL_ID_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
 
 export const catalogueSignatureSchema = z
   .object({
@@ -204,6 +223,11 @@ export const catalogueSignatureSchema = z
     replacementNote: z.string().max(500).nullish(),
     provenance: z.string().min(1).max(300).default("admin"),
     enabled: z.boolean().default(true),
+    os: z.enum(SIGNATURE_OSES).nullish(),
+    ecosystem: z.string().regex(SIGNATURE_ECOSYSTEM_PATTERN).nullish(),
+    toolId: z.string().regex(SIGNATURE_TOOL_ID_PATTERN).nullish(),
+    note: z.string().max(500).nullish(),
+    confidence: z.enum(SIGNATURE_CONFIDENCES).default("high"),
   })
   .strict()
   .refine((s) => s.kind !== "api_key_prefix" || typeof s.minLength === "number", {
@@ -455,6 +479,10 @@ export interface Observation {
   names?: string[] | null;
   /** ADR-0195 decision 20: the person behind the sighting, as a pseudonym (`psn:` + 24 hex), never a name */
   actorPseudonym?: string | null;
+  /** ADR-0195: the OS the sighting came from (rows scoped to an OS match only it) */
+  os?: SignatureOs | null;
+  /** ADR-0195: the package ecosystem (rows scoped to an ecosystem match only it) */
+  ecosystem?: string | null;
   declaredProvider?: string | null;
   detail?: Record<string, unknown>;
 }
@@ -478,6 +506,8 @@ export interface Classification {
   replacementAgentId: string | null;
   replacementNote: string | null;
   reason: string;
+  /** ADR-0195: the matched row's confidence (absent = high) */
+  signatureConfidence?: SignatureConfidence;
 }
 
 const UNMATCHED: Classification = Object.freeze({
@@ -528,7 +558,11 @@ const ARTIFACT_PHRASE: Readonly<Record<ArtifactSignatureKind, string>> = {
 };
 
 export function classifyObservation(obs: Observation, catalogue: readonly AiSignature[]): Classification {
-  const enabled = catalogue.filter((s) => s.enabled);
+  // ADR-0195: a row scoped to an OS or a package ecosystem matches only an observation from it
+  const obsEcosystem = obs.ecosystem ? obs.ecosystem.trim().toLowerCase() : null;
+  const enabled = catalogue.filter(
+    (s) => s.enabled && (s.os == null || s.os === obs.os) && (s.ecosystem == null || s.ecosystem.toLowerCase() === obsEcosystem),
+  );
   const hit = (sig: AiSignature, severity: ShadowAiSeverity, matchedValue: string, reason: string): Classification => ({
     matched: true,
     provider: sig.provider,
@@ -537,6 +571,7 @@ export function classifyObservation(obs: Observation, catalogue: readonly AiSign
     severity,
     replacementAgentId: sig.replacementAgentId ?? null,
     replacementNote: sig.replacementNote ?? null,
+    ...(sig.confidence && sig.confidence !== "high" ? { signatureConfidence: sig.confidence } : {}),
     reason,
   });
 
@@ -663,6 +698,8 @@ export type FindingEvidence = {
   location?: SightingLocation;
   names?: string[];
   actor?: string;
+  /** the matched catalogue row's confidence when it is not high */
+  signatureConfidence?: SignatureConfidence;
 };
 
 export interface CorrelatedFinding {
@@ -715,6 +752,7 @@ export function correlateObservations(
       ...(o.location ? { location: o.location } : {}),
       ...(o.names && o.names.length > 0 ? { names: o.names } : {}),
       ...(o.actorPseudonym ? { actor: o.actorPseudonym } : {}),
+      ...(c.signatureConfidence ? { signatureConfidence: c.signatureConfidence } : {}),
     };
     if (!existing) {
       byKey.set(key, {

@@ -51,6 +51,8 @@ export interface DiscoveryKindSpec {
   /** the slice that builds its scanner (ADR-0195 "Slices") */
   slice: "SD1" | "SD2" | "SD3" | "SD4";
   label: string;
+  /** fed by uploads, not by a schedule: the worker never queues a scheduled run for it, and the UI asks no schedule */
+  uploadFed?: boolean;
 }
 
 const REPO: Pick<DiscoveryKindSpec, "family" | "evidenceKinds" | "subjectKinds" | "slice"> = {
@@ -74,8 +76,8 @@ export const DISCOVERY_KIND_SPECS: Readonly<Record<DiscoverySourceKind, Discover
   cloud_aws: { ...CLOUD, label: "AWS" },
   cloud_gcp: { ...CLOUD, label: "GCP" },
   cloud_azure: { ...CLOUD, label: "Azure" },
-  endpoint_osquery: { family: "endpoint", evidenceKinds: ["endpoint_osquery"], subjectKinds: ["device"], slice: "SD3", label: "osquery results (no agent)" },
-  endpoint_inventory: { family: "endpoint", evidenceKinds: ["endpoint_inventory"], subjectKinds: ["device"], slice: "SD3", label: "MDM or EDR inventory (no agent)" },
+  endpoint_osquery: { family: "endpoint", evidenceKinds: ["endpoint_osquery"], subjectKinds: ["device"], slice: "SD3", label: "osquery results (no agent)", uploadFed: true },
+  endpoint_inventory: { family: "endpoint", evidenceKinds: ["endpoint_inventory"], subjectKinds: ["device"], slice: "SD3", label: "MDM or EDR inventory (no agent)", uploadFed: true },
   endpoint_agent: { family: "endpoint", evidenceKinds: ["endpoint_agent"], subjectKinds: ["device"], slice: "SD4", label: "RegulAIt endpoint agent" },
 });
 
@@ -115,7 +117,7 @@ export const DISCOVERY_ENDPOINT_RETENTION_MAX_DAYS = 3650;
 export const DISCOVERY_RUN_MAX_ATTEMPTS = 3;
 
 /** the pseudonymised kinds of person a scanner may name (ADR-0195 decision 20) */
-export const DISCOVERY_PSEUDONYM_KINDS = ["device_user", "commit_author", "cloud_principal"] as const;
+export const DISCOVERY_PSEUDONYM_KINDS = ["device_user", "commit_author", "cloud_principal", "device"] as const;
 export type DiscoveryPseudonymKind = (typeof DISCOVERY_PSEUDONYM_KINDS)[number];
 /** a pseudonym as shown in findings: `psn:` + 24 hex characters of the per-tenant HMAC */
 export const DISCOVERY_PSEUDONYM_PREFIX = "psn:";
@@ -293,6 +295,8 @@ export function credentialTargetMatch(
 
 /** a subject that names a person (or a device) must be a pseudonym (ADR-0195 decision 20) */
 export const DISCOVERY_PSEUDONYM_PATTERN = /^psn:[0-9a-f]{24}$/;
+/** the source kinds fed by uploads (no schedule) */
+export const UPLOAD_FED_SOURCE_KINDS: readonly DiscoverySourceKind[] = DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed === true);
 export const PSEUDONYMISED_SUBJECT_KINDS: readonly DiscoverySubjectKind[] = ["cloud_principal", "device"];
 
 /** one read a scanner attempted (SD2: which logs or APIs it could read), shown per run */

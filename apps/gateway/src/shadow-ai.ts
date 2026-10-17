@@ -216,6 +216,11 @@ function toSignature(r: typeof aiEndpointSignatures.$inferSelect): AiSignature {
     replacementAgentId: r.replacementAgentId,
     replacementNote: r.replacementNote,
     provenance: r.provenance,
+    os: r.os,
+    ecosystem: r.ecosystem,
+    toolId: r.toolId,
+    note: r.note,
+    confidence: r.confidence,
     lastUpdatedAt: r.lastUpdatedAt,
     enabled: r.enabled,
   };
@@ -403,6 +408,11 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           minLength: s.minLength ?? null,
           provenance: s.provenance,
           enabled: s.enabled,
+          os: s.os ?? null,
+          ecosystem: s.ecosystem ?? null,
+          toolId: s.toolId ?? null,
+          note: s.note ?? null,
+          confidence: s.confidence ?? "high",
           updatedByUserId: req.authCtx.userId ?? null,
         });
         inserted += 1;
@@ -447,6 +457,11 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       // an admin touching a row TAKES OWNERSHIP of it — see the seed above
       provenance: body.provenance === "admin" ? "admin" : body.provenance,
       enabled: body.enabled,
+      os: body.os ?? null,
+      ecosystem: body.ecosystem ?? null,
+      toolId: body.toolId ?? null,
+      note: body.note ?? null,
+      confidence: body.confidence,
       lastUpdatedAt: new Date(),
       updatedByUserId: req.authCtx.userId ?? null,
     };
