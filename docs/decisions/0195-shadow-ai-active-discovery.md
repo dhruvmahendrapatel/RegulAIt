@@ -213,3 +213,56 @@ two contribute detection data under their licences.
 | HEUDavid/shadow-ai | No licence file | Not a detector: a hidden assistant built to evade monitoring. Not used; its traits (no visible window, LAN remote control) become SD3/SD4 detection signatures written by us. |
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
+
+## Owner decisions (2026-10-17): endpoint agent and detection data
+
+Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-spike.md)). Nothing above is changed.
+
+**Owner decisions (2026-10-17).**
+
+1. **Apple signing.** A company Apple Developer account. The Developer ID signing identity is kept in a protected CI
+   secret store that only release jobs can use.
+2. **Windows signing.** An OV code-signing certificate, with its key in a cloud HSM-backed key service called from CI.
+3. **Enrolment.** A per-org bulk enrolment token, delivered by MDM, capped, expiring and revocable. Each device then
+   creates its own key and identity (ADR-0188 S7 pattern, new workload kind `endpoint_agent`).
+4. **Device keys.** Hardware-bound by default: Secure Enclave P-256 on macOS, TPM on Windows and Linux. The OS-keystore
+   fallback is used only where no such hardware exists, and posture flags it. A macOS build runner is needed.
+5. **Product names in detection data.** AI products, including ones RegulAIt competes with, may appear as detection
+   catalogue data (names, domains, bundle ids, extension ids, package names) and in the findings it produces, because
+   customers need to see them. They never appear in marketing, docs prose, ADR prose, comparisons or UI copy.
+
+**Technical calls recorded with them (master, 2026-10-17).**
+
+- **The agent runs only as the logged-in user.** There is no root/SYSTEM component in v1. The package's one-time
+  install step, which runs as root under MDM, redeems the bulk token for a per-device enrolment ticket (only when the
+  device holds no valid one, and never failing an MDM install because redemption failed). The fleet token is never
+  readable by ordinary users. The ticket file is readable only by the agent's group, and every registration is
+  audited against the ticket id. A leaked ticket is usable from any machine until it expires; hardware-binding it is
+  a later slice.
+- **Endpoint findings record key presence only.** A finding carries the provider, the file or variable, and the key
+  name. It carries no 8-character prefix: decision 18's "names (never values)" governs endpoints.
+- **Key patterns are compiled into the agent** from the gitleaks-derived `dlp.secret.*` set (Go RE2). The collection
+  manifest carries only paths, globs and names.
+- **Pseudonyms are applied on the server.** Device user names and device hostnames are keyed-hashed server-side, and
+  their display names are stored encrypted. Revealing one needs a `pseudonym_reveal` step-up and is audited. A device
+  user name is self-reported, and the reveal UI says so. Endpoint evidence keeps the 90-day default retention of
+  decision 20.
+- **Three separate signing keys.** Agent releases are signed in the ADR-0041 manifest format under their own key id,
+  separate from the ADR-0041 control-plane release key. Decision 18's query pack and collection manifest use the same
+  format under a further key id of their own. A customer-side verify step ships with every pack, and the gateway
+  verifies the pack manifest when it serves or accepts it. SD3's signer hook calls the same signing stage.
+  `infra/release-keys/` is not reused. MDM is the only install channel. In v1, self-update (a relaxation, off by
+  default) only downloads, verifies and notifies the user and the admin. A privileged install helper is out of
+  scope, because it would bring back a resident root component.
+- **Bulk token defaults.** The admin must set the device cap (there is no unlimited default). Expiry defaults to 30
+  days, and lengthening it is a relaxation. The admin is alerted as the cap is approached. Rotation is by MDM
+  re-push.
+- **ADR-0176 build-tool exceptions.** WiX (MS-RL) and `rcodesign` (MPL-2.0) are accepted as written exceptions, with
+  the unmet requirement stated in R15 §4.4: no permissively licensed tool builds an MSI, or signs and notarises Mach-O
+  from Linux. Both are build tools only; their output is not covered by their licences and nothing of them is
+  shipped.
+- **Linux TPM.** The agent uses the TPM only where `/dev/tpmrm0` is already reachable by the user. Adding console
+  users to the `tss` group is an audited admin opt-in (a relaxation), because it grants raw TPM access. Otherwise the
+  software fallback applies and posture flags it.
+- **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
+  for darwin.
