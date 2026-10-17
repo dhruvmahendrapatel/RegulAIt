@@ -37,6 +37,7 @@ import {
 import { changeDescriptorSchema, startInstanceSchema } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import {
   SHADOW_AI_REMEDIATION_CHANGE_TYPE,
   SHADOW_AI_REMEDIATION_DEFAULT_INSTALLED,
@@ -56,6 +57,7 @@ const PSEUDONYM = "psn:0123456789abcdef01234567";
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreGates: () => Promise<void> = async () => {};
+let restoreAdminKeyMfa: () => Promise<void> = async () => {};
 let userAuth: { authorization: string };
 let adminA: { auth: { authorization: string }; id: string };
 let adminB: { auth: { authorization: string }; id: string };
@@ -103,6 +105,9 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "f".repeat(64) });
   restoreGates = await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false });
+  // ADR-0181 (FX2): an admin's API key answers to mfaRequired. This suite drives two admins through keys and is not
+  // about MFA, so it relaxes the dial and hands the shared database back strict in afterAll (M-068)
+  restoreAdminKeyMfa = await relaxIdentityForTest(db, { mfaRequired: "off" });
   await removeDefault();
   await db.delete(auditLog).where(eq(auditLog.ruleId, SHADOW_AI_REMEDIATION_DEFAULT_INSTALLED));
   userAuth = (await makeUser("a4-remediator@example.com")).auth;
@@ -167,6 +172,7 @@ afterAll(async () => {
   await db.update(users).set({ isAdmin: false, disabledAt: new Date() }).where(inArray(users.id, [adminA.id, adminB.id]));
   await db.delete(auditLog).where(eq(auditLog.ruleId, SHADOW_AI_REMEDIATION_DEFAULT_INSTALLED));
   await restoreGates();
+  await restoreAdminKeyMfa();
   await app.close();
 });
 
