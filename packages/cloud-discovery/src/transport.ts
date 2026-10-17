@@ -167,8 +167,10 @@ function toBody(body: PipelineRequest["body"]): RequestInit["body"] | undefined 
 /** `@azure/core-rest-pipeline` HttpClient over the guarded fetch */
 export class GuardedAzureHttpClient implements HttpClient {
   readonly #fetch: GuardedFetch;
-  constructor(fetchImpl: GuardedFetch) {
+  readonly #maxBytes: number;
+  constructor(fetchImpl: GuardedFetch, maxBytes = AZURE_RESPONSE_MAX_BYTES) {
     this.#fetch = fetchImpl;
+    this.#maxBytes = maxBytes;
   }
 
   async sendRequest(request: PipelineRequest): Promise<PipelineResponse> {
@@ -186,7 +188,7 @@ export class GuardedAzureHttpClient implements HttpClient {
     const res = await this.#fetch(request.url, init);
     const responseHeaders = createHttpHeaders();
     res.headers.forEach((v, k) => responseHeaders.set(k, v));
-    const bytes = await readBodyCapped(res.body, AZURE_RESPONSE_MAX_BYTES);
+    const bytes = await readBodyCapped(res.body, this.#maxBytes);
     return { request, status: res.status, headers: responseHeaders, bodyAsText: new TextDecoder().decode(bytes) };
   }
 }

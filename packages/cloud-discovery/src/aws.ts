@@ -147,6 +147,18 @@ export function awsCredentialProvider(deps: AwsScannerDeps, stsRegion: string): 
   };
 }
 
+/** a provider whose every resolved credential set is handed to the sink before use */
+function registering(provider: AwsCredentialIdentityProvider, sink: SecretSink | undefined): AwsCredentialIdentityProvider {
+  if (!sink) return provider;
+  return async () => {
+    const c = await provider();
+    sink(c.accessKeyId);
+    sink(c.secretAccessKey);
+    if (c.sessionToken) sink(c.sessionToken);
+    return c;
+  };
+}
+
 function awsCredentialProviderInner(deps: AwsScannerDeps, stsRegion: string): AwsCredentialIdentityProvider {
   const cred = awsCredentialSchema.parse(deps.credential);
   const clientConfig = { region: stsRegion, requestHandler: guardedAwsRequestHandler(deps.credentialFetch ?? deps.fetch), ...AWS_PINNED_ENDPOINT_CONFIG };
@@ -178,7 +190,8 @@ function awsCredentialProviderInner(deps: AwsScannerDeps, stsRegion: string): Aw
       return memoizeCredentials(
         fromTemporaryCredentials({
           params: { RoleArn: cred.roleArn, ExternalId: cred.externalId, RoleSessionName: cred.roleSessionName ?? sessionName, DurationSeconds: 3600 },
-          masterCredentials: deps.sourceCredentials,
+          // the source principal's credentials are registered too (round 2, finding 5)
+          masterCredentials: registering(deps.sourceCredentials, deps.onSecret),
           clientConfig,
         }),
       );
@@ -248,7 +261,9 @@ export class AwsCloudScanner implements CloudScanner {
       const who = await sts.send(new GetCallerIdentityCommand({}));
       const account = who.Account ?? (who.Arn ? who.Arn.split(":")[4] : undefined);
       if (account !== this.target.accountId) {
-        c.report("aws.sts.caller_identity", null, "error", `the credential belongs to account ${account ?? "(unknown)"}, not the source's account ${this.target.accountId}; nothing was read`);
+        // only the last 4 digits of the presented account are shown (round 2, finding 6)
+        const shown = account ? `ending ${account.slice(-4)}` : "(unknown)";
+        c.report("aws.sts.caller_identity", null, "error", `the credential belongs to another account (${shown}), not the source's account ${this.target.accountId}; nothing was read`);
         return false;
       }
       c.ok("aws.sts.caller_identity", null, 1, `credential verified for account ${account}`);

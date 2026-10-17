@@ -12,7 +12,8 @@ import { classifyError, digestObservations, redact } from "./report.js";
 import { CLOUD_AI_SERVICE_SEED } from "./seed.js";
 import { assertHttpsAuthority } from "./azure.js";
 import { fakeCloud } from "./test-cloud.js";
-import { BodyTooLargeError, GuardedAzureHttpClient, readBodyCapped, requestAwareFetch } from "./transport.js";
+import { BodyTooLargeError, captureReturnedTokens, captureSentSecrets, GuardedAzureHttpClient, readBodyCapped, requestAwareFetch } from "./transport.js";
+import { synthetic } from "./test-cloud.js";
 import { createHttpHeaders, createPipelineRequest } from "@azure/core-rest-pipeline";
 
 describe("requestAwareFetch", () => {
@@ -32,6 +33,32 @@ describe("Azure authorityHost", () => {
     for (const bad of ["http://login.example", "https://u:p@login.example", "https://login.example/x", "https://login.example/?a=1", "not a url"]) {
       expect(() => assertHttpsAuthority(bad)).toThrow();
     }
+  });
+});
+
+describe("each secret-capture path works on its own (round 2, finding 4)", () => {
+  it("captureSentSecrets registers a sent bearer token and an AWS session token", async () => {
+    const seen: string[] = [];
+    const f = captureSentSecrets((async () => new Response("{}")) as typeof fetch, (v) => seen.push(v));
+    const bearer = synthetic("bearer");
+    const session = synthetic("session");
+    await f("https://x.example/", { headers: { authorization: `Bearer ${bearer}` } });
+    await f("https://x.example/", { headers: { "x-amz-security-token": session } });
+    expect(seen).toEqual([bearer, session]);
+  });
+
+  it("captureReturnedTokens registers tokens a JSON response returns, and nothing from a non-JSON body", async () => {
+    const seen: string[] = [];
+    const access = synthetic("access");
+    const impersonated = synthetic("imp");
+    const bodies = [JSON.stringify({ access_token: access }), JSON.stringify({ accessToken: impersonated }), "access_token=not-json"];
+    let i = 0;
+    const f = captureReturnedTokens((async () => {
+      const b = bodies[i++]!;
+      return new Response(b, { headers: { "content-type": b.startsWith("{") ? "application/json" : "text/plain" } });
+    }) as typeof fetch, (v) => seen.push(v));
+    for (let n = 0; n < 3; n++) await f("https://sts.example/token", { method: "POST" });
+    expect(seen).toEqual([access, impersonated]);
   });
 });
 
@@ -61,6 +88,21 @@ describe("GuardedAzureHttpClient", () => {
     expect(res.headers.get("x-r")).toBe("1");
     expect(cloud.calls[0]).toMatchObject({ method: "PUT", body: '{"b":2}' });
     expect(cloud.calls[0]!.headers.get("x-h")).toBe("h");
+  });
+
+  it("reads response bodies with a running cap (round 2, finding 2b)", async () => {
+    // a finite body (so an uncapped read would succeed) with no Content-Length, over the 1000-byte cap
+    const over = () => {
+      let n = 0;
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(c) {
+          if (n++ >= 40) return c.close();
+          c.enqueue(new Uint8Array(64));
+        },
+      }));
+    };
+    const client = new GuardedAzureHttpClient((async () => over()) as typeof fetch, 1000);
+    await expect(client.sendRequest(createPipelineRequest({ url: "https://management.azure.com/x", method: "GET" }))).rejects.toBeInstanceOf(BodyTooLargeError);
   });
 
   it("refuses stream bodies instead of guessing", async () => {

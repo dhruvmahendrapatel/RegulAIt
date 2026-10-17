@@ -140,6 +140,30 @@ describe("AzureCloudScanner through the real Azure SDKs and a fake cloud", () =>
     expect(res.capabilities.find((x) => x.capability === "azure.activity_log.Microsoft.CognitiveServices")?.detail).toContain("1 event(s) on resources that are not a discovered AI service");
   });
 
+  it("redacts a Log Analytics partial-error message (round 2, finding 2a)", async () => {
+    const leaked = synthetic("leak");
+    // every ARM route except the stock Log Analytics one (the last), which this test replaces
+    const routes = armRoutes({ graphDeployments: true }).slice(0, -1);
+    const cloud = fakeCloud([
+      ...routes,
+      (c: RecordedCall) =>
+        c.url.hostname === "api.loganalytics.io"
+          ? json({
+              tables: [{ name: "PrimaryResult", columns: [{ name: "ResourceId", type: "string" }], rows: [] }],
+              error: { code: "PartialError", message: `query partly failed: access_token=${leaked} and {"client_secret":"${leaked}"}` },
+            })
+          : undefined,
+    ]);
+    const res = await new AzureCloudScanner(
+      { subscriptionIds: [SUB], logAnalyticsWorkspaceIds: [WS] },
+      { fetch: cloud.fetch, credential: { mode: "azure_client_secret", tenantId: TENANT, clientId: CLIENT, clientSecret: synthetic("cs") } },
+    ).scan(ctx());
+    const diag = res.capabilities.find((x) => x.capability === "azure.log_analytics.diagnostics");
+    expect(diag?.status).toBe("error");
+    expect(diag?.detail).toContain("[redacted]");
+    expect(diag?.detail).not.toContain(leaked);
+  });
+
   it("uses Resource Graph deployments when present and skips diagnostics without a workspace", async () => {
     const cloud = fakeCloud(armRoutes({ graphDeployments: true }));
     const scanner = new AzureCloudScanner(

@@ -95,6 +95,8 @@ describe("credential public config: an allowlist per kind and mode (review of #4
     // the suffix is required: a look-alike domain never matches
     expect(credentialTargetMatch("cloud_gcp", { projectId: "acme-ml" }, { serviceAccountEmail: "x@acme-ml.example.com" })).toBe("unverifiable");
     expect(credentialTargetMatch("cloud_gcp", { projectId: "acme-ml" }, { serviceAccountEmail: "x@acme-ml.evil.iam.gserviceaccount.com" })).toBe("unverifiable");
+    // a project id that merely ENDS with the target's is a different project
+    expect(credentialTargetMatch("cloud_gcp", { projectId: "acme-ml" }, { serviceAccountEmail: "x@evil-acme-ml.iam.gserviceaccount.com" })).toBe("unverifiable");
   });
 });
 

@@ -153,9 +153,27 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     ).scan(ctx());
     expect(res.capabilities).toHaveLength(1);
     expect(res.capabilities[0]).toMatchObject({ capability: "aws.sts.caller_identity", status: "error" });
-    expect(res.capabilities[0]!.detail).toContain("999999999999");
+    // only the last 4 digits of the presented account are shown (round 2, finding 6)
+    expect(res.capabilities[0]!.detail).toContain("ending 9999");
+    expect(res.capabilities[0]!.detail).not.toContain("999999999999");
     expect(cloud.calls.filter((c) => !c.url.hostname.startsWith("sts."))).toEqual([]);
     expect(res.observations).toEqual([]);
+  });
+
+  it("assume-role registers the source principal's credentials as well as the assumed ones (round 2, finding 5)", async () => {
+    const seen: string[] = [];
+    const source = { accessKeyId: synthetic("src-akid"), secretAccessKey: synthetic("src-sk"), sessionToken: synthetic("src-st") };
+    await new AwsCloudScanner(
+      { accountId: ACCOUNT, regions: ["us-east-1"] },
+      {
+        fetch: fakeCloud(awsRoutes()).fetch,
+        credential: { mode: "aws_assume_role", roleArn: ROLE, externalId: "regulait-test-external-id" },
+        sourceCredentials: async () => source,
+        onSecret: (v) => seen.push(v),
+      },
+    ).scan(ctx());
+    expect(seen).toEqual(expect.arrayContaining([source.accessKeyId, source.secretAccessKey, source.sessionToken]));
+    expect(seen.some((v) => v.startsWith("st-"))).toBe(true); // the assumed session token
   });
 
   it("refuses an account id that is not 12 digits", () => {
@@ -186,6 +204,7 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     const listXml = (contents: string, prefixes = "") =>
       xml(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>trail</Name><IsTruncated>false</IsTruncated>${contents}${prefixes}</ListBucketResult>`);
     const got: string[] = [];
+    let sent = 0;
     const cloud = fakeCloud([
       (c) => {
         if (!c.url.hostname.startsWith("trail.s3.")) return undefined;
@@ -193,16 +212,16 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
         if (c.url.searchParams.get("list-type") === "2" && p === prefix) return listXml("", `<CommonPrefixes><Prefix>${prefix}us-east-1/</Prefix></CommonPrefixes>`);
         if (c.url.searchParams.get("list-type") === "2" && p === `${prefix}us-east-1/${day}`) {
           const k = (key: string, size: number) => `<Contents><Key>${prefix}us-east-1/${day}${key}</Key><Size>${size}</Size></Contents>`;
-          return listXml(k("big.json.gz", AWS_TRAIL_OBJECT_MAX_BYTES + 1) + k("bomb.json.gz", bombBody.length) + k("nolen.json.gz", 10) + k("ok.json.gz", okBody.length));
+          return listXml(k("big.json.gz", AWS_TRAIL_OBJECT_MAX_BYTES + 1) + k("bomb.json.gz", bombBody.length) + k("nolen.json", 10) + k("ok.json.gz", okBody.length));
         }
         if (c.url.searchParams.get("list-type") === "2") return listXml("");
         got.push(c.url.pathname);
         if (c.url.pathname.endsWith("bomb.json.gz")) return new Response(bombBody, { headers: { "content-length": String(bombBody.length) } });
         if (c.url.pathname.endsWith("ok.json.gz")) return new Response(okBody, { headers: { "content-length": String(okBody.length) } });
-        if (c.url.pathname.endsWith("nolen.json.gz")) {
-          // listed as tiny, served with no Content-Length and far over the cap: the running cap must stop it
-          let sent = 0;
-          const chunk = new Uint8Array(1024 * 1024);
+        if (c.url.pathname.endsWith("nolen.json")) {
+          // listed as tiny, NOT gzip (so no decompression can fail), served with no Content-Length and far over the
+          // cap: only the running byte cap can stop it (round 2, finding 2c)
+          const chunk = new Uint8Array(1024 * 1024).fill(32); // whitespace: a valid JSON prefix
           return new Response(new ReadableStream<Uint8Array>({
             pull(ctrl) {
               if (sent > AWS_TRAIL_OBJECT_MAX_BYTES * 2) return ctrl.close();
@@ -226,6 +245,9 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     expect(cap?.status).toBe("read");
     expect(cap?.items).toBe(1);
     expect(cap?.detail).toContain("3 object(s) skipped");
+    // the over-cap object was cut off near the cap, not read to its end (the stream offers twice the cap)
+    expect(sent).toBeGreaterThan(AWS_TRAIL_OBJECT_MAX_BYTES);
+    expect(sent).toBeLessThanOrEqual(AWS_TRAIL_OBJECT_MAX_BYTES + 4 * 1024 * 1024);
   });
 
   it("assume-role mode sends the per-source external id", async () => {

@@ -122,6 +122,21 @@ describe("every short-lived credential is registered with onSecret", () => {
     for (const t of sent) expect(seen).toContain(t);
   });
 
+  it("GCP static key: the self-signed JWT is registered through the sent-bearer path (round 2, finding 4)", async () => {
+    const seen: string[] = [];
+    const s = split();
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const keyJson = JSON.stringify({ type: "service_account", client_email: "s@p.iam.gserviceaccount.com", private_key: privateKey.export({ type: "pkcs8", format: "pem" }).toString() });
+    await new GcpCloudScanner({ projectIds: ["p"] }, { fetch: s.scan.fetch, credentialFetch: s.cred.fetch, onSecret: (v) => seen.push(v), credential: { mode: "gcp_service_account_key", keyJson } }).scan(ctx());
+    expect(s.cred.calls).toEqual([]); // no exchange, so the returned-token path saw nothing
+    const jwts = [...new Set(s.scan.calls.map((c) => (c.headers.get("authorization") ?? "").slice(7)))];
+    expect(jwts.length).toBeGreaterThan(0);
+    for (const j of jwts) {
+      expect(j.split(".")).toHaveLength(3);
+      expect(seen).toContain(j);
+    }
+  });
+
   it("Azure: the Entra access token returned and sent", async () => {
     const seen: string[] = [];
     const s = split();
