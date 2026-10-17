@@ -466,7 +466,7 @@ type VersionRow = Pick<ProfileVersion, "name" | "version">;
 const readable = (rows: readonly unknown[]): VersionRow[] =>
   rows.filter((r): r is VersionRow => r !== null && typeof r === "object" && !("unreadable" in r) && "version" in r);
 
-/** the number a new version of `name` gets: the newest version + 1 (a withdrawn version keeps its number) */
+/** the number a new version of `name` gets: the newest version + 1 (a revert is a new version too, with an earlier version's controls) */
 export function nextVersionOf(name: string, rows: readonly unknown[]): number {
   return Math.max(0, ...readable(rows).filter((r) => r.name === name).map((r) => r.version)) + 1;
 }

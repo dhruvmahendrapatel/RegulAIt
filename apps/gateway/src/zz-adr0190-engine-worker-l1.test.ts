@@ -164,21 +164,30 @@ describe("the revert: a NEW version with the exact shipped controls, free, audit
     );
     const again = await decidePlacement(db, { workloadKind: "engine_worker", projectId, agent: null, imageDigest: IMAGE, onlyExecutorIds: [runcExecutorId], actorUserId: adminId });
     expect(again).toMatchObject({ kind: "refused", code: "class_below_required" });
+    // the profile in force is the revert version v3 itself (its digest), not v1
+    if (again.kind === "refused" && again.requirement.kind === "required") {
+      expect(again.requirement.profile).toMatchObject({ name: "engine-worker", version: 3, digest: v3.digest, minClass: "user_space_kernel" });
+    } else {
+      throw new Error(`expected a resolved requirement, got ${JSON.stringify(again)}`);
+    }
     expect(await engineWorkerAttestationBasis(db, { onlyExecutorIds: [runcExecutorId] })).toMatchObject({ attested: false, requiredClass: "user_space_kernel", profileDigest: v3.digest });
   });
 
-  it("the same controls again are unchanged (marker or not); a client's own marker is dropped; versioning continues", async () => {
+  it("the same controls again are unchanged; a client's own marker on NEW controls is dropped (a plain version)", async () => {
     const same = await inject("POST", "/v1/execution-profiles/engine-worker/versions", adminAuth, { body: engineBody() });
     expect(same.statusCode, same.body).toBe(409);
     expect(same.json()).toMatchObject({ error: "execution_profile_unchanged" });
-    const forged = await inject("POST", "/v1/execution-profiles/engine-worker/versions", adminAuth, { body: { ...engineBody(), revertOf: { version: 1, digest: "f".repeat(64), replacing: 9 } } });
-    expect(forged.statusCode, forged.body).toBe(409);
-    expect(forged.json()).toMatchObject({ error: "execution_profile_unchanged" });
-    // a tightening (L3) is a plain new version: no marker, no step-up
-    const v4 = await inject("POST", "/v1/execution-profiles/engine-worker/versions", adminAuth, { body: engineBody({ minClass: "microvm" }) });
+    // a tightening (L3) with a forged marker: written as a plain v4, the marker stripped from the answer and the row
+    const forgedMarker = { version: 1, digest: "f".repeat(64), replacing: 9 };
+    const v4 = await inject("POST", "/v1/execution-profiles/engine-worker/versions", adminAuth, { body: { ...engineBody({ minClass: "microvm" }), revertOf: forgedMarker } });
     expect(v4.statusCode, v4.body).toBe(201);
     expect(v4.json()).toMatchObject({ version: 4, minClass: "microvm" });
     expect(v4.json().revertOf).toBeUndefined();
+    expect(v4.json().body.revertOf).toBeUndefined();
+    const [stored] = await db.select().from(executionProfiles).where(eq(executionProfiles.id, v4.json().id));
+    expect(JSON.parse(stored!.body).revertOf).toBeUndefined();
+    expect(stored!.digest).toBe(executionProfileDigest(engineBody({ minClass: "microvm" })));
+    expect(await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "execution-profile-reverted"), eq(auditLog.objectId, v4.json().id)))).toEqual([]);
   });
 
   it("reverting to a LOOSER earlier version is a relaxation: step-up, and audited execution-profile-relaxed", async () => {
@@ -235,8 +244,9 @@ describe("retirement stays terminal after a revert (the 0183 guard is unchanged)
       );
     expect(await refused(sql`update execution_profiles set retired_at = null, retired_by = null where name = ${name} and version = 3`)).toMatch(/retirement is terminal/);
     expect(await refused(sql`update execution_profiles set retired_at = now() where name = ${name} and version = 1`)).toMatch(/retirement is terminal/);
-    const [v3row] = await db.select().from(executionProfiles).where(and(eq(executionProfiles.name, name), eq(executionProfiles.version, 3)));
-    expect(await refused(sql`insert into execution_profiles (name, version, body, digest, min_class) values (${name}, 4, ${v3row!.body}, ${v3row!.digest}, 'microvm')`)).toMatch(/is retired|execution_profiles_digest_uq/);
+    // a body no row holds (so only the retirement can refuse it)
+    const fresh: ExecutionProfileBody = { ...v1Body, resources: { ...v1Body.resources, cpuMillis: 125 } };
+    expect(await refused(sql`insert into execution_profiles (name, version, body, digest, min_class) values (${name}, 4, ${canonicalExecutionProfile(fresh)}, ${executionProfileDigest(fresh)}, 'microvm')`)).toMatch(/is retired/);
     const live = await db.select({ version: executionProfiles.version }).from(executionProfiles).where(and(eq(executionProfiles.name, name), sql`${executionProfiles.retiredAt} is null`));
     expect(live).toEqual([]);
   });

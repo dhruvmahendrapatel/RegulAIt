@@ -323,7 +323,7 @@ function NewVersionDialog(props: { profile: ProfileVersion; nextVersion: number;
       const detail = await api.get<unknown>(`/v1/execution-profiles/${encodeURIComponent(name)}`);
       const body = newProfileBody(versionBody(detail, props.profile.id), name, minClass);
       if (!body) throw new Error("The profile's current body could not be read. Nothing was created.");
-      // a body equal to an earlier live version is a revert: the toast says which happened
+      // controls equal to an earlier version make a revert (a new version with that version's controls): the toast says so
       return versionOutcomeText(name, await withStepUp((h) => stepUpApi.post(`/v1/execution-profiles/${encodeURIComponent(name)}/versions`, { body }, h)));
     });
     if (ok) props.onClose();
@@ -353,7 +353,8 @@ function NewVersionDialog(props: { profile: ProfileVersion; nextVersion: number;
         <p className={v.dim}>
           Version {props.nextVersion} copies every control of version {props.profile.version}. Running workloads keep the version they
           started with. A lower class is an audited relaxation and needs a step-up. If the result equals an earlier version, the new version
-          is recorded as a revert to it; no version is retired.
+          is recorded as a revert to it; no version is retired. Agents and servers assigned to an older version keep that version: a revert
+          does not move them.
         </p>
         <Field label="Minimum isolation class">
           <Select value={minClass} onChange={(e) => setMinClass(e.target.value)}>

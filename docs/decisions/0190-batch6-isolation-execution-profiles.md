@@ -1899,6 +1899,9 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
        version in force, with or without a marker, are refused `execution_profile_unchanged`.
      - Executors attest the new digest at their next self-test before it places, so placement fails closed until
        then.
+     - A revert changes only the profile's newest version. An agent or stdio server assigned to an older version
+       (for a custom profile, perhaps an older, looser one) keeps that assignment: an admin moves it with the
+       assignment route. The dialog says so.
      - The panel numbers a new version after the newest version and says "reverted to the controls of vN" when the
        route wrote a revert.
      - A first build reverted by retiring the versions above the target and changed the guard (migration 0202) so a
