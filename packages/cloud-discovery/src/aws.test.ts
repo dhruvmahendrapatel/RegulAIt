@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { AwsCloudScanner } from "./aws.js";
+import { gzipSync } from "node:zlib";
+import { AWS_TRAIL_OBJECT_MAX_BYTES, AWS_TRAIL_OBJECT_MAX_INFLATED_BYTES, AwsCloudScanner } from "./aws.js";
 import { fakeCloud, installNetworkTripwire, json, synthetic, testPseudonymise, xml, type RecordedCall } from "./test-cloud.js";
 import type { CloudScanContext } from "./types.js";
 
@@ -148,6 +149,45 @@ describe("AwsCloudScanner through the real AWS SDK and a fake cloud", () => {
     expect(res.observations.some((o) => o.resourceType === "bedrock.agent")).toBe(false);
     // static mode makes no STS call
     expect(cloud.calls.some((c) => c.url.hostname.startsWith("sts."))).toBe(false);
+  });
+
+  it("trail bucket: skips objects over the size cap and gzip bombs, still reads the rest (review finding 2)", async () => {
+    const prefix = `AWSLogs/${ACCOUNT}/CloudTrail/`;
+    const day = "2026/10/17/";
+    const record = { Records: [{ eventName: "InvokeAgent", eventSource: "bedrock.amazonaws.com", eventTime: "2026-10-17T08:00:00Z", awsRegion: "us-east-1", userIdentity: { arn: `arn:aws:iam::${ACCOUNT}:role/agent-caller` } }] };
+    const okBody = gzipSync(Buffer.from(JSON.stringify(record)));
+    const bombBody = gzipSync(Buffer.alloc(AWS_TRAIL_OBJECT_MAX_INFLATED_BYTES + 1024));
+    const listXml = (contents: string, prefixes = "") =>
+      xml(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>trail</Name><IsTruncated>false</IsTruncated>${contents}${prefixes}</ListBucketResult>`);
+    const got: string[] = [];
+    const cloud = fakeCloud([
+      (c) => {
+        if (!c.url.hostname.startsWith("trail.s3.")) return undefined;
+        const p = c.url.searchParams.get("prefix");
+        if (c.url.searchParams.get("list-type") === "2" && p === prefix) return listXml("", `<CommonPrefixes><Prefix>${prefix}us-east-1/</Prefix></CommonPrefixes>`);
+        if (c.url.searchParams.get("list-type") === "2" && p === `${prefix}us-east-1/${day}`) {
+          const k = (key: string, size: number) => `<Contents><Key>${prefix}us-east-1/${day}${key}</Key><Size>${size}</Size></Contents>`;
+          return listXml(k("big.json.gz", AWS_TRAIL_OBJECT_MAX_BYTES + 1) + k("bomb.json.gz", bombBody.length) + k("ok.json.gz", okBody.length));
+        }
+        if (c.url.searchParams.get("list-type") === "2") return listXml("");
+        got.push(c.url.pathname);
+        if (c.url.pathname.endsWith("bomb.json.gz")) return new Response(bombBody, { headers: { "content-length": String(bombBody.length) } });
+        if (c.url.pathname.endsWith("ok.json.gz")) return new Response(okBody, { headers: { "content-length": String(okBody.length) } });
+        return undefined;
+      },
+      ...awsRoutes(),
+    ]);
+    const scanner = new AwsCloudScanner(
+      { accountId: ACCOUNT, regions: ["us-east-1"], trailBucket: { bucket: "trail", region: "us-east-1" } },
+      { fetch: cloud.fetch, credential: { mode: "aws_static", accessKeyId: synthetic("akid"), secretAccessKey: synthetic("sk") } },
+    );
+    const res = await scanner.scan({ ...ctx(), auditLookbackDays: 1 });
+    expect(cloud.unrouted.map((c) => `${c.method} ${c.url.href}`)).toEqual([]);
+    expect(got.some((p) => p.endsWith("big.json.gz"))).toBe(false); // never fetched
+    const cap = res.capabilities.find((x) => x.capability === "aws.cloudtrail.data_events");
+    expect(cap?.status).toBe("read");
+    expect(cap?.items).toBe(1);
+    expect(cap?.detail).toContain("2 object(s) skipped");
   });
 
   it("assume-role mode sends the per-source external id", async () => {

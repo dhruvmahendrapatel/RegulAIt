@@ -6,7 +6,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { cloudScanner, capabilitySummary } from "./discovery-cloud-scanners.js";
+import { cloudScanner, capabilitySummary, digestBounded } from "./discovery-cloud-scanners.js";
 import type { ScanContext } from "./discovery-scanners.js";
 import { checkObservations } from "./discovery-worker.js";
 
@@ -122,6 +122,25 @@ describe("ADR-0195 SD2 cloud scanners on the SD0 contract", () => {
     const err = await cloudScanner("cloud_aws").run(ctx).catch((e: Error) => e);
     expect(String(err)).toContain("no cloud read succeeded");
     expect(String(err)).toContain("unreachable");
+  });
+
+  it("digests at most the cap of a body: a declared oversize is a marker, a stream past the cap is cut (finding 2)", async () => {
+    const chunks: Array<string | Uint8Array> = [];
+    await digestBounded(new Response("x".repeat(10), { headers: { "content-length": "999999999" } }), (c) => chunks.push(c), 100);
+    expect(chunks).toEqual(["[body of 999999999 bytes over the 100-byte digest cap: not digested]"]);
+    chunks.length = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        c.enqueue(new Uint8Array(60));
+      },
+    });
+    const res = new Response(stream);
+    await digestBounded(res, (c) => chunks.push(c), 100);
+    expect(chunks.at(-1)).toBe("[body truncated at the 100-byte digest cap]");
+    expect(chunks.filter((c) => typeof c !== "string").reduce((n, c) => n + (c as Uint8Array).byteLength, 0)).toBeLessThanOrEqual(100);
+    chunks.length = 0;
+    await digestBounded(new Response("small"), (c) => chunks.push(c), 100);
+    expect(Buffer.concat(chunks.map((c) => Buffer.from(c as Uint8Array))).toString()).toBe("small");
   });
 
   it("capabilitySummary lists only reads that did not succeed", () => {

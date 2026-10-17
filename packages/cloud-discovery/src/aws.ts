@@ -42,6 +42,11 @@ export const AWS_LOOKUP_EVENT_NAMES = ["InvokeModel", "InvokeModelWithResponseSt
 /** data events only the trail bucket holds */
 export const AWS_DATA_EVENT_NAMES = new Set(["InvokeAgent", "Retrieve", "RetrieveAndGenerate", "InvokeModel", "InvokeModelWithResponseStream", "Converse", "ConverseStream"]);
 
+/** a CloudTrail log object is at most a few hundred KB; anything over this is skipped unread (review of #404, finding 2) */
+export const AWS_TRAIL_OBJECT_MAX_BYTES = 8 * 1024 * 1024;
+/** and no object may inflate past this (gzip bomb guard) */
+export const AWS_TRAIL_OBJECT_MAX_INFLATED_BYTES = 64 * 1024 * 1024;
+
 export interface AwsTrailBucket {
   bucket: string;
   /** the trail's key prefix, if any (without the trailing `AWSLogs/`) */
@@ -343,6 +348,7 @@ export class AwsCloudScanner implements CloudScanner {
     const base = `${prefix ? `${prefix}/` : ""}AWSLogs/${this.target.accountId}/CloudTrail/`;
     let objects = 0;
     let records = 0;
+    let skippedObjects = 0;
     try {
       // newest first: walk days backwards from now, per region prefix discovered under the account
       const regionPrefixes = await paginate(ctx.maxPagesPerCall,
@@ -354,15 +360,40 @@ export class AwsCloudScanner implements CloudScanner {
         for (const rp of regionPrefixes) {
           const keys = await paginate(ctx.maxPagesPerCall,
             (ContinuationToken) => s3.send(new ListObjectsV2Command({ Bucket: tb.bucket, Prefix: `${rp}${ymd}`, ContinuationToken })),
-            (p) => p.Contents?.map((o) => o.Key).filter((k): k is string => !!k),
+            (p) => p.Contents?.filter((o) => {
+              // never fetch a log object over the cap: CloudTrail files are small, a huge one is not a trail file
+              if (o.Size !== undefined && o.Size > AWS_TRAIL_OBJECT_MAX_BYTES) {
+                skippedObjects += 1;
+                return false;
+              }
+              return true;
+            }).map((o) => o.Key).filter((k): k is string => !!k),
             (p) => p.NextContinuationToken);
           for (const key of keys) {
             if (objects >= maxObjects) break outer;
             objects += 1;
             const obj = await s3.send(new GetObjectCommand({ Bucket: tb.bucket, Key: key }));
+            if (obj.ContentLength !== undefined && obj.ContentLength > AWS_TRAIL_OBJECT_MAX_BYTES) {
+              skippedObjects += 1;
+              await obj.Body?.transformToWebStream().cancel().catch(() => undefined);
+              continue;
+            }
             const bytes = await obj.Body?.transformToByteArray();
             if (!bytes) continue;
-            const text = key.endsWith(".gz") ? gunzipSync(bytes).toString("utf8") : Buffer.from(bytes).toString("utf8");
+            if (bytes.byteLength > AWS_TRAIL_OBJECT_MAX_BYTES) {
+              skippedObjects += 1;
+              continue;
+            }
+            let text: string;
+            try {
+              text = key.endsWith(".gz")
+                ? gunzipSync(bytes, { maxOutputLength: AWS_TRAIL_OBJECT_MAX_INFLATED_BYTES }).toString("utf8")
+                : Buffer.from(bytes).toString("utf8");
+            } catch {
+              // a gzip bomb (inflates past the cap) or a corrupt object: skip it, count it, keep scanning
+              skippedObjects += 1;
+              continue;
+            }
             let parsed: { Records?: TrailRecord[] };
             try {
               parsed = JSON.parse(text) as { Records?: TrailRecord[] };
@@ -388,9 +419,10 @@ export class AwsCloudScanner implements CloudScanner {
         }
       }
       // A bucket with log objects but no Bedrock data events usually means no data-event selector: say so.
+      const skipped = skippedObjects ? `; ${skippedObjects} object(s) skipped: over the size cap or not valid gzip` : "";
       const detail = records === 0
-        ? `${objects} log object(s) read, no Bedrock data events found: data-event selectors for Bedrock may not be enabled on the trail`
-        : `${objects} log object(s) read; ${agg.size} calling principal(s)`;
+        ? `${objects} log object(s) read, no Bedrock data events found: data-event selectors for Bedrock may not be enabled on the trail${skipped}`
+        : `${objects} log object(s) read; ${agg.size} calling principal(s)${skipped}`;
       c.ok("aws.cloudtrail.data_events", tb.bucket, records, detail);
       await agg.flush(c);
     } catch (err) {

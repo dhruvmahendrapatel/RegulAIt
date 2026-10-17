@@ -94,11 +94,43 @@ export function scannerFetch(ctx: Pick<ScanContext, "fetch" | "throttle" | "back
       await ctx.throttle();
       const res = await ctx.fetch(input, init);
       if ((res.status === 429 || res.status === 503) && (await ctx.backoff(res))) continue;
-      ctx.recordRaw(new Uint8Array(await res.clone().arrayBuffer()));
+      await digestBounded(res, ctx.recordRaw);
       return res;
     }
   };
   return wrapped as typeof fetch;
+}
+
+/** at most this much of one response body is digested (review of #404, finding 2) */
+export const RAW_DIGEST_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Feed a response body to the digest without holding more than the cap: a declared length over the cap is recorded
+ * as a marker only; otherwise a clone is streamed chunk by chunk and abandoned once the cap is passed.
+ */
+export async function digestBounded(res: Response, recordRaw: (chunk: string | Uint8Array) => void, max = RAW_DIGEST_MAX_BYTES): Promise<void> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > max) {
+    recordRaw(`[body of ${declared} bytes over the ${max}-byte digest cap: not digested]`);
+    return;
+  }
+  const body = res.clone().body;
+  if (!body) return;
+  const reader = body.getReader();
+  let seen = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    seen += value.byteLength;
+    if (seen > max) {
+      recordRaw(`[body truncated at the ${max}-byte digest cap]`);
+      // not awaited: cancelling one branch of a tee'd body settles only when the other branch is cancelled too,
+      // and the caller still owns the other branch
+      void reader.cancel().catch(() => undefined);
+      return;
+    }
+    recordRaw(value);
+  }
 }
 
 function awsCredential(ctx: ScanContext, opts: CloudScannerOptions): AwsCredentialInput {
