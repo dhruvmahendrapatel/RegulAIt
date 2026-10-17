@@ -30,6 +30,9 @@ function jobs(text) {
     if (m) {
       current = m[1];
       out.set(current, []);
+    } else if (/^ {2}\S/.test(l) && !l.trimStart().startsWith("#")) {
+      // a quoted, flow-style or otherwise unusual job key: never folded into the previous job (see jobKeys)
+      current = null;
     } else if (current && (l.startsWith("   ") || l.trim() === "")) {
       out.get(current).push(l);
     } else if (l.trim() !== "" && !l.startsWith(" ")) {
@@ -38,6 +41,37 @@ function jobs(text) {
   }
   return out;
 }
+
+/** every non-comment two-space key line under `jobs:` (a job key), however it is written */
+function jobKeys(text) {
+  const lines = text.split("\n");
+  const out = [];
+  for (const l of lines.slice(lines.indexOf("jobs:") + 1)) {
+    if (l.trim() !== "" && !l.startsWith(" ") && !l.startsWith("#")) break;
+    if (/^ {2}\S/.test(l) && !l.trimStart().startsWith("#")) out.push(l);
+  }
+  return out;
+}
+
+/** the lines outside block-scalar `run:` bodies (shell text may legitimately contain `&` and `*`) */
+function outsideRunBodies(lines) {
+  const out = [];
+  let runIndent = -1;
+  for (const l of lines) {
+    if (runIndent >= 0) {
+      if (l.trim() === "" || l.search(/\S/) > runIndent) continue;
+      runIndent = -1;
+    }
+    out.push(l);
+    if (/^\s*(-\s+)?run:\s*[|>][-+]?\s*$/.test(l)) runIndent = l.indexOf("run:");
+  }
+  return out;
+}
+
+/** a YAML anchor (`&x`), alias (`*x`) or merge key (`<<:`): an alias can hand a job a signing job's secrets env
+ *  without the word `secrets` appearing in it */
+const ANCHOR_OR_ALIAS = /(^|[\s[{,:?-])[&*][A-Za-z0-9_-]/;
+const MERGE_KEY = /(^|[\s[{,-])<<\s*:/;
 
 /** the `run: |` body of the step with `id: <id>` inside one job's lines */
 function stepRun(jobLines, id) {
@@ -83,6 +117,18 @@ describe("endpoint-agent.yml signing jobs (ADR-0195 owner decision 1)", () => {
       if (m) keys.push(m[1]);
     }
     expect(keys.sort()).toEqual(["pull_request", "push", "workflow_dispatch"]);
+  });
+
+  it("writes every job key as a plain block-style id, so no job hides from the per-job checks", () => {
+    // a quoted id ("leak":) or a flow-style job (flow: {...}) would otherwise be skipped or folded into its neighbour
+    const bad = jobKeys(yaml).filter((l) => !/^ {2}[A-Za-z_][A-Za-z0-9_-]*:\s*$/.test(l));
+    expect(bad).toEqual([]);
+    expect([...all.keys()].length).toBe(jobKeys(yaml).length);
+  });
+
+  it("uses no YAML anchors, aliases or merge keys outside run bodies", () => {
+    const hits = code(outsideRunBodies(yaml.split("\n"))).filter((l) => ANCHOR_OR_ALIAS.test(l) || MERGE_KEY.test(l));
+    expect(hits).toEqual([]);
   });
 
   it("calls no reusable workflow (a `uses:` job could be handed secrets: inherit)", () => {
