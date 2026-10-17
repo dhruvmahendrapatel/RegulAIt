@@ -143,7 +143,7 @@ export function checkReadOutcomes(outcomes: readonly DiscoveryReadOutcome[] | un
     if (typeof o.read !== "string" || !o.read.trim() || o.read.length > READ_NAME_MAX) {
       throw new ObservationRefused(`read outcome ${i}: 'read' must be 1 to ${READ_NAME_MAX} characters`);
     }
-    if (!(DISCOVERY_READ_STATUSES as readonly string[]).includes(o.status)) throw new ObservationRefused(`read outcome ${i}: '${String(o.status)}' is not a read status`);
+    if (!(DISCOVERY_READ_STATUSES as readonly string[]).includes(o.status)) throw new ObservationRefused(`read outcome ${i}: status is not a read status`);
     return {
       read: scrubRunText(o.read.trim(), secrets, READ_NAME_MAX),
       status: o.status,
@@ -424,10 +424,10 @@ export function checkObservations(
   }
   return observations.map((o, i) => {
     if (!spec.evidenceKinds.includes(o.evidenceKind)) {
-      throw new ObservationRefused(`observation ${i}: evidence kind '${String(o.evidenceKind)}' is not one a ${kind} source reports`);
+      throw new ObservationRefused(`observation ${i}: evidenceKind is not one a ${kind} source reports`);
     }
     if (!spec.subjectKinds.includes(o.subjectKind)) {
-      throw new ObservationRefused(`observation ${i}: subject kind '${String(o.subjectKind)}' is not one a ${kind} source reports`);
+      throw new ObservationRefused(`observation ${i}: subjectKind is not one a ${kind} source reports`);
     }
     const subject = typeof o.subject === "string" ? o.subject.trim() : "";
     if (!subject || subject.length > SUBJECT_MAX) throw new ObservationRefused(`observation ${i}: the subject must be 1 to ${SUBJECT_MAX} characters`);
@@ -449,7 +449,7 @@ export function checkObservations(
     };
     let artifact: Observation["artifact"] = null;
     if (o.artifact !== undefined) {
-      if (!isArtifactSignatureKind(o.artifact.kind)) throw new ObservationRefused(`observation ${i}: '${String(o.artifact.kind)}' is not an artifact kind`);
+      if (!isArtifactSignatureKind(o.artifact.kind)) throw new ObservationRefused(`observation ${i}: artifact.kind is not an artifact kind`);
       artifact = { kind: o.artifact.kind, value: bounded(o.artifact.value, "the artifact value")! };
     }
     const observedAt = o.observedAt && Number.isFinite(Date.parse(o.observedAt)) ? new Date(o.observedAt).toISOString() : nowIso;

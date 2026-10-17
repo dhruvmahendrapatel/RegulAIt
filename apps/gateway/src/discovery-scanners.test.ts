@@ -26,6 +26,28 @@ describe("ADR-0195 SD0 scanner contract", () => {
     expect(() => checkObservations("endpoint_agent", [{ evidenceKind: "endpoint_agent", subjectKind: "device", subject: "janes-laptop" }], NOW)).toThrow(ObservationRefused);
   });
 
+  it("a refusal names the index and field only, never the scanner-supplied value (review of #419, F1)", () => {
+    const envName = "OPENAI_API_KEY";
+    const message = (f: () => unknown) => {
+      try {
+        f();
+      } catch (e) {
+        expect(e).toBeInstanceOf(ObservationRefused);
+        return (e as Error).message;
+      }
+      throw new Error("expected a refusal");
+    };
+    const device = { evidenceKind: "endpoint_agent" as const, subjectKind: "device" as const, subject: `psn:${"0b".repeat(12)}` };
+    const refusals = [
+      message(() => checkObservations("endpoint_agent", [{ ...device, artifact: { kind: envName as never, value: "x" } }], NOW)),
+      message(() => checkObservations("repo_github", [{ evidenceKind: envName as never, subjectKind: "repo", subject: "r" }], NOW)),
+      message(() => checkObservations("repo_github", [{ evidenceKind: "repo_scan", subjectKind: envName as never, subject: "r" }], NOW)),
+      message(() => checkReadOutcomes([{ read: "x", status: envName as never }], [])),
+    ];
+    expect(refusals[0]).toMatch(/observation 0: artifact\.kind/);
+    for (const m of refusals) expect(m).not.toContain(envName);
+  });
+
   it("bounds subjects and values, and keeps only 8 characters of a key", () => {
     expect(() => checkObservations("repo_github", [{ evidenceKind: "repo_scan", subjectKind: "repo", subject: "" }], NOW)).toThrow(ObservationRefused);
     expect(() => checkObservations("repo_github", [{ evidenceKind: "repo_scan", subjectKind: "repo", subject: "r", packageName: "x".repeat(600) }], NOW)).toThrow(ObservationRefused);

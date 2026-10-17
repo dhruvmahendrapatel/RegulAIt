@@ -615,7 +615,9 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
      the presence catalogue does not know (for example a local runtime) is still matched as an artifact.
    - **SD0.** `ScanObservation.presence` and `Observation.presence` carry ids, checked against the presence
      catalogue (an unknown id is refused). `checkObservations` refuses a `names` entry shaped like an env name
-     (`^[A-Z][A-Z0-9_]*$`), and its refusal messages no longer echo the refused text. `classifyObservation` has a
+     (`^[A-Z][A-Z0-9_]*$`), and its refusal messages no longer echo the refused text. No SD0 refusal echoes a scanner-supplied value: the
+     evidence-kind, subject-kind, artifact-kind and read-status refusals name the index and the field only (recheck of
+     #419, F1). `classifyObservation` has a
      presence step: an id counts only when an ENABLED `identifier` row of a backing kind carries the same value
      (`PRESENCE_BACKING_KINDS`: `assistant_config`/`local_runtime` for env names, `desktop_app`/`local_runtime` for
      CLI names, the kinds SD3's seed stores them as). Disabling that row turns the detection off. The finding's
@@ -628,6 +630,10 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
    **Still missing (follow-ups):** (a) the kind migration above; (b) adding `env_name` and `cli` to
    `AI_SIGNATURE_KINDS`, `catalogueSignatureSchema` and `PRESENCE_BACKING_KINDS`, with seed rows from
    `PRESENCE_SIGNATURES_V1` carrying `tool_id` and `confidence`; (c) SD4's agent rows calling the same matchers.
+   SD4a (merged in #411) already emits `env_name` facts whose `identifier` is the env-variable name
+   (`agents/endpoint/internal/collect/configs.go`). When the SD4b gateway intake is built, it must map each such fact
+   to its presence signature id (`matchEnvNames`) and send it as `presence`; it must never pass the name through
+   `names` (which `checkObservations` refuses) or as an artifact value.
    Coverage note: the SD1 repo path now detects only the env names in `PRESENCE_SIGNATURES_V1` (the same 13 that
    SD3's seed carries); an admin-added env name cannot be matched until (b), because the scanner no longer handles
    names.
