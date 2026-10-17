@@ -104,6 +104,7 @@ export const STEP_UP_ACTION_KINDS: readonly Choice[] = [
   { value: "passkey_manage", label: "Managing passkeys" },
   { value: "owner_change", label: "Changing an owner" },
   { value: "identity_manage", label: "Managing agent identities" },
+  { value: "key_management", label: "Managing signing keys" },
 ];
 export const VENDORED_DETECTION_PACKS: readonly Choice[] = [
   { value: "pipelock-secrets", label: "Secret patterns (pipelock-secrets)" },
@@ -182,8 +183,8 @@ export const BATCH4_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     label: "Actions that need a step-up",
     strictDefault: STEP_UP_ALL,
     strict:
-      "All seven: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
-      "changing an owner and managing agent identities.",
+      "All eight: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner, managing agent identities and managing signing keys.",
     relaxed: "Each action removed from the list can be done with the session alone.",
     control: { kind: "set", options: STEP_UP_ACTION_KINDS },
     isRelaxed: (v) => missingAny(v, STEP_UP_ALL),

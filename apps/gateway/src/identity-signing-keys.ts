@@ -17,13 +17,13 @@
  *    configured key that was never recorded, as the active key (a first load).
  *    With none, or more than one, candidate it refuses: which key signs is an
  *    admin's choice, made by rotation.
- *  - rotate (admin, `identity_manage` step-up): the named configured key
+ *  - rotate (admin, `key_management` step-up bound to the key rotated to): the named configured key
  *    becomes the signer and the previous one is RETIRED. Rotation is not
  *    revocation (decision 12): a retired key stays in the JWKS for
  *    `SIGNING_KEY_OVERLAP_SECONDS` (the longest a token can live), so every
  *    token it signed verifies until it expires; after that the verifier
  *    refuses it ("a key retired past its overlap").
- *  - revoke (admin, `identity_manage` step-up): compromise. Leaves the JWKS
+ *  - revoke (admin, `key_management` step-up bound to the key): compromise. Leaves the JWKS
  *    at once, every unexpired token it signed is revoked in `issued_tokens`,
  *    and the verifier refuses its `kid` from then on. Never undone (trigger).
  *
@@ -301,7 +301,15 @@ type DbOrTx = Db | Tx;
 async function auditSigningKey(
   db: DbOrTx,
   userId: string,
-  detail: { phase: "activate" | "rotate" | "revoke"; kid: string; previousKid?: string | null; tokensRevoked?: number },
+  detail: {
+    phase: "activate" | "rotate" | "revoke";
+    kid: string;
+    previousKid?: string | null;
+    tokensRevoked?: number;
+    /** migration 0207: the step-up an admin gave for a rotate or revoke (its kind is always `key_management`) */
+    stepUp?: string;
+    stepUpKind?: "key_management";
+  },
   reason: string,
 ): Promise<void> {
   await db.insert(auditLog).values({
@@ -315,6 +323,8 @@ async function auditSigningKey(
     reason,
   });
 }
+
+const stepUpDetail = (method: string | undefined) => (method === undefined ? {} : { stepUp: method, stepUpKind: "key_management" as const });
 
 const isUniqueViolation = (err: unknown): boolean => {
   const e = err as { code?: string; cause?: { code?: string } };
@@ -382,28 +392,60 @@ export async function currentIssuerSigner(db: Db, env: NodeJS.ProcessEnv = proce
  * A recorded key (retired, revoked, or the current signer) is never
  * re-activated: a key is used for one stretch only.
  */
+/** the configured key a rotation activates: `kid`, or the single configured key never recorded */
+function pickRotationTarget(configured: readonly ConfiguredSigningKey[], recorded: ReadonlySet<string>, kid: string | undefined): ConfiguredSigningKey {
+  if (kid !== undefined) {
+    const target = configured.find((k) => k.kid === kid);
+    if (!target) throw new IdentitySigningKeyError("signing_key_unknown", "that key id is not among the configured issuer keys");
+    if (recorded.has(target.kid)) {
+      throw new IdentitySigningKeyError("signing_key_already_recorded", "that key has already been used (or revoked); configure a new key to rotate to");
+    }
+    return target;
+  }
+  const fresh = configured.filter((k) => !recorded.has(k.kid));
+  if (fresh.length === 0) throw new IdentitySigningKeyError("signing_key_unavailable", "no configured issuer key is available to rotate to");
+  if (fresh.length > 1) throw new IdentitySigningKeyError("signing_key_ambiguous", "more than one configured key is available: name one with `kid`");
+  return fresh[0]!;
+}
+
+/**
+ * The key a rotation would activate, decided unlocked BEFORE the step-up: the
+ * `key_management` grant is bound to that exact kid, and a rotation that
+ * would be refused is refused without spending one. `rotateIdentitySigningKey`
+ * decides again under its lock.
+ */
+export async function resolveRotationTarget(db: Db, kid: string | undefined, env: NodeJS.ProcessEnv = process.env): Promise<string> {
+  const configured = await configuredIdentitySigningKeys(env);
+  const recorded = new Set((await db.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
+  return pickRotationTarget(configured, recorded, kid).kid;
+}
+
+/**
+ * Revoking `kid` would be refused (unknown, or already revoked): decided
+ * unlocked before the step-up, so such a revoke never spends a grant.
+ */
+export async function revokeRefusal(db: Db, kid: string): Promise<IdentitySigningKeyError | null> {
+  const [row] = await db.select({ revokedAt: identitySigningKeys.revokedAt }).from(identitySigningKeys).where(eq(identitySigningKeys.kid, kid));
+  if (!row) return new IdentitySigningKeyError("signing_key_not_found", "no such issuer signing key");
+  if (row.revokedAt) return new IdentitySigningKeyError("signing_key_already_revoked", "that issuer signing key is already revoked");
+  return null;
+}
+
+/** migration 0207: an issuer-key rotation is a `key_management` step-up bound to the key rotated TO */
+export const signingKeyRotateStepUp = (kid: string) => ({ kind: "key_management" as const, facts: { op: "signing_key_rotate", keyId: kid } });
+/** migration 0207: an issuer-key revocation is a `key_management` step-up bound to the key revoked */
+export const signingKeyRevokeStepUp = (kid: string) => ({ kind: "key_management" as const, facts: { op: "signing_key_revoke", keyId: kid } });
+
 export async function rotateIdentitySigningKey(
   db: Db,
-  opts: { kid?: string | undefined; actorUserId: string; env?: NodeJS.ProcessEnv },
+  opts: { kid?: string | undefined; actorUserId: string; env?: NodeJS.ProcessEnv; stepUp?: string },
 ): Promise<{ kid: string; previousKid: string | null }> {
   const configured = await configuredIdentitySigningKeys(opts.env ?? process.env);
   return db.transaction(async (tx) => {
     // serialise rotations: the current signer row is locked (and the table, when there is none)
     await tx.execute(sql`LOCK TABLE ${identitySigningKeys} IN SHARE ROW EXCLUSIVE MODE`);
     const recorded = new Set((await tx.select({ kid: identitySigningKeys.kid }).from(identitySigningKeys)).map((r) => r.kid));
-    let target: ConfiguredSigningKey | undefined;
-    if (opts.kid !== undefined) {
-      target = configured.find((k) => k.kid === opts.kid);
-      if (!target) throw new IdentitySigningKeyError("signing_key_unknown", "that key id is not among the configured issuer keys");
-      if (recorded.has(target.kid)) {
-        throw new IdentitySigningKeyError("signing_key_already_recorded", "that key has already been used (or revoked); configure a new key to rotate to");
-      }
-    } else {
-      const fresh = configured.filter((k) => !recorded.has(k.kid));
-      if (fresh.length === 0) throw new IdentitySigningKeyError("signing_key_unavailable", "no configured issuer key is available to rotate to");
-      if (fresh.length > 1) throw new IdentitySigningKeyError("signing_key_ambiguous", "more than one configured key is available: name one with `kid`");
-      target = fresh[0]!;
-    }
+    const target = pickRotationTarget(configured, recorded, opts.kid);
     const [previous] = await tx
       .update(identitySigningKeys)
       // database clock, never earlier than activation: a replica whose clock trails
@@ -416,7 +458,7 @@ export async function rotateIdentitySigningKey(
     await auditSigningKey(
       tx,
       opts.actorUserId,
-      { phase: "rotate", kid: target.kid, previousKid: previous?.kid ?? null },
+      { phase: "rotate", kid: target.kid, previousKid: previous?.kid ?? null, ...stepUpDetail(opts.stepUp) },
       previous
         ? `issuer signing key rotated; the previous key stays published for ${SIGNING_KEY_OVERLAP_SECONDS} s so the tokens it signed live to their expiry`
         : "issuer signing key activated by rotation (there was no active key)",
@@ -430,7 +472,7 @@ export async function rotateIdentitySigningKey(
  * signed is revoked, and the verifier refuses its kid. Never undone. A revoked
  * signer leaves no signer: the next signature fails until a rotation.
  */
-export async function revokeIdentitySigningKey(db: Db, opts: { kid: string; actorUserId: string }): Promise<{ tokensRevoked: number }> {
+export async function revokeIdentitySigningKey(db: Db, opts: { kid: string; actorUserId: string; stepUp?: string }): Promise<{ tokensRevoked: number }> {
   return db.transaction(async (tx) => {
     const [row] = await tx.select().from(identitySigningKeys).where(eq(identitySigningKeys.kid, opts.kid)).for("update");
     if (!row) throw new IdentitySigningKeyError("signing_key_not_found", "no such issuer signing key");
@@ -450,7 +492,7 @@ export async function revokeIdentitySigningKey(db: Db, opts: { kid: string; acto
     await auditSigningKey(
       tx,
       opts.actorUserId,
-      { phase: "revoke", kid: opts.kid, tokensRevoked: revoked.length },
+      { phase: "revoke", kid: opts.kid, tokensRevoked: revoked.length, ...stepUpDetail(opts.stepUp) },
       "issuer signing key revoked: every token it signed is refused from now on (ADR-0188 decision 12)",
     );
     return { tokensRevoked: revoked.length };

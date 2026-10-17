@@ -1650,6 +1650,15 @@ Open after the fix round (recheck follow-ups):
   revocation or upload for that domain waits on it. Under heavy issue load for one domain, an admin write may wait a
   request's duration. No pool sizing was changed.
 
+### As built: issuer-key writes under `key_management` (2026-10-17, migration 0207)
+
+Rotating and revoking the issuer's signing key (`POST /v1/identity/signing-keys/rotate`, `/:kid/revoke`, S3) now ask
+for a `key_management` step-up instead of `identity_manage`, bound to `{op, keyId}`; a rotation with no `kid` is bound
+to the key it resolves to before the step-up. An `identity_manage` grant can no longer rotate or revoke an issuer key,
+and a `key_management` grant cannot administer an identity. Binding a key to a workload identity stays
+`identity_manage` (decision 2). Full note: ADR-0186, "As built — 2026-10-17: a step-up kind of its own for key
+management".
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of

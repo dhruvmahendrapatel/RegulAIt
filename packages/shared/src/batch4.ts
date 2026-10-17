@@ -55,6 +55,9 @@ export const STEP_UP_ACTION_KINDS = [
   // ADR-0188 (migration 0180): creating, binding a key to, suspending or revoking a workload identity,
   // and every other identity administration write
   "identity_manage",
+  // migration 0207: rotating, revoking or retiring a signing key (the receipt key, the issuer key); a grant of any
+  // other kind never authorises one, and a key_management grant authorises nothing else
+  "key_management",
 ] as const;
 export type StepUpActionKind = (typeof STEP_UP_ACTION_KINDS)[number];
 
@@ -385,8 +388,8 @@ export const BATCH4_SETTING_COPY: Readonly<Record<Batch4SettingKey, { label: str
   stepUpActions: {
     label: "Actions that need a step-up",
     strict:
-      "All seven: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
-      "changing an owner and managing agent identities.",
+      "All eight: deciding an approval, relaxing a setting, overriding an evidence hold, break-glass, managing passkeys, " +
+      "changing an owner, managing agent identities and managing signing keys.",
     relaxed: "Each action removed from the list can be done with the session alone.",
   },
   toolApprovalSensitiveQuorum: {

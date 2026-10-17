@@ -99,8 +99,6 @@ export function stepUpRefusalOf(err: unknown): { action: StepUpAction; methods: 
   return { action, methods };
 }
 
-/** at most one step-up per action kind rides one request (the gateway reads at most one per kind, seven today) */
-const MAX_STEP_UPS = 7;
 
 /**
  * Run `call`, stepping up when it is refused for that, and retrying it with
@@ -193,7 +191,11 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   passkey_manage: "changing your passkeys",
   owner_change: "changing who owns this",
   identity_manage: "changing an agent identity",
+  key_management: "changing a signing key",
 };
+
+/** at most one step-up per action kind rides one request (the gateway reads at most one per kind): one per kind above */
+const MAX_STEP_UPS = Object.keys(STEP_UP_ACTION_COPY).length;
 
 export const STEP_UP_METHOD_COPY: Readonly<Record<string, string>> = {
   passkey: "Use a passkey",

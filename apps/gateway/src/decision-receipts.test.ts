@@ -307,7 +307,7 @@ describe.skipIf(!suppliedConnection && !baseConnection)("X21 real receipt pipeli
     expect((await retire("x21-race-key", member)).statusCode).toBe(403);
     const keyed = await retire("x21-race-key", admin);
     expect(keyed.statusCode).toBe(403);
-    expect(keyed.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
+    expect(keyed.json()).toMatchObject({ error: "step_up_required", actionKind: "key_management" });
     expect((await keyRow("x21-race-key"))!.retiredAt).toBeNull();
     expect((await retire("bad key", boot)).statusCode).toBe(400);
     expect((await retire("x21-never-recorded", boot)).statusCode).toBe(404);

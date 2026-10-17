@@ -3,9 +3,10 @@
  * suite about something ELSE copes with them.
  *
  * Under the strict defaults (`step_up_mode = required`, every kind in
- * `STEP_UP_ACTION_KINDS`, seven today) an approval decision, a settings
+ * `STEP_UP_ACTION_KINDS`, eight today) an approval decision, a settings
  * relaxation, a break-glass change, an evidence-hold override, a passkey
- * change, an owner change and an identity administration write each need a
+ * change, an owner change, an identity administration write and a signing-key
+ * operation each need a
  * fresh step-up from a person in a browser session, and an API key can never
  * give one. A suite that pins
  * pre-0186 behaviour by driving those actions through an API key turns

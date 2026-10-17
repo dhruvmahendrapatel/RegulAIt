@@ -1005,8 +1005,8 @@ export interface IdentitySigningKeyListView {
 export const IDENTITY_SIGNING_KID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /**
- * `POST /v1/identity/signing-keys/rotate` (S3; admin, `identity_manage`
- * step-up, audited). The new key's PRIVATE half is a deploy-time secret
+ * `POST /v1/identity/signing-keys/rotate` (S3; admin, a `key_management`
+ * step-up bound to the key rotated to, migration 0207; audited). The new key's PRIVATE half is a deploy-time secret
  * (`REGULAIT_IDENTITY_SIGNING_KEY`), never sent here: the operator deploys it
  * first, then this activates it and retires the current signer (overlap keeps
  * the retired key's public half in the JWKS until every token it signed has

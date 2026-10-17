@@ -4649,7 +4649,7 @@ export const orgSettings = pgTable(
     check("org_settings_step_up_max_age_seconds_check", sql`${t.stepUpMaxAgeSeconds} BETWEEN 30 AND 900`),
     check(
       "org_settings_step_up_actions_check",
-      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage"]'::jsonb`,
+      sql`jsonb_typeof(${t.stepUpActions}) = 'array' AND ${t.stepUpActions} <@ '["approval_decide", "settings_relax", "evidence_hold_override", "break_glass", "passkey_manage", "owner_change", "identity_manage", "key_management"]'::jsonb`,
     ),
     check(
       "org_settings_tool_approval_sensitive_quorum_check",
@@ -11813,7 +11813,7 @@ export const webauthnChallenges = pgTable(
     check("webauthn_challenges_used_check", sql`${t.usedAt} IS NULL OR ${t.usedAt} >= ${t.createdAt}`),
     check(
       "webauthn_challenges_action_kind_check",
-      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
+      sql`${t.actionKind} IS NULL OR ${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'key_management')`,
     ),
     check(
       "webauthn_challenges_action_digest_check",
@@ -11858,7 +11858,7 @@ export const stepUpGrants = pgTable(
     check("step_up_grants_method_check", sql`${t.method} IN ('passkey', 'totp', 'sso')`),
     check(
       "step_up_grants_action_kind_check",
-      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage')`,
+      sql`${t.actionKind} IN ('approval_decide', 'settings_relax', 'evidence_hold_override', 'break_glass', 'passkey_manage', 'owner_change', 'identity_manage', 'key_management')`,
     ),
     check("step_up_grants_action_digest_check", sql`${t.actionDigest} ~ '^[0-9a-f]{64}$'`),
     check(

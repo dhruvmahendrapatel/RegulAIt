@@ -872,3 +872,44 @@ relaxation since PR #378 (As built 2026-10-12 above; ADR-0101 As built 2026-10-1
 nothing. `zz-secure-default-stepups.test.ts` covers them. The web views (`McpRegistriesPanel`,
 `ExpectedServedModelCard`) send these writes through `withStepUp`. No demo seeder creates a registry or sets an
 expected served model, so the demo seed needs no change for them. Nothing further was built for this item.
+
+## As built — 2026-10-17: a step-up kind of its own for key management (migration 0207)
+
+Branch `keymgmt-stepup-1017`. Signing-key operations had borrowed other kinds: retiring a receipt key was a
+`settings_relax` step-up (`{op: "receipt_key_retire", keyId}`, As built 2026-10-12 above), and rotating or revoking
+the token issuer's key was an `identity_manage` step-up (ADR-0188 S3). A grant of either kind made for the same
+facts would therefore have been valid for a key operation. Both now ask for the new kind `key_management`:
+
+| Route | Facts the grant is bound to |
+|---|---|
+| `POST /v1/receipts/keys/:keyId/retire` | `{op: "receipt_key_retire", keyId}` |
+| `POST /v1/identity/signing-keys/rotate` | `{op: "signing_key_rotate", keyId}`: the key rotated TO, resolved before the step-up (a body with no `kid` used to bind `kid: null`, which named no key) |
+| `POST /v1/identity/signing-keys/:kid/revoke` | `{op: "signing_key_revoke", keyId}` |
+
+- **The kind.** `STEP_UP_ACTION_KINDS` gains `key_management` (eight kinds). The strict default includes it
+  (ADR-0180); migration 0207 widens the three CHECKs (`step_up_grants`, `webauthn_challenges`,
+  `org_settings.step_up_actions`), sets the column default, and adds the kind to the existing org row (first load, no
+  grandfathering). Removing it from the list is a relaxation, so it needs a `settings_relax` step-up like any other.
+- **Negative controls** (`zz-key-management-step-up.test.ts`): a `settings_relax` or `identity_manage` grant made for
+  the very facts of a key operation is refused and not spent; a `key_management` grant for another key or another op
+  is refused and not spent; each refusal leaves a `step-up-grant-refused` row naming `key_management`. Nothing in
+  `checkStepUp` changed: the grant claim already matches on kind AND digest, so these hold by construction and the
+  tests pin them.
+- **Refused before the step-up.** The rotation target, and a revoke of an unknown or already revoked key, are decided
+  before the step-up is asked for (as the receipt retire already was), so a refused key operation spends no grant.
+  Rotation decides again under its table lock.
+- **Audit.** The allow rows (`receipt-signing-key-retired`, `identity-signing-key-rotate`,
+  `identity-signing-key-revoke`) and the receipt retire's deny row carry `stepUpKind: "key_management"` beside the
+  method.
+- **Web.** The dialog reads "You're changing a signing key"; the org setting lists "Managing signing keys"; the
+  client's cap on step-ups per request is now the number of kinds it has copy for, not a literal.
+- **Not moved:** binding a key to a workload identity stays `identity_manage` (ADR-0188 decision 2 names it). The
+  data-key custody attestation (`POST /v1/security/data-key/attestations`) records where the key is held and changes
+  no key, so it has no step-up today; adding one is a separate decision. No route rotates the data key or an export
+  key: both are deploy-time secrets, rotated by redeploying.
+- **Migration journal:** 0207 is hand-written and has no journal entry yet (the master session adds it once the
+  earlier reserved numbers merge). Until then CI applies nothing from it, so the DB suites that need the kind fail.
+
+Open (not built): an emergency retire of the key in use. Today retiring the key this gateway signs with is refused
+(`receipt_key_in_use`, accepted as the stricter posture in STATE). After a compromise, the operator must configure a
+replacement and restart, and only then retire it. A recommendation is in the builder report on the PR.
