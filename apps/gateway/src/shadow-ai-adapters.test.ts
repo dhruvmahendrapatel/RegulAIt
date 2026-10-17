@@ -139,6 +139,8 @@ describe("the adapter registry states what it cannot do", () => {
     // the coverage claim ADR-0055 makes must survive this slice intact
     expect(body.posture).toMatch(/No active discovery source is enabled, so nothing is scanned/);
     expect(body.posture).toMatch(/Coverage remains exactly what you exported/);
+    // ADR-0195: what an active source adds is stated as a limit too, never as "complete" coverage
+    expect(body.posture).toMatch(/adds only what that one source can read/);
     expect(body.pipeline).toMatch(/layer, not a second importer/);
   });
 

@@ -21,9 +21,60 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-17 - shadow-AI active discovery designed and building, the egress step-up, compose engines, and a parallel
+cloud-builder wave.** Full record: [sessions/2026-10-17-session-01.md](sessions/2026-10-17-session-01.md). This
+paragraph supersedes the 2026-10-16 one below.
+- **Merged (UTC 2026-10-17):**
+  - #392: engine dependency advisories with no patch the pins allow, risk-accepted by the owner until 2026-11-16;
+  - #394: batch 7 hygiene (test timing, IdChip target size, CycloneDX specVersion);
+  - #395: adding any egress allow entry now needs a `settings_relax` step-up (ADR-0034 D4);
+  - #396: compose engines (engine task images, executor input volume, Caddy digest pin);
+  - #398: **ADR-0195 shadow-AI active discovery**, amending ADR-0055, 0071, 0083 and 0122:
+    - read-only scanning of code repos, AWS, GCP, Azure and user machines;
+    - detection is data;
+    - federated credentials are the default, and static keys are an audited relaxation;
+    - pseudonymity for people and devices;
+  - #400: the R15 endpoint-agent design spike (SD4);
+  - #399: ADR-0190 owner decisions C and D (migration 0201), merged at 05:21Z.
+- **Last migration on main:** 0201. Queued, in order:
+  - 0202: #397, runc L1 backend and a versioned engine-worker profile (reviewed; journal entry added at b52ed33 after
+    #399 merged; back on HOLD for a CI failure in the 0183 retirement invariant, fix in progress);
+  - 0203: #403, SD0 discovery foundation (approved with conditions; final fixes in).
+- **ADR-0195 slices in review, all HOLD:**
+  - SD0 #403;
+  - SD1 repo scanners #402 (approved, final head e44523f);
+  - SD2 cloud scanners #404 (third recheck running at 0f66701);
+  - SD3 endpoint discovery without an agent #401 (approved).
+
+  SD1 to SD3 merge after SD0. Federated cloud credentials fail with an explicit reason until the RS256 signer slice lands
+  (Entra accepts RS256 only).
+- **Owner decisions 2026-10-17:**
+  - AI products, competitors included, may appear as detection-catalogue data and in findings, never in prose or UI copy;
+  - the SD4 answers are recorded in ADR-0195;
+  - extra builders run as separate cloud sessions;
+  - the enterprise UI bar is WCAG 2.2 AA plus keyboard, three browsers at five viewports, a visual-consistency audit, and
+    performance budgets;
+  - engine images go to private GHCR, without public transparency-log signing unless approved;
+  - the google-auth-library STS transporter bug (still present in 11.3.1 and on its main branch) is not reported
+    upstream; our workaround stays, and it is re-checked on every upgrade.
+- **Cloud builder wave (HOLD, held by branch until reviewed):**
+  - engine image publishing (#405);
+  - the SD4a endpoint agent (#411);
+  - UI lows (#406, reviewed and released);
+  - server secure-by-default gaps (#408, 0204 reserved);
+  - reliability and test hygiene (#407, 0205 reserved);
+  - the enterprise UI test harness (#410, with a new ADR);
+  - decision-facts relaxation evidence (0208 reserved);
+  - the gateway log-leak fix with SPIFFE follow-ups.
+- **Still open:**
+  - #385, the gVisor CI job, which waits on an upstream runsc release (check on 2026-10-20). L2 stays UNVERIFIED.
+- **Dev-host scrub:** concrete developer host names, addresses and instance ids in this file are replaced with
+  `<dev-host>`, `<dev-host-ip>`, `<dev-instance>`
+  and `<dev-volume>`, and the AWS account ids with `<mgmt-account>` and `<workload-account>`.
+
 **2026-10-16 - SPIFFE trust bundles audited, engines under execution profiles, an internal TLS front for the
 executor, and the B8 runbooks.** Full record: [sessions/2026-10-16-session-01.md](sessions/2026-10-16-session-01.md).
-This paragraph supersedes the 2026-10-15 queue below.
+Superseded by the 2026-10-17 paragraph above; it supersedes the 2026-10-15 queue below.
 - **Merged (UTC 2026-10-16)**, after #384 (the 2026-10-15 docs PR):
   - #386 ADR-0190 owner decision C (docs only). A person's own stdio call (no agent) stays L3 by default. An admin
     may lower it to L2 for interactive sessions only (never an API key), per server or project, audited with
@@ -3506,7 +3557,7 @@ default-deny JIT provisioning (ADR-0025); API keys remain the programmatic/IDE c
 **IDE interception** ships as provider-shaped translation shims (`/v1/messages`,
 `/v1/chat/completions`) over the one governed dispatch core, admin-gated and off by default
 (ADR-0020/0024). Everything runs on the dev EC2 box, now over **real HTTPS** at
-**`https://3-229-246-126.sslip.io`** — a browser-trusted Let's Encrypt certificate terminated by
+**`https://<dev-host>`** — a browser-trusted Let's Encrypt certificate terminated by
 Caddy on-box, at zero AWS cost (ADR-0029). Still **dev-grade, explicitly NOT production**. The
 box **powers itself off outside 08:00–20:00 Mon–Fri America/New_York** (ADR-0032) on an Elastic
 IP, so the address — and therefore the URL and its certificate — survives the cycle. **CI is
@@ -3521,8 +3572,8 @@ row and leaves every credential undecryptable). Both are tracked in
 
 The infrastructure bootstrap phase (EPIC-01) is **complete**. The private GitHub repo
 [dhruvmahendrapatel/RegulAIt](https://github.com/dhruvmahendrapatel/RegulAIt) is live with the
-full scaffold. AWS is a two-account Organization (Management `913436627353` / Workload
-`regulait-dev` `517506432475`), IAM Identity Center only (no long-lived keys), and the full
+full scaffold. AWS is a two-account Organization (Management `<mgmt-account>` / Workload
+`regulait-dev` `<workload-account>`), IAM Identity Center only (no long-lived keys), and the full
 security baseline — org-wide CloudTrail, GuardDuty, Security Hub (FSBP + CIS standards), AWS
 Config with a cross-account aggregator, account-level S3 Block Public Access, a $5/month Budget,
 3 SCPs, and all three permission sets (`Admin-BreakGlass`, `Deploy-Builder`, `ReadOnly-Audit`) —
@@ -3753,7 +3804,7 @@ IMDSv2-only, SSM Session Manager access with NO ssh keypair, pulls a source tarb
 module-owned private S3 bucket, `docker compose up -d --build` with per-deploy random
 runtime config) composed into `infra/environments/regulait-dev-app` — its own state key
 (`regulait-dev-app/terraform.tfstate`) so app deploys can never re-plan the org/security
-baseline. Applied: instance `i-013c62adc887c76bb`, `http://3.237.199.248:3000` (/app +
+baseline. Applied: instance `<dev-instance>`, `http://<dev-host-ip>:3000` (/app +
 /admin verified 200 through the public IP; seed keys handed to the user in-chat, never
 committed). Dev-grade by declaration: HTTP only, port open to the world but everything
 key-gated, demo data, ~$15–30/mo (will trip the $5 foundation budget alert — expected).
@@ -4206,9 +4257,9 @@ triggers kept commented for a one-line revert once minutes top up); local verifi
 (`pnpm -r build` + `check-ui-syntax` + `pnpm -r test`) is the gate meanwhile. PR #38 carries both
 and is MERGED — `main` builds again. The dev stack was redeployed from the branch HEAD (= `main` +
 those two commits, byte-identical app to post-merge main) because `main` itself didn't build until
-#38 merged: `docker compose up -d --build` on `i-013c62adc887c76bb`, gateway container recreated,
+#38 merged: `docker compose up -d --build` on `<dev-instance>`, gateway container recreated,
 the Postgres volume (pgdata) + per-boot secrets override preserved, migrations 0030–0033 applied
-(`deploy_targets` present), `/app` + `/admin` 200 on-box at `http://3.237.199.248:3000`. Still
+(`deploy_targets` present), `/app` + `/admin` 200 on-box at `http://<dev-host-ip>:3000`. Still
 dev-grade, NOT production. The user then directed the four remaining open-item areas in parallel:
 pillar-3 infra-ops AUTOMATION (drift/CVE/cert/backup — the operational half beyond the §8.2
 governed-ops layer), clearing the ADR-0015/0016 + pillar-2 deferrals, and a deeper UX/a11y pass.
@@ -4280,7 +4331,7 @@ depth, Azure/GCP infra, A4.
 **Waves 7–8 addendum, 2026-08-01 — TLS, hardening, true SPA parity, username login, and a
 terraform landmine (PRs #76–#84).** Written the same day, per the lesson recorded above.
 
-- **#77 / ADR-0029 — zero-cost TLS.** Caddy in the compose stack, `3-237-199-248.sslip.io`
+- **#77 / ADR-0029 — zero-cost TLS.** Caddy in the compose stack, `<dev-host>`
   (free wildcard DNS, no domain purchase), real Let's Encrypt certs. ALB+ACM declined on cost;
   self-signed rejected as not honestly "TLS". Cert volume is named (without it every redeploy
   re-issues and burns the rate limit); HSTS deliberately OFF on an IP-derived hostname; :80 must
@@ -4774,11 +4825,11 @@ the legacy UI, and get HTTPS live. All are done or in flight, and the route ther
 real defects that had been latent precisely because nothing was exercising them.
 
 **Infra applied (#84's plan, verified `0 add / 2 change / 0 destroy`).** Ports 80/443 opened, the
-`:3000` ingress removed. No instance replacement, so the Postgres volume (`vol-0573958930d696417`)
+`:3000` ingress removed. No instance replacement, so the Postgres volume (`<dev-volume>`)
 survived — that was the whole point of the #84 landmine fix. **But the apply changed `user_data`,
 which the EC2 provider applies by STOPPING AND STARTING the instance**, which released the
-auto-assigned public IPv4. The address moved `3.237.199.248` → `98.86.163.252`, and later again to
-`3.229.246.126` on Elastic-IP attachment. Worth internalising: *any* `user_data` edit is an
+auto-assigned public IPv4. The address moved `<dev-host-ip-1>` → `<dev-host-ip-2>`, and later again to
+`<dev-host-ip-3>` on Elastic-IP attachment. Worth internalising: *any* `user_data` edit is an
 address change on a box whose hostname is derived from its address.
 
 **Defect 1 — the `tls` profile had never once started.** It shipped in #77 and was never exercised
@@ -4791,7 +4842,7 @@ listening on 80 or 443. Since the gateway is loopback-only since ADR-0029, this 
 **no route in at all**. Fixed in #88 with an explicit `ip_range: 172.28.1.0/24` confining dynamic
 allocation clear of the pinned address.
 
-**HTTPS is live and verified** (#88 + deploy): Let's Encrypt `CN=3-229-246-126.sslip.io`, `/`→302,
+**HTTPS is live and verified** (#88 + deploy): Let's Encrypt `CN=<dev-host>`, `/`→302,
 `/ui`→200, `/health`→200, port 80→308 redirect, chain validates. Deploys preserve
 `REGULAIT_DATA_KEY` — regenerating it would make every stored credential permanently undecryptable.
 
@@ -4978,7 +5029,7 @@ first).
 | COMPONENT-04 | RegulAIt GitHub repo | **live and private**: https://github.com/dhruvmahendrapatel/RegulAIt | EPIC-01 |
 | COMPONENT-05 | Admin portal | **MVP shipped** — single-file API-client portal at /admin (ADR-0012), §6's eight panels + §10.4 cost surface | EPIC-02, ADR-0012 |
 | COMPONENT-06 | Policy/allow-list engine (`packages/policy-kernel`) | **shipped** — default-deny kernel over MCP tools, agents, connectors; role grants (UNION-MAX, ADR-0014), per-user revocations, scoped rules, lead ceilings; pure, no I/O | EPIC-02, ADR-0009, ADR-0014 |
-| COMPONENT-07 | Dev demo stack on AWS (`regulait-dev-app`) | **live** — EC2 `i-013c62adc887c76bb`, http://3.237.199.248:3000, dev-grade only; teardown = `terraform destroy` | ADR-0013 |
+| COMPONENT-07 | Dev demo stack on AWS (`regulait-dev-app`) | **live** — EC2 `<dev-instance>`, http://<dev-host-ip>:3000, dev-grade only; teardown = `terraform destroy` | ADR-0013 |
 | COMPONENT-10 | Workflow orchestrator (`packages/workflow-kernel` + gateway) | **shipped** — declarative templates, stage state machine, executable git/build/check/deploy/rollback stages, assignment matching | EPIC-03 |
 | COMPONENT-11 | Orchestration engine (`packages/orchestration-kernel` + gateway) | **shipped** — task-graph DAG, PM/Team-Lead/Worker delegation, transitive entitlement + budget ceilings | EPIC-05, ADR-0016 |
 | COMPONENT-12 | Optimizer (`packages/optimizer-kernel`) | **shipped** — all seven pillar-6 techniques (routing, compaction, lazy tools, prompt caching, edit-vs-rewrite, file preprocessing, semantic caching + batching estimator) | EPIC-04 |
@@ -5231,7 +5282,7 @@ restore it, because adding any new test file reshuffles the order and can surfac
 **The wave completed and deployed, 2026-08-02→03 (session-06, PR #105 `27205e7`).** All 26 ADRs
 (0036–0061) built across migrations 0049–0073; suite **1,004 → 1,611** across 100 files with no
 regression. Merged to `main` and **deployed to the dev box** — 73 migrations applied, live at
-`https://3-229-246-126.sslip.io/ui` on a valid Let's Encrypt certificate, login verified
+`https://<dev-host>/ui` on a valid Let's Encrypt certificate, login verified
 end-to-end over the public URL.
 
 Three things from the back half worth carrying forward:

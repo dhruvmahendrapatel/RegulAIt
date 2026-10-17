@@ -170,7 +170,7 @@ also confirmed that no other regulAIt suite module owns discovery or scanning, s
 
 ### Slices
 
-- **SD0 Foundation** (migration 0203; 0201 and 0202 are claimed by builds in flight): discovery
+- **SD0 Foundation** (migration 0202; 0201 is claimed by the ADR-0190 isolation-admin build in flight): discovery
   sources, scanner credentials, scan runs and schedules; the new signature kinds, subject kinds and signal sources;
   the pseudonym table; enable, widen and credential step-ups; posture rows and the rewritten posture sentences; an
   admin "Discovery sources" page; the scan worker with leased runs. Depends on #395 (egress step-up).
@@ -214,13 +214,13 @@ two contribute detection data under their licences.
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
 
-## As built: SD0 foundation (2026-10-17, migration 0203)
+## As built: SD0 foundation (2026-10-17, migration 0202)
 
-**Status: built on branch `sd0-discovery-foundation`; the migration journal entry waits for 0202 to merge.** No
+**Status: built on branch `sd0-discovery-foundation`; migration 0202 with its journal entry (idx 202) after 0201.** No
 scanner ships: the production registry is empty, so no source can be created yet and the admin page shows every
 kind as "not built yet" with the slice that builds it.
 
-1. **Migration 0203** (hand-written; no function and no trigger, so the 0185 guard has nothing new to check):
+1. **Migration 0202** (hand-written; no function and no trigger, so the 0185 guard has nothing new to check):
    - `discovery_sources`: `kind` (the ten kinds), `target` (a JSON object), `scope` (`{orgLevel, include[]}`, CHECKed),
      `enabled` default false, `schedule_interval_seconds` (3600 to 30 days, default daily), `version` for
      compare-and-set, `next_run_at`/`last_run_at`, who enabled and disabled it. Unique by `lower(name)`.
@@ -266,7 +266,7 @@ kind as "not built yet" with the slice that builds it.
      one sent by the admin. Revoking is free and destroys the secret. No view selects the ciphertext.
    - Settings: lengthening the warning age or the endpoint retention is a `settings_relax` step-up; shortening is free.
    - Reveal: its own step-up kind `pseudonym_reveal` (master decision on #403: revealing a name is not a settings
-     relaxation), facts `{op: "pseudonym_reveal", pseudonym}`. Migration 0203 adds the kind to the `step_up_grants`,
+     relaxation), facts `{op: "pseudonym_reveal", pseudonym}`. Migration 0202 adds the kind to the `step_up_grants`,
      `webauthn_challenges` and `org_settings.step_up_actions` CHECKs, to the column default and to the existing org row
      (first load); `STEP_UP_ACTION_KINDS` has eight kinds and the dialog says "revealing a person's name". A
      `settings_relax` grant does not reveal. The audit names the pseudonym, never the name.
@@ -394,6 +394,59 @@ kind as "not built yet" with the slice that builds it.
 read methods (SD1); `SHADOW_AI_CATALOG_V2` and seed rows for the artifact kinds (SD1/SD3); the endpoint-notice
 template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" state for cloud sources (SD2).
 
+## Owner decisions (2026-10-17): endpoint agent and detection data
+
+Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-spike.md)). Nothing above is changed.
+
+**Owner decisions (2026-10-17).**
+
+1. **Apple signing.** A company Apple Developer account. The Developer ID signing identity is kept in a protected CI
+   secret store that only release jobs can use.
+2. **Windows signing.** An OV code-signing certificate, with its key in a cloud HSM-backed key service called from CI.
+3. **Enrolment.** A per-org bulk enrolment token, delivered by MDM, capped, expiring and revocable. Each device then
+   creates its own key and identity (ADR-0188 S7 pattern, new workload kind `endpoint_agent`).
+4. **Device keys.** Hardware-bound by default: Secure Enclave P-256 on macOS, TPM on Windows and Linux. The OS-keystore
+   fallback is used only where no such hardware exists, and posture flags it. A macOS build runner is needed.
+5. **Product names in detection data.** AI products, including ones RegulAIt competes with, may appear as detection
+   catalogue data (names, domains, bundle ids, extension ids, package names) and in the findings it produces, because
+   customers need to see them. They never appear in marketing, docs prose, ADR prose, comparisons or UI copy.
+
+**Technical calls recorded with them (master, 2026-10-17).**
+
+- **The agent runs only as the logged-in user.** There is no root/SYSTEM component in v1. The package's one-time
+  install step, which runs as root under MDM, redeems the bulk token for a per-device enrolment ticket (only when the
+  device holds no valid one, and never failing an MDM install because redemption failed). The fleet token is never
+  readable by ordinary users. The ticket file is readable only by the agent's group, and every registration is
+  audited against the ticket id. A leaked ticket is usable from any machine until it expires; hardware-binding it is
+  a later slice.
+- **Endpoint findings record key presence only.** A finding carries the provider, the file or variable, and the key
+  name. It carries no 8-character prefix: decision 18's "names (never values)" governs endpoints.
+- **Key patterns are compiled into the agent** from the gitleaks-derived `dlp.secret.*` set (Go RE2). The collection
+  manifest carries only paths, globs and names.
+- **Pseudonyms are applied on the server.** Device user names and device hostnames are keyed-hashed server-side, and
+  their display names are stored encrypted. Revealing one needs a `pseudonym_reveal` step-up and is audited. A device
+  user name is self-reported, and the reveal UI says so. Endpoint evidence keeps the 90-day default retention of
+  decision 20.
+- **Three separate signing keys.** Agent releases are signed in the ADR-0041 manifest format under their own key id,
+  separate from the ADR-0041 control-plane release key. Decision 18's query pack and collection manifest use the same
+  format under a further key id of their own. A customer-side verify step ships with every pack, and the gateway
+  verifies the pack manifest when it serves or accepts it. SD3's signer hook calls the same signing stage.
+  `infra/release-keys/` is not reused. MDM is the only install channel. In v1, self-update (a relaxation, off by
+  default) only downloads, verifies and notifies the user and the admin. A privileged install helper is out of
+  scope, because it would bring back a resident root component.
+- **Bulk token defaults.** The admin must set the device cap (there is no unlimited default). Expiry defaults to 30
+  days, and lengthening it is a relaxation. The admin is alerted as the cap is approached. Rotation is by MDM
+  re-push.
+- **ADR-0176 build-tool exceptions.** WiX (MS-RL) and `rcodesign` (MPL-2.0) are accepted as written exceptions, with
+  the unmet requirement stated in R15 §4.4: no permissively licensed tool builds an MSI, or signs and notarises Mach-O
+  from Linux. Both are build tools only; their output is not covered by their licences and nothing of them is
+  shipped.
+- **Linux TPM.** The agent uses the TPM only where `/dev/tpmrm0` is already reachable by the user. Adding console
+  users to the `tss` group is an audited admin opt-in (a relaxation), because it grants raw TPM access. Otherwise the
+  software fallback applies and posture flags it.
+- **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
+  for darwin.
+
 ## SD3 build notes (2026-10-17)
 
 - The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
@@ -410,7 +463,7 @@ template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" sta
   disabled: its presence is not AI use. The two LAN-listener trait rows stay enabled and are marked low confidence
   (coordinator, 2026-10-17).
 - Importers bound each file at 5,000,000 bytes and 20,000 rows (one osquery line at 262,144 characters, one cell at
-  1,024); every row not imported is refused with its line and counted. A row with a value, command-line or contents
+  512); every row not imported is refused with its line and counted. A row with a value, command-line or contents
   column is refused. Decorations are discarded. Device names are pseudonymised as well as device users, because host
   names often carry a person's name. There is no default pseudonym hook; a missing hook refuses the import.
 - The pack is unsigned until SD4; the manifest carries its SHA-256 and a signer seam.
@@ -420,7 +473,7 @@ template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" sta
   commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only the devices
   and device users of committed sightings get SD0 pseudonyms; the user travels as `actorPseudonym`. `POST /v1/discovery/endpoint-signatures/seed` installs the
   seed as `identifier` rows (ports as `port:<n>`, trait sets as `trait:<sorted set>`). Endpoint retention is SD0's.
-- With SD0's follow-up columns (migration 0203): device names use the `device` pseudonym kind and device users
+- With SD0's follow-up columns (migration 0202): device names use the `device` pseudonym kind and device users
   `device_user` (sent as `actorPseudonym`); seed rows carry `os` (one OS, or any when SD3 scoped a row to two),
   `ecosystem` (`vscode`, `jetbrains`, `firefox`, `safari`, and `chromium` for Chrome and Edge), `tool_id`, `note` and
   `confidence` (`high`, and `low` on the two LAN-listener trait rows); upload-fed sources are never scheduled. An

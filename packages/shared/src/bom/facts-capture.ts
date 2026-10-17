@@ -64,6 +64,7 @@ import {
   bomRowDigest,
   bomUuidSchema,
   DECISION_FACTS_CURRENT_VERSION,
+  decisionExecutionRelaxationSchema,
   decisionFactsV2Schema,
   isBomSpiffeId,
   projectBomRow,
@@ -218,6 +219,16 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
       : null;
     const outcome = asText(pl.outcome);
     const report = asText(pl.reportSha256);
+    // ADR-0190 owner decision C: the relaxation the decision's requirement relied on, as the gateway wrote it on the
+    // decision row in this transaction (`detail.execution.relaxation`). Absent = none. A malformed one is a capture
+    // failure (fail closed), never dropped: the decision would otherwise read as an unrelaxed L3 requirement.
+    const rawRelaxation = asRecord(asRecord(row.detail)?.execution)?.relaxation;
+    let relaxation: DecisionExecutionFacts["relaxation"] = null;
+    if (rawRelaxation !== undefined && rawRelaxation !== null) {
+      const parsed = decisionExecutionRelaxationSchema.safeParse(rawRelaxation);
+      if (!parsed.success) throw new DecisionFactsCaptureError(row.id, "the decision names a person's own stdio relaxation that is not well formed (ADR-0190 owner decision C)");
+      relaxation = parsed.data;
+    }
     const att = p.executorAttestation;
     return {
       workloadKind: pl.workloadKind,
@@ -233,6 +244,8 @@ export function buildExecutionFacts(row: DecisionAuditRow, reads: DecisionFactRe
       offerId: outcome === "offered" ? asText(pl.offerId) : null,
       imageDigest: asText(pl.imageDigest),
       runtimeFlagsSha256: asText(pl.runtimeFlagsSha256),
+      // written only when one was used: facts with none stay byte-identical to the pre-0201 capture
+      ...(relaxation ? { relaxation } : {}),
       attestation:
         outcome === "refused"
           ? null
