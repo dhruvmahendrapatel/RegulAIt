@@ -70,13 +70,18 @@ The steps depend on your product; these are the parts every route has in common.
 4. **Collect the results.** osquery's filesystem logger writes JSON lines to its results log; your MDM, EDR or log
    pipeline can gather those files. Event, snapshot and batch result formats are all accepted, as JSON lines or as one
    JSON array.
-5. **Import them into RegulAIt** as `endpoint_osquery` evidence. The import route and admin page arrive with ADR-0195's
-   SD0 foundation (pending in this build; see "Verification status").
+5. **Import them into RegulAIt.** In **Admin → Discovery sources**, add an "osquery results (no agent)" source, enable
+   it, and press **Install endpoint signatures** once so your catalogue holds the endpoint signature rows. Then use
+   **Import endpoint evidence**: a dry run shows what matches and writes nothing; **Import** writes the findings. The
+   same import is `POST /v1/discovery/sources/:sourceId/endpoint-imports` with `content`, `mode` (`dry_run` or `apply`)
+   and, if the pack has another key in your osquery config, `packName`. Results arrive as findings in Shadow-AI
+   discovery, one per device and tool.
 
 ## Importing an MDM or EDR software inventory
 
 RegulAIt has no vendor-named presets (ADR-0195 decision 12). Export your software inventory as CSV or JSON and
-import it as `endpoint_inventory` evidence with a column mapping:
+import it into an "MDM or EDR inventory (no agent)" source, the same way as osquery results, with a column mapping
+(`config.mapping`, and `config.itemTypeValues` for the item type words):
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -95,9 +100,10 @@ is refused with its line number; nothing is dropped silently.
 
 ## Privacy defaults
 
-- Device users, Windows SIDs and device names are replaced by a keyed hash (one key per tenant). The username part of
-  every path (`/Users/<name>/`, `/home/<name>/`, `C:\Users\<name>\`) is replaced the same way. The display name is kept
-  encrypted in a separate table and is revealed only under step-up, with an audit record (SD0).
+- Usernames, Windows SIDs and home paths are used only inside the import request, under a key made for that request,
+  and are not stored in any form. A finding names its device by a keyed hash (one key per tenant); the device name is
+  kept encrypted in a separate table and is revealed only under step-up, with an audit record.
+- The file itself is not kept: only its SHA-256 digest is recorded on the run.
 - Endpoint evidence is kept for 90 days by default. Lengthening that is a relaxation an admin makes and is audited.
 - RegulAIt never contacts a device and never tests a key it learns about.
 
@@ -121,6 +127,7 @@ is refused with its line number; nothing is dropped silently.
   committed files match the generator.
 - **Pending execution**: running the pack under osquery on macOS, Windows and Linux. osquery is not installed in the
   build environment, so no query has been executed and no result shown in this document comes from a real device.
-- **Pending (SD0)**: the import route, the `endpoint_osquery` and `endpoint_inventory` sources and the 90-day retention
-  setting.
+- **Pending CI**: the import route and the signature-seed route against a real database
+  (`apps/gateway/src/zz-adr0195-sd3-endpoint-import.test.ts`); PostgreSQL is not available in the build environment, so
+  that suite was typechecked only.
 - **Pending (SD4)**: pack signing.

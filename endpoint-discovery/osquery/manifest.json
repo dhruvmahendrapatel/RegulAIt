@@ -5,7 +5,7 @@
   "file": "regulait-ai-discovery.conf",
   "sha256": "6cf008260ce4b77039635e719d89c6d02b288cd737c817411249d0be00204d83",
   "bytes": 14481,
-  "seedSha256": "e29a74450fae313b9047965960b46d67edcdfc37b9e2ced7d8c17a8e2e4eed0a",
+  "seedSha256": "b744aed899f46e7a60140782834e3703b40cbff3ca236ea7afb8faae7bd4b8f9",
   "queries": [
     {
       "name": "ai_apps_macos",

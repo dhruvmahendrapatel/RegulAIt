@@ -34,6 +34,7 @@
  */
 import type { DiscoveryEvidenceKind, DiscoveryPseudonymKind, DiscoverySourceKind, DiscoverySubjectKind, ArtifactSignatureKind } from "@regulait/shared";
 import type { DiscoveryCredentialMode } from "@regulait/shared";
+import { ENDPOINT_IMPORT_SCANNERS } from "./endpoint-discovery-scanners.js";
 
 /** the source as a scanner sees it */
 export interface ScanSource {
@@ -118,10 +119,13 @@ export function scannerRegistry(scanners: readonly Scanner[]): ScannerRegistry {
 }
 
 /**
- * THE PRODUCTION REGISTRY. Empty in SD0: SD1 to SD4 add their scanners here
+ * THE PRODUCTION REGISTRY. Empty in SD0; SD3 adds the two upload-fed endpoint kinds. SD1, SD2 and SD4 add their scanners here
  * (one line each), and the admin page and `POST /v1/discovery/sources` read it.
  */
-export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([]);
+export const DISCOVERY_SCANNERS: ScannerRegistry = scannerRegistry([
+  // ADR-0195 SD3: the no-agent endpoint kinds, fed by upload (endpoint-import-routes.ts)
+  ...ENDPOINT_IMPORT_SCANNERS,
+]);
 
 /**
  * TEST ONLY: a scanner that calls nothing and reports the observations it was

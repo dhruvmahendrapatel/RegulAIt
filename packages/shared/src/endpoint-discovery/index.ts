@@ -6,4 +6,5 @@ export * from "./osquery-pack.js";
 export * from "./osquery-import.js";
 export * from "./inventory-import.js";
 export * from "./pack-manifest.js";
+export * from "./catalogue.js";
 export { ENDPOINT_REGISTRY_SOURCE_COMMIT } from "./registry-signatures.generated.js";

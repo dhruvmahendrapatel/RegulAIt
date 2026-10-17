@@ -326,11 +326,22 @@ template and query pack (SD3); the agent (SD4); the air-gapped "unreachable" sta
   (`listen_all_interfaces`, `user_writable_path`, `hidden_path`, `background_agent`). SD0 aligns its matcher columns
   to these.
 - Seed: 90 rows derived from the pinned registry (commit `12b7bbf7`), 12 written by us (local runtime names and default
-  ports, AI CLI npm packages, three hidden-assistant trait rows). The Notion app rows are imported disabled: a
-  general-purpose app's presence is not AI use.
+  ports, AI CLI npm packages, three hidden-assistant trait rows). Rows for a general-purpose desktop app are imported
+  disabled: its presence is not AI use. The two LAN-listener trait rows stay enabled and are marked low confidence
+  (coordinator, 2026-10-17).
 - Importers bound each file at 5,000,000 bytes and 20,000 rows (one osquery line at 262,144 characters, one cell at
   1,024); every row not imported is refused with its line and counted. A row with a value, command-line or contents
   column is refused. Decorations are discarded. Device names are pseudonymised as well as device users, because host
   names often carry a person's name. There is no default pseudonym hook; a missing hook refuses the import.
 - The pack is unsigned until SD4; the manifest carries its SHA-256 and a signer seam.
+- Phase B (wired into SD0): `endpoint_osquery` and `endpoint_inventory` are registered as upload-fed scanners (a
+  scheduled run observes nothing). `POST /v1/discovery/sources/:sourceId/endpoint-imports` parses the file with a
+  request-local keyed hash, matches it against the enabled catalogue, opens a run on the source holding its lease, and
+  commits through SD0's fenced path (`applyDiscoveryRunObservations`, factored out of the worker). Only committed
+  devices get an SD0 pseudonym; usernames are never stored. `POST /v1/discovery/endpoint-signatures/seed` installs the
+  seed as `identifier` rows (ports as `port:<n>`, trait sets as `trait:<sorted set>`). Endpoint retention is SD0's.
+- What SD0 lacks for SD3 (reported, not changed here): a `device` pseudonym kind (device names use `device_user`
+  until it exists); a place on an observation or finding for the device user; catalogue columns for a row's OS,
+  extension ecosystem, tool id, note and confidence (the LAN-listener rows' low confidence is not stored); and a way
+  to keep upload-fed sources off the schedule.
 

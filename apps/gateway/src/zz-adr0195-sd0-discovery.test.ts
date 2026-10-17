@@ -2,8 +2,8 @@
  * ADR-0195 SD0 — SHADOW-AI ACTIVE DISCOVERY, THE FOUNDATION, on a real database
  * through the real app (`buildApp`) and its hooks:
  *
- *  - HONEST REGISTRY: with the production registry (empty in SD0) every kind is
- *    "not built" and no source can be created.
+ *  - HONEST REGISTRY: with the production registry (only SD3's two upload-fed
+ *    endpoint kinds) every other kind is "not built" and no such source can be created.
  *  - ADMIN ONLY: a non-admin key reads nothing.
  *  - STEP-UPS, with negative controls: enabling needs a `settings_relax`
  *    step-up bound to the source's kind, target and scope (refused without one,
@@ -184,10 +184,11 @@ afterAll(async () => {
 });
 
 describe("ADR-0195 SD0 discovery foundation", () => {
-  it("the production registry is empty: every kind is not built, and no source can be created", async () => {
+  it("the production registry holds only SD3's upload-fed endpoint kinds: no other source can be created", async () => {
     const k = await inject("GET", "/v1/discovery/scanners", AUTH, undefined, bare);
     expect(k.statusCode).toBe(200);
-    expect((k.json().kinds as Array<{ built: boolean }>).every((x) => !x.built)).toBe(true);
+    const kinds = k.json().kinds as Array<{ kind: string; built: boolean }>;
+    expect(kinds.filter((x) => x.built).map((x) => x.kind).sort()).toEqual(["endpoint_inventory", "endpoint_osquery"]);
     const c = await inject("POST", "/v1/discovery/sources", AUTH, { name: `none-${RUN}`, kind: "repo_github", target: { org: "x" }, scope: { orgLevel: true, include: [] } }, bare);
     expect(c.statusCode).toBe(409);
     expect(c.json().error).toBe("scanner_not_built");

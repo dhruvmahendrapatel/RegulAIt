@@ -502,6 +502,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
@@ -5425,6 +5426,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0195 SD0 — shadow-AI ACTIVE discovery: sources (off until enabled with a step-up), scanner credentials
   // (never returned), scan runs and settings. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
   registerDiscoveryRoutes(app, db, {
+    dataKey: opts.dataKey,
+    ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+  });
+  // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
+  // and the endpoint signature seed. Admin-only by default.
+  registerEndpointImportRoutes(app, db, {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });

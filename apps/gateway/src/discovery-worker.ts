@@ -266,7 +266,7 @@ async function renewLease(db: Db, runId: string, owner: string, leaseSeconds: nu
 }
 
 /** fail a run this owner holds (fenced); false when the lease was lost */
-async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code: string, detail: string, extra: Record<string, unknown> = {}): Promise<boolean> {
+export async function failRun(db: Db, run: DiscoveryRunRow, owner: string, code: string, detail: string, extra: Record<string, unknown> = {}): Promise<boolean> {
   const res = await db.execute(sql`
     UPDATE discovery_runs
        SET status = 'failed', error_code = ${code}, error_detail = ${detail.slice(0, 1000)}, finished_at = now(),
@@ -372,7 +372,7 @@ function gapOf(o: Observation): { kind: string; value: string } | null {
   return null;
 }
 
-const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
+export const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
   (await db.select().from(aiEndpointSignatures).where(eq(aiEndpointSignatures.enabled, true))).map((r) => ({
     provider: r.provider,
     kind: r.kind,
@@ -389,7 +389,7 @@ const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
 // one run
 // ---------------------------------------------------------------------------
 
-type RunVerdict = "succeeded" | "failed" | "lease_lost";
+export type RunVerdict = "succeeded" | "failed" | "lease_lost";
 
 async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Required<Pick<DiscoveryWorkerOptions, "registry" | "rateLimiter" | "leaseSeconds">> & DiscoveryWorkerOptions): Promise<RunVerdict> {
   const fail = async (code: string, detail: string, extra: Record<string, unknown> = {}): Promise<RunVerdict> =>
@@ -486,6 +486,23 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     throw err;
   }
   const digest = rawSeen ? hash.digest("hex") : createHash("sha256").update(JSON.stringify(observations)).digest("hex");
+  return applyDiscoveryRunObservations(db, run, owner, source, observations, digest);
+}
+
+/**
+ * ADR-0195: classify a run's CHECKED observations against the enabled admin
+ * catalogue and commit the findings with the run's completion, fenced on the
+ * run's lease. Shared by the scan worker and by SD3's endpoint upload route
+ * (which holds the lease of the run it opened for the upload).
+ */
+export async function applyDiscoveryRunObservations(
+  db: Db,
+  run: DiscoveryRunRow,
+  owner: string,
+  source: DiscoverySourceRow,
+  observations: Observation[],
+  digest: string,
+): Promise<RunVerdict> {
   const catalogue = await loadEnabledCatalogue(db);
   const pairs = observations.map((observation) => ({ observation, classification: classifyObservation(observation, catalogue) }));
   const matched = pairs.filter((p) => p.classification.matched);

@@ -23,9 +23,14 @@ import {
   resolveOsqueryResultName,
   signEndpointPackManifest,
   verifyEndpointPack,
+  endpointArtifactCandidates,
+  endpointCatalogueSignatures,
+  isShippedEndpointProvenance,
+  reduceEndpointObservations,
   type EndpointImportResult,
   type EndpointPseudonymHook,
 } from "./index.js";
+import { catalogueSignatureSchema, type AiSignature } from "../shadow-ai.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../../..");
@@ -91,10 +96,14 @@ describe("endpoint signature seed", () => {
     const traits = ENDPOINT_SIGNATURE_SEED.filter((s) => s.matchType === "trait_set");
     expect(traits.map((t) => t.value).sort()).toEqual([
       "background_agent+user_writable_path",
-      "listen_all_interfaces+hidden_path",
+      "hidden_path+listen_all_interfaces",
       "listen_all_interfaces+user_writable_path",
     ]);
     expect(traits.every((t) => t.source.origin === "regulait")).toBe(true);
+    // coordinator decision 2026-10-17: the LAN-listener rows stay on, marked low confidence
+    const lan = traits.filter((t) => t.value.includes("listen_all_interfaces"));
+    expect(lan.every((t) => t.enabled && t.confidence === "low")).toBe(true);
+    expect(endpointSignatureSeedSchema.safeParse({ ...lan[0]!, value: "listen_all_interfaces+hidden_path" }).success).toBe(false);
   });
 
   it("refuses a trait name outside the closed vocabulary and an ecosystem on a non-extension row", () => {
@@ -290,6 +299,7 @@ describe("osquery results importer", () => {
     expect(matchEndpointObservation(claude!, ENDPOINT_SIGNATURE_SEED).map((s) => s.tool)).toEqual(["claude", "claude"]);
     expect(hider!.traits).toEqual(["background_agent", "user_writable_path"]);
     expect(matchEndpointObservation(hider!, ENDPOINT_SIGNATURE_SEED).map((s) => s.id)).toEqual(["rgl.hidden-assistant.trait_set.windowless-user-app"]);
+    expect(endpointArtifactCandidates(hider!)).toContainEqual({ kind: "desktop_app", value: "trait:background_agent+user_writable_path" });
     expect(ext!.user).toMatch(/^p_/);
     expect(ext!.observedAt).toBe(new Date(1790000100 * 1000).toISOString());
     expect(matchEndpointObservation(ext!, ENDPOINT_SIGNATURE_SEED).map((s) => s.tool)).toEqual(["claude-code"]);
@@ -419,5 +429,60 @@ describe("generic MDM/EDR inventory importer", () => {
       importEndpointInventory({ content: csv, format: "csv", pseudonymise: hook, config: { mapping: { device: "device", itemName: "nope" } } }),
     ).toThrow(/does not carry/);
     expect(() => importEndpointInventory({ content: csv, format: "csv", pseudonymise: hook, config: { preset: "any-vendor" } })).toThrow(EndpointImportFormatError);
+  });
+});
+
+describe("SD0 catalogue bridge (phase B)", () => {
+  const rows = endpointCatalogueSignatures();
+
+  it("every seed row becomes a valid SD0 `identifier` catalogue row", () => {
+    for (const r of rows) {
+      const { confidence: _c, seedIds: _s, ...sig } = r;
+      const parsed = catalogueSignatureSchema.safeParse(sig);
+      expect(parsed.success, `${r.kind} ${r.value}: ${parsed.success ? "" : parsed.error.issues[0]?.message}`).toBe(true);
+      expect(isShippedEndpointProvenance(r.provenance)).toBe(true);
+    }
+    expect(rows.reduce((n, r) => n + r.seedIds.length, 0)).toBe(ENDPOINT_SIGNATURE_SEED.length);
+  });
+
+  it("no (kind, identifier) collision crosses providers", () => {
+    const byId = new Map<string, string>();
+    for (const s of ENDPOINT_SIGNATURE_SEED) {
+      const r = rows.find((x) => x.seedIds.includes(s.id))!;
+      const k = `${r.kind}:${r.value.toLowerCase()}`;
+      if (byId.has(k)) expect(byId.get(k), `${s.id} vs ${k}`).toBe(s.provider);
+      byId.set(k, s.provider);
+    }
+  });
+
+  it("encodes ports and trait sets, and keeps the low confidence on the LAN rows", () => {
+    expect(rows.find((r) => r.value === "port:11434")?.kind).toBe("local_runtime");
+    const lan = rows.filter((r) => r.value.startsWith("trait:") && r.value.includes("listen_all_interfaces"));
+    expect(lan).toHaveLength(2);
+    expect(lan.every((r) => r.confidence === "low" && r.enabled)).toBe(true);
+    expect(rows.filter((r) => r.value.startsWith("trait:")).every((r) => r.provenance === "regulait-seed")).toBe(true);
+    expect(isShippedEndpointProvenance("admin")).toBe(false);
+  });
+
+  it("reduces observations against the enabled catalogue only, one sighting per device and artifact", () => {
+    const hook = testHook();
+    const content = [
+      JSON.stringify({ name: "ai_apps_macos", hostIdentifier: "m1", unixTime: 1790000000, snapshot: [{ name: "Claude.app", bundle_identifier: "com.anthropic.claudefordesktop" }, { name: "Unknown.app", bundle_identifier: "org.example.unknown" }] }),
+      JSON.stringify({ name: "ai_apps_macos", hostIdentifier: "m1", unixTime: 1790000500, columns: { name: "Claude.app" } }),
+      JSON.stringify({ name: "hidden_assistant_lan_listeners", hostIdentifier: "m2", columns: { name: "h", path: "/Users/x/.h/h", port: "4000", address: "0.0.0.0" } }),
+    ].join("\n");
+    const imported = importOsqueryResults({ content, pseudonymise: hook });
+    const catalogue: AiSignature[] = rows.map(({ confidence: _c, seedIds: _s, ...sig }) => sig);
+    const red = reduceEndpointObservations(imported, catalogue);
+    const claude = red.matched.filter((m) => m.provider === "anthropic");
+    expect(claude).toHaveLength(1);
+    expect(claude[0]!.count).toBe(2);
+    expect(claude[0]!.observedAt).toBe(new Date(1790000500 * 1000).toISOString());
+    expect(red.matched.some((m) => m.value.startsWith("trait:") && m.provider === "unattributed")).toBe(true);
+    expect(red.unmatchedCount).toBe(1);
+    expect(red.unmatched[0]!.value).toBe("Unknown.app");
+    // detection is data: with the catalogue empty or disabled nothing matches
+    expect(reduceEndpointObservations(imported, []).matched).toEqual([]);
+    expect(reduceEndpointObservations(imported, catalogue.map((c) => ({ ...c, enabled: false }))).matched).toEqual([]);
   });
 });

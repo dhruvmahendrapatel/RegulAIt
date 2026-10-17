@@ -19,6 +19,7 @@
  * expression, and no matcher evaluates one (ADR-0055 "no regex from data").
  */
 import { z } from "zod";
+import { DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS } from "../discovery/index.js";
 import { ENDPOINT_REGISTRY_SIGNATURE_ROWS, ENDPOINT_REGISTRY_SOURCE_COMMIT } from "./registry-signatures.generated.js";
 
 /** ADR-0195 decision 5: the five endpoint kinds SD0 adds to `ai_endpoint_signatures.kind`. */
@@ -79,7 +80,8 @@ export const ENDPOINT_TRAITS = [
 export type EndpointTrait = (typeof ENDPOINT_TRAITS)[number];
 
 /** Endpoint evidence retention default, in days (ADR-0195 decision 20). Lengthening it is a relaxation. */
-export const ENDPOINT_EVIDENCE_DEFAULT_RETENTION_DAYS = 90;
+/** SD0 owns the setting (`discovery_settings.endpoint_retention_days`); this is its default, re-exported for SD3. */
+export const ENDPOINT_EVIDENCE_DEFAULT_RETENTION_DAYS = DISCOVERY_ENDPOINT_RETENTION_DEFAULT_DAYS;
 
 /** a row exactly as the generator writes it from the vendored registry */
 export interface EndpointRegistrySignatureRow {
@@ -96,6 +98,9 @@ export interface EndpointRegistrySignatureRow {
   /** the upstream registry entry id */
   entry: string;
 }
+
+export const ENDPOINT_SIGNATURE_CONFIDENCES = ["normal", "low"] as const;
+export type EndpointSignatureConfidence = (typeof ENDPOINT_SIGNATURE_CONFIDENCES)[number];
 
 export type EndpointSignatureSource =
   | { origin: "regulait" }
@@ -115,6 +120,12 @@ export interface EndpointSignatureSeed {
   /** extension rows only */
   ecosystem: EndpointExtensionEcosystem | null;
   enabled: boolean;
+  /**
+   * `low` marks a lead rather than a detection (the LAN-listener trait rows,
+   * coordinator decision 2026-10-17). SD0's catalogue has no column for it yet;
+   * see `endpointCatalogueSignatures`.
+   */
+  confidence: EndpointSignatureConfidence;
   note: string | null;
   source: EndpointSignatureSource;
   /** fits `ai_endpoint_signatures.provenance` (max 300 characters) */
@@ -125,7 +136,7 @@ const REGISTRY_REPO = "https://github.com/AmanSK5/shadow-ai-guard";
 const REGISTRY_PATH = "registry/registry.yaml";
 
 /** Rows written by us. Values are documented defaults or names, not guesses dressed up as facts. */
-const OWN_ROWS: ReadonlyArray<Omit<EndpointSignatureSeed, "source" | "provenance">> = [
+const OWN_ROWS: ReadonlyArray<Omit<EndpointSignatureSeed, "source" | "provenance" | "confidence"> & { confidence?: EndpointSignatureConfidence }> = [
   // --- local model runtimes: process names and documented default ports --------------------------
   { id: "rgl.ollama.process_name.ollama", provider: "ollama", tool: "ollama", kind: "local_runtime", matchType: "process_name", value: "ollama", os: null, ecosystem: null, enabled: true, note: "Ollama server or CLI process." },
   { id: "rgl.ollama.listening_port.11434", provider: "ollama", tool: "ollama", kind: "local_runtime", matchType: "listening_port", value: "11434", os: null, ecosystem: null, enabled: true, note: "Ollama's default API port. Another program can use the same port; the process name in the same observation tells them apart." },
@@ -138,8 +149,8 @@ const OWN_ROWS: ReadonlyArray<Omit<EndpointSignatureSeed, "source" | "provenance
   { id: "rgl.codex-cli.npm_package.openai-codex", provider: "openai", tool: "codex-cli", kind: "desktop_app", matchType: "npm_package", value: "@openai/codex", os: null, ecosystem: null, enabled: true, note: "AI coding CLI installed globally with npm." },
   { id: "rgl.gemini-cli.npm_package.google-gemini-cli", provider: "google", tool: "gemini-cli", kind: "desktop_app", matchType: "npm_package", value: "@google/gemini-cli", os: null, ecosystem: null, enabled: true, note: "AI coding CLI installed globally with npm." },
   // --- traits of hidden or evasive assistants (ours) ---------------------------------------------
-  { id: "rgl.hidden-assistant.trait_set.lan-listener-hidden-dir", provider: "unattributed", tool: "hidden-assistant-trait", kind: "local_runtime", matchType: "trait_set", value: "listen_all_interfaces+hidden_path", os: null, ecosystem: null, enabled: true, note: "A program run from a hidden directory accepts connections from the network: the shape of a remote-controlled assistant. A lead, not proof of AI use." },
-  { id: "rgl.hidden-assistant.trait_set.lan-listener-user-dir", provider: "unattributed", tool: "hidden-assistant-trait", kind: "local_runtime", matchType: "trait_set", value: "listen_all_interfaces+user_writable_path", os: null, ecosystem: null, enabled: true, note: "A program run from a user or temp directory accepts connections from the network. Developer servers share this shape; a lead, not proof of AI use." },
+  { id: "rgl.hidden-assistant.trait_set.lan-listener-hidden-dir", provider: "unattributed", tool: "hidden-assistant-trait", kind: "local_runtime", matchType: "trait_set", value: "hidden_path+listen_all_interfaces", os: null, ecosystem: null, enabled: true, confidence: "low", note: "A program run from a hidden directory accepts connections from the network: the shape of a remote-controlled assistant. A lead, not proof of AI use." },
+  { id: "rgl.hidden-assistant.trait_set.lan-listener-user-dir", provider: "unattributed", tool: "hidden-assistant-trait", kind: "local_runtime", matchType: "trait_set", value: "listen_all_interfaces+user_writable_path", os: null, ecosystem: null, enabled: true, confidence: "low", note: "A program run from a user or temp directory accepts connections from the network. Developer servers share this shape; a lead, not proof of AI use." },
   { id: "rgl.hidden-assistant.trait_set.windowless-user-app", provider: "unattributed", tool: "hidden-assistant-trait", kind: "desktop_app", matchType: "trait_set", value: "background_agent+user_writable_path", os: ["darwin"], ecosystem: null, enabled: true, note: "A user-installed macOS app with no Dock icon or window: the shape of an assistant built to stay out of sight. A lead, not proof of AI use." },
 ];
 
@@ -154,6 +165,7 @@ function registryRowToSeed(r: EndpointRegistrySignatureRow): EndpointSignatureSe
     os: r.os,
     ecosystem: r.ecosystem,
     enabled: r.enabled,
+    confidence: "normal",
     note: r.note,
     source: {
       origin: "third_party",
@@ -178,7 +190,7 @@ const deepFreeze = <T>(o: T): T => {
 /** The complete SD3 seed: imported rows first, then ours. Frozen. */
 export const ENDPOINT_SIGNATURE_SEED: ReadonlyArray<EndpointSignatureSeed> = deepFreeze([
   ...ENDPOINT_REGISTRY_SIGNATURE_ROWS.map(registryRowToSeed),
-  ...OWN_ROWS.map((r) => ({ ...r, source: { origin: "regulait" } as const, provenance: "regulait-seed" })),
+  ...OWN_ROWS.map((r) => ({ ...r, confidence: r.confidence ?? "normal", source: { origin: "regulait" } as const, provenance: "regulait-seed" })),
 ]);
 
 /** characters a value may hold: printable ASCII minus quote and backslash, so it is safe in SQL literals */
@@ -199,6 +211,7 @@ export const endpointSignatureSeedSchema = z
     os: z.array(z.enum(ENDPOINT_OSES)).min(1).nullable(),
     ecosystem: z.enum(ENDPOINT_EXTENSION_ECOSYSTEMS).nullable(),
     enabled: z.boolean(),
+    confidence: z.enum(ENDPOINT_SIGNATURE_CONFIDENCES),
     note: z.string().max(500).nullable(),
     source: z.union([
       z.object({ origin: z.literal("regulait") }).strict(),
@@ -223,9 +236,15 @@ export const endpointSignatureSeedSchema = z
   .refine(
     (s) =>
       s.matchType !== "trait_set" ||
-      s.value.split("+").every((t) => (ENDPOINT_TRAITS as readonly string[]).includes(t)),
-    { message: "a trait_set value names traits from ENDPOINT_TRAITS joined by '+'" },
+      (s.value.split("+").every((t) => (ENDPOINT_TRAITS as readonly string[]).includes(t)) &&
+        s.value === canonicalTraitSet(s.value.split("+"))),
+    { message: "a trait_set value names traits from ENDPOINT_TRAITS, sorted and joined by '+'" },
   );
+
+/** the canonical form of a trait set: distinct, sorted, joined by '+' */
+export function canonicalTraitSet(traits: readonly string[]): string {
+  return [...new Set(traits)].sort().join("+");
+}
 
 function isPort(v: string): boolean {
   if (v.length === 0 || v.length > 5 || ![...v].every((c) => c >= "0" && c <= "9")) return false;

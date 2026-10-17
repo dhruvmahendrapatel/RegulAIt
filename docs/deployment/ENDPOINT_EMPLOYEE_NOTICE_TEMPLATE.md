@@ -25,7 +25,7 @@ on [company-owned devices / devices enrolled in [MDM name]]:
 - installed AI desktop applications;
 - AI extensions in code editors and web browsers;
 - AI command-line tools and local AI model software, and the network ports that software listens on;
-- the **names** of AI-related settings (for example, that a setting called `OPENAI_API_KEY` exists), and whether AI
+- the **names** of AI-related settings (for example, that a setting named after an AI service's key exists, never what it holds), and whether AI
   assistant configuration files exist.
 
 **What we do not collect.** We do not collect the contents of files, the value of any setting or key, what you type,

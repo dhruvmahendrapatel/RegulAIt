@@ -11,8 +11,8 @@ import { checkObservations, ObservationRefused, retryAfterMs, spacingRateLimiter
 const NOW = "2026-10-17T00:00:00.000Z";
 
 describe("ADR-0195 SD0 scanner contract", () => {
-  it("ships no scanner in SD0, and a registry refuses two scanners for one kind", () => {
-    expect(DISCOVERY_SCANNERS.size).toBe(0);
+  it("ships only SD3's two upload-fed endpoint kinds, and a registry refuses two scanners for one kind", () => {
+    expect([...DISCOVERY_SCANNERS.keys()].sort()).toEqual(["endpoint_inventory", "endpoint_osquery"]);
     expect(() => scannerRegistry([noopTestScanner("repo_github"), noopTestScanner("repo_github")])).toThrow(/duplicate/);
   });
 
