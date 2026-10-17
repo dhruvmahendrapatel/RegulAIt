@@ -1838,29 +1838,6 @@ Both were built 2026-10-17 in migration 0201.
   here, not in the owner's section).
 - L2 itself (gVisor) stays unverified, as recorded above.
 
-## I5 follow-up: refusal ordering (2026-10-17)
-
-No migration. CI gateway shard 4 (run 38991262736) saw "an executor that reports another input digest" read the
-task's refusal as `session_lost` instead of `execution_profile_mismatch`. The mismatch, the offer's `mismatch`
-status and its report row commit in one transaction, before the quarantine. The stdio watchdog then sees the offer
-ended and calls `lose()` on the session, and the task's end hook stamped `session_lost` in memory before any read of
-the committed report.
-
-1. **A lost session is no longer a refusal by itself.** The task records only that its session was lost
-   (`sessionLost`). Reading the task's state resolves the refusal in order: a refusal already held, then the
-   placement's linked report (`mismatch` reads `execution_profile_mismatch`; a `session_lost` row reads
-   `session_lost`), then the offer's own end (`offer_<status>`), and only then the lost session. The result route's
-   in-memory check (`engineTaskRefusalOf`) still refuses a lost session before it is resolved (fail closed).
-2. **Point 18's dispatch checks** (`judge_required`, `agent_not_dispatchable`, a judge that is gone) now run at the
-   task start, as at the lease (pinned in `zz-adr0190-i5-engines.test.ts`).
-3. **Points 12 and 13** were corrected above: the dropped `not_run` envelope of an unplaced task, and the attestation
-   basis read once per poll, outside the lease transaction.
-4. The "a refusal holds no task of its own" test now asks about its own run (`engineTaskHeldFor(runId)`) rather than
-   comparing the process-wide task count, which other tests' tasks could change.
-
-**Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
-database shards run it.
-
 ## As built: I5 follow-up, the runc L1 backend and the versioned engine-worker profile (2026-10-17)
 
 This closes I5 point 14's follow-up ("a versionable engine-worker profile and a runc L1 backend"). No migration
@@ -1986,3 +1963,26 @@ supersedes I5 point 14's "for placement it is a no-op today", and I2 point 5's "
   executor switch) is added only if a customer needs it.
 - **Follow-ups after #385 verifies L2:** apply the outside `HostConfig` check to the gVisor backend too, and pass
   `--cgroupns private` on the gVisor line.
+
+## I5 follow-up: refusal ordering (2026-10-17)
+
+No migration. CI gateway shard 4 (run 38991262736) saw "an executor that reports another input digest" read the
+task's refusal as `session_lost` instead of `execution_profile_mismatch`. The mismatch, the offer's `mismatch`
+status and its report row commit in one transaction, before the quarantine. The stdio watchdog then sees the offer
+ended and calls `lose()` on the session, and the task's end hook stamped `session_lost` in memory before any read of
+the committed report.
+
+1. **A lost session is no longer a refusal by itself.** The task records only that its session was lost
+   (`sessionLost`). Reading the task's state resolves the refusal in order: a refusal already held, then the
+   placement's linked report (`mismatch` reads `execution_profile_mismatch`; a `session_lost` row reads
+   `session_lost`), then the offer's own end (`offer_<status>`), and only then the lost session. The result route's
+   in-memory check (`engineTaskRefusalOf`) still refuses a lost session before it is resolved (fail closed).
+2. **Point 18's dispatch checks** (`judge_required`, `agent_not_dispatchable`, a judge that is gone) now run at the
+   task start, as at the lease (pinned in `zz-adr0190-i5-engines.test.ts`).
+3. **Points 12 and 13** were corrected above: the dropped `not_run` envelope of an unplaced task, and the attestation
+   basis read once per poll, outside the lease transaction.
+4. The "a refusal holds no task of its own" test now asks about its own run (`engineTaskHeldFor(runId)`) rather than
+   comparing the process-wide task count, which other tests' tasks could change.
+
+**Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
+database shards run it.
