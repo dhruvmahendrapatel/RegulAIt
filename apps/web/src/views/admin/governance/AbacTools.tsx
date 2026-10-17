@@ -30,6 +30,7 @@ import {
 import {
   ABAC_REFUSALS,
   EMPTY_SIMULATE_FORM,
+  schemaNote,
   simulateBody,
   simulationSentence,
   validationErrorsOf,
@@ -42,7 +43,6 @@ import {
   type VersionForm,
 } from "./abacModel";
 import { withRefusalCopy } from "./refusalCopy";
-import { schemaNote } from "./abacModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 

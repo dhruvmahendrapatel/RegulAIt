@@ -342,6 +342,8 @@ export interface BuildAppOptions {
   engines?: Pick<EngineOptions, "manifest" | "taxonomy" | "gatewayBaseUrl">;
   /** ADR-0187 B5-M TEST SEAM: the model-artifact store (default: from the environment; none = uploads refused) */
   artifactStore?: ArtifactStore | null;
+  /** ADR-0195 SD0 TEST SEAM: the discovery scanner registry (default: `DISCOVERY_SCANNERS`, empty in SD0). Code-only. */
+  discoveryScanners?: ScannerRegistry;
 }
 import { z } from "zod";
 import { boundTargetsForApprovals, registerMcpProxy } from "./mcp-proxy.js";
@@ -500,6 +502,8 @@ import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
+import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import type { ScannerRegistry } from "./discovery-scanners.js";
 import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
@@ -5422,6 +5426,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The subsystem makes NO outbound request and can write only its own three
   // tables — an evidence file cannot mint a user, role, grant or approval.
   registerShadowAiRoutes(app, db);
+  // ADR-0195 SD0 — shadow-AI ACTIVE discovery: sources (off until enabled with a step-up), scanner credentials
+  // (never returned), scan runs and settings. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
+  registerDiscoveryRoutes(app, db, {
+    dataKey: opts.dataKey,
+    ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
+  });
   // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
   // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
   // which refuses in-handler unless the caller IS that user. Uploading a file

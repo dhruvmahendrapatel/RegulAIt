@@ -164,6 +164,8 @@ const str = (v: unknown, max = 256): v is string => typeof v === "string" && v.l
 const time = (v: unknown): v is string => typeof v === "string" && v.length <= 40 && Number.isFinite(Date.parse(v));
 const uuid = (v: unknown): v is string => typeof v === "string" && UUID.test(v);
 const sha = (v: unknown): v is string => typeof v === "string" && SHA256_HEX.test(v);
+/** a `.strict()` object of the shared contract: exactly these keys, none missing and none extra */
+const exactKeys = (o: Obj, keys: readonly string[]) => Object.keys(o).sort().join() === [...keys].sort().join();
 
 // ---------------------------------------------------------------------------
 // subjects
@@ -453,7 +455,6 @@ const isSha = (x: unknown): x is string => typeof x === "string" && SHA256_HEX.t
 const isUuid = (x: unknown): x is string => typeof x === "string" && UUID.test(x);
 const isIdText = (x: unknown): x is string => typeof x === "string" && ID_TEXT.test(x);
 const isSpiffe = (x: unknown): x is string => typeof x === "string" && x.length <= 2048 && /^spiffe:\/\/[a-z0-9._-]+\/[A-Za-z0-9._/-]+$/.test(x);
-const exactKeys = (o: Obj, keys: readonly string[]) => Object.keys(o).sort().join() === [...keys].sort().join();
 /** the `execution` section of a v2 body: exactly the contract's fields and vocabularies, or the whole BOM is unreadable */
 export function readExecution(value: unknown): ExecutionView | null {
   if (value === null) return null;
@@ -730,8 +731,9 @@ interface VerifyEnvelope {
 /**
  * The contract's structural rules on a report (contract-b4 `bomVerifyResponseSchema`), as one sentence each.
  * Null means none is broken. A report that breaks one is never displayed: it could claim more than it checked.
- * Every rule of the shared refinement is mirrored here; bomModel.test.ts runs both over a fixture matrix and
- * fails when they disagree on accept or refuse.
+ * Every rule of the shared refinement is mirrored here, and `readVerifyReport` mirrors the shapes it relies on
+ * (exact keys on the report, its checks, sections and identity; the manifest to the depth `manifestOk` names).
+ * bomVerifyDrift.test.ts runs both over a fixture matrix and fails when they disagree on accept or refuse.
  */
 function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], id: VerifyIdentity | null, env: VerifyEnvelope, cannotProve: string[]): string | null {
   const { source, outcome } = env;
@@ -742,7 +744,8 @@ function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], 
   for (const r of refs.values()) if (r.length > 1 && (r.includes(null) || new Set(r).size !== r.length)) return "it repeats a check without telling the results apart";
   if ((source === "bundle") !== env.hasManifest && outcome !== "invalid") return source === "bundle" ? "it reports a readable bundle without its manifest" : "it reports a bundle manifest for a stored BOM";
   if (id === null || env.bodyVersion === null) {
-    return outcome === "invalid" && checks.some((c) => c.status === "invalid") ? null : "an unreadable bundle is reported as more than invalid, or without the check that failed";
+    const what = source === "bundle" ? "an unreadable bundle" : "an unreadable stored BOM";
+    return outcome === "invalid" && checks.some((c) => c.status === "invalid") ? null : `${what} is reported as more than invalid, or without the check that failed`;
   }
   const of = (check: string) => checks.filter((c) => c.check === check);
   const all = (check: string, status: string, reason: string) => of(check).every((c) => c.status === status && c.reason === reason);
@@ -783,12 +786,15 @@ function brokenRule(checks: VerifyCheckRow[], sections: VerifyView["sections"], 
   return null;
 }
 
+const DECISION_IDENTITY_KEYS = ["subject", "auditId", "bomId", "version", "recordedFinality", "reportedFinality", "receiptPayloadVersion"] as const;
+const AI_IDENTITY_KEYS = ["subject", "snapshotId", "subjectKind", "subjectId", "version", "serialNumber"] as const;
+
 function readIdentity(value: unknown): VerifyIdentity | null {
   if (value === null) return null;
   const v = obj(value);
   if (v?.subject === "decision-bom") {
     if (
-      !uuid(v.auditId) || !uuid(v.bomId) || !posInt(v.version) || !oneOf(DECISION_BOM_FINALITY_STATES, v.recordedFinality) ||
+      !exactKeys(v, DECISION_IDENTITY_KEYS) || !uuid(v.auditId) || !uuid(v.bomId) || !posInt(v.version) || !oneOf(DECISION_BOM_FINALITY_STATES, v.recordedFinality) ||
       !oneOf(BOM_REPORTED_FINALITY_STATES, v.reportedFinality) || !oneOf(["v1", "v2"] as const, v.receiptPayloadVersion)
     ) {
       return unreadable("The verification result");
@@ -796,12 +802,45 @@ function readIdentity(value: unknown): VerifyIdentity | null {
     return { subject: "decision-bom", auditId: v.auditId, bomId: v.bomId, version: v.version, recordedFinality: v.recordedFinality, reportedFinality: v.reportedFinality, receiptPayloadVersion: v.receiptPayloadVersion };
   }
   if (v?.subject === "ai-bom") {
-    if (!uuid(v.snapshotId) || !oneOf(AI_BOM_SUBJECT_KINDS, v.subjectKind) || !uuid(v.subjectId) || !posInt(v.version) || !str(v.serialNumber, 45) || !SERIAL.test(v.serialNumber)) {
+    if (!exactKeys(v, AI_IDENTITY_KEYS) || !uuid(v.snapshotId) || !oneOf(AI_BOM_SUBJECT_KINDS, v.subjectKind) || !uuid(v.subjectId) || !posInt(v.version) || !str(v.serialNumber, 45) || !SERIAL.test(v.serialNumber)) {
       return unreadable("The verification result");
     }
     return { subject: "ai-bom", snapshotId: v.snapshotId, subjectKind: v.subjectKind, subjectId: v.subjectId, version: v.version, serialNumber: v.serialNumber };
   }
   return unreadable("The verification result");
+}
+
+const VERIFY_REPORT_KEYS = ["trust", "source", "bodyVersion", "identity", "outcome", "checks", "sections", "cannotProve", "manifest", "verifiedAt", "capabilities"] as const;
+const VERIFY_CHECK_KEYS = ["check", "status", "reason", "ref"] as const;
+const VERIFY_SECTION_KEYS = ["section", "status", "completeness", "notRecordedReason"] as const;
+const MANIFEST_KEYS = [
+  "schema", "product", "installId", "installIdSource", "exportedAt", "exportedAtSource", "exportedByUserId", "subject", "files", "audit", "signingKeyId", "signingKeyFingerprint",
+] as const;
+/** contract-b4 `EXPORT_BUNDLE_V3_SCHEMA`, mirrored */
+export const EXPORT_BUNDLE_V3_SCHEMA = "regulait.export-bundle/3";
+
+/**
+ * The bundle manifest a verify report echoes (contract-b4 `exportBundleV3ManifestSchema`), to the depth this page
+ * relies on: its envelope (exact keys, schema, product), its subject kind, its sorted file list, and a chain segment
+ * exactly for a Decision BOM. The page never displays the manifest, so the subject descriptor's fields, the
+ * install-id and email scans and the segment arithmetic are left to the gateway's own schema and are not mirrored.
+ */
+function manifestOk(value: unknown): boolean {
+  const m = obj(value);
+  if (!m || !exactKeys(m, MANIFEST_KEYS) || m.schema !== EXPORT_BUNDLE_V3_SCHEMA || m.product !== "regulait") return false;
+  const subject = obj(m.subject);
+  if (!subject || !oneOf(["decision-bom", "ai-bom"] as const, subject.kind) || !exactKeys(subject, ["kind", "id", "descriptor"]) || !uuid(subject.id) || !obj(subject.descriptor)) return false;
+  if (!Array.isArray(m.files) || m.files.length < 1 || m.files.length > 64) return false;
+  const paths: string[] = [];
+  for (const raw of m.files) {
+    const f = obj(raw);
+    if (!f || !exactKeys(f, ["path", "sha256"]) || !str(f.path) || f.path.length === 0 || !sha(f.sha256)) return false;
+    paths.push(f.path);
+  }
+  if (paths.some((p, i) => i > 0 && p <= paths[i - 1]!)) return false;
+  const audit = obj(m.audit);
+  if (m.audit !== null && audit === null) return false;
+  return (subject.kind === "decision-bom") === (audit !== null);
 }
 
 /**
@@ -814,7 +853,7 @@ function readIdentity(value: unknown): VerifyIdentity | null {
  */
 export function readVerifyReport(value: unknown, expected: VerifyExpectation): VerifyView {
   const v = obj(value);
-  if (!v || v.trust !== "deployment_registry" || v.source !== expected.source || !oneOf(BOM_VERIFY_OUTCOMES, v.outcome) || !(v.bodyVersion === null || oneOf(BOM_BODY_VERSIONS, v.bodyVersion)) || !(v.manifest === null || obj(v.manifest)) || !time(v.verifiedAt) || !Array.isArray(v.checks) || !Array.isArray(v.sections) || !Array.isArray(v.cannotProve)) {
+  if (!v || !exactKeys(v, VERIFY_REPORT_KEYS) || v.trust !== "deployment_registry" || v.source !== expected.source || !oneOf(BOM_VERIFY_OUTCOMES, v.outcome) || !(v.bodyVersion === null || oneOf(BOM_BODY_VERSIONS, v.bodyVersion)) || !(v.manifest === null || manifestOk(v.manifest)) || !time(v.verifiedAt) || !Array.isArray(v.checks) || !Array.isArray(v.sections) || !Array.isArray(v.cannotProve)) {
     return unreadable("The verification result");
   }
   const identity = readIdentity(v.identity);
@@ -828,13 +867,13 @@ export function readVerifyReport(value: unknown, expected: VerifyExpectation): V
     const c = obj(raw);
     const reasonOk =
       c?.status === "valid" ? c.reason === null : c?.status === "invalid" ? oneOf(BOM_VERIFY_INVALID_REASONS, c.reason) : c?.status === "unverifiable" ? oneOf(BOM_VERIFY_UNVERIFIABLE_REASONS, c.reason) : false;
-    if (!c || !oneOf(BOM_VERIFY_CHECKS, c.check) || !reasonOk || !(c.ref === null || (str(c.ref) && /^[A-Za-z0-9._:/-]+$/.test(c.ref)))) return unreadable("The verification result");
+    if (!c || !exactKeys(c, VERIFY_CHECK_KEYS) || !oneOf(BOM_VERIFY_CHECKS, c.check) || !reasonOk || !(c.ref === null || (str(c.ref) && /^[A-Za-z0-9._:/-]+$/.test(c.ref)))) return unreadable("The verification result");
     const reason = c.reason as string | null;
     return { check: c.check, status: c.status as VerifyCheckRow["status"], reason, ref: c.ref as string | null, byDesign: identity !== null && c.status === "unverifiable" && byDesign(c.check, reason, identity, expected.source) };
   });
   const sections = v.sections.map((raw) => {
     const s = obj(raw);
-    if (!s || !oneOf(DECISION_BOM_SECTIONS_V2, s.section) || !oneOf(["valid", "invalid"] as const, s.status) || !oneOf(BOM_SECTION_STATUSES, s.completeness) || !(s.notRecordedReason === null || oneOf(BOM_NOT_RECORDED_REASONS, s.notRecordedReason)) || (s.completeness === "not_recorded") !== (s.notRecordedReason !== null)) {
+    if (!s || !exactKeys(s, VERIFY_SECTION_KEYS) || !oneOf(DECISION_BOM_SECTIONS_V2, s.section) || !oneOf(["valid", "invalid"] as const, s.status) || !oneOf(BOM_SECTION_STATUSES, s.completeness) || !(s.notRecordedReason === null || oneOf(BOM_NOT_RECORDED_REASONS, s.notRecordedReason)) || (s.completeness === "not_recorded") !== (s.notRecordedReason !== null)) {
       return unreadable("The verification result");
     }
     return { section: s.section, status: s.status, completeness: s.completeness, notRecordedReason: s.notRecordedReason as string | null };

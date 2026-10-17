@@ -142,6 +142,8 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
       // A discovered row is a governance gap, not a connection to configure.
       { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
+      // ADR-0195 SD0 — where RegulAIt may scan, read-only, for shadow AI; every source off until enabled
+      { label: "Discovery sources", to: "/admin/shadow-ai/discovery-sources" },
     ],
   },
   {

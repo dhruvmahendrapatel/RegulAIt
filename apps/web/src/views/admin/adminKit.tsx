@@ -798,7 +798,15 @@ export async function downloadCsv(
     onError(describe?.(res.status, body) ?? `Download failed (${res.status}${body?.error ? ` — ${body.error}` : ""})`);
     return false;
   }
-  const url = URL.createObjectURL(await res.blob());
+  let blob: Blob;
+  try {
+    blob = await res.blob();
+  } catch {
+    // the body broke off mid-read: report it, never reject into a caller that only `void`s the promise
+    onError("The download was interrupted before it finished. Try again.");
+    return false;
+  }
+  const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;

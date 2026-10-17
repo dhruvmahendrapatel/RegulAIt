@@ -80,6 +80,7 @@ import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
 import ReviewWorkbenchPage from "./views/admin/governance/ReviewWorkbenchPage";
 import AuditLogPage from "./views/admin/governance/AuditLogPage";
 import ShadowAiPage from "./views/admin/governance/ShadowAiPage";
+import DiscoverySourcesPage from "./views/admin/governance/DiscoverySourcesPage";
 import CopilotPage from "./views/admin/governance/CopilotPage";
 import ChatOpsPage from "./views/admin/governance/ChatOpsPage";
 import LineagePage from "./views/admin/governance/LineagePage";
@@ -273,6 +274,8 @@ function ApplicationRoutes() {
                 <Route path="regulait-llm" element={<RegulAItLlmPage />} />
                 {/* ADR-0055 */}
                 <Route path="shadow-ai" element={<ShadowAiPage />} />
+                {/* ADR-0195 SD0 */}
+                <Route path="shadow-ai/discovery-sources" element={<DiscoverySourcesPage />} />
                 {/* ADR-0056 */}
                 <Route path="copilot" element={<CopilotPage />} />
                 {/* ADR-0061 */}
