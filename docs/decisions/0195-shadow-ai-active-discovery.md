@@ -207,3 +207,24 @@ two contribute detection data under their licences.
 | HEUDavid/shadow-ai | No licence file | Not a detector: a hidden assistant built to evade monitoring. Not used; its traits (no visible window, LAN remote control) become SD3/SD4 detection signatures written by us. |
 
 Every imported signature records its source project, commit and licence; the packages' `THIRD_PARTY.md` lists them.
+
+## SD3 build notes (2026-10-17)
+
+- The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
+  device filters to what the catalogue can match instead of shipping its whole software inventory; each query's
+  definition also carries the importer's column allowlist. `scripts/endpoint-pack-build.mjs` writes
+  `endpoint-discovery/osquery/`, and the shared suite fails on drift. Execution under osquery is pending (M-041).
+- Endpoint match types are exact, case-insensitive comparisons (`app_name`, `bundle_id`, `executable_name`,
+  `cli_binary`, `npm_package`, `process_name`, `ide_extension_id`, `browser_extension_id`, `env_var_name`), a
+  home-relative `config_path`, a decimal `listening_port`, and a `trait_set` over a closed trait vocabulary
+  (`listen_all_interfaces`, `user_writable_path`, `hidden_path`, `background_agent`). SD0 aligns its matcher columns
+  to these.
+- Seed: 90 rows derived from the pinned registry (commit `12b7bbf7`), 12 written by us (local runtime names and default
+  ports, AI CLI npm packages, three hidden-assistant trait rows). The Notion app rows are imported disabled: a
+  general-purpose app's presence is not AI use.
+- Importers bound each file at 5,000,000 bytes and 20,000 rows (one osquery line at 262,144 characters, one cell at
+  1,024); every row not imported is refused with its line and counted. A row with a value, command-line or contents
+  column is refused. Decorations are discarded. Device names are pseudonymised as well as device users, because host
+  names often carry a person's name. There is no default pseudonym hook; a missing hook refuses the import.
+- The pack is unsigned until SD4; the manifest carries its SHA-256 and a signer seam.
+

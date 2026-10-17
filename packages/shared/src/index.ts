@@ -4669,3 +4669,5 @@ export * from "./receipts/verify.js";
 export * from "./eval-datasets/cyberseceval.js";
 // ADR-0188 S7: REGULAIT_PUBLIC_URL parsed one way, by the gateway and by engine runners
 export * from "./public-url.js";
+// ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
+export * from "./endpoint-discovery/index.js";
