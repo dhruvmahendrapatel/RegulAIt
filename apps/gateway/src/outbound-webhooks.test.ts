@@ -30,6 +30,7 @@ import { Webhook } from "standardwebhooks";
 import { and, auditLog, eq, egressAllowHosts, inArray, webhookDeliveries, webhookSubscriptions } from "@regulait/db";
 import { WEBHOOK_LIMITS } from "@regulait/shared";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { drainBackgroundWork } from "./background-work.js";
 import { attemptDelivery, enqueueWebhookEvent, runWebhookDeliverySweep } from "./outbound-webhooks.js";
 import { decryptSecret } from "./secrets.js";
@@ -39,7 +40,7 @@ let admin: Person;
 let person: Person;
 let srv: http.Server;
 let port = 0;
-let allowId: string | null = null;
+let allowId: string | undefined;
 const createdSubs: string[] = [];
 
 /** what the receiver saw */
@@ -85,14 +86,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await drainBackgroundWork(k.db);
-  if (createdSubs.length) {
-    for (const id of createdSubs) await k.db.delete(webhookSubscriptions).where(eq(webhookSubscriptions.id, id));
+  // M-068: the loopback allow entry goes first, through the audited route, while the app is up
+  const loopback = await removeEgressAllowEntry(k?.app, k?.BOOT ?? {}, { id: allowId });
+  try {
+    await drainBackgroundWork(k.db);
+    if (createdSubs.length) {
+      for (const id of createdSubs) await k.db.delete(webhookSubscriptions).where(eq(webhookSubscriptions.id, id));
+    }
+    srv.closeAllConnections();
+    await new Promise<void>((r) => srv.close(() => r()));
+    await k.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  if (allowId) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowId));
-  srv.closeAllConnections();
-  await new Promise<void>((r) => srv.close(() => r()));
-  await k.close();
 });
 
 let reusedAllow = false;
@@ -172,6 +178,7 @@ describe("egress and signing", () => {
   });
 
   it("the test notification is Standard-Webhooks signed with the secret shown once", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     const sub = await createSub("/signed", ["prompt.*"]);
     expect(sub.secret).toMatch(/^whsec_/);
@@ -201,6 +208,7 @@ describe("egress and signing", () => {
   });
 
   it("a prompt commit reaches a prompt.* subscriber, signed, with ids and hashes only", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     const sub = await createSub("/prompts", ["prompt.commit"]);
     const p = await k.req("POST", "/v1/prompts", person.auth, { name: `owh-prompt-${k.RUN}` });
@@ -222,6 +230,7 @@ describe("egress and signing", () => {
 
 describe("retries", () => {
   it("backs off exponentially on the sweep, keeps the webhook-id, and gives up after maxAttempts", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     statusFor.set("/flaky", 500);
     const sub = await createSub("/flaky", ["prompt.*"]);
@@ -270,6 +279,7 @@ describe("retries", () => {
   });
 
   it("a deactivated subscription receives nothing", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     const sub = await createSub("/off", ["prompt.*"]);
     const off = await k.req("PATCH", `/v1/webhooks/${sub.id}`, admin.auth, { active: false });
@@ -282,6 +292,7 @@ describe("retries", () => {
   });
 
   it("rotating the secret signs with the new one; deleting removes the subscription", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     const sub = await createSub("/rotate", ["prompt.*"]);
     const rot = await k.req("POST", `/v1/webhooks/${sub.id}/rotate-secret`, admin.auth);
@@ -324,6 +335,7 @@ describe("the sweep's clock, leases and fairness", () => {
   }
 
   it("signs each delivery when it is sent: a healthy receiver after a slow one gets a fresh timestamp", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     delayFor.set("/slow", 2100);
     const slow = await createSub("/slow", ["prompt.*"]);
@@ -345,6 +357,7 @@ describe("the sweep's clock, leases and fairness", () => {
   });
 
   it("a pass that started long ago still leases from its claim, so a concurrent sweep does not send twice", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     let release!: () => void;
     holdFor.set("/race", new Promise<void>((r) => (release = r)));
@@ -363,6 +376,7 @@ describe("the sweep's clock, leases and fairness", () => {
   });
 
   it("an attempt whose lease was taken over writes nothing over the new holder's row", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     let release!: () => void;
     holdFor.set("/lost", new Promise<void>((r) => (release = r)));
@@ -382,6 +396,7 @@ describe("the sweep's clock, leases and fairness", () => {
   });
 
   it("a receiver that never answers costs the pass one attempt, not one per delivery; the rest wait", async () => {
+    // egress-allow-cleanup: afterAll — its id is recorded in allowId, which afterAll removes
     await allowLoopback();
     dropFor.add("/dead");
     const dead = await createSub("/dead", ["prompt.*"]);

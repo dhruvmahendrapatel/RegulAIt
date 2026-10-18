@@ -210,6 +210,41 @@ export interface IdentityPickerSourcesView {
   roles: IdentityPickerOption[];
   workerIdentities: IdentityPickerOption[];
   truncated: boolean;
+  /** which lists were cut (the shared contract's IDENTITY_PICKER_LISTS); absent from an older gateway */
+  truncatedLists?: string[];
+}
+
+/** what each picker list is called on the form, for "this list was cut" */
+export const PICKER_LIST_LABELS: Readonly<Record<string, string>> = {
+  sponsors: "stewards",
+  "subjects.agent": "agents without an identity",
+  "subjects.builder_agent": "builder agents without an identity",
+  "subjects.engine_runner": "engine runners without an identity",
+  environments: "environments",
+  servers: "MCP servers",
+  agents: "agents",
+  connectors: "connectors",
+  roles: "roles",
+  workerIdentities: "worker identities",
+  tools: "MCP tools",
+};
+
+/**
+ * The notice for cut picker lists, naming each one; null when nothing was cut. A gateway that names no list (an
+ * older one) still gets the general notice when it says something was cut.
+ */
+export function pickerTruncationNotice(v: Pick<IdentityPickerSourcesView, "truncated" | "truncatedLists">): string | null {
+  const names = (v.truncatedLists ?? []).map((l) => PICKER_LIST_LABELS[l] ?? l);
+  if (names.length > 0) {
+    const tools = names.includes(PICKER_LIST_LABELS.tools!);
+    const lists = names.filter((n) => n !== PICKER_LIST_LABELS.tools);
+    const parts = [
+      ...(lists.length ? [`These lists show only their first 1,000 entries: ${lists.join(", ")}.`] : []),
+      ...(tools ? ["Some MCP servers show only part of their tool list."] : []),
+    ];
+    return parts.join(" ");
+  }
+  return v.truncated ? "Some lists were cut to their first 1,000 entries." : null;
 }
 
 /** the body of `POST /v1/workload-identities` */

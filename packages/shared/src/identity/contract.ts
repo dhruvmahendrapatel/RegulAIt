@@ -949,6 +949,34 @@ export const IDENTITY_PICKER_MAX = 1000;
 export const IDENTITY_PICKER_TOOLS_PER_SERVER = 500;
 export const IDENTITY_PICKER_TOOLS_TOTAL = 5000;
 
+/** the picker lists `truncatedLists` may name, in response order (`tools`: any server's tool list, or all of them) */
+export const IDENTITY_PICKER_LISTS = [
+  "sponsors",
+  "subjects.agent",
+  "subjects.builder_agent",
+  "subjects.engine_runner",
+  "environments",
+  "servers",
+  "agents",
+  "connectors",
+  "roles",
+  "workerIdentities",
+  "tools",
+] as const;
+export type IdentityPickerListName = (typeof IDENTITY_PICKER_LISTS)[number];
+
+/**
+ * The lists that were cut, in `IDENTITY_PICKER_LISTS` order: each list read up to one past the cap reports how many
+ * rows it read (more than `max` means cut); `tools` reports its own verdict (per-server and total caps).
+ */
+export function identityPickerTruncatedLists(
+  read: Readonly<Record<Exclude<IdentityPickerListName, "tools">, number>>,
+  toolsCut: boolean,
+  max: number = IDENTITY_PICKER_MAX,
+): IdentityPickerListName[] {
+  return IDENTITY_PICKER_LISTS.filter((l) => (l === "tools" ? toolsCut : read[l] > max));
+}
+
 /**
  * `GET /v1/identity/picker-sources`: what the identity forms may offer. Only
  * objects that exist and that an admin may name; a picker never offers a free
@@ -974,6 +1002,8 @@ export interface IdentityPickerSourcesView {
   workerIdentities: IdentityPickerOption[];
   /** S6: true when any list above reached `IDENTITY_PICKER_MAX`, or a tool list its per-server or total cap */
   truncated: boolean;
+  /** which lists were cut (`truncated` is true exactly when this is not empty), so a form can say which one */
+  truncatedLists: IdentityPickerListName[];
 }
 
 export interface IdentitySigningKeyView {

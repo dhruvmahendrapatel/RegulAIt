@@ -29,13 +29,14 @@
  *     air-gapped behaviour of §8.5 arriving from the guard, not a mode flag.
  *
  * SHARED-STATE DISCIPLINE. `egress_allow_hosts` is org-wide and this suite adds
- * an entry for 127.0.0.1; `afterAll` removes it along with every connection,
+ * an entry for 127.0.0.1; `afterAll` removes it (by its id, M-068) along with every connection,
  * link, message, interaction, approval, project, compliance profile, connector,
  * user and audit row the suite created.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,6 +90,8 @@ const UNLISTED_LOGIN_HOST = "http://127.0.0.2:9";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
+/** M-068: the loopback allow entry this suite created, removed by id in afterAll */
+let loopbackAllowHostId: string | undefined;
 
 let danaId: string;
 let malloryId: string;
@@ -229,6 +232,7 @@ beforeAll(async () => {
     note: "chatops suite: local fake Slack",
   }));
   expect([201, 200]).toContain(allow.statusCode);
+  loopbackAllowHostId = allow.json().id;
 
   const mk = async (email: string, name: string) => {
     const res = await post("/v1/users", { email, displayName: name });
@@ -336,25 +340,30 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await restorePiiFloor?.();
-  await db.delete(chatopsInteractions);
-  await db.delete(chatopsMessages);
-  await db.delete(chatIdentityLinks);
-  await db
-    .delete(chatopsConnections)
-    .where(inArray(chatopsConnections.id, [connectionId, teamsConnectionId, badLoginConnectionId].filter(Boolean)));
-  await db.delete(approvals).where(eq(approvals.userId, requesterId));
-  if (fencedProjectId) await db.delete(projects).where(eq(projects.id, fencedProjectId));
-  await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, PROFILE_TAG));
-  const allConnectors = [connectorId, teamsConnectorId, badLoginConnectorId].filter(Boolean);
-  await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, allConnectors));
-  await db.delete(connectors).where(inArray(connectors.id, allConnectors));
-  await db.delete(auditLog).where(inArray(auditLog.ruleId, RULE_IDS));
-  await db.delete(users).where(inArray(users.email, EMAILS));
-  await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
-  app.server.closeAllConnections();
-  await app.close();
-  await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  // M-068: remove the loopback allow entry this suite created, first, while the app is up; asserted last
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restorePiiFloor?.();
+    await db.delete(chatopsInteractions);
+    await db.delete(chatopsMessages);
+    await db.delete(chatIdentityLinks);
+    await db
+      .delete(chatopsConnections)
+      .where(inArray(chatopsConnections.id, [connectionId, teamsConnectionId, badLoginConnectionId].filter(Boolean)));
+    await db.delete(approvals).where(eq(approvals.userId, requesterId));
+    if (fencedProjectId) await db.delete(projects).where(eq(projects.id, fencedProjectId));
+    await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, PROFILE_TAG));
+    const allConnectors = [connectorId, teamsConnectorId, badLoginConnectorId].filter(Boolean);
+    await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, allConnectors));
+    await db.delete(connectors).where(inArray(connectors.id, allConnectors));
+    await db.delete(auditLog).where(inArray(auditLog.ruleId, RULE_IDS));
+    await db.delete(users).where(inArray(users.email, EMAILS));
+    app.server.closeAllConnections();
+    await app.close();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 // ===========================================================================
@@ -663,12 +672,15 @@ describe("outbound posting", () => {
       expect(audits.length).toBeGreaterThan(0);
     } finally {
       for (const row of saved) {
-        await db.insert(egressAllowHosts).values({
-          host: row.host,
+        // egress-allow-cleanup: afterAll — the same row back under its own id, which afterAll removes
+        const [back] = await db.insert(egressAllowHosts).values({
+          id: row.id,
+          host: "127.0.0.1", // the row selected by that host (unique)
           allowPrivateRanges: row.allowPrivateRanges,
           allowPlaintextHttp: row.allowPlaintextHttp,
           note: row.note,
-        });
+        }).returning({ id: egressAllowHosts.id });
+        loopbackAllowHostId = back!.id;
       }
     }
   });
@@ -795,12 +807,15 @@ describe("ADR-0113: Teams outbound", () => {
       expect(await db.select().from(chatopsMessages).where(eq(chatopsMessages.approvalId, approvalId))).toHaveLength(0);
     } finally {
       for (const row of saved) {
-        await db.insert(egressAllowHosts).values({
-          host: row.host,
+        // egress-allow-cleanup: afterAll — the same row back under its own id, which afterAll removes
+        const [back] = await db.insert(egressAllowHosts).values({
+          id: row.id,
+          host: "127.0.0.1", // the row selected by that host (unique)
           allowPrivateRanges: row.allowPrivateRanges,
           allowPlaintextHttp: row.allowPlaintextHttp,
           note: row.note,
-        });
+        }).returning({ id: egressAllowHosts.id });
+        loopbackAllowHostId = back!.id;
       }
     }
     // POSITIVE PAIR (M-033): with the entry restored, the SAME post succeeds —
