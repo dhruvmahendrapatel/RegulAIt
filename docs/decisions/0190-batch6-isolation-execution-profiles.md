@@ -969,6 +969,8 @@ Open questions I4 leaves (for the owner or the master):
    **Answered 2026-10-15: Owner decision C** (L3 by default; an admin may lower it to L2 for interactive sessions).
 2. **Multi-replica stdio sessions** (item 9): sticky routing of `/v1/executor-channel/offers/*/stdio`, or a frames
    table (a migration).
+   **Built 2026-10-17 as a frames table** (migration 0204): see "I4 follow-up: stdio sessions on a multi-replica
+   gateway" below.
 3. **A gVisor CI job**: GitHub-hosted runners have Docker and sudo, so a job could install the pinned tarball,
    register `runsc` and run the integration suite. It was not added because it has never been run (M-041).
 4. **Engines (I5)** inherit the runsc backend for `engine_worker`; they need the input volume and task-scoped
@@ -1977,6 +1979,152 @@ Both were built 2026-10-17 in migration 0201.
   here, not in the owner's section).
 - L2 itself (gVisor) stays unverified, as recorded above.
 
+## I4 follow-up: stdio sessions on a multi-replica gateway (2026-10-17)
+
+This closes I4 open question 2 and the item 9 caveat ("a multi-replica gateway needs the stdio routes to reach the
+placing replica, or a frames table"). Migration **0204** (`0204_isolation_stdio_relay.sql`) is hand-written; its
+journal entry (idx 204) follows 0203. The number was 0206 as first written; the master assigned 0204.
+
+1. **The choice: (b) a frames table, not (a) ownership plus forwarding.**
+   - **(a) An ownership table plus forwarding to the owning replica over the internal TLS front: rejected.**
+     - A replica that received the executor's request would have to call the holder. That is a new replica-to-replica
+       endpoint, which needs its own authentication: the executor's proof is one-use and bound to its own request
+       (`htu`, `bh`, `jti`), so it cannot be passed on.
+     - The front (`executor-front`) knows one upstream, `gateway:3000`. Compose replicas have no per-replica address,
+       so forwarding would also need replica addressing (a registry of replica URLs and their certificates).
+   - **(b) A frames table any replica appends to and reads: chosen.** The database already connects every replica.
+     The executor's routes stay exactly as they were, behind the same proof, so there is **no new endpoint of any
+     kind**. The holder is found by a row, not by an address.
+   - **Searched (ADR-0176), not used:**
+     - Caddy's sticky load balancing (`lb_policy` `uri_hash`, `header`, `cookie`) on the front. The holder is the
+       replica the CALL reached through the public front, not the one a hash of the offer id picks, and a hash moves
+       whenever the replica set changes. Stickiness would route to the wrong replica.
+     - Redis Streams and NATS JetStream (BSD-3-Clause and Apache-2.0). Both fit the shape, but each adds a stateful
+       service to every deploy mode, the image bundle and the backup plan (pillar 3), for traffic that Postgres
+       carries at this size.
+     - Job queues on Postgres (pg-boss, graphile-worker). They carry jobs, not ordered byte streams with
+       acknowledgement, so the sequencing below would still be ours.
+     - Postgres `LISTEN`/`NOTIFY` (no new dependency) to replace polling. Deferred: it needs one dedicated
+       connection per replica outside the pool. Polling at 100 ms bounds the added latency; see follow-ups.
+2. **What is stored** (`stdio_relay_sessions`, `stdio_relay_frames`):
+   - One session row per placed stdio session (engine task sessions too: they use the same routes). It holds:
+     - the holder (`owner_replica`, a random id per process, so a restarted replica holds nothing) and its lease;
+     - the sealed `start` line;
+     - the counters (`in_next_seq`, `in_acked_to`, `out_next_seq`, `out_buffered_bytes`);
+     - one window token at a time, with an expiry if its replica dies;
+     - `closed_at`, `eof_at`, `ended_at` and an `end_code` limited by a CHECK to `ended`, `sequence`, `lease_expired`,
+       `buffer_full` or (point 9) `unsealed`. There is no free-text column, so the ADR-0102 prose-scrub registry is unaffected.
+   - A frame row is one stdin or stdout line (at most 768 KiB). Stdin frames are deleted once the executor's `from`
+     acknowledges them. Stdout frames are deleted once the holder takes them. All of a session's frames go when it
+     ends.
+   - The `start` line can carry an engine task's secret (I5). It is sealed with AES-256-GCM under a key derived from
+     the same root as the session MAC key (HKDF of the data key, label `regulait/adr0190/stdio-start-seal/v1`), with
+     the offer id as associated data. So a replica with the shared data key opens it, and one without cannot: that
+     replica refuses the window `stdio_unkeyed`, as it would fail the MAC. A sealed line copied into another row
+     does not open there. The row drops the line as soon as the sandbox posts its first stdout, as the in-process
+     session already dropped the secret.
+3. **Who reads what.**
+   - Every route query names both the offer in the path AND the executor that the request's proof names. So an
+     executor sees only its own offers' rows and frames (another executor's request is `offer_unavailable`), and no
+     request reads a session other than its own.
+   - Holder calls name `owner_replica`, so a replica never takes, ends or renews another replica's session.
+   - A trigger refuses any change to a row's offer, executor or holder, and any change to an ended row's end. There is
+     no takeover. A second trigger refuses any UPDATE of a frame. Both functions pin `search_path`, and both tables
+     refuse TRUNCATE (the migration 0185 rules).
+   - Offers carry no tenant column: a deployment is one organisation's control plane. The executor that owns the
+     offer is the boundary, as on one replica.
+4. **The holder's relay** (`executor-stdio.ts`, `relayOnce`) runs every `STDIO_RELAY_POLL_MS` (100 ms), and at once
+   when this process has news (a pushed frame, a close, an end, a posted stdout). It:
+   - writes each new session's row with its lease. The row is written only for a committed offer of that executor,
+     so an engine task held before its transaction commits is written on the first tick after the commit;
+   - appends pushed stdin frames, and marks a local close;
+   - applies the executor's acknowledgements and takes stdout frames, in order and once (one step at a time per
+     session), handing them to the MCP transport;
+   - ends the session on eof once its output is delivered;
+   - renews every lease it holds every 5 s (the lease is 15 s, so one missed beat is not a loss);
+   - deletes ended rows after 5 minutes, and any row whose lease lapsed an hour ago (its frames go with it).
+   - Once the placement is accepted, the relay also watches the offer, as the I4 watchdog did:
+     - the offer `ended` (the executor's `/end`, on any replica) ends the call normally once the output is in;
+     - an offer withdrawn, expired or gone under a live call is a loss (`lose`, recorded `where: holder`).
+   - The `/end` route on the holding replica takes the remaining output first and then ends the session there.
+5. **Fail closed when the holder is gone** (`stdioRouteDecision`, one rule for both routes):
+   - an offer that is not this executor's, or not placed: `offer_unavailable`;
+   - an ended row: `offer_unavailable`;
+   - a lapsed lease: the row is ended `lease_expired` by one conditional UPDATE (of two replicas, only one moves it).
+     The loss is recorded as before (one `execution-session-lost` audit row and, for a governed placement, one
+     `session_lost` report row), and the route answers **409 `session_lost`**;
+   - no row for an offer older than one lease: its holder never wrote it, so the session is lost the same way;
+   - no row for a younger offer: a window gets 409 `stdio_session_pending` (the holder writes the row within a tick).
+     That code is not final, so the executor re-opens with back-off. A stdout POST never waits, because it can only
+     follow a `start`;
+   - an open window whose lease lapses under it ends the row the same way and closes. The executor's next window is
+     `offer_unavailable`.
+   - `session_lost` joins the executor's final refusals (`stdio-pump.ts`), so the sandbox is stopped. A holder that
+     comes back finds its row ended and fails its call as lost: each pending request gets the gateway's own refusal,
+     never the server's failure (review M3).
+   - `stdio_session_unknown` is no longer answered. It stays in the vocabulary and in the executor's final set, so an
+     older peer still reads it.
+6. **Bounds.**
+   - Stdin: 4 MiB unacknowledged per session (the holder's existing bound).
+   - Stdout: 4 MiB buffered per session (`out_buffered_bytes`, a CHECK). A POST past it ends the session
+     `buffer_full`, a loss: the holder is not draining it. On one replica this output was delivered at once and had
+     no bound.
+   - So one live session holds at most 8 MiB of frames, and one replica holds at most 256 live sessions (unchanged).
+   - The routes and the holder poll at 100 ms, so a call on another replica waits up to about that per hop.
+     Same-replica traffic is woken in process and does not wait for the poll.
+7. **What was and was not run (M-041).**
+   - Run here: the gateway and executor builds; the routing-rule and sealing unit tests
+     (`adr0190-i4-stdio-relay.test.ts`); the executor's stdio pump tests with `session_lost` final and
+     `stdio_session_pending` retried; the gateway typecheck of the database suite.
+   - Not run here (no Postgres in the build environment): the database suite `zz-adr0190-i4-stdio-relay.test.ts`
+     (ownership, isolation, the lease, loss, bounds, retention, the 0185 guards) and the existing I4 and I5 suites
+     against the relay. They run in CI with the journal entry for 0204 (idx 204).
+   - **Pending execution:** a real multi-replica deployment (two or more gateway processes behind the front, a placed
+     stdio call whose window and stdout reach a replica other than the holder, and a holder stopped mid-call). The
+     database suite plays the second replica with rows written under another holder id.
+8. **Follow-ups this leaves:**
+   - `LISTEN`/`NOTIFY` to wake windows and holders on other replicas, instead of polling.
+   - An engine run's runner routes (`/v1/engine-runner/...`) still find their task in the process that started it
+     (`tasksByRun`). Only the executor side of an engine task's session is multi-replica now.
+   - No take-over: a session whose holder dies is lost, never resumed elsewhere. Resuming would need the MCP client's
+     state, which lives only in the holder.
+9. **Review fixes (the independent review of PR #417, findings 1 to 4).** These supersede the points above where they
+   differ; migration 0204 was still unmerged, so it was edited in place.
+   - **Finding 1 (Medium): one session's fault no longer stalls the replica's leases.** `relayOnce` now renews the
+     leases FIRST, in its own catch. The work for each session (its row, stdin and close; then what the routes did)
+     runs in its own catch. A session whose work fails on every tick for one lease length (15 s, so a database outage
+     loses no session earlier than its lease would) is lost on its own, and the loss is recorded (`where: holder`).
+     The replica's other sessions keep their leases. Ending rows and the sweep also each have their own catch. Test:
+     a session whose every statement throws is held next to a healthy one; the healthy lease is renewed while the
+     poisoned session fails, and then only the poisoned one is lost.
+   - **Finding 2 (Low): a raw NUL in a frame is refused.** The frame schema (`packages/shared`, `frameData`) refuses
+     U+0000, so a stdout POST carrying one is a clean 400 `invalid_body`, never a 500 from the insert. JSON-RPC
+     never needs one, because JSON escapes it. Test in `adr0190-i4-stdio-relay.test.ts`.
+   - **Finding 3 (Low; the master decided to seal, ADR-0180): frames are sealed at rest.** This supersedes point 2's
+     plain frame row. Each frame is stored as AES-256-GCM (`data_sealed`, `iv.tag.ciphertext` in base64url) under a
+     key derived from the same root as the `start` seal (HKDF label `regulait/adr0190/stdio-frame-seal/v1`). The
+     associated data is the offer id, the direction and the sequence number. So a frame moved to another session,
+     turned around, or swapped with another frame in the order does not open.
+     - `bytes` is the plaintext size. A CHECK holds `data_sealed` to the sealed shape, with a length that follows
+       exactly from `bytes`, so the table refuses a frame in the clear. The old `octet_length(data) = bytes` CHECK
+       is gone with the `data` column.
+     - Fail closed: a frame that does not open (another root, so no shared data key; or altered at rest) is never
+       delivered. The session ends with the new end code **`unsealed`**, which is a loss, recorded once by whoever
+       moved the row: the route that finds it in a window, or the holder that finds it in stdout. `end_code`'s CHECK
+       gains `unsealed`, and `STDIO_RELAY_LOST_CODES` is now `lease_expired`, `buffer_full` and `unsealed`.
+     - Without a data key, each process seals under its own random root, as for the `start` line. One replica works;
+       a second cannot open the first one's frames, and the session is lost rather than served.
+     - Tests: unit tests for seal and open (another offer, the other direction, swapped seqs, an altered iv, tag or
+       ciphertext, another root), and DB tests (no plaintext stored and a plaintext insert refused; stdin swapped at
+       rest ends the session `unsealed` on the route side exactly once; stdout swapped at rest is never delivered;
+       stdout under another root fails the holder's call as lost `unsealed`).
+   - **Finding 4 (Low, tests): the filters the review could remove are now pinned.** In the foreign-holder test,
+     `markStdioClosed` leaves `closed_at` NULL, `stdioHolderView` returns nothing, and the holder's
+     `endUnsealedStdioSession` moves nothing. On a lapsed row, `endLapsedStdioSession` for executor B returns
+     `false` and the row stays live until executor A's call ends it.
+   - Run here: the build; the gateway non-database tests for I4 and I5; `packages/shared`; `packages/sandbox-executor`;
+     the gateway typecheck of the database suite. The database suite runs in CI (no Postgres here).
+
 ## As built: slice A1, the relaxation in the Decision BOM (2026-10-17)
 
 Owner decision C asked that the Decision BOM panel show the relaxation and that vectors pin the API-key case. A1
@@ -2197,3 +2345,44 @@ the committed report.
 
 **Not verified here:** the gateway database suite has not run in the session that wrote this (no database); CI's
 database shards run it.
+
+## As built: first engine image publish recorded (ENG-IMG follow-up, 2026-10-17)
+
+The merge of PR #405 (`5bb229e`) was a push to `main` that touched engine paths, so it ran the `Engine images`
+workflow (run 39025547605, attempt 1):
+- all three `publish` jobs and the `record` job succeeded;
+- each publish job's `Sign (skipped, with the reason)` step ran, so nothing was signed.
+
+The `engine-images-publish` artifact was recorded with `node scripts/engine-images-lock.mjs --apply` and checked with
+`--check`. `--apply` accepted it: the repositories are this repository's owner namespace, and the source commit is on
+`main`. The lock now names, per engine (repository, manifest digest, image id):
+
+| Engine | Repository | Manifest digest (pull, runner report) | Image id (`taskImage`) |
+|---|---|---|---|
+| promptfoo | `ghcr.io/dhruvmahendrapatel/regulait-engine-promptfoo` | `sha256:e973eab40486832b9b3c858acc43fa5f4d732bc47aea24ede2d89c576f36a577` | `sha256:f6592409f684252fe36952deb42b9369dbeeb9ac85f33ac8093d1505a94a454f` |
+| modelscan | `ghcr.io/dhruvmahendrapatel/regulait-engine-modelscan` | `sha256:d9e3bd1e364fec7ce6beec86716548965b4651e065b52570ebbb6ae8647e9413` | `sha256:a3057ca433c3fcf4f226cebcb12e876521c1e543ca359a4eef3b4dc93e9990bd` |
+| garak | `ghcr.io/dhruvmahendrapatel/regulait-engine-garak` | `sha256:8fe7d51851bcaff2fdf562c9db1b5f2b0423966e034954ee3976ae8754d6da6c` | `sha256:c0749c4f4c6707a011767cef76d9105b6dc002ed687986f4b6dca5217893bfde` |
+
+Each entry's `publishGeneration` is 1, so each manifest generation moves up by one (ADR-0187 decision 95). The compose
+defaults now name these references, so a stock install no longer needs `REGULAIT_ENGINE_<ENGINE>_DIGEST`.
+
+**What this changes, and what it does not.**
+- An engine can now pass the runner self-test's image check, and its task can now be placed. Every other gate stays:
+  - an engine is disabled until an admin enables it after a passing self-test;
+  - the worker switches need a fresh executor attestation;
+  - placement needs an attested executor at the engine-worker floor.
+- **The images are unsigned.** ADR-0187 decision 55's "admission is the signature verification at deploy time" is
+  still open (signing, open question 1 above). Recording the digests pins exactly which build runs. It does not
+  attest who built it beyond this repository's `main` and the run named here.
+- Tests that meant "an engine with no image" now say so explicitly (`imageDigest: null` overrides) instead of relying
+  on the shipped lock being null:
+  - `zz-b5-engines` (modelscan) and `engines.test.ts`;
+  - the promptfoo and garak manifest tests, which now compare with the lock;
+  - the lock script's apply tests, which start from a blank lock;
+  - `zz-b5-compose`, which derives each runner's reference defaults from the lock.
+
+**Not verified (pending execution, M-041).**
+- No image has been pulled from GHCR or run on a Docker host.
+- The packages' visibility is unconfirmed: GitHub's docs say it is private on first publish.
+- The pulled image's `.Id` has not been compared with the recorded image id.
+- No engine has been enabled, and no engine task has run end to end. Real gVisor still waits on the `runsc` re-pin.

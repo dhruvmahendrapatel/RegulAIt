@@ -49,8 +49,17 @@ describe("discovery sources model (ADR-0195 SD0)", () => {
     const psn = `psn:${"ab".repeat(12)}`;
     expect(sightingLines([{ source: "egress_log" }])).toEqual([]);
     expect(
-      sightingLines([{ source: "repo_scan", location: { path: "src/a.ts", line: 3, commit: "0123456789abcdef" }, names: ["OPENAI_API_KEY"], actor: psn }]),
-    ).toEqual([{ text: "src/a.ts:3 @01234567 · names: OPENAI_API_KEY", actor: psn }]);
+      sightingLines([{ source: "repo_scan", location: { path: ".mcp.json", commit: "0123456789abcdef" }, names: ["npx"], actor: psn }]),
+    ).toEqual([{ text: ".mcp.json @01234567 · names: npx", actor: psn }]);
+  });
+
+  it("renders ADR-0195 A6 presence signature ids, never an env-variable name", () => {
+    expect(sightingLines([{ source: "repo_scan", location: { path: ".env.example" }, presence: ["env.openai.api-key"] }])).toEqual([
+      { text: ".env.example · presence signatures: env.openai.api-key", actor: null },
+    ]);
+    expect(sightingLines([{ source: "endpoint_osquery", presence: ["cli.openai.codex"] }])).toEqual([
+      { text: "presence signatures: cli.openai.codex", actor: null },
+    ]);
   });
 
   it("describes scope and schedule", () => {

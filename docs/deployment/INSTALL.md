@@ -178,8 +178,9 @@ override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
 Container Registry, so log in to `ghcr.io` first with a token that can read them. The bundle refuses an engine the lock
 has no published image for, pulls each image by its digest, checks its image id against the lock, and saves it under
 the digest reference and the tag `regulait/engine-<engine>:bundled`. The air-gapped install runs those tags (never
-pulled) and checks each loaded tag's id against the lock. **Pending execution (M-041):** no engine image has been
-published yet, and neither the bundle with `--with-engines` nor its `docker load` round trip has been run.
+pulled) and checks each loaded tag's id against the lock. The first publish is recorded in the lock (ADR-0190 "As
+built: first engine image publish recorded"). **Pending execution (M-041):** neither the bundle with `--with-engines`
+nor its `docker load` round trip has been run.
 
 If integrity across the gap matters (it should), ship the image tarball **inside a signed update
 bundle** rather than loose:
@@ -260,8 +261,10 @@ shred -u /root/first-admin-password
 
 The file must be a regular file (not a symbolic link) owned by you or root, with mode `0600` or
 stricter, holding one line: no control characters except one trailing newline, and no UTF-8
-byte-order mark. Anything else is refused before anything renders, and checked again just before
-use. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
+byte-order mark. Its directory must be owned by you or root, and no one else may write to it (so
+the file cannot be swapped between the check and the open). Anything else is refused before
+anything renders, and checked again just before use. The password file works on Linux only; on
+other systems run the installer interactively. `REGULAIT_FIRST_ADMIN_EMAIL` is required with it, and `--check` validates all
 three. Without the file, a non-interactive install skips the step and says so.
 
 **The bootstrap door closes itself.** `REGULAIT_BOOTSTRAP_TOKEN` authenticates as an admin **with
@@ -644,8 +647,8 @@ the comment above them in `docker-compose.yml`) so you can check the Dockerfiles
 - The modelscan runner no longer downloads the artifact: the gateway streams it to the executor's input volume.
 
 Under real gVisor an engine task still waits on the `runsc` re-pin (ADR-0190 I5). **Pending execution (M-041):**
-none of this has been run on a Docker host yet, and no publish has run; record what you find against ADR-0190 "As
-built: engine task images".
+the first publish ran on GitHub's runners and is recorded in the lock, but no image has been pulled or run on a Docker
+host yet; record what you find against ADR-0190 "As built: first engine image publish recorded".
 
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always

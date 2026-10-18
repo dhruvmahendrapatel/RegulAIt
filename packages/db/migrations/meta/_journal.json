@@ -1359,6 +1359,20 @@
       "when": 1785138000000,
       "tag": "0203_step_up_key_management",
       "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1785139000000,
+      "tag": "0204_isolation_stdio_relay",
+      "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1785140000000,
+      "tag": "0205_federation_signing_keys",
+      "breakpoints": true
     }
   ]
 }

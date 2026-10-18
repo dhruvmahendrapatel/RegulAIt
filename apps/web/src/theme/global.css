@@ -186,7 +186,12 @@ pre code {
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
+    /* no motion at all rather than a 0.01 ms one. A 0.01 ms transition still starts from the old value and reaches
+       the new one only on the next frame, so a style read straight after a change (a theme flip) saw the old
+       colour; and a 0.01 ms INFINITE animation (the pulse, shimmer and caret) flickers and never finishes. No
+       animation here uses a fill mode, so `none` leaves every element in its resting style, and nothing in the
+       app waits for transitionend or animationend. */
+    animation: none !important;
+    transition: none !important;
   }
 }

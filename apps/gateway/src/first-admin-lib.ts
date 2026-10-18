@@ -31,6 +31,7 @@ import { auditAuth, checkPasswordPolicy, hashPassword } from "./auth.js";
 import { withSignInInvariant } from "./break-glass.js";
 import { realAdminExists } from "./dev-secrets.js";
 import { refuseIfSeatCapReached } from "./licensing.js";
+import { realAdminEmails } from "./seed-demo-guard.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -63,11 +64,19 @@ export interface FirstAdminResult {
   username?: string;
 }
 
-/** `--status`: is the step still needed? (3 = an active admin exists) */
+/** the `--status` line when every admin is one of the demo seed's personas; install.sh matches its marker */
+export const FIRST_ADMIN_STATUS_DEMO_ONLY = "first admin: only the demo seed's personas are admins — nothing to do";
+
+/**
+ * `--status`: is the step still needed? (3 = an active admin exists). When an admin exists, the line also says
+ * whether they are all demo personas (the seed-demo guard's own test), so the installer's `--seed-demo` summary
+ * does not claim the demo admin is the admin when a real one existed and the seed refused.
+ */
 export async function firstAdminStatus(db: Db): Promise<{ exitCode: 0 | 3; line: string }> {
-  return (await realAdminExists(db))
-    ? { exitCode: 3, line: "first admin: an active admin already exists — nothing to do" }
-    : { exitCode: 0, line: "first admin: none yet" };
+  if (!(await realAdminExists(db))) return { exitCode: 0, line: "first admin: none yet" };
+  return (await realAdminEmails(db)).length === 0
+    ? { exitCode: 3, line: FIRST_ADMIN_STATUS_DEMO_ONLY }
+    : { exitCode: 3, line: "first admin: an active admin already exists — nothing to do" };
 }
 
 const ADMIN_EXISTS: FirstAdminResult = {
