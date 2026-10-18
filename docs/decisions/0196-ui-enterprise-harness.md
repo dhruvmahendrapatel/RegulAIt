@@ -281,3 +281,78 @@ census) is unchanged.
    `networkidle` (500 ms quiet) fires inside the retry gap and the check counts before the retry lands. A run that
    waited for the alert saw it on both by 1.5 s. Making the check wait for the alert (as the loading check already
    waits up to `LOADING_MS`) is a harness change, so it is left to the owner; the baseline keeps both at 1.
+
+### As built: U4 performance (route-level code splitting)
+
+Bar 4 says "JS bundle-size ceilings per entry, enforced in CI". U4 shrinks what the entry loads and then lowers the
+ceilings to the new sizes. No ceiling was raised and no harness constant or gate changed.
+
+- **Screens load on demand.** `apps/web/src/App.tsx` declares every screen with `React.lazy`. The router is the
+  repo's own (react-router 7, `createBrowserRouter`), so no dependency was added (ADR-0176). Its default wraps every
+  navigation in a React transition, so the screen being left stays up until the next one has loaded, and focus does
+  not move. The router's own `lazy` route property was not used: the screens are declared as JSX `<Route>`s, and the
+  route census (`scripts/ui-spa-routes.mjs`) reads them there.
+- **One chunk per console section, not per screen.** `apps/web/src/screens/*.ts` re-export the screens of one admin
+  section (the groups in `shell/suites.tsx`) or one workspace area. Each module is the dynamic-import target for its
+  screens, so a section's shared code ships once, and code shared between sections stays in the entry or in a shared
+  chunk. A chunk per screen (174 files) measured 1,144.8 kB on the "all JS" entry, over its 1,020 kB ceiling. Gzip
+  loses its dictionary at each file boundary, and that entry adds up per-file sizes. One chunk per source directory
+  measured 1,000.7 kB, but its governance chunk was 201 kB. The section grouping measures 1,010.1 kB, and its largest
+  screen chunk is 86.7 kB (AI Governance). A single-screen area (home, chat, models, spend, account, the two
+  single-file admin areas) imports its file directly.
+- **Loading fallback.** `apps/web/src/shell/RouteFallback.tsx` renders only on a first load. It sits in the same box as
+  the auth probe's skeleton in `Protected`, so nothing moves when one hands over to the other. It announces "Loading
+  page" through `RouteLoadingAnnouncer`, a polite `aria-live` region that is always mounted beside the router (outside
+  `<main>`) and only changes its text while a fallback is up, because many screen readers say nothing for a region
+  that is inserted together with its text. Its skeleton bars are hidden from assistive technology. It
+  deliberately has no `role="status"` and no `aria-busy`. Those are what the states check reads as the screen
+  announcing its own data loading. A first run with a `role="status"` fallback cleared 21 of the 22 `loading-not-announced`
+  findings that the screens had not fixed, because the fallback was in `<main>` while the chunk loaded. That would
+  have loosened the gate. It takes no focus. Signed-in screens suspend inside `AppShell` (a boundary around `<Outlet />`), so the shell and the
+  skip link stay mounted. The screens outside the shell (sign-in, the public feedback link, the forced gates) suspend
+  to a boundary around the router element.
+- **Failed chunks (review fix).** A chunk that fails to load (a tab opened before a gateway upgrade asks for an old
+  hash and gets a 404; a dropped link) used to replace the app with the router's developer page, stack trace and
+  asset URLs included. `apps/web/src/shell/RouteError.tsx` now shows a `role="alert"` panel instead: "This page
+  failed to load" for a failed import (recognised by the Chromium, Firefox and WebKit messages), "Something went
+  wrong on this page" for a screen that threw. It offers **Reload** and a link home, and never shows the error's
+  message or stack (they go to the console). Reload is the recovery because React caches a lazy screen's rejected
+  import, so re-rendering cannot fetch it again. Signed-in screens get the panel inside the shell
+  (`ShellRouteBoundary`, around the `Suspense` in `Protected`), so the shell and skip link stay mounted; it resets
+  when the path changes rather than remounting, so a later navigation still runs in the transition. The rest get it
+  from the root route's `errorElement` (react-router's `useRouteError`). The in-shell boundary is
+  `react-error-boundary` 6.1.6 (MIT, no dependencies, released 2026-09-20), chosen under ADR-0176 over a
+  hand-written class: its `resetKeys` is exactly the reset-on-navigation rule. It does not reload by itself on vite's
+  `vite:preloadError`: a failed client navigation would then throw away the screen the person is on, with anything
+  typed into it. `e2e/enterprise/route-chunks.ent.spec.ts` aborts the chunk on a direct load, on a client
+  navigation and outside the shell, and holds it to check the fallback; each case failed with the fix removed.
+- **Logos are files, not script.** `vite.config.ts` sets `assetsInlineLimit` so `.svg` files are never inlined. The
+  72 vendored logos (`src/ui/logos/svg`, loaded by `Logo.tsx` with `?url`) had been inlined into a shared chunk as
+  `data:` URIs (43.8 kB gzip of script). They are now hashed files under `/ui/assets`. The gateway already serves
+  `.svg` as `image/svg+xml` with immutable caching, and they stay air-gapped. A screen fetches only the marks it
+  draws.
+- **Heavy libraries.** recharts (`SeriesLineChart`) and @xyflow/dagre (`RunGraphCanvas`) were already lazy, behind
+  their own boundaries. They stay separate chunks, so the two `lazy:` entries keep matching their files. The
+  react-router package exports only its development build. Its production build has the same size, so aliasing it
+  was not worth a resolver override.
+
+Bundle (gzip, size-limit 14.2.0, `pnpm --filter @regulait/web size`), main at 71d0aff and then this branch:
+
+| entry | before | after | ceiling before | ceiling after |
+|---|---|---|---|---|
+| entry JS (index) | 804.1 kB | 133.4 kB | 817 kB | 137.5 kB |
+| entry CSS (index) | 28.6 kB | 10.2 kB | 30 kB | 10.6 kB |
+| lazy: SeriesLineChart | 106.1 kB | 106.1 kB | 110 kB | 109 kB |
+| lazy: RunGraphCanvas | 75.9 kB | 75.9 kB | 79 kB | 78 kB |
+| all JS | 1,001.3 kB | 1,010.1 kB | 1,020 kB | 1,020 kB (unchanged) |
+
+The new ceilings are the measured size plus about 3 %, the margin the harness first set. Entry CSS gets about 4 %
+(10.6 kB), because lane U1 (#423) adds a focus-ring rule of about 0.6 kB raw to `global.css`. "All JS" stays at 1,020 kB:
+it grew by 8.8 kB (the per-file gzip cost of 64 files instead of 7), and 1,020 kB is already within 1 % of it. A
+first visit now downloads the entry plus one section chunk instead of all 804 kB. After the failed-chunk fix (and
+a merge of main), entry JS measures 134.6 kB (2.1 % under 137.5 kB) and all JS 1,012.2 kB (0.8 % under 1,020 kB);
+no ceiling moved.
+
+Performance (`perf.ent.spec.ts`, Chromium, all 113 screens, this container, mocked API): LCP median 1,248 to
+1,180 ms, p90 1,312 to 1,248 ms, highest 1,368 to 1,300 ms; highest INP 16 ms both times. No screen was over a budget
+before or after, so `baselines/perf.json` stays empty: `--update` rewrote it with 0 keys and no diff.
