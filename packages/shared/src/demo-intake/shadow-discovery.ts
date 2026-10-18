@@ -101,7 +101,6 @@ export interface DemoShadowDiscoveryDataset {
   /** the finding the remediation beat opens: the GitLab repository below */
   remediation: {
     repo: string;
-    templateName: string;
     environment: string;
     deployTargetName: string;
     plan: string;
@@ -286,7 +285,6 @@ export const DEMO_SHADOW_DISCOVERY: DemoShadowDiscoveryDataset = {
   },
   remediation: {
     repo: "acme-bank-demo/credit-memo-assistant",
-    templateName: "acme-shadow-ai-remediation",
     environment: "staging",
     deployTargetName: "acme-staging",
     plan:

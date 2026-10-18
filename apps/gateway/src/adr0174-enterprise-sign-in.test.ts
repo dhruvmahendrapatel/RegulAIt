@@ -1197,8 +1197,8 @@ describe("demo:set-passwords", () => {
       expect(res.statusCode, `${e}: ${res.body}`).toBe(200);
       expect(res.json().mustChangePassword).toBe(false);
     }
-    const rows = await db.select().from(auditLog).where(eq(auditLog.ruleId, "demo-password-set")).orderBy(desc(auditLog.at)).limit(3);
-    expect(rows).toHaveLength(3);
+    const rows = await db.select().from(auditLog).where(eq(auditLog.ruleId, "demo-password-set")).orderBy(desc(auditLog.at)).limit(DEMO_PERSONA_EMAILS.length);
+    expect(rows).toHaveLength(4); // Ada, Dana, Avery and Morgan (ADR-0197 addendum)
     for (const row of rows) {
       const serialized = JSON.stringify(row);
       expect(serialized).not.toContain(password);

@@ -8,6 +8,8 @@ import { describe, expect, it } from "vitest";
 import { DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
 import { checkShadowDiscovery, demoShadowNeverStored, leakedShadowNames, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
 import { DEMO_SECURITY_LEAD } from "./demo-identity.js";
+import { DEMO_PERSONA_EMAILS } from "./demo-set-passwords-lib.js";
+import { recordedDiscoveryRegistry } from "./demo-shadow-seed-lib.js";
 
 type Json = Record<string, any>;
 
@@ -96,6 +98,7 @@ describe("checkShadowDiscovery FAILs a step that silently produced nothing", () 
   const breaks: Array<[string, (typeof SHADOW_DISCOVERY_BEATS)[number], (w: World) => void]> = [
     ["the Azure run succeeded with 0 matches", "1 Discovery sources", (w) => void (w.runs[sourceIds.azure] = [{ status: "succeeded", matched: 0 }])],
     ["the GitLab run never ran", "1 Discovery sources", (w) => void (w.runs[sourceIds.gitlab] = [])],
+    ["the AWS source is disabled", "1 Discovery sources", (w) => void (w.sources = w.sources.map((x) => (x.id === sourceIds.aws ? { ...x, enabled: false } : x)))],
     ["an Azure resource has no finding", "1 Sightings", (w) => void (w.findings = w.findings.filter((f) => !String(f.subject).includes("/deployments/")))],
     ["one recorded repository has no finding", "1 Sightings", (w) => void (w.findings = w.findings.filter((f) => f.id !== "f-repo-1"))],
     ["the AWS principal has no audit-log finding", "1 Sightings", (w) => void (w.findings = w.findings.filter((f) => f.id !== "f-principal"))],
@@ -109,6 +112,9 @@ describe("checkShadowDiscovery FAILs a step that silently produced nothing", () 
     ["the security lead is missing", "1 Remediation plan", (w) => void (w.users = w.users.filter((u) => u.id !== MORGAN))],
     ["the security lead has no MFA", "1 Remediation plan", (w) => void (w.users = w.users.map((u) => (u.id === MORGAN ? { ...u, totpEnabled: false } : u)))],
     ["the security lead initiated it", "1 Remediation plan", (w) => void (w.instance = { ...w.instance, initiatorUserId: MORGAN })],
+    ["the security lead is deactivated", "1 Remediation plan", (w) => void (w.users = w.users.map((u) => (u.id === MORGAN ? { ...u, disabledAt: "2026-10-18T09:00:00Z" } : u)))],
+    ["the security lead is not an admin", "1 Remediation plan", (w) => void (w.users = w.users.map((u) => (u.id === MORGAN ? { ...u, isAdmin: false } : u)))],
+    ["the remediation link is replaceable", "1 Remediation plan", (w) => void (w.link = { ...w.link, replaceable: true })],
     ["one library read left no record", "3 Content trust", (w) => void (w.records = w.records.filter((r) => r.id !== "p0"))],
     ["the library reads are untrusted", "3 Content trust", (w) => void (w.records = w.records.map((r) => ({ ...r, trustTier: "untrusted" })))],
     ["a device row carries the hostname", "1 Data minimisation", (w) => void (w.devices = [{ ...w.devices[0], hostname: D.agent.hostname }])],
@@ -135,10 +141,29 @@ describe("the data-minimisation scan", () => {
     expect(names).not.toContain("com.openai.chat");
   });
 
-  it("matches a short name only as a whole value, a long one anywhere", () => {
+  it("matches a short name only as a whole value, a long one anywhere, object keys included", () => {
     expect(leakedShadowNames({ a: "REPORT ready" }, ["PORT"])).toEqual([]);
     expect(leakedShadowNames({ a: ["PORT"] }, ["PORT"])).toEqual(["PORT"]);
     expect(leakedShadowNames({ a: { b: "set OPENAI_API_KEY here" } }, ["OPENAI_API_KEY"])).toEqual(["OPENAI_API_KEY"]);
-    expect(leakedShadowNames({ OPENAI_API_KEY: 1 }, ["OPENAI_API_KEY"])).toEqual([]);
+    expect(leakedShadowNames({ OPENAI_API_KEY: 1 }, ["OPENAI_API_KEY"])).toEqual(["OPENAI_API_KEY"]);
+    expect(leakedShadowNames({ a: { "x.OPENAI_API_KEY": true } }, ["OPENAI_API_KEY"])).toEqual(["OPENAI_API_KEY"]);
+    // a short name as a key is an ordinary field name, not a leak
+    expect(leakedShadowNames({ PORT: 1 }, ["PORT"])).toEqual([]);
+  });
+});
+
+describe("demo:set-passwords covers the second admin (ADR-0197 addendum)", () => {
+  it("lists Morgan beside Ada, Dana and Avery", () => {
+    expect(DEMO_PERSONA_EMAILS).toEqual(["admin@regulait.local", "dana@regulait.local", "avery@regulait.local", DEMO_SECURITY_LEAD.email]);
+  });
+});
+
+describe("the seeder's recorded registry (review L5)", () => {
+  it("replays only the dataset's own sources and refuses, never scans, any other", () => {
+    const registry = recordedDiscoveryRegistry(D, new Set(["x"]));
+    for (const kind of ["repo_gitlab", "cloud_aws", "cloud_azure", "cloud_gcp", "repo_github"] as const) {
+      const ctx = { source: { id: "another-source" } } as unknown as Parameters<NonNullable<ReturnType<typeof registry.get>>["run"]>[0];
+      expect(() => registry.get(kind)!.run(ctx), kind).toThrow(/not a source of the demo dataset/);
+    }
   });
 });

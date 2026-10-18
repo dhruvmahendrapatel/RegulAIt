@@ -14,12 +14,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { auditLog, createDb, discoverySources, endpointDevices, eq, runMigrations, shadowAiFindings, sql, workflowInstances, type Db } from "@regulait/db";
+import { auditLog, createDb, discoveryRuns, discoverySources, endpointDevices, eq, runMigrations, shadowAiFindings, sql, workflowInstances, type Db } from "@regulait/db";
 import { DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
 import { buildApp } from "./app.js";
 import { checkShadowDiscovery, demoShadowNeverStored, leakedShadowNames, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
 import { DEMO_SECURITY_LEAD, enrolAdminsTotp } from "./demo-identity.js";
 import { RECORDED_RUN_OUTCOME, seedShadowSetup, seedShadowStory } from "./demo-shadow-seed-lib.js";
+import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
+import { APPROVER_ADMIN_NOT_INITIATOR } from "./workflow-approvers.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
 
@@ -150,7 +152,14 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     const morgan = (await get("/v1/users")).body.users.find((u: { email: string }) => u.email === DEMO_SECURITY_LEAD.email);
     expect(morgan).toMatchObject({ isAdmin: true, totpEnabled: true });
     expect(instance!.status).toBe("blocked_on_approval");
-    expect(stages[state.currentStageIndex]?.approvers).toEqual([morgan.id]);
+    // the SHIPPED default's sign-off (ADR-0197 addendum decision 1), resolved at the stage to Morgan alone: the only
+    // active admin other than the initiator; the seeder authored no template and no assignment rule of its own
+    expect(stages[state.currentStageIndex]?.approvers).toEqual([APPROVER_ADMIN_NOT_INITIATOR]);
+    const templates = (await get("/v1/workflows/templates")).body.templates as Array<{ id: string; name: string }>;
+    const shipped = templates.find((t) => t.name === SHADOW_AI_REMEDIATION_TEMPLATE_NAME);
+    expect(instance!.templateIds).toEqual([shipped!.id]);
+    const pending = (await get(`/v1/workflows/instances/${instance!.id}`)).body.pendingApprovals as Array<{ approverUserId: string }>;
+    expect(pending.map((p) => p.approverUserId)).toEqual([morgan.id]);
     expect(instance!.initiatorUserId).not.toBe(morgan.id);
 
     const findings = (await get("/v1/shadow-ai/findings")).body.findings;
@@ -183,5 +192,70 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     expect([...s.failed, ...t.failed]).toEqual([]);
     expect([...s.created, ...t.created]).toEqual([]);
     expect(await counts()).toEqual(first);
+  }, 180_000);
+});
+
+describe("ADR-0197 decision 7 (review L5): the seeder runs no discovery pass beside a source outside the dataset", () => {
+  // its own scratch database: the guard is reached only while the dataset's recorded runs have not succeeded yet
+  const GUARD_DB = `${SCRATCH_DB}_guard`;
+  const NIL = "00000000-0000-0000-0000-000000000000";
+  let gdb: Db;
+  let gapp: ReturnType<typeof buildApp>;
+  let restoreGuardIssuer: () => Promise<void> = async () => {};
+  let foreignSourceId: string;
+  let foreignRunId: string;
+
+  beforeAll(async () => {
+    await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${GUARD_DB} WITH (FORCE)`));
+    await admin.execute(sql.raw(`CREATE DATABASE ${GUARD_DB}`));
+    gdb = createDb(urlFor(GUARD_DB));
+    await runMigrations(gdb, migrationsFolder);
+    restoreGuardIssuer = await useTestIssuerKey(gdb);
+    gapp = buildApp(gdb, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+    await gapp.ready();
+    // a source the dataset does not own, enabled, with a scan waiting for the gateway's worker
+    const [src] = await gdb
+      .insert(discoverySources)
+      .values({ name: "Someone else's GCP project", kind: "cloud_gcp", target: { projectId: "not-the-demo" }, scope: { orgLevel: false, include: [] }, enabled: true, enabledAt: new Date(), enabledBy: NIL, createdBy: NIL })
+      .returning({ id: discoverySources.id });
+    foreignSourceId = src!.id;
+    const [run] = await gdb.insert(discoveryRuns).values({ sourceId: foreignSourceId, trigger: "manual", sourceVersion: 1, kind: "cloud_gcp" }).returning({ id: discoveryRuns.id });
+    foreignRunId = run!.id;
+  }, 180_000);
+
+  afterAll(async () => {
+    await closeAll([
+      () => restoreGuardIssuer(),
+      () => gapp.close(),
+      () => (gdb.$client as { end: () => Promise<void> }).end(),
+      () => dropScratchDatabase(admin, GUARD_DB),
+    ]);
+  });
+
+  const recordedNames = [D.gitlab.name, D.aws.name, D.azure.name];
+  async function expectUntouched() {
+    const [foreign] = await gdb.select().from(discoveryRuns).where(eq(discoveryRuns.id, foreignRunId));
+    expect(foreign).toMatchObject({ status: "queued", attempt: 0, startedAt: null, leaseOwner: null, errorCode: null });
+    // ...and none of the dataset's own runs was scanned either: no pass ran
+    const ours = (await gdb.select().from(discoveryRuns)).filter((r) => r.sourceId !== foreignSourceId);
+    expect(ours.length).toBeGreaterThan(0);
+    expect(ours.every((r) => r.status === "queued"), JSON.stringify(ours.map((r) => r.status))).toBe(true);
+  }
+
+  it("one extra enabled source: other_sources_enabled for each recorded source, and that source's run is untouched", async () => {
+    const r = await seedShadowSetup(gapp, gdb, D, OPTS);
+    for (const name of recordedNames) {
+      expect(r.failed.some((f) => f.startsWith(`recorded run of '${name}'`) && f.includes("other_sources_enabled")), `${name}: ${r.failed.join("\n")}`).toBe(true);
+    }
+    await expectUntouched();
+  }, 180_000);
+
+  it("the extra source disabled but its run still queued: other_source_run_pending, and the run is still untouched", async () => {
+    await gdb.update(discoverySources).set({ enabled: false, disabledAt: new Date(), disabledBy: NIL }).where(eq(discoverySources.id, foreignSourceId));
+    const r = await seedShadowSetup(gapp, gdb, D, OPTS);
+    for (const name of recordedNames) {
+      expect(r.failed.some((f) => f.startsWith(`recorded run of '${name}'`) && f.includes("other_source_run_pending")), `${name}: ${r.failed.join("\n")}`).toBe(true);
+    }
+    await expectUntouched();
   }, 180_000);
 });

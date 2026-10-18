@@ -319,11 +319,16 @@ export const SHADOW_DISCOVERY_BEATS = [
   "3 Content trust",
 ] as const;
 
-/** every string value anywhere in a JSON value (keys excluded) */
-function stringValues(v: unknown, out: string[] = []): string[] {
+/** every string value anywhere in a JSON value; with `keys`, every object key too */
+function stringValues(v: unknown, out: string[] = [], keys = false): string[] {
   if (typeof v === "string") out.push(v);
-  else if (Array.isArray(v)) for (const x of v) stringValues(x, out);
-  else if (v && typeof v === "object") for (const x of Object.values(v)) stringValues(x, out);
+  else if (Array.isArray(v)) for (const x of v) stringValues(x, out, keys);
+  else if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      if (keys) out.push(k);
+      stringValues(x, out, keys);
+    }
+  }
   return out;
 }
 
@@ -346,14 +351,15 @@ export function demoShadowNeverStored(data: DemoShadowDiscoveryDataset = DEMO_SH
 }
 
 /**
- * Which never-stored names appear in `payload`: a string value equal to one (whatever its length), or containing one
- * long enough to be unambiguous (8+ characters with a `_` or `-`; a short name like `PORT` would match ordinary words).
+ * Which never-stored names appear in `payload`: a string value equal to one (whatever its length), or a value or an
+ * object key containing one long enough to be unambiguous (8+ characters with a `_` or `-`; a short name like `PORT`
+ * would match ordinary words and ordinary keys). A name stored as a key (`{ OPENAI_API_KEY: … }`) is still stored.
  */
 export function leakedShadowNames(payload: unknown, names: readonly string[]): string[] {
-  const values = stringValues(payload);
-  const exact = new Set(values);
+  const exact = new Set(stringValues(payload));
+  const withKeys = stringValues(payload, [], true);
   const long = (n: string) => n.length >= 8 && (n.includes("_") || n.includes("-"));
-  return names.filter((n) => exact.has(n) || (long(n) && values.some((v) => v.includes(n))));
+  return names.filter((n) => exact.has(n) || (long(n) && withKeys.some((v) => v.includes(n))));
 }
 
 /**

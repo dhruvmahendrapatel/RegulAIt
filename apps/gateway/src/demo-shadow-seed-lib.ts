@@ -39,6 +39,7 @@ import { DISCOVERY_SCANNERS, scannerRegistry, type Scanner, type ScanResult } fr
 import { repoScanner } from "./discovery-repo-scanner.js";
 import { toReadOutcomes, toScanObservation } from "./discovery-cloud-scanners.js";
 import { runDiscoveryPass } from "./discovery-worker.js";
+import { SHADOW_AI_REMEDIATION_CHANGE_TYPE, SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
 import { contentDigestOf, ENDPOINT_AGENT_PATHS, ENDPOINT_REPORT_SCHEMA } from "./endpoint-agent.js";
 import { DEMO_SCRIPT_KEY_TTL_DAYS, DEMO_SECURITY_LEAD, demoKeyExpiresAt, enrolAdminTotp, revokeScriptKeys } from "./demo-identity.js";
 
@@ -152,8 +153,8 @@ function withRecordedOutcome(r: ScanResult): ScanResult {
 /**
  * The registry the seeder's passes run with: a run of one of the dataset's own network-bound sources (by id) replays
  * its recording, and ANY other source's run is refused, never scanned: the seeder must not reach a real provider for a
- * source that is not its own (ensureRecordedRuns also runs no pass while such a source is enabled; this is the guard
- * behind that check, for a source enabled in between).
+ * source that is not its own (ensureRecordedRuns runs no pass while such a source is enabled or has a run waiting, and
+ * checks again before every pass; this is the guard behind that check, for a run queued in the moment between).
  */
 export function recordedDiscoveryRegistry(data: DemoShadowDiscoveryDataset, recordedSourceIds: ReadonlySet<string>) {
   const recorded: Record<"repo_gitlab" | "cloud_aws" | "cloud_azure", Scanner> = {
@@ -332,6 +333,28 @@ async function ensureSource(h: Harness, spec: SourceSpec, allowStepUps: boolean)
 const lastRuns = async (h: Harness, sourceId: string): Promise<Json[]> =>
   (await h.call("GET", `/v1/discovery/runs?sourceId=${sourceId}&limit=20`)).body.runs ?? [];
 
+/** why a discovery pass must not run now: a source outside the dataset is enabled, or one has a run waiting */
+async function foreignDiscoveryActivity(h: Harness, ours: ReadonlySet<string>): Promise<{ error: string; detail: string } | null> {
+  const others = (await listSources(h)).filter((s) => !ours.has(s.name));
+  const enabled = others.filter((s) => s.enabled);
+  if (enabled.length) {
+    return {
+      error: "other_sources_enabled",
+      detail: `${enabled.length} discovery source(s) outside the demo dataset are enabled; the seeder runs no discovery pass beside them (the gateway's worker would scan them)`,
+    };
+  }
+  for (const s of others) {
+    const latest = (await lastRuns(h, s.id))[0];
+    if (latest && (latest.status === "queued" || latest.status === "running")) {
+      return {
+        error: "other_source_run_pending",
+        detail: `a run of a discovery source outside the demo dataset is ${latest.status}; the seeder runs no discovery pass that could claim it`,
+      };
+    }
+  }
+  return null;
+}
+
 /** a recorded run for each enabled network source that has none that succeeded */
 async function ensureRecordedRuns(h: Harness, db: Db, data: DemoShadowDiscoveryDataset, sources: Map<string, Json>, dataKey: string | undefined) {
   const specs = demoSourceSpecs(data).filter((s) => s.recorded);
@@ -353,23 +376,12 @@ async function ensureRecordedRuns(h: Harness, db: Db, data: DemoShadowDiscoveryD
   }
   if (wanted.length === 0) return;
   // A pass enqueues every due enabled source and claims queued runs of ANY source, oldest first. So it runs only while
-  // the dataset's own sources are the only enabled ones: anything else is the gateway worker's to scan, not ours.
+  // the dataset's own sources are the only enabled ones and no other source has a run waiting: anything else is the
+  // gateway worker's to scan, not ours. Checked again before every pass, so a source enabled (or a run queued) in
+  // between stops the seeder instead of reaching the registry's backstop, which would fail that run.
   const ours = new Set(demoSourceSpecs(data).map((s) => s.name));
-  const others = (await listSources(h)).filter((s) => s.enabled && !ours.has(s.name));
-  if (others.length) {
-    for (const s of wanted) {
-      h.fail(`recorded run of '${s.name}'`, {
-        status: 0,
-        body: {
-          error: "other_sources_enabled",
-          detail: `${others.length} discovery source(s) outside the demo dataset are enabled; the seeder runs no discovery pass beside them (the gateway's worker would scan them)`,
-        },
-      });
-    }
-    return;
-  }
   const registry = recordedDiscoveryRegistry(data, new Set(wanted.map((s) => s.id as string)));
-  // a pass claims up to five queued runs, oldest first; a few passes reach ours behind any other queued run
+  // a pass claims up to five queued runs, oldest first; a few passes are the margin for a run still leased
   for (let pass = 0; pass < 4; pass++) {
     const pending = [];
     for (const s of wanted) {
@@ -377,6 +389,11 @@ async function ensureRecordedRuns(h: Harness, db: Db, data: DemoShadowDiscoveryD
       if (latest && (latest.status === "queued" || latest.status === "running")) pending.push(s);
     }
     if (pending.length === 0) break;
+    const foreign = await foreignDiscoveryActivity(h, ours);
+    if (foreign) {
+      for (const s of wanted) h.fail(`recorded run of '${s.name}'`, { status: 0, body: foreign });
+      return;
+    }
     await runDiscoveryPass(db, { dataKey, registry, owner: `${PASS_OWNER}:${randomUUID().slice(0, 8)}` });
   }
   for (const s of wanted) {
@@ -694,7 +711,7 @@ export async function seedShadowStory(app: FastifyInstance, db: Db, data: DemoSh
           detail: `${DEMO_SECURITY_LEAD.email} must be an active admin with TOTP enrolled — \`seed\` creates her during first-admin setup; run \`demo:prepare\` on an empty database`,
         },
       });
-    } else if (ada) await ensureRemediation(h, data, ada, { id: String(morgan.id) });
+    } else if (ada) await ensureRemediation(h, data, ada);
     if (dana && connectorId) await ensureProvenance(h, db, data, connectorId, dana);
   } finally {
     h.report.notes.push(...(await revokeScriptKeys(app, opts.bootstrapToken, minted)));
@@ -706,7 +723,7 @@ export async function seedShadowStory(app: FastifyInstance, db: Db, data: DemoSh
 // the remediation workflow (ADR-0195 A4): started from the plan's own body, waiting on Morgan (the second admin)
 // ---------------------------------------------------------------------------
 
-async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, ada: { id: string; auth: Headers }, approver: { id: string }) {
+async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, ada: { id: string; auth: Headers }) {
   const rem = data.remediation;
   // the environment is one an admin gave a meaning to: the demo company's staging deploy target (mock)
   const targets: Json[] = (await h.call("GET", "/v1/deploy/targets")).body.targets ?? [];
@@ -716,39 +733,16 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
     h.report.created.push(`deploy target '${rem.deployTargetName}' (mock, ${rem.environment})`);
   }
 
-  // The shipped default owes the sign-off to an admin other than the initiator; the demo names WHICH one, the security
-  // lead, so the Inbox it lands in is known before the demo. The deployment's own template routes it to Morgan, never
-  // to the initiator. It is assigned before any remediation starts, so the shipped default is never installed over it;
-  // where a rule for the change type already exists, it decides and nothing is added.
-  const changeType = "shadow-ai-remediation";
+  // The sign-off is the SHIPPED default's (ADR-0197 addendum, decision 1: the Q7 default `admin_not_initiator` stays).
+  // The start route installs that default on first use, and its sign-off resolves to every active admin other than the
+  // initiator: on the fallback database, Ada initiates and Morgan, the only other admin, is the one approver. demo:check
+  // asserts exactly that approver set. The seeder authors no template and no rule; where an admin's own rule for the
+  // change type exists, it decides, and the seeder says so.
   const rules: Json[] = (await h.call("GET", "/v1/workflows/assignment-rules")).body.rules ?? [];
   const templates: Json[] = (await h.call("GET", "/v1/workflows/templates")).body.templates ?? [];
-  const ours = templates.find((t) => t.name === rem.templateName);
-  let templateId = ours?.id as string | undefined;
-  if (!rules.some((r) => r.changeType === changeType)) {
-    if (!templateId) {
-      const t = await h.call("POST", "/v1/workflows/templates", {
-        name: rem.templateName,
-        definition: {
-          workflow: rem.templateName,
-          stages: [
-            { id: "intake", type: "trigger" },
-            { id: "plan", type: "planning" },
-            { id: "remediation_plan", type: "artifact_generation", output: "shadow_ai_remediation_plan" },
-            { id: "signoff", type: "human_approval", approvers: [approver.id] },
-          ],
-        },
-      });
-      if (!h.ok(t.status)) return h.fail(`workflow template '${rem.templateName}'`, t);
-      templateId = t.body.id as string;
-      h.report.created.push(`workflow template '${rem.templateName}' (sign-off: ${DEMO_SECURITY_LEAD.displayName}, ${DEMO_SECURITY_LEAD.role})`);
-    }
-    const rule = await h.call("POST", "/v1/workflows/assignment-rules", { templateId, changeType });
-    if (!h.ok(rule.status)) return h.fail("remediation assignment rule", rule);
-    h.report.created.push(`assignment rule ${changeType} → '${rem.templateName}'`);
-  } else if (!rules.some((r) => r.changeType === changeType && r.templateId === ours?.id)) {
-    templateId = undefined;
-    h.report.notes.push(`a workflow assignment rule for '${changeType}' already exists; it decides who signs the remediation off`);
+  const shipped = templates.find((t) => t.name === SHADOW_AI_REMEDIATION_TEMPLATE_NAME);
+  if (rules.some((r) => r.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE && r.templateId !== shipped?.id)) {
+    h.report.notes.push(`an admin's workflow assignment rule for '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}' decides who signs the remediation off, not the shipped default`);
   }
 
   const findings: Json[] = (await h.call("GET", "/v1/shadow-ai/findings")).body.findings ?? [];
@@ -765,11 +759,8 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
   if (!instanceId) {
     const plan = await h.call("GET", `${planUrl}?environment=${encodeURIComponent(rem.environment)}`, undefined, ada.auth);
     if (!h.ok(plan.status)) return h.fail("remediation plan body", plan);
-    // The demo's template is named explicitly (the admin-only path). Without it, the start route checks the SHIPPED
-    // default's sign-off rule (an admin other than the initiator) before it sees that an admin's rule decides, and
-    // refuses on a deployment with one admin (`second_approver_unavailable`) even though the default is never used.
-    const startBody = { ...plan.body.workflowRequest.body, ...(templateId ? { templateId } : {}) };
-    const start = await h.call("POST", "/v1/workflows/instances", startBody, ada.auth);
+    // the plan's own body, unchanged: the change type picks the workflow (the shipped default on a fresh database)
+    const start = await h.call("POST", "/v1/workflows/instances", plan.body.workflowRequest.body, ada.auth);
     if (!h.ok(start.status)) return h.fail("start the remediation workflow", start);
     instanceId = start.body.id as string;
     h.report.created.push(`remediation workflow started from the plan's body (${start.body.status})`);
