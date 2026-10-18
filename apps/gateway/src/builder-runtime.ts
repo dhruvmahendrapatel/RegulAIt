@@ -78,7 +78,7 @@ import {
   type Db,
 } from "@regulait/db";
 import type { ModelChatMessage, ModelContentBlock } from "@regulait/model-provider";
-import { BUILDER_LIMITS, nextScheduleRun, skillPromptSection, type BuilderCadenceValue } from "@regulait/shared";
+import { BUILDER_LIMITS, builderThreadContextId, nextScheduleRun, skillPromptSection, type BuilderCadenceValue } from "@regulait/shared";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { agentDecision } from "./copilot.js";
 import { BUILDER_MODEL_FEATURE, loadVisibleAgent, skillVisible } from "./builder-access.js";
@@ -1267,6 +1267,8 @@ async function runQueue(seg: Segment, state: LoopState, box: Toolbox): Promise<T
       toolCallId: call.id,
       detail: { ...seg.baseDetail, builderStepId: stepId },
       delegationGrantId: seg.delegation?.grantId,
+      // ADR-0193 P1: the thread is the causal context its tool results flow into
+      contextId: builderThreadContextId(seg.thread.id),
     });
     const latencyMs = Date.now() - started;
     if (run.approvalId) {

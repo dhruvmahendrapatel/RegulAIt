@@ -142,6 +142,12 @@ import {
   type DiscoveryReadOutcome,
   SIGNATURE_OSES,
   SIGNATURE_CONFIDENCES,
+  // ADR-0193 (migration 0206): the content provenance and trust-tier vocabularies
+  CONTENT_CLASSIFICATIONS,
+  CONTENT_DIGEST_ALGS,
+  CONTENT_SOURCE_KINDS,
+  CONTENT_TRUST_TIERS,
+  CONTENT_TRUST_WRITE_FLOORS,
 } from "@regulait/shared";
 import {
   type AnyPgColumn,
@@ -1520,6 +1526,10 @@ export const auditLog = pgTable(
         "discovery_run",
         "discovery_settings",
         "discovery_pseudonym",
+        // ADR-0193 (I4): a content provenance record (objectId = the record) and a trust-tier change (a source's
+        // tier, or the write floor). Plain text column — no DDL.
+        "content_provenance",
+        "content_trust",
         // ADR-0195 SD2b: a federation signing key (generated, activated, rotated, retired, revoked) and federation
         // turned on or off. Plain text column — no DDL.
         "federation_signing_key",
@@ -13971,3 +13981,105 @@ export const executionOffers = pgTable(
   ],
 );
 export type ExecutionOfferRow = typeof executionOffers.$inferSelect;
+
+// ---------------------------------------------------------------------------------------------------------------
+// ADR-0193 (I4) P0 and P1, migration 0206: content provenance and trust tiers
+// ---------------------------------------------------------------------------------------------------------------
+
+/**
+ * ADR-0193 decision 3: the per-tenant content digest HMAC key (32 random bytes, a data-key envelope). One row per data
+ * key, found by the envelope's key-fingerprint segment: a deployment runs one data key (boot-gated), so one row.
+ */
+export const contentDigestKeys = pgTable("content_digest_keys", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  keyCiphertext: text("key_ciphertext").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type ContentDigestKeyRow = typeof contentDigestKeys.$inferSelect;
+
+/** ADR-0193 decision 7: an admin-set source tier; a source with no row is `untrusted` (ADR-0180) */
+export const contentTrustTiers = pgTable(
+  "content_trust_tiers",
+  {
+    sourceKind: text("source_kind", { enum: CONTENT_SOURCE_KINDS }).notNull(),
+    sourceId: uuid("source_id").notNull(),
+    tier: text("tier", { enum: CONTENT_TRUST_TIERS }).notNull(),
+    version: integer("version").notNull().default(1),
+    setByUserId: uuid("set_by_user_id").notNull(),
+    setAt: timestamp("set_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "content_trust_tiers_pk", columns: [t.sourceKind, t.sourceId] }),
+    check("content_trust_tiers_source_kind_check", sql`${t.sourceKind} IN ('mcp_server', 'connector')`),
+    check("content_trust_tiers_tier_check", sql`${t.tier} IN ('untrusted', 'standard', 'trusted')`),
+    check("content_trust_tiers_version_check", sql`${t.version} >= 1`),
+  ],
+);
+export type ContentTrustTierRow = typeof contentTrustTiers.$inferSelect;
+
+/** ADR-0193 P1: the write floor (one row); `trusted` by default, `standard` is a relaxation */
+export const contentTrustSettings = pgTable(
+  "content_trust_settings",
+  {
+    id: integer("id").primaryKey().default(1),
+    writeFloor: text("write_floor", { enum: CONTENT_TRUST_WRITE_FLOORS }).notNull().default("trusted"),
+    version: integer("version").notNull().default(1),
+    updatedBy: uuid("updated_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("content_trust_settings_singleton_check", sql`${t.id} = 1`),
+    check("content_trust_settings_write_floor_check", sql`${t.writeFloor} IN ('standard', 'trusted')`),
+    check("content_trust_settings_version_check", sql`${t.version} >= 1`),
+  ],
+);
+export type ContentTrustSettingsRow = typeof contentTrustSettings.$inferSelect;
+
+/**
+ * ADR-0193 P0: one governed return's provenance label and digests, append-only (UPDATE, DELETE and TRUNCATE are
+ * refused). `audit_id` is the provenance audit row whose content hash covers the label; `decision_audit_id` the
+ * decision that allowed the call. Digests only, never content.
+ */
+export const contentProvenanceRecords = pgTable(
+  "content_provenance_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    auditId: uuid("audit_id").notNull(),
+    decisionAuditId: uuid("decision_audit_id").notNull(),
+    contextId: text("context_id"),
+    sourceKind: text("source_kind", { enum: CONTENT_SOURCE_KINDS }).notNull(),
+    sourceId: uuid("source_id").notNull(),
+    /** the MCP tool name, or the connector `operation[:object]` */
+    sourceDetail: text("source_detail"),
+    trustTier: text("trust_tier", { enum: CONTENT_TRUST_TIERS }).notNull(),
+    classification: text("classification", { enum: CONTENT_CLASSIFICATIONS }).notNull(),
+    digestAlg: text("digest_alg", { enum: CONTENT_DIGEST_ALGS }).notNull(),
+    digestKeyId: uuid("digest_key_id"),
+    upstreamDigest: text("upstream_digest"),
+    deliveredDigest: text("delivered_digest"),
+    label: jsonb("label").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("content_provenance_records_audit_uq").on(t.auditId),
+    index("content_provenance_records_context_idx").on(t.contextId).where(sql`${t.contextId} IS NOT NULL`),
+    index("content_provenance_records_created_idx").on(t.createdAt),
+    check("content_provenance_records_source_kind_check", sql`${t.sourceKind} IN ('mcp_server', 'connector')`),
+    check("content_provenance_records_tier_check", sql`${t.trustTier} IN ('untrusted', 'standard', 'trusted')`),
+    check("content_provenance_records_classification_check", sql`${t.classification} IN ('pii', 'clean', 'unscanned')`),
+    check("content_provenance_records_context_check", sql`${t.contextId} IS NULL OR ${t.contextId} ~ '^(run|builder_thread):[0-9a-f-]{36}$'`),
+    check(
+      "content_provenance_records_digest_check",
+      sql`CASE ${t.digestAlg}
+        WHEN 'sha256' THEN ${t.classification} = 'clean' AND ${t.digestKeyId} IS NULL
+          AND ${t.upstreamDigest} ~ '^[0-9a-f]{64}$' AND ${t.deliveredDigest} ~ '^[0-9a-f]{64}$'
+        WHEN 'hmac-sha256' THEN ${t.classification} <> 'clean' AND ${t.digestKeyId} IS NOT NULL
+          AND ${t.upstreamDigest} ~ '^[0-9a-f]{64}$' AND ${t.deliveredDigest} ~ '^[0-9a-f]{64}$'
+        WHEN 'unavailable' THEN ${t.classification} <> 'clean' AND ${t.digestKeyId} IS NULL
+          AND ${t.upstreamDigest} IS NULL AND ${t.deliveredDigest} IS NULL
+        ELSE false END`,
+    ),
+    check("content_provenance_records_label_check", sql`jsonb_typeof(${t.label}) = 'object' AND ${t.label} ->> 'v' = 'regulait.content-provenance-label.v1'`),
+  ],
+);
+export type ContentProvenanceRecordRow = typeof contentProvenanceRecords.$inferSelect;

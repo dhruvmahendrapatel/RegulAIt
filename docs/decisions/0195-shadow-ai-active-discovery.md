@@ -1079,3 +1079,89 @@ be listed: `scripts/check-licences.sh` fails CI otherwise.
 2. Should a user or host name colliding with a catalogue token block uploads (today), or should the guard drop the
    colliding fact and send the rest?
 3. Windows installer: confirm WiX's licence terms, or name another MSI route, so SD4h can build it.
+
+## As built: A4 remediation plan start (2026-10-17, no migration)
+
+Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section records how the remediation plan
+(decision 5a: "the remediation plan works unchanged") was made to start a workflow with the discovery subject kinds.
+
+1. **The plan body is the start body.** `GET /v1/shadow-ai/findings/:id/remediation-plan` returns a
+   `workflowRequest.body` that `startInstanceSchema` (and the strict change descriptor) accepts as it stands; a gateway
+   test posts it to `POST /v1/workflows/instances` unchanged and gets 201. The old `repoPath` shape was already gone
+   (#378); A4 completes it:
+   - the description names the subject and provider, or only the subject kind ("a device (pseudonymised)") when the
+     subject is a pseudonym (`device`, `cloud_principal`, or any `psn:` value), and always ends with the finding
+     reference `shadow-AI finding <id>`;
+   - `paths` are the repo and the repo-relative `location.path` values of its sightings (decision 6), at most 20. A
+     path that climbs (`..`), is absolute, home or drive-rooted (starts with `/`, `\`, `~` or `X:`; it names a
+     person), carries a pseudonym, or that the audit scrubber would change (credential-shaped) is dropped. Non-repo findings have no paths: a device's home-relative config path is not a repo path and is personal;
+   - `targetSystem` is the subject only when it is not pseudonymised.
+2. **Environment, fail closed.** `?environment=` is optional. It must match `^[a-z0-9][a-z0-9_.-]{0,63}$` and be one an
+   admin has already given a meaning to: an environment named on a deploy target or a workflow assignment rule. There
+   is no shipped list, so with none configured every stated value is refused (400 `environment_not_allowed`, with the
+   allowed list). Without it the body keeps `unstated` and `needsInput: ["change.environment"]`. The start route
+   applies the same rule to a `shadow-ai-remediation` change: `unstated` in any case is refused (422
+   `environment_unstated`), and any other value must match the pattern and the allowed list (422
+   `environment_not_allowed`), so a workflow never starts in a placeholder or a made-up environment.
+3. **A strict default workflow ships.** `apps/gateway/src/shadow-ai-remediation.ts` holds the template
+   `shadow-ai-remediation`: intake, the ADR-0079 plan-only stage, a `shadow_ai_remediation_plan` artifact and a
+   sign-off by an admin other than the initiator (point 6). The start route installs it, with a rule on the change
+   type, the first time a remediation starts (the ADR-0080 "minted on first use" pattern, so no migration; race-safe
+   on the unique template name; audited once as `shadow-ai-remediation-default-installed`). The install runs only
+   after that start's own checks pass (environment, project attribution, a second admin exists), so a refused start
+   installs nothing. It is never installed:
+   - over an admin's decision: when any assignment rule already names the change type (checked inside the install
+     transaction), that rule decides alone and the default's stages are never unioned into it;
+   - again once the name exists, active or retired.
+   An admin relaxes it by retiring the template (`POST /v1/workflows/templates/:id/retire`). For this template the
+   retirement also deletes its change-type rule in the same transaction, and the `workflow-template-retired` audit
+   row records it (`ruleId`, `ruleIds`). Starts then answer 422 `no_workflow_matches_change` until the admin assigns
+   their own template, which then runs alone. Deleting the rule while the template stays active only makes starting
+   fail again (stricter, not looser). The plan reports `assignment.defaultTemplate.state` (`not_installed`, `active`,
+   `retired`), and `ruleConfigured` counts only rules whose template is active.
+4. **The unlinked start is server state.** "Live" below means any status except the three terminals that leave the
+   finding unremediated, `denied`, `aborted` and `rolled_back` (one constant, `UNSUCCESSFUL_TERMINAL_STATUSES`, used
+   by the plan, the link route and the screen). `completed` is the successful end: it counts as live and stays
+   linkable. The plan returns `pendingLink`: the newest live `shadow-ai-remediation`
+   instance THE VIEWER started whose description carries the finding reference and that no finding
+   links yet. Another user's instance is never offered (they control its description), nor one that is not live. The screen seeds its
+   "started but not linked" state from it, so after a reload it still offers only "Retry linking this workflow"; the
+   start button and the "link an existing workflow" form stay disabled until the link lands. The screen keeps the
+   finding reference on the description whatever the person types. Browser storage is not used.
+   The link route (`POST /v1/shadow-ai/findings/:id/remediate`) enforces the same on the server:
+   - only the instance's own initiator may link it (403 `not_your_workflow`; the bootstrap token has no user and is
+     refused);
+   - the instance must be a live `shadow-ai-remediation` workflow whose description carries THIS finding's reference
+     (422 `workflow_not_linkable`), and not one already linked to another finding (409 `instance_already_linked`);
+   - a link is set once while it stands. A finding linked to a live workflow is refused (409 `already_linked`).
+   - the one replace path: when the linked workflow ended `denied`, `aborted` or `rolled_back`, it remediates nothing,
+     so a new live workflow may replace it, under every rule above (initiator, change type, reference). The update is
+     conditional on the column still holding that dead instance (or `IS NULL` for a first link), so a concurrent
+     second link cannot overwrite the first. The `shadow-ai-finding-remediation-linked` audit row records
+     `replacedInstanceId` and `replacedInstanceStatus`. A terminal status never changes, so a live link can never be
+     replaced. Without this path a denied plan would dead-end the finding for good (only a database edit could free it).
+     An admin who wants another user's workflow linked asks that user to link it.
+   The plan also returns `currentLink` (`instanceId`, `status`, `replaceable`). The screen keeps start and link
+   disabled while the link stands, and says so; when it is replaceable it offers both and says the replace is audited.
+   The screen's "link an existing workflow" list offers only live remediation workflows carrying the reference.
+5. **Open-source check (ADR-0176).** Nothing new to adopt: validation is zod, queries are drizzle, both already pinned.
+6. **Sign-off by a second person (owner question Q1, decided by the master session under ADR-0180; the owner may
+   overrule).** The engine had no per-template separation of duties for a workflow sign-off: a `requesting_user`
+   approver decides their own gate with a recorded reason (stamped `selfReview`). The default instead names a new
+   approver placeholder, `admin_not_initiator` (`apps/gateway/src/workflow-approvers.ts`), with quorum `any`:
+   - at the stage it resolves to one approval row per active org admin other than the initiator, so one other admin
+     decides it through the existing approvals queue;
+   - the decide path refuses the initiator on such a stage by any route (named approver, delegate or admin override),
+     keyed on the decider: 403 `initiator_cannot_sign_off`;
+   - a start is refused (422 `second_approver_unavailable`) when no other active admin exists, since the stage could
+     never be decided.
+   An admin who wants the initiator to sign off authors their own template (`requesting_user`) through the existing
+   audited template path and retires the default.
+
+**Limits and open points (A4):**
+- The `admin_not_initiator` rows are written when the instance reaches its sign-off, from the admins active then. An
+  admin added later is not added to a sign-off already waiting, and one demoted later can still decide the row they
+  were named on (the existing named-approver rule); the initiator never can.
+- `pendingLink` matches on the description text, but only among the viewer's own instances, so another user's
+  description cannot steer it.
+- The gateway tests for 1 to 4 run against Postgres in CI only (typechecked locally).

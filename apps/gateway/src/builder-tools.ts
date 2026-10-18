@@ -370,6 +370,8 @@ export interface ToolRunContext {
   detail: Record<string, unknown>;
   /** ADR-0188 S4: the delegation grant the builder agent acts under (decided with its stored chain) */
   delegationGrantId?: string | undefined;
+  /** ADR-0193 P1: the causal context (the builder thread) results are recorded under and writes are gated on */
+  contextId?: string | undefined;
 }
 
 function refused(code: string, detail: string, opts: Partial<ToolRun> = {}): ToolRun {
@@ -440,6 +442,7 @@ export async function runGovernedTool(
       toolCallId: ctx.toolCallId,
       detail: ctx.detail,
       delegationGrantId: ctx.delegationGrantId,
+      contextId: ctx.contextId,
     });
   } catch (err) {
     const msg = safeErrorMessage(err);
@@ -544,6 +547,7 @@ async function runConnector(
       trace: ctx.trace,
       detail: ctx.detail,
       delegationGrantId: ctx.delegationGrantId,
+      contextId: ctx.contextId,
     });
   } catch {
     return {

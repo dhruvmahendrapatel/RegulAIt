@@ -140,6 +140,7 @@ const BY_ROUTE: Record<string, keyof typeof G> = {
   "/admin/rules": "sliders",
   "/admin/abac-policies": "tag",
   "/admin/guardrails": "rails",
+  "/admin/content-trust": "shield", // ADR-0193 (I4)
   "/admin/model-policy": "modelGrid",
   "/admin/prompt-versions": "history",
   "/admin/simulation": "flask",

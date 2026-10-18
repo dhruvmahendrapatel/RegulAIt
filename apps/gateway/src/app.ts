@@ -512,6 +512,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -545,7 +546,8 @@ import {
   exportBundleMaxCsvRows,
   resolveExportSigningKey,
 } from "./export-bundle.js";
-import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
+import { MergeConflictError, WorkflowStateError, type WorkflowDefinition } from "@regulait/workflow-kernel";
+import { stageExcludesInitiator } from "./workflow-approvers.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -4334,6 +4336,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       return { ok: true as const, body: { ...decided.body, ...(pmMirror ? { pmMirror } : {}) } };
     }
+    // ADR-0195 A4: a stage owed to an admin OTHER than the initiator (`admin_not_initiator`) is never decided by
+    // the initiator, by any route: as a named approver, a delegate or an admin override. Keyed on the DECIDER.
+    if (row.objectType === "workflow" && row.instanceId) {
+      const [owner] = await db
+        .select({ initiatorUserId: workflowInstances.initiatorUserId, definition: workflowInstances.definition })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, row.instanceId));
+      if (
+        owner &&
+        stageExcludesInitiator(owner.definition as WorkflowDefinition, row.stageId) &&
+        (deciderUserId === owner.initiatorUserId || deciderUserId === row.userId)
+      ) {
+        return fail(403, {
+          error: "initiator_cannot_sign_off",
+          detail: "this sign-off must be decided by an admin other than the person who started the workflow",
+        });
+      }
+    }
     // Only the rule's named approver may decide (§3) — with two sanctioned
     // widenings: (a) ADR-0022 delegation — an ACTIVE delegation window from
     // the named approver lets the delegate decide, recorded as the real
@@ -5422,6 +5442,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0193 (I4) P1 — content source trust tiers, the write floor (both step-up, audited) and the P0 provenance
+  // evidence view. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
+  registerContentTrustRoutes(app, db);
   // ADR-0195 SD2b — the cloud federation issuer: its public OIDC discovery document and RS256 JWKS (the clouds
   // fetch them), and the admin key lifecycle (off by default; on is a `settings_relax` step-up, rotate and revoke
   // are `key_management` step-ups). The admin routes are admin-only by default (none is in NON_ADMIN_ROUTES).

@@ -298,7 +298,11 @@ describe("ADR-0185 G3 — gate 2: the kernel decides on the protocol surface", (
     const read = await client.readResource({ uri: "file:///public/readme.md" });
     expect(read.contents).toEqual([{ uri: "file:///public/readme.md", text: "# public readme" }]);
     await client.close();
-    const allows = (await auditFor(u)).filter((r) => r.effect === "allow");
+    const rows = await auditFor(u);
+    // ADR-0193 P0: each delivered result also wrote its provenance row, named by the method
+    const provenance = rows.filter((r) => r.objectType === "content_provenance");
+    expect(provenance.map((r) => (r.detail as { contentProvenance: { source: { toolName: string } } }).contentProvenance.source.toolName).sort()).toEqual(["resources/list", "resources/read"]);
+    const allows = rows.filter((r) => r.effect === "allow" && r.objectType !== "content_provenance");
     expect(allows.map((r) => (r.detail as { method: string }).method).sort()).toEqual(["resources/list", "resources/read"]);
     expect(allows.every((r) => r.toolName === "mcp:resources" && r.ruleId === grantId)).toBe(true);
   });
