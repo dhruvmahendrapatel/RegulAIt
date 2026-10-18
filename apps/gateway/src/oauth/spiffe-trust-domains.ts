@@ -8,18 +8,33 @@
  *  - `loadSpiffeTrustAnchors`: trust domain → the ACTIVE bundle's authorities
  *    (DER), for `validateClientCertificate`;
  *  - `activeSpiffeTrustDomains`: the domains with an active bundle, for binding
- *    a `spiffe_id` credential (an ID in any other domain could never authenticate).
+ *    a `spiffe_id` credential (an ID in any other domain could never authenticate);
+ *  - `loadSpiffeJwtAuthorities` (S9 follow-up): one domain's active bundle's JWT
+ *    authorities, for `verifyJwtSvid`.
+ *
+ * S9 follow-up: a bundle FETCHED from the domain's bundle endpoint is used for
+ * authentication only while its endpoint's `trust_until` (last successful fetch
+ * + `SPIFFE_FETCHED_BUNDLE_MAX_AGE_SECONDS`) is in the future on the database
+ * clock. A failed refresh keeps the last good bundle until then, and never
+ * after: a domain whose refreshes keep failing stops authenticating (fail
+ * closed). An uploaded bundle is pinned and does not lapse.
  *
  * The S5 environment variable `REGULAIT_SPIFFE_TRUST_BUNDLES` is never read
  * (secure by default, ADR-0180: nothing is trusted that was not uploaded through
  * the audited route); `legacySpiffeEnvSet` only lets the boot log and the list
  * view say it is ignored.
  */
-import { and, eq, isNull, spiffeTrustBundles, type Db } from "@regulait/db";
+import { and, eq, isNull, spiffeTrustBundles, sql, type Db } from "@regulait/db";
 import { SPIFFE_TRUST_BUNDLES_LEGACY_ENV } from "@regulait/shared";
 import { pemBundleToDer } from "./x509.js";
 
 const activeWhere = () => and(isNull(spiffeTrustBundles.supersededAt), isNull(spiffeTrustBundles.revokedAt));
+/** active, and either uploaded (pinned) or fetched and still inside its endpoint's trust window (database clock) */
+const usableWhere = () =>
+  and(
+    activeWhere(),
+    sql`(${spiffeTrustBundles.source} = 'upload' OR EXISTS (SELECT 1 FROM spiffe_bundle_endpoints e WHERE e.trust_domain = ${spiffeTrustBundles.trustDomain} AND e.trust_until > now()))`,
+  );
 
 /** one domain's active bundle: its id (the token endpoint locks it while it issues, #389 review M1) and its authorities */
 export interface SpiffeTrustAnchors {
@@ -27,12 +42,15 @@ export interface SpiffeTrustAnchors {
   authorities: Buffer[];
 }
 
-/** trust domain → the active bundle's X.509 authorities (DER). A stored bundle that does not parse throws (fail closed). */
+/**
+ * trust domain → the active bundle's X.509 authorities (DER). A stored bundle that does not parse throws (fail closed).
+ * A fetched bundle past its trust window is left out (the domain authenticates nothing until a fetch succeeds).
+ */
 export async function loadSpiffeTrustAnchors(db: Db): Promise<Map<string, SpiffeTrustAnchors>> {
   const rows = await db
     .select({ id: spiffeTrustBundles.id, trustDomain: spiffeTrustBundles.trustDomain, authoritiesPem: spiffeTrustBundles.authoritiesPem })
     .from(spiffeTrustBundles)
-    .where(activeWhere());
+    .where(usableWhere());
   const out = new Map<string, SpiffeTrustAnchors>();
   for (const r of rows) out.set(r.trustDomain, { bundleId: r.id, authorities: pemBundleToDer(r.authoritiesPem) });
   return out;
@@ -82,6 +100,16 @@ export function spiffeIssueAllowed(
   if (!auth || auth.revokedAt !== null) return false;
   if (rows.some((r) => r.revokedAt !== null && r.createdAt.getTime() >= auth.createdAt.getTime())) return false;
   return rows.some((r) => r.supersededAt === null && r.revokedAt === null);
+}
+
+/** one domain's usable bundle's JWT authorities (public JWKs, each with its `kid`), or null when it has none */
+export async function loadSpiffeJwtAuthorities(db: Db, trustDomain: string): Promise<{ bundleId: string; keys: Array<Record<string, string>> } | null> {
+  const [row] = await db
+    .select({ id: spiffeTrustBundles.id, jwtAuthorities: spiffeTrustBundles.jwtAuthorities })
+    .from(spiffeTrustBundles)
+    .where(and(eq(spiffeTrustBundles.trustDomain, trustDomain), usableWhere()));
+  if (!row || !Array.isArray(row.jwtAuthorities) || row.jwtAuthorities.length === 0) return null;
+  return { bundleId: row.id, keys: row.jwtAuthorities };
 }
 
 /** the trust domains with an active bundle */
