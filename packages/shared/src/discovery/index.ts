@@ -12,6 +12,7 @@
  * observations go into `shadow_ai_findings` through the same merge-by-usage
  * path as evidence imports, under one of the evidence kinds below.
  */
+import { federationUnsupportedReason } from "./federation.js";
 
 /** every kind of discovery source (migration 0202 `discovery_sources_kind_check`) */
 export const DISCOVERY_SOURCE_KINDS = [
@@ -228,8 +229,10 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
     federated: { appId: { shape: "numeric_id", required: true }, installationId: { shape: "numeric_id", required: true } },
     static: {},
   },
-  repo_gitlab: { federated: { audience: { shape: "https_url", required: true } }, static: {} },
-  repo_bitbucket: { federated: { audience: { shape: "https_url", required: true } }, static: {} },
+  // ADR-0195 A5: GitLab and Bitbucket take no external OIDC token, so a federated credential is refused for them
+  // (`federationUnsupportedReason`); their stored read-only token is the explicit fallback
+  repo_gitlab: { federated: {}, static: {} },
+  repo_bitbucket: { federated: {}, static: {} },
   repo_azure_devops: {
     federated: { tenantId: { shape: "guid", required: true }, clientId: { shape: "guid", required: true } },
     static: {},
@@ -255,6 +258,10 @@ export const DISCOVERY_PUBLIC_CONFIG: Readonly<Record<DiscoverySourceKind, Reado
 
 /** null when `config` is exactly an allowed, well-formed public config for this kind and mode; else the problem */
 export function publicConfigProblem(kind: DiscoverySourceKind, mode: DiscoveryCredentialMode, config: Readonly<Record<string, string>>): string | null {
+  if (mode === "federated") {
+    const unsupported = federationUnsupportedReason(kind);
+    if (unsupported) return unsupported;
+  }
   const spec = DISCOVERY_PUBLIC_CONFIG[kind][mode];
   for (const key of Object.keys(config)) {
     // own keys only: `constructor`, `__proto__` or `toString` are unknown fields, never the prototype's

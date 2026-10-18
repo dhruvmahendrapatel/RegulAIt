@@ -5,7 +5,9 @@
  * author only pseudonymised, rate limits handed to SD0's backoff, the lease
  * heartbeat honoured. Synthetic data only; key shapes are built at runtime.
  */
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { decodeJwt, decodeProtectedHeader } from "jose";
+import type { RepoReader, RepoReaderOptions } from "@regulait/git-provider";
 import { describe, expect, it } from "vitest";
 import { DISCOVERY_SCANNERS } from "./discovery-scanners.js";
 import { checkObservations, ObservationRefused } from "./discovery-worker.js";
@@ -239,11 +241,231 @@ describe("ADR-0195 SD1 repo scanners", () => {
     expect(fake.calls).toEqual([]);
   });
 
-  it("stops when the lease is lost, and needs a static token", async () => {
+  it("stops when the lease is lost, and needs a usable credential", async () => {
     const fake = githubFake();
     await expect(repoScanner("repo_github").run(ctx(fake.fetchImpl, { heartbeat: async () => false }).c)).rejects.toThrow(/^lease_lost:/);
+    // federated, but this deployment has no GitHub App (the variables are unset in tests)
     await expect(
-      repoScanner("repo_github").run(ctx(fake.fetchImpl, { credential: { mode: "federated", publicConfig: {}, secret: null } }).c),
-    ).rejects.toThrow(/^credential_unusable:/);
+      repoScanner("repo_github").run(ctx(fake.fetchImpl, { credential: { mode: "federated", publicConfig: { appId: "1", installationId: "2" }, secret: null } }).c),
+    ).rejects.toThrow(/^credential_unusable: .*REGULAIT_GITHUB_APP_ID/);
+    // ADR-0195 A5: neither a federated nor a stored credential: refused before any call
+    const none = githubFake();
+    await expect(repoScanner("repo_github").run(ctx(none.fetchImpl, { credential: null }).c)).rejects.toThrow(/^credential_unusable:/);
+    expect(none.calls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0195 A5: federated git-provider credentials
+// ---------------------------------------------------------------------------
+
+const APP_ID = "424242";
+const INSTALLATION = "777";
+const appKey = () => generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
+const TENANT = "00000000-0000-4000-8000-0000000000a1";
+const CLIENT = "00000000-0000-4000-8000-0000000000b2";
+const ADO = "https://dev.azure.com/acme";
+
+/** the GitHub fake plus the installation-token exchange (POST) and the installation's repository list */
+function githubAppFake(grant: Record<string, string> = { contents: "read", metadata: "read" }, status = 201) {
+  const fake = githubFake((u) =>
+    u.pathname === "/installation/repositories" ? json({ total_count: 1, repositories: [{ full_name: "acme/app", default_branch: "main" }] }) : undefined,
+  );
+  const minted = `ghs_synthetic${randomUUID().replaceAll("-", "")}`;
+  const exchanges: Array<{ url: string; auth: string; body: unknown }> = [];
+  const seenAuth: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const auth = new Headers(init?.headers).get("authorization") ?? "";
+    if (init?.method === "POST" && u.pathname === `/app/installations/${INSTALLATION}/access_tokens`) {
+      exchanges.push({ url: u.href, auth, body: JSON.parse(String(init.body)) });
+      return status === 201
+        ? json({ token: minted, expires_at: "2099-01-01T00:00:00Z", permissions: grant, repository_selection: "selected" }, 201)
+        : json({ message: "Bad credentials" }, status);
+    }
+    seenAuth.push(auth);
+    return fake.fetchImpl(input, init);
+  }) as typeof fetch;
+  return { fetchImpl, calls: fake.calls, exchanges, seenAuth, minted };
+}
+
+const ghFederated = { mode: "federated" as const, publicConfig: { appId: APP_ID, installationId: INSTALLATION }, secret: null };
+
+describe("ADR-0195 A5 federated git credentials", () => {
+  it("GitHub: exchanges a short App JWT for a read-only installation token and scans with it", async () => {
+    const key = appKey();
+    const fake = githubAppFake();
+    const t = ctx(fake.fetchImpl, { credential: ghFederated, source: { id: randomUUID(), name: "src", kind: "repo_github", target: { baseUrl: API }, scope: { orgLevel: true, include: [] } } });
+    const res = await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key }) } }).run(t.c);
+    expect(fake.exchanges).toHaveLength(1);
+    const ex = fake.exchanges[0]!;
+    expect(ex.url).toBe(`${API}/app/installations/${INSTALLATION}/access_tokens`);
+    // downscoped to read-only, whatever the App itself holds
+    expect(ex.body).toEqual({ permissions: { contents: "read", metadata: "read" } });
+    const jwt = ex.auth.slice("Bearer ".length);
+    expect(decodeProtectedHeader(jwt).alg).toBe("RS256");
+    const claims = decodeJwt(jwt);
+    expect(claims.iss).toBe(APP_ID);
+    expect(claims.exp! - claims.iat!).toBeLessThanOrEqual(600);
+    // the installation token reads the repos; /user is never asked (an installation token cannot read it)
+    expect(fake.seenAuth.every((a) => a === `Bearer ${fake.minted}`)).toBe(true);
+    expect(fake.calls).toContain("/installation/repositories?per_page=100");
+    expect(fake.calls).not.toContain("/user");
+    expect(res.credentialWriteScope).toBe("read_only");
+    expect(res.observations.length).toBeGreaterThan(0);
+    // the JWT and the token are registered for scrubbing
+    expect(t.registered).toEqual(expect.arrayContaining([jwt, fake.minted]));
+  });
+
+  it("GitHub: refuses a credential naming another App (wrong audience), a write grant, and a rejected JWT", async () => {
+    const key = appKey();
+    const app = { githubApp: () => ({ appId: APP_ID, privateKey: key }) };
+    const other = githubAppFake();
+    await expect(
+      repoScanner("repo_github", { federation: app }).run(ctx(other.fetchImpl, { credential: { ...ghFederated, publicConfig: { appId: "999", installationId: INSTALLATION } } }).c),
+    ).rejects.toThrow(/^credential_unusable: the credential names GitHub App 999/);
+    expect(other.exchanges).toEqual([]);
+
+    const write = githubAppFake({ contents: "write", metadata: "read" });
+    const res = await repoScanner("repo_github", { federation: app }).run(ctx(write.fetchImpl, { credential: ghFederated }).c);
+    expect(res).toEqual({ observations: [], credentialWriteScope: "write" });
+    expect(write.calls).toEqual([]);
+
+    const rejected = githubAppFake(undefined, 401);
+    const t = ctx(rejected.fetchImpl, { credential: ghFederated });
+    const err = await repoScanner("repo_github", { federation: app }).run(t.c).catch((e: Error) => e);
+    expect(String(err)).toMatch(/credential_unusable: .*rejected the App's JWT/);
+    expect(String(err)).not.toContain(rejected.exchanges[0]!.auth.slice(7));
+  });
+
+  it("GitHub: re-exchanges the installation token before it expires", async () => {
+    const key = appKey();
+    const fake = githubAppFake();
+    const clock = Date.parse("2099-01-01T00:00:00Z") - 4 * 60_000; // inside the refresh margin of the token's expiry
+    const t = ctx(fake.fetchImpl, { credential: ghFederated });
+    await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key }), now: () => clock } }).run(t.c);
+    expect(fake.exchanges.length).toBe(2);
+  });
+
+  /** a reader stub that records how the scanner built it */
+  function stubReader(built: RepoReaderOptions[]) {
+    return (_kind: string, opts: RepoReaderOptions): RepoReader => {
+      built.push(opts);
+      return {
+        kind: "azure_devops",
+        historyEnabled: false,
+        listRepos: async () => ({ repos: [], truncated: false }),
+        getTree: async (repo: string) => ({ repo, ref: null, commitSha: null, author: null, entries: [], truncated: false }),
+        readFile: async () => ({ status: "missing" }),
+        inspectCredential: async () => ({ status: "read_only", scopes: [], detail: "" }),
+        listCommits: async () => [],
+        getTreeAt: async (repo: string) => ({ repo, ref: null, commitSha: null, author: null, entries: [], truncated: false }),
+      } as unknown as RepoReader;
+    };
+  }
+
+  /** Entra's endpoints, answering the token request with `token` (or an AADSTS error) */
+  function entraFake(answer: "ok" | "wrong_audience") {
+    const assertions: string[] = [];
+    const scopes: string[] = [];
+    const accessToken = `synthetic-entra-${randomUUID()}`;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (u.hostname !== "login.microsoftonline.com") return json({ message: "unexpected host" }, 500);
+      if (u.pathname.endsWith("/discovery/instance")) {
+        return json({
+          tenant_discovery_endpoint: `https://login.microsoftonline.com/${TENANT}/v2.0/.well-known/openid-configuration`,
+          "api-version": "1.1",
+          metadata: [{ preferred_network: "login.microsoftonline.com", preferred_cache: "login.windows.net", aliases: ["login.microsoftonline.com", "login.windows.net"] }],
+        });
+      }
+      if (u.pathname.endsWith("/.well-known/openid-configuration")) {
+        return json({
+          token_endpoint: `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`,
+          authorization_endpoint: `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/authorize`,
+          issuer: `https://login.microsoftonline.com/${TENANT}/v2.0`,
+          end_session_endpoint: `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/logout`,
+          jwks_uri: `https://login.microsoftonline.com/${TENANT}/discovery/v2.0/keys`,
+        });
+      }
+      if (u.pathname.endsWith("/oauth2/v2.0/token")) {
+        const form = new URLSearchParams(typeof init?.body === "string" ? init.body : "");
+        assertions.push(form.get("client_assertion") ?? "");
+        scopes.push(form.get("scope") ?? "");
+        if (answer === "wrong_audience") {
+          return json(
+            { error: "invalid_client", error_description: "AADSTS700212: No matching federated identity record found for presented assertion audience 'x'.", error_codes: [700212] },
+            400,
+          );
+        }
+        return json({ token_type: "Bearer", expires_in: 3600, ext_expires_in: 3600, access_token: accessToken });
+      }
+      return json({ message: "no route" }, 500);
+    }) as typeof fetch;
+    return { fetchImpl, assertions, scopes, accessToken };
+  }
+
+  const adoFederated = { mode: "federated" as const, publicConfig: { tenantId: TENANT, clientId: CLIENT }, secret: null };
+  const adoSource = { id: randomUUID(), name: "ado", kind: "repo_azure_devops" as const, target: { baseUrl: ADO }, scope: { orgLevel: false, include: ["proj/repo"] } };
+
+  it("Azure DevOps: exchanges a federation token at Entra and reads with the Entra access token (Bearer)", async () => {
+    const entra = entraFake("ok");
+    const audiences: string[] = [];
+    const minted = `synthetic-federation-${randomUUID()}`;
+    const built: RepoReaderOptions[] = [];
+    const t = ctx(entra.fetchImpl, {
+      source: adoSource,
+      credential: adoFederated,
+      federation: {
+        sourceToken: async (aud) => {
+          audiences.push(aud);
+          return minted;
+        },
+      },
+    });
+    const res = await repoScanner("repo_azure_devops", { resolveReader: stubReader(built) }).run(t.c);
+    // every token the run minted was for Entra's token-exchange audience (the credential library may ask more than once)
+    expect(audiences.length).toBeGreaterThan(0);
+    expect(new Set(audiences)).toEqual(new Set(["api://AzureADTokenExchange"]));
+    expect(entra.assertions).toEqual([minted]);
+    expect(entra.scopes[0]).toContain("499b84ac-1321-427f-aa17-267ca6975798/.default");
+    expect(built).toHaveLength(1);
+    expect(built[0]!.token).toBe(entra.accessToken);
+    expect(built[0]!.credentialKind).toBe("entra_access_token");
+    // an Entra token carries no Azure DevOps scopes: honest "unverified"
+    expect(res.credentialWriteScope).toBe("unverified");
+    expect(t.registered).toEqual(expect.arrayContaining([minted, entra.accessToken]));
+  });
+
+  it("Azure DevOps: a federated credential with no matching audience is refused without leaking the assertion", async () => {
+    const entra = entraFake("wrong_audience");
+    const minted = `synthetic-federation-${randomUUID()}`;
+    const t = ctx(entra.fetchImpl, { source: adoSource, credential: adoFederated, federation: { sourceToken: async () => minted } });
+    const err = await repoScanner("repo_azure_devops", { resolveReader: stubReader([]) }).run(t.c).catch((e: Error) => e);
+    expect(String(err)).toMatch(/^RepoScanError: credential_unusable: .*AADSTS700212.*api:\/\/AzureADTokenExchange/);
+    expect(String(err)).not.toContain(minted);
+
+    // the minter itself refuses an audience the credential does not name: no token, no Entra call
+    const refusing = entraFake("ok");
+    const t2 = ctx(refusing.fetchImpl, {
+      source: adoSource,
+      credential: adoFederated,
+      federation: { sourceToken: async (aud) => Promise.reject(new Error(`federation audience '${aud}' is not one this credential names`)) },
+    });
+    await expect(repoScanner("repo_azure_devops", { resolveReader: stubReader([]) }).run(t2.c)).rejects.toThrow(/^credential_unusable:/);
+    expect(refusing.assertions).toEqual([]);
+  });
+
+  it("GitLab and Bitbucket: the stored read-only token is the fallback; a federated credential is refused", async () => {
+    for (const kind of ["repo_gitlab", "repo_bitbucket"] as const) {
+      const built: RepoReaderOptions[] = [];
+      const fetchImpl = (async () => json({}, 500)) as unknown as typeof fetch;
+      const src = { id: randomUUID(), name: "g", kind, target: {}, scope: { orgLevel: false, include: ["acme/app"] } };
+      const secret = `synthetic-${randomUUID()}`;
+      await repoScanner(kind, { resolveReader: stubReader(built) }).run(ctx(fetchImpl, { source: src, credential: { mode: "static", publicConfig: {}, secret } }).c);
+      expect(built.map((b) => [b.token, b.credentialKind])).toEqual([[secret, "token"]]);
+      const fed = ctx(fetchImpl, { source: src, credential: { mode: "federated", publicConfig: {}, secret: null }, federation: { sourceToken: async () => "x" } });
+      await expect(repoScanner(kind, { resolveReader: stubReader([]) }).run(fed.c)).rejects.toThrow(/^credential_unusable: .*accepts no external OIDC token/);
+    }
   });
 });

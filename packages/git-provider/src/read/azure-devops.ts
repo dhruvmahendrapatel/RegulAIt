@@ -57,17 +57,26 @@ export class AzureDevOpsRepoReader implements RepoReader {
   readonly kind = "azure_devops" as const;
   readonly historyEnabled: boolean;
   private readonly http: ReadClient;
+  /** ADR-0195 A5: the credential is an Entra access token, not a PAT */
+  private readonly entra: boolean;
 
   constructor(opts: RepoReaderOptions) {
     if (!opts.baseUrl) {
       throw new GitProviderError("azure_devops requires a baseUrl (the organization URL, e.g. https://dev.azure.com/<organization>)");
     }
+    const kind = opts.credentialKind ?? "token";
+    if (kind !== "token" && kind !== "entra_access_token") throw new GitProviderError(`azure_devops does not take a ${kind} credential`);
     this.historyEnabled = opts.allowHistory === true;
+    this.entra = kind === "entra_access_token";
     this.http = new ReadClient({
       label: "azure_devops",
       baseUrl: opts.baseUrl,
       token: opts.token,
-      authHeaders: { authorization: `Basic ${Buffer.from(`:${opts.token}`, "utf8").toString("base64")}`, accept: "application/json" },
+      // a PAT is Basic with an empty user; an Entra access token (ADR-0195 A5) is a Bearer token
+      authHeaders: {
+        authorization: this.entra ? `Bearer ${opts.token}` : `Basic ${Buffer.from(`:${opts.token}`, "utf8").toString("base64")}`,
+        accept: "application/json",
+      },
       opts,
     });
   }
@@ -165,6 +174,13 @@ export class AzureDevOpsRepoReader implements RepoReader {
   }
 
   async inspectCredential(): Promise<CredentialScopeReport> {
+    if (this.entra) {
+      return {
+        status: "unverified",
+        scopes: [],
+        detail: "an Entra access token carries no Azure DevOps scopes; write scope unverified (add the service principal to the Readers group only)",
+      };
+    }
     return {
       status: "unverified",
       scopes: [],

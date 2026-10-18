@@ -79,3 +79,48 @@ export function federationKeyState(k: { activatedAt: unknown; retiredAt: unknown
   if (k.activatedAt) return "active";
   return "pending";
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0195 A5: federated git-provider credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * How each repo source kind is reached without a stored per-source token (checked against the providers' documentation
+ * on 2026-10-18; see ADR-0195 "As built: A5"):
+ *  - `entra_workload_identity` (Azure DevOps): a federation token (aud `api://AzureADTokenExchange`) is exchanged at
+ *    Entra for an access token to Azure DevOps. Fully keyless.
+ *  - `github_app_installation` (GitHub): GitHub accepts no external OIDC token for its API. The deployment's GitHub App
+ *    key (a deploy-time file, never in the database) signs a short JWT that is exchanged for a 1-hour installation
+ *    token, downscoped to read-only contents and metadata.
+ *  - null (GitLab, Bitbucket): no inbound federation exists; a stored read-only token is the explicit fallback.
+ */
+export type RepoFederationMechanism = "entra_workload_identity" | "github_app_installation";
+export const REPO_FEDERATION_MECHANISM = Object.freeze({
+  repo_github: "github_app_installation",
+  repo_gitlab: null,
+  repo_bitbucket: null,
+  repo_azure_devops: "entra_workload_identity",
+} as const satisfies Record<string, RepoFederationMechanism | null>);
+
+/** null when the kind can use a federated credential; otherwise why not (shown to the admin) */
+export function federationUnsupportedReason(kind: string): string | null {
+  if (kind === "repo_gitlab" || kind === "repo_bitbucket") {
+    const name = kind === "repo_gitlab" ? "GitLab" : "Bitbucket";
+    return `${name} accepts no external OIDC token for its API, so a federated credential cannot work; store a read-only access token in static mode (a relaxation, confirmed with a step-up)`;
+  }
+  return null;
+}
+
+/** secure by default (ADR-0180): federated wherever the provider supports it, a stored token only where it does not */
+export function defaultCredentialMode(kind: string): "federated" | "static" {
+  return federationUnsupportedReason(kind) ? "static" : "federated";
+}
+
+/** the Azure DevOps resource an Entra access token is requested for (the `.default` scope of its application id) */
+export const AZURE_DEVOPS_ENTRA_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default";
+
+/** the deployment variables naming RegulAIt's GitHub App: its numeric App id and the path of its private key PEM */
+export const GITHUB_APP_ID_ENV = "REGULAIT_GITHUB_APP_ID";
+export const GITHUB_APP_PRIVATE_KEY_FILE_ENV = "REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE";
+/** the only permissions an installation token is requested with; any other granted permission is refused */
+export const GITHUB_APP_READ_PERMISSIONS = Object.freeze({ contents: "read", metadata: "read" } as const);

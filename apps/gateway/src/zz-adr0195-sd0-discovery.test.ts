@@ -237,6 +237,28 @@ describe("ADR-0195 SD0 discovery foundation", () => {
     expect((await inject("POST", "/v1/discovery/sources", memberKey, { name: "x", kind: "repo_github", target: { namespace: "x" }, scope: { orgLevel: true, include: [] } }, bare)).statusCode).toBe(403);
   });
 
+  it("ADR-0195 A5: an omitted credential mode is the kind's secure default; GitLab and Bitbucket refuse federation", async () => {
+    const org = { orgLevel: true, include: [] as string[] };
+    const ado = await createSource("a5-ado", "repo_azure_devops", org);
+    const tenantId = "00000000-0000-4000-8000-0000000000a1";
+    const clientId = "00000000-0000-4000-8000-0000000000b2";
+    const r = await inject("PUT", `/v1/discovery/sources/${ado.id}/credential`, AUTH, { publicConfig: { tenantId, clientId }, replacesCredentialId: null });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().mode).toBe("federated");
+    for (const kind of ["repo_gitlab", "repo_bitbucket"]) {
+      const s = await createSource(`a5-${kind}`, kind, org);
+      const fed = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { mode: "federated", publicConfig: {}, replacesCredentialId: null });
+      expect(fed.statusCode, fed.body).toBe(400);
+      expect(fed.json().error).toBe("public_config_refused");
+      expect(fed.body).toMatch(/accepts no external OIDC token/);
+      // the default for a provider without inbound federation is a stored token, so a body without one is refused
+      const dflt = await inject("PUT", `/v1/discovery/sources/${s.id}/credential`, AUTH, { publicConfig: {}, replacesCredentialId: null });
+      expect(dflt.statusCode, dflt.body).toBe(400);
+      expect(dflt.json().error).toBe("secret_required");
+      expect((await db.select().from(discoveryCredentials).where(eq(discoveryCredentials.sourceId, s.id))).length).toBe(0);
+    }
+  });
+
   it("a new source is disabled; enabling needs the step-up bound to kind, target and scope", async () => {
     const s = await createSource("enable");
     expect((await sourceRow(s.id)).enabled).toBe(false);

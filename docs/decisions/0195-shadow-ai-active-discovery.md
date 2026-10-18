@@ -1328,3 +1328,80 @@ Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section
 - `pendingLink` matches on the description text, but only among the viewer's own instances, so another user's
   description cannot steer it.
 - The gateway tests for 1 to 4 run against Postgres in CI only (typechecked locally).
+
+## As built: A5 federated git-provider credentials (2026-10-18, no migration)
+
+**Status: built on branch `a5-federated-git-credentials`.** Closes the SD1 follow-up "federated git credentials" and the
+SD2b note "federated git-provider credentials (SD1 follow-up)". The separate `/federation` RS256 issuer is kept, as the
+Q11 review recommended and the owner accepted; A5 adds no key, issuer or table.
+
+### Provider support (checked 2026-10-18)
+
+| Provider | Inbound federation | Built | Source |
+|---|---|---|---|
+| Azure DevOps | yes, through Entra: a service principal added to the organisation calls the REST API with an Entra token for `499b84ac-1321-427f-aa17-267ca6975798/.default`; an Entra federated identity credential accepts an external issuer with audience `api://AzureADTokenExchange` | federated (default) | learn.microsoft.com/azure/devops/integrate/get-started/authentication/service-principal-managed-identity ("You must explicitly add an application identity to each Azure DevOps organization that it accesses"); learn.microsoft.com/entra/identity-platform/v2-oauth2-client-creds-grant-flow ("Access token request with a federated credential") |
+| GitHub | no: GitHub's OIDC covers tokens it issues to Actions, not tokens it accepts. GitHub App installation tokens are the norm | federated through the deployment's GitHub App (default) | docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app ("Installation tokens expire one hour from the time you create them"); docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app (RS256, `exp` at most 10 minutes); …/managing-private-keys-for-github-apps ("GitHub only stores the public portion of the key") |
+| GitLab | no: inbound workload identity federation exists only as a proposal (a design document marked proposed, 2025-03-21) | static token only (default static) | docs.gitlab.com/security/tokens/access_token_scopes/ (`read_api`, `read_repository`); docs.gitlab.com/user/group/settings/group_access_tokens/ |
+| Bitbucket Cloud | no: its OIDC covers tokens Pipelines issues | static token only (default static) | support.atlassian.com/bitbucket-cloud/docs/access-tokens/; support.atlassian.com/bitbucket-cloud/docs/using-access-tokens/ |
+
+Also noted: Azure DevOps global PATs stop working on 2026-12-01 (organisation-scoped PATs remain), which makes the
+federated Azure DevOps path the durable one; Bitbucket app passwords are being retired in favour of API and access
+tokens. Unverified: whether GitHub ever lets a user upload their own App public key (no document says so; treated as
+not supported), and whether GitLab's `personal_access_tokens/self` reports group and project token scopes on every
+version (the reader already reports "unverified" when it does not).
+
+### What was built
+
+1. **Shared** (`packages/shared/src/discovery/federation.ts`): `REPO_FEDERATION_MECHANISM`,
+   `federationUnsupportedReason(kind)`, `defaultCredentialMode(kind)`, `AZURE_DEVOPS_ENTRA_SCOPE`, the GitHub App
+   variable names and `GITHUB_APP_READ_PERMISSIONS`. `publicConfigProblem` refuses a federated GitLab or Bitbucket
+   credential with the reason; their former placeholder `audience` field is gone (nothing could have used it: the
+   scanner refused every federated credential).
+2. **Route**: `PUT /v1/discovery/sources/:id/credential` takes `mode` as optional; omitted, it is the kind's secure
+   default (federated for Azure DevOps, GitHub and the clouds; static for GitLab and Bitbucket, where a body without
+   a secret is then refused `secret_required`). An explicit mode behaves as before, so the demo's gitlab.com group
+   token (static, ADR-0197 decision 5) is stored and scanned exactly as before.
+3. **Gateway** (`discovery-git-federation.ts`, wired in `discovery-repo-scanner.ts`):
+   - **Azure DevOps**: the run's `ctx.federation.sourceToken` mints the source's RS256 token for
+     `api://AzureADTokenExchange` (the worker's minter now allows that audience for `repo_azure_devops`, and refuses
+     any other); `@azure/identity`'s `ClientAssertionCredential` on the guarded HttpClient (the SD2 Azure path,
+     `azureCredential`) exchanges it for an Azure DevOps token, sent as `Authorization: Bearer`. An Entra token
+     carries no Azure DevOps scopes, so write scope is reported unverified. Entra errors keep only their AADSTS code.
+   - **GitHub**: `REGULAIT_GITHUB_APP_ID` and `REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE` name the deployment's App; the
+     key is a deploy-time file (PKCS#1 or PKCS#8 RSA, at least 2048 bits, at most 64 KiB), never stored in the
+     database, the same custody as the ADR-0188 issuer key. A run signs a JWT (`jose`, RS256, `iss` the App id,
+     `iat` 60 s back-dated, `exp` 9 minutes on) and calls `POST /app/installations/{id}/access_tokens` with
+     `permissions: {contents: read, metadata: read}`. Any granted permission other than `read` refuses the credential
+     as write scope (decision 7); otherwise it is `read_only`, verified. The credential's `appId` must be the
+     deployment's App (a token is never minted for another App). Repositories are listed from
+     `/installation/repositories`; `/user` is never asked.
+   - **Lifetime**: tokens are exchanged again 5 minutes before they expire, before each repository and history
+     commit, because a run may last 2 hours and the provider tokens about 1.
+   - **Refusals**: no credential, a static credential without a secret, a federated GitLab or Bitbucket credential,
+     a federated GitHub credential without a configured App, an App id mismatch, a rejected exchange: each fails the
+     run `credential_unusable` with a message that carries no secret. Every JWT, assertion and token is registered
+     with `ctx.registerSecret` before use.
+4. **Readers** (`packages/git-provider/src/read`): an optional `credentialKind` (`token`, `github_app_installation`,
+   `entra_access_token`); a reader refuses a kind its provider does not take.
+5. **Tests**: `discovery-repo-scanner.test.ts` (GitHub federated success with JWT claims and downscoped body, App-id
+   mismatch, write grant, rejected JWT, refresh; Azure DevOps federated success, Entra audience refusal
+   `AADSTS700212`, minter refusal; GitLab and Bitbucket static fallback and federated refusal; no credential),
+   `discovery-git-federation.test.ts` (App key configuration fails closed), `read.test.ts` (Bearer for Entra, the
+   installation listing, refused kinds), `discovery.test.ts` (defaults and refusals) and
+   `zz-adr0195-sd0-discovery.test.ts` (database: the omitted-mode default and the GitLab/Bitbucket refusals;
+   typechecked locally, run first in CI).
+6. **Docs**: [docs/deployment/GIT_DISCOVERY_CREDENTIALS.md](../deployment/GIT_DISCOVERY_CREDENTIALS.md), every
+   provider-side step marked pending execution.
+
+Open source first (ADR-0176): no new dependency. The Entra exchange is `@azure/identity` (already pinned), the GitHub
+JWT is `jose` 6.2.12, key parsing is Node `crypto`. No provider SDK is added, as SD1 decided.
+
+### Pending execution and deviations
+
+- **Not run against a real account** (M-041): a GitHub App installation and an Azure DevOps organisation with a
+  federated Entra credential are both pending execution; the demo's GitLab path does not depend on them.
+- **Deviation**: GitHub "federation" is not OIDC federation, because GitHub offers none. It is keyless per source (no
+  stored per-source secret, 1-hour read-only tokens), with one deploy-time App key per deployment. An operator who
+  does not configure an App keeps the static fine-grained token fallback.
+- **Web**: no change. The Discovery sources page already offers "federated (default)" and free-form public config;
+  choosing federated for GitLab or Bitbucket now gets the refusal text.

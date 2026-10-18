@@ -1,6 +1,7 @@
 // Bitbucket Cloud read-only reader, REST 2.0. Listings page through the
 // absolute `next` link in the body, checked to stay on the API origin.
 
+import { GitProviderError } from "../types.js";
 import {
   assertCommitSha,
   clampLimit,
@@ -65,6 +66,8 @@ export class BitbucketRepoReader implements RepoReader {
   private readonly http: ReadClient;
 
   constructor(opts: RepoReaderOptions) {
+    // ADR-0195 A5: this provider takes no federated credential, only a stored token
+    if ((opts.credentialKind ?? "token") !== "token") throw new GitProviderError(`bitbucket does not take a ${opts.credentialKind} credential`);
     this.historyEnabled = opts.allowHistory === true;
     const auth = opts.token.includes(":")
       ? `Basic ${Buffer.from(opts.token, "utf8").toString("base64")}`
