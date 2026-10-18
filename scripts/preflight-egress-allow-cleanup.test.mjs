@@ -386,6 +386,56 @@ it("x", () => { ${later} });\n`;
     });
   });
 
+  describe("#427 round 4 M1′: one create that runs several times with an unreadable host does not own a scalar binding", () => {
+    const REMOVE = "(await removeEgressAllowEntry(app, AUTH, { id: saved })).assertRemoved();";
+    const CREATE = (h) => `saved = (await post("/v1/egress-allow-hosts", { host: ${h} })).json().id;`;
+    const ALLOW = `const allow = async (h) => { ${CREATE("h")} };\n`;
+    const file = (body, prefix = "") => `${IMPORT}let saved;\n${prefix}afterAll(async () => { ${REMOVE} });\n${body}\n`;
+
+    it("negative fixtures: every loop and iteration form is flagged (only the last row would be removed)", () => {
+      for (const src of [
+        file(`beforeAll(async () => { for (const h of ["a.example", "b.example"]) { ${CREATE("h")} } });`),
+        file(`beforeAll(async () => { for (const h in hosts) { ${CREATE("h")} } });`),
+        file(`beforeAll(async () => { for (let i = 0; i < 2; i++) { ${CREATE('"h" + i')} } });`),
+        file(`beforeAll(async () => { let i = 0; while (i++ < 2) { ${CREATE('"h" + i')} } });`),
+        file(`beforeAll(async () => { let i = 0; do { ${CREATE('"h" + i')} } while (i++ < 2); });`),
+        file('beforeAll(async () => { for (const h of ["a.example", "b.example"]) await allow(h); });', ALLOW),
+        file('beforeAll(async () => { await Promise.all(["a.example", "b.example"].map(allow)); });', ALLOW),
+        file('beforeAll(async () => { await Promise.all(["a.example", "b.example"].map((h) => allow(h))); });', ALLOW),
+        file('beforeAll(async () => { ["a.example", "b.example"].forEach(async (h) => { await allow(h); }); });', ALLOW),
+        file(`beforeAll(async () => { await Promise.all(["a.example", "b.example"].map(async (h) => { ${CREATE("h")} })); });`),
+        file(`beforeEach(async () => { ${CREATE("cfg.host")} });`),
+        file(`it.each(["a.example", "b.example"])("x %s", async (h) => { // egress-allow-cleanup: afterAll
+  ${CREATE("h")}
+});`),
+        file(`describe.each(["a.example", "b.example"])("d %s", (h) => { beforeAll(async () => { ${CREATE("h")} }); });`),
+      ]) {
+        expect(flagged(analyzeTestFile(src)), src).toHaveLength(1);
+      }
+    });
+
+    it("live controls: an unreadable host created once, a readable host re-created in a loop, and a loop that pushes every id", () => {
+      for (const src of [
+        // prose-scrub's shape: a template host, created once directly in a test through a step-up wrapper
+        file(`it("x", async () => {
+  const host = \`ps-\${randomUUID()}.example\`;
+  // egress-allow-cleanup: afterAll
+  const first = await relaxStepUpAround(db, () => post("/v1/egress-allow-hosts", { host }));
+  saved = first.json().id;
+});`),
+        file(`beforeAll(async () => { ${CREATE("cfg.host")} });`),
+        file('beforeAll(async () => { await allow(cfg.host); });', ALLOW),
+        // the same row each time: an upsert by host
+        file(`beforeAll(async () => { for (let i = 0; i < 2; i++) { ${CREATE('"127.0.0.1"')} } });`),
+        `${IMPORT}const ids = [];
+afterAll(async () => { for (const id of ids) (await removeEgressAllowEntry(app, AUTH, { id })).assertRemoved(); });
+beforeAll(async () => { for (const h of ["a.example", "b.example"]) ids.push((await post("/v1/egress-allow-hosts", { host: h })).json().id); });\n`,
+      ]) {
+        expect(flagged(analyzeTestFile(src)), src).toEqual([]);
+      }
+    });
+  });
+
   describe("#427 round 3 L1: the removal must run, and its result must be asserted", () => {
     const file = (body) => `${IMPORT}let saved;
 beforeAll(async () => { saved = (await post("/v1/egress-allow-hosts", { host: "127.0.0.1" })).json().id; });

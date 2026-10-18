@@ -174,6 +174,17 @@ const isHook = (name) => (node) => ts.isCallExpression(node) && ts.isIdentifier(
 const isAfterAll = isHook("afterAll");
 const isAfterEach = isHook("afterEach");
 
+/** a call that runs its callback once: `it`, `test`, `describe`, `beforeAll`, `afterAll` and their modifiers, never `.each` */
+const ONCE_FNS = new Set(["it", "test", "describe", "beforeAll", "afterAll"]);
+const runsOnce = (call) => {
+  let e = call.expression;
+  while (ts.isPropertyAccessExpression(e) || ts.isCallExpression(e)) {
+    if (ts.isPropertyAccessExpression(e) && e.name.text === "each") return false;
+    e = e.expression;
+  }
+  return ts.isIdentifier(e) && ONCE_FNS.has(e.text);
+};
+
 /** `it(...)`, `test(...)`, `it.skip(...)`, `it.each(rows)(...)`: the root identifier of the callee chain */
 const isTestCall = (node) => {
   if (!ts.isCallExpression(node)) return false;
@@ -823,11 +834,41 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
     const all = new Set([...hosts.literals, ...hosts.refNodes.map((r) => resolve(r, 0))]);
     return all.size === 1 && !all.has(undefined) ? [...all][0] : undefined;
   };
+  /**
+   * may this site run MORE THAN ONCE? (#427 review M1′) Yes when the create, or any call it was reached through, sits
+   * under a loop, in a callback passed to any call but a once-only test or hook or a plain function's value arrow
+   * (`.map`, `forEach`, `it.each`, `beforeEach` all repeat), or in a named function the file also passes by name
+   * (`xs.map(allow)`). Unsure counts as yes.
+   */
+  const repeats = (site) => {
+    for (const node of [site.create, ...site.chain.map((l) => l.call)]) {
+      for (let p = node.parent; p; p = p.parent) {
+        if (ts.isIterationStatement(p, false)) return true;
+        if ((ts.isArrowFunction(p) || ts.isFunctionExpression(p)) && ts.isCallExpression(p.parent) && p.parent.arguments.includes(p)) {
+          // `relaxStepUpAround(db, () => post(...))`: a value arrow handed to a plain function is the call's value
+          const wraps = isValueArrow(p) && ts.isIdentifier(p.parent.expression) && !TEST_FNS.has(p.parent.expression.text);
+          if (!runsOnce(p.parent) && !wraps) return true;
+        }
+      }
+      const named = namedFunctionOf(node);
+      if (named) {
+        const key = keys.keyOf(named.name);
+        const passed = (n) =>
+          (ts.isIdentifier(n) &&
+            n !== named.name &&
+            keys.keyOf(n) === key &&
+            !(ts.isCallExpression(n.parent) && n.parent.expression === n)) ||
+          ts.forEachChild(n, passed);
+        if (passed(sf)) return true;
+      }
+    }
+    return false;
+  };
   const perSite = sites.map((site) => {
     const hosts = hostsOf(statementOf(site.create) ?? site.create, keys);
     const sources = (root) => site.results.some((r) => r === root || (ts.isCallExpression(root) && within(r, root)));
     const { names, accepted } = carriersOf(sf, sources, keys);
-    return { site, hosts, carriers: names, accepted, row: rowOf(site, hosts) };
+    return { site, hosts, carriers: names, accepted, row: rowOf(site, hosts), repeats: repeats(site) };
   });
   /**
    * does THIS site own the saved-id key `k`? (#427 review M1 and L1) Every write to `k`, or to a name it is read
@@ -841,6 +882,8 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
       .every((w) => {
         const by = perSite.filter((o) => o.accepted.has(w.node));
         if (by.length === 0) return w.decl;
+        // a create that may run several times with a host the analysis cannot read writes several rows into one name
+        if (me.repeats && me.row === undefined) return false;
         return by.every((o) => o === me || (me.row !== undefined && o.row === me.row));
       });
   const judged = perSite.map((me) => {
