@@ -26,6 +26,7 @@ import { readFileSync, statSync } from "node:fs";
 import { SignJWT } from "jose";
 import { azureCredential } from "@regulait/cloud-discovery";
 import type { RepoCredentialKind } from "@regulait/git-provider";
+import { safeErrorMessage } from "./gateway-logger.js";
 import {
   AZURE_DEVOPS_ENTRA_SCOPE,
   GITHUB_APP_ID_ENV,
@@ -190,7 +191,7 @@ export async function githubInstallationToken(ctx: GitFederationContext, deps: G
 
 /** the AADSTS code of an Entra error, the only part of its text kept */
 const aadstsCode = (err: unknown): string | null => {
-  const m = /AADSTS[0-9]{5,7}/.exec(err instanceof Error ? err.message : String(err));
+  const m = /AADSTS[0-9]{5,7}/.exec(safeErrorMessage(err));
   return m ? m[0] : null;
 };
 
@@ -217,7 +218,8 @@ export async function azureDevOpsAccessToken(ctx: GitFederationContext, deps: Gi
         ? " (the app registration has no federated credential matching this issuer, subject and audience api://AzureADTokenExchange)"
         : "";
     // the minter's own refusals (federation off, an audience the credential does not name) carry no secret
-    const own = err instanceof Error && !code && /federation|audience/i.test(err.message) ? `: ${err.message.slice(0, 300)}` : "";
+    const text = safeErrorMessage(err);
+    const own = !code && /federation|audience/i.test(text) ? `: ${text.slice(0, 300)}` : "";
     throw new GitFederationError(`the Entra token exchange for Azure DevOps failed${code ? ` (${code})` : ""}${hint}${own}`);
   }
   if (!token?.token) throw new GitFederationError("the Entra token exchange for Azure DevOps returned no token");
