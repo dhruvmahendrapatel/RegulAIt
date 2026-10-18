@@ -3,7 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   bundleDraftError,
   earliestAuthorityExpiry,
+  endpointDraftError,
   isBundleList,
+  isEndpointList,
+  SPIFFE_ENDPOINT_CODES,
+  spiffeEndpointCode,
+  spiffeIdOk,
   SPIFFE_BUNDLE_MAX_BYTES,
   SPIFFE_BUNDLE_REFUSALS,
   spiffeBundleRefusal,
@@ -53,5 +58,46 @@ describe("ADR-0188 S9 — SPIFFE trust bundles in the browser", () => {
     expect(Object.keys(SPIFFE_BUNDLE_REFUSALS).filter((code) => !gateway.includes(`"${code}"`))).toEqual([]);
     expect(spiffeBundleRefusal("spiffe_bundle_conflict")).toMatch(/Refresh/);
     expect(spiffeBundleRefusal("step_up_required")).toBeNull();
+  });
+});
+
+describe("ADR-0188 S9 follow-up — SPIFFE bundle endpoints in the browser", () => {
+  const draft = (over: Partial<{ trustDomain: string; url: string; profile: "https_web" | "https_spiffe"; endpointSpiffeId: string }> = {}) => ({
+    trustDomain: "example.org",
+    url: "https://bundle.example.org/example.org",
+    profile: "https_spiffe" as const,
+    endpointSpiffeId: "spiffe://example.org/spire/server",
+    ...over,
+  });
+
+  it("an endpoint is https with no userinfo or fragment; https_spiffe names a SPIFFE ID", () => {
+    expect(endpointDraftError(draft())).toBeNull();
+    expect(endpointDraftError(draft({ profile: "https_web", endpointSpiffeId: "" }))).toBeNull();
+    expect(endpointDraftError(draft({ url: "http://bundle.example.org/x" }))).toMatch(/https/);
+    expect(endpointDraftError(draft({ url: "https://u:p@bundle.example.org/x" }))).toMatch(/user name/);
+    expect(endpointDraftError(draft({ url: "https://bundle.example.org/x#f" }))).toMatch(/fragment/);
+    expect(endpointDraftError(draft({ endpointSpiffeId: "https://example.org/server" }))).toMatch(/SPIFFE ID/);
+    expect(endpointDraftError(draft({ trustDomain: "Example.org" }))).toMatch(/trust domain/);
+  });
+
+  it("a SPIFFE ID is checked by character, like the gateway's pattern", () => {
+    for (const ok of ["spiffe://example.org/a", "spiffe://ex-1.org/a/B_c.d"]) expect(spiffeIdOk(ok), ok).toBe(true);
+    for (const bad of ["spiffe://example.org", "spiffe://example.org/", "spiffe://Example.org/a", "spiffe://example.org/a/../b", "spiffe://example.org/a b", "x://example.org/a"]) {
+      expect(spiffeIdOk(bad), bad).toBe(false);
+    }
+  });
+
+  it("a list it cannot trust is never read as 'no endpoints'", () => {
+    expect(isEndpointList({ items: [] })).toBe(true);
+    for (const bad of [{}, null, { items: "x" }]) expect(isEndpointList(bad)).toBe(false);
+  });
+
+  it("every endpoint code named here is one the endpoint module raises", () => {
+    const gateway = src("../../../../../gateway/src/oauth/spiffe-bundle-endpoint.ts");
+    expect(Object.keys(SPIFFE_ENDPOINT_CODES).filter((code) => !gateway.includes(`"${code}"`))).toEqual([]);
+    expect(spiffeEndpointCode("egress_blocked")).toMatch(/allow-list/);
+    // a bundle refusal raised through a fetch reads in the bundle's words
+    expect(spiffeEndpointCode("spiffe_bundle_sequence_rollback")).toMatch(/older/);
+    expect(spiffeEndpointCode("step_up_required")).toBeNull();
   });
 });

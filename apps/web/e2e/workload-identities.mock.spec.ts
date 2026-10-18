@@ -77,10 +77,16 @@ const TREE = {
 /** ADR-0188 S9: one active SPIFFE trust bundle and one it replaced */
 const BUNDLE = {
   id: U(70), trustDomain: "byoc.example.test", status: "active", format: "spiffe_jwks", digest: "a".repeat(64),
-  authorities: [{ thumbprint: "t1", subject: "C=US, O=SPIFFE", notBefore: ISO, notAfter: LATER }], jwtAuthoritiesIgnored: 1,
+  authorities: [{ thumbprint: "t1", subject: "C=US, O=SPIFFE", notBefore: ISO, notAfter: LATER }],
+  jwtAuthorities: [{ kid: "jwt-k1", kty: "EC", crv: "P-256", thumbprint: "j1" }], jwtAuthoritiesIgnored: 0, source: "fetch", sequence: 4,
   createdBy: STEWARD.id, createdAt: ISO, supersededAt: null, supersededByBundleId: null, revokedAt: null, revokedBy: null,
 };
-const OLD_BUNDLE = { ...BUNDLE, id: U(71), status: "superseded", digest: "b".repeat(64), supersededAt: ISO, supersededByBundleId: BUNDLE.id };
+const OLD_BUNDLE = { ...BUNDLE, id: U(71), status: "superseded", digest: "b".repeat(64), supersededAt: ISO, supersededByBundleId: BUNDLE.id, jwtAuthorities: [], jwtAuthoritiesIgnored: 1, source: "upload", sequence: null };
+/** ADR-0188 S9 follow-up: the bundle endpoint that fetched BUNDLE */
+const ENDPOINT = {
+  trustDomain: BUNDLE.trustDomain, url: "https://bundle.byoc.example.test/byoc", profile: "https_spiffe", endpointSpiffeId: "spiffe://byoc.example.test/spire/server",
+  enabled: true, nextRefreshAt: LATER, lastAttemptAt: ISO, lastSuccessAt: ISO, lastErrorCode: null, consecutiveFailures: 0, trustUntil: LATER, updatedBy: STEWARD.id, updatedAt: ISO,
+};
 /** a PEM block the browser forwards as typed (its body need not parse: the gateway judges it) */
 const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBsynthetic\n-----END CERTIFICATE-----\n";
 
@@ -132,6 +138,12 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
     }
     if (p === `/v1/identity/spiffe-trust-bundles/${BUNDLE.id}/revoke` && method === "POST") {
       return json(route, { bundle: { ...BUNDLE, status: "revoked", revokedAt: ISO, revokedBy: STEWARD.id }, tokensRevoked: 2, grantsRevoked: [U(40)], cascade: "complete", grantsNotRevoked: [] });
+    }
+    // ADR-0188 S9 follow-up: the SPIFFE bundle endpoints card
+    if (p === "/v1/identity/spiffe-bundle-endpoints" && method === "GET") return json(route, { items: [ENDPOINT] });
+    if (p.startsWith("/v1/identity/spiffe-bundle-endpoints/") && method === "PUT") {
+      const body = req.postDataJSON() as { enabled: boolean };
+      return json(route, { endpoint: { ...ENDPOINT, ...body, trustDomain: decodeURIComponent(p.split("/").pop()!) }, refresh: body.enabled ? { trustDomain: "x", outcome: "unchanged", bundleId: BUNDLE.id } : null });
     }
     if (p === "/v1/roles") return json(route, { roles: [ROLE] });
     if (p === "/v1/workload-identities" && method === "GET") {
@@ -467,7 +479,9 @@ test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
     const m = await mockApi(page, { legacyEnv: true });
     await page.goto("/ui/admin/workload-identities");
     const c = card(page);
-    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("1 JWT-SVID key(s) not used");
+    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("1 JWT-SVID key(s): jwt-k1");
+    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("fetched, sequence 4");
+    await expect(c.getByRole("row", { name: /superseded/ })).toContainText("1 JWT-SVID key(s) not kept");
     await expect(c.getByRole("row", { name: /superseded/ })).toContainText("Replaced");
     await expect(c.getByRole("note")).toContainText("REGULAIT_SPIFFE_TRUST_BUNDLES");
     await c.getByLabel("Trust domain", { exact: true }).fill("new.example.test");
@@ -534,5 +548,68 @@ test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
     await su.expectResentOnce();
     expect(su.attempts[1]!.body).toEqual({});
     await expect(page.getByText("Bundle revoked.")).toBeVisible();
+  });
+});
+
+test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
+  test.beforeEach(() => {
+    current = null;
+  });
+  test.afterEach(() => {
+    expect(current?.unmatched ?? [], "every /v1 call this page makes is mocked deliberately").toEqual([]);
+  });
+
+  const card = (page: Page) => page.getByTestId("spiffe-bundle-endpoints");
+  const endpointPuts = (m: Mock) => m.calls.filter((c) => c.method === "PUT" && c.path.startsWith("/v1/identity/spiffe-bundle-endpoints/"));
+
+  test("lists the endpoint with its fetch state, and refuses a non-https URL and a missing server ID in the browser", async ({ page }) => {
+    const m = await mockApi(page);
+    await page.goto("/ui/admin/workload-identities");
+    const c = card(page);
+    await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("fetching");
+    await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("spiffe://byoc.example.test/spire/server");
+    await c.getByLabel("Trust domain to fetch").fill("new.example.test");
+    await c.getByLabel("Bundle endpoint URL").fill("http://bundle.new.example.test/new");
+    await c.getByLabel("Endpoint server SPIFFE ID").fill("spiffe://new.example.test/spire/server");
+    await c.getByRole("button", { name: "Save and fetch" }).click();
+    await expect(c.getByText("A bundle endpoint URL is https.")).toBeVisible();
+    await c.getByLabel("Bundle endpoint URL").fill("https://bundle.new.example.test/new");
+    await c.getByLabel("Endpoint server SPIFFE ID").fill("");
+    await c.getByRole("button", { name: "Save and fetch" }).click();
+    await expect(c.getByText("Name the endpoint server's SPIFFE ID")).toBeVisible();
+    expect(endpointPuts(m)).toHaveLength(0);
+    await expectNoAxeViolations(page, "the SPIFFE bundle endpoints card");
+  });
+
+  test("setting an endpoint is confirmed, then resent once through the identity_manage step-up with the same body", async ({ page }) => {
+    await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "PUT", path: "/v1/identity/spiffe-bundle-endpoints/new.example.test", kind: "identity_manage" });
+    await page.goto("/ui/admin/workload-identities");
+    const c = card(page);
+    await c.getByLabel("Trust domain to fetch").fill("new.example.test");
+    await c.getByLabel("Bundle endpoint URL").fill("https://bundle.new.example.test/new");
+    await c.getByLabel("Endpoint profile").selectOption("https_web");
+    await c.getByRole("button", { name: "Save and fetch" }).click();
+    const confirm = page.getByRole("dialog", { name: "Fetch the bundle of new.example.test?" });
+    await expect(confirm).toContainText("whoever controls this endpoint decides");
+    await confirm.getByRole("button", { name: "Save and fetch" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ url: "https://bundle.new.example.test/new", profile: "https_web", endpointSpiffeId: null, enabled: true });
+    await expect(page.getByText("Endpoint saved.")).toBeVisible();
+  });
+
+  test("stopping a fetch keeps the endpoint and names when the last bundle stops authenticating", async ({ page }) => {
+    await mockApi(page);
+    const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/identity/spiffe-bundle-endpoints/${ENDPOINT.trustDomain}`, kind: "identity_manage" });
+    await page.goto("/ui/admin/workload-identities");
+    await card(page).getByRole("button", { name: `Stop fetching the bundle of ${ENDPOINT.trustDomain}` }).click();
+    const confirm = page.getByRole("dialog", { name: `Stop fetching the bundle of ${ENDPOINT.trustDomain}?` });
+    await expect(confirm).toContainText("keeps authenticating until");
+    await confirm.getByRole("button", { name: "Stop fetching" }).click();
+    await confirmStepUp(page);
+    await su.expectResentOnce();
+    expect(su.attempts[1]!.body).toEqual({ url: ENDPOINT.url, profile: ENDPOINT.profile, endpointSpiffeId: ENDPOINT.endpointSpiffeId, enabled: false });
+    await expect(page.getByText("Fetching stopped.")).toBeVisible();
   });
 });

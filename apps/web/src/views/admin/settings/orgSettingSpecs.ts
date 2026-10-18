@@ -118,6 +118,7 @@ export const WORKLOAD_CLIENT_AUTH_METHODS: readonly Choice[] = [
   { value: "tls_client_auth", label: "CA-issued client certificate (tls_client_auth)" },
   { value: "self_signed_tls_client_auth", label: "Registered self-signed certificate (self_signed_tls_client_auth)" },
   { value: "spiffe_svid", label: "SPIFFE identity (spiffe_svid)" },
+  { value: "spiffe_jwt_svid", label: "SPIFFE JWT identity, a bearer token (spiffe_jwt_svid)" },
 ];
 export const INTERNATIONAL_PII_CATEGORIES: readonly Choice[] = [
   { value: "aadhaar", label: "India: Aadhaar number" },
@@ -139,7 +140,8 @@ export const DEPLOY_MODES: readonly Choice[] = [
 
 const STEP_UP_ALL = values(STEP_UP_ACTION_KINDS);
 const PACKS_ALL = values(VENDORED_DETECTION_PACKS);
-const AUTH_ALL = values(WORKLOAD_CLIENT_AUTH_METHODS);
+// every method but the bearer JWT-SVID (ADR-0188 S9 follow-up: off by default)
+const AUTH_STRICT = values(WORKLOAD_CLIENT_AUTH_METHODS).filter((m) => m !== "spiffe_jwt_svid");
 const SIGNATURE_RANK: Record<string, number> = { passkey: 2, step_up: 1, off: 0 };
 
 // ---------------------------------------------------------------------------
@@ -415,13 +417,15 @@ export const IDENTITY_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
   workloadClientAuthMethods: {
     key: "workloadClientAuthMethods",
     label: "How workloads may sign in",
-    strictDefault: AUTH_ALL,
+    strictDefault: AUTH_STRICT,
     strict:
-      "Signed assertions from a registered key, client certificates and SPIFFE identities. Shared secrets are " +
-      "never offered.",
-    relaxed: "Adding back a method you removed lets workloads sign in that way again.",
+      "Signed assertions from a registered key, client certificates and SPIFFE X.509 identities. SPIFFE JWT " +
+      "identities (bearer tokens) are off. Shared secrets are never offered.",
+    relaxed:
+      "Adding back a method you removed lets workloads sign in that way again. Adding SPIFFE JWT identities lets a " +
+      "workload sign in with a bearer JWT-SVID (its token is still bound to a DPoP key).",
     control: { kind: "set", options: WORKLOAD_CLIENT_AUTH_METHODS },
-    isRelaxed: () => false,
+    isRelaxed: (v) => Array.isArray(v) && v.includes("spiffe_jwt_svid"),
     looser: addsAny,
   },
   dpopNonceRequired: {

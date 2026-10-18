@@ -66,8 +66,10 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
       <div data-testid="spiffe-trust-bundles">
         <p>
           A workload whose SPIRE issues it an X.509-SVID can authenticate to the token endpoint with it, once its trust domain&apos;s CA certificates are
-          uploaded here and its SPIFFE ID is bound as a credential of its identity. SPIFFE is off until a bundle is uploaded. Nothing is fetched: paste the
-          output of <code>spire-server bundle show -format spiffe</code> (or <code>-format pem</code>). Only public CA certificates are accepted.
+          uploaded here and its SPIFFE ID is bound as a credential of its identity. SPIFFE is off until a bundle is uploaded. Paste the output of{" "}
+          <code>spire-server bundle show -format spiffe</code> (or <code>-format pem</code>). Only public keys and CA certificates are accepted. The SPIFFE
+          format also carries the domain&apos;s JWT-SVID keys, which JWT-SVID sign-in uses once an admin allows it under &quot;How workloads may sign in&quot;.
+          To keep a bundle current automatically, set the domain&apos;s bundle endpoint below instead.
         </p>
         {list?.legacyEnvironmentIgnored && (
           <p role="note">
@@ -178,12 +180,13 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                 render: (b) => (
                   <>
                     {b.authorities.length} (earliest expiry {dateLabel(earliestAuthorityExpiry(b))})
-                    {b.jwtAuthoritiesIgnored > 0 && <div>{b.jwtAuthoritiesIgnored} JWT-SVID key(s) not used</div>}
+                    {(b.jwtAuthorities?.length ?? 0) > 0 && <div>{b.jwtAuthorities.length} JWT-SVID key(s): {b.jwtAuthorities.map((j) => j.kid).join(", ")}</div>}
+                    {b.jwtAuthoritiesIgnored > 0 && <div>{b.jwtAuthoritiesIgnored} JWT-SVID key(s) not kept (uploaded before JWT-SVIDs were supported)</div>}
                   </>
                 ),
               },
               { key: "digest", header: "Digest", render: (b) => <code title={b.digest}>{b.digest.slice(0, 12)}…</code> },
-              { key: "created", header: "Uploaded", render: (b) => dateLabel(b.createdAt) },
+              { key: "created", header: "Added", render: (b) => <>{dateLabel(b.createdAt)}{b.source === "fetch" && <div>fetched{b.sequence !== null ? `, sequence ${b.sequence}` : ""}</div>}</> },
               {
                 key: "actions",
                 header: "Actions",
