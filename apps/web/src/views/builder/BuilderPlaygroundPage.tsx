@@ -462,6 +462,16 @@ export default function BuilderPlaygroundPage() {
               )}
             </div>
             <ModelPicker label="Model" agents={models.tiles} value={modelAgentId} onChange={setModelAgentId} feature="playground" testId="playground-model" />
+            {/* an empty picker must not hide a failed read: "no models" and "couldn't load them" differ */}
+            {models.isLoading ? (
+              <span className={s.small} role="status" aria-busy="true">
+                Loading your models…
+              </span>
+            ) : models.error ? (
+              <span className={s.small} role="alert">
+                Couldn't load your models: {models.error instanceof Error ? models.error.message : String(models.error)}
+              </span>
+            ) : null}
             <div className={p.row}>
               <Field label="Max output tokens (optional)" error={maxTokensBad ? "A whole number from 1 to 32000" : null}>
                 <Input value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} inputMode="numeric" placeholder="model default" />

@@ -552,7 +552,8 @@ export function Table<T>(props: {
 
   return (
     <div className={s.tableWrap}>
-      <table className={s.table}>
+      {/* aria-busy while the skeleton rows stand in for data, so the wait is announced like SkeletonBlock's */}
+      <table className={s.table} aria-busy={props.loading || undefined}>
         <thead>
           <tr>
             {props.columns.map((c) => {

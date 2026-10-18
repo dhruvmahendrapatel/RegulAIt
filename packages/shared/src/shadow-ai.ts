@@ -60,7 +60,15 @@
  * correctly. A finding is a pointer to a secret, never a copy of one.
  */
 import { z } from "zod";
-import { activeDiscoveryPosture, type ActiveDiscoverySource, type DiscoveryEvidenceKind } from "./discovery/index.js";
+import {
+  activeDiscoveryPosture,
+  PRESENCE_BACKING_KINDS,
+  PRESENCE_SIGNATURES_V1,
+  presenceSignatureById,
+  type ActiveDiscoverySource,
+  type DiscoveryEvidenceKind,
+  type PresenceSignature,
+} from "./discovery/index.js";
 
 // ===========================================================================
 // 1. BOUNDS — the untrusted-input envelope
@@ -475,8 +483,13 @@ export interface Observation {
   artifact?: { kind: ArtifactSignatureKind; value: string } | null;
   /** ADR-0195 decision 6: where it was found (a repo path, line and commit; or a device's config file). Never contents */
   location?: SightingLocation | null;
-  /** ADR-0195 decision 6: NAMES only (e.g. `.env.example` variable names, an MCP command basename), never values */
+  /**
+   * ADR-0195 decision 6: NAMES only (an MCP command basename), never values. An environment-variable name is never
+   * a name here: it travels as a presence signature id (`presence`, lane A6)
+   */
   names?: string[] | null;
+  /** ADR-0195 lane A6: the ids of the presence signatures (env-variable or CLI names) the sighting matched; never the names */
+  presence?: string[] | null;
   /** ADR-0195 decision 20: the person behind the sighting, as a pseudonym (`psn:` + 24 hex), never a name */
   actorPseudonym?: string | null;
   /** ADR-0195: the OS the sighting came from (rows scoped to an OS match only it) */
@@ -556,6 +569,28 @@ const ARTIFACT_PHRASE: Readonly<Record<ArtifactSignatureKind, string>> = {
   local_runtime: "the local model runtime",
   assistant_config: "the coding-assistant config",
 };
+
+const CONF_RANK: Readonly<Record<SignatureConfidence, number>> = { low: 0, medium: 1, high: 2 };
+const lowerConfidence = (a: SignatureConfidence, b: SignatureConfidence): SignatureConfidence => (CONF_RANK[a] <= CONF_RANK[b] ? a : b);
+
+/**
+ * ADR-0195 lane A6: the enabled `identifier` row that backs a presence
+ * signature id: same value (case-insensitive) and one of the kinds
+ * `PRESENCE_BACKING_KINDS` allows. Null for an unknown id or no backing row.
+ * The caller has already applied enabled/os/ecosystem scoping.
+ */
+export function presenceBackingSignature(
+  id: string,
+  enabled: readonly AiSignature[],
+  presenceCatalogue: readonly PresenceSignature[] = PRESENCE_SIGNATURES_V1,
+): { presence: PresenceSignature; signature: AiSignature } | null {
+  const p = presenceSignatureById(id, presenceCatalogue);
+  if (!p) return null;
+  const kinds = PRESENCE_BACKING_KINDS[p.kind];
+  const want = p.value.toLowerCase();
+  const sig = enabled.find((s) => s.matchType === "identifier" && kinds.includes(s.kind) && s.value.toLowerCase() === want);
+  return sig ? { presence: p, signature: sig } : null;
+}
 
 export function classifyObservation(obs: Observation, catalogue: readonly AiSignature[]): Classification {
   // ADR-0195: a row scoped to an OS or a package ecosystem matches only an observation from it
@@ -645,6 +680,28 @@ export function classifyObservation(obs: Observation, catalogue: readonly AiSign
     }
   }
 
+  // 2c. ADR-0195 lane A6: a presence signature (an env-variable or CLI name),
+  //     reported as its id only. It counts when an ENABLED catalogue row backs
+  //     it, so disabling that row turns the detection off. The evidence keeps
+  //     the id, never the name.
+  if (obs.presence && obs.presence.length > 0) {
+    for (const id of obs.presence) {
+      const backed = presenceBackingSignature(id, enabled);
+      if (!backed) continue;
+      const { presence: p, signature: sig } = backed;
+      const c = lowerConfidence(sig.confidence ?? "high", p.confidence);
+      return {
+        ...hit(
+          sig,
+          ARTIFACT_SEVERITY[sig.kind as ArtifactSignatureKind] ?? "low",
+          p.id,
+          `${obs.subject} matches the ${sig.provider} ${p.kind === "cli" ? "CLI" : "environment-variable"} presence signature '${p.id}' (the name itself is not kept)`,
+        ),
+        ...(c !== "high" ? { signatureConfidence: c } : {}),
+      };
+    }
+  }
+
   // 3. a capability, not an act
   if (obs.packageName) {
     for (const sig of enabled) {
@@ -697,6 +754,8 @@ export type FindingEvidence = {
   observedAt: string;
   location?: SightingLocation;
   names?: string[];
+  /** ADR-0195 lane A6: presence signature ids, never the env-variable or CLI names */
+  presence?: string[];
   actor?: string;
   /** the matched catalogue row's confidence when it is not high */
   signatureConfidence?: SignatureConfidence;
@@ -751,6 +810,7 @@ export function correlateObservations(
       observedAt: at,
       ...(o.location ? { location: o.location } : {}),
       ...(o.names && o.names.length > 0 ? { names: o.names } : {}),
+      ...(o.presence && o.presence.length > 0 ? { presence: o.presence } : {}),
       ...(o.actorPseudonym ? { actor: o.actorPseudonym } : {}),
       ...(c.signatureConfidence ? { signatureConfidence: c.signatureConfidence } : {}),
     };
