@@ -21,7 +21,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
-import type { DemoIntakeFixtures } from "@regulait/shared";
+import { DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
 
 export type CheckLevel = "PASS" | "WARN" | "FAIL";
@@ -94,6 +94,7 @@ async function runDemoCheckRun(
   if (shadow.status !== 200) add("1 Shadow AI", "FAIL", `findings endpoint ${shadow.status}`);
   else if (findings.length === 0) add("1 Shadow AI", "FAIL", "no shadow-AI findings", "run `demo:intake` (it imports a synthetic export)");
   else add("1 Shadow AI", "PASS", `${findings.length} finding(s) to open the story with`);
+  if (shadow.status === 200) out.push(...(await checkShadowDiscovery((url) => call("GET", url, auth), findings)));
 
   // --- 1 Intake assistant: the hero's answers must land on HIGH -----------------------------
   if (opts.fixtures) {
@@ -304,6 +305,132 @@ async function runDemoCheckRun(
     );
   }
 
+  return out;
+}
+
+/** the beats `checkShadowDiscovery` reports (pinned PASS by demo-shadow-seed.test.ts on its first-admin-setup database) */
+export const SHADOW_DISCOVERY_BEATS = [
+  "1 Discovery sources",
+  "1 Sightings",
+  "1 Data minimisation",
+  "1 Federation",
+  "1 Endpoint agent",
+  "1 Remediation plan",
+  "3 Content trust",
+] as const;
+
+/**
+ * ADR-0197 decision 7: every Shadow-AI screen the story opens with has data — the discovery sources of each family
+ * with a run that succeeded, sightings from each family, the federation card, the endpoint import and agent cards,
+ * a remediation plan waiting on its sign-off, and content-provenance records with their trust tiers. It also checks
+ * the data-minimisation rule on what was seeded: no environment-variable name, device name or device user of the
+ * dataset is stored on any finding (ADR-0195 decision 20, lane A6).
+ */
+export async function checkShadowDiscovery(
+  get: (url: string) => Promise<{ status: number; body: Json }>,
+  findings: Json[],
+  data: DemoShadowDiscoveryDataset = DEMO_SHADOW_DISCOVERY,
+): Promise<DemoCheck[]> {
+  const out: DemoCheck[] = [];
+  const add = (beat: string, level: CheckLevel, detail: string, fix?: string) => out.push({ beat, level, detail, ...(fix ? { fix } : {}) });
+  const RERUN = "run `demo:prepare` on an empty database (its first step enables the sources during first-admin setup)";
+
+  const sources: Json[] = (await get("/v1/discovery/sources")).body.sources ?? [];
+  const named = (n: string) => sources.find((s) => s.name === n);
+  const problems: string[] = [];
+  const facts: string[] = [];
+  for (const [label, name, needsRun] of [
+    ["GitLab", data.gitlab.name, true],
+    ["AWS", data.aws.name, true],
+    ["Azure", data.azure.name, true],
+    ["MDM import", data.inventory.name, true],
+    ["endpoint agent", data.agent.name, false],
+  ] as const) {
+    const s = named(name);
+    if (!s) problems.push(`${label} source missing`);
+    else if (!s.enabled) problems.push(`${label} source disabled`);
+    else if (needsRun && s.lastRun?.status !== "succeeded") problems.push(`${label} source's last run ${s.lastRun?.status ?? "never ran"}`);
+    else facts.push(label);
+  }
+  if (problems.length) add("1 Discovery sources", "FAIL", problems.join("; "), RERUN);
+  else add("1 Discovery sources", "PASS", `${facts.length} demo sources enabled, each scanned: ${facts.join(", ")}`);
+
+  const has = (f: Json, kinds: string[]) => (f.signalSources ?? []).some((k: string) => kinds.includes(k));
+  const families: Array<[string, string[]]> = [
+    ["repo", ["repo_scan"]],
+    ["cloud", ["cloud_inventory", "cloud_audit_log"]],
+    ["endpoint import", ["endpoint_inventory"]],
+  ];
+  const counts = families.map(([label, kinds]) => [label, findings.filter((f) => has(f, kinds))] as const);
+  const missing = counts.filter(([, fs]) => fs.length === 0).map(([l]) => l);
+  const sightings = counts.reduce((n, [, fs]) => n + fs.reduce((m, f) => m + Number(f.observationCount ?? 0), 0), 0);
+  if (missing.length) add("1 Sightings", "FAIL", `no ${missing.join(", ")} finding(s)`, RERUN);
+  else add("1 Sightings", "PASS", `${counts.map(([l, fs]) => `${fs.length} ${l}`).join(", ")} finding(s), ${sightings} sighting(s)`);
+
+  // names are matched, never stored: none of the dataset's env names, devices or device users is on a finding
+  const stored = JSON.stringify(findings);
+  const names = [
+    ...data.gitlab.repos.flatMap((r) => r.files.filter((f) => f.path.endsWith(".env.example")).flatMap((f) => f.content.split("\n").map((l) => l.split("=")[0]!))),
+    ...data.agent.facts.filter((f) => f.kind === "env_name").map((f) => f.identifier),
+    data.agent.hostname,
+    data.agent.deviceUser,
+    ...data.inventory.csv.split("\n").slice(1).flatMap((l) => [l.split(",")[0]!, l.split(",")[3]!]),
+    ...data.aws.observations.filter((o) => o.subjectKind === "cloud_principal").map((o) => o.subject),
+  ].filter((n) => n && (n.includes("_") || n.includes("-")) && n.length >= 8);
+  const leaked = names.filter((n) => stored.includes(n));
+  if (leaked.length) add("1 Data minimisation", "FAIL", `${leaked.length} name(s) of the dataset stored in clear on a finding`, "a scanner or importer stored a name it must only match: stop and report it");
+  else add("1 Data minimisation", "PASS", "no environment-variable name, device, device user or cloud principal of the dataset is stored in clear on a finding");
+
+  const fed = await get("/v1/discovery/federation");
+  if (fed.status !== 200) add("1 Federation", "FAIL", `federation status ${fed.status}`);
+  else {
+    const keys: Json[] = fed.body.keys ?? [];
+    add(
+      "1 Federation",
+      keys.length ? "PASS" : "WARN",
+      `${keys.length} signing key(s); federation ${fed.body.enabled ? "on" : "off"}${fed.body.issuer ? ` at ${fed.body.issuer}` : " (no public URL)"}`,
+      keys.length ? undefined : RERUN,
+    );
+  }
+
+  const agent = named(data.agent.name);
+  if (agent?.enabled) {
+    const d = await get(`/v1/discovery/sources/${agent.id}/endpoint-devices`);
+    const devices: Json[] = d.body.devices ?? [];
+    const reporting = devices.filter((x) => !x.revokedAt && x.lastReportAt);
+    const agentFindings = findings.filter((f) => has(f, ["endpoint_agent"]));
+    if (reporting.length) add("1 Endpoint agent", "PASS", `${reporting.length} enrolled device(s) reporting, ${agentFindings.length} agent finding(s)`);
+    else
+      add(
+        "1 Endpoint agent",
+        "WARN",
+        devices.length ? `${devices.length} device(s) enrolled, none has reported` : "no enrolled device",
+        "the agent needs this deployment's public URL (REGULAIT_PUBLIC_URL) and identity signing key (`identity-key:init`); set them and re-run `demo:shadow`",
+      );
+  }
+
+  const repoFinding = findings.find((f) => f.subjectKind === "repo" && f.subject === `gitlab:${data.remediation.repo}`);
+  if (!repoFinding) add("1 Remediation plan", "FAIL", `no finding for gitlab:${data.remediation.repo}`, RERUN);
+  else {
+    const plan = await get(`/v1/shadow-ai/findings/${repoFinding.id}/remediation-plan`);
+    const link = plan.body.currentLink;
+    if (plan.status !== 200) add("1 Remediation plan", "FAIL", `remediation plan ${plan.status}`);
+    else if (!link || link.replaceable) add("1 Remediation plan", "FAIL", `gitlab:${data.remediation.repo} has no live remediation workflow`, "re-run `demo:shadow`");
+    else add("1 Remediation plan", "PASS", `gitlab:${data.remediation.repo} → remediation workflow ${link.status}`);
+  }
+
+  const rec = await get("/v1/content-provenance/records?limit=200");
+  if (rec.status !== 200) add("3 Content trust", "FAIL", `provenance records ${rec.status}`);
+  else {
+    const records: Json[] = rec.body.records ?? [];
+    const tiers = [...new Set(records.map((r) => String(r.trustTier)))].sort();
+    add(
+      "3 Content trust",
+      records.length === 0 ? "FAIL" : tiers.length > 1 ? "PASS" : "WARN",
+      `${records.length} provenance record(s); tiers ${tiers.join(", ") || "none"}`,
+      records.length === 0 || tiers.length < 2 ? "re-run `demo:shadow` (it reads the trusted policy library as Dana)" : undefined,
+    );
+  }
   return out;
 }
 
