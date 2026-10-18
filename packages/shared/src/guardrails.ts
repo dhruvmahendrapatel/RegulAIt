@@ -537,6 +537,16 @@ const DLP_RULES: readonly Rule[] = [
     category: "credential_material",
     re: /\bglpat-[\w-]{20,300}(?:\.[0-9a-z]{9})?/g,
   },
+  {
+    // gitleaks `huggingface-access-token` (`hf_(?i:[a-z]{34})`) and
+    // `huggingface-organization-api-token` (`api_org_(?i:[a-z]{34})`),
+    // verbatim bodies, as one rule; the trailing context becomes "not followed
+    // by another key character", since the body is exactly 34. gitleaks'
+    // `entropy = 2` floor is not applied: matching without it is stricter.
+    id: "dlp.secret.huggingface_token",
+    category: "credential_material",
+    re: /\b(?:hf|api_org)_[A-Za-z]{34}(?![A-Za-z0-9_])/g,
+  },
   // The credential shapes THIS PRODUCT mints. Every one is `rgl` + an optional
   // kind letter/word + `_` + a long hex run: `rgl_` (ADR-0025 user API key),
   // `rglv_` (ADR-0066 virtual key), `rgls_` (session cookie token) and

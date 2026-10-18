@@ -486,9 +486,21 @@ export default function CustomProvidersPage() {
           </div>
         </Card>
 
-        <EgressAllowListCard hosts={hostRows} loading={hosts.isLoading} providers={providerRows} />
+        <EgressAllowListCard
+          hosts={hostRows}
+          loading={hosts.isLoading}
+          error={hosts.error}
+          onRetry={() => void hosts.refetch()}
+          providers={providerRows}
+        />
 
-        <ProvidersCard providers={providerRows} loading={providers.isLoading} hosts={hostRows} />
+        <ProvidersCard
+          providers={providerRows}
+          loading={providers.isLoading}
+          error={providers.error}
+          onRetry={() => void providers.refetch()}
+          hosts={hostRows}
+        />
 
         <RegisterProviderCard hosts={hostRows} />
       </div>
@@ -517,6 +529,8 @@ function LifecycleStep(props: { n: number; title: string; text: string }) {
 function EgressAllowListCard(props: {
   hosts: EgressAllowHost[];
   loading: boolean;
+  error: unknown;
+  onRetry: () => void;
   providers: CustomModelProvider[];
 }) {
   const act = useGuardedAction();
@@ -682,6 +696,8 @@ function EgressAllowListCard(props: {
         rows={props.hosts}
         rowKey={(h) => h.id}
         loading={props.loading}
+        error={props.error ?? undefined}
+        onRetry={props.onRetry}
         empty={
           <EmptyState
             title="No destinations granted"
@@ -771,6 +787,8 @@ function OptIn(props: {
 function ProvidersCard(props: {
   providers: CustomModelProvider[];
   loading: boolean;
+  error: unknown;
+  onRetry: () => void;
   hosts: EgressAllowHost[];
 }) {
   const act = useGuardedAction();
@@ -935,6 +953,8 @@ function ProvidersCard(props: {
         rows={props.providers}
         rowKey={(p) => p.id}
         loading={props.loading}
+        error={props.error ?? undefined}
+        onRetry={props.onRetry}
         empty={
           <EmptyState
             title="No custom endpoints registered"

@@ -181,8 +181,8 @@ describe("the self-test verdict", () => {
     expect(evaluateRunnerSelfTest(m, ok, new Date())).toEqual({ passed: true, failures: [] });
     expect(evaluateRunnerSelfTest(m, { ...ok, egress: { ...ok.egress, connected: true } }, new Date()).failures).toEqual(["egress_connected"]);
     expect(evaluateRunnerSelfTest(m, { ...ok, at: new Date(Date.now() - 2 * 86_400_000).toISOString() }, new Date()).failures).toEqual(["stale"]);
-    // the shipped manifest has no built image: nothing passes
-    expect(evaluateRunnerSelfTest(ENGINE_MANIFEST.promptfoo, ok, new Date()).failures).toContain("image_not_built");
+    // an engine with no built image: nothing passes
+    expect(evaluateRunnerSelfTest({ ...ENGINE_MANIFEST.promptfoo, imageDigest: null }, ok, new Date()).failures).toContain("image_not_built");
   });
   it("ADR-0190 I5: a worker switch the runner cannot report rests on a fresh executor attestation, never on nothing", () => {
     for (const engine of [ENGINE_MANIFEST.promptfoo, ENGINE_MANIFEST.garak, ENGINE_MANIFEST.modelscan]) {

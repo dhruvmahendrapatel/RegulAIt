@@ -22,7 +22,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago, fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -106,6 +106,15 @@ export default function PromptVersionsPage() {
       />
       <div className={v.stack}>
         <Card title="Agent">
+          {agents.isLoading && <SkeletonBlock lines={1} />}
+          {agents.error && !agents.data && (
+            <ErrorState
+              title="Couldn't load the agents"
+              message={agents.error instanceof Error ? agents.error.message : String(agents.error)}
+              access={(agents.error as { status?: number }).status === 403}
+              onRetry={() => void agents.refetch()}
+            />
+          )}
           <div className={a.formRow}>
             <Field label="Agent">
               <Select
