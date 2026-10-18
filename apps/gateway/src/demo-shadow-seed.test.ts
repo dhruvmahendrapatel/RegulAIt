@@ -236,9 +236,14 @@ describe("ADR-0197 decision 7 (review L5): the seeder runs no discovery pass bes
   async function expectUntouched() {
     const [foreign] = await gdb.select().from(discoveryRuns).where(eq(discoveryRuns.id, foreignRunId));
     expect(foreign).toMatchObject({ status: "queued", attempt: 0, startedAt: null, leaseOwner: null, errorCode: null });
-    // ...and none of the dataset's own runs was scanned either: no pass ran
-    const ours = (await gdb.select().from(discoveryRuns)).filter((r) => r.sourceId !== foreignSourceId);
-    expect(ours.length).toBeGreaterThan(0);
+    // ...and none of the dataset's recorded runs was scanned either: no pass ran (the MDM import and the endpoint
+    // agent's report land without a pass, so their runs succeed)
+    const recordedIds = new Set(
+      (await gdb.select({ id: discoverySources.id, name: discoverySources.name }).from(discoverySources)).filter((x) => recordedNames.includes(x.name)).map((x) => x.id),
+    );
+    expect(recordedIds.size).toBe(recordedNames.length);
+    const ours = (await gdb.select().from(discoveryRuns)).filter((r) => recordedIds.has(r.sourceId));
+    expect(ours.length).toBeGreaterThanOrEqual(recordedNames.length);
     expect(ours.every((r) => r.status === "queued"), JSON.stringify(ours.map((r) => r.status))).toBe(true);
   }
 
