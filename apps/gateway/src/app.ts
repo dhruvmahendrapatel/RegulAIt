@@ -89,7 +89,8 @@ import {
   resolveRateLimitConfig,
   type RateLimitConfig,
 } from "./rate-limit.js";
-import { framesOnly, parserRefusal, parserRefusalLogFields, redactLogText, requestLogFields, safeErrorMessage, safeErrorText, unhandledErrorLogFields } from "./gateway-logger.js";
+import { errMessage, errSerializer } from "./err-serializer.js";
+import { parserRefusal, parserRefusalLogFields, redactLogText, requestLogFields, unhandledErrorLogFields } from "./gateway-logger.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -4193,7 +4194,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ruleId: "builder-tool-step-resume-failed",
           ruleChain: [],
           reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-            safeErrorMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err)
+            errMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err)
           }`
             .replace(/\s+/g, " ")
             .slice(0, 1000),
@@ -4934,7 +4935,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         const w = extra && typeof extra === "object" ? (extra as { executionWarning?: Record<string, unknown> }).executionWarning : undefined;
         if (w) executionWarning = { ...(executionWarning ?? {}), ...w };
       } catch (err) {
-        executionError ??= safeErrorMessage(err);
+        executionError ??= errMessage(err);
       }
     }
     // ADR-0189 R25 items 5 and 7: the owed AI BOM snapshots, after commit; a failure
@@ -5975,8 +5976,7 @@ export function handleGatewayError(err: unknown, req: FastifyRequest, reply: Fas
   // query's bound values, a SyntaxError's quoted body): turning a debug knob
   // on must not relax what reaches a collector (ADR-0180).
   if (process.env.DEBUG_ERRORS) {
-    const shown = { ...fields, err: fields.err === undefined ? undefined : safeErrorText(fields.err) };
-    console.error("GATEWAY ERR:", redactLogText(JSON.stringify(shown)), `\n${err instanceof Error ? framesOnly(err) : ""}`);
+    console.error("GATEWAY ERR:", redactLogText(JSON.stringify({ ...fields, err: errSerializer(err) })));
   }
   return reply.status(500).send({ error: "internal" });
 }

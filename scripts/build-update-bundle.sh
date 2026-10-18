@@ -116,6 +116,8 @@ if [ "${#INCLUDES[@]}" -eq 0 ]; then
     infra/release-keys
     scripts
     docs/deployment
+    # the engine image lock and its signatures (engines/signatures/): the installer verifies bundled engine images
+    engines
   )
 fi
 

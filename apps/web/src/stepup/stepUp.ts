@@ -195,7 +195,7 @@ export const STEP_UP_ACTION_COPY: Readonly<Record<string, string>> = {
   owner_change: "changing who owns this",
   identity_manage: "changing an agent identity",
   pseudonym_reveal: "revealing a person's name",
-  key_management: "changing a signing key",
+  key_management: "changing a signing key or recording a key's custody",
 };
 
 export const STEP_UP_METHOD_COPY: Readonly<Record<string, string>> = {

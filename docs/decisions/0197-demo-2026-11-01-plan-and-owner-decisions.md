@@ -91,3 +91,11 @@ The owner wants discovery to run against a real GitLab account, a real AWS accou
   - protect the `release` environment;
   - raise the AWS budget from USD 5/month for the sandbox.
 - **Teardown** of the sandbox resources after the demo is a tracked follow-up.
+
+## Addendum: owner decisions, 2026-10-18 (afternoon)
+The demo script lane (#434) raised five questions. The owner answered them:
+1. **Remediation sign-off persona.** The Q7 default (`admin_not_initiator`) stays. The demo seed adds a second admin persona with MFA, a security lead, who gives the remediation sign-off. Avery stays the independent reviewer for the governance beats.
+2. **Deploy gate.** The `demo:gate` beat runs live from a terminal on the dev instance host (SSH or Session Manager). The T-24h captured output is the fallback.
+3. **Live database.** The live demo database holds only what the real GitLab, AWS and Azure scans find. The seeded discovery dataset exists only in the fallback database.
+4. **Fallback host.** The fallback runs as the local docker compose stack on the presenting laptop, prepared with `demo:prepare` the night before.
+5. **GitLab wording.** The script keeps its open statement. GitLab is read through a scoped, read-only group token because GitLab has no keyless federation for API reads, and RegulAIt lists that token as a relaxation on the posture page.

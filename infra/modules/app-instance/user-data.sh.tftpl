@@ -73,6 +73,12 @@ if [ -n "$${PUBLIC_IP}" ]; then
     environment:
       REGULAIT_TLS_HOST: $${TLS_HOST}
 EOF
+  # REGULAIT_PUBLIC_URL is this deployment's https origin (ADR-0121). Without it
+  # the ADR-0195 SD2b federation issuer (`<public URL>/federation`) does not
+  # exist: its discovery document answers 404 and no cloud can verify a token.
+  # Compose interpolates it from .env into every service that reads it, so the
+  # gateway and the engine runners name the same issuer.
+  echo "REGULAIT_PUBLIC_URL=https://$${TLS_HOST}" >> /opt/app/.env
   COMPOSE_PROFILE_ARGS="--profile tls"
   echo "app-boot: on-box TLS enabled for $${TLS_HOST}"
 else

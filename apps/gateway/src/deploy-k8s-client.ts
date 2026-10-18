@@ -30,7 +30,7 @@
  */
 
 import type { KubernetesLiveDeployClient } from "./deploy.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 export class K8sDeployClientError extends Error {
   constructor(message: string) {
@@ -205,7 +205,7 @@ export function buildK8sLiveDeployClient(
       // Deployment; applying into the void would silently create one
       await api.readNamespacedDeployment({ name: params.target, namespace: params.namespace }).catch((err) => {
         throw new K8sDeployClientError(
-          `deployment '${params.target}' not found in namespace '${params.namespace}': ${safeErrorMessage(err)}`,
+          `deployment '${params.target}' not found in namespace '${params.namespace}': ${errMessage(err)}`,
         );
       });
       // the applied manifest: a pod-template annotation stamp (the rollout-

@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
+tenant_id                      = "<entra-tenant-id>"
+subscription_id                = "<subscription-id>"
+regulait_federation_issuer_url = "https://<demo-instance-host>/federation"
+azure_discovery_source_id      = "<uuid of the cloud_azure discovery source>"
+openai_model_name              = "<lowest-priced chat model name offered in the region>"
+openai_model_version           = "<its version>"
+budget_contact_emails          = ["<alert-recipient>"]

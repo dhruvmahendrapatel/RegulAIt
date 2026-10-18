@@ -56,7 +56,7 @@ import {
   manifestDigest,
   type ScannableTool,
 } from "@regulait/shared";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 export const MANIFEST_DIGEST_REPIN = "mcp-manifest-digest-sha256";
 /** the audit row filed for every CLEARED server whose clearance was carried */
@@ -89,7 +89,7 @@ export class ManifestDigestRepinBootError extends Error {
       `MCP manifest digest re-pin (ADR-0176, migration 0145) failed, so the gateway is NOT starting: ` +
         `serving now would compare new SHA-256 manifest digests with un-pinned FNV ones and re-hold every ` +
         `cleared MCP server. Nothing was changed (the pass is one transaction). Fix the cause and restart; ` +
-        `the re-pin runs again on the next boot. Cause: ${safeErrorMessage(cause)}`,
+        `the re-pin runs again on the next boot. Cause: ${errMessage(cause)}`,
     );
     this.name = "ManifestDigestRepinBootError";
   }

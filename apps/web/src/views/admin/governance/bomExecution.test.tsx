@@ -245,4 +245,39 @@ describe("ADR-0190 owner decision C (A1): the relaxation's record beside the sig
     expect(() => m.readDecisionBom({ ...plain, executionRelaxation: record }, U(1))).toThrow(m.BomEvidenceError);
     expect(s.decisionBomReadResponseSchema.safeParse({ ...plain, executionRelaxation: record }).success).toBe(false);
   });
+
+  // ADR-0197 Q3: a relaxation expires; the record shows the expiry in force today and the latest renewal
+  const withExpiry = { ...record, expiresAt: "2026-11-08T08:30:00.000Z", renewedBy: null, renewedAt: null };
+  const R = (r: object) => r as m.RelaxationRecordView;
+  it("ADR-0197 Q3: shows the expiry, and says when it has expired that L3 applies again", async () => {
+    const view = m.readDecisionBom(await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: withExpiry }), U(1));
+    expect(view.relaxationRecord).toEqual(withExpiry);
+    const future = { ...withExpiry, expiresAt: new Date(Date.now() + 86_400_000).toISOString() };
+    const live = shown(R(future));
+    expect(live).toContain(m.shownTime(future.expiresAt));
+    expect(live).toContain("Still in force");
+    const past = shown(R({ ...withExpiry, expiresAt: "2026-10-09T09:30:00.000Z" }));
+    expect(past).toContain(`Expired ${m.shownTime("2026-10-09T09:30:00.000Z")}; L3 applies again until an admin renews it`);
+    expect(past).not.toContain("Still in force");
+    const renewed = shown(R({ ...future, renewedBy: U(954), renewedAt: "2026-10-11T10:00:00.000Z" }));
+    expect(renewed).toContain(`renewed ${m.shownTime("2026-10-11T10:00:00.000Z")} by Drew Reviewer`);
+    // a gateway before Q3 does not report the expiry: the screen says so
+    expect(shown(R(record))).toContain("Not reported: this gateway does not say when the relaxation expires");
+  });
+  it("ADR-0197 Q3: a record whose expiry or renewal cannot be true is unreadable, as the shared contract says", async () => {
+    const s = await sharedBom();
+    const r = await v2Response(RELAXED, "mcp_tool", undefined, { executionRelaxation: withExpiry });
+    for (const [what, bad] of [
+      ["expires before it was set", { ...withExpiry, expiresAt: "2026-10-01T00:00:00.000Z" }],
+      ["expires when it was set", { ...withExpiry, expiresAt: withExpiry.setAt }],
+      ["renewed by no one", { ...withExpiry, renewedAt: "2026-10-11T10:00:00.000Z" }],
+      ["renewed at no time", { ...withExpiry, renewedBy: U(954) }],
+      ["renewed before it was set", { ...withExpiry, renewedBy: U(954), renewedAt: "2000-01-01T00:00:00.000Z" }],
+      ["an expiry without the renewal fields", { ...record, expiresAt: withExpiry.expiresAt }],
+      ["the renewal fields without an expiry", { ...record, renewedBy: null, renewedAt: null }],
+    ] as const) {
+      expect(() => m.readDecisionBom({ ...r, executionRelaxation: bad }, U(1)), what).toThrow(m.BomEvidenceError);
+      expect(s.decisionBomReadResponseSchema.safeParse({ ...r, executionRelaxation: bad }).success, what).toBe(false);
+    }
+  });
 });

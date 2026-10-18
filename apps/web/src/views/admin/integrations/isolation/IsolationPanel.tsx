@@ -942,7 +942,8 @@ async function subjectWrite<T>(fn: () => Promise<T>): Promise<T> {
  * with no agent runs at L3 (microVM). An admin may allow L2 for a PERSON in an INTERACTIVE session only (never an
  * API key, an agent or an engine): `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId`. Allowing it
  * asks for a step-up and is audited; restoring L3 needs no step-up and is audited. The gateway enforces it when it
- * decides each call; this control only records the choice.
+ * decides each call; this control only records the choice. ADR-0197 Q3: it expires after 30 days and then lowers
+ * nothing; renewing it (in force or expired) is another step-up, audited.
  */
 export function PersonStdioRelaxationControl(props: { scopeKind: PersonStdioScope; scopeId: string; context: string }) {
   const act = useAction();
@@ -964,6 +965,9 @@ export function PersonStdioRelaxationControl(props: { scopeKind: PersonStdioScop
   const restore = async () => {
     if (await act.run(() => subjectWrite(() => api.put(url, { relaxed: false })), "L3 restored for a person's own calls")) await q.refetch();
   };
+  const renew = async () => {
+    if (await act.run(() => subjectWrite(() => withStepUp((h) => stepUpApi.put(url, { relaxed: true, renew: true }, h))), "L2 renewed for 30 days for a person's own calls (audited)")) await q.refetch();
+  };
   const scopeText = props.scopeKind === "mcp_server" ? "this server" : "this project";
   return (
     <div className={v.stackTight} data-testid="person-stdio-relaxation">
@@ -973,6 +977,8 @@ export function PersonStdioRelaxationControl(props: { scopeKind: PersonStdioScop
           <Badge tone="neutral">Not reported</Badge>
         ) : current === null ? (
           <Badge tone="ok">L3 · MicroVM sandbox (strict default)</Badge>
+        ) : current.expired ? (
+          <Badge tone="ok">L3 · the L2 allowance expired</Badge>
         ) : (
           <Badge tone="warn">L2 allowed · audited</Badge>
         )}
@@ -985,13 +991,24 @@ export function PersonStdioRelaxationControl(props: { scopeKind: PersonStdioScop
       </p>
       {current !== undefined && current !== null && (
         <p className={v.faint}>
-          Allowed {ago(new Date(current.createdAt).toISOString())}. A saved setting is policy; it does not show that any call ran under it.
+          Allowed {ago(new Date(current.createdAt).toISOString())}.{" "}
+          {current.expiresAt === null
+            ? "The gateway does not report when it expires."
+            : current.expired
+              ? `It expired ${new Date(current.expiresAt).toLocaleString()} and no longer applies; renewing it asks you to confirm it is you.`
+              : `It expires ${new Date(current.expiresAt).toLocaleString()} unless renewed.`}{" "}
+          A saved setting is policy; it does not show that any call ran under it.
         </p>
       )}
       <div>
         {current === null && (
           <Button size="sm" disabled={act.busy || blocked !== null} aria-describedby={reasonId} onClick={() => setConfirming(true)}>
             Allow L2 for a person&apos;s own calls
+          </Button>
+        )}
+        {current && current.expiresAt !== null && (
+          <Button size="sm" disabled={act.busy || blocked !== null} onClick={() => void renew()}>
+            Renew L2 for 30 days
           </Button>
         )}
         {current && (

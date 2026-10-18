@@ -16,9 +16,12 @@
  *   GET  /v1/endpoint-agent/config              the agent's self token; 503 until a signed collection pack exists
  *   POST /v1/endpoint-agent/reports             the agent's self token + Content-Digest + report signature
  *
- *   POST /v1/discovery/sources/:sourceId/enrolment-tokens     admin: issue (capped, at most 30 days; shown once)
+ *   POST /v1/discovery/sources/:sourceId/enrolment-tokens     admin: issue (capped, 30 days at most; up to 90 only
+ *                                                             with a `settings_relax` step-up, ADR-0197 Q13; shown once)
  *   GET  /v1/discovery/sources/:sourceId/enrolment-tokens     admin: list (never the token)
- *   POST /v1/discovery/enrolment-tokens/:tokenId/revoke       admin: no new tickets, no new registrations
+ *   POST /v1/discovery/enrolment-tokens/:tokenId/revoke       admin: no new tickets, no new registrations;
+ *                                                             `{revokeDevices: true}` also revokes the devices it
+ *                                                             enrolled, in the same transaction (ADR-0197 Q14)
  *   GET  /v1/discovery/sources/:sourceId/endpoint-devices     admin: pseudonymous devices and their identities
  *   POST /v1/discovery/endpoint-devices/:deviceId/revoke      admin: the device's identities and tokens are revoked
  *
@@ -91,6 +94,7 @@ import {
   ENDPOINT_TICKET_TTL_DAYS,
   ENDPOINT_TOKEN_MAX_DAYS,
   ENDPOINT_TOKEN_MAX_DEVICES,
+  ENDPOINT_TOKEN_RELAXED_MAX_DAYS,
   isUuidV4,
   reduceReportFacts,
   registerRequestSchema,
@@ -106,6 +110,7 @@ import { resolveTrustDomain } from "./in-process-delegation.js";
 import { deploymentEnvironment, identityIssuer } from "./oauth/common.js";
 import { bindPreparedCredentialTx, IdentityAdminError, revokeWorkloadIdentity } from "./oauth/identity-admin.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
+import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 import { hashToken } from "./token-hash.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -328,9 +333,22 @@ const issueTokenSchema = z
     label: z.string().trim().min(1).max(100),
     // owner decision: the admin must set the cap; there is no unlimited default
     deviceCap: z.number().int().min(1).max(ENDPOINT_TOKEN_MAX_DEVICES),
-    expiresInDays: z.number().int().min(1).max(ENDPOINT_TOKEN_MAX_DAYS).default(ENDPOINT_TOKEN_MAX_DAYS),
+    // ADR-0197 Q13: past ENDPOINT_TOKEN_MAX_DAYS (the default) only with a step-up, never past the relaxed cap
+    expiresInDays: z.number().int().min(1).max(ENDPOINT_TOKEN_RELAXED_MAX_DAYS).default(ENDPOINT_TOKEN_MAX_DAYS),
   })
   .strict();
+
+/** ADR-0197 Q14: revoking a token stops new enrolments; revoking the devices it enrolled is a separate, explicit choice */
+const revokeTokenSchema = z.object({ revokeDevices: z.boolean().default(false) }).strict();
+
+/**
+ * ADR-0197 Q13: an enrolment token that lives longer than 30 days is a relaxation of that one token, bound to
+ * everything the token is issued with (so the grant cannot issue a different token).
+ */
+export const enrolmentTokenLongExpiryStepUp = (input: { sourceId: string; label: string; deviceCap: number; expiresInDays: number }): StepUpCheckArgs => ({
+  kind: "settings_relax",
+  facts: { op: "endpoint_enrolment_token_long_expiry", sourceId: input.sourceId, label: input.label, deviceCap: input.deviceCap, expiresInDays: input.expiresInDays },
+});
 
 function tokenView(t: typeof endpointEnrolmentTokens.$inferSelect) {
   return {
@@ -342,7 +360,43 @@ function tokenView(t: typeof endpointEnrolmentTokens.$inferSelect) {
     createdAt: t.createdAt.toISOString(),
     expiresAt: t.expiresAt.toISOString(),
     revokedAt: t.revokedAt?.toISOString() ?? null,
+    /** ADR-0197 Q13: true when an admin relaxed the 30-day expiry for this token (step-up, audited) */
+    expiryRelaxed: t.expiryRelaxationStepUp !== null,
   };
+}
+
+/**
+ * Revoke one device in the caller's transaction: the device row, its identities (their keys and live tokens,
+ * ADR-0188 decision 12, each audited by S6) and the device audit row. Null when it was already revoked or is gone.
+ */
+async function revokeDeviceTx(t: Db, deviceId: string, actorId: string, revokedBy: string | null, cause: Record<string, unknown> = {}) {
+  const [device] = await t
+    .update(endpointDevices)
+    .set({ revokedAt: sql`GREATEST(now(), ${endpointDevices.createdAt})`, revokedBy })
+    .where(and(eq(endpointDevices.id, deviceId), isNull(endpointDevices.revokedAt)))
+    .returning();
+  if (!device) return null;
+  const links = await t
+    .select({ identityId: endpointAgentIdentities.identityId, status: workloadIdentities.status })
+    .from(endpointAgentIdentities)
+    .innerJoin(workloadIdentities, eq(workloadIdentities.id, endpointAgentIdentities.identityId))
+    .where(eq(endpointAgentIdentities.deviceId, deviceId));
+  let identitiesRevoked = 0;
+  let tokensRevoked = 0;
+  for (const l of links) {
+    if (l.status === "revoked") continue;
+    const r = await revokeWorkloadIdentity(t, l.identityId, actorId);
+    identitiesRevoked += 1;
+    tokensRevoked += r.tokensRevoked;
+  }
+  await audit(t, actorId, "discovery_source", device.sourceId, "endpoint-device-revoked", "allow", `endpoint agent device ${device.id} revoked: ${identitiesRevoked} identity(ies) and ${tokensRevoked} token(s) revoked with it; it uploads nothing more (ADR-0195 SD4b)`, {
+    deviceId: device.id,
+    devicePseudonym: device.devicePseudonym,
+    identitiesRevoked,
+    tokensRevoked,
+    ...cause,
+  });
+  return { device, identitiesRevoked, tokensRevoked };
 }
 
 export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string | undefined; registry?: ScannerRegistry } = {}): void {
@@ -739,32 +793,66 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
     const p = uuidParam("sourceId").safeParse(req.params);
     if (!p.success) return reply.status(400).send({ error: "invalid_request", detail: "sourceId must be a uuid" });
     const b = issueTokenSchema.safeParse(req.body ?? {});
-    if (!b.success) return reply.status(400).send({ error: "invalid_request", detail: "send {label, deviceCap (1 to 100000), expiresInDays (1 to 30, default 30)}" });
+    if (!b.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        detail: `send {label, deviceCap (1 to 100000), expiresInDays (1 to ${ENDPOINT_TOKEN_MAX_DAYS}, default ${ENDPOINT_TOKEN_MAX_DAYS}; up to ${ENDPOINT_TOKEN_RELAXED_MAX_DAYS} asks you to confirm it's you and is audited)}`,
+      });
+    }
     const source = await agentSource(reply, p.data.sourceId as string, true);
     if (!source) return reply;
     const issuer = identityIssuer();
     if (!issuer) return reply.status(503).send({ error: "issuer_not_configured", detail: "the gateway's public URL is not configured, so agents could not reach it" });
+    // ADR-0197 Q13: past 30 days is a relaxation of this token: a fresh step-up bound to what is issued (ADR-0180)
+    const relaxed = b.data.expiresInDays > ENDPOINT_TOKEN_MAX_DAYS;
+    const su = relaxed ? await requireStepUp(db, req, reply, enrolmentTokenLongExpiryStepUp({ sourceId: source.id, label: b.data.label, deviceCap: b.data.deviceCap, expiresInDays: b.data.expiresInDays })) : null;
+    if (su && !su.ok) return reply;
     const secret = ENDPOINT_BULK_TOKEN_PREFIX + randomBytes(32).toString("hex");
-    const [row] = await db
-      .insert(endpointEnrolmentTokens)
-      .values({
-        sourceId: source.id,
-        label: b.data.label,
-        tokenHash: hashToken(secret),
-        deviceCap: b.data.deviceCap,
-        createdBy: req.authCtx.userId ?? null,
-        expiresAt: sql`now() + make_interval(days => ${b.data.expiresInDays})`,
-      })
-      .returning();
-    await audit(db, actor(req), "discovery_source", source.id, "endpoint-enrolment-token-issued", "allow", `endpoint agent enrolment token '${row!.label}' issued for up to ${row!.deviceCap} device(s) until ${row!.expiresAt.toISOString()} (ADR-0195 SD4b)`, {
-      tokenId: row!.id,
-      deviceCap: row!.deviceCap,
-      expiresAt: row!.expiresAt.toISOString(),
+    const row = await db.transaction(async (tx) => {
+      const t = tx as unknown as Db;
+      const tokenId = randomUUID();
+      let relaxation: { expiryRelaxedBy: string | null; expiryRelaxationStepUp: string; expiryRelaxationAuditId: string } | null = null;
+      if (su?.ok) {
+        // the relaxation's audit row is written first, so the token row can name it (0208's CHECK needs it past 30 days)
+        const auditId = randomUUID();
+        await t.insert(auditLog).values({
+          id: auditId,
+          userId: actor(req),
+          objectType: "discovery_source",
+          objectId: source.id,
+          detail: { subsystem: "shadow-ai-discovery", slice: "SD4b", tokenId, expiresInDays: b.data.expiresInDays, defaultDays: ENDPOINT_TOKEN_MAX_DAYS, maxDays: ENDPOINT_TOKEN_RELAXED_MAX_DAYS, relaxation: true, stepUp: su.method },
+          effect: "allow",
+          ruleId: "endpoint-enrolment-token-expiry-relaxed",
+          ruleChain: [],
+          reason: `endpoint agent enrolment token '${b.data.label}' may live ${b.data.expiresInDays} days instead of at most ${ENDPOINT_TOKEN_MAX_DAYS} (step-up ${su.method}) (ADR-0197 Q13)`,
+        });
+        relaxation = { expiryRelaxedBy: req.authCtx.userId ?? null, expiryRelaxationStepUp: su.method, expiryRelaxationAuditId: auditId };
+      }
+      const [inserted] = await t
+        .insert(endpointEnrolmentTokens)
+        .values({
+          id: tokenId,
+          sourceId: source.id,
+          label: b.data.label,
+          tokenHash: hashToken(secret),
+          deviceCap: b.data.deviceCap,
+          createdBy: req.authCtx.userId ?? null,
+          expiresAt: sql`now() + make_interval(days => ${b.data.expiresInDays})`,
+          ...(relaxation ?? {}),
+        })
+        .returning();
+      await audit(t, actor(req), "discovery_source", source.id, "endpoint-enrolment-token-issued", "allow", `endpoint agent enrolment token '${inserted!.label}' issued for up to ${inserted!.deviceCap} device(s) until ${inserted!.expiresAt.toISOString()} (ADR-0195 SD4b)`, {
+        tokenId: inserted!.id,
+        deviceCap: inserted!.deviceCap,
+        expiresAt: inserted!.expiresAt.toISOString(),
+        expiryRelaxed: relaxation !== null,
+      });
+      return inserted!;
     });
     // the token is shown once, inside the enrolment file MDM delivers to `/etc/regulait-agent/enrol.json` (root, 0600)
     return reply.status(201).send({
-      token: tokenView(row!),
-      enrolFile: { schema: ENDPOINT_ENROL_FILE_SCHEMA, issuer, token: secret, expiresAt: row!.expiresAt.toISOString() },
+      token: tokenView(row),
+      enrolFile: { schema: ENDPOINT_ENROL_FILE_SCHEMA, issuer, token: secret, expiresAt: row.expiresAt.toISOString() },
     });
   });
 
@@ -774,26 +862,70 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
     const source = await agentSource(reply, p.data.sourceId as string, false);
     if (!source) return reply;
     const rows = await db.select().from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.sourceId, source.id)).orderBy(desc(endpointEnrolmentTokens.createdAt)).limit(200);
-    return reply.send({ tokens: rows.map(tokenView) });
+    // ADR-0197 Q14: how many devices each token enrolled are still unrevoked (what "also revoke its devices" revokes)
+    const active = rows.length
+      ? await db
+          .select({ tokenId: endpointDevices.tokenId, n: sql<number>`count(*)::int` })
+          .from(endpointDevices)
+          .where(and(inArray(endpointDevices.tokenId, rows.map((r) => r.id)), isNull(endpointDevices.revokedAt)))
+          .groupBy(endpointDevices.tokenId)
+      : [];
+    const activeBy = new Map(active.map((a) => [a.tokenId, Number(a.n)]));
+    return reply.send({ tokens: rows.map((r) => ({ ...tokenView(r), devicesActive: activeBy.get(r.id) ?? 0 })) });
   });
 
   app.post("/v1/discovery/enrolment-tokens/:tokenId/revoke", async (req, reply) => {
     const p = uuidParam("tokenId").safeParse(req.params);
     if (!p.success) return reply.status(400).send({ error: "invalid_request", detail: "tokenId must be a uuid" });
-    const [row] = await db
-      .update(endpointEnrolmentTokens)
-      .set({ revokedAt: sql`GREATEST(now(), ${endpointEnrolmentTokens.createdAt})`, revokedBy: req.authCtx.userId ?? null })
-      .where(and(eq(endpointEnrolmentTokens.id, p.data.tokenId as string), isNull(endpointEnrolmentTokens.revokedAt)))
-      .returning();
-    if (!row) {
-      const [exists] = await db.select({ id: endpointEnrolmentTokens.id }).from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.id, p.data.tokenId as string));
+    const b = revokeTokenSchema.safeParse(req.body ?? {});
+    if (!b.success) return reply.status(400).send({ error: "invalid_request", detail: "send {revokeDevices?: boolean} (default false: the devices it enrolled keep reporting)" });
+    const tokenId = p.data.tokenId as string;
+    // ADR-0197 Q14: one transaction. The token, and (only when asked) every device it enrolled that is not revoked yet,
+    // with their identities, keys and tokens, commit together with their audit rows, or nothing does.
+    const done = await db.transaction(async (tx) => {
+      const t = tx as unknown as Db;
+      const [row] = await t
+        .update(endpointEnrolmentTokens)
+        .set({ revokedAt: sql`GREATEST(now(), ${endpointEnrolmentTokens.createdAt})`, revokedBy: req.authCtx.userId ?? null })
+        .where(and(eq(endpointEnrolmentTokens.id, tokenId), isNull(endpointEnrolmentTokens.revokedAt)))
+        .returning();
+      if (!row) return null;
+      let devicesRevoked = 0;
+      let identitiesRevoked = 0;
+      let tokensRevoked = 0;
+      if (b.data.revokeDevices) {
+        const live = await t
+          .select({ id: endpointDevices.id })
+          .from(endpointDevices)
+          .where(and(eq(endpointDevices.tokenId, row.id), isNull(endpointDevices.revokedAt)))
+          .orderBy(asc(endpointDevices.createdAt));
+        for (const d of live) {
+          const r = await revokeDeviceTx(t, d.id, actor(req), req.authCtx.userId ?? null, { cause: "enrolment_token_revoked", tokenId: row.id });
+          if (!r) continue;
+          devicesRevoked += 1;
+          identitiesRevoked += r.identitiesRevoked;
+          tokensRevoked += r.tokensRevoked;
+        }
+      }
+      await audit(
+        t,
+        actor(req),
+        "discovery_source",
+        row.sourceId,
+        "endpoint-enrolment-token-revoked",
+        "allow",
+        b.data.revokeDevices
+          ? `endpoint agent enrolment token '${row.label}' revoked with the ${devicesRevoked} device(s) it enrolled that were not revoked yet: it redeems no ticket and those devices upload nothing more (ADR-0195 SD4b; ADR-0197 Q14)`
+          : `endpoint agent enrolment token '${row.label}' revoked: it redeems no ticket and its tickets register no identity; the devices it enrolled keep reporting (ADR-0195 SD4b; ADR-0197 Q14)`,
+        { tokenId: row.id, devicesEnrolled: row.devicesEnrolled, revokeDevices: b.data.revokeDevices, devicesRevoked, identitiesRevoked, tokensRevoked },
+      );
+      return { row, devicesRevoked, identitiesRevoked, tokensRevoked };
+    });
+    if (!done) {
+      const [exists] = await db.select({ id: endpointEnrolmentTokens.id }).from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.id, tokenId));
       return reply.status(exists ? 409 : 404).send(exists ? { error: "already_revoked", detail: "this enrolment token is already revoked" } : { error: "not_found", detail: "no such enrolment token" });
     }
-    await audit(db, actor(req), "discovery_source", row.sourceId, "endpoint-enrolment-token-revoked", "allow", `endpoint agent enrolment token '${row.label}' revoked: it redeems no ticket and its tickets register no identity (ADR-0195 SD4b)`, {
-      tokenId: row.id,
-      devicesEnrolled: row.devicesEnrolled,
-    });
-    return reply.send({ token: tokenView(row) });
+    return reply.send({ token: tokenView(done.row), devicesRevoked: done.devicesRevoked, identitiesRevoked: done.identitiesRevoked, tokensRevoked: done.tokensRevoked });
   });
 
   app.get("/v1/discovery/sources/:sourceId/endpoint-devices", async (req, reply) => {
@@ -853,35 +985,7 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
     // one transaction: the device, its identities (their keys and live tokens, ADR-0188 decision 12, each audited by
     // S6) and the device audit row commit together, so a crash midway leaves no identity showing as active. The device
     // is refused from the commit on (every agent route and the token endpoint read it).
-    const done = await db.transaction(async (tx) => {
-      const t = tx as unknown as Db;
-      const [device] = await t
-        .update(endpointDevices)
-        .set({ revokedAt: sql`GREATEST(now(), ${endpointDevices.createdAt})`, revokedBy: req.authCtx.userId ?? null })
-        .where(and(eq(endpointDevices.id, deviceId), isNull(endpointDevices.revokedAt)))
-        .returning();
-      if (!device) return null;
-      const links = await t
-        .select({ identityId: endpointAgentIdentities.identityId, status: workloadIdentities.status })
-        .from(endpointAgentIdentities)
-        .innerJoin(workloadIdentities, eq(workloadIdentities.id, endpointAgentIdentities.identityId))
-        .where(eq(endpointAgentIdentities.deviceId, deviceId));
-      let identitiesRevoked = 0;
-      let tokensRevoked = 0;
-      for (const l of links) {
-        if (l.status === "revoked") continue;
-        const r = await revokeWorkloadIdentity(t, l.identityId, actor(req));
-        identitiesRevoked += 1;
-        tokensRevoked += r.tokensRevoked;
-      }
-      await audit(t, actor(req), "discovery_source", device.sourceId, "endpoint-device-revoked", "allow", `endpoint agent device ${device.id} revoked: ${identitiesRevoked} identity(ies) and ${tokensRevoked} token(s) revoked with it; it uploads nothing more (ADR-0195 SD4b)`, {
-        deviceId: device.id,
-        devicePseudonym: device.devicePseudonym,
-        identitiesRevoked,
-        tokensRevoked,
-      });
-      return { device, identitiesRevoked, tokensRevoked };
-    });
+    const done = await db.transaction(async (tx) => revokeDeviceTx(tx as unknown as Db, deviceId, actor(req), req.authCtx.userId ?? null));
     if (!done) {
       const [exists] = await db.select({ id: endpointDevices.id }).from(endpointDevices).where(eq(endpointDevices.id, deviceId));
       return reply.status(exists ? 409 : 404).send(exists ? { error: "already_revoked", detail: "this device is already revoked" } : { error: "not_found", detail: "no such device" });

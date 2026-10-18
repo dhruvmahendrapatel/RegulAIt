@@ -38,7 +38,7 @@ import { agentUnsuspendStepUp, refuseLifecycleChangedConcurrently, registerAgent
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { literacySlot } from "./ai-literacy.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import {
   CREDENTIAL_HOST_CONNECTOR_KINDS,
@@ -959,7 +959,7 @@ async function dispatchOnce(
         kind: args.traceSpanKind ?? "llm",
         name: args.traceSpanName ?? (args.served ? args.served.name : "dispatch"),
         status: "error",
-        statusReason: safeErrorMessage(err) || "dispatch threw",
+        statusReason: errMessage(err) || "dispatch threw",
         startedAt,
         agentId: args.served?.id ?? null,
         provider: sink.provider ?? args.served?.provider ?? null,
@@ -1277,7 +1277,7 @@ async function dispatchAttempt(
         await recordCanaryFailure(
           db,
           [agentConfigShadow.note],
-          safeErrorMessage(err) || "agent_config shadow evaluation failed",
+          errMessage(err) || "agent_config shadow evaluation failed",
           { userId, projectId: args.projectId ?? null, detail: { phase: "agent-config-shadow" } },
           { effect: servedDesc, ruleId: "agent-config", reason: "active agent_config (served)" },
         );
