@@ -699,7 +699,11 @@ Loosening it would weaken the delegated-token verifier's invariants, so `federat
      `{op: "federation_key_rotate", keyId}`; the previous key is retired, its private half destroyed, and it stays
      published for 600 s (token life plus skew).
    - `POST …/keys/:kid/revoke`: `key_management` step-up `{op: "federation_key_revoke", keyId}`; the key leaves the
-     JWKS at once (revoking the active key turns federation off).
+     JWKS at the origin at once (revoking the active key turns federation off). The JWKS is served with
+     `cache-control: public, max-age=60`, and each cloud keeps its own copy of the JWKS, refreshed on its own schedule,
+     so a stolen private key can still mint tokens a cloud accepts until that cloud refreshes. For a real compromise,
+     also remove or narrow the trust policy (or federated credential) on the customer's side. (#420 review finding 5;
+     the revoke confirmation in the web card should say the same, a follow-up for the discovery UI lane.)
    - `POST /v1/discovery/federation/disable`: free (a tightening); the active key is retired.
    The step-up is decided on an unlocked read and re-checked under the table lock; if the active key moved, nothing
    is written (409 `changed_concurrently`, ADR-0186 A). A refused act spends no grant.
