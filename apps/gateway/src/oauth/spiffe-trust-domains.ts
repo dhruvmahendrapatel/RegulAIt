@@ -13,11 +13,12 @@
  *    authorities, for `verifyJwtSvid`.
  *
  * S9 follow-up: a bundle FETCHED from the domain's bundle endpoint is used for
- * authentication only while its endpoint's `trust_until` (last successful fetch
+ * authentication only while its endpoint is enabled and its `trust_until` (last successful fetch
  * + `SPIFFE_FETCHED_BUNDLE_MAX_AGE_SECONDS`) is in the future on the database
  * clock. A failed refresh keeps the last good bundle until then, and never
  * after: a domain whose refreshes keep failing stops authenticating (fail
- * closed). An uploaded bundle is pinned and does not lapse.
+ * closed). Disabling the endpoint ends that trust at once. An uploaded bundle is
+ * pinned and does not lapse.
  *
  * The S5 environment variable `REGULAIT_SPIFFE_TRUST_BUNDLES` is never read
  * (secure by default, ADR-0180: nothing is trusted that was not uploaded through
@@ -29,11 +30,11 @@ import { SPIFFE_TRUST_BUNDLES_LEGACY_ENV } from "@regulait/shared";
 import { pemBundleToDer } from "./x509.js";
 
 const activeWhere = () => and(isNull(spiffeTrustBundles.supersededAt), isNull(spiffeTrustBundles.revokedAt));
-/** active, and either uploaded (pinned) or fetched and still inside its endpoint's trust window (database clock) */
+/** active, and either uploaded (pinned) or fetched with its endpoint enabled and inside its trust window (database clock) */
 const usableWhere = () =>
   and(
     activeWhere(),
-    sql`(${spiffeTrustBundles.source} = 'upload' OR EXISTS (SELECT 1 FROM spiffe_bundle_endpoints e WHERE e.trust_domain = ${spiffeTrustBundles.trustDomain} AND e.trust_until > now()))`,
+    sql`(${spiffeTrustBundles.source} = 'upload' OR EXISTS (SELECT 1 FROM spiffe_bundle_endpoints e WHERE e.trust_domain = ${spiffeTrustBundles.trustDomain} AND e.enabled AND e.trust_until > now()))`,
   );
 
 /** one domain's active bundle: its id (the token endpoint locks it while it issues, #389 review M1) and its authorities */

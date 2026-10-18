@@ -1905,6 +1905,36 @@ Open after this:
 - The migration's journal entry (0209) is the coordinator's to add; until it is, the database suites cannot see the
   new columns.
 
+#### As built: S9 follow-ups fix round (#442 independent review, 2026-10-18, no migration)
+
+Corrections to the text above (left as written):
+- **Journal.** Point 1 and the last "open" item say the 0209 journal entry is left to the coordinator and that the
+  database suites cannot see the new columns. Both are stale: the entry is journaled (idx 209), and the database suites
+  run against the new columns in CI.
+- **`client_id`.** Point 2 says `client_id` "is taken from `sub`". That overstates it. When the form has no
+  `client_id`, the token endpoint reads the assertion's `sub` as the client ID, but `findWorkloadClient` looks the
+  client up by its workload identifier (or a JWK-thumbprint URI), never by SPIFFE ID. A workload that omits
+  `client_id` authenticates only when its identifier is literally its SPIFFE ID; otherwise it is `client_unknown`.
+  Sending `client_id` is the supported form.
+
+Changes (review items 4 and 5, code only):
+- **Disabling an endpoint ends trust at once (secure by default, ADR-0180).** Setting `enabled: false` sets the
+  endpoint's `trust_until` to `now()`, and a fetched bundle is usable only while its endpoint is enabled and inside its
+  trust window (`spiffe-trust-domains.ts`). A success write after a fetch is applied only to an enabled row, so a fetch
+  racing a disable cannot reopen the window. Re-enabling fetches before anything is trusted again. An uploaded bundle
+  is unaffected. The "Stop fetching" confirmation and the audit reason say so.
+- **An upload is not silently superseded.** A fetched write over an active uploaded bundle created at or after the
+  endpoint was last set is refused `spiffe_bundle_upload_newer` (recorded and audited as a fetch failure; the upload
+  stays active). Setting the endpoint again, stepped up, hands the domain back to the fetch. This compares
+  `created_at` with the endpoint's `updated_at`, as the revocation check does, so no schema change was needed.
+
+Tests added: `fetchBundleText` refusing a body over 256 KiB by its declared `content-length` (the response is left open,
+so only the declared check can answer) and by what actually streams (chunked, no `content-length`), and mapping a
+redirect to `spiffe_bundle_fetch_redirect` (offline, `spiffe-bundle-endpoint.test.ts`, with a stub database); a JWT-SVID
+over 16 KiB that is otherwise valid refused `jwt_svid_malformed`, with a valid padded token under the cap as the control
+(`spiffe-jwt-svid.test.ts`); the upload-newer refusal and the disable ending trust (database suite, CI only). Each guard
+was removed locally and its offline test seen failing, then restored. The database cases were typechecked only.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of

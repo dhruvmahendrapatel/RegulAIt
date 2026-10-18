@@ -9,7 +9,10 @@
  *    endpoint ID under the domain's bundle, and refuses another ID, a CA
  *    certificate as the leaf, and a chain the bundle does not anchor; Web PKI
  *    (`https_web`, no override) still refuses a certificate the system store
- *    does not trust; a redirect is refused, never followed.
+ *    does not trust; a redirect is refused, never followed;
+ *  - `fetchBundleText` itself (with a stub database that answers only the
+ *    allow-list and the domain's authorities): the 256 KiB cap, by declared
+ *    length and by what actually streams, and a redirect, each as its code.
  *
  * The refresh itself (write on change, keep the last good bundle on failure,
  * rotation, the trust window, the step-up and audit of the admin route) needs
@@ -18,12 +21,16 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { X509Certificate } from "node:crypto";
 import { exportJWK } from "jose";
+import { egressAllowHosts, type Db } from "@regulait/db";
+import { SPIFFE_BUNDLE_MAX_BYTES } from "@regulait/shared";
 import { createGuardedFetch, EgressRedirectError, type EgressResolver } from "../egress-guard.js";
 import { bundleEndpointServer, type BundleEndpointFixture } from "../testing/spiffe-endpoint-fixture.js";
 import { makeCert, type TestCert } from "../testing/x509-fixtures.js";
 import { IdentityAdminError } from "./identity-admin.js";
 import {
+  BundleFetchError,
   endpointUrlProblem,
+  fetchBundleText,
   parseFetchedBundle,
   refreshIntervalSeconds,
   retryDelaySeconds,
@@ -149,5 +156,59 @@ describe("https_web and the guard itself", () => {
     const err = await createGuardedFetch({ allowList: [], resolve, tls: spiffeEndpointTls(ENDPOINT_ID, [ca.der]) })(url(server)).catch((e: unknown) => e);
     expect((err as Error).name).toBe("EgressBlockedError");
     expect(server.requests).toBe(before);
+  });
+});
+
+describe("fetchBundleText: the size cap and the redirect, each as its code", () => {
+  // the two reads the fetch makes (the egress allow-list, the domain's authorities); audit inserts are kept
+  const audits: unknown[] = [];
+  const stubDb = () =>
+    ({
+      select: () => ({
+        from: (t: unknown) => {
+          const rows = t === egressAllowHosts ? allowList : [{ authoritiesPem: ca.pem }];
+          return Object.assign(Promise.resolve(rows), { where: async () => rows });
+        },
+      }),
+      insert: () => ({ values: async (v: unknown) => void audits.push(v) }),
+    }) as unknown as Db;
+  const fetchFrom = (fixture: BundleEndpointFixture) =>
+    fetchBundleText(stubDb(), { trustDomain: TD, url: url(fixture), profile: "https_spiffe", endpointSpiffeId: ENDPOINT_ID }, { resolve });
+  const codeOf = (e: unknown) => (e instanceof BundleFetchError ? e.code : `not a BundleFetchError: ${String(e)}`);
+  const oversize = `{"keys":[],"pad":"${"x".repeat(SPIFFE_BUNDLE_MAX_BYTES)}"}`;
+  let big: BundleEndpointFixture;
+
+  beforeAll(async () => {
+    big = await bundleEndpointServer(serverSvid);
+  });
+  afterAll(async () => {
+    await big?.close();
+  });
+
+  it("positive control: a bundle under the cap is returned as its text", async () => {
+    const doc = await bundleDoc([ca], { spiffe_sequence: 1 });
+    big.set(doc, 200, { chunked: true });
+    expect(await fetchFrom(big)).toBe(doc);
+  });
+
+  it("refused by its declared content-length, before the body is read (the response here never ends)", async () => {
+    big.set("{", 200, { declaredLength: SPIFFE_BUNDLE_MAX_BYTES + 1 });
+    expect(codeOf(await fetchFrom(big).catch((e: unknown) => e))).toBe("spiffe_bundle_fetch_too_large");
+  });
+
+  it("refused by what actually streams: a chunked body with no content-length past the cap", async () => {
+    big.set(oversize, 200, { chunked: true });
+    // the case is the streamed one: no declared length reaches the reader
+    const raw = await guarded(spiffeEndpointTls(ENDPOINT_ID, [ca.der]))(url(big));
+    expect([raw.headers.get("content-length"), raw.headers.get("transfer-encoding")]).toEqual([null, "chunked"]);
+    await raw.body?.cancel();
+    expect(codeOf(await fetchFrom(big).catch((e: unknown) => e))).toBe("spiffe_bundle_fetch_too_large");
+  });
+
+  it("a redirect is spiffe_bundle_fetch_redirect, and not followed", async () => {
+    big.set("", 302);
+    const before = big.requests;
+    expect(codeOf(await fetchFrom(big).catch((e: unknown) => e))).toBe("spiffe_bundle_fetch_redirect");
+    expect(big.requests).toBe(before + 1);
   });
 });

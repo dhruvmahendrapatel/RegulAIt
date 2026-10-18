@@ -105,7 +105,7 @@ export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskCo
                 render: (x) => (
                   <>
                     <Badge tone={!x.enabled ? "neutral" : x.lastErrorCode ? "warn" : "ok"}>{!x.enabled ? "off" : x.lastErrorCode ? "failing" : "fetching"}</Badge>
-                    <div>{x.lastErrorCode ? spiffeEndpointCode(x.lastErrorCode) ?? x.lastErrorCode : `trusted until ${dateLabel(x.trustUntil)}`}</div>
+                    <div>{!x.enabled ? "not trusted" : x.lastErrorCode ? spiffeEndpointCode(x.lastErrorCode) ?? x.lastErrorCode : `trusted until ${dateLabel(x.trustUntil)}`}</div>
                   </>
                 ),
               },
@@ -122,9 +122,9 @@ export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskCo
                         props.ask({
                           title: `Stop fetching the bundle of ${x.trustDomain}?`,
                           label: "Stop fetching",
-                          danger: false,
+                          danger: true,
                           okMessage: "Fetching stopped.",
-                          body: <>The last fetched bundle keeps authenticating until {dateLabel(x.trustUntil)}.</>,
+                          body: <>The last fetched bundle stops authenticating at once. A bundle you uploaded is not affected.</>,
                           run: () => save(x.trustDomain, { url: x.url, profile: x.profile, endpointSpiffeId: x.endpointSpiffeId, enabled: false }),
                         })
                       }

@@ -13,7 +13,10 @@
  *    keeps the last good bundle, is recorded and audited; the trust window
  *    lapses (fail closed) and a good fetch restores it; ROTATION writes a new
  *    bundle and supersedes the old; the scheduler pass claims a due endpoint;
- *    a REVOCATION disables the endpoint and a fetch cannot undo it.
+ *    a REVOCATION disables the endpoint and a fetch cannot undo it; an admin's
+ *    UPLOAD after the endpoint was set is not superseded by a fetch until the
+ *    endpoint is set again; DISABLING the endpoint ends trust in its fetched
+ *    bundle at once.
  *  - JWT-SVID AT THE TOKEN ENDPOINT: off by default (`method_not_allowed`);
  *    once allowed, a valid SVID + DPoP gives a DPoP-bound token authenticated
  *    by the `spiffe_id` credential; the SVID is single-use; no DPoP is refused
@@ -457,6 +460,44 @@ describe("S9 follow-up — fetching a domain's bundle", () => {
     expect(r.json().refresh).toMatchObject({ outcome: "failed", code: "spiffe_endpoint_id_mismatch" });
     // put it back
     expect((await inject("PUT", `${ENDPOINTS}/${FTD}`, AUTH, endpointBody())).json().refresh).toMatchObject({ outcome: "unchanged" });
+  });
+
+  it("an admin's upload after the endpoint was set is not superseded by a fetch; setting the endpoint again hands the domain back", async () => {
+    const fetched = (await activeBundle(FTD))!;
+    const up = await inject("POST", BUNDLES, AUTH, { trustDomain: FTD, bundle: fca2.pem, replacesBundleId: fetched.id });
+    expect(up.statusCode, up.body).toBe(201);
+    endpoint.set(await bundleDoc([fca], [jwtKey], { spiffe_sequence: 4 }));
+    expect(await refreshSpiffeBundleEndpoint(db, await endpointRow())).toMatchObject({ outcome: "failed", code: "spiffe_bundle_upload_newer" });
+    expect((await activeBundle(FTD))!).toMatchObject({ id: up.json().id, source: "upload" });
+    const again = await inject("PUT", `${ENDPOINTS}/${FTD}`, AUTH, endpointBody());
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().refresh).toMatchObject({ outcome: "changed", sequence: 4 });
+    expect((await activeBundle(FTD))!).toMatchObject({ source: "fetch", sequence: 4 });
+  });
+
+  it("disabling the endpoint ends trust in its fetched bundle at once, audited; re-enabling fetches before it trusts again", async () => {
+    expect((await loadSpiffeTrustAnchors(db)).has(FTD)).toBe(true);
+    const off = await inject("PUT", `${ENDPOINTS}/${FTD}`, AUTH, endpointBody({ enabled: false }));
+    expect(off.statusCode, off.body).toBe(200);
+    const e = await endpointRow();
+    expect([e.enabled, e.nextRefreshAt]).toEqual([false, null]);
+    expect(e.trustUntil!.getTime()).toBeLessThanOrEqual(Date.now() + 5_000);
+    expect((await loadSpiffeTrustAnchors(db)).has(FTD)).toBe(false);
+    const [set] = await db
+      .select({ reason: auditLog.reason, detail: auditLog.detail })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "spiffe-bundle-endpoint-set"), sql`${auditLog.detail} ->> 'trustDomain' = ${FTD}`))
+      .orderBy(desc(auditLog.seq))
+      .limit(1);
+    expect(set!.detail).toMatchObject({ phase: "endpoint_update", enabled: false });
+    expect(set!.reason).toMatch(/stopped authenticating now/);
+    // a disabled endpoint's bundle is unusable even inside a trust window (a racing write cannot reopen it)
+    await db.execute(sql`update spiffe_bundle_endpoints set trust_until = now() + interval '1 hour' where trust_domain = ${FTD}`);
+    expect((await loadSpiffeTrustAnchors(db)).has(FTD)).toBe(false);
+    const on = await inject("PUT", `${ENDPOINTS}/${FTD}`, AUTH, endpointBody());
+    expect(on.statusCode, on.body).toBe(200);
+    expect(on.json().refresh).toMatchObject({ outcome: "unchanged" });
+    expect((await loadSpiffeTrustAnchors(db)).has(FTD)).toBe(true);
   });
 });
 

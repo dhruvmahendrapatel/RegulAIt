@@ -98,6 +98,7 @@ describe("ADR-0188 S9 follow-up — SPIFFE bundle endpoints in the browser", () 
     expect(spiffeEndpointCode("egress_blocked")).toMatch(/allow-list/);
     // a bundle refusal raised through a fetch reads in the bundle's words
     expect(spiffeEndpointCode("spiffe_bundle_sequence_rollback")).toMatch(/older/);
+    expect(spiffeEndpointCode("spiffe_bundle_upload_newer")).toMatch(/uploaded bundle is newer/);
     expect(spiffeEndpointCode("step_up_required")).toBeNull();
     // the other endpoint codes read as their own words
     expect(spiffeEndpointCode("spiffe_bundle_fetch_timeout")).toBe("Failed: timeout.");

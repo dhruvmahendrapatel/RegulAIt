@@ -153,6 +153,16 @@ describe("refusals", () => {
     expect(await code(await svid({ header: { typ: "dpop+jwt" } }))).toBe("jwt_svid_header");
     expect(await code(await svid({ header: { cty: "JWT" } }))).toBe("jwt_svid_header");
   });
+
+  it("malformed: a token over 16 KiB, even one that is otherwise valid (a just-under-cap token is the positive control)", async () => {
+    // a valid SVID padded by an extra claim: the cap is the only rule that refuses the larger one
+    const under = await svid({ claims: { pad: "x".repeat(11_000) } });
+    expect(under.length).toBeLessThanOrEqual(16_384);
+    expect(await code(under)).toBe("accepted");
+    const over = await svid({ claims: { pad: "x".repeat(13_000) } });
+    expect(over.length).toBeGreaterThan(16_384);
+    expect(await code(over)).toBe("jwt_svid_malformed");
+  });
 });
 
 describe("alg confusion: a token never chooses how a key is used", () => {

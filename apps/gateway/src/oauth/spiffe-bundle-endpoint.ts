@@ -40,7 +40,14 @@
  * retried at most every five minutes (never sooner than the floor). The last
  * good fetched bundle authenticates only until `trust_until` (its last
  * successful fetch + 24 h); after that the domain authenticates nothing until a
- * fetch succeeds (`spiffe-trust-domains.ts`).
+ * fetch succeeds (`spiffe-trust-domains.ts`). Disabling the endpoint ends that
+ * trust at once (`trust_until = now()`, and only an enabled endpoint's bundle is
+ * usable); re-enabling fetches before anything is trusted again.
+ *
+ * AN UPLOAD IS NOT SILENTLY SUPERSEDED. A fetched write over an active uploaded
+ * bundle made at or after the endpoint was last set is refused
+ * (`spiffe_bundle_upload_newer`): an admin sets the endpoint again to hand the
+ * domain back to it.
  *
  * A REVOCATION IS NOT UNDONE BY A FETCH. Revoking a domain's bundle disables its
  * endpoint in the same transaction (`revokeSpiffeTrustBundle`), and a fetched
@@ -334,7 +341,12 @@ export async function refreshSpiffeBundleEndpoint(db: Db, endpoint: SpiffeBundle
     .select({ id: spiffeTrustBundles.id, digest: spiffeTrustBundles.digest })
     .from(spiffeTrustBundles)
     .where(and(eq(spiffeTrustBundles.trustDomain, endpoint.trustDomain), sql`${spiffeTrustBundles.supersededAt} IS NULL AND ${spiffeTrustBundles.revokedAt} IS NULL`));
-  const onSuccess = (t: Db) => t.update(spiffeBundleEndpoints).set(successState(interval)).where(eq(spiffeBundleEndpoints.trustDomain, endpoint.trustDomain));
+  // only while still enabled: a fetch racing a disable never reopens the trust window the disable closed
+  const onSuccess = (t: Db) =>
+    t
+      .update(spiffeBundleEndpoints)
+      .set(successState(interval))
+      .where(and(eq(spiffeBundleEndpoints.trustDomain, endpoint.trustDomain), eq(spiffeBundleEndpoints.enabled, true)));
   if (active && active.digest === fetched.parsed.digest) {
     await onSuccess(db);
     return { trustDomain: endpoint.trustDomain, outcome: "unchanged", bundleId: active.id };
@@ -351,6 +363,14 @@ export async function refreshSpiffeBundleEndpoint(db: Db, endpoint: SpiffeBundle
           select count(*)::int as n from spiffe_trust_bundles b join spiffe_bundle_endpoints e on e.trust_domain = b.trust_domain
           where b.trust_domain = ${endpoint.trustDomain} and b.revoked_at is not null and b.revoked_at >= e.updated_at`);
         if ((revoked.rows[0]?.n ?? 0) > 0) throw new IdentityAdminError("spiffe_bundle_revoked", 409, `a bundle of ${endpoint.trustDomain} was revoked; an admin must set its endpoint again`);
+        // an admin's upload is never silently replaced by a fetch: refused while the active bundle is an upload made at
+        // or after the endpoint was last set (setting the endpoint again, stepped up, hands the domain back to it)
+        const uploaded = await t.execute<{ n: number }>(sql`
+          select count(*)::int as n from spiffe_trust_bundles b join spiffe_bundle_endpoints e on e.trust_domain = b.trust_domain
+          where b.trust_domain = ${endpoint.trustDomain} and b.source = 'upload' and b.superseded_at is null and b.revoked_at is null
+            and b.created_at >= e.updated_at`);
+        if ((uploaded.rows[0]?.n ?? 0) > 0)
+          throw new IdentityAdminError("spiffe_bundle_upload_newer", 409, `the active bundle of ${endpoint.trustDomain} was uploaded after its endpoint was set; an admin must set the endpoint again`);
         const enabled = await t
           .update(spiffeBundleEndpoints)
           .set(successState(interval))
@@ -479,6 +499,8 @@ export async function setSpiffeBundleEndpoint(db: Db, trustDomain: string, input
       enabled: input.enabled,
       // enabling (or changing where it fetches from) fetches at once; disabling stops the schedule
       nextRefreshAt: input.enabled ? sql`now()` : null,
+      // disabling ends trust in the fetched bundle at once (secure by default, ADR-0180); a re-enable fetches before it trusts
+      ...(input.enabled ? {} : { trustUntil: sql`now()` }),
       updatedBy: actorUserId,
       updatedAt: sql`now()`,
       // a new source starts with no failure history; the last good bundle's window is kept (it is still that bundle)
@@ -510,7 +532,7 @@ export async function setSpiffeBundleEndpoint(db: Db, trustDomain: string, input
       ruleChain: [],
       reason: input.enabled
         ? `the SPIFFE bundle of ${trustDomain} is fetched from ${input.url} (${input.profile}); a changed bundle replaces the active one`
-        : `fetching the SPIFFE bundle of ${trustDomain} is off; its last fetched bundle stops authenticating at the end of its trust window`,
+        : `fetching the SPIFFE bundle of ${trustDomain} is off; its last fetched bundle stopped authenticating now (an uploaded bundle is unaffected)`,
     });
     await spendOrThrow(t, spend);
     return row!;

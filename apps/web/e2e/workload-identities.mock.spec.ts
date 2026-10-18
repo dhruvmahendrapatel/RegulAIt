@@ -598,13 +598,13 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
     await expect(page.getByText("Endpoint saved.")).toBeVisible();
   });
 
-  test("stopping a fetch keeps the endpoint and names when the last bundle stops authenticating", async ({ page }) => {
+  test("stopping a fetch keeps the endpoint and says the last fetched bundle stops authenticating at once", async ({ page }) => {
     await mockApi(page);
     const su = await requireStepUpOn(page, { method: "PUT", path: `/v1/identity/spiffe-bundle-endpoints/${ENDPOINT.trustDomain}`, kind: "identity_manage" });
     await page.goto("/ui/admin/workload-identities");
     await card(page).getByRole("button", { name: `Stop fetching the bundle of ${ENDPOINT.trustDomain}` }).click();
     const confirm = page.getByRole("dialog", { name: `Stop fetching the bundle of ${ENDPOINT.trustDomain}?` });
-    await expect(confirm).toContainText("keeps authenticating until");
+    await expect(confirm).toContainText("stops authenticating at once");
     await confirm.getByRole("button", { name: "Stop fetching" }).click();
     await confirmStepUp(page);
     await su.expectResentOnce();

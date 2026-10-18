@@ -203,6 +203,7 @@ export const SPIFFE_ENDPOINT_CODES: Readonly<Record<string, string>> = {
   spiffe_bundle_fetch_tls: "Certificate not trusted.",
   spiffe_endpoint_id_mismatch: "SVID for another ID.",
   spiffe_bundle_revoked: "Bundle revoked; save the endpoint again.",
+  spiffe_bundle_upload_newer: "An uploaded bundle is newer; save the endpoint again to fetch.",
 };
 
 const ENDPOINT_CODE_PREFIXES = ["spiffe_bundle_fetch_", "spiffe_endpoint_"];

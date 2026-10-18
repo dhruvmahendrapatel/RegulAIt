@@ -9,10 +9,18 @@ import { webcrypto } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { TestCert } from "./x509-fixtures.js";
 
+export interface BodyMode {
+  chunked?: boolean;
+  declaredLength?: number;
+}
+
 export interface BundleEndpointFixture {
   port: number;
-  /** what the next requests are answered with */
-  set(body: string, status?: number): void;
+  /**
+   * what the next requests are answered with. `chunked`: the body in 16 KiB writes with no content-length (streamed);
+   * `declaredLength`: that content-length is sent, then the body, and the response is left open (never ended)
+   */
+  set(body: string, status?: number, opts?: BodyMode): void;
   /** requests served so far */
   readonly requests: number;
   close(): Promise<void>;
@@ -26,18 +34,31 @@ export async function bundleEndpointServer(leaf: TestCert, chain: TestCert[] = [
   const key = pem("PRIVATE KEY", await webcrypto.subtle.exportKey("pkcs8", leaf.key.privateKey));
   let body = "{}";
   let status = 200;
+  let mode: BodyMode = {};
   let requests = 0;
   const server = https.createServer({ key, cert: [leaf.pem, ...chain.map((c) => c.pem)].join("") }, (req, res) => {
     requests++;
-    res.writeHead(status, { "content-type": "application/json" });
+    if (mode.declaredLength !== undefined) {
+      res.writeHead(status, { "content-type": "application/json", "content-length": String(mode.declaredLength) });
+      res.write(body);
+      return;
+    }
+    if (mode.chunked) {
+      res.writeHead(status, { "content-type": "application/json" });
+      for (let i = 0; i < body.length; i += 16_384) res.write(body.slice(i, i + 16_384));
+      res.end();
+      return;
+    }
+    res.writeHead(status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
     res.end(body);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     port: (server.address() as AddressInfo).port,
-    set(b: string, s = 200) {
+    set(b: string, s = 200, m: BodyMode = {}) {
       body = b;
       status = s;
+      mode = m;
     },
     get requests() {
       return requests;
