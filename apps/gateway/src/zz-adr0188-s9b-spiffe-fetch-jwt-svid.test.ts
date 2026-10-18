@@ -464,7 +464,8 @@ describe("S9 follow-up — fetching a domain's bundle", () => {
 
   it("an admin's upload after the endpoint was set is not superseded by a fetch; setting the endpoint again hands the domain back", async () => {
     const fetched = (await activeBundle(FTD))!;
-    const up = await inject("POST", BUNDLES, AUTH, { trustDomain: FTD, bundle: fca2.pem, replacesBundleId: fetched.id });
+    // the upload still anchors the endpoint's own SVID (fca), so the fetch reaches the bundle write and is refused there
+    const up = await inject("POST", BUNDLES, AUTH, { trustDomain: FTD, bundle: fca.pem, replacesBundleId: fetched.id });
     expect(up.statusCode, up.body).toBe(201);
     endpoint.set(await bundleDoc([fca], [jwtKey], { spiffe_sequence: 4 }));
     expect(await refreshSpiffeBundleEndpoint(db, await endpointRow())).toMatchObject({ outcome: "failed", code: "spiffe_bundle_upload_newer" });
