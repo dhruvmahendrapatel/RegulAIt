@@ -14,7 +14,7 @@
  */
 import { Writable } from "node:stream";
 import Fastify, { LogController, type FastifyInstance } from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { handleGatewayError } from "./app.js";
 import {
   parserRefusal,
@@ -28,6 +28,7 @@ import {
   unhandledErrorLogFields,
 } from "./gateway-logger.js";
 import { parseScimJsonBody } from "./scim.js";
+import { recordSchedulerFailure, resetSchedulerHealth, schedulerHealth } from "./scheduler-health.js";
 
 // built at runtime so no secret-shaped literal sits in the source
 const MARKER = ["N8", "LEAK", "MARKER", String(Date.now())].join("_");
@@ -361,5 +362,46 @@ describe("the real SCIM parser", () => {
   it("accepts an empty body (no refusal)", async () => {
     const empty = await app.inject({ method: "POST", url: "/scim", headers: { "content-type": "application/scim+json" }, payload: "" });
     expect(empty.statusCode).toBe(200);
+  });
+});
+
+describe("a scheduler failure records the withheld form (N8 S2)", () => {
+  it("the console line, lastError and the audit row carry no failed-query text", async () => {
+    resetSchedulerHealth();
+    const inserted: unknown[] = [];
+    const fakeDb = {
+      // the actor lookup fails over to the system id
+      select: () => {
+        throw new Error("no admin lookup in this test");
+      },
+      insert: () => ({
+        values: async (v: unknown) => {
+          inserted.push(v);
+        },
+      }),
+    } as unknown as Parameters<typeof recordSchedulerFailure>[0];
+    const failed = Object.assign(new Error(`Failed query: delete from audit_log\nparams: ${MARKER}`), {
+      query: "delete from audit_log",
+      params: [MARKER],
+      cause: Object.assign(new Error(`detail ${MARKER}`), { code: "57014" }),
+    });
+    failed.name = "DrizzleQueryError";
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => {
+      lines.push(a.map(String).join(" "));
+    });
+    try {
+      await recordSchedulerFailure(fakeDb, "audit-prune", failed);
+    } finally {
+      spy.mockRestore();
+    }
+    const health = schedulerHealth().find((h) => h.name === "audit-prune");
+    expect(lines).toHaveLength(1);
+    expect(inserted).toHaveLength(1);
+    const all = JSON.stringify({ lines, health, inserted });
+    expect(all).not.toContain(MARKER);
+    expect(health?.lastError).toContain("SQLSTATE 57014");
+    expect(JSON.stringify(inserted[0])).toContain("SQLSTATE 57014");
+    resetSchedulerHealth();
   });
 });

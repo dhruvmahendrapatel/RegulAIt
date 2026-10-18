@@ -513,3 +513,31 @@ it writes, the job `error` that `scheduler.ts` persists and its tick result's `e
    destructured `globalThis.fetch` and an `import()` of a non-literal specifier.
 
 The Open note above (pino's generic `{ err }` serializer) stands.
+
+### As built 2026-10-18 — N8 fix round 3 (independent recheck S1–S4)
+
+**Correction to fix round 2, items 2 and 3.** Item 2 ("every generic form … now goes through") was wrong: three sites
+read `(x as Error)?.message`, and the scan's cast rule needed a `.` straight after the `)`, so `?.` passed. Item 3
+("reverting a converted site turns it red") was wrong for the template variant
+`` x instanceof Error ? `${x.name}: ${x.message}` : … ``: the instanceof rule needed `.message` straight after the `?`,
+so reverting `scheduler-health.ts` or `scheduler.ts` to that form stayed green. What changed:
+
+1. **The three `?.message` sites (S1)** use `safeErrorMessage`: the `acceptance-expiry-failed` audit row's
+   `detail.error` (`risk-tolerance.ts`), the trace span's `statusReason` on an unexpected dispatch throw and the
+   `agent_config` shadow canary note (`agents-connectors.ts`).
+2. **The scan is wider (S1, S2).** The cast rule matches `(x as Error)?.message` and a structural cast
+   (`(x as { message?: … } | null)?.message`). The instanceof rule matches `x.message`/`x.stack` anywhere in the true
+   branch of the ternary, which covers the template variant. Two match-only reads that feed `includes(...)` and never a
+   line or a stored field (`mcp-transports.ts`, `isolation-routes.ts`) carry a `// log-safe:` exemption. Negative
+   controls cover `?.message`, the structural cast, and the template variant with and without `.slice`. Reverting each
+   of `risk-tolerance.ts`, `agents-connectors.ts`, `scheduler-health.ts` and both `scheduler.ts` sites to its earlier
+   form was run, and each turned the scan red.
+3. **`recordSchedulerFailure` is pinned by behaviour (S2).** An offline test in `log-leak.test.ts` passes a failed
+   query to it against a fake database and checks that the console line, `lastError` and the inserted audit row carry
+   the SQLSTATE and no bound value.
+4. **Provider error text is bounded and scrubbed (S4).** A `PmProviderError` message embeds the provider's response
+   body, which can echo the work-item payload we sent. The orphaned-link audit `reason` and the returned `error`
+   (`pm.ts`, both sync paths) and the governance-alert ticket's `pm_provider_failed` detail now carry
+   `redactLogText(message)` cut at 300 characters. The provider's own text is kept for diagnosis, so it is not withheld.
+
+The Open note above (pino's generic `{ err }` serializer) stands.

@@ -9,8 +9,9 @@
  * sweep by hand missed sites (the message reached the console through an
  * injected `log`, or was stored before it was printed), so this source scan pins
  * the rule: in every non-CLI gateway module,
- *  - the generic forms `x instanceof Error ? x.message : …` and
- *    `(x as Error).message` are refused anywhere: an error of unknown shape goes
+ *  - the generic forms `x instanceof Error ? x.message : …` (or
+ *    `` `${x.name}: ${x.message}` ``) and `(x as Error).message` /
+ *    `(x as Error)?.message` / `(x as { message?: … })?.message` are refused anywhere: an error of unknown shape goes
  *    through `safeErrorMessage` / `safeErrorText` (gateway-logger.ts);
  *  - `err.stack ?? err.message` is refused (a stack's first line is the message);
  *  - inside a `console.*(…)`, `log(…)` or `*.log.<level>(…)` call, an error's
@@ -66,8 +67,11 @@ function stripComments(src: string): string {
 const ERR = String.raw`(?:e|ex|err|error|cause|\w+Err|\w+Error)`;
 
 const ANYWHERE: ReadonlyArray<readonly [string, RegExp]> = [
-  ["generic instanceof message", new RegExp(String.raw`\b(\w+)\s+instanceof\s+Error\s*\?\s*\(?\s*\1\.(?:message|stack)\b`)],
-  ["cast message", new RegExp(String.raw`\(\s*\w+\s+as\s+Error\s*\)\s*\.(?:message|stack)\b`)],
+  // the true branch of the ternary, up to its end: catches `x.message` and the
+  // template `${x.name}: ${x.message}` alike (S2)
+  ["generic instanceof message", new RegExp(String.raw`\b(\w+)\s+instanceof\s+Error\s*\?[^;\n]{0,200}?\b\1\.(?:message|stack)\b`)],
+  // `(e as Error).message`, `(e as Error)?.message`, `(e as { message?: string } | null)?.message` (S1)
+  ["cast message", new RegExp(String.raw`\(\s*\w+\s+as\s+(?:Error|\{[^}]*\})(?:\s*\|\s*(?:null|undefined))*\s*\)\s*\??\.(?:message|stack)\b`)],
   ["stack-or-message", new RegExp(String.raw`\.stack\s*\?\?\s*\w+\.message\b`)],
   ["raw message assignment", new RegExp(String.raw`\b(?:const|let|var)\s+\w+\s*=\s*${ERR}\.message\b`)],
 ];
@@ -144,6 +148,11 @@ describe("no raw error text in a gateway log line or stored copy (ADR-0167 N8 R1
   it("negative controls: each form is caught, and the safe forms are not", () => {
     expect(violations("const m = err instanceof Error ? err.message : String(err);")).toEqual(["generic instanceof message @ 1"]);
     expect(violations("x = (e as Error).message;")).toEqual(["cast message @ 1"]);
+    expect(violations("x = (e as Error)?.message;")).toEqual(["cast message @ 1"]);
+    expect(violations("x = (e as { message?: string })?.message;")).toEqual(["cast message @ 1"]);
+    expect(violations("x = (e as { message?: unknown } | null)?.message;")).toEqual(["cast message @ 1"]);
+    expect(violations("const m = err instanceof Error ? `${err.name}: ${err.message}` : String(err);")).toEqual(["generic instanceof message @ 1"]);
+    expect(violations("const m = (err instanceof Error ? `${err.name}: ${err.message}` : String(err)).slice(0, 2000);")).toEqual(["generic instanceof message @ 1"]);
     expect(violations("log(`boom: ${err.stack ?? err.message}`);")).toEqual(["stack-or-message @ 1", "error message in a log call @ 1"]);
     expect(violations("const message = err.message;")).toEqual(["raw message assignment @ 1"]);
     expect(violations("log(`sweep skipped — ${err.message}`);")).toEqual(["error message in a log call @ 1"]);
@@ -154,6 +163,7 @@ describe("no raw error text in a gateway log line or stored copy (ADR-0167 N8 R1
     // safe forms
     expect(violations("console.error(`failed: ${safeErrorText(err)}`);")).toEqual([]);
     expect(violations("const m = safeErrorMessage(err);\nlog(`skipped — ${m}`);")).toEqual([]);
+    expect(violations("const n = err instanceof Error ? err.name : \"unknown\";")).toEqual([]);
     expect(violations("app.log.warn({ err }, \"anchor capture failed\");")).toEqual([]);
     expect(violations("log(`             ${dataKey.message}`);")).toEqual([]);
     expect(violations("// log-safe: our own refusal text\nconst m = err.message;")).toEqual([]);
