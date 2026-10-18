@@ -32,8 +32,8 @@ const obs = (o: Partial<Observation>): Observation => ({
 });
 
 describe("ADR-0195 SD0 discovery vocabulary", () => {
-  it("upload-fed kinds are exactly the two no-agent endpoint importers", () => {
-    expect(DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed)).toEqual(["endpoint_osquery", "endpoint_inventory"]);
+  it("upload-fed kinds are exactly the two no-agent endpoint importers and the endpoint agent (SD4b)", () => {
+    expect(DISCOVERY_SOURCE_KINDS.filter((k) => DISCOVERY_KIND_SPECS[k].uploadFed)).toEqual(["endpoint_osquery", "endpoint_inventory", "endpoint_agent"]);
   });
 
   it("every source kind has a spec whose evidence and subject kinds are non-empty", () => {

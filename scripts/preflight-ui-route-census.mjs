@@ -97,6 +97,7 @@ export const MACHINE_ONLY = new Map([
 
   // ---- runner and executor channels (credentialed machines) ----------------
   ["* /v1/engine-runner/*", { reason: "runner channel: only an engine runner credential reaches these (ADR-0187, route-classes.ts; ADR-0188 S7 adds the key rotation route; ADR-0190 I5 adds the three task routes; ENG-IMG removes the runner artifact route)", matches: 9 }],
+  ["* /v1/endpoint-agent/*", { reason: "endpoint agent channel: the agent's install step (bulk enrolment token), its registration (device ticket) and its own DPoP-bound self token reach these, never a person (ADR-0195 SD4b)", matches: 5 }],
   ["* /v1/executor-channel/*", { reason: "executor channel: only an enrolled executor reaches these (ADR-0190; I4 adds the two stdio session routes, I5 the two task input routes)", matches: 11 }],
 
   // ---- inbound callbacks and provisioning -----------------------------------

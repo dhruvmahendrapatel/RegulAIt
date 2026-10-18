@@ -1380,6 +1380,13 @@
       "when": 1785141000000,
       "tag": "0206_content_provenance",
       "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1785142000000,
+      "tag": "0207_endpoint_agent_devices",
+      "breakpoints": true
     }
   ]
 }

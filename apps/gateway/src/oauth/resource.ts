@@ -234,10 +234,16 @@ async function authenticateSelfRequest(
     await auditSelfRefusal(db, v.code, route);
     // ADR-0187: the runner's loop reads a revoked runner as `revoked` (it re-enrols or stops and says so)
     const runnerRevoked = v.code === "engine_runner_revoked";
+    // ADR-0195 SD4b: an endpoint agent reads `device_revoked` as final (SD4a `ErrDeviceRevoked`: no token retry)
+    const deviceRevoked = v.code === "device_revoked";
     return {
       kind: "refused",
       status: 401,
-      body: runnerRevoked ? { error: "engine_runner_revoked", code: v.code, next: "revoked" } : { error: v.error, code: v.code },
+      body: runnerRevoked
+        ? { error: "engine_runner_revoked", code: v.code, next: "revoked" }
+        : deviceRevoked
+          ? { error: "device_revoked", code: v.code }
+          : { error: v.error, code: v.code },
       headers: { ...challenge(v.error), ...(v.dpopNonce ? { "dpop-nonce": v.dpopNonce } : {}) },
     };
   }
@@ -250,6 +256,9 @@ async function authenticateSelfRequest(
       kind: "ok",
       ctx: { userId: null, isAdmin: false, via: "engine-runner", engineRunnerId: runner!.id, engineId: runner!.engineId, workloadIdentityId: identity.id, workloadCredentialId: authCredentialId },
     };
+  }
+  if (kind === "endpoint_agent") {
+    return { kind: "ok", ctx: { userId: null, isAdmin: false, via: "endpoint-agent", workloadIdentityId: identity.id, workloadCredentialId: authCredentialId } };
   }
   return { kind: "ok", ctx: { userId: null, isAdmin: false, via: "pdp", workloadIdentityId: identity.id, workloadCredentialId: authCredentialId } };
 }

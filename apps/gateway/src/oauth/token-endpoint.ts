@@ -100,6 +100,7 @@ import { rootCapFor, verifyDelegationProof, type VerifiedDelegationProof } from 
 import { presentedClientCertificate } from "./x509.js";
 import { lockSpiffeBundleUnrevoked } from "./spiffe-trust-domains.js";
 import { mintWorkloadSelfToken, selfKindForResource } from "./workload-self.js";
+import { endpointAgentContext } from "../endpoint-agent.js";
 
 /** the form parameters the exchange grant reads (everything else is stripped by the provider) */
 export const EXCHANGE_PARAMS = [
@@ -375,6 +376,10 @@ async function selfPreflight(ctx: KoaContextLike, s: RequestState): Promise<Pref
       : [];
     if (!runner) throw refuse(new InvalidClientAuth("no such engine runner"), "engine_runner_unknown");
     if (runner.revokedAt !== null) throw refuse(new InvalidClientAuth("this engine runner was revoked"), "engine_runner_revoked");
+  }
+  // ADR-0195 SD4b: an endpoint agent's device must exist and not be revoked
+  if (kind === "endpoint_agent" && !(await endpointAgentContext(s.db, client.identity.id)).ok) {
+    throw refuse(new InvalidClientAuth("this device was revoked"), "device_revoked");
   }
   const dpop = await requestDpop(ctx, s);
   if (!dpop) throw refuse(new InvalidDpopProof("a DPoP proof is required"), "dpop_required");
