@@ -1520,6 +1520,9 @@ export const auditLog = pgTable(
         "discovery_run",
         "discovery_settings",
         "discovery_pseudonym",
+        // ADR-0195 SD2b: a federation signing key (generated, activated, rotated, retired, revoked) and federation
+        // turned on or off. Plain text column — no DDL.
+        "federation_signing_key",
       ],
     })
       .notNull()
@@ -13237,6 +13240,47 @@ export const identitySigningKeys = pgTable(
   ],
 );
 export type IdentitySigningKeyRow = typeof identitySigningKeys.$inferSelect;
+
+/**
+ * ADR-0195 SD2b (migration 0205): the RS256 keys RegulAIt's cloud workload identity FEDERATION issuer signs with
+ * (`<REGULAIT_PUBLIC_URL>/federation`; AWS, GCP and Entra verify RS256). Generated in the product; the PKCS#8
+ * private half is a data-key envelope (CIPHERTEXT_COLUMNS), destroyed when the key is retired or revoked. Separate
+ * from `identity_signing_keys` (Ed25519), whose CHECKs and verifier stay untouched. At most one active key; never
+ * deleted; identity and each lifecycle stamp written once (trigger), TRUNCATE refused.
+ */
+export const federationSigningKeys = pgTable(
+  "federation_signing_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kid: text("kid").notNull(),
+    algorithm: text("algorithm", { enum: ["RS256"] }).notNull().default("RS256"),
+    publicJwk: jsonb("public_jwk").$type<{ kty: "RSA"; n: string; e: string }>().notNull(),
+    privateKeyCiphertext: text("private_key_ciphertext"),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("federation_signing_keys_kid_uq").on(t.kid),
+    check("federation_signing_keys_kid_check", sql`${t.kid} ~ '^[A-Za-z0-9._:-]{1,128}$'`),
+    check("federation_signing_keys_algorithm_check", sql`${t.algorithm} = 'RS256'`),
+    check(
+      "federation_signing_keys_public_only_check",
+      sql`COALESCE(jsonb_typeof(${t.publicJwk}) = 'object' AND ${t.publicJwk} ->> 'kty' = 'RSA' AND ${t.publicJwk} ->> 'e' = 'AQAB' AND jsonb_typeof(${t.publicJwk} -> 'n') = 'string' AND length(${t.publicJwk} ->> 'n') BETWEEN 342 AND 683 AND NOT (${t.publicJwk} ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']), false)`,
+    ),
+    check("federation_signing_keys_private_check", sql`(${t.retiredAt} IS NULL AND ${t.revokedAt} IS NULL) = (${t.privateKeyCiphertext} IS NOT NULL)`),
+    check(
+      "federation_signing_keys_order_check",
+      sql`(${t.activatedAt} IS NULL OR ${t.activatedAt} >= ${t.createdAt}) AND (${t.retiredAt} IS NULL OR (${t.activatedAt} IS NOT NULL AND ${t.retiredAt} >= ${t.activatedAt})) AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
+    ),
+    uniqueIndex("federation_signing_keys_one_active_uq")
+      .on(sql`(true)`)
+      .where(sql`${t.activatedAt} IS NOT NULL AND ${t.retiredAt} IS NULL AND ${t.revokedAt} IS NULL`),
+  ],
+);
+export type FederationSigningKeyRow = typeof federationSigningKeys.$inferSelect;
 
 /**
  * ADR-0188 S9 (migration 0199): the SPIFFE trust bundles, in audited storage
