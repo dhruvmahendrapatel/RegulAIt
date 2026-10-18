@@ -21,12 +21,10 @@ import {
   redactLogText,
   requestLogFields,
   resolveGatewayLogger,
-  safeErrorMessage,
-  safeErrorText,
-  safeLogObject,
   UNMATCHED_PATH_MAX,
   unhandledErrorLogFields,
 } from "./gateway-logger.js";
+import { errFields, errLine, errMessage } from "./err-serializer.js";
 import { parseScimJsonBody } from "./scim.js";
 import { recordSchedulerFailure, resetSchedulerHealth, schedulerHealth } from "./scheduler-health.js";
 
@@ -141,11 +139,11 @@ describe("the 500 line withholds what can quote request input", () => {
     const res = await app.inject({ method: "POST", url: "/handler-parse", payload: { raw: `{"a":"${MARKER}` } });
     expect(res.statusCode).toBe(500);
     expect(out).not.toContain(MARKER);
-    expect(out).toContain('"errType":"SyntaxError"');
+    expect(lineWith("unhandled error").err).toMatchObject({ type: "SyntaxError", message: "[withheld: may quote request input]" });
     expect(out).toContain(" at ");
   });
 
-  it("a failed query keeps its SQL and SQLSTATE, not its params or Postgres's quoted values", async () => {
+  it("a failed query keeps its SQLSTATE, not its SQL, params or Postgres's quoted values (Q10)", async () => {
     out = "";
     // a non-credential name: only the path strip keeps it out (the scrubber would not)
     const res = await app.inject({ method: "POST", url: "/db-fail?q=QSEARCH_VALUE&page=2", payload: {} });
@@ -154,7 +152,8 @@ describe("the 500 line withholds what can quote request input", () => {
     expect(out).not.toContain(MARKER);
     expect(out).not.toContain("QSEARCH_VALUE");
     const line = lineWith("unhandled error");
-    expect(line).toMatchObject({ sql: "select 1 where id = $1", params: "[1 withheld]", pgCode: "22P02", path: "/db-fail" });
+    expect(line).toMatchObject({ path: "/db-fail", err: { type: "DrizzleQueryError", sqlState: "22P02" } });
+    expect(JSON.stringify(line)).not.toContain('"params"');
   });
 
   it("a wrapper whose cause is a failed query is withheld the same way (F2)", async () => {
@@ -162,38 +161,20 @@ describe("the 500 line withholds what can quote request input", () => {
     const res = await app.inject({ method: "POST", url: "/wrapped-fail", payload: {} });
     expect(res.statusCode).toBe(500);
     expect(out).not.toContain(MARKER);
-    expect(lineWith("unhandled error")).toMatchObject({ errType: "Error", causeType: "Error", sql: "select 2", params: "[2 withheld]" });
-    const viaSyntax = unhandledErrorLogFields(
-      { method: "POST", url: "/x", routeOptions: { url: "/x" } } as never,
-      new Error("outer", { cause: new SyntaxError(`Unexpected token in JSON at "${MARKER}"`) }),
-    );
-    expect(JSON.stringify(viaSyntax)).not.toContain(MARKER);
-    expect(viaSyntax).toMatchObject({ causeType: "SyntaxError", errMessage: expect.stringContaining("withheld") });
-  });
-
-  it("a bare driver error is withheld on the 500 line, keeping SQLSTATE and names (R5)", () => {
-    const pg = Object.assign(new Error(`invalid input syntax for type uuid: "${MARKER}"`), {
-      code: "22P02",
-      severity: "ERROR",
-      table: "ai_use_cases",
+    expect(lineWith("unhandled error").err).toMatchObject({
+      type: "Error",
+      message: "[withheld: may quote request input]",
+      cause: { message: "[withheld: may quote request input]" },
     });
-    const fields = unhandledErrorLogFields({ method: "GET", url: "/v1/x?q=1", routeOptions: { url: "/v1/x" } } as never, pg);
-    expect(JSON.stringify(fields)).not.toContain(MARKER);
-    expect(fields).toMatchObject({ pgCode: "22P02", pgTable: "ai_use_cases", errMessage: "[withheld: may quote request input]" });
   });
 
-  it("a cyclic cause chain terminates and falls through to the ordinary line", () => {
-    const a = new Error("a") as Error & { cause?: unknown };
-    a.cause = a;
-    expect((unhandledErrorLogFields({ method: "GET", url: "/x" } as never, a).err as Error).message).toBe("a");
-  });
-
-  it("negative control: an ordinary error still logs its message for the operator", async () => {
+  it("the 500 line's fields carry the error itself, for the serializer", () => {
+    const err = new Error("pool exhausted");
     const fields = unhandledErrorLogFields(
       { method: "GET", url: "/x?state=abc", routeOptions: { url: "/x" } } as never,
-      new Error("pool exhausted"),
+      err,
     );
-    expect((fields.err as Error).message).toBe("pool exhausted");
+    expect(fields.err).toBe(err);
     expect(fields.path).toBe("/x");
   });
 });
@@ -313,15 +294,15 @@ describe("console-bound error text (F1)", () => {
       cause: Object.assign(new Error(`Key (email)=(${MARKER}) already exists`), { code: "23505" }),
     });
     err.name = "DrizzleQueryError";
-    const text = safeErrorText(err);
+    const text = errLine(err);
     expect(text).not.toContain(MARKER);
     expect(text).toContain("DrizzleQueryError");
     expect(text).toContain("23505");
   });
 
   it("withholds a SyntaxError anywhere in the cause chain", () => {
-    expect(safeErrorText(new SyntaxError(MARKER))).not.toContain(MARKER);
-    expect(safeErrorText(new Error("outer", { cause: new SyntaxError(MARKER) }))).toMatch(/^Error \(cause SyntaxError\)/);
+    expect(errLine(new SyntaxError(MARKER))).not.toContain(MARKER);
+    expect(errLine(new Error("outer", { cause: new SyntaxError(MARKER) }))).toMatch(/^Error \(cause SyntaxError\)/);
   });
 
   it("withholds a bare driver error: SQLSTATE plus severity/detail (R5)", () => {
@@ -330,29 +311,29 @@ describe("console-bound error text (F1)", () => {
       severity: "ERROR",
     });
     pg.name = "DatabaseError";
-    expect(safeErrorText(pg)).toBe("DatabaseError [SQLSTATE 22P02]: [withheld: may quote request input]");
-    expect(safeErrorMessage(pg)).not.toContain(MARKER);
-    expect(safeErrorText(new Error("outer", { cause: pg }))).not.toContain(MARKER);
+    expect(errLine(pg)).toBe("DatabaseError [SQLSTATE 22P02]: [withheld: may quote request input]");
+    expect(errMessage(pg)).not.toContain(MARKER);
+    expect(errLine(new Error("outer", { cause: pg }))).not.toContain(MARKER);
     // a Node system error's code is not a SQLSTATE: still an ordinary message
-    expect(safeErrorText(Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }))).toBe("Error: connect refused");
+    expect(errLine(Object.assign(new Error("connect refused"), { code: "ECONNREFUSED" }))).toBe("Error: connect refused");
   });
 
-  it("safeErrorMessage: the message without the name, withheld where the line withholds (R1)", () => {
-    expect(safeErrorMessage(new Error("pool exhausted"))).toBe("pool exhausted");
-    expect(safeErrorMessage(new Error("GET /cb?code=abc failed"))).toBe("GET /cb?code=[redacted] failed");
-    expect(safeErrorMessage(new SyntaxError(MARKER))).not.toContain(MARKER);
-    expect(safeErrorMessage(42)).toBe("42");
+  it("errMessage: the message without the name, withheld where the line withholds (R1)", () => {
+    expect(errMessage(new Error("pool exhausted"))).toBe("pool exhausted");
+    expect(errMessage(new Error("GET /cb?code=abc failed"))).toBe("GET /cb?code=[redacted] failed");
+    expect(errMessage(new SyntaxError(MARKER))).not.toContain(MARKER);
+    expect(errMessage(42)).toBe("42");
   });
 
   it("keeps an ordinary message, with credential query values scrubbed", () => {
-    expect(safeErrorText(new Error("pool exhausted"))).toBe("Error: pool exhausted");
-    expect(safeErrorText(new Error("GET /cb?code=abc failed"))).toBe("Error: GET /cb?code=[redacted] failed");
-    expect(safeErrorText("plain")).toBe("plain");
+    expect(errLine(new Error("pool exhausted"))).toBe("Error: pool exhausted");
+    expect(errLine(new Error("GET /cb?code=abc failed"))).toBe("Error: GET /cb?code=[redacted] failed");
+    expect(errLine("plain")).toBe("plain");
   });
 
-  it("safeLogObject: the {obj} a console logger receives carries no withheld text", () => {
+  it("errFields: the {obj} a console logger receives carries no withheld text", () => {
     const dbErr = Object.assign(new Error(`params: ${MARKER}`), { query: "q", params: [MARKER] });
-    const o = safeLogObject({ err: dbErr, subject: "s1", url: "/cb?state=xyz" }) as Record<string, unknown>;
+    const o = errFields({ err: dbErr, subject: "s1", url: "/cb?state=xyz" }) as Record<string, unknown>;
     expect(JSON.stringify(o)).not.toContain(MARKER);
     expect(o).toMatchObject({ subject: "s1", url: "/cb?state=[redacted]" });
   });

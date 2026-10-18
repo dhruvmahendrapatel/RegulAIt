@@ -12,11 +12,15 @@
  *  - the generic forms `x instanceof Error ? x.message : …` (or
  *    `` `${x.name}: ${x.message}` ``) and `(x as Error).message` /
  *    `(x as Error)?.message` / `(x as { message?: … })?.message` are refused anywhere: an error of unknown shape goes
- *    through `safeErrorMessage` / `safeErrorText` (gateway-logger.ts);
+ *    through the serializer (err-serializer.ts, Q10): `{ err }` to pino, `errMessage` for a stored copy or a
+ *    refusal, `errLine` for a line written outside pino;
  *  - `err.stack ?? err.message` is refused (a stack's first line is the message);
  *  - inside a `console.*(…)`, `log(…)` or `*.log.<level>(…)` call, an error's
  *    `.message` / `.stack`, `String(err)`, `${err}` and a raw error argument
  *    are refused;
+ *  - inside a log call, an error under any key but `err` / `error` (`{ e }`, `{ reason: err }`) is refused:
+ *    the serializer is configured for those two keys only, and pino writes an unserialized error's enumerable
+ *    fields (drizzle's `params`) as they are;
  *  - `const m = err.message` is refused (an assignment that later feeds a line).
  * A typed error whose message we wrote ourselves may be exempted with a
  * `// log-safe: <why>` comment on the line or the line above.
@@ -82,6 +86,11 @@ const IN_LOG_CALL: ReadonlyArray<readonly [string, RegExp]> = [
   ["String(err) in a log call", new RegExp(String.raw`\bString\(\s*${ERR}\s*\)`)],
   ["${err} in a log call", new RegExp(String.raw`\$\{\s*${ERR}\s*\}`)],
   ["raw error argument", new RegExp(String.raw`,\s*${ERR}\s*\)$`)],
+  // Q10: the serializer covers `err` and `error` only
+  [
+    "error under an unserialized key",
+    new RegExp(String.raw`(?:(?:(?<!\$)\{|,)\s*(?!(?:err|error)\s*[,}])${ERR}\s*[,}])|(?:(?:(?<!\$)\{|,)\s*(?!(?:err|error)\s*:)\w+\s*:\s*${ERR}\s*[,}])`),
+  ],
 ];
 
 const LOG_CALL = /(?:\bconsole\.(?:log|info|warn|error|debug|trace)|(?<![\w.$])log|\.log\.(?:warn|error|info|debug|fatal|trace))\s*\(/g;
@@ -162,8 +171,12 @@ describe("no raw error text in a gateway log line or stored copy (ADR-0167 N8 R1
     expect(violations('console.error("failed", err)')).toEqual(["raw error argument @ 1"]);
     expect(violations("app.log.error(`x ${auditErr.message}`);")).toEqual(["error message in a log call @ 1"]);
     // safe forms
-    expect(violations("console.error(`failed: ${safeErrorText(err)}`);")).toEqual([]);
-    expect(violations("const m = safeErrorMessage(err);\nlog(`skipped — ${m}`);")).toEqual([]);
+    expect(violations('app.log.warn({ e }, "failed");')).toEqual(["error under an unserialized key @ 1"]);
+    expect(violations('app.log.warn({ id, reason: err }, "failed");')).toEqual(["error under an unserialized key @ 1"]);
+    expect(violations("console.error(`failed: ${errLine(err)}`);")).toEqual([]);
+    expect(violations("const m = errMessage(err);\nlog(`skipped — ${m}`);")).toEqual([]);
+    expect(violations('req.log.error({ id, err }, "failed");')).toEqual([]);
+    expect(violations('req.log.error({ error: err }, "failed");')).toEqual([]);
     expect(violations("const n = err instanceof Error ? err.name : \"unknown\";")).toEqual([]);
     expect(violations("app.log.warn({ err }, \"anchor capture failed\");")).toEqual([]);
     expect(violations("log(`             ${dataKey.message}`);")).toEqual([]);

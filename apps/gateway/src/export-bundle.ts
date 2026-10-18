@@ -81,7 +81,7 @@ import {
   canonicalAuditPayloadV2,
   canonicalJson,
 } from "@regulait/shared";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 /** The manifest schema id. Bumped with the shape, never silently. */
 export const EXPORT_BUNDLE_SCHEMA = "regulait.export-bundle/1" as const;
@@ -203,7 +203,7 @@ export function resolveExportSigningKey(): ExportSigningKey | ExportSigningRefus
     return {
       ok: false,
       ruleId: "export-signing-key-unreadable",
-      reason: `the export signing key at ${keyPath} could not be loaded: ${safeErrorMessage(err)}`,
+      reason: `the export signing key at ${keyPath} could not be loaded: ${errMessage(err)}`,
     };
   }
 

@@ -128,7 +128,7 @@ import { stepUpRateLimitUserKey } from "./rate-limit.js";
 import { decryptSecret } from "./secrets.js";
 import { resolvePublicUrl } from "./public-url.js";
 import { ApprovalRuleWriteRefusedError, type ApprovalRuleStepUp } from "./approval-pool.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 
 
@@ -1171,7 +1171,7 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
         await auditStepUpFailure(db, caller.userId, "sso", "start_failed", {
           providerKind: sso.kind,
           providerId: sso.providerId,
-          error: safeErrorMessage(err).slice(0, 300),
+          error: errMessage(err).slice(0, 300),
         });
         ssoStart = null;
       }
@@ -1292,7 +1292,7 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
         requireUserVerification: true,
       });
     } catch (err) {
-      return invalid(`verification_error: ${safeErrorMessage(err).slice(0, 200)}`);
+      return invalid(`verification_error: ${errMessage(err).slice(0, 200)}`);
     }
     if (!verified.verified || !verified.authenticationInfo.userVerified) return invalid("not_verified");
     // the counter moves forward once: a concurrent use of the same assertion matches no row
