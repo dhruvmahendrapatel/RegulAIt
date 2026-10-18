@@ -157,7 +157,9 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     const checks = await checkShadowDiscovery(get, findings, D);
     const bad = checks.filter((c) => c.level === "FAIL");
     expect(bad, JSON.stringify(bad)).toEqual([]);
-    for (const beat of SHADOW_DISCOVERY_BEATS) {
+    // all PASS but content trust, which needs a second (untrusted) tier this lone database has no other source for:
+    // its FAIL conditions (a trusted record per library read) are pinned by `bad` above; demo:check PASSes it in CI
+    for (const beat of SHADOW_DISCOVERY_BEATS.filter((b) => b !== "3 Content trust")) {
       expect(checks.find((c) => c.beat === beat)?.level, `${beat}: ${checks.find((c) => c.beat === beat)?.detail}`).toBe("PASS");
     }
     // ADR-0195 lane A6: the repo's env names are presence signature hits, never stored names
