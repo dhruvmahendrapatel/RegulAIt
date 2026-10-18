@@ -550,7 +550,10 @@ describe("ADR-0195 SD4b: rotation and revocation", () => {
     expect(after.statusCode).toBe(401);
     expect(after.json().error).toBe("device_revoked");
     a.key.reset();
-    expect((await a.key.tokenRequest()).statusCode).not.toBe(200);
+    // the token endpoint refuses the revoked device's client outright (not a 500, not a token)
+    const minted = await a.key.tokenRequest();
+    expect(minted.statusCode, minted.body).toBe(401);
+    expect(minted.json().error).toBe("invalid_client");
     // registering again with the device's ticket is refused too
     expect((await registerReq(a.ticket, await AgentKey.make())).json()).toEqual({ error: "device_revoked" });
     const audited = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-device-revoked' AND ${auditLog.detail}->>'deviceId' = ${a.deviceId}`);

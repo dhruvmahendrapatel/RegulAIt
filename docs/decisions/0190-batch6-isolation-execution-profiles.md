@@ -2458,3 +2458,139 @@ applying only when it is cleared".
 
 **Not verified.** The database test typechecks but did not run in the building session (no Postgres there). Migration
 0208 has no journal entry on this branch (the master adds it), so CI's database shards cannot apply it until then.
+
+## As built: engine image signing and the lock-update bot (ADR-0197 Q2 and N10, 2026-10-18)
+
+This answers open question 1 of "As built: engine task images" (signing) and open question 3 (who records a publish),
+as owner decision Q2 settled them (ADR-0197): keyless, with cosign, the CI identity token and the public transparency
+log; air-gapped installs verify with a bundled trust root. The task-images section's point 4 ("Signing: PENDING") is
+superseded; its text is left as it was. No migration.
+
+1. **Signing (the `publish` job of `engine-images.yml`).**
+   - The job runs in the GitHub `release` environment (`environment: release`) and gains `id-token: write`; it keeps
+     `contents: read` and `packages: write`. No key, password or secret exists for signing.
+   - cosign v3.1.3 is downloaded and checked against its pinned SHA-256 (the same pin as `publish-image.yml`).
+   - After the push, `cosign sign --yes -a imageId=<config digest> -a sourceCommit=<commit> --bundle <file>
+     <repository>@<manifest digest>` signs the digest: a Fulcio certificate for the job's OIDC identity and a Rekor
+     entry. cosign also stores the signature next to the image on GHCR.
+   - The signed in-toto statement has one subject (the manifest digest) and the two annotations. So the signature
+     covers the whole lock entry an executor relies on, including the image id that `docker load` keeps. This was
+     checked with cosign v3.1.3 against a throwaway local registry (a key-signed stand-in, see point 6).
+   - The job then verifies its own signature twice: offline, with the check every later use runs (below), and online,
+     with `cosign verify` of the GHCR copy against the same identity.
+   - It adds a `signature` record to the engine's output:
+     - the Sigstore bundle;
+     - `certificateIdentity` (read from the certificate), `certificateOidcIssuer`, `workflowRepository` and
+       `workflowRef`;
+     - the Rekor entry (`logIndex`, `logId`, `integratedTime`).
+     `record` copies these records into `engine-images-publish.json` and refuses an engine without one.
+   - The `Sign (skipped, with the reason)` step is gone.
+2. **Verification (`scripts/engine-images-lock-verify.mjs`, one code path for every use).** A signature is accepted
+   only when all of these hold:
+   - the bundle exists. An unsigned image is refused, never warned about (ADR-0180);
+   - the statement signs exactly the lock entry: the subject is the manifest digest, and the annotations are the image
+     id and source commit;
+   - the certificate's one URI identity is `https://github.com/<owner>/<repo>/.github/workflows/engine-images.yml@refs/heads/main`.
+     `<owner>/<repo>` is read from `package.json` `repository` with its case kept, because the certificate names the
+     repository as GitHub does;
+   - cosign, refused unless its SHA-256 is the pinned release's for the platform, runs
+     `verify-blob-attestation --bundle <file> --trusted-root <file>` with these pins:
+     - `--certificate-identity <that identity>` and `--certificate-oidc-issuer https://token.actions.githubusercontent.com`;
+     - `--certificate-github-workflow-repository <owner>/<repo>` and `--certificate-github-workflow-ref refs/heads/main`;
+     - `--type https://sigstore.dev/cosign/sign/v1` and `--digest <manifest digest hex> --digestAlg sha256`.
+     It checks the Fulcio chain, the Rekor inclusion, the identity and the digest. Because the trust root is a file,
+     the check needs no network and runs the same way air-gapped.
+   The first three checks read the bundle without cryptography, so that a refusal says why. cosign is the proof.
+3. **Where it runs, before use.**
+   - **`engine-images-lock.mjs --apply <publish.json> --trusted-root <file>`** (now required). Every engine the
+     publish names must carry a signature that verifies for the publish's own digest, image id and source commit, or
+     nothing is written. Signatures kept from earlier publishes are re-verified against the new root before anything
+     is written. Then it writes:
+     - each new image's bundle to `engines/signatures/<engine>.sigstore.json`;
+     - the root to `engines/signatures/trusted_root.json`.
+   - **`--check --base origin/main`** (CI). A new image must come with its committed bundle, signing exactly the new
+     entry by that identity (structural; CI has no cosign). Plain `--check` refuses a committed bundle that does not
+     match its entry, and reports an entry with no bundle.
+   - **`scripts/build-image-bundle.sh --with-engines`** verifies each pulled engine image before saving it.
+   - **`scripts/install.sh`** (air-gapped, a bundle that carries engine images) verifies each loaded `:bundled` engine
+     image (`engine_signature_ok`) after the id check. With no node, no cosign, no bundle or any refusal, the install
+     stops (fail closed).
+   - **A connected deploy** runs `node scripts/engine-images-lock-verify.mjs` (every published engine) before
+     `docker compose --profile engines up`. The installer does not start that profile, so this stays the operator's
+     step.
+   - `build-update-bundle.sh` now includes `engines/` by default. Without it, an install from an unpacked update
+     bundle had neither the lock nor the signatures. That gap existed before this change for the lock's id check.
+4. **Air-gapped trust root.**
+   - The root the bot commits is the one `cosign initialize` fetched in the bot's own job, through Sigstore's TUF
+     repository, verified from the root embedded in the pinned cosign. It is never taken from the publish artifact.
+   - It travels with the checkout or the update bundle (`engines/signatures/trusted_root.json`). The install verifies
+     against it with no network.
+   - The root and the lock ship in the same update bundle, so anyone able to replace both could substitute a CA. The
+     air-gapped guarantee therefore rests on the update bundle's own release-key signature (#437 review).
+   - The operator puts cosign v3.1.3 on the air-gapped host (on PATH, or `COSIGN=<path>`). The installer refuses any
+     other binary.
+   - A Sigstore key rotation reaches air-gapped hosts with the next recorded publish. A trusted root keeps retired keys
+     with their validity windows, so earlier bundles still verify.
+   - To refresh the root by hand on a connected host: `cosign initialize`, then copy
+     the one `targets/trusted_root.json` under `~/.sigstore/root/`. The bot does exactly this.
+5. **The lock-update bot (N10, the `lock-pr` job).**
+   - It runs after `record`, so only after a successful publish on `main`.
+   - Its permissions are `contents: write` and `pull-requests: write`, through `GITHUB_TOKEN` only.
+   - It installs the pinned cosign, fetches the trusted root, and runs `--apply` (which verifies), `--check --base
+     origin/main` and the full verify. Then `scripts/engine-images-lock-bot.mjs --pr` compares the lock at the
+     published commit with the one `--apply` wrote. The transition must pass `checkLockTransition`, the rule CI
+     applies to the PR.
+   - When an image changed, the job pushes `engine-images-lock/<commit12>`, staging only the files `--apply` writes,
+     by path. It opens the PR with `gh pr create --draft` and the title
+     `HOLD chore(engines): record the signed engine image publish of <commit12>`. The job refuses a title without the
+     `HOLD ` prefix.
+   - It never merges, marks a PR ready or enables auto-merge.
+   - The publish trigger now excludes `engines/images.lock.json` and `engines/signatures/**`, and so does the
+     build-only check. Without that, merging the bot's PR would publish again: a loop.
+6. **Checked here.**
+   - The unit tests: `scripts/engine-images-lock-verify.test.mjs` covers valid, wrong identity, missing signature,
+     tampered digest, image id and commit, and the cosign checksum pin; `scripts/engine-images-lock-bot.test.mjs`
+     covers the signed apply, the bot's lock transitions, the PR shape and the job's permissions. The existing lock
+     tests and `zz-eng-img-engine-images.test.ts` were updated. The whole `vitest --dir scripts` suite passed (273
+     tests), and the three gateway file guards passed.
+   - The signing mechanics, with cosign v3.1.3 against a throwaway local registry (crane's `registry serve`, used in a
+     scratch directory and not added to the repository), with a KEY standing in for the keyless certificate:
+     - `cosign sign --use-signing-config=false --tlog-upload=false --bundle` wrote a v0.3 bundle whose DSSE statement
+       has the digest as its one subject and the `-a` annotations;
+     - `cosign verify` listed the annotations;
+     - `verify-blob-attestation --digest` accepted the right digest and refused another ("provided artifact digest does
+       not match any digest in statement").
+   - Red proof with the real pinned cosign: the exact argument list from `cosignVerifyArgs`, run against a synthetic
+     keyless bundle (a self-signed certificate naming the expected identity) and the real trusted root, was refused.
+   - `cosign initialize` wrote the trusted root at the path the workflow reads.
+   - `--check` and `--check --base origin/main` on the current lock, `bash -n` on the changed scripts, and the full
+     workspace build.
+7. **Not verified (pending execution, M-041).**
+   - Keyless signing itself: no GitHub OIDC token here. That covers the Fulcio certificate's actual SAN, the
+     workflow-repository and workflow-ref extensions, the Rekor entry in the bundle, and the online `cosign verify` of
+     the GHCR copy.
+   - The `lock-pr` job: the push with `GITHUB_TOKEN`, `gh pr create`, and whether the repository allows Actions to
+     create pull requests.
+   - The installer's and the bundle's verify against a real signed image.
+   - Whether the `release` environment's required review gates all three matrix jobs with one approval.
+8. **Limits, stated.**
+   - The three images recorded at generation 1 (#425) are unsigned. Every use above refuses them until a signed
+     publish is recorded. They are not grandfathered.
+   - A PR opened with `GITHUB_TOKEN` starts no workflow run (GitHub docs, "Triggering a workflow from a workflow"), so
+     CI does not start on the bot's PR by itself. Starting it (for example a `workflow_dispatch` of `ci.yml` on the
+     branch) needs a person or `actions: write`, which this job does not hold.
+   - The engine runner still cannot prove which image it runs (ADR-0187 decision 55). Admission is the deploy-time
+     verification above, not the runner's report.
+   - `publish-image.yml` (the gateway image) is unchanged.
+9. **ADR-0176.** cosign does the signing and verification. The bundle and statement reader is about 40 lines of
+   RegulAIt's own code, which turns a refusal into the reason a reviewer needs (identity, digest, image id or commit),
+   and it is never the proof. The bot is a few lines around `--apply`, `git` and `gh`. The dependency-update bots
+   track upstream versions and do not record our own signed builds. Listed in `security/THIRD_PARTY.md`.
+
+**Owner actions.**
+1. Protect the `release` environment, with the owner as required reviewer, **before this PR merges** (Q4). Merging
+   changes `engine-images.yml`, which starts a publish. If the environment does not exist, GitHub creates it
+   unprotected on first use, and the run would sign without review.
+2. If the bot is to open PRs, allow GitHub Actions to create pull requests (repository settings, Actions, Workflow
+   permissions). Without it, `gh pr create` fails and the publish artifact stays recorded only in the run.
+3. Start CI on each bot PR (it is opened with `GITHUB_TOKEN`), review it, and release it through the master as usual.

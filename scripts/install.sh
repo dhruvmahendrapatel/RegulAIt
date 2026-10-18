@@ -417,6 +417,17 @@ engine_bundled_id_ok() { # engine
   esac
 }
 
+# ADR-0197 Q2: the locked engine image is also the one the publish workflow signed keylessly. Verified OFFLINE, before
+# the image is used, against the Sigstore bundle and trusted root the checkout carries (engines/signatures/, written by
+# `engine-images-lock.mjs --apply`): cosign v3.1.3, pinned by SHA-256, checks the Fulcio chain, the Rekor inclusion
+# proof, the certificate identity (engine-images.yml on refs/heads/main of this repository), the GitHub OIDC issuer,
+# and that the signed statement names exactly the lock's manifest digest, image id and source commit. No cosign, no
+# node, no bundle or any refusal: the check fails closed. COSIGN names the binary when it is not on PATH.
+engine_signature_ok() { # engine
+  have node || { warn "node is needed to verify the bundled engine images' signatures"; return 1; }
+  node "$SCRIPT_DIR/engine-images-lock-verify.mjs" --engine "$1"
+}
+
 # ===========================================================================
 # 1. RESOLVE CONFIGURATION (flags > environment > existing .env > prompt)
 # ===========================================================================
@@ -1111,7 +1122,8 @@ if [ -n "$IMAGE_BUNDLE" ]; then
     for engine in $ENGINE_IDS; do
       image_present "regulait/engine-$engine:bundled" || continue
       engine_bundled_id_ok "$engine" || die "the bundle's regulait/engine-$engine:bundled is not the image engines/images.lock.json records for $engine"
-      ok "regulait/engine-$engine:bundled is the locked image"
+      engine_signature_ok "$engine" || die "regulait/engine-$engine:bundled has no signature that verifies (engines/signatures/$engine.sigstore.json, cosign v3.1.3 on PATH or in COSIGN): an unsigned or unverified engine image is never run"
+      ok "regulait/engine-$engine:bundled is the locked image, signed by the publish workflow on main"
     done
   fi
 fi

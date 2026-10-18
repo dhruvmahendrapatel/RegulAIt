@@ -265,7 +265,7 @@ function OwnershipPanel({ alert, onChanged }: { alert: GovernanceAlert; onChange
   const href = alert.ticket ? safeHref(alert.ticket.externalUrl) : null;
   return (
     <div className={v.stack} data-testid="alert-ownership">
-      <div className={v.sectionTitle} style={{ marginTop: 0 }}>Owner and SLA</div>
+      <div className={`${v.sectionTitle} ${v.flushTop}`}>Owner and SLA</div>
       <div className={v.row}>
         <span>
           Owner: {alert.owner ? <strong>{alert.owner.name ?? alert.owner.id}</strong> : <Badge tone="warn">unowned</Badge>}
@@ -467,7 +467,7 @@ function RemediationPanel({ alertId }: { alertId: string }) {
 
   return (
     <div className={v.stack}>
-      <div className={v.sectionTitle} style={{ marginTop: 0 }}>Remediation</div>
+      <div className={`${v.sectionTitle} ${v.flushTop}`}>Remediation</div>
       <QueryGate loading={remediation.isLoading} error={remediation.error} onRetry={() => void remediation.refetch()}>
         {remediation.data ? (
           <div className={v.stack}>
@@ -587,7 +587,7 @@ export function GovernanceAlertsSnapshot() {
   const open = alerts.data?.counts.open ?? 0;
   return (
     <Card title="Governance monitor" actions={<Link to="/admin/governance/alerts">Open alerts</Link>}>
-      {alerts.isLoading ? <p className={v.faint}>Loading active governance conditions…</p> : alerts.isError ? <p className={v.errLine}>Alerts could not be loaded.</p> : !alerts.data?.lastEvaluatedAt ? (
+      {alerts.isLoading ? <p className={v.faint} role="status">Loading active governance conditions…</p> : alerts.isError ? <p className={v.errLine} role="alert">Alerts could not be loaded.</p> : !alerts.data?.lastEvaluatedAt ? (
         // a monitor that has never run has not found "0 open" — it has found nothing yet
         <div className={v.row}>
           <span className={v.dim}>Governance monitor not evaluated</span>

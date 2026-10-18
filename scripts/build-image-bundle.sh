@@ -41,7 +41,8 @@
 # runs (a digest reference does not survive save/load on the classic store,
 # the same reason as Caddy). `docker load` keeps each image's id, the config
 # digest the executor starts a task by (the manifest's `taskImage`). An engine
-# the lock has no published image for stops the bundle (nothing is guessed).
+# the lock has no published image for stops the bundle (nothing is guessed), and
+# so does one whose keyless signature (engines/signatures/) does not verify.
 #
 # The tag matters: install.sh pins the gateway to `regulait/gateway:<version>`
 # with `pull_policy: never`, so the tag written here and the --version passed
@@ -129,6 +130,8 @@ if [ "$WITH_ENGINES" = "1" ]; then
       "$image_id" | "$digest") ok "$tag is $ref (image id $id)" ;;
       *) die "$tag has image id $id, which is neither the lock's image id ($image_id) nor its manifest digest ($digest)" ;;
     esac
+    # ADR-0197 Q2: only a signed image is bundled (the same offline check the air-gapped install runs on arrival)
+    node "$REPO_ROOT/scripts/engine-images-lock-verify.mjs" --engine "$engine" || die "$ref has no keyless signature from the publish workflow on main that verifies (cosign v3.1.3 on PATH or in COSIGN)"
     ENGINE_REFS+=("$ref" "$tag")
   done
 fi

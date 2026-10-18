@@ -251,7 +251,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
 
       {startedUnlinked && (
         <div className={v.row} data-testid="shadow-started-unlinked">
-          <p role="alert" className={v.errLine} style={{ margin: 0 }}>
+          <p role="alert" className={`${v.errLine} ${v.flush}`}>
             Workflow <code>{startedUnlinked}</code> was started but is not linked to this finding yet. Retry the link; a
             second workflow will not be started.
           </p>

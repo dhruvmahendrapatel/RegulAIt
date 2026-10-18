@@ -11,9 +11,10 @@
  *
  * DATA MINIMISATION (master decision, 2026-10-17). An `env_name` fact names an
  * environment variable. Environment-variable names and values are never
- * stored, logged or echoed: PR #419's presence matcher (which maps a name to a
- * presence signature id) is not on main, so an `env_name` fact is REFUSED here
- * and only counted (`facts_env_refused`), and a key name inside any other fact
+ * stored, logged or echoed. PR #419's presence matcher (which maps a name to a
+ * presence signature id) has merged, but an `env_name` fact is still REFUSED
+ * here on purpose, pending owner question 4 (ADR-0195 "As built: SD4b"), and
+ * only counted (`facts_env_refused`), and a key name inside any other fact
  * is dropped (only the matched catalogue value of a sighting is kept). Every
  * refusal is a fixed code; no refusal echoes what the device sent.
  *

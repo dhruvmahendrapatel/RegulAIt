@@ -49,16 +49,17 @@ import { dataKeyFingerprint, decryptSecret, encryptSecret, FINGERPRINT_PREFIX } 
 /**
  * The per-tenant content digest key, made on first use; null when no data key is configured. Found by the envelope's
  * key-fingerprint segment, so it is the key sealed under THIS data key: a deployment runs one data key (the boot gate
- * refuses another), so there is one row. After a re-encryption walk the row carries the new key's marker; a call made
- * under the new key before the walk reached the row makes a second one, and the oldest wins from then on. Every record
- * names the row it was keyed under, so both stay verifiable.
+ * refuses another), so there is one row: concurrent first uses take an advisory lock on the marker, so exactly one of
+ * them creates it. After a re-encryption walk the row carries the new key's marker; a call made under the new key
+ * before the walk reached the row makes a second one, and the oldest wins from then on. Every record names the row it
+ * was keyed under, so both stay verifiable.
  */
 export async function contentDigestKey(db: Db, dataKey: string | undefined): Promise<{ id: string; bytes: Buffer } | null> {
   if (!dataKey) return null;
   const marker = dataKeyFingerprint(dataKey).slice(FINGERPRINT_PREFIX.length);
-  const read = async () =>
+  const read = async (q: Pick<Db, "select"> = db) =>
     (
-      await db
+      await q
         .select()
         .from(contentDigestKeys)
         .where(sql`split_part(${contentDigestKeys.keyCiphertext}, '.', 4) = ${marker}`)
@@ -67,8 +68,17 @@ export async function contentDigestKey(db: Db, dataKey: string | undefined): Pro
     )[0];
   let row = await read();
   if (!row) {
-    await db.insert(contentDigestKeys).values({ keyCiphertext: encryptSecret(dataKey, randomBytes(32).toString("hex")) });
-    row = await read();
+    // first use: concurrent callers serialise on this marker's lock, so the second one finds the first one's row
+    // instead of inserting its own (R1 on PR #428). A unique index per marker cannot do this, because a re-encryption
+    // walk legitimately leaves two rows under one marker. When `db` is already a transaction the lock is held until
+    // it commits, which is when the new row becomes visible to the waiters.
+    row = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`content_digest_key:${marker}`}, 0))`);
+      const found = await read(tx);
+      if (found) return found;
+      await tx.insert(contentDigestKeys).values({ keyCiphertext: encryptSecret(dataKey, randomBytes(32).toString("hex")) });
+      return read(tx);
+    });
   }
   if (!row) throw new Error("the content digest key could not be created");
   return { id: row.id, bytes: Buffer.from(decryptSecret(dataKey, row.keyCiphertext), "hex") };

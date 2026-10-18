@@ -3,7 +3,7 @@
 
 .unsureNote {
   display: block;
-  margin-top: 2px;
+  margin-top: var(--s-half);
   color: var(--text);
   font-weight: 600;
 }
@@ -142,7 +142,7 @@
 .answers {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px var(--s2);
+  gap: var(--s-half) var(--s2);
   margin: 0;
 }
 .answers dt { color: var(--text-dim); }
