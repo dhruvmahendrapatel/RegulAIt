@@ -1284,7 +1284,7 @@ Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section
    `retired`), and `ruleConfigured` counts only rules whose template is active.
 4. **The unlinked start is server state.** "Live" below means any status except the three terminals that leave the
    finding unremediated, `denied`, `aborted` and `rolled_back` (one constant, `UNSUCCESSFUL_TERMINAL_STATUSES`, used
-   by the plan, the link route and the screen). `completed` is the successful end: it counts as live and stays
+   by the plan and the link route, and mirrored on the screen in `shadowRemediationModel.ts`). `completed` is the successful end: it counts as live and stays
    linkable. The plan returns `pendingLink`: the newest live `shadow-ai-remediation`
    instance THE VIEWER started whose description carries the finding reference and that no finding
    links yet. Another user's instance is never offered (they control its description), nor one that is not live. The screen seeds its
