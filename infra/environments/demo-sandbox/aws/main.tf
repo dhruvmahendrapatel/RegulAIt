@@ -124,6 +124,9 @@ module "generator_support" {
   end_date            = var.activity_end_date
   enabled             = var.activity_enabled
   tags                = local.tags
+
+  extra_invoke_resource_arns = var.bedrock_extra_invoke_arns
+  reserved_concurrency       = var.generator_reserved_concurrency
 }
 
 module "generator_invoices" {
@@ -143,6 +146,9 @@ module "generator_invoices" {
   end_date            = var.activity_end_date
   enabled             = var.activity_enabled
   tags                = local.tags
+
+  extra_invoke_resource_arns = var.bedrock_extra_invoke_arns
+  reserved_concurrency       = var.generator_reserved_concurrency
 }
 
 resource "aws_bedrock_guardrail" "planted" {

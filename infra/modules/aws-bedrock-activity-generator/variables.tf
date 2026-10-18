@@ -73,6 +73,16 @@ variable "enabled" {
   default     = true
 }
 
+variable "reserved_concurrency" {
+  description = "Concurrent runs allowed (reserved concurrency). 1 keeps runs from overlapping. A new account whose Lambda concurrency quota is 10 cannot reserve any (AWS keeps 10 unreserved), so the apply fails; then set -1 (no reservation) or raise the quota."
+  type        = number
+  default     = 1
+  validation {
+    condition     = var.reserved_concurrency == -1 || (var.reserved_concurrency >= 1 && var.reserved_concurrency <= 3)
+    error_message = "reserved_concurrency must be -1 (no reservation) or between 1 and 3."
+  }
+}
+
 variable "runtime" {
   type    = string
   default = "python3.12"

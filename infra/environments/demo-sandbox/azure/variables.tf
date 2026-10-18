@@ -66,7 +66,7 @@ variable "activity_enabled" {
 }
 
 variable "budget_amount" {
-  description = "Resource-group budget from budget_start_date, in the billing currency."
+  description = "Resource-group budget from budget_start_date, in the billing currency. The default 10 is the Azure share of the ADR-0197 USD 50 ceiling (AWS takes 40); if the billing currency is not USD, set the equivalent of USD 10 or less."
   type        = number
   default     = 10
 }

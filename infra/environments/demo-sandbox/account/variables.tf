@@ -27,9 +27,9 @@ variable "parent_id" {
 }
 
 variable "budget_limit_usd" {
-  description = "Total budget for the sandbox from budget_period_start (ADR-0197 decision 4)."
+  description = "Total AWS budget for the sandbox from budget_period_start. ADR-0197 decision 4 caps AWS plus Azure at USD 50 in total, so the strict default is 40 here and 10 in the azure stack; raising either breaks that ceiling."
   type        = number
-  default     = 50
+  default     = 40
 }
 
 variable "budget_period_start" {

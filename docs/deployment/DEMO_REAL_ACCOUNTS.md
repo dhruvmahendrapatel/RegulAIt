@@ -13,7 +13,7 @@ by RegulAIt through keyless federation (AWS, Azure) or a read-only token (GitLab
 
 | Stack | Directory | Creates | Expected cost |
 |---|---|---|---|
-| Sandbox account | `infra/environments/demo-sandbox/account` | A member account in the Organization (tagged `Environment=sandbox`, `Purpose=demo`; nothing production), a USD 50 total budget from 2026-10-01 with an alert at 80% and a forecast alert at 100%, and an automatic spend cap: at 100% AWS Budgets attaches an SCP denying Bedrock invocation and Lambda invocation to the account | none |
+| Sandbox account | `infra/environments/demo-sandbox/account` | A member account in the Organization (tagged `Environment=sandbox`, `Purpose=demo`; nothing production), a USD 40 total budget from 2026-10-01 with an alert at 80% and a forecast alert at 100%, and an automatic spend cap: at 100% AWS Budgets attaches an SCP denying Bedrock invocation and Lambda invocation to the account | none |
 | Sandbox workload | `infra/environments/demo-sandbox/aws` | A CloudTrail trail (management events, private bucket, 30-day expiry); the role `regulait-ai-discovery` trusting RegulAIt's federation issuer for one discovery source; two scheduled Bedrock generators (`larkfield-support-reply-bot`, `larkfield-invoice-summariser`); one Bedrock guardrail | under USD 1 per month (worked figure in the stack's `main.tf`) |
 | Azure | `infra/environments/demo-sandbox/azure` | Resource group `rg-larkfield-ai-demo` with one Azure OpenAI account (key authentication off) and one pay-per-token deployment, a Logic App calling it every 3 hours with its managed identity, diagnostic logs to a capped Log Analytics workspace, a budget alerting at 80%; an Entra app registration with a federated credential for RegulAIt's issuer, Reader on the resource group and an activity-log-only role on the subscription | under USD 1 per month |
 | GitLab | `infra/environments/demo-sandbox/gitlab` | Four private projects in the owner's demo group, seeded from `infra/demo-fixtures/gitlab/` (fictional company Larkfield Outfitters), and a group access token with `read_api` and `read_repository` only | none (needs a Premium or Ultimate group for the token, see step 6) |
@@ -21,9 +21,12 @@ by RegulAIt through keyless federation (AWS, Azure) or a read-only token (GitLab
 Modules (project-agnostic): `aws-sandbox-account`, `aws-oidc-federated-role`, `aws-cloudtrail-trail`,
 `aws-bedrock-activity-generator`, `azure-federated-reader`, `azure-openai-activity`, `gitlab-seeded-projects`.
 
-Spend ceiling. The AWS budget is USD 50 (the ADR-0197 ceiling) and the Azure budget defaults to 10 in the billing
-currency, so together the alarms allow more than USD 50. Expected spend is under USD 2 per month in total. To make the
-ceiling strict, set `budget_limit_usd = 40` in the account stack.
+Spend ceiling. ADR-0197 caps the demo at USD 50 in total, AWS and Azure together, through November. The defaults split
+it: `budget_limit_usd = 40` in the account stack and `budget_amount = 10` in the azure stack. Both alert at 80% of
+actual spend (USD 32 and 8), and at 100% AWS also applies the automatic spend cap. The Azure budget is in the subscription's
+billing currency: if that is not USD, set `budget_amount` to the equivalent of USD 10 or less. Expected spend is under USD
+2 per month in total. Raising either value relaxes the ceiling and needs the owner's sign-off, since the two budgets
+together would then exceed USD 50.
 
 No AI model identifier is committed. The Bedrock model id and the Azure OpenAI model name and version are variables set
 in each stack's `terraform.tfvars` (git-ignored): pick the lowest-priced text model offered in the region.
@@ -52,8 +55,9 @@ The clouds verify RegulAIt's federation tokens by fetching, over public HTTPS:
 Both routes are served by the gateway (`apps/gateway/src/federation-routes.ts`, ADR-0195 SD2b) and are public. Caddy
 (`infra/caddy/Caddyfile`) already proxies every path to the gateway over the Let's Encrypt certificate, and ports 80 and
 443 are open (`infra/environments/regulait-dev-app`). What was missing is the issuer itself: it is
-`<REGULAIT_PUBLIC_URL>/federation`, and the dev box never set `REGULAIT_PUBLIC_URL`, so compose fell back to
-`http://localhost:3000` and the discovery document cannot name a public issuer.
+`<REGULAIT_PUBLIC_URL>/federation`, and the dev box never set `REGULAIT_PUBLIC_URL`. Compose passes the gateway and the
+engine runners an empty value (only Keycloak falls back to `http://localhost:3000`), so the discovery document answers
+404 and no public issuer exists.
 
 This change fixes it for every new instance: `infra/modules/app-instance/user-data.sh.tftpl` now writes
 `REGULAIT_PUBLIC_URL=https://<sslip host>` to `/opt/app/.env`, which compose interpolates into the gateway and the
@@ -73,12 +77,25 @@ Two things to know about the running box:
 
 ```bash
 # pending execution
-echo "REGULAIT_PUBLIC_URL=https://<sslip host>" | sudo tee -a /opt/app/.env
+grep -q '^REGULAIT_PUBLIC_URL=' /opt/app/.env \
+  || echo "REGULAIT_PUBLIC_URL=https://<sslip host>" | sudo tee -a /opt/app/.env
 cd /opt/app && sudo docker compose --profile tls up -d
 ```
 
-The value must be exactly the origin users reach (`terraform output app_url`), with no trailing slash. The gateway
-refuses to boot on an invalid value (ADR-0121), so check the gateway logs after the restart.
+The guard keeps a second run from adding a duplicate line. The value must be exactly the origin users reach
+(`terraform output app_url`), with no trailing slash. The gateway refuses to boot on an invalid value (ADR-0121), so
+check the gateway logs after the restart.
+
+Setting `REGULAIT_PUBLIC_URL` turns on more than the federation issuer. The same value becomes:
+
+- the issuer and endpoint of the ADR-0188 self-token (the gateway's own OAuth tokens);
+- the passkey relying-party origin, so passkeys are bound to this origin;
+- the public URLs in the MCP authorization metadata, SAML and step-up flows;
+- Keycloak's public URL (`docker-compose.yml`), in place of `http://localhost:3000`.
+
+So after 1b, check on the public URL (pending execution) that admin sign-in works, that a step-up prompt completes,
+and that the **Cloud federation** card shows the issuer `https://<sslip host>/federation`. If sign-in breaks, remove
+the line from `/opt/app/.env` and run the same `docker compose` command to go back.
 
 **1c. Turn federation on in RegulAIt** (pending execution). Admin, **Shadow AI > Discovery sources**
 (`/admin/shadow-ai/discovery-sources`), **Cloud federation** card: generate a key, then turn federation on (a
@@ -127,9 +144,26 @@ trail created in step 4 cannot be changed or destroyed from inside the account; 
 ## Step 4: the sandbox workload (pending execution)
 
 Before applying, check in the Bedrock console of the sandbox account (region `us-east-1`, Model catalog) that the
-chosen text model can be invoked on demand, and put its id in `bedrock_model_id`. If it is only offered through a
-cross-region inference profile, add the profile ARN and its regional model ARNs through the generator module's
-`extra_invoke_resource_arns`.
+chosen text model can be invoked on demand **in that region**, and put its id in `bedrock_model_id`. This keeps every
+call inside the baseline region allow-list SCP, and it is the default: the stack rejects an inference-profile id
+(`us.`, `eu.`, `global.` and similar prefixes) unless `allow_cross_region_inference = true`.
+
+Cross-region inference profiles route a call to other regions, and the region allow-list SCP denies any region outside
+its list (`allowed_regions` in `infra/environments/regulait-dev`, which the example sets to `us-east-1` and `us-east-2`).
+A profile that also routes to, say, `us-west-2` fails with an access-denied error there. Use one only if no suitable
+model is invocable on demand in-region, and then:
+
+1. check that every region the profile routes to is in the SCP's `allowed_regions`; adding a region is an owner change
+   to `infra/environments/regulait-dev`, outside this runbook;
+2. set `allow_cross_region_inference = true`, `bedrock_model_id` to the profile id, and `bedrock_extra_invoke_arns` to
+   the profile ARN and the regional model ARNs behind it. The stack rejects any ARN outside `bedrock_allowed_regions`,
+   which must match the SCP's list.
+
+Each generator Lambda reserves a concurrency of 1, so runs never overlap, and neither the schedule nor Lambda retries
+a failed run. A new account's Lambda concurrency quota can be as low as 10, and AWS keeps 10 unreserved, so the apply
+can fail with "decreases account's UnreservedConcurrentExecution below its minimum value". In that case either request a
+quota increase or set `generator_reserved_concurrency = -1` (no reservation). The retry limits still apply, so a run
+still makes at most `calls_per_run` calls.
 
 ```bash
 # pending execution, in infra/environments/demo-sandbox/aws
@@ -181,8 +215,13 @@ terraform apply tfplan
 ```
 
 4. Copy the scanner token straight to the clipboard, never to the terminal or a file:
-   `terraform output -raw scanner_token`, piped to your clipboard tool (pending execution). The token lives only in the
-   encrypted state and, after step 7, encrypted in RegulAIt.
+   `terraform output -raw scanner_token`, piped to your clipboard tool (pending execution). After step 7 RegulAIt
+   stores it encrypted. **The Terraform state also holds it in plaintext**, as a value in the state JSON.
+   `sensitive` only hides it from terminal output. The state backend encrypts the object at rest, but anyone who has
+   `s3:GetObject` on the state key and `kms:Decrypt` on its key can read the token, and it stays in state until
+   `terraform destroy`. Keep this stack on an encrypted remote backend with access limited to the owner (the
+   `backend.hcl` from step 6.3), never on local state. Revoke or rotate the token right after the demo (Teardown).
+   The fallback below keeps the token out of state entirely.
 5. Revoke the personal access token from item 2.
 
 **Fallback without Premium or Ultimate** (pending execution): set `create_group_access_token = false`, then create a
@@ -218,7 +257,10 @@ Analytics hold events. On the run, every read is listed with an outcome:
 
 - **AWS.** `aws.sts.caller_identity` read for the sandbox account; Bedrock inventory read, with the guardrail listed;
   `aws.bedrock.invocation_logging` reports not enabled (deliberate); CloudTrail `Converse` events grouped under the two
-  generator roles (pseudonymised); the trail bucket read.
+  generator roles (pseudonymised); the trail bucket read, which is expected to return **no records**. The scanner reads
+  the trail bucket for Bedrock *data* events (`InvokeAgent`, `Retrieve`). This trail logs management events only, and
+  the planted calls are `Converse` management events, which `cloudtrail:LookupEvents` reports above. An empty bucket
+  read is not a fault. The bucket stays in the source target so that the read path and its permissions are exercised.
 - **Azure.** The OpenAI account and its deployment from Resource Graph; the activity log read; diagnostic counts from
   the Log Analytics workspace, attributed to the account.
 - **GitLab.** The four projects read; sightings for the Python and npm AI SDKs, the provider hosts, the MCP config,
@@ -236,7 +278,8 @@ Tracked follow-up (ADR-0197). In this order:
 
 1. In RegulAIt: disable the three sources and delete their credentials. Turn federation off if nothing else uses it.
 2. GitLab: `terraform destroy` in `demo-sandbox/gitlab` (revokes the group token and deletes the projects), then delete
-   the group in the UI.
+   the group in the UI. If the fallback was used, revoke the demo account's personal access token instead. Either way,
+   no scanner token from the demo stays valid, and the destroy also removes the token's plaintext copy from state.
 3. Azure: `terraform destroy` in `demo-sandbox/azure`.
 4. AWS: `terraform destroy` in `demo-sandbox/account` closes the sandbox account (`close_on_deletion = true`), which
    stops everything in it from billing. The workload stack is not destroyed first: its trail cannot be deleted under
@@ -254,5 +297,9 @@ On 2026-10-18, in the build session, with Terraform 1.9.8 and no cloud credentia
   `.mcp.json` are included.
 - The fixtures were run through RegulAIt's own repo analyser (`analyseRepo` in `packages/shared`) to confirm they
   produce sightings.
+- In the review fix round (same day), `fmt` and `validate` again in all four stacks. The `aws` stack's new variable
+  checks were run with `terraform plan` on a provider-free copy of those variables. An in-region model id passes. An
+  inference-profile id fails unless `allow_cross_region_inference = true`. Extra ARNs fail unless that flag is set, and
+  an ARN in `us-west-2` fails against the default `bedrock_allowed_regions`.
 
 Nothing was planned or applied against AWS, Azure or GitLab.

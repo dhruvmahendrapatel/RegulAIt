@@ -44,6 +44,45 @@ variable "aws_discovery_source_id" {
 variable "bedrock_model_id" {
   description = "On-demand Bedrock foundation model id the generators call. Pick the lowest-priced text model enabled for the account in this region. Set in terraform.tfvars."
   type        = string
+  validation {
+    condition     = var.allow_cross_region_inference || !can(regex("^(us|us-gov|eu|apac|jp|au|ca|global)\\.", var.bedrock_model_id))
+    error_message = "bedrock_model_id looks like a cross-region inference profile id. Pick a model invocable on demand in aws_region, or set allow_cross_region_inference = true after checking the region allow-list SCP (runbook step 4)."
+  }
+}
+
+variable "allow_cross_region_inference" {
+  description = "false (strict) keeps every Bedrock call in aws_region, inside the region allow-list SCP. true permits an inference-profile model id plus bedrock_extra_invoke_arns, and only works if the SCP allows every region the profile routes to."
+  type        = bool
+  default     = false
+}
+
+variable "bedrock_allowed_regions" {
+  description = "Regions the Organization's region allow-list SCP allows. Every ARN in bedrock_extra_invoke_arns must name one of them (or none, for a global ARN)."
+  type        = list(string)
+  default     = ["us-east-1", "us-east-2"]
+}
+
+variable "bedrock_extra_invoke_arns" {
+  description = "Inference-profile and regional model ARNs the generators may also invoke. Only with allow_cross_region_inference = true."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = var.allow_cross_region_inference || length(var.bedrock_extra_invoke_arns) == 0
+    error_message = "bedrock_extra_invoke_arns needs allow_cross_region_inference = true."
+  }
+  validation {
+    condition = alltrue([
+      for arn in var.bedrock_extra_invoke_arns :
+      can(regex("^arn:[^:]+:bedrock:[^:]*:", arn)) && (split(":", arn)[3] == "" || contains(var.bedrock_allowed_regions, split(":", arn)[3]))
+    ])
+    error_message = "Every bedrock_extra_invoke_arns entry must be a Bedrock ARN in one of bedrock_allowed_regions; the region allow-list SCP denies calls routed anywhere else."
+  }
+}
+
+variable "generator_reserved_concurrency" {
+  description = "Reserved concurrency of each generator Lambda (1: runs never overlap). Set -1 only if the account's Lambda concurrency quota is too low to reserve any (runbook step 4)."
+  type        = number
+  default     = 1
 }
 
 variable "demo_company_slug" {

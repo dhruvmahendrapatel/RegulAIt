@@ -3,8 +3,11 @@
 # exists to plant real, attributable AI activity in an account (CloudTrail
 # records each call as a `Converse` event with this role as the caller).
 #
-# Cost is bounded three ways:
+# Cost is bounded four ways:
 # - the handler caps calls per run and output tokens per call in code;
+# - nothing retries a run: the schedule and Lambda's own async retries are both
+#   0, a queued event older than 60 s is dropped, and reserved concurrency (1 by
+#   default) means runs never overlap;
 # - the schedule has an end date, after which it never fires again;
 # - the role may invoke only the one model named in var.model_id.
 # Expected spend is calls x tokens x the model's price; see the environment
@@ -88,6 +91,8 @@ resource "aws_lambda_function" "this" {
   timeout          = 30
   memory_size      = 128
 
+  reserved_concurrent_executions = var.reserved_concurrency
+
   environment {
     variables = {
       MODEL_ID      = var.model_id
@@ -100,6 +105,14 @@ resource "aws_lambda_function" "this" {
   tags = var.tags
 
   depends_on = [aws_cloudwatch_log_group.this, aws_iam_role_policy.lambda]
+}
+
+# Scheduler invokes asynchronously, and Lambda retries a failed async run twice
+# by default; without this a throttled run could repeat 3 x calls_per_run calls.
+resource "aws_lambda_function_event_invoke_config" "this" {
+  function_name                = aws_lambda_function.this.function_name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 60
 }
 
 # --- schedule --------------------------------------------------------------------
