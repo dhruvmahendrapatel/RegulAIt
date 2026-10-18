@@ -103,7 +103,7 @@ import { isModelProviderKind } from "@regulait/model-provider";
 import { buildAgentHolderIndex, computeAlignmentIndex, ownershipFlagFor } from "./inventory.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { computeRuleViolators, loadRuleSelectors, resolveSelectorObjects } from "./sod.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 export const ACCESS_RECOMMENDATION_NOTES = {
   what:
@@ -963,7 +963,7 @@ export async function annotateReportWithJudge(
       enabled: true,
       status: "unavailable",
       error: "judge_not_dispatchable",
-      reason: safeErrorMessage(err),
+      reason: errMessage(err),
       note: RECOMMENDATION_JUDGE_UNAVAILABLE_NOTE,
     };
     return report;

@@ -55,7 +55,7 @@ import { agentDecision } from "./copilot.js";
 import { RESPONSE_FORMAT_CAPABLE_PROVIDERS } from "./compat-core.js";
 import { assertProjectAttribution } from "./projects.js";
 import type { ModelPolicyGate } from "./model-policy.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 /** ADR-0173 batch 2b — the playground is its own feature of the model allow-list */
 export const PLAYGROUND_FEATURE: ModelPolicyGate = { feature: "playground" };
@@ -102,7 +102,7 @@ export function validateJsonSchemaShape(schema: Record<string, unknown>): string
     newAjv().compile(schema);
     return [];
   } catch (err) {
-    return [safeErrorMessage(err).slice(0, 300)];
+    return [errMessage(err).slice(0, 300)];
   }
 }
 

@@ -54,7 +54,7 @@ import {
   type ReviewPolicyView,
   type UseCaseReviewView,
 } from "@regulait/shared";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 import type { ApprovalPostCommit } from "./orchestration.js";
 import { reopenWorkflowInstance } from "./workflows.js";
 import {
@@ -499,7 +499,7 @@ export async function runUseCaseRecertificationSweep(
       });
     } catch (err) {
       postCommits.splice(0);
-      const message = safeErrorMessage(err);
+      const message = errMessage(err);
       log(`recertification sweep: use case ${c.id} skipped — ${message}`);
       out.skipped.push({ id: c.id, reason: `error: ${message}` });
       continue;
