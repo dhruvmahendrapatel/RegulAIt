@@ -726,6 +726,7 @@ export function registerAiLiteracyRoutes(app: FastifyInstance, db: Db): void {
         return inserted;
       });
     } catch (err) {
+      // log-safe: matched against a constraint name, never logged or stored
       if (/ai_policy_documents_key_version_uq/.test(`${(err as Error).message} ${String((err as { cause?: Error }).cause?.message ?? "")}`)) {
         return refuse(reply, 409, "ai_policy_version_conflict", `another version of '${body.key}' was created at the same time; retry`);
       }

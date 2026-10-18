@@ -71,6 +71,7 @@ import { autonomyFloorFor } from "./autonomy.js";
 import { residualPosition } from "./risk-tolerance.js";
 import { incidentGateInputs } from "./incidents.js";
 import { databaseNow } from "./db-clock.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 export const DEPLOY_GATE_RULE_IDS = { allowed: "deploy-gate-allowed", denied: "deploy-gate-denied" } as const;
 
@@ -207,7 +208,7 @@ export function registerDeployGateRoutes(app: FastifyInstance, db: Db): void {
       try {
         return await f();
       } catch (e) {
-        assuranceErrors.push({ check, error: e instanceof Error ? e.message : String(e) });
+        assuranceErrors.push({ check, error: safeErrorMessage(e) });
         return undefined; // reported as `assurance_check_unavailable`, never passed
       }
     };

@@ -82,6 +82,7 @@ import {
 import type { SchedulerJobDefinition } from "./scheduler.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { fileGovernanceAlertTicket, governanceAlertTicket, governanceAlertTickets } from "./pm.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 export const ALERT_SLA_SWEEP_JOB_NAME = "alert-sla-sweep";
 
@@ -318,7 +319,7 @@ async function fileTicket(
   try {
     out = await fileGovernanceAlertTicket(db, dataKey, { alertId: a.id, connectionId, actorUserId, trigger, text });
   } catch (err) {
-    out = { outcome: "refused", status: 502, error: "pm_provider_failed", detail: err instanceof Error ? err.message : String(err) };
+    out = { outcome: "refused", status: 502, error: "pm_provider_failed", detail: safeErrorMessage(err) };
   }
   if (out.outcome === "created") {
     await audit(db, actorUserId, a.id, ALERT_OWNERSHIP_RULE_IDS.ticketFiled,

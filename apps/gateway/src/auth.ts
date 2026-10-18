@@ -862,6 +862,7 @@ export {
   verifyTotp,
 } from "./totp.js";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "./totp.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 // --- audit helper -----------------------------------------------------------
 
@@ -2275,7 +2276,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     } catch (err) {
       await auditAuth(db, null, row.userId, "oidc-reauth-failed", "deny",
         `OIDC step-up token exchange/validation failed for provider '${provider.name}'`,
-        { phase: "oidc-reauth-callback", provider: provider.name, stepUpId: row.stepUpId, error: err instanceof Error ? err.message : String(err) });
+        { phase: "oidc-reauth-callback", provider: provider.name, stepUpId: row.stepUpId, error: safeErrorMessage(err) });
       return reply.status(401).send({ error: "oidc_validation_failed" });
     }
     const anchor: FederatedAnchor = {
@@ -2367,7 +2368,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     } catch (err) {
       await auditAuth(db, null, null, "oidc-login-failed", "deny",
         `OIDC token exchange/validation failed for provider '${provider.name}'`,
-        { phase: "oidc-callback", provider: provider.name, error: err instanceof Error ? err.message : String(err) });
+        { phase: "oidc-callback", provider: provider.name, error: safeErrorMessage(err) });
       return reply.status(401).send({ error: "oidc_validation_failed" });
     }
 

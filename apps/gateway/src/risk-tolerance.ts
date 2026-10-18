@@ -92,6 +92,7 @@ import {
   type ToleranceRowInput,
 } from "@regulait/shared";
 import { z } from "zod";
+import { safeErrorMessage } from "./gateway-logger.js";
 // IMPORT-CYCLE RULE: this file has NO module-level import of another gateway
 // module. `risks.ts` imports it, and `inventory.ts` imports `risks.ts`; a
 // static edge from here to ./review-policy.js (→ workflows → evals → … → mrm
@@ -539,7 +540,7 @@ export async function runRiskAcceptanceExpirySweep(
           detail: {
             phase: "acceptance-expiry-failed",
             acceptanceId: id,
-            error: String((e as Error)?.message ?? e).slice(0, 500),
+            error: safeErrorMessage(e).slice(0, 500),
             ...actorDetail,
           },
           effect: "deny",

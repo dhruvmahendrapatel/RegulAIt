@@ -32,6 +32,7 @@
  * §8.3 trace prune. That is what a dataset is; it is why the copy is admin-only,
  * capped, and audited with the span ids.
  */
+import { safeErrorText } from "./gateway-logger.js";
 import crypto from "node:crypto";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -299,7 +300,7 @@ export async function addTracesToDataset(db: Db, input: AddTracesToDatasetInput)
       );
     } catch (e) {
       // a webhook is a notification, never a reason to undo an audited write
-      input.log?.warn({ err: (e as Error).message }, "trace.added_to_dataset webhook enqueue failed");
+      input.log?.warn({ err: safeErrorText(e) }, "trace.added_to_dataset webhook enqueue failed");
     }
   }
 

@@ -129,6 +129,7 @@ export function originPinnedFetch(origin: string, inner: typeof fetch): typeof f
  * 1.32.0 wording, pinned by the lockfile and by the G4 test) */
 export function isSseCrossOriginRefusal(err: unknown): boolean {
   if (err instanceof SseCrossOriginError) return true;
+  // log-safe: matched against fixed SDK wording only, never logged or stored
   const msg = (err as { message?: unknown } | null)?.message;
   return typeof msg === "string" && msg.includes("Endpoint origin does not match connection origin");
 }
