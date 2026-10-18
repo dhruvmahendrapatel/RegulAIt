@@ -82,7 +82,7 @@
   color: var(--text);
 }
 .btnSm {
-  padding: var(--s-half) var(--s1-5);
+  padding: var(--s0) var(--s1-5);
   font-size: var(--text-xs);
 }
 
@@ -687,7 +687,7 @@ a.barLabel {
 .tagList { display: flex; flex-wrap: wrap; gap: var(--s0); list-style: none; margin: 0; padding: 0; }
 .tagChip {
   display: inline-flex; align-items: center; gap: var(--s0-5);
-  padding: var(--s-half) var(--s0-5) var(--s-half) var(--s1-5);
+  padding: var(--s0) var(--s0-5) var(--s0) var(--s1-5);
   border: 1px solid var(--rg-signal-ring);
   border-radius: var(--rg-r-pill);
   background: var(--rg-signal-tint);
