@@ -142,6 +142,13 @@ export async function storedSelfToken(
   if (typeof claims.jti !== "string" || typeof claims.iat !== "number" || typeof claims.client_id !== "string" || claims.sub !== claims.client_id) return fail("claims_missing");
   if (!signingKeyAccepts(key, claims.iat, now)) return fail("signing_key_not_accepted");
   const [row] = await db.select().from(issuedTokens).where(eq(issuedTokens.jti, claims.jti));
+  // ADR-0195 SD4b: a device's revocation revokes its tokens too; the agent must still read `device_revoked` (final)
+  // rather than a token refusal it would retry. The token's signature is already verified here, so this names
+  // only an identity this issuer minted for
+  if (row?.revokedAt && row.subjectIdentityId) {
+    const [subject] = await db.select({ kind: workloadIdentities.kind }).from(workloadIdentities).where(eq(workloadIdentities.id, row.subjectIdentityId));
+    if (subject?.kind === "endpoint_agent" && !(await endpointAgentContext(db, row.subjectIdentityId)).ok) return fail("device_revoked");
+  }
   if (
     !row ||
     row.revokedAt !== null ||

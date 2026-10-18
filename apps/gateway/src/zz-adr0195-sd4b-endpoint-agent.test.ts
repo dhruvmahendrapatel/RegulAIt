@@ -520,8 +520,13 @@ describe("ADR-0195 SD4b: the report table's guard (migration 0185's rule)", () =
     const s = randomUUID();
     expect((await a.key.report(reportBody({ snapshotId: s }), s)).statusCode).toBe(202);
     const [row] = await db.select().from(endpointAgentReports).where(eq(endpointAgentReports.snapshotId, s));
-    await expect(db.execute(sql`update endpoint_agent_reports set sightings = '[]'::jsonb where id = ${row!.id}`)).rejects.toThrow(/written once/);
-    await expect(db.execute(sql`update endpoint_agent_reports set status = 'pending', run_id = null, committed_at = null where id = ${row!.id}`)).rejects.toThrow(/written once/);
+    // drizzle wraps the database error ("Failed query: …"); the guard's own message is its cause
+    const refusal = async (q: Promise<unknown>) => {
+      const e = (await q.then(() => null, (err: unknown) => err)) as { message?: string; cause?: { message?: string } } | null;
+      return `${e?.message ?? ""} ${e?.cause?.message ?? ""}`;
+    };
+    expect(await refusal(db.execute(sql`update endpoint_agent_reports set sightings = '[]'::jsonb where id = ${row!.id}`))).toMatch(/written once/);
+    expect(await refusal(db.execute(sql`update endpoint_agent_reports set status = 'pending', run_id = null, committed_at = null where id = ${row!.id}`))).toMatch(/written once/);
     await expect(db.execute(sql`truncate endpoint_agent_reports`)).rejects.toThrow();
   });
 });
