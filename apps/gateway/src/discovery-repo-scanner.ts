@@ -30,8 +30,9 @@
  *
  * WHAT EACH OBSERVATION CARRIES (decision 6): the matchable value (package,
  * host, key prefix and length, or artifact), its location (path, line, commit),
- * NAMES only where they apply (a stdio MCP server's command basename,
- * `.env.example` variable names), and `actorPseudonym`: the pseudonym of the
+ * NAMES only where they apply (a stdio MCP server's command basename), the
+ * ids of the env-variable presence signatures a `.env.example`, Dockerfile or
+ * CI config matched (ADR-0195 lane A6: never the names), and `actorPseudonym`: the pseudonym of the
  * author of the commit the tree was read at. That is the commit's author, not
  * a per-line blame.
  */
@@ -39,6 +40,7 @@ import {
   EVIDENCE_MAX_ROWS,
   SHADOW_AI_CATALOG_V2,
   analyseRepo,
+  isEnvName,
   type ArtifactSignatureKind,
   type DiscoveryPseudonymKind,
   type DiscoveryReadOutcome,
@@ -74,7 +76,10 @@ export interface RepoScanObservation {
   keyLength?: number;
   artifact?: { kind: ArtifactSignatureKind; value: string };
   location?: { path: string; line?: number; commit?: string };
+  /** an MCP command basename; never an env-variable name */
   names?: string[];
+  /** ADR-0195 lane A6: presence signature ids, never the env-variable names */
+  presence?: string[];
   actorPseudonym?: string;
 }
 
@@ -171,7 +176,7 @@ const isCommit = (sha: string) => sha.length >= 7 && sha.length <= 64 && [...sha
 
 /** the value fields an observation is matched on (location, names and actor excluded) */
 const valueKey = (o: RepoScanObservation) =>
-  JSON.stringify([o.host ?? "", o.packageName ?? "", o.keyFragment ?? "", o.keyLength ?? "", o.artifact?.kind ?? "", o.artifact?.value ?? ""]);
+  JSON.stringify([o.host ?? "", o.packageName ?? "", o.keyFragment ?? "", o.keyLength ?? "", o.artifact?.kind ?? "", o.artifact?.value ?? "", (o.presence ?? []).join(",")]);
 
 /**
  * Map one analysed tree onto SD0 observations: one per distinct value and
@@ -180,9 +185,9 @@ const valueKey = (o: RepoScanObservation) =>
 export function toScanObservations(subject: string, analysis: RepoAnalysisResult, actorPseudonym: string | null): RepoScanObservation[] {
   const merged = new Map<string, RepoScanObservation>();
   const commit = isCommit(analysis.commitSha.toLowerCase()) ? analysis.commitSha.toLowerCase() : null;
-  const envNamesByPath = new Map<string, Set<string>>();
+  const presenceByPath = new Map<string, Set<string>>();
   const add = (
-    o: Pick<RepoScanObservation, "host" | "packageName" | "keyFragment" | "keyLength" | "artifact" | "names">,
+    o: Pick<RepoScanObservation, "host" | "packageName" | "keyFragment" | "keyLength" | "artifact" | "names" | "presence">,
     path: string,
     line: number | null,
   ) => {
@@ -215,7 +220,8 @@ export function toScanObservations(subject: string, analysis: RepoAnalysisResult
         break;
       case "mcp_server": {
         const value = (o.catalogEntryId && ASSISTANT_PATTERN_BY_ID.get(o.catalogEntryId)) || o.path;
-        const cmd = o.mcpServer?.command && isScanName(o.mcpServer.command) ? [o.mcpServer.command] : undefined;
+        // an env-variable-shaped basename is never sent as a name (lane A6: SD0 refuses it)
+        const cmd = o.mcpServer?.command && isScanName(o.mcpServer.command) && !isEnvName(o.mcpServer.command) ? [o.mcpServer.command] : undefined;
         if (o.mcpServer?.host) add({ host: o.mcpServer.host }, o.path, o.line);
         // a stdio server: the config file's artifact, with the command basename as a NAME
         else if (cmd) add({ artifact: { kind: "assistant_config", value }, names: cmd }, o.path, o.line);
@@ -233,18 +239,19 @@ export function toScanObservations(subject: string, analysis: RepoAnalysisResult
       case "ide_extension":
         if (o.extensionId) add({ artifact: { kind: "ide_extension", value: o.extensionId } }, o.path, o.line);
         break;
-      case "env_var_name":
-        if (o.envVarName && isScanName(o.envVarName)) {
-          const set = envNamesByPath.get(o.path) ?? new Set<string>();
-          set.add(o.envVarName);
-          envNamesByPath.set(o.path, set);
+      case "env_presence":
+        // ADR-0195 lane A6: the analyser already reduced the names to signature ids; no name reaches here
+        if (o.presenceSignatureId) {
+          const set = presenceByPath.get(o.path) ?? new Set<string>();
+          set.add(o.presenceSignatureId);
+          presenceByPath.set(o.path, set);
         }
         break;
     }
   }
-  // `.env.example` names: one observation per file, NAMES only (values are never read)
-  for (const [path, names] of envNamesByPath) {
-    add({ names: [...names].slice(0, REPO_SCAN_LIMITS.namesMax) }, path, null);
+  // env-variable presence: one observation per file, signature ids only (names and values are never kept)
+  for (const [path, ids] of presenceByPath) {
+    add({ presence: [...ids].sort().slice(0, REPO_SCAN_LIMITS.namesMax) }, path, null);
   }
   return [...merged.values()];
 }

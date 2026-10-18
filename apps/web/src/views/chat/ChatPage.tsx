@@ -36,6 +36,7 @@ import {
   CodeBlock,
   ConfirmModal,
   EmptyState,
+  ErrorState,
   Field,
   Input,
   Select,
@@ -578,7 +579,13 @@ export default function ChatPage() {
     );
   }
 
-  const noAgents = agents.length === 0;
+  // a failed read is not an empty one: "no agents granted" / "no conversations yet" only on a good answer
+  const agentsFailed = agentsQ.error != null && !agentsQ.data;
+  const convosFailed = convosQ.error != null && !convosQ.data;
+  const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  const noAgents = agents.length === 0 && !agentsFailed;
+  // nothing can be sent without an agent, whether none is granted or the list failed to load
+  const cannotSend = noAgents || agentsFailed;
   const selAgent = agents.find((a) => a.agentId === agentId);
 
   return (
@@ -605,7 +612,13 @@ export default function ChatPage() {
           >
             + New conversation
           </Button>
-          {conversations.length === 0 ? (
+          {convosFailed ? (
+            <ErrorState
+              title="Couldn't load your conversations"
+              message={errText(convosQ.error)}
+              onRetry={() => void convosQ.refetch()}
+            />
+          ) : conversations.length === 0 ? (
             <EmptyState
               title="No conversations yet"
               body="Send a message and a thread starts itself."
@@ -650,7 +663,14 @@ export default function ChatPage() {
         <div className={v.stack}>
           <Card>
             <div className={v.row}>
-              {noAgents ? (
+              {agentsFailed ? (
+                <ErrorState
+                  title="Couldn't load your agents"
+                  message={errText(agentsQ.error)}
+                  access={(agentsQ.error as { status?: number }).status === 403}
+                  onRetry={() => void agentsQ.refetch()}
+                />
+              ) : noAgents ? (
                 <span className={v.dim}>
                   No agents are granted to your account — ask an admin to grant you one.
                 </span>
@@ -700,9 +720,11 @@ export default function ChatPage() {
             <div className={s.log} ref={logRef} aria-live="polite">
               {exchanges.length === 0 ? (
                 <EmptyState
-                  title={noAgents ? "Nothing to send to yet" : "Start the conversation"}
+                  title={cannotSend ? "Nothing to send to yet" : "Start the conversation"}
                   body={
-                    noAgents
+                    agentsFailed
+                      ? "Your agents could not be loaded — retry above."
+                      : noAgents
                       ? "An admin has to grant your account an agent first."
                       : "Pick an agent and say something — the first message starts a thread. Mock agents reply instantly with no external keys; type «<<refuse>>» to see refusal handling."
                   }
@@ -775,7 +797,7 @@ export default function ChatPage() {
                 <Button
                   aria-label="Attach files"
                   title="Attach images, PDFs, or text/code files"
-                  disabled={noAgents}
+                  disabled={cannotSend}
                   onClick={() => fileRef.current?.click()}
                 >
                   📎
@@ -785,13 +807,15 @@ export default function ChatPage() {
                   rows={2}
                   style={{ flex: 1 }}
                   placeholder={
-                    noAgents
+                    agentsFailed
+                      ? "Your agents could not be loaded…"
+                      : noAgents
                       ? "No agent granted to your account yet…"
                       : convoId
                         ? "Continue the conversation…"
                         : "Ask the agent to do something…"
                   }
-                  disabled={noAgents}
+                  disabled={cannotSend}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -802,7 +826,7 @@ export default function ChatPage() {
                   }}
                   onPaste={onPaste}
                 />
-                <Button variant="primary" disabled={noAgents || streaming} onClick={() => void send()}>
+                <Button variant="primary" disabled={cannotSend || streaming} onClick={() => void send()}>
                   Send
                 </Button>
                 {streaming && (

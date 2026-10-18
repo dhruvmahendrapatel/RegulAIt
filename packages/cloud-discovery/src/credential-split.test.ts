@@ -18,7 +18,7 @@ function routes(c: RecordedCall): Response {
   if (sts) return sts;
   if (h.startsWith("account.")) return json({ Regions: [{ RegionName: "us-east-1", RegionOptStatus: "ENABLED_BY_DEFAULT" }] });
   if (h === "sts.googleapis.com") return json({ access_token: synthetic("at"), issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: 3600 });
-  if (h === "iamcredentials.googleapis.com") return json({ accessToken: synthetic("at"), expireTime: "2026-10-17T13:00:00Z" });
+  if (h === "iamcredentials.googleapis.com") return json({ accessToken: synthetic("at"), expireTime: new Date(Date.now() + 3_600_000).toISOString() });
   if (h === "login.microsoftonline.com") {
     const tenant = c.url.pathname.split("/")[1];
     const base = `https://login.microsoftonline.com/${tenant}`;

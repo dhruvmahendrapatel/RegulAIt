@@ -200,6 +200,47 @@ These add to the subsection above; where they differ, this one ships.
    inline `<Routes>` now throws, because its screens would live in a file the census never reads; the top-level
    catch-all and a splat `<Navigate>` redirect are exempt.
 
+### As built: U2, responsive and state fixes (lane U2)
+
+What the U2 lane found and changed against the harness. The harness itself (specs, constants, `VIEWPORTS`, gates,
+census) is unchanged.
+
+1. **Responsive (bar 2) was already at zero in all three browsers.** `baselines/responsive.json` was empty on main and
+   the harness's CI run on #410 passed Chromium, Firefox and WebKit against it, so no layout finding at 1280, 1440,
+   1920, 1024 or 768 existed to shrink. A wider probe (not committed) looked for more than sideways page scroll at the
+   five widths in Chromium: any visible element past the viewport edge with no scrolling ancestor, and any
+   `overflow: hidden`/`clip` box whose content is cut off without an ellipsis or line clamp. It found nothing on any of
+   the 113 screens in the census. The kit's `Table` already scrolls inside its own `tableWrap` (`overflow-x: auto`), and the shell's
+   nav becomes a drawer at 960 px and below. **Caveat:** like the harness, the probe saw each screen's error state
+   (every call answers 503). Populated tables, charts and long values are not covered until the feature-baseline
+   fixtures land in `mock-api.ts`; that is where a real responsive defect would most likely show.
+2. **States (bar 3): 29 findings down to 2** (Chromium, the only browser the states spec runs in).
+   - `loading-not-announced` on 17 screens had one cause: the kit's `Table` drew skeleton rows with no busy state.
+     The `<table>` now carries `aria-busy="true"` while `loading`, the same signal `SkeletonBlock` gives with
+     `role="status"`.
+   - A failed read shown as an empty one (the UXJ-01 pattern) on five screens:
+     - `/chat` said "No conversations yet" and "No agents are granted to your account" on a 503. It now shows
+       `ErrorState` for each, and the composer stays disabled while the agent list has failed.
+     - `/admin/custom-providers` said "An empty allow-list is the default-deny posture, not a problem" when the
+       allow-list read failed. Both of its tables now get `error` and `onRetry`.
+     - `/admin/teams` said "No teams yet" (and showed nothing while loading). It now shows a skeleton, then
+       `ErrorState`.
+     - `/admin/prompt-versions` showed an empty agent picker and "Pick an agent" when the agent list failed. It now
+       shows a skeleton, then `ErrorState` above the picker.
+     - `/feedback/:useCaseId`: the use case's name is optional (anyone may report), so a 403 or 404 stays quiet.
+       Any other failure now shows a one-line alert that the report can still be sent, and the lookup is announced
+       while it runs.
+   - `/builder/playground`: the model list now announces its loading and shows an alert when it fails, beside the
+     picker (the shared `ModelPicker` is unchanged).
+   - `/admin/governance/intake`: the similar-use-cases rail's summary is `role="status"` (it was `aria-live`
+     only, which the states check does not read), and a failed registry read is `role="alert"`.
+3. **The 2 that stay** are `error-not-shown` on `/builder/playground` and `/admin/governance/intake`. Both screens do
+   show their alert, about 1.1 s after load: the app's query client retries a 503 once after the default 1 s backoff
+   (`App.tsx`), and on these two screens nothing else is in flight during that second, so Playwright's
+   `networkidle` (500 ms quiet) fires inside the retry gap and the check counts before the retry lands. A run that
+   waited for the alert saw it on both by 1.5 s. Making the check wait for the alert (as the loading check already
+   waits up to `LOADING_MS`) is a harness change, so it is left to the owner; the baseline keeps both at 1.
+
 ### As built: U4 performance (route-level code splitting)
 
 Bar 4 says "JS bundle-size ceilings per entry, enforced in CI". U4 shrinks what the entry loads and then lowers the
