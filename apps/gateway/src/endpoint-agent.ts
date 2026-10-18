@@ -66,8 +66,13 @@ export const ENDPOINT_AGENT_ENROLMENT_PATHS = [ENDPOINT_AGENT_PATHS.tickets, END
 /** the bulk enrolment token's prefix; the device ticket's */
 export const ENDPOINT_BULK_TOKEN_PREFIX = "rgea_";
 export const ENDPOINT_TICKET_PREFIX = "rgat_";
-/** owner decision: expiry defaults to 30 days; it is also the maximum (lengthening is not offered) */
+/**
+ * owner decision: expiry defaults to 30 days, and it is the maximum unless the issuing admin relaxes it.
+ * ADR-0197 Q13: a longer expiry, up to `ENDPOINT_TOKEN_RELAXED_MAX_DAYS`, is a `settings_relax` step-up for that
+ * one token, audited and recorded on the row (migration 0208's CHECK holds 30 days without it, 90 with it).
+ */
 export const ENDPOINT_TOKEN_MAX_DAYS = 30;
+export const ENDPOINT_TOKEN_RELAXED_MAX_DAYS = 90;
 /** the admin must set the device cap: there is no unlimited default */
 export const ENDPOINT_TOKEN_MAX_DEVICES = 100_000;
 /** R15 §3.2: a device ticket lives 7 days and admits 8 identities (users) of its device */

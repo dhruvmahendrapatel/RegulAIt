@@ -165,6 +165,7 @@ import {
   dataKeyFormatError,
   decryptSecret,
 } from "./secrets.js";
+import { requireStepUp, type StepUpCheckArgs } from "./step-up.js";
 
 export const DATA_KEY_ENV = "REGULAIT_DATA_KEY";
 export const DATA_KEY_ROTATION_ENV = "REGULAIT_DATA_KEY_ROTATED_FROM";
@@ -801,7 +802,19 @@ export interface RecordAttestationArgs {
   method: DataKeyAttestationMethod;
   locationHint?: string | null;
   note?: string | null;
+  /** ADR-0197 Q6: how the person confirmed it was them (the `key_management` step-up), recorded in the audit row */
+  stepUp?: string;
 }
+
+/**
+ * ADR-0197 Q6: recording a custody attestation is a `key_management` step-up, bound to `{op, keyId}` as every key
+ * operation is: the act and the key it is about (its fingerprint). A grant of another kind, or for another key or op,
+ * is refused unspent. The method claimed is not a step-up fact: the claim itself is recorded and audited.
+ */
+export const dataKeyAttestStepUp = (fingerprint: string): StepUpCheckArgs => ({
+  kind: "key_management",
+  facts: { op: "data_key_attest", keyId: fingerprint },
+});
 
 /**
  * File a custody claim. Audited with the actor and the fingerprint, because an
@@ -834,6 +847,7 @@ export async function recordAttestation(
       fingerprint: args.fingerprint,
       method: args.method,
       locationHint: args.locationHint ?? null,
+      ...(args.stepUp !== undefined ? { stepUp: args.stepUp, stepUpKind: "key_management" } : {}),
     },
   });
   return row!;
@@ -1049,6 +1063,11 @@ export function registerDataKeyRoutes(
       }
     }
 
+    // ADR-0197 Q6: a fresh `key_management` step-up for exactly this key and method (never an API key; the
+    // bootstrap credential only during first-admin setup, as for every step-up)
+    const su = await requireStepUp(db, req, reply, dataKeyAttestStepUp(fingerprint));
+    if (!su.ok) return reply;
+
     const actorUserId = req.authCtx.userId;
     let actorLabel = `bootstrap token (${req.authCtx.via})`;
     if (actorUserId) {
@@ -1067,6 +1086,7 @@ export function registerDataKeyRoutes(
       method: body.method,
       locationHint: body.locationHint ?? null,
       note: body.note ?? null,
+      stepUp: su.method,
     });
 
     return reply.status(201).send({

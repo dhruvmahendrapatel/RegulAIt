@@ -802,6 +802,10 @@ export interface PersonStdioRelaxation {
   scopeId: string;
   scopeName: string | null;
   createdAt: number;
+  /** ADR-0197 Q3: when it stops applying; null = a gateway before Q3 did not report it */
+  expiresAt: number | null;
+  /** past its expiry: it lowers nothing until an admin renews it */
+  expired: boolean;
 }
 
 /**
@@ -821,7 +825,11 @@ export function parsePersonStdioRelaxations(value: unknown): PersonStdioRelaxati
     if (typeof r.scopeKind !== "string" || !(PERSON_STDIO_SCOPES as readonly string[]).includes(r.scopeKind)) return null;
     if (r.from !== "microvm" || r.to !== "user_space_kernel") return null;
     if (r.scopeName !== null && !str(r.scopeName)) return null;
-    out.push({ id: r.id, scopeKind: r.scopeKind as PersonStdioScope, scopeId: r.scopeId, scopeName: r.scopeName as string | null, createdAt });
+    // ADR-0197 Q3: reported together, or (a gateway before Q3) not at all
+    const reported = r.expiresAt !== undefined || r.expired !== undefined;
+    const expiresAt = reported ? isoMs(r.expiresAt) : null;
+    if (reported && (expiresAt === null || typeof r.expired !== "boolean" || expiresAt <= createdAt)) return null;
+    out.push({ id: r.id, scopeKind: r.scopeKind as PersonStdioScope, scopeId: r.scopeId, scopeName: r.scopeName as string | null, createdAt, expiresAt, expired: r.expired === true });
   }
   return out;
 }
@@ -915,6 +923,9 @@ export const SUBJECT_REFUSALS: Readonly<Record<string, string>> = {
   invalid_project_id: "That project id could not be read. Refresh the list.",
   project_not_found: "That project no longer exists. Refresh the list.",
   changed_concurrently: "This changed while your request was being checked, so nothing was saved. Reload and try again.",
+  // ADR-0197 Q3
+  relaxation_expired: "This L2 allowance has expired and no longer applies. Renew it to allow L2 again.",
+  no_relaxation: "There is no L2 allowance here to renew. Refresh the page.",
 };
 
 export function subjectRefusal(error: unknown): string | null {

@@ -6,8 +6,9 @@ and its review. Written from ADR text only; no shared source, product test, cont
 These are semantic requests and expected decision projections, not HTTP DTOs. `placement_eligible` means only that the
 isolation constraint can be met; it never authorizes a sponsor, actor, grant or upstream call.
 
-Counts: 149 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, and 6 pinned by slice I2, see
-below), 7 revised, 60 new (9 of them added by slice I2, 4 by the owner decision C build, 5 by slice A1).
+Counts: 150 vectors = 82 from X50 (13 of them re-pinned by owner decisions A and B, and 6 pinned by slice I2, see
+below), 7 revised, 61 new (9 of them added by slice I2, 4 by the owner decision C build, 5 by slice A1, 1 by ADR-0197
+Q3: `person-stdio-expired-relaxation-stays-L3`, an expired relaxation stays at L3).
 48 carry `"pendingBranch": "b6-isolation-i3@cee8a67c…"`: every vector that cites an
 amendment from K to W, whose text is not yet on `main` (the checker enforces this marker both ways). Find them with
 `grep -n pendingBranch placement-semantic-corpus.json`.
@@ -138,6 +139,15 @@ active, an invented `expired` state, a state with no relaxation and a relaxation
 runner (`adr0190-i2-placement-decision.test.ts`) treats only an `active` row as in scope, as the resolution reads only
 rows with `cleared_at IS NULL`; the database test covers that read. Like the four above, these were written by the
 builder, who had read the implementation.
+
+## Added by ADR-0197 Q3 (2026-10-18)
+
+This supersedes slice A1's "no expiry". A relaxation now expires 30 days after it is set or renewed (migration 0208),
+and the resolution reads only rows with `cleared_at IS NULL AND expires_at > now()`. `personStdioRelaxationState`
+gains `expired`, which never relaxes. One vector, `person-stdio-expired-relaxation-stays-L3`: an expired, uncleared
+server-scope relaxation leaves an interactive person's call at L3. A1's "invented `expired` state" control now
+invents `lapsed` on the same cleared vector, and two new controls (an expired row relaxing, an expired row read as
+active) make 38. Written by the builder, who had read the implementation.
 
 ## Checks
 
@@ -302,6 +312,7 @@ not I2 conformance or runtime attestation.
 | `person-stdio-workload-token-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
 | `person-stdio-interactive-relaxed-server-L2` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
 | `person-stdio-cleared-relaxation-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
+| `person-stdio-expired-relaxation-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (ADR-0197 Q3) |
 | `person-stdio-cleared-server-relaxation-stays-L3` | main | Decision 7 items 1–2; Owner decision C | claude-new (slice A1) |
 
 ## History
