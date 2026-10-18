@@ -83,6 +83,30 @@ describe("person's own stdio call relaxations", () => {
   });
 });
 
+describe("ADR-0197 Q3: a relaxation's expiry", () => {
+  it("reads the expiry and whether it has passed; a gateway before Q3 reports none (null)", () => {
+    const list = parsePersonStdioRelaxations(
+      envelope([
+        relaxation({ expiresAt: "2026-11-16T10:00:00.000Z", expired: false }),
+        relaxation({ id: "r2", scopeKind: "project", scopeId: "p1", expiresAt: "2026-10-18T09:00:00.000Z", expired: true }),
+        relaxation({ id: "r3", scopeId: "s3" }),
+      ]),
+    );
+    expect(relaxationFor(list, "mcp_server", "s1")).toMatchObject({ expiresAt: Date.parse("2026-11-16T10:00:00.000Z"), expired: false });
+    expect(relaxationFor(list, "project", "p1")).toMatchObject({ expired: true });
+    expect(relaxationFor(list, "mcp_server", "s3")).toMatchObject({ expiresAt: null, expired: false });
+  });
+
+  it.each([
+    ["an expiry with no state", relaxation({ expiresAt: "2026-11-16T10:00:00.000Z" })],
+    ["a state with no expiry", relaxation({ expired: true })],
+    ["an unreadable expiry", relaxation({ expiresAt: "soon", expired: false })],
+    ["an expiry before it was set", relaxation({ expiresAt: "2026-10-01T00:00:00.000Z", expired: true })],
+  ])("%s is unmeasured (null)", (_name, row) => {
+    expect(parsePersonStdioRelaxations(envelope([row]))).toBeNull();
+  });
+});
+
 describe("project sensitivity", () => {
   it("reads every project; an unresolved project reads effective null", () => {
     const list = parseProjectSensitivities({ projects: [project(), project({ projectId: "p2", useCaseCount: 0, useCaseSensitivity: null, effectiveSensitivity: null })] });

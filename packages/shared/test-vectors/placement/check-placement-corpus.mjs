@@ -19,8 +19,9 @@ const SECTION_RE = /^(Decision (1|2|3|4|6|7|8|11|14)(\b| )|Test strategy: |Amend
 // Owner decision C (2026-10-15): who made a call with no agent, and where a "person's own stdio call" relaxation is set
 const CALLERS = ['interactive_person', 'api_key', 'workload_token'];
 const RELAXATION_SCOPES = ['mcp_server', 'project'];
-// slice A1: an active relaxation row, or one an admin cleared (revoked). The as-built model has no expiry.
-const RELAXATION_STATES = ['active', 'cleared'];
+// slice A1: an active relaxation row, or one an admin cleared (revoked). ADR-0197 Q3: or one past its expiry (30 days
+// after it was set or renewed), which nobody cleared.
+const RELAXATION_STATES = ['active', 'cleared', 'expired'];
 const PENDING_SECTION_RE = /^Amendment [K-W]$/;
 const ID_RE = /^[A-Za-z0-9_-]+$/;
 const DOTTED_QUAD_127_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
@@ -45,7 +46,7 @@ function requiredClassOf(q) {
   const inputs = [workloadFloor(q), q.sensitivityFloor, q.autonomyFloor, q.ownProfileFloor,
     ...q.complianceFloors.filter((x) => x !== null), q.parentRequiredClass].filter((x) => x !== null && x !== undefined);
   // decision 7 item 5 as amended by owner decision C: L2 only for an mcp_stdio call with no agent, from a person in an
-  // interactive session, where an active (not cleared) relaxation is set (server or project); every other unknown or
+  // interactive session, where an active (not cleared, not expired) relaxation is set (server or project); every other unknown or
   // low-assurance case L3
   const relaxed = q.workloadKind === 'mcp_stdio' && q.agentAssurance === 'unknown' && q.caller === 'interactive_person' && RELAXATION_SCOPES.includes(q.personStdioRelaxation) &&
     q.personStdioRelaxationState === 'active';
@@ -109,10 +110,10 @@ export function checkPlacementCorpus(c) {
     if (q.personStdioRelaxation !== undefined && q.personStdioRelaxation !== null) assert(RELAXATION_SCOPES.includes(q.personStdioRelaxation), `${v.id}: relaxation scope (never org-wide)`);
     // slice A1: a relaxation names its state, and only a relaxation has one
     const scoped = q.personStdioRelaxation !== undefined && q.personStdioRelaxation !== null;
-    if (scoped) assert(RELAXATION_STATES.includes(q.personStdioRelaxationState), `${v.id}: relaxation state (active or cleared; none expire)`);
+    if (scoped) assert(RELAXATION_STATES.includes(q.personStdioRelaxationState), `${v.id}: relaxation state (active, cleared or expired)`);
     else assert.equal(q.personStdioRelaxationState, undefined, `${v.id}: a relaxation state with no relaxation`);
-    // a cleared relaxation never relaxes
-    if (v.id.startsWith('person-stdio-') && q.personStdioRelaxationState === 'cleared') assert.equal(e.requiredClass, 'L3', v.id);
+    // a cleared or an expired relaxation never relaxes (ADR-0197 Q3: fail closed)
+    if (v.id.startsWith('person-stdio-') && ['cleared', 'expired'].includes(q.personStdioRelaxationState)) assert.equal(e.requiredClass, 'L3', v.id);
     // owner decision C: a caller other than an interactive person is never relaxed
     if (v.id.startsWith('person-stdio-') && q.caller !== 'interactive_person') assert.equal(e.requiredClass, 'L3', v.id);
     if (e.requiredClass) {
@@ -288,7 +289,10 @@ export const PLACEMENT_MUTATIONS = [
   ['cleared relaxation still relaxes', (c) => { const e = find(c, 'person-stdio-cleared-relaxation-stays-L3').expectedProjection; e.outcome = 'placement_eligible'; e.requiredClass = 'L2'; e.minimumSelectableClass = 'L2'; e.selectedClassAtLeast = 'L2'; e.notAnAuthorizationGrant = true; }],
   ['cleared relaxation read as active', (c) => { find(c, 'person-stdio-cleared-server-relaxation-stays-L3').semanticRequest.personStdioRelaxationState = 'active'; }],
   // on a cleared (L3) vector, so only the RELAXATION_STATES check can reject it (an active one fails the class check too)
-  ['relaxation with an invented expiry state', (c) => { find(c, 'person-stdio-cleared-relaxation-stays-L3').semanticRequest.personStdioRelaxationState = 'expired'; }],
+  ['relaxation with an invented state', (c) => { find(c, 'person-stdio-cleared-relaxation-stays-L3').semanticRequest.personStdioRelaxationState = 'lapsed'; }],
+  // ADR-0197 Q3 (2026-10-18)
+  ['expired relaxation still relaxes', (c) => { const e = find(c, 'person-stdio-expired-relaxation-stays-L3').expectedProjection; e.outcome = 'placement_eligible'; e.requiredClass = 'L2'; e.minimumSelectableClass = 'L2'; e.selectedClassAtLeast = 'L2'; e.notAnAuthorizationGrant = true; }],
+  ['expired relaxation read as active', (c) => { find(c, 'person-stdio-expired-relaxation-stays-L3').semanticRequest.personStdioRelaxationState = 'active'; }],
   ['relaxation state with no relaxation', (c) => { find(c, 'person-stdio-interactive-unrelaxed-L3').semanticRequest.personStdioRelaxationState = 'active'; }],
   ['relaxation without its state', (c) => { delete find(c, 'person-stdio-interactive-relaxed-L2').semanticRequest.personStdioRelaxationState; }],
   ['relaxed sensitivity lowers code_exec', (c) => { const e = find(c, 'code_exec-relaxed-sensitivity-keeps-L3').expectedProjection; e.requiredClass = 'L1'; e.minimumSelectableClass = 'L1'; e.selectedClassAtLeast = 'L1'; }],

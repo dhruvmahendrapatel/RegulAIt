@@ -3,10 +3,14 @@
  * issue an enrolment token for an enabled endpoint agent source (shown once,
  * as the enrolment file MDM delivers), revoke tokens, and list and revoke the
  * devices that enrolled. Devices and their users appear only as pseudonyms.
+ * ADR-0197 Q13: a token lives 30 days at most unless the admin confirms it is
+ * them for a longer one (up to 90, audited). Q14: revoking a token stops new
+ * enrolments; revoking the devices it enrolled is a separate, unchecked choice.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, CodeBlock, ConfirmModal, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
 import v from "../../views.module.css";
@@ -20,6 +24,8 @@ interface TokenView {
   createdAt: string;
   expiresAt: string;
   revokedAt: string | null;
+  /** ADR-0197 Q14: devices it enrolled that are not revoked (absent from a gateway before Q14) */
+  devicesActive?: number;
 }
 interface IdentityView {
   identityId: string;
@@ -47,6 +53,9 @@ interface DevicesView {
 }
 
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
+/** ADR-0197 Q13: the default and strict maximum, and the most a step-up relaxation allows */
+const TOKEN_DAYS = 30;
+const TOKEN_RELAXED_DAYS = 90;
 
 export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySourceView[] }) {
   const act = useAction();
@@ -58,6 +67,8 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
   const [enrolFile, setEnrolFile] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<{ kind: "token"; row: TokenView } | { kind: "device"; row: DeviceView } | null>(null);
+  // ADR-0197 Q14: off by default each time the dialog opens
+  const [alsoDevices, setAlsoDevices] = useState(false);
   const chosen = targets.find((s) => s.id === sourceId) ?? null;
 
   const tokens = useQuery({
@@ -77,14 +88,12 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
     const expiresInDays = Number(days);
     if (!label.trim()) return setError("Name the token, for example the MDM group it is for.");
     if (!Number.isInteger(cap) || cap < 1 || cap > 100_000) return setError("Set how many devices may enrol with it (1 to 100000).");
-    if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 30) return setError("Expiry is 1 to 30 days.");
+    if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > TOKEN_RELAXED_DAYS) return setError(`Expiry is 1 to ${TOKEN_RELAXED_DAYS} days.`);
     setError(null);
+    const body = { label: label.trim(), deviceCap: cap, expiresInDays };
     void act.run(async () => {
-      const out = await api.post<{ token: TokenView; enrolFile: Record<string, string> }>(`/v1/discovery/sources/${chosen.id}/enrolment-tokens`, {
-        label: label.trim(),
-        deviceCap: cap,
-        expiresInDays,
-      });
+      // past 30 days the gateway asks for a step-up (a relaxation of this token, audited); the same body is resent
+      const out = await withStepUp((h) => stepUpApi.post<{ token: TokenView; enrolFile: Record<string, string> }>(`/v1/discovery/sources/${chosen.id}/enrolment-tokens`, body, h));
       setEnrolFile(JSON.stringify(out.enrolFile, null, 2));
       setLabel("");
       await tokens.refetch();
@@ -94,13 +103,16 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
 
   const confirmRevoke = () => {
     const r = revoking;
+    const revokeDevices = alsoDevices;
     setRevoking(null);
+    setAlsoDevices(false);
     if (!r) return;
     void act.run(async () => {
       if (r.kind === "token") {
-        await api.post(`/v1/discovery/enrolment-tokens/${r.row.id}/revoke`, {});
+        const out = await api.post<{ devicesRevoked?: number }>(`/v1/discovery/enrolment-tokens/${r.row.id}/revoke`, { revokeDevices });
         await tokens.refetch();
-        return `Enrolment token '${r.row.label}' revoked`;
+        if (revokeDevices) await devices.refetch();
+        return revokeDevices ? `Enrolment token '${r.row.label}' revoked with ${out.devicesRevoked ?? 0} device(s)` : `Enrolment token '${r.row.label}' revoked`;
       }
       const out = await api.post<{ identitiesRevoked: number }>(`/v1/discovery/endpoint-devices/${r.row.id}/revoke`, {});
       await devices.refetch();
@@ -139,7 +151,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                   <Field label="Device cap (required)">
                     <Input inputMode="numeric" value={deviceCap} onChange={(e) => setDeviceCap(e.target.value)} />
                   </Field>
-                  <Field label="Expires in (days, at most 30)">
+                  <Field label={`Expires in (days, ${TOKEN_DAYS} by default; past ${TOKEN_DAYS}, up to ${TOKEN_RELAXED_DAYS}, asks you to confirm it's you and is audited)`}>
                     <Input inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} />
                   </Field>
                 </div>
@@ -228,13 +240,32 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
         danger
         title={revoking?.kind === "device" ? "Revoke this device?" : "Revoke this enrolment token?"}
         body={
-          revoking?.kind === "device"
-            ? "Its agent identities, keys and tokens are revoked and it uploads nothing more. Enrolling it again needs a new ticket."
-            : "It redeems no new device ticket, and its unexpired tickets register no new user. Devices already enrolled keep reporting."
+          revoking?.kind === "device" ? (
+            "Its agent identities, keys and tokens are revoked and it uploads nothing more. Enrolling it again needs a new ticket."
+          ) : (
+            <div className={v.stackTight}>
+              <p>
+                It redeems no new device ticket, and its unexpired tickets register no new user.{" "}
+                {alsoDevices ? "The devices it enrolled are revoked too." : "Devices already enrolled keep reporting."}
+              </p>
+              <label className={v.rowTight}>
+                <input type="checkbox" checked={alsoDevices} onChange={(e) => setAlsoDevices(e.target.checked)} />
+                <span>
+                  {revoking?.kind === "token" && revoking.row.devicesActive !== undefined
+                    ? `Also revoke the ${revoking.row.devicesActive} device(s) it enrolled`
+                    : "Also revoke the devices it enrolled"}
+                  {" "}(their agent identities, keys and tokens; they upload nothing more)
+                </span>
+              </label>
+            </div>
+          )
         }
-        confirmLabel="Revoke"
+        confirmLabel={revoking?.kind === "token" && alsoDevices ? "Revoke token and devices" : "Revoke"}
         onConfirm={confirmRevoke}
-        onCancel={() => setRevoking(null)}
+        onCancel={() => {
+          setRevoking(null);
+          setAlsoDevices(false);
+        }}
       />
     </Card>
   );

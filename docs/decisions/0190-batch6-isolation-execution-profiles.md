@@ -2407,3 +2407,54 @@ defaults now name these references, so a stock install no longer needs `REGULAIT
 - The packages' visibility is unconfirmed: GitHub's docs say it is private on first publish.
 - The pulled image's `.Id` has not been compared with the recorded image id.
 - No engine has been enabled, and no engine task has run end to end. Real gVisor still waits on the `runsc` re-pin.
+
+## As built: ADR-0197 Q3, a person's own stdio call relaxation expires (2026-10-18, migration 0208)
+
+ADR-0197 Q3 (owner, 2026-10-18): "stdio relaxations for a person (ADR-0190 A1) expire by default, renewable through an
+audited step-up." This supersedes A1 item 6's "There is no expiry" and owner decision C's as-built "a relaxation stops
+applying only when it is cleared".
+
+1. **The expiry.** Migration 0208 adds `expires_at` (NOT NULL), `renewed_at` and `renewed_by_user_id` to
+   `execution_person_stdio_relaxations`. A set writes `now() + 30 days` (`PERSON_STDIO_RELAXATION_DAYS`, also the
+   column default). A CHECK holds `expires_at` after `created_at` and at most 30 days after the set or the latest
+   renewal. There is no setting to lengthen it.
+2. **No grandfathering (ADR-0180).** The backfill sets an existing row's expiry to 30 days after it was set, so a row
+   older than that stops applying when 0208 runs. 0201's guard is disabled for that one UPDATE and enabled again in
+   the same migration.
+3. **Fail closed.** `personStdioRelaxation` (execution-placement.ts) reads `cleared_at IS NULL AND expires_at > now()`
+   on the database clock. An expired, uncleared row lowers nothing: the call is back at L3 and the decision names no
+   relaxation. The project view's `personStdioRelaxationId` reads the same way.
+4. **Renewal.** `PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId` with `{relaxed: true, renew: true}`
+   renews the uncleared row, whether in force or expired, for 30 days from now.
+   - It is a `settings_relax` step-up bound to `{op: "person_stdio_renew", relaxationId, scopeKind, scopeId}`, plus
+     the stdio program digest for a server. A server renewal takes the same program lock as a set.
+   - It is audited `execution-person-stdio-relaxation-renewed`, with the expiry before and after and the step-up
+     method.
+   - The row keeps its id, so decisions that relied on it still name it.
+   - Renewing where there is no uncleared row is 404 `no_relaxation`.
+   - `{relaxed: true}` on a scope whose row has expired is refused 409 `relaxation_expired`, so a renewal is never
+     an implied side effect of a set.
+5. **The guard** (0201's function, replaced by 0208, search_path still pinned, TRUNCATE still refused) admits two
+   UPDATEs of an uncleared row, and nothing on a cleared row:
+   - a clearing, which changes nothing else (the expiry and the renewal included);
+   - a renewal: a later `renewed_at`, its actor and a later `expires_at`.
+6. **The Decision BOM record** (`decisionExecutionRelaxationRecordSchema`) gains `expiresAt`, `renewedBy` and
+   `renewedAt`. They are optional, but a gateway reports all three or none; a gateway before Q3 reports none.
+   - The schema and the web reader refuse an expiry at or before the set, a renewal without its actor or time, and a
+     renewal before the set.
+   - The panel shows "Expires" (with the latest renewal), and "Today: Expired …; L3 applies again until an admin
+     renews it" once it has passed.
+   - The signed facts are unchanged, as in A1.
+7. **The Isolation panel** shows the expiry, an expired allowance as L3, and "Renew L2 for 30 days" (step-up).
+8. **Vectors.** `personStdioRelaxationState` gains `expired`, which never relaxes. There is one new vector
+   (`person-stdio-expired-relaxation-stays-L3`), making 150. A1's invented-state control now uses `lapsed`, and two
+   new controls bring the total to 38.
+9. **Tests.** `zz-adr0197-q3-relaxation-expiry.test.ts` (database) covers:
+   - the 0208 CHECKs and guard;
+   - fail closed on an expired row;
+   - renewal refused with no grant or another act's grant (not spent), then renewed with the exact grant;
+   - the BOM record.
+   Also `ownerDecisionsCD.test.ts`, `bomExecution.test.tsx` and the vector checker.
+
+**Not verified.** The database test typechecks but did not run in the building session (no Postgres there). Migration
+0208 has no journal entry on this branch (the master adds it), so CI's database shards cannot apply it until then.
