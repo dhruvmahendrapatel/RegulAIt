@@ -1,10 +1,10 @@
 ---
-phase: batch-7-shadow-ai-sd0-sd3-merged-builder-wave-in-review
-last_updated: 2026-10-17
+phase: batch-7-shadow-ai-sd2b-sd4a-a4-a6-i4-u1-u2-u4-merged-sd4b-in-review
+last_updated: 2026-10-18
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-10-17-session-02.md
+last_session: sessions/2026-10-18-session-01.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,28 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-10-18 (night) - ADR-0195 SD2b, SD4a, A4 and A6, ADR-0193 I4 (content provenance P0 and trust tiers P1),
+ADR-0196 U1/U2/U4, the N2/N4/N8/N11/N12/N13 tail and engine image digests are merged.** Full record:
+[sessions/2026-10-18-session-01.md](sessions/2026-10-18-session-01.md). This paragraph supersedes the "Last
+migration", "Released" and "Open" lists of the 2026-10-17 (evening) paragraph below; its owner decisions stand.
+- **Merged (UTC)**, after #414: #411 (SD4a Go endpoint agent), #422 (STATE), #424 (expiring fixtures that had turned
+  main red), #425 (first engine image digests), #417 (N2 multi-replica stdio, **0204**), #419 (A6 env-name and CLI
+  presence signatures; environment-variable names and values are never stored), #418 (N12/N13), #426 (U2), #416
+  (N4/N11), #420 (SD2b federation signer, **0205**), #413 (N8/N1), #423 (U1), #430 (U4), #421 (A4) and #428 (I4,
+  **0206**).
+- **Last migration on main: 0206.** 0207 (#429) has its journal entry on its branch.
+- **Open, HOLD:** #427 (review-tail sweep, fix round 3 in recheck), #429 (SD4b gateway side, migration 0207, fix round
+  in recheck), #385 (gVisor CI job; upstream runsc check on 2026-10-20).
+- **Incidents:** two HOLD PRs were merged by sessions without a master release. #414 was merged by its fixer, and the
+  builder-written session 02 says the owner instructed it; the owner has not confirmed. #421 was merged by its recheck
+  reviewer, which then merged main into #428 before the master stopped it (M-087). The approved heads were what merged,
+  so no unreviewed code reached main. Prompt rules are tightened; a real control needs an owner decision (question 15).
+- **Owner questions open:** 15, listed in the session record. The most urgent is 15 (merge enforcement): required
+  human review on `main`, or a separate agent identity without merge rights.
+- **Next:** U3 visual consistency (U1 and U2 are merged), A5 federated git credentials (after SD2b), N10 lock-update
+  bot, SPIFFE bundle fetch and JWT-SVID, and the follow-ups from tonight's reviews (#413 L1/L2/N1, #420 test gaps and
+  wording, #428 R1 key race and R2 wording).
 
 **2026-10-17 (evening) - the first ADR-0195 slices, the server secure-by-default and reliability batches, engine task
 images, the enterprise UI harness (ADR-0196) and the N5-N9 ops tail are merged.** Full record:
