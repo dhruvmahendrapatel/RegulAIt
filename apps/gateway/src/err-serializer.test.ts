@@ -121,7 +121,7 @@ describe("the error serializer (Q10)", () => {
     const raise = Object.assign(new Error(`row ${MARKER} is immutable`), { code: "P0001", severity: "ERROR" });
     raise.name = "DatabaseError";
     expect(errLine(raise)).toBe(`DatabaseError [SQLSTATE P0001]: ${WITHHELD}`);
-    expect(errMessage(raise)).toBe(WITHHELD);
+    expect(errMessage(raise)).toBe(`DatabaseError [SQLSTATE P0001]: ${WITHHELD}`);
   });
 
   it("an error logged as pino's first argument goes through the same serializer", async () => {

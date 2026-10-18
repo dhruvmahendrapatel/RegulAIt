@@ -172,10 +172,13 @@ export function errSerializer(err: unknown): SafeErr {
 
 /**
  * The serialized message, for a site that stores or reports an error (a job's
- * `error`, an audit row's `detail`, a refusal's `detail`).
+ * `error`, an audit row's `detail`, a refusal's `detail`). A withheld shape
+ * gives its `errLine` (`Type [SQLSTATE n]: [withheld…]`) rather than the bare
+ * placeholder.
  */
 export function errMessage(err: unknown): string {
-  return errSerializer(err).message;
+  // a withheld shape keeps its type and SQLSTATE, so the stored copy still says what failed
+  return withheldLink(err) ? errLine(err) : errSerializer(err).message;
 }
 
 /**

@@ -559,7 +559,8 @@ Q10 replaces the hand-written error-to-text helpers from #413 (`safeErrorText`, 
 2. **Configured on the logger.** `resolveGatewayLogger` sets it for the `err` and `error` keys, and a `logMethod` hook
    moves a bare error argument (`log.error(err)`) under `err`: pino otherwise writes that error's raw message as the
    line's `msg`, a leak the old helpers did not cover.
-3. **Call sites.** Pino lines log `{ err }`. A stored copy or refusal uses `errMessage` (the serialized message), a
+3. **Call sites.** Pino lines log `{ err }`. A stored copy or refusal uses `errMessage` (the serialized message; a withheld shape keeps its type and SQLSTATE,
+   as `safeErrorMessage` did), a
    line written outside pino uses `errLine` (`Type (cause X) [SQLSTATE n]: message`) and a console field bag
    `errFields`; all three derive from the serializer. The 500 line is `{ status, method, route, path, err }`.
    **Deviation:** the failed query's SQL text (`sql`) and the `params` count are no longer on the 500 line: the
