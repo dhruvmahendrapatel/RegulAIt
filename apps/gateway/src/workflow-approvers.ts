@@ -35,3 +35,12 @@ export function stageExcludesInitiator(definition: WorkflowDefinition | null | u
 export function definitionNeedsSecondApprover(definition: WorkflowDefinition): boolean {
   return definition.stages.some((s) => (s.approvers ?? []).includes(APPROVER_ADMIN_NOT_INITIATOR));
 }
+
+/**
+ * whether starting this definition must be refused because its sign-off is owed by an admin other than the
+ * initiator and none exists: the stage could never be decided. Both start paths (the one instance-creation path and
+ * the shadow-AI default's install) ask this one question
+ */
+export async function secondApproverMissing(db: Db, definition: WorkflowDefinition, initiatorUserId: string): Promise<boolean> {
+  return definitionNeedsSecondApprover(definition) && (await adminsOtherThan(db, initiatorUserId)).length === 0;
+}

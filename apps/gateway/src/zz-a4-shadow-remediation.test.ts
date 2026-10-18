@@ -283,8 +283,38 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
     expect(otherViewer.json().pendingLink).toBeNull();
     const bootstrapViewer = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`);
     expect(bootstrapViewer.json().pendingLink).toBeNull();
-    const linked = await post(`/v1/shadow-ai/findings/${repoFindingId}/remediate`, { instanceId: again.json().id });
+    // the link is the initiator's own act: another admin, the bootstrap token, or the initiator naming someone
+    // else's workflow is refused
+    const link = (instanceId: string, headers = adminA.auth, findingId = repoFindingId) =>
+      post(`/v1/shadow-ai/findings/${findingId}/remediate`, { instanceId }, headers);
+    const byOther = await link(again.json().id, adminB.auth);
+    expect(byOther.statusCode).toBe(403);
+    expect(byOther.json().error).toBe("not_your_workflow");
+    const byBootstrap = await link(again.json().id, AUTH);
+    expect(byBootstrap.statusCode).toBe(403);
+    const othersInstance = await link(start.json().id);
+    expect(othersInstance.statusCode).toBe(403);
+    // a workflow of another change type is refused, even one the caller started with this finding's reference
+    const unrelated = await post(
+      "/v1/workflows/instances",
+      { ...body, change: { ...body.change, changeType: "a4-unrelated" } },
+      adminA.auth,
+    );
+    expect(unrelated.statusCode).toBe(201);
+    const wrongType = await link(unrelated.json().id);
+    expect(wrongType.statusCode).toBe(422);
+    expect(wrongType.json().error).toBe("workflow_not_linkable");
+    // the caller's own remediation workflow for THIS finding is not linkable to another finding
+    const wrongFinding = await link(again.json().id, adminA.auth, deviceFindingId);
+    expect(wrongFinding.statusCode).toBe(422);
+    const linked = await link(again.json().id);
     expect(linked.statusCode).toBe(200);
+    // a link is set once: a second link, even of the caller's own other workflow, never re-points it
+    const relink = await link(again.json().id);
+    expect(relink.statusCode).toBe(409);
+    expect(relink.json().error).toBe("already_linked");
+    const [stillLinked] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.id, repoFindingId));
+    expect(stillLinked!.remediationInstanceId).toBe(again.json().id);
     const after = await get(`/v1/shadow-ai/findings/${repoFindingId}/remediation-plan`, adminA.auth);
     expect(after.json().pendingLink).toBeNull();
   });
@@ -312,6 +342,10 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
     expect(aborted.json().status).toBe("aborted");
     const after = await get(`/v1/shadow-ai/findings/${deviceFindingId}/remediation-plan`, adminA.auth);
     expect(after.json().pendingLink).toBeNull();
+    // and the server refuses to link it, not only the screen
+    const linked = await post(`/v1/shadow-ai/findings/${deviceFindingId}/remediate`, { instanceId: start.json().id }, adminA.auth);
+    expect(linked.statusCode).toBe(422);
+    expect(linked.json()).toMatchObject({ error: "workflow_not_linkable", detail: "the workflow is aborted" });
   });
 
   it("the sign-off goes to admins other than the initiator, and the initiator can never decide it", async () => {

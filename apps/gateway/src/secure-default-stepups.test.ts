@@ -12,7 +12,8 @@ import { privateRangesRelaxation, registryCreateRelaxations, registryUpdateRelax
 import { cardFieldsWithScrubMarker } from "./mrm.js";
 import { remediationStartBody, repoRelativePath, SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai.js";
 import { shadowAiRemediationDefinition } from "./shadow-ai-remediation.js";
-import { APPROVER_ADMIN_NOT_INITIATOR, stageExcludesInitiator } from "./workflow-approvers.js";
+import { APPROVER_ADMIN_NOT_INITIATOR, secondApproverMissing, stageExcludesInitiator } from "./workflow-approvers.js";
+import type { Db } from "@regulait/db";
 import { isStepUpPrompt } from "./step-up.js";
 
 describe("MCP registry relaxations", () => {
@@ -201,5 +202,33 @@ describe("a step-up prompt is not a deny", () => {
     expect(isStepUpPrompt({ error: "step_up_required", methods: [], credential: "bootstrap" })).toBe(false);
     expect(isStepUpPrompt({ error: "step_up_unavailable", methods: [] })).toBe(false);
     expect(isStepUpPrompt({ error: "chatops_step_up_required", methods: [] })).toBe(false);
+  });
+});
+
+describe("ADR-0195 A4: a sign-off nobody but the initiator could decide is refused at start", () => {
+  /** a database whose admin query answers `rows`; `calls` counts the queries */
+  function adminsDb(rows: Array<{ id: string }>) {
+    const state = { calls: 0 };
+    const db = { select: () => ({ from: () => ({ where: async () => (state.calls++, rows) }) }) } as unknown as Db;
+    return { db, state };
+  }
+
+  it("refuses the default when no other active admin exists, and allows it when one does", async () => {
+    const none = adminsDb([]);
+    expect(await secondApproverMissing(none.db, shadowAiRemediationDefinition(), "initiator")).toBe(true);
+    expect(none.state.calls).toBe(1);
+    const one = adminsDb([{ id: "other-admin" }]);
+    expect(await secondApproverMissing(one.db, shadowAiRemediationDefinition(), "initiator")).toBe(false);
+  });
+
+  it("never asks for a second admin when no stage needs one", async () => {
+    const definition = shadowAiRemediationDefinition();
+    const relaxed = {
+      ...definition,
+      stages: definition.stages.map((s) => (s.type === "human_approval" ? { ...s, approvers: ["requesting_user"] } : s)),
+    };
+    const none = adminsDb([]);
+    expect(await secondApproverMissing(none.db, relaxed, "initiator")).toBe(false);
+    expect(none.state.calls).toBe(0);
   });
 });

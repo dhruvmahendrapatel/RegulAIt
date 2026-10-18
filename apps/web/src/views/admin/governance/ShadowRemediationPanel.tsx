@@ -20,6 +20,7 @@ import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../ad
 import { withRefusalCopy } from "./refusalCopy";
 import {
   SHADOW_REMEDIATION_REFUSALS,
+  linkableInstances,
   startFormFrom,
   startInstanceBody,
   startWillMatch,
@@ -215,7 +216,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
             onChange={(e) => { setProblem(null); setExisting(e.target.value); }}
           >
             {optionEls(
-              (instances.data?.instances ?? []).map((i) => ({
+              linkableInstances(p.findingId, instances.data?.instances ?? []).map((i) => ({
                 v: i.id,
                 l: `${i.change?.description ?? i.id.slice(0, 8)} · ${i.status} · ${ago(i.createdAt)}`,
               })),

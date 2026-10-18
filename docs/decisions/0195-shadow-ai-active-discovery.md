@@ -935,6 +935,15 @@ Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section
    "started but not linked" state from it, so after a reload it still offers only "Retry linking this workflow"; the
    start button and the "link an existing workflow" form stay disabled until the link lands. The screen keeps the
    finding reference on the description whatever the person types. Browser storage is not used.
+   The link route (`POST /v1/shadow-ai/findings/:id/remediate`) enforces the same on the server:
+   - only the instance's own initiator may link it (403 `not_your_workflow`; the bootstrap token has no user and is
+     refused);
+   - the instance must be a live `shadow-ai-remediation` workflow whose description carries THIS finding's reference
+     (422 `workflow_not_linkable`), and not one already linked to another finding (409 `instance_already_linked`);
+   - a link is set once. A finding already linked is refused (409 `already_linked`), and the update is conditional
+     on `remediation_instance_id IS NULL`, so a concurrent second link cannot overwrite the first. There is no
+     replace path; an admin who wants another user's workflow linked asks that user to link it.
+   The screen's "link an existing workflow" list offers only live remediation workflows carrying the reference.
 5. **Open-source check (ADR-0176).** Nothing new to adopt: validation is zod, queries are drizzle, both already pinned.
 6. **Sign-off by a second person (owner question Q1, decided by the master session under ADR-0180; the owner may
    overrule).** The engine had no per-template separation of duties for a workflow sign-off: a `requesting_user`

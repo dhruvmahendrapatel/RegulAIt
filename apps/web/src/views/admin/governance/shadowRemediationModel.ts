@@ -44,6 +44,19 @@ export interface RemediationPlan {
 /** the reference every remediation workflow's description carries (how the server finds an unlinked start) */
 export const remediationReference = (findingId: string) => `shadow-AI finding ${findingId}`;
 
+/** the workflows the link route can accept for this finding: a live remediation workflow started from its plan. The
+ * server also requires the viewer to be its initiator, and refuses a finding that is already linked */
+export const linkableInstances = <T extends { status: string; change?: { description?: string; changeType?: string } }>(
+  findingId: string,
+  instances: readonly T[],
+): T[] =>
+  instances.filter(
+    (i) =>
+      i.status !== "aborted" &&
+      i.change?.changeType === "shadow-ai-remediation" &&
+      (i.change.description ?? "").includes(remediationReference(findingId)),
+  );
+
 /** the environment placeholder the server sends until one is stated; the start route refuses it */
 export const ENVIRONMENT_UNSTATED = "unstated";
 
@@ -110,4 +123,8 @@ export const SHADOW_REMEDIATION_REFUSALS: RefusalSentences = {
   environment_unstated: "Name the environment the usage runs in before starting the workflow.",
   environment_not_allowed: "That environment is not one a deploy target or workflow assignment rule uses.",
   bootstrap_cannot_initiate: "A workflow has to be started by a named person, not the bootstrap credential.",
+  not_your_workflow: "Only the person who started a remediation workflow can link it to a finding.",
+  workflow_not_linkable: "That workflow cannot be linked: it must be a live remediation workflow started from this finding's plan.",
+  already_linked: "This finding is already linked to a remediation workflow.",
+  instance_already_linked: "That workflow is already linked to another finding.",
 };

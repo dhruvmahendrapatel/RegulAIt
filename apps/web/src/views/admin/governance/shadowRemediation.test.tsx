@@ -10,6 +10,7 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import { PlanBody } from "./ShadowRemediationPanel";
 import {
+  linkableInstances,
   remediationReference,
   startFormFrom,
   startInstanceBody,
@@ -107,5 +108,19 @@ describe("a workflow that started but never linked (server state)", () => {
     const coming = render(plan({ assignment: { changeType: "shadow-ai-remediation", ruleConfigured: false, defaultTemplate: { name: "x", state: "not_installed" } } }));
     expect(coming).not.toContain('data-testid="shadow-no-assignment-rule"');
     expect(coming).toContain('data-testid="shadow-default-workflow"');
+  });
+});
+
+describe("the link list", () => {
+  it("offers only live remediation workflows started from this finding's plan", () => {
+    const ref = remediationReference(FINDING);
+    const listed = [
+      { id: "ok", status: "blocked_on_plan", change: { changeType: "shadow-ai-remediation", description: `x — ${ref}` } },
+      { id: "aborted", status: "aborted", change: { changeType: "shadow-ai-remediation", description: `x — ${ref}` } },
+      { id: "other-type", status: "running", change: { changeType: "feature", description: `x — ${ref}` } },
+      { id: "other-finding", status: "running", change: { changeType: "shadow-ai-remediation", description: "x — shadow-AI finding 0" } },
+      { id: "no-change", status: "running" },
+    ];
+    expect(linkableInstances(FINDING, listed).map((i) => i.id)).toEqual(["ok"]);
   });
 });

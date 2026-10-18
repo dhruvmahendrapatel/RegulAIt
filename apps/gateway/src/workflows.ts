@@ -77,8 +77,9 @@ import {
   deleteRulesOfRetiredDefault,
   ensureShadowAiRemediationDefault,
   shadowAiRemediationDefaultState,
+  shadowAiRemediationDefinition,
 } from "./shadow-ai-remediation.js";
-import { APPROVER_ADMIN_NOT_INITIATOR, adminsOtherThan, definitionNeedsSecondApprover } from "./workflow-approvers.js";
+import { APPROVER_ADMIN_NOT_INITIATOR, adminsOtherThan, secondApproverMissing } from "./workflow-approvers.js";
 import { networkFacingSignal } from "./dev-secrets.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
@@ -2653,7 +2654,7 @@ export async function startWorkflowInstanceWithTemplates(
 
   // ADR-0195 A4: a sign-off owed by an admin other than the initiator needs one to exist, or the stage could never
   // be decided: refused before anything is written
-  if (definitionNeedsSecondApprover(merged) && (await adminsOtherThan(db, initiatorUserId)).length === 0) {
+  if (await secondApproverMissing(db, merged, initiatorUserId)) {
     return { ok: false, status: 422, body: secondApproverUnavailable() };
   }
 
@@ -3032,7 +3033,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
           const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
           if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
         }
-        if ((await adminsOtherThan(db, userId)).length === 0) return reply.status(422).send(secondApproverUnavailable());
+        if (await secondApproverMissing(db, shadowAiRemediationDefinition(), userId)) {
+          return reply.status(422).send(secondApproverUnavailable());
+        }
         await ensureShadowAiRemediationDefault(db, userId);
       }
     }

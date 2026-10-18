@@ -1490,7 +1490,12 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     const [row] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.id, findingId));
     if (!row) return reply.status(404).send({ error: "unknown_finding" });
     const [instance] = await db
-      .select({ id: workflowInstances.id })
+      .select({
+        id: workflowInstances.id,
+        initiatorUserId: workflowInstances.initiatorUserId,
+        status: workflowInstances.status,
+        change: workflowInstances.change,
+      })
       .from(workflowInstances)
       .where(eq(workflowInstances.id, body.instanceId));
     if (!instance) {
@@ -1498,6 +1503,43 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         error: "invalid_reference",
         detail: "instanceId names no workflow instance — start one through POST /v1/workflows/instances first",
       });
+    }
+    // a link is set once: re-pointing a linked finding would silently swap the workflow that answers for it
+    if (row.remediationInstanceId) {
+      return reply.status(409).send({
+        error: "already_linked",
+        detail: `this finding is already linked to remediation workflow ${row.remediationInstanceId}`,
+      });
+    }
+    // only the caller's OWN workflow: another user controls that workflow's description and drives its stages. The
+    // bootstrap token has no user, so it starts nothing it could link
+    const callerId = req.authCtx.userId;
+    if (!callerId || instance.initiatorUserId !== callerId) {
+      return reply.status(403).send({
+        error: "not_your_workflow",
+        detail: "only the user who started a remediation workflow can link it to a finding",
+      });
+    }
+    const change = (instance.change ?? {}) as { changeType?: unknown; description?: unknown };
+    const refusal =
+      instance.status === "aborted"
+        ? "the workflow is aborted"
+        : change.changeType !== SHADOW_AI_REMEDIATION_CHANGE_TYPE
+          ? `the workflow's change type is not '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}'`
+          : typeof change.description !== "string" || !change.description.includes(remediationReference(row.id))
+            ? "the workflow was not started from this finding's remediation plan"
+            : null;
+    if (refusal) {
+      return reply.status(422).send({ error: "workflow_not_linkable", detail: refusal });
+    }
+    // an instance answers for one finding only
+    const [elsewhere] = await db
+      .select({ id: shadowAiFindings.id })
+      .from(shadowAiFindings)
+      .where(eq(shadowAiFindings.remediationInstanceId, body.instanceId))
+      .limit(1);
+    if (elsewhere) {
+      return reply.status(409).send({ error: "instance_already_linked", detail: "that workflow is already linked to another finding" });
     }
     const [updated] = await db
       .update(shadowAiFindings)
@@ -1509,11 +1551,13 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         dispositionAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(shadowAiFindings.id, findingId))
+      // conditional: a concurrent link that landed first wins, and this one is refused rather than overwriting it
+      .where(and(eq(shadowAiFindings.id, findingId), isNull(shadowAiFindings.remediationInstanceId)))
       .returning();
+    if (!updated) return reply.status(409).send({ error: "already_linked", detail: "this finding was linked concurrently" });
     await audit(req.authCtx.userId, "shadow_ai_finding", findingId, SHADOW_AI_RULE_IDS.findingRemediationLinked, "allow",
       `finding for ${row.provider} on ${row.subject} linked to remediation workflow instance ${body.instanceId}`,
-      { instanceId: body.instanceId, provider: row.provider, subject: row.subject });
+      { instanceId: body.instanceId, initiatorUserId: instance.initiatorUserId, provider: row.provider, subject: row.subject });
     return updated;
   });
 }

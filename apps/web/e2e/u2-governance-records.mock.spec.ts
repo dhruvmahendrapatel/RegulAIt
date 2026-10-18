@@ -188,7 +188,14 @@ async function mockApi(page: Page, opts: { noWorkflowMatch?: boolean; failLinkOn
       startedNotLinked = INSTANCE;
       return json(route, { id: INSTANCE, status: "running" }, 201);
     }
-    if (p === "/v1/workflows/instances") return json(route, { instances: [{ id: INSTANCE, status: "running", createdAt: ISO, change: { description: "Existing remediation" } }] });
+    if (p === "/v1/workflows/instances") return json(route, {
+      // the link list offers only live remediation workflows started from this finding's plan
+      instances: [
+        { id: INSTANCE, status: "running", createdAt: ISO, change: { changeType: "shadow-ai-remediation", description: `Existing remediation — shadow-AI finding ${FINDING}` } },
+        { id: "99999999-9999-4999-8999-9999999999f1", status: "running", createdAt: ISO, change: { changeType: "feature", description: `Unrelated — shadow-AI finding ${FINDING}` } },
+        { id: "99999999-9999-4999-8999-9999999999f2", status: "aborted", createdAt: ISO, change: { changeType: "shadow-ai-remediation", description: `Abandoned — shadow-AI finding ${FINDING}` } },
+      ],
+    });
     if (p === `/v1/shadow-ai/findings/${FINDING}/remediate` && method === "POST") {
       if (linkFailures > 0) {
         linkFailures -= 1;
@@ -395,6 +402,8 @@ test.describe("U2: governance records", () => {
     await expect(plan.getByTestId("shadow-no-assignment-rule")).toContainText("An admin must add an assignment rule");
     expect(posted(calls, "POST", `/v1/shadow-ai/findings/${FINDING}/remediate`)).toHaveLength(0);
 
+    // a workflow of another change type, or an aborted one, is never offered
+    await expect(plan.getByLabel("Or link an existing workflow").locator("option")).toHaveCount(2);
     await plan.getByLabel("Or link an existing workflow").selectOption(INSTANCE);
     await plan.getByRole("button", { name: "Link workflow…" }).click();
     await page.getByRole("dialog", { name: "Link this workflow?" }).getByRole("button", { name: "Link" }).click();
