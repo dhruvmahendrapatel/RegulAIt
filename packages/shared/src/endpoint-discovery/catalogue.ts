@@ -22,6 +22,7 @@
  */
 import {
   artifactMatchesSignature,
+  presenceBackingSignature,
   type AiSignature,
   type ArtifactSignatureKind,
   type SignatureOs,
@@ -37,6 +38,7 @@ import {
 } from "./endpoint-signatures.js";
 import type { EndpointImportResult, EndpointObservation } from "./observation.js";
 import { scrubAuditText } from "../audit-scrub.js";
+import { matchCliNames, matchEnvNames } from "../discovery/presence-signatures.js";
 
 export const ENDPOINT_PORT_IDENTIFIER_PREFIX = "port:";
 export const ENDPOINT_TRAIT_IDENTIFIER_PREFIX = "trait:";
@@ -175,10 +177,13 @@ export interface EndpointArtifactSighting {
   /** SD0's ecosystem, for an extension sighting */
   ecosystem: string | null;
   kind: ArtifactSignatureKind;
+  /** the matched identifier; for a presence sighting, the presence signature id (never the env or CLI name) */
   value: string;
   provider: string;
   count: number;
   observedAt: string | null;
+  /** ADR-0195 lane A6: set when an env-variable or CLI name matched; the pipeline sends it as `presence` */
+  presenceSignatureId?: string;
 }
 
 export interface EndpointReduction {
@@ -198,6 +203,14 @@ export interface EndpointReduction {
  * its first matching candidate per provider. A row scoped to an OS or an
  * ecosystem matches only a sighting with the same one, exactly as SD0's
  * classifier decides (`classifyObservation`).
+ *
+ * ADR-0195 lane A6 (master decision: env-variable names are never stored as
+ * evidence): env-variable names go through `matchEnvNames` and CLI binaries
+ * through `matchCliNames` first. A match counts when an enabled catalogue row
+ * backs it (`presenceBackingSignature`, the same rule the classifier applies),
+ * and the sighting carries the presence signature id, never the name. An
+ * env-variable name is never an artifact candidate; a CLI binary the presence
+ * catalogue does not know is still matched as an artifact.
  */
 export function reduceEndpointObservations(
   result: Pick<EndpointImportResult, "observations">,
@@ -215,13 +228,49 @@ export function reduceEndpointObservations(
   for (const obs of result.observations) {
     const providers = new Set<string>();
     const os = endpointOsToSignatureOs(obs.os);
+    const record = (kind: ArtifactSignatureKind, value: string, provider: string, ecosystem: string | null, presenceSignatureId?: string) => {
+      const key = `${obs.device}\u0000${obs.user ?? ""}\u0000${os ?? ""}\u0000${ecosystem ?? ""}\u0000${kind}\u0000${value.toLowerCase()}`;
+      const have = matched.get(key);
+      if (have) {
+        have.count += 1;
+        if (obs.observedAt && (!have.observedAt || obs.observedAt > have.observedAt)) have.observedAt = obs.observedAt;
+      } else {
+        matched.set(key, {
+          device: obs.device,
+          user: obs.user,
+          os,
+          ecosystem,
+          kind,
+          value,
+          provider,
+          count: 1,
+          observedAt: obs.observedAt,
+          ...(presenceSignatureId ? { presenceSignatureId } : {}),
+        });
+      }
+    };
+    // lane A6: presence first, by signature id only
+    const presenceScoped = enabled.filter((s) => (s.os == null || s.os === os) && s.ecosystem == null);
+    const presence = [
+      ...matchEnvNames(obs.keys.filter((k) => k.matchType === "env_var_name").map((k) => k.value)),
+      ...matchCliNames(obs.keys.filter((k) => k.matchType === "cli_binary").map((k) => k.value)),
+    ];
+    for (const p of presence) {
+      const backed = presenceBackingSignature(p.signatureId, presenceScoped);
+      if (!backed || providers.has(backed.signature.provider)) continue;
+      providers.add(backed.signature.provider);
+      record(backed.signature.kind as ArtifactSignatureKind, p.signatureId, backed.signature.provider, null, p.signatureId);
+    }
     // SD0 refuses an observation whose text the audit scrubber would change; such a value is likely a secret
     // someone placed in a name column, so it is dropped here, counted, and never matched, sampled or stored
     const all = endpointArtifactCandidates(obs);
     const candidates = all.filter((c) => {
-      if (scrubAuditText(c.value) === c.value) return true;
-      droppedValues.add(c.value);
-      return false;
+      if (scrubAuditText(c.value) !== c.value) {
+        droppedValues.add(c.value);
+        return false;
+      }
+      // an env-variable name is never an artifact value (lane A6): it is matched above, by presence, or not at all
+      return c.from !== "env_var_name";
     });
     for (const c of candidates) {
       const sig = enabled.find(
@@ -232,29 +281,13 @@ export function reduceEndpointObservations(
       );
       if (!sig || providers.has(sig.provider)) continue;
       providers.add(sig.provider);
-      const key = `${obs.device}\u0000${obs.user ?? ""}\u0000${os ?? ""}\u0000${c.ecosystem ?? ""}\u0000${c.kind}\u0000${sig.value.toLowerCase()}`;
-      const have = matched.get(key);
-      if (have) {
-        have.count += 1;
-        if (obs.observedAt && (!have.observedAt || obs.observedAt > have.observedAt)) have.observedAt = obs.observedAt;
-      } else {
-        matched.set(key, {
-          device: obs.device,
-          user: obs.user,
-          os,
-          ecosystem: c.ecosystem,
-          kind: c.kind,
-          value: sig.value,
-          provider: sig.provider,
-          count: 1,
-          observedAt: obs.observedAt,
-        });
-      }
+      record(c.kind, sig.value, sig.provider, c.ecosystem);
     }
     if (providers.size === 0) {
       unmatchedCount += 1;
-      // an environment variable name is never recorded as a gap: an unmatched "name" may be a value someone aliased
-      const first = candidates.find((c) => c.from !== "env_var_name");
+      // an environment variable name is never recorded as a gap (it is not even a candidate): an unmatched "name" may
+      // be a value someone aliased, and names are never stored (lane A6)
+      const first = candidates[0];
       if (first && unmatched.length < sample) {
         const k = `${first.kind}\u0000${first.value.toLowerCase()}`;
         if (!unmatchedSeen.has(k)) {
