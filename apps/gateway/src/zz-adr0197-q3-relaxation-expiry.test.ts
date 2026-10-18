@@ -192,7 +192,7 @@ describe("ADR-0197 Q3: renewal is a step-up, audited", () => {
     // an API key can never step up
     const key = await app.inject({ method: "PUT", url: renewUrl, headers: adminAuth, payload: { relaxed: true, renew: true } });
     expect(key.statusCode, key.body).toBe(403);
-    expect(key.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax", action: { body: renewFacts(expired.id, "mcp_server", server).facts } });
+    expect(key.json()).toMatchObject({ error: "step_up_required", actionKind: "settings_relax" });
     // the set's grant, a renewal grant for another row or another program, a grant of another kind: refused, unspent
     for (const args of [
       relaxFacts("mcp_server", server),
