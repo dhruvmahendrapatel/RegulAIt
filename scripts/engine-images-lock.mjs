@@ -17,18 +17,28 @@
  *   node scripts/engine-images-lock.mjs --check                   exit 1 when a derived file is stale
  *   node scripts/engine-images-lock.mjs --check --base origin/main   also: the lock changed only as --apply changes it
  *   node scripts/engine-images-lock.mjs --write                   rewrite the derived files from the lock
- *   node scripts/engine-images-lock.mjs --apply <publish.json>    record a publish (the workflow's artifact)
+ *   node scripts/engine-images-lock.mjs --apply <publish.json> --trusted-root <trusted_root.json>
+ *                                                                 record a SIGNED publish (the workflow's artifact)
  *
  * `--apply` takes the `engine-images-publish.json` artifact the workflow uploads. It refuses a sourceCommit not
  * reachable from origin/main, and anything that is not `ghcr.io/<this repository's owner>/regulait-engine-<engine>`
  * (the owner from package.json `repository`, lowercased) with two `sha256:<64 hex>` digests, bumps an
  * engine's `publishGeneration` only when its digest changes (the manifest generation must move with every build,
  * ADR-0187 decision 95), and rewrites the derived files. Commit all three in one PR.
+ *
+ * Signing (ADR-0197 Q2, ADR-0190 "As built: engine image signing"): `--apply` refuses an engine whose publish entry
+ * carries no keyless signature, or whose signature `engine-images-lock-verify.mjs` does not verify (the expected
+ * identity and issuer, against the given Sigstore trusted root, for exactly this digest, image id and source commit).
+ * It writes each new image's bundle to `engines/signatures/<engine>.sigstore.json` and the trusted root to
+ * `engines/signatures/trusted_root.json`, so an air-gapped install verifies with no network. The lock-update bot (the
+ * workflow's `lock-pr` job) runs `--apply` and opens the PR; nothing merges it but a person.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundlePath, checkBundleForEntry, SIGNATURES_DIR, TRUSTED_ROOT, verifyEntrySignature } from "./engine-images-lock-verify.mjs";
 
 export const ENGINE_IDS = ["promptfoo", "modelscan", "garak"];
 export const LOCK_SCHEMA = "regulait.engine-images-lock.v1";
@@ -106,9 +116,11 @@ export function validateLock(lock) {
  * `assertCommitOnMain`), an engine whose image changed moves its `publishGeneration` to exactly the base's + 1, and an
  * engine whose image did not change keeps its whole entry, and a new image's `publishedAt` is later than the base's.
  * `base` is the lock on the base ref (origin/main). This proves the SHAPE of a change, not that `--apply` made it:
- * provenance rests on the signed publish (#427 review F3).
+ * provenance rests on the signed publish (#427 review F3). ADR-0197 Q2: a new image also carries its signature bundle,
+ * and the bundle signs exactly the new entry by the publish workflow on main (`bundleFor`, default the committed
+ * `engines/signatures/<engine>.sigstore.json`; read without cryptography here, cosign verifies it before use).
  */
-export function checkLockTransition(base, lock, { onMain = (c) => assertCommitOnMain(c) } = {}) {
+export function checkLockTransition(base, lock, { onMain = (c) => assertCommitOnMain(c), bundleFor = readBundle } = {}) {
   validateLock(base);
   validateLock(lock);
   for (const id of ENGINE_IDS) {
@@ -124,8 +136,23 @@ export function checkLockTransition(base, lock, { onMain = (c) => assertCommitOn
       throw new LockError(`${id}: a new image is published later than the base's (${b.publishedAt}), not at ${e.publishedAt}`);
     }
     if (!changed && JSON.stringify(e) !== JSON.stringify(b)) throw new LockError(`${id}: an engine whose image did not change keeps its whole entry`);
+    if (changed && e.manifestDigest !== null) {
+      const bundle = bundleFor(id);
+      if (bundle === undefined) throw new LockError(`${id}: a new image carries its signature (engines/signatures/${id}.sigstore.json is missing)`);
+      try {
+        checkBundleForEntry(bundle, e);
+      } catch (err) {
+        throw new LockError(`${id}: ${err.message}`);
+      }
+    }
   }
   return lock;
+}
+
+/** the committed signature bundle of an engine, or undefined when there is none */
+export function readBundle(id) {
+  const f = bundlePath(id);
+  return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : undefined;
 }
 
 /** the lock as committed on `ref` (git is injectable for tests) */
@@ -156,6 +183,44 @@ export function applyPublish(lock, publish) {
     };
   }
   return validateLock(next);
+}
+
+/**
+ * `--apply`'s signature gate (pure apart from `verify`): every engine the publish names must carry a signature that
+ * `verify(id, entry, bundle)` accepts for exactly the entry the publish states, with the publish's sourceCommit
+ * (the annotation the publish job signed). Returns the next lock and the bundles of the engines whose image changed.
+ * `verify` throws to refuse; the CLI passes engine-images-lock-verify.mjs's cosign check.
+ */
+export function applySignedPublish(lock, publish, { verify }) {
+  const names = Object.keys(publish?.engines ?? {});
+  for (const id of names) {
+    const p = publish.engines[id];
+    const bundle = p?.signature?.bundle;
+    if (!bundle) throw new LockError(`${id}: the publish carries no signature; an unsigned image is never recorded (ADR-0197 Q2)`);
+    try {
+      verify(id, { repository: p.repository, manifestDigest: p.manifestDigest, imageId: p.imageId, sourceCommit: publish.sourceCommit }, bundle);
+    } catch (err) {
+      throw new LockError(`${id}: ${err.message}`);
+    }
+  }
+  const next = applyPublish(lock, publish);
+  const bundles = {};
+  for (const id of names) if (JSON.stringify(next.engines[id]) !== JSON.stringify(lock.engines[id])) bundles[id] = publish.engines[id].signature.bundle;
+  return { lock: next, bundles };
+}
+
+/** cosign's check of one bundle, written to a scratch file (the CLI's `verify` for applySignedPublish) */
+function cosignVerify(trustedRoot) {
+  return (id, entry, bundle) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "engine-sig-"));
+    try {
+      const bundleFile = path.join(dir, `${id}.sigstore.json`);
+      writeFileSync(bundleFile, JSON.stringify(bundle));
+      verifyEntrySignature(id, entry, { bundleFile, trustedRoot });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
 }
 
 /** the generated TypeScript module (deterministic) */
@@ -225,6 +290,21 @@ function main(argv) {
       checkLockTransition(readLockAt(ref), lock, { onMain: (c) => assertCommitOnMain(c, { ref }) });
       console.log(`engine image lock: every published build is of ${ref}, and each changed image moved its generation once`);
     } else if (arg !== undefined) throw new LockError(`unknown --check option: ${arg}`);
+    // a committed signature must sign its entry; an entry without one is reported (every use refuses it, ADR-0197 Q2)
+    for (const id of ENGINE_IDS) {
+      const e = lock.engines[id];
+      if (e.manifestDigest === null) continue;
+      const bundle = readBundle(id);
+      if (bundle === undefined) {
+        console.log(`engine image lock: ${id} has no signature; the installer and the bundle refuse it until a signed publish is recorded`);
+        continue;
+      }
+      try {
+        checkBundleForEntry(bundle, e);
+      } catch (err) {
+        throw new LockError(`${id}: ${err.message}`);
+      }
+    }
     const stale = [];
     if (readFileSync(PATHS.ts, "utf8") !== renderTs(lock)) stale.push(path.relative(ROOT, PATHS.ts));
     const compose = readFileSync(PATHS.compose, "utf8");
@@ -240,9 +320,21 @@ function main(argv) {
     let lock = readLock();
     if (mode === "--apply") {
       if (!arg) throw new LockError("--apply needs the publish file (the workflow's engine-images-publish.json artifact)");
+      const trustedRoot = argv[2] === "--trusted-root" ? argv[3] : undefined;
+      if (!trustedRoot) throw new LockError("--apply needs --trusted-root <trusted_root.json> (the Sigstore trusted root the signatures are verified against)");
       const publish = JSON.parse(readFileSync(arg, "utf8"));
       assertCommitOnMain(publish?.sourceCommit);
-      lock = applyPublish(lock, publish);
+      const signed = applySignedPublish(lock, publish, { verify: cosignVerify(trustedRoot) });
+      lock = signed.lock;
+      // the root replaces the committed one, so every signature kept from before must verify against it too (the
+      // air-gapped install's check); checked before anything is written
+      for (const id of ENGINE_IDS) {
+        if (id in signed.bundles || lock.engines[id].manifestDigest === null || readBundle(id) === undefined) continue;
+        verifyEntrySignature(id, lock.engines[id], { trustedRoot });
+      }
+      mkdirSync(SIGNATURES_DIR, { recursive: true });
+      if (path.resolve(trustedRoot) !== TRUSTED_ROOT) copyFileSync(trustedRoot, TRUSTED_ROOT);
+      for (const [id, bundle] of Object.entries(signed.bundles)) writeFileSync(bundlePath(id), `${JSON.stringify(bundle, null, 2)}\n`);
       writeFileSync(PATHS.lock, `${JSON.stringify(lock, null, 2)}\n`);
     }
     writeFileSync(PATHS.ts, renderTs(lock));
@@ -250,7 +342,7 @@ function main(argv) {
     console.log(`engine image lock: wrote ${mode === "--apply" ? "the lock, " : ""}the generated module and the compose defaults`);
     return 0;
   }
-  console.error("usage: engine-images-lock.mjs --check [--base <ref>] | --write | --apply <publish.json>");
+  console.error("usage: engine-images-lock.mjs --check [--base <ref>] | --write | --apply <publish.json> --trusted-root <trusted_root.json>");
   return 2;
 }
 
