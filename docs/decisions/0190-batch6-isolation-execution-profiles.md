@@ -2474,6 +2474,8 @@ superseded; its text is left as it was. No migration.
      repository, verified from the root embedded in the pinned cosign. It is never taken from the publish artifact.
    - It travels with the checkout or the update bundle (`engines/signatures/trusted_root.json`). The install verifies
      against it with no network.
+   - The root and the lock ship in the same update bundle, so anyone able to replace both could substitute a CA. The
+     air-gapped guarantee therefore rests on the update bundle's own release-key signature (#437 review).
    - The operator puts cosign v3.1.3 on the air-gapped host (on PATH, or `COSIGN=<path>`). The installer refuses any
      other binary.
    - A Sigstore key rotation reaches air-gapped hosts with the next recorded publish. A trusted root keeps retired keys

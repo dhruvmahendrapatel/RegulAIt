@@ -70,6 +70,18 @@ describe("ENG-IMG: the engine image workflows", () => {
     expect(publish).not.toMatch(/name: Sign \(skipped/);
   });
 
+  it("N10: lock-pr opens one draft PR whose title must start with HOLD, and nothing merges it or marks it ready", () => {
+    const jobLockPr = publish.slice(publish.indexOf("\n  lock-pr:"));
+    expect(jobLockPr).toContain('gh pr create --draft --base main --head "$branch" --title "$title"');
+    expect(jobLockPr.match(/gh pr create/g)).toHaveLength(1);
+    // the HOLD refusal runs before anything is committed or pushed
+    const refusal = jobLockPr.indexOf('case "$title" in "HOLD "*) ;; *) echo "::error::the lock PR title must start with HOLD"; exit 1 ;; esac');
+    expect(refusal).toBeGreaterThan(-1);
+    expect(refusal).toBeLessThan(jobLockPr.indexOf("git commit "));
+    expect(refusal).toBeLessThan(jobLockPr.indexOf("push origin "));
+    expect(publish).not.toMatch(/gh pr (merge|ready)|--auto\b|enable-auto-merge|automerge|auto-merge/i);
+  });
+
   it("every action in both workflows is pinned by a full commit sha", () => {
     for (const text of [publish, build]) {
       const uses = [...text.matchAll(/uses: (\S+)/g)].map((m) => m[1]!);

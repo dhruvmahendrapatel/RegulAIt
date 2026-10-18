@@ -10,23 +10,23 @@ import path from "node:path";
 import { expectedIdentity, SIGN_PREDICATE } from "./engine-images-lock-verify.mjs";
 
 const certs = new Map();
-/** a DER certificate (base64) whose only URI SAN is `identity` */
-export function certFor(identity = expectedIdentity()) {
-  if (!certs.has(identity)) {
+/** a DER certificate (base64) whose only URI SAN is `identity` (or whose subjectAltName is exactly `san`) */
+export function certFor(identity = expectedIdentity(), san = `URI:${identity}`) {
+  if (!certs.has(san)) {
     const dir = mkdtempSync(path.join(tmpdir(), "engine-sig-cert-"));
     try {
       const der = path.join(dir, "c.der");
-      execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", path.join(dir, "k.pem"), "-subj", "/O=synthetic-test", "-days", "1", "-addext", `subjectAltName=URI:${identity}`, "-outform", "DER", "-out", der], { stdio: "ignore" });
-      certs.set(identity, readFileSync(der).toString("base64"));
+      execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", path.join(dir, "k.pem"), "-subj", "/O=synthetic-test", "-days", "1", "-addext", `subjectAltName=${san}`, "-outform", "DER", "-out", der], { stdio: "ignore" });
+      certs.set(san, readFileSync(der).toString("base64"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
-  return certs.get(identity);
+  return certs.get(san);
 }
 
 /** a keyless cosign image-signature bundle for `entry`, in the shape `cosign sign --bundle` writes (v0.3) */
-export function bundleFor(entry, { identity = expectedIdentity(), digest = entry.manifestDigest, imageId = entry.imageId, sourceCommit = entry.sourceCommit, cert = true, tlog = true } = {}) {
+export function bundleFor(entry, { identity = expectedIdentity(), digest = entry.manifestDigest, imageId = entry.imageId, sourceCommit = entry.sourceCommit, san, cert = true, tlog = true } = {}) {
   const statement = {
     _type: "https://in-toto.io/Statement/v1",
     subject: [{ digest: { sha256: digest.slice("sha256:".length) }, annotations: { imageId, sourceCommit } }],
@@ -34,7 +34,7 @@ export function bundleFor(entry, { identity = expectedIdentity(), digest = entry
     predicate: {},
   };
   const verificationMaterial = {};
-  if (cert) verificationMaterial.certificate = { rawBytes: certFor(identity) };
+  if (cert) verificationMaterial.certificate = { rawBytes: certFor(identity, san) };
   else verificationMaterial.publicKey = { hint: "c3ludGhldGlj" };
   if (tlog) verificationMaterial.tlogEntries = [{ logIndex: "4242", logId: { keyId: "c3ludGhldGljLWxvZw==" }, kindVersion: { kind: "dsse", version: "0.0.1" }, integratedTime: "1760000000", inclusionPromise: { signedEntryTimestamp: "c3ludGhldGlj" }, inclusionProof: { logIndex: "4242", rootHash: "c3ludGhldGlj", treeSize: "4243", hashes: [], checkpoint: { envelope: "synthetic" } }, canonicalizedBody: "e30=" }];
   return {

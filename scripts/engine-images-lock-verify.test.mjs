@@ -82,6 +82,9 @@ describe("ADR-0197 Q2: verifying an engine image signature", () => {
     expect(() => verify(bundleFor(entry, { cert: false }))).toThrow(/not a keyless signature/);
     expect(() => verify(bundleFor(entry, { tlog: false }))).toThrow(/no Rekor entry/);
     expect(() => verify({ hello: "world" })).toThrow(/not a Sigstore bundle/);
+    // #437 review: a certificate naming two URI identities, or none, is refused even when one of them is the expected one
+    expect(() => verify(bundleFor(entry, { san: `URI:${expectedIdentity()},URI:https://example.invalid/other` }))).toThrow(/exactly one URI identity/);
+    expect(() => verify(bundleFor(entry, { san: "DNS:example.invalid" }))).toThrow(/exactly one URI identity/);
     const s = scratch(bundleFor(entry));
     try {
       expect(() => verifyEntrySignature("garak", entry, { bundleFile: s.bundleFile, trustedRoot: path.join(s.dir, "absent.json"), cosign: fakeCosign() })).toThrow(/no Sigstore trusted root/);

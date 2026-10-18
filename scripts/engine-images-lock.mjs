@@ -223,6 +223,49 @@ function cosignVerify(trustedRoot) {
   };
 }
 
+const NO_TRUSTED_ROOT = "--apply needs --trusted-root <trusted_root.json> (the Sigstore trusted root the signatures are verified against)";
+
+/**
+ * `--apply` up to the writes (the checks are injectable for tests): the publish is of a commit on main, every new image
+ * is signed for its entry, and, because `trustedRoot` replaces the committed one, every signature kept from before
+ * verifies against it too (the air-gapped install's check). Throws before anything is written.
+ */
+export function prepareApply(lock, publish, { trustedRoot, verify, verifyKept, bundleFor = readBundle, onMain = (c) => assertCommitOnMain(c) } = {}) {
+  if (!trustedRoot) throw new LockError(NO_TRUSTED_ROOT);
+  onMain(publish?.sourceCommit);
+  const signed = applySignedPublish(lock, publish, { verify: verify ?? cosignVerify(trustedRoot) });
+  const kept = verifyKept ?? ((id, entry) => verifyEntrySignature(id, entry, { trustedRoot }));
+  for (const id of ENGINE_IDS) {
+    if (id in signed.bundles || signed.lock.engines[id].manifestDigest === null || bundleFor(id) === undefined) continue;
+    kept(id, signed.lock.engines[id]);
+  }
+  return signed;
+}
+
+/**
+ * `--check`'s signature pass: a committed signature must sign its entry; an entry without one is reported, not
+ * refused here (every use refuses it, ADR-0197 Q2). Returns the engines reported unsigned.
+ */
+export function checkCommittedSignatures(lock, { bundleFor = readBundle, log = console.log } = {}) {
+  const unsigned = [];
+  for (const id of ENGINE_IDS) {
+    const e = lock.engines[id];
+    if (e.manifestDigest === null) continue;
+    const bundle = bundleFor(id);
+    if (bundle === undefined) {
+      log(`engine image lock: ${id} has no signature; the installer and the bundle refuse it until a signed publish is recorded`);
+      unsigned.push(id);
+      continue;
+    }
+    try {
+      checkBundleForEntry(bundle, e);
+    } catch (err) {
+      throw new LockError(`${id}: ${err.message}`);
+    }
+  }
+  return unsigned;
+}
+
 /** the generated TypeScript module (deterministic) */
 export function renderTs(lock) {
   validateLock(lock);
@@ -290,21 +333,7 @@ function main(argv) {
       checkLockTransition(readLockAt(ref), lock, { onMain: (c) => assertCommitOnMain(c, { ref }) });
       console.log(`engine image lock: every published build is of ${ref}, and each changed image moved its generation once`);
     } else if (arg !== undefined) throw new LockError(`unknown --check option: ${arg}`);
-    // a committed signature must sign its entry; an entry without one is reported (every use refuses it, ADR-0197 Q2)
-    for (const id of ENGINE_IDS) {
-      const e = lock.engines[id];
-      if (e.manifestDigest === null) continue;
-      const bundle = readBundle(id);
-      if (bundle === undefined) {
-        console.log(`engine image lock: ${id} has no signature; the installer and the bundle refuse it until a signed publish is recorded`);
-        continue;
-      }
-      try {
-        checkBundleForEntry(bundle, e);
-      } catch (err) {
-        throw new LockError(`${id}: ${err.message}`);
-      }
-    }
+    checkCommittedSignatures(lock);
     const stale = [];
     if (readFileSync(PATHS.ts, "utf8") !== renderTs(lock)) stale.push(path.relative(ROOT, PATHS.ts));
     const compose = readFileSync(PATHS.compose, "utf8");
@@ -321,17 +350,8 @@ function main(argv) {
     if (mode === "--apply") {
       if (!arg) throw new LockError("--apply needs the publish file (the workflow's engine-images-publish.json artifact)");
       const trustedRoot = argv[2] === "--trusted-root" ? argv[3] : undefined;
-      if (!trustedRoot) throw new LockError("--apply needs --trusted-root <trusted_root.json> (the Sigstore trusted root the signatures are verified against)");
-      const publish = JSON.parse(readFileSync(arg, "utf8"));
-      assertCommitOnMain(publish?.sourceCommit);
-      const signed = applySignedPublish(lock, publish, { verify: cosignVerify(trustedRoot) });
+      const signed = prepareApply(lock, JSON.parse(readFileSync(arg, "utf8")), { trustedRoot });
       lock = signed.lock;
-      // the root replaces the committed one, so every signature kept from before must verify against it too (the
-      // air-gapped install's check); checked before anything is written
-      for (const id of ENGINE_IDS) {
-        if (id in signed.bundles || lock.engines[id].manifestDigest === null || readBundle(id) === undefined) continue;
-        verifyEntrySignature(id, lock.engines[id], { trustedRoot });
-      }
       mkdirSync(SIGNATURES_DIR, { recursive: true });
       if (path.resolve(trustedRoot) !== TRUSTED_ROOT) copyFileSync(trustedRoot, TRUSTED_ROOT);
       for (const [id, bundle] of Object.entries(signed.bundles)) writeFileSync(bundlePath(id), `${JSON.stringify(bundle, null, 2)}\n`);

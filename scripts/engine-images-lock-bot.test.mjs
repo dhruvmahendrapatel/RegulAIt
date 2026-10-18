@@ -8,7 +8,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { lockPr, prPaths } from "./engine-images-lock-bot.mjs";
 import { bundleFor } from "./engine-images-lock-fixtures.mjs";
-import { applyPublish, applySignedPublish, checkLockTransition, ENGINE_IDS, GHCR_OWNER, LockError, PATHS } from "./engine-images-lock.mjs";
+import { applyPublish, applySignedPublish, checkCommittedSignatures, checkLockTransition, ENGINE_IDS, GHCR_OWNER, LockError, PATHS, prepareApply } from "./engine-images-lock.mjs";
 import { expectedIdentity } from "./engine-images-lock-verify.mjs";
 
 const hex = (c) => `sha256:${c.repeat(64)}`;
@@ -64,6 +64,66 @@ describe("N10: --apply records only a signed publish", () => {
         },
       }),
     ).toThrow(LockError);
+  });
+});
+
+describe("#437 review: the --apply and --check signature gates of the CLI", () => {
+  const p = () => signedPublish({ garak: img("garak", "1", "2") }, c1, "2026-10-18T05:00:00.000Z");
+  const accept = () => undefined;
+  /** a lock where modelscan is already published and signed, so --apply keeps its signature */
+  const withModelscan = () => applySignedPublish(blank(), signedPublish({ modelscan: img("modelscan", "3", "4") }, c2, "2026-10-17T05:00:00.000Z"), { verify: accept });
+
+  it("--apply refuses without a trusted root, before the publish or its signatures are looked at", () => {
+    const touched = [];
+    const spy = (what) => () => touched.push(what);
+    for (const trustedRoot of [undefined, ""]) {
+      expect(() => prepareApply(blank(), p(), { trustedRoot, verify: spy("verify"), verifyKept: spy("kept"), onMain: spy("onMain") })).toThrow(/needs --trusted-root/);
+    }
+    expect(touched).toEqual([]);
+  });
+
+  it("--apply asks that the publish is of a commit on main", () => {
+    const seen = [];
+    prepareApply(blank(), p(), { trustedRoot: "root.json", verify: accept, verifyKept: accept, bundleFor: () => undefined, onMain: (c) => seen.push(c) });
+    expect(seen).toEqual([c1]);
+    expect(() =>
+      prepareApply(blank(), p(), {
+        trustedRoot: "root.json",
+        verify: accept,
+        onMain: () => {
+          throw new LockError("not on main");
+        },
+      }),
+    ).toThrow(/not on main/);
+  });
+
+  it("--apply re-verifies every kept signature against the new root, and refuses when one fails", () => {
+    const base = withModelscan();
+    const kept = [];
+    const out = prepareApply(base.lock, p(), { trustedRoot: "root.json", verify: accept, verifyKept: (id, e) => kept.push([id, e]), bundleFor: bundlesOf(base), onMain });
+    expect(kept).toEqual([["modelscan", base.lock.engines.modelscan]]);
+    expect(Object.keys(out.bundles)).toEqual(["garak"]);
+    expect(() =>
+      prepareApply(base.lock, p(), {
+        trustedRoot: "root.json",
+        verify: accept,
+        verifyKept: () => {
+          throw new Error("does not verify against the new root");
+        },
+        bundleFor: bundlesOf(base),
+        onMain,
+      }),
+    ).toThrow(/new root/);
+  });
+
+  it("--check reports an unsigned entry, accepts a bundle of its entry, and refuses a bundle of another digest", () => {
+    const base = withModelscan();
+    const log = [];
+    expect(checkCommittedSignatures(base.lock, { bundleFor: () => undefined, log: (m) => log.push(m) })).toEqual(["modelscan"]);
+    expect(log.join("\n")).toMatch(/modelscan has no signature/);
+    expect(checkCommittedSignatures(base.lock, { bundleFor: bundlesOf(base), log: () => undefined })).toEqual([]);
+    const forged = bundleFor({ ...img("modelscan", "9", "4"), sourceCommit: c2 });
+    expect(() => checkCommittedSignatures(base.lock, { bundleFor: () => forged, log: () => undefined })).toThrow(/modelscan: .*tampered digest/);
   });
 });
 
