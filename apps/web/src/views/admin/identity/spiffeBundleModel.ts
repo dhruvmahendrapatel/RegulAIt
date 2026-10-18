@@ -129,8 +129,8 @@ export const SPIFFE_BUNDLE_REFUSALS: Readonly<Record<string, string>> = {
   spiffe_bundle_not_found: "That bundle no longer exists. Refresh the list.",
   spiffe_bundle_already_revoked: "That bundle is already revoked.",
   spiffe_bundle_not_active: "That bundle was replaced. Revoke the domain's active bundle to end its trust.",
-  spiffe_bundle_jwt_key_unsupported: "A JWT-SVID key is not RSA (2048 bits or more) or EC on P-256, P-384 or P-521, or names an algorithm it cannot sign with.",
-  spiffe_bundle_sequence_rollback: "The fetched bundle is older than the one already trusted (its spiffe_sequence went backwards). It was not used.",
+  spiffe_bundle_jwt_key_unsupported: "Unsupported JWT-SVID key.",
+  spiffe_bundle_sequence_rollback: "Fetched bundle is older (sequence went backwards).",
 };
 
 export function spiffeBundleRefusal(code: unknown): string | null {
@@ -172,38 +172,31 @@ export interface PutSpiffeBundleEndpointBody {
 }
 
 export const SPIFFE_ENDPOINT_PROFILE_TEXT: Readonly<Record<SpiffeBundleEndpointProfile, string>> = {
-  https_web: "Web PKI (https_web): the endpoint's certificate is checked like any HTTPS site.",
-  https_spiffe: "SPIFFE (https_spiffe): the endpoint must present an X.509-SVID for the SPIFFE ID below, checked against that domain's bundle.",
+  https_web: "Web PKI.",
+  https_spiffe: "The server's SVID must be this ID, under its domain's bundle (upload that first).",
 };
 
 export function isEndpointList(v: unknown): v is SpiffeBundleEndpointListView {
   return !!v && typeof v === "object" && Array.isArray((v as { items?: unknown }).items);
 }
 
-/** `spiffe://<trust-domain>/<path>`, checked by character (M-074: no regex on caller input) */
+/** `spiffe://<trust-domain>/<path>`, roughly (the gateway checks it exactly) */
 export function spiffeIdOk(value: string): boolean {
-  if (value.length > 2048 || !value.startsWith("spiffe://")) return false;
-  const rest = value.slice("spiffe://".length);
+  const rest = value.startsWith("spiffe://") ? value.slice(9) : "";
   const slash = rest.indexOf("/");
-  if (slash < 1 || !trustDomainOk(rest.slice(0, slash))) return false;
-  const segs = rest.slice(slash + 1).split("/");
-  return segs.every((seg) => {
-    if (seg === "" || seg === "." || seg === "..") return false;
-    for (const c of seg) if (!((c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "." || c === "_" || c === "-")) return false;
-    return true;
-  });
+  return value.length <= 2048 && slash > 0 && trustDomainOk(rest.slice(0, slash)) && slash < rest.length - 1;
 }
 
 /** the browser's own checks before an endpoint is sent; null = fine */
 export function endpointDraftError(draft: { trustDomain: string; url: string; profile: SpiffeBundleEndpointProfile; endpointSpiffeId: string }): string | null {
-  if (!trustDomainOk(draft.trustDomain)) return "A trust domain is 1 to 255 lowercase letters, digits, dots, dashes or underscores (no spiffe:// prefix).";
-  let u: URL;
+  if (!trustDomainOk(draft.trustDomain)) return bundleDraftError({ trustDomain: draft.trustDomain, bundle: "" });
+  let u: URL | null = null;
   try {
     u = new URL(draft.url);
   } catch {
-    return "The endpoint URL could not be read. It looks like https://bundle.example.org/example.org.";
+    // reported below
   }
-  if (u.protocol !== "https:") return "A bundle endpoint URL is https.";
+  if (u?.protocol !== "https:") return "A bundle endpoint URL is https.";
   if (u.username || u.password) return "A bundle endpoint URL carries no user name or password.";
   if (u.hash) return "A bundle endpoint URL carries no #fragment.";
   if (draft.profile === "https_spiffe" && !spiffeIdOk(draft.endpointSpiffeId)) return "Name the endpoint server's SPIFFE ID, for example spiffe://example.org/spire/server.";
@@ -212,20 +205,20 @@ export function endpointDraftError(draft: { trustDomain: string; url: string; pr
 
 /** the endpoint refusal and failure codes, in words (pinned to spiffe-bundle-endpoint.ts by the test) */
 export const SPIFFE_ENDPOINT_CODES: Readonly<Record<string, string>> = {
-  spiffe_endpoint_url_invalid: "The endpoint URL was refused: it must be https, with no user name, password or #fragment.",
-  spiffe_endpoint_trust_domain_unknown: "The endpoint's SPIFFE ID is in a trust domain with no active bundle. Upload that domain's bundle first.",
-  egress_blocked: "The endpoint's host is not on the egress allow-list. An admin adds it under Egress Allow Hosts.",
-  spiffe_bundle_fetch_format: "The endpoint did not serve the SPIFFE bundle format (JSON).",
-  spiffe_bundle_fetch_too_large: "The endpoint served more than 256 KB.",
-  spiffe_bundle_fetch_encoding: "The endpoint's answer is not UTF-8.",
-  spiffe_bundle_fetch_redirect: "The endpoint answered with a redirect, which is never followed. Use the final URL.",
-  spiffe_bundle_fetch_status: "The endpoint did not answer 200.",
-  spiffe_bundle_fetch_tls: "The endpoint's certificate was not trusted.",
-  spiffe_bundle_fetch_timeout: "The endpoint did not answer within 10 seconds.",
-  spiffe_bundle_fetch_network: "The endpoint could not be reached.",
-  spiffe_endpoint_id_mismatch: "The endpoint presented an SVID for another SPIFFE ID.",
-  spiffe_endpoint_certificate_is_ca: "The endpoint presented a CA certificate as its own.",
-  spiffe_bundle_revoked: "The domain's bundle was revoked after this endpoint was set. Save the endpoint again to fetch.",
+  spiffe_endpoint_url_invalid: "URL refused.",
+  spiffe_endpoint_trust_domain_unknown: "Upload the endpoint ID's domain bundle first.",
+  egress_blocked: "Host not on the egress allow-list.",
+  spiffe_bundle_fetch_format: "Not a SPIFFE bundle.",
+  spiffe_bundle_fetch_too_large: "Over 256 KB.",
+  spiffe_bundle_fetch_encoding: "Not UTF-8.",
+  spiffe_bundle_fetch_redirect: "Redirect refused.",
+  spiffe_bundle_fetch_status: "Not 200.",
+  spiffe_bundle_fetch_tls: "Certificate not trusted.",
+  spiffe_bundle_fetch_timeout: "Timed out.",
+  spiffe_bundle_fetch_network: "Unreachable.",
+  spiffe_endpoint_id_mismatch: "SVID for another ID.",
+  spiffe_endpoint_certificate_is_ca: "CA certificate as leaf.",
+  spiffe_bundle_revoked: "Bundle revoked; save the endpoint again.",
 };
 
 export function spiffeEndpointCode(code: unknown): string | null {

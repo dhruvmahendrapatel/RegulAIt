@@ -1849,8 +1849,10 @@ validation stays `pkijs`, and TLS is Node's. No dependency was added; `THIRD_PAR
      `client_assertion`, keyed by the SPIFFE ID) after the whole request is checked and before the DPoP proof, as the
      provider orders a private_key_jwt assertion. A JWT-SVID cannot take a self token (`client_credentials`).
 5. **UI.** A "SPIFFE bundle endpoints" card on the workload identities page lists each endpoint with its state (fetching,
-   failing with the code in words, or off), last good fetch and trust window; it sets an endpoint (profile, endpoint
-   SPIFFE ID) and stops a fetch, each confirmed and resent once through the step-up. The bundles card shows each
+   failing with the code in words, or off) and trust window; it sets an endpoint (profile, endpoint SPIFFE ID; saving a
+   listed domain changes it) and stops a fetch, each confirmed and resent once through the step-up. The card is kept
+   small: the web "all JS" bundle ceiling (ADR-0196, 1,020 kB gzip) left about 1 kB, and the first version went 629 B
+   over it. The bundles card shows each
    bundle's JWT-SVID keys and whether it was fetched. The route census stays at 0 known UI gaps.
 6. **The SPIFFE egress tripwire** (`oauth/spiffe-egress.test.ts`, S9 follow-ups item (a)) now scans the fetch module
    itself. Its bare-`fetch` rule reads code with quoted strings blanked and `typeof fetch` removed (an audit rule id,

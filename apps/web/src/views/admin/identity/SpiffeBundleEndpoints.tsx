@@ -8,7 +8,7 @@
  * fetch itself goes through the egress allow-list. Air-gapped installs leave
  * this empty and upload bundles instead.
  */
-import { useId, useState } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock, Table } from "../../../ui/kit";
@@ -43,52 +43,24 @@ export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskCo
   const [url, setUrl] = useState("");
   const [profile, setProfile] = useState<SpiffeBundleEndpointProfile>("https_spiffe");
   const [endpointSpiffeId, setEndpointSpiffeId] = useState("");
-  const [editing, setEditing] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-  const helpId = useId();
   const list = isEndpointList(q.data) ? q.data : null;
 
-  const reset = () => {
-    setEditing(null);
-    setTrustDomain("");
-    setUrl("");
-    setProfile("https_spiffe");
-    setEndpointSpiffeId("");
-    setFormError(null);
-  };
-  const startEdit = (e: SpiffeBundleEndpointView) => {
-    setEditing(e.trustDomain);
-    setTrustDomain(e.trustDomain);
-    setUrl(e.url);
-    setProfile(e.profile);
-    setEndpointSpiffeId(e.endpointSpiffeId ?? "");
-    setFormError(null);
-  };
   const save = async (td: string, body: Parameters<typeof setSpiffeBundleEndpoint>[1]) => {
     const out = await endpointCall(() => setSpiffeBundleEndpoint(td, body));
     // a fetch may have written a new bundle: both lists are read again
     void qc.invalidateQueries({ queryKey: spiffeEndpointKeys.list });
     void qc.invalidateQueries({ queryKey: spiffeBundleKeys.list });
-    // the endpoint was saved; a first fetch that failed is said in the page's words (the row shows it too)
-    if (out.refresh?.outcome === "failed") throw new Error(`Saved, but the first fetch failed: ${spiffeEndpointCode(out.refresh.code) ?? out.refresh.code ?? "unknown"}`);
+    if (out.refresh?.outcome === "failed") throw new Error(`Saved; the fetch failed: ${spiffeEndpointCode(out.refresh.code) ?? out.refresh.code}`);
     return out;
   };
 
   return (
-    <Card
-      title="SPIFFE bundle endpoints"
-      actions={
-        <Button disabled={q.isFetching} onClick={() => void q.refetch()}>
-          Refresh endpoints
-        </Button>
-      }
-    >
+    <Card title="SPIFFE bundle endpoints">
       <div data-testid="spiffe-bundle-endpoints">
         <p>
-          Instead of uploading a trust domain&apos;s bundle by hand, the gateway can fetch it from the domain&apos;s SPIFFE bundle endpoint and keep it current
-          (on the bundle&apos;s refresh hint). Nothing is fetched until you set an endpoint here, and every fetch goes through the egress allow-list. If a fetch
-          fails, the last good bundle is kept for at most 24 hours, then the domain stops authenticating until a fetch succeeds. Air-gapped deployments leave
-          this empty and upload bundles above.
+          Fetch a domain&apos;s bundle from its SPIFFE bundle endpoint, through the egress allow-list. Off until set. After a failed fetch the last good
+          bundle is kept for 24 hours at most. Air-gapped: leave empty and upload. Saving a listed domain changes its endpoint.
         </p>
         <form
           className={s.stack}
@@ -97,148 +69,91 @@ export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskCo
             const td = trustDomain.trim();
             const draft = { trustDomain: td, url: url.trim(), profile, endpointSpiffeId: endpointSpiffeId.trim() };
             const problem = endpointDraftError(draft);
-            if (problem) return setFormError(problem);
-            const existing = list?.items.find((x) => x.trustDomain === td) ?? null;
-            if (existing && editing !== td) return setFormError(`${td} already has an endpoint. Use "Edit" on its row.`);
-            setFormError(null);
+            setFormError(problem);
+            if (problem) return;
             props.ask({
-              title: existing ? `Change where ${td} is fetched from?` : `Fetch the bundle of ${td}?`,
+              title: `Fetch the bundle of ${td}?`,
               label: "Save and fetch",
               danger: false,
-              okMessage: "Endpoint saved. The bundle was fetched and will be kept current.",
+              okMessage: "Endpoint saved.",
               body: (
                 <>
-                  The gateway will fetch the trust bundle of <code>{td}</code> from <code>{draft.url}</code> ({SPIFFE_ENDPOINT_PROFILE_TEXT[profile]}) now and on
-                  its refresh hint. A changed bundle replaces the domain&apos;s active bundle without asking again, so whoever controls this endpoint decides
-                  which SVIDs of <code>{td}</code> authenticate.
+                  A fetched bundle replaces the active one without asking: whoever controls this endpoint decides which SVIDs of <code>{td}</code>{" "}
+                  authenticate.
                 </>
               ),
-              run: async () => {
-                await save(td, { url: draft.url, profile, endpointSpiffeId: profile === "https_spiffe" ? draft.endpointSpiffeId : null, enabled: true });
-                reset();
-              },
+              run: () => save(td, { url: draft.url, profile, endpointSpiffeId: profile === "https_spiffe" ? draft.endpointSpiffeId : null, enabled: true }),
             });
           }}
         >
           <Field label="Trust domain to fetch" error={formError}>
-            <Input
-              value={trustDomain}
-              maxLength={255}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="example.org"
-              aria-describedby={helpId}
-              readOnly={editing !== null}
-              onChange={(e) => setTrustDomain(e.target.value)}
-            />
+            <Input value={trustDomain} maxLength={255} spellCheck={false} placeholder="example.org" onChange={(e) => setTrustDomain(e.target.value)} />
           </Field>
           <Field label="Bundle endpoint URL">
-            <Input value={url} type="url" maxLength={2048} autoComplete="off" spellCheck={false} placeholder="https://bundle.example.org/example.org" onChange={(e) => setUrl(e.target.value)} />
+            <Input value={url} type="url" maxLength={2048} spellCheck={false} onChange={(e) => setUrl(e.target.value)} />
           </Field>
           <Field label="Endpoint profile">
             <Select value={profile} onChange={(e) => setProfile(e.target.value as SpiffeBundleEndpointProfile)}>
-              <option value="https_spiffe">SPIFFE authentication (https_spiffe)</option>
-              <option value="https_web">Web PKI (https_web)</option>
+              <option value="https_spiffe">https_spiffe</option>
+              <option value="https_web">https_web</option>
             </Select>
           </Field>
           {profile === "https_spiffe" && (
             <Field label="Endpoint server SPIFFE ID">
-              <Input
-                value={endpointSpiffeId}
-                maxLength={2048}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="spiffe://example.org/spire/server"
-                onChange={(e) => setEndpointSpiffeId(e.target.value)}
-              />
+              <Input value={endpointSpiffeId} maxLength={2048} spellCheck={false} onChange={(e) => setEndpointSpiffeId(e.target.value)} />
             </Field>
           )}
-          <p id={helpId}>
-            {SPIFFE_ENDPOINT_PROFILE_TEXT[profile]}
-            {profile === "https_spiffe" && <> The endpoint ID&apos;s trust domain needs an active bundle first: upload it once above to bootstrap.</>}
-          </p>
-          <div className={s.actions}>
-            <Button type="submit" variant="primary" disabled={props.busy}>
-              Save and fetch
-            </Button>
-            {editing && (
-              <Button type="button" onClick={reset}>
-                Cancel edit
-              </Button>
-            )}
-          </div>
+          <p>{SPIFFE_ENDPOINT_PROFILE_TEXT[profile]}</p>
+          <Button type="submit" variant="primary" disabled={props.busy}>
+            Save and fetch
+          </Button>
         </form>
         {q.isPending ? (
           <SkeletonBlock lines={2} />
         ) : !list ? (
-          <ErrorState message="The SPIFFE bundle endpoints could not be read. No fetch state is inferred." onRetry={() => void q.refetch()} />
+          <ErrorState message="The SPIFFE bundle endpoints could not be read." onRetry={() => void q.refetch()} />
         ) : (
           <Table<SpiffeBundleEndpointView>
             rows={list.items}
             rowKey={(x) => x.trustDomain}
-            empty={<EmptyState title="No bundle endpoint" body="No trust domain's bundle is fetched. Bundles come only from uploads." />}
+            empty={<EmptyState title="No bundle endpoint" />}
             columns={[
               { key: "domain", header: "Trust domain", render: (x) => <code>{x.trustDomain}</code> },
-              {
-                key: "source",
-                header: "Endpoint",
-                render: (x) => (
-                  <>
-                    <code>{x.url}</code>
-                    <div>{x.profile === "https_spiffe" ? <>https_spiffe, server {x.endpointSpiffeId}</> : "https_web"}</div>
-                  </>
-                ),
-              },
+              { key: "source", header: "Endpoint", render: (x) => `${x.url} (${x.profile}${x.endpointSpiffeId ? `, ${x.endpointSpiffeId}` : ""})` },
               {
                 key: "state",
                 header: "State",
                 render: (x) => (
                   <>
                     <Badge tone={!x.enabled ? "neutral" : x.lastErrorCode ? "warn" : "ok"}>{!x.enabled ? "off" : x.lastErrorCode ? "failing" : "fetching"}</Badge>
-                    {x.lastErrorCode && (
-                      <div>
-                        {spiffeEndpointCode(x.lastErrorCode) ?? x.lastErrorCode} ({x.consecutiveFailures} in a row)
-                      </div>
-                    )}
+                    {x.lastErrorCode && <div>{spiffeEndpointCode(x.lastErrorCode) ?? x.lastErrorCode}</div>}
                   </>
                 ),
               },
-              { key: "success", header: "Last good fetch", render: (x) => dateLabel(x.lastSuccessAt) },
               { key: "until", header: "Trusted until", render: (x) => dateLabel(x.trustUntil) },
               {
                 key: "actions",
                 header: "Actions",
-                render: (x) => (
-                  <div className={s.actions}>
-                    <Button size="sm" disabled={props.busy} aria-label={`Edit the endpoint of ${x.trustDomain}`} onClick={() => startEdit(x)}>
-                      Edit
+                render: (x) =>
+                  x.enabled && (
+                    <Button
+                      size="sm"
+                      disabled={props.busy}
+                      aria-label={`Stop fetching the bundle of ${x.trustDomain}`}
+                      onClick={() =>
+                        props.ask({
+                          title: `Stop fetching the bundle of ${x.trustDomain}?`,
+                          label: "Stop fetching",
+                          danger: false,
+                          okMessage: "Fetching stopped.",
+                          body: <>The last fetched bundle keeps authenticating until {dateLabel(x.trustUntil)}.</>,
+                          run: () => save(x.trustDomain, { url: x.url, profile: x.profile, endpointSpiffeId: x.endpointSpiffeId, enabled: false }),
+                        })
+                      }
+                    >
+                      Stop fetching
                     </Button>
-                    {x.enabled && (
-                      <Button
-                        size="sm"
-                        disabled={props.busy}
-                        aria-label={`Stop fetching the bundle of ${x.trustDomain}`}
-                        onClick={() =>
-                          props.ask({
-                            title: `Stop fetching the bundle of ${x.trustDomain}?`,
-                            label: "Stop fetching",
-                            danger: false,
-                            okMessage: "Fetching stopped.",
-                            body: (
-                              <>
-                                The bundle of <code>{x.trustDomain}</code> is no longer fetched. Its last fetched bundle keeps authenticating until{" "}
-                                {dateLabel(x.trustUntil)}, then the domain stops authenticating unless you upload a bundle or fetch again.
-                              </>
-                            ),
-                            run: () => save(x.trustDomain, { url: x.url, profile: x.profile, endpointSpiffeId: x.endpointSpiffeId, enabled: false }),
-                          })
-                        }
-                      >
-                        Stop fetching
-                      </Button>
-                    )}
-                  </div>
-                ),
+                  ),
               },
             ]}
           />

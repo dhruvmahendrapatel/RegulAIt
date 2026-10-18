@@ -419,11 +419,9 @@ export const IDENTITY_SPECS: Readonly<Record<string, OrgSettingSpec>> = {
     label: "How workloads may sign in",
     strictDefault: AUTH_STRICT,
     strict:
-      "Signed assertions from a registered key, client certificates and SPIFFE X.509 identities. SPIFFE JWT " +
-      "identities (bearer tokens) are off. Shared secrets are never offered.",
-    relaxed:
-      "Adding back a method you removed lets workloads sign in that way again. Adding SPIFFE JWT identities lets a " +
-      "workload sign in with a bearer JWT-SVID (its token is still bound to a DPoP key).",
+      "Signed assertions from a registered key, client certificates and SPIFFE identities; not SPIFFE JWT bearer " +
+      "tokens. Shared secrets are never offered.",
+    relaxed: "Adding a method lets workloads sign in that way.",
     control: { kind: "set", options: WORKLOAD_CLIENT_AUTH_METHODS },
     isRelaxed: (v) => Array.isArray(v) && v.includes("spiffe_jwt_svid"),
     looser: addsAny,

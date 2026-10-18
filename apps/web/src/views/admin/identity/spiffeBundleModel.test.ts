@@ -80,9 +80,9 @@ describe("ADR-0188 S9 follow-up — SPIFFE bundle endpoints in the browser", () 
     expect(endpointDraftError(draft({ trustDomain: "Example.org" }))).toMatch(/trust domain/);
   });
 
-  it("a SPIFFE ID is checked by character, like the gateway's pattern", () => {
+  it("a SPIFFE ID is checked roughly in the browser (a domain and a path; the gateway checks it exactly)", () => {
     for (const ok of ["spiffe://example.org/a", "spiffe://ex-1.org/a/B_c.d"]) expect(spiffeIdOk(ok), ok).toBe(true);
-    for (const bad of ["spiffe://example.org", "spiffe://example.org/", "spiffe://Example.org/a", "spiffe://example.org/a/../b", "spiffe://example.org/a b", "x://example.org/a"]) {
+    for (const bad of ["spiffe://example.org", "spiffe://example.org/", "spiffe://Example.org/a", "spiffe:///a", "x://example.org/a"]) {
       expect(spiffeIdOk(bad), bad).toBe(false);
     }
   });

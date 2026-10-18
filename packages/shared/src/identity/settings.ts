@@ -95,11 +95,9 @@ export const IDENTITY_SETTING_COPY: Readonly<Record<IdentitySettingKey, { label:
   workloadClientAuthMethods: {
     label: "How workloads may sign in",
     strict:
-      "Signed assertions from a registered key, client certificates and SPIFFE X.509 identities. SPIFFE JWT " +
-      "identities (bearer tokens) are off. Shared secrets are never offered.",
-    relaxed:
-      "Adding back a method you removed lets workloads sign in that way again. Adding SPIFFE JWT identities lets a " +
-      "workload sign in with a bearer JWT-SVID (its token is still bound to a DPoP key).",
+      "Signed assertions from a registered key, client certificates and SPIFFE identities; not SPIFFE JWT bearer " +
+      "tokens. Shared secrets are never offered.",
+    relaxed: "Adding a method lets workloads sign in that way.",
   },
   dpopNonceRequired: {
     label: "Require a server nonce in proof-of-possession",
