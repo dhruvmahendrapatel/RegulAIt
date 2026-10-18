@@ -13,8 +13,8 @@
  *  Anything the gateway sends that cannot be read is shown as unreadable, never
  *  as a default or an empty list.
  */
-import { lazy, Suspense, useEffect, useId, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { lazy, Suspense, useEffect, useId, useMemo, useState } from "react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
 import { ago, fmtAt } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
@@ -39,6 +39,7 @@ import {
   parsePlacementDetail,
   strengthText,
   parsePlacements,
+  placementsPageUrl,
   parseProfiles,
   nextVersionOf,
   profileActions,
@@ -426,9 +427,21 @@ function outcomeBadge(p: Placement) {
 
 function PlacementsCard() {
   const [open, setOpen] = useState<string | null>(null);
-  const q = useQuery({ queryKey: isolationKeys.placements, retry: false, queryFn: () => api.get<unknown>("/v1/execution-placements?limit=50") });
-  const parsed = q.data === undefined ? null : parsePlacements(q.data);
-  const failed = q.isError || (!q.isPending && parsed === null);
+  // N11: keyset pages; a later page carries only the cursors of the lists that have more
+  const q = useInfiniteQuery({
+    queryKey: isolationKeys.placements,
+    retry: false,
+    queryFn: async ({ pageParam }) => parsePlacements(await api.get<unknown>(placementsPageUrl(pageParam))),
+    initialPageParam: null as { cursor: string | null; refusalsCursor: string | null } | null,
+    getNextPageParam: (last) => (last && (last.nextCursor || last.refusalsNextCursor) ? { cursor: last.nextCursor, refusalsCursor: last.refusalsNextCursor } : undefined),
+  });
+  const parsed = useMemo(() => {
+    const pages = q.data?.pages;
+    if (pages === undefined || pages.some((p) => p === null)) return null;
+    return { placements: pages.flatMap((p) => p!.placements), unrecorded: pages.flatMap((p) => p!.unrecorded) };
+  }, [q.data]);
+  // a failed LATER page keeps the pages already shown; only the first page failing hides the list
+  const failed = (q.isError && !q.isFetchNextPageError) || (!q.isPending && parsed === null);
   return (
     <Card
       title="Placement decisions"
@@ -491,6 +504,11 @@ function PlacementsCard() {
               empty={<EmptyState title="No placement decisions yet" body="No isolable call has been placed or refused." />}
             />
             {open && <PlacementEvidence key={open} placementId={open} />}
+            {q.hasNextPage && (
+              <Button size="sm" disabled={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>
+                {q.isFetchingNextPage ? "Loading…" : q.isFetchNextPageError ? "Older decisions could not be read: try again" : "Load older decisions"}
+              </Button>
+            )}
             {parsed && parsed.unrecorded.length > 0 && <UnrecordedRefusals rows={parsed.unrecorded} />}
           </>
         )}

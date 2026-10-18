@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  ENGINE_IMAGES_LOCK,
   ENGINE_MANIFEST,
   ENGINE_RESULT_VERSION,
   ENGINE_TAXONOMY,
@@ -150,7 +151,8 @@ describe("the plan: only what this build admits reaches promptfoo", () => {
   it("the manifest classes every set that runs and lists the reduced set; the taxonomy maps promptfoo ids", () => {
     const m = ENGINE_MANIFEST.promptfoo;
     expect(m.version).toBe("0.124.1");
-    expect(m.imageDigest).toBeNull(); // not built here: the engine cannot be enabled
+    // ENG-IMG: the image digest is the lock's (null until a publish is recorded, and then the engine cannot be enabled)
+    expect(m.imageDigest).toBe(ENGINE_IMAGES_LOCK.promptfoo.manifestDigest);
     // B5-P2: the documented switches plus the worker container's own isolation report
     expect(m.usageDataEnv).toEqual({ ...PROMPTFOO_USAGE_DATA_ENV, REGULAIT_PROMPTFOO_WORKER_ISOLATED: "1" });
     expect(m.sets["prompt-extraction"]).toBe("standard");

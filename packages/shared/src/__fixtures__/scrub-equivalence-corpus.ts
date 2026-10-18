@@ -43,6 +43,13 @@ const forgedShapes = (t: string): string[] => [
   `[redacted:field:40:012345abcdef ${t}]`,
 ];
 
+/** N4: Hugging Face access and organization tokens and their near misses, in their own group so the existing
+ * groups' inputs are unchanged by adding them */
+const HF_TOKENS = [
+  `hf_${"aB".repeat(17)}`, `api_org_${"Zy".repeat(17)}`, `hf_${"a".repeat(33)}`, `hf_${"a".repeat(35)}`, `hf_${"a1".repeat(17)}`,
+  `api_org_${"a".repeat(35)}`, `my_api_org_${"a".repeat(34)}`, "hf_transfer", "api_org_settings", "hf_hub_download",
+];
+
 /** xorshift32, so the corpus is identical on every run and in the snapshot generator */
 function prng(seed: number) {
   let s = seed >>> 0;
@@ -76,5 +83,6 @@ export function scrubEquivalenceCorpus(): Array<{ group: string; inputs: string[
     mixed.push(`${"lorem ipsum ".repeat(next() % 50)}${token} ${nearMiss} ${"é".repeat(next() % 30)}${token}`);
   }
   groups.push({ group: "mixed", inputs: mixed });
+  groups.push({ group: "huggingface", inputs: HF_TOKENS.flatMap((t) => [t, ` ${t} `, `x${t}`, `${t}x`, `"${t}"`, `${t}${t}`, `${t}\n${t}`, ...forgedShapes(t)]) });
   return groups;
 }

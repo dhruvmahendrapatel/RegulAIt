@@ -78,7 +78,7 @@ import {
   type EngineTaskState,
   type ExecutionRefusalReason,
 } from "@regulait/shared";
-import { databaseNow } from "./delegation.js";
+import { databaseWallNow } from "./delegation.js";
 import { expireOffers, linkedReportOf, offerLinkedPlacement, pickLinkedReport, refusedLinkedPlacement, type EngineTaskChannelHooks } from "./executor-channel.js";
 import { resolveRequirement } from "./execution-placement.js";
 import { holdStdioSession, liveStdioSessions, StdioSession, watchHeldStdioSession } from "./executor-stdio.js";
@@ -347,7 +347,7 @@ async function endUnstartedRun(db: Db, deps: EngineTaskDeps, runnerId: string, r
   return db.transaction(async (tx) => {
     const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
     if (!run || run.runnerId !== runnerId || run.status !== "leased" || run.taskPlacementId !== null) return null;
-    return deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause }, await databaseNow(tx as unknown as Db));
+    return deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause }, await databaseWallNow(tx as unknown as Db));
   });
 }
 
@@ -364,8 +364,8 @@ async function startEngineTaskTx(
     const txDb = tx as unknown as Db;
     const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
     if (!run || run.runnerId !== runnerId || run.status !== "leased") return { kind: "refused_request" as const, status: 409, error: "engine_run_not_leased" };
-    // M-075: the database clock decides liveness, as the lease and the heartbeat do
-    const now = await databaseNow(txDb);
+    // M-075: the database wall clock, read once the run row is locked, decides liveness, as the lease and the heartbeat do
+    const now = await databaseWallNow(txDb);
     if ((run.deadlineAt && run.deadlineAt <= now) || (run.leaseExpiresAt && run.leaseExpiresAt <= now)) {
       return { kind: "refused_request" as const, status: 409, error: "engine_run_not_leased", detail: "the run's lease or deadline has passed" };
     }
@@ -578,7 +578,7 @@ async function endRunOfRefusedTask(db: Db, deps: EngineTaskDeps, task: EngineTas
   const ended = await db.transaction(async (tx) => {
     const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, task.runId)).for("update");
     if (!run || run.status !== "leased" || run.taskPlacementId !== task.placementId) return null;
-    return deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause }, await databaseNow(tx as unknown as Db));
+    return deps.endRunTx(tx, run, { status: "not_run", errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE, cause }, await databaseWallNow(tx as unknown as Db));
   });
   // recheck L5: marked only once the transaction committed (a throw leaves it to the watchdog's next tick)
   task.runEnded = true;

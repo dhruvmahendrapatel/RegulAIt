@@ -79,3 +79,54 @@ func TestLinearOnPathologicalInput(t *testing.T) {
 		t.Fatalf("took %v", d)
 	}
 }
+
+// letters mirrors the xorshift32 helper in packages/shared/src/huggingface-token-scrub.test.ts, so the tokens are
+// assembled at run time and this file holds no key-shaped literal.
+func letters(seed uint32, n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	s := seed
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		s ^= s << 13
+		s ^= s >> 17
+		s ^= s << 5
+		b.WriteByte(alphabet[s%uint32(len(alphabet))])
+	}
+	return b.String()
+}
+
+// The shared N4 cases: a mixed-case access or organization token is found in prose and in a multi-line log; the
+// lookalike identifiers and a one-short body are not.
+func TestHuggingFaceToken(t *testing.T) {
+	const id = "dlp.secret.huggingface_token"
+	access := strings.Join([]string{"hf", letters(0x4e04_0001, 34)}, "_")
+	org := strings.Join([]string{"api", "org", letters(0x4e04_0002, 34)}, "_")
+	for _, tok := range []string{access, org} {
+		for _, in := range []string{
+			"rotated after " + tok + " was pasted in the ticket",
+			"401 from the hub: token " + tok + " is invalid",
+			"Authorization: Bearer " + tok,
+			"INFO pulling weights\nDEBUG HF_TOKEN=" + tok + "\nINFO done",
+		} {
+			if !slices.Contains(MatchAll(in), id) {
+				t.Errorf("missed in %q", in)
+			}
+		}
+		for _, in := range []string{"x" + tok, tok + "x", tok + "7", tok + tok, "x_" + tok} {
+			if slices.Contains(MatchAll(in), id) {
+				t.Errorf("matched %q", in)
+			}
+		}
+	}
+	for _, in := range []string{
+		"set hf_transfer=1 before the download",
+		"the api_org_settings page lists members",
+		"hf_" + letters(7, 33) + " is one character short",
+		"hf_hub_download(repo_id, filename) returned a path",
+		"huggingface.co/models is a public listing",
+	} {
+		if slices.Contains(MatchAll(in), id) {
+			t.Errorf("matched %q", in)
+		}
+	}
+}

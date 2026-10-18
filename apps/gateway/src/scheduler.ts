@@ -129,6 +129,9 @@ export interface SchedulerJobContext {
    * which inherit the entitlements of whoever pinned the baseline). */
   actorUserId: string | null;
   now: Date;
+  /** true when `now` came from a clock a caller supplied (a test), not the process clock. A job that judges rows
+   * the database stamped reads the database clock unless this is set (M-075). */
+  clockInjected?: boolean;
   runId: string;
 }
 
@@ -521,6 +524,8 @@ export interface RunJobOptions {
   trigger: SchedulerTrigger;
   actorUserId?: string | null;
   now?: Date;
+  /** defaults to whether `now` was passed */
+  clockInjected?: boolean;
   leaseSeconds?: number;
   ignoreDue?: boolean;
   ignoreEnabled?: boolean;
@@ -597,6 +602,7 @@ export async function runSchedulerJob(
       db,
       actorUserId: opts.actorUserId ?? null,
       now,
+      clockInjected: opts.clockInjected ?? opts.now !== undefined,
       runId: run.id,
     });
     const items = result.itemsProcessed ?? 0;
@@ -695,6 +701,7 @@ export class Scheduler {
   private readonly db: Db;
   private readonly registry: SchedulerJobRegistry;
   private readonly clock: () => Date;
+  private readonly clockInjected: boolean;
   private timer: NodeJS.Timeout | null = null;
   /** in-process overlap guard. The lease already stops a second PROCESS; this
    * stops a second copy in THIS process without a database round trip, which is
@@ -712,6 +719,7 @@ export class Scheduler {
     this.leaseSeconds = opts.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
     this.instanceId = opts.instanceId ?? randomUUID();
     this.clock = opts.now ?? (() => new Date());
+    this.clockInjected = opts.now !== undefined;
   }
 
   /** true while a tick is in progress — used by tests and by `stop()` */
@@ -772,6 +780,7 @@ export class Scheduler {
             instanceId: this.instanceId,
             trigger: "schedule",
             now: at,
+            clockInjected: this.clockInjected,
             leaseSeconds: this.leaseSeconds,
           }),
         );

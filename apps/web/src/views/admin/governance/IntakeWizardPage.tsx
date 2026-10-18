@@ -1219,7 +1219,12 @@ function SimilarUseCases(props: { name: string; description: string; excludeIds:
   return (
     <aside className={rg.rail} aria-labelledby="similar-use-cases-title">
       <h2 id="similar-use-cases-title" className={rg.railTitle}>Similar use cases</h2>
-      <p className={rg.railSummary} aria-live="polite">{summary}</p>
+      {/* a failed registry read is an alert, not a status line: the duplicate check did not happen */}
+      {list.isError ? (
+        <p className={rg.railSummary} role="alert">{summary}</p>
+      ) : (
+        <p className={rg.railSummary} role="status" aria-busy={list.isLoading || undefined}>{summary}</p>
+      )}
       {matches.length > 0 && (
         <ul className={rg.railList}>
           {matches.map(({ useCase }) => (

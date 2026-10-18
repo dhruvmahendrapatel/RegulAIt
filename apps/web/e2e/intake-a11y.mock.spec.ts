@@ -226,7 +226,8 @@ test.describe("AER-029: the intake wizard is accessible at every stage, in both 
 
   test("Describe — prefilled from a shadow-AI finding", async ({ page }) => {
     await page.goto("/ui/admin/governance/intake?source=shadow-ai&title=Unregistered%20assistant&description=Observed%20on%20team-17%20egress");
-    await expect(page.getByRole("status")).toContainText("Prefilled from a shadow-AI finding");
+    // the similar-use-cases rail is a status line too, so pick the prefill callout by its text
+    await expect(page.getByRole("status").filter({ hasText: "Prefilled from a shadow-AI finding" })).toBeVisible();
     await expect(page.getByLabel("Use-case name")).toHaveValue("Unregistered assistant");
     await expectNoAxeViolations(page, "Describe (shadow-AI prefill)");
     await expectEveryControlNamed(page, "Describe (shadow-AI prefill)", 5);
