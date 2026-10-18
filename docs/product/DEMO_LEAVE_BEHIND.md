@@ -5,10 +5,16 @@ connector and MCP-tool call also records what happened, so governance is measure
 platform saw — and labelled as an attestation where it cannot be.
 
 ## 1. Discover & Register
-RegulAIt classifies the evidence you import — SaaS exports, egress logs, code scans — to find AI
-in use that nobody registered. A finding becomes a governed proposal in one step: the intake
-wizard pre-fills only what the evidence established, and the proposer answers the EU AI Act
-screening. The risk tier is computed from those structured answers by deterministic rules, with
+RegulAIt finds AI in use that nobody registered in two ways. It scans, read-only, the sources an
+admin enables: source-control groups, cloud accounts and endpoints (ADR-0195). Every source starts
+off, cloud accounts are read through short-lived federated tokens with no stored secret, and git
+providers through a read-only token. It also classifies evidence you import: SaaS exports, egress
+logs, code scans. Each finding says what each scanner saw and where; it keeps locations and names,
+never contents, and shows people as pseudonyms. The page states its coverage: the inventory
+reduces shadow AI, it does not prove its absence. A finding's remediation plan starts a workflow
+that someone other than its initiator signs off (ADR-0195 A4). A finding becomes a governed
+proposal in one step: the intake wizard pre-fills only what the evidence established, and the
+proposer answers the EU AI Act screening. The risk tier is computed from those structured answers by deterministic rules, with
 the reasons shown (ADR-0085); suggested frameworks, risks and controls are accepted, edited or
 rejected by a person (ADR-0149).
 
@@ -39,3 +45,5 @@ lands in one hash-chained audit trail exportable as a signed bundle (ADR-0060).
 - **Remediation is human-approved.** A remediation proposal changes governed state only after a
   second person approves it. (Administrators can still edit records directly — audited.)
 - **Screening is not legal advice.** The tier is a calculator over your answers.
+- **Discovery is not proof of absence.** It covers the sources you enable and the evidence you
+  supply, and says which.
