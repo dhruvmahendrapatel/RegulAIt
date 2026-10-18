@@ -1740,6 +1740,166 @@ and a `key_management` grant cannot administer an identity. Binding a key to a w
 `identity_manage` (decision 2). Full note: ADR-0186, "As built — 2026-10-17: a step-up kind of its own for key
 management".
 
+### As built: S9 follow-ups, bundle endpoint fetch and JWT-SVID (2026-10-18, branch `spiffe-bundle-jwtsvid`, migration 0209)
+
+This builds the two items the S9 follow-ups note (2026-10-17, items (a) and (b)) sized and left open, along the design
+that note wrote down. Decisions 5, 10, 11, 12 and 21 are unchanged; the points below say how they were met and where the
+build differs from that note.
+
+**Open source first (ADR-0176), recorded.** npm was searched again for a relying-party SPIFFE library (`jwt-svid`,
+`spiffe`, `spiffe bundle`, 2026-10-18). `spiffe` 0.5.1, `@jeengbe/spiffe` 2.1.1 and `@defakto/spiffe` 0.7.0 are Workload
+API clients: they validate through a SPIRE agent over gRPC, which a relying party outside the trust domain does not have.
+`@atlasauth/pca-spiffe` 0.4.1 and `spiffile` 0.1.0 were first published weeks ago, with no maintenance record. None is
+validated, so the JWT-SVID profile and the bundle-endpoint client are ours; the JOSE work is `jose` (pinned), path
+validation stays `pkijs`, and TLS is Node's. No dependency was added; `THIRD_PARTY.md` is unchanged.
+
+1. **Storage (migration 0209, hand-written; its journal entry is left to the coordinator).**
+   - `spiffe_trust_bundles` keeps a bundle's JWT authorities: `jwt_authorities` (public JWKs reduced to their public
+     members, `kid` and an optional `alg`; a CHECK refuses any private member) and `jwt_authority_views` (kid, key type,
+     curve, RFC 7638 thumbprint). It also records `source` (`upload` or `fetch`) and a fetched bundle's `sequence`. The
+     write-once trigger function is replaced to cover the new columns, with the 0185 `search_path` pin; the table's
+     TRUNCATE refusal is unchanged. Nothing is backfilled: a bundle recorded before 0209 verifies no JWT-SVID until a
+     bundle with its JWT authorities is uploaded or fetched (ADR-0180, as for a first load).
+   - `spiffe_bundle_endpoints`: one row per trust domain an admin configured (URL, profile, endpoint SPIFFE ID, enabled,
+     and the refresh state). It starts empty. It has no refusal trigger: it is configuration and state, and its history
+     is the audit log.
+   - `org_settings.workload_client_auth_methods` may now hold `spiffe_jwt_svid`. The column default is unchanged.
+2. **What a bundle's JWT authorities must be** (`parseSpiffeBundle`, upload and fetch alike): JWT-SVID section 6.1 (a
+   `kid` on each, unique in the bundle) and section 2.1 key types only, RSA of at least 2048 bits or EC on P-256, P-384
+   or P-521. A named `alg` must be one the key serves. An Ed25519 or a short RSA key is refused
+   `spiffe_bundle_jwt_key_unsupported`, so the whole bundle is refused, never partly kept. A bundle still needs at least
+   one X.509 authority (a JWT-only bundle is refused, as in S9). The digest keeps S9's form for a bundle with X.509
+   authorities only, so every stored digest still compares; with JWT authorities it also covers each `kid` and
+   thumbprint, so a JWT-key change is never `spiffe_bundle_unchanged` (the follow-ups note's open digest question).
+3. **The bundle endpoint (follow-up (a)).** `oauth/spiffe-bundle-endpoint.ts`.
+   - Routes: `GET /v1/identity/spiffe-bundle-endpoints` and `PUT /v1/identity/spiffe-bundle-endpoints/:trustDomain`
+     `{url, profile, endpointSpiffeId, enabled}`, admin-only, under an `identity_manage` step-up bound to every field.
+     Disabling is stepped up too, as a revocation is: it changes what is trusted. A URL that is not `https`, carries
+     userinfo or a fragment, or an `https_spiffe` endpoint whose ID's trust domain has no active bundle, is refused
+     before the step-up and audited (`spiffe-bundle-endpoint-refused`). An enabled URL is checked against the egress
+     allow-list when it is set (`refuseConnectionEgressWrite`, audited). Setting is audited
+     (`spiffe-bundle-endpoint-set`, with the previous values). An enabled endpoint is fetched once at once, and the
+     answer says how that went.
+   - Every fetch goes through `guardConnectionCall` (surface `connector`, so the allow or the refusal is audited), with
+     a 10 s budget and the upload's 256 KiB cap. `https_web` is Web PKI, unchanged. `https_spiffe` replaces the system
+     trust store with the X.509 authorities of the ACTIVE bundle of the endpoint ID's trust domain (an admin uploads the
+     first one to bootstrap, Federation section 5.2.2), and replaces the hostname check with the X.509-SVID profile:
+     one URI SAN, exactly the configured ID, not a CA. This needed an opt-in TLS override on the pinned transport
+     (`PinnedTarget.tls` in `pinned-fetch.ts`, threaded through `createGuardedFetch` and `ConnectionEgressDeps`). It is
+     additive: without it nothing changes, and a request that uses it never takes a pooled connection, so a socket
+     verified one way is never reused for a request verified the other way.
+   - What is fetched must be the SPIFFE JSON format (PEM is refused) and passes the upload's checks. It is written
+     through the upload's compare-and-set (`setSpiffeTrustBundle`, `source = 'fetch'`) by the system principal, so a
+     fetched bundle is superseded, revoked and backstopped exactly like an uploaded one. Only a change writes a row, and
+     its `spiffe-trust-bundle-set` audit row names the old and new authorities, digests and sequences. A
+     `spiffe_sequence` that does not follow the active fetched bundle's is refused `spiffe_bundle_sequence_rollback`
+     (Trust Domain and Bundle section 4.1.1), so an endpoint cannot replay an older bundle.
+   - Refresh: the `spiffe-bundle-refresh` scheduler job (60 s) claims one due endpoint at a time with
+     `FOR UPDATE SKIP LOCKED` and a 120 s lease, so two replicas never fetch one domain at once. After a good fetch the
+     next one follows `spiffe_refresh_hint`, clamped to [60 s, 24 h], and five minutes when the bundle names none
+     (Federation section 5). After a failure the retry waits the polling interval but at most five minutes.
+   - **Fail closed, keeping the last good bundle.** A failed fetch, or a body that does not parse or validate, changes
+     no bundle. It is recorded on the endpoint row as a code (never the response text, a CHECK holds it to
+     `[a-z0-9_]`) and audited `spiffe-bundle-fetch-failed`. The last good fetched bundle authenticates only until
+     `trust_until` (its last successful fetch + 24 h, `SPIFFE_FETCHED_BUNDLE_MAX_AGE_SECONDS`). After that,
+     `loadSpiffeTrustAnchors` and `loadSpiffeJwtAuthorities` leave the domain out, so it authenticates nothing until a
+     fetch succeeds. An uploaded bundle has no such limit: it is pinned.
+   - **A revocation is never undone by a fetch.** Revoking a domain's bundle disables its endpoint in the same
+     transaction, and a fetched write into a domain whose bundle was revoked at or after the endpoint's last admin
+     setting is refused `spiffe_bundle_revoked`. Only a stepped-up PUT (after an upload, for `https_spiffe`) fetches
+     again.
+   - **Air-gapped: "pin a static bundle file" is the upload.** The brief allowed pinning a static bundle file instead
+     of fetching. S9 item 2 (the S5 security review's ruling) is that nothing is trusted unless it came through the
+     audited route; a deploy-time file would be the retired environment variable in another form. So the static
+     bundle is pinned by uploading the SPIFFE bundle file (`spire-server bundle show -format spiffe`) through the
+     stepped-up route, and leaving the domain without an endpoint. Such a bundle never lapses and is never refreshed.
+     The endpoint feature is off unless an admin sets one, and the egress allow-list refuses it on an air-gapped
+     install anyway.
+   - **Deviation: redirects are refused.** Federation section 5.2 says a client SHOULD follow a redirect to a valid
+     endpoint URL. The pinned transport refuses every redirect (ADR-0034), and this keeps that: an allow-listed
+     endpoint cannot hand the fetch to another host. An operator configures the final URL.
+4. **JWT-SVID client authentication (follow-up (b)).** `oauth/spiffe-jwt-svid.ts`, `matchJwtSvidCredential` in
+   `oauth/clients.ts`, and the token endpoint.
+   - **Off by default; enabling is the audited org setting.** `spiffe_jwt_svid` is a new member of
+     `workload_client_auth_methods` and the one member outside the strict default
+     (`WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT`). Adding it is a relaxation: `PUT /v1/org/settings` asks for the
+     `settings_relax` step-up and audits it as relaxed (`identitySettingRelaxed`). The settings screen offers it, with
+     its strict and relaxed text.
+   - The assertion is draft-ietf-oauth-spiffe-client-auth-02 section 3.1:
+     `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe` with the JWT-SVID as
+     `client_assertion`; `client_id` names the workload identity (or is taken from `sub`). The token endpoint verifies
+     and matches it before `oidc-provider` runs, takes it out of the form, and tells the provider the outcome through
+     the same pre-authenticated path as an mTLS certificate (the provider knows no `jwt-spiffe` type). One assertion
+     and one type, or nothing authenticates.
+   - The verifier's rules, each refused with its own code: a compact JWS of at most 16 KiB; a JOSE header of `alg`,
+     optional `kid` and optional `typ` (`JWT` or `JOSE`) and nothing else (JWT-SVID section 2), so an embedded `jwk`,
+     `jku`, `x5c` or `crit` is refused before any key is chosen; `alg` one of section 2.1's nine; the key of the type
+     and curve that `alg` names, and only for its own `alg` when it names one (alg confusion); `sub` a SPIFFE ID whose
+     trust domain has a usable bundle with JWT authorities; the key by `kid` from that bundle only, never looked up
+     elsewhere (draft section 8.1); **`aud` exactly one value, this gateway's issuer identifier** (draft section 3.1
+     step 3; JWT-SVID section 7.2); `exp` present, not past (5 s leeway) and at most five minutes away (decision 5);
+     `nbf` and `iat` not in the future; then the signature, with `jose`.
+   - It maps to the same identity path as an X.509-SVID: a `spiffe_id` credential whose SPIFFE ID equals `sub`, on the
+     client the request names (`spiffe_id_mismatch` otherwise). The token endpoint locks the authenticating bundle's
+     domain rows for the issue (`lockSpiffeBundleUnrevoked`, S9 fix round item 6), so revocation, the cascade and the
+     live-chain backstop apply unchanged. The issue audit row says `clientAuth: "spiffe_jwt_svid"`.
+   - **A bearer credential, so its token is always DPoP-bound** (the follow-ups note's sender-constraint point): a
+     JWT-SVID request without a DPoP proof is refused `dpop_required` before anything is claimed. The SVID is
+     single-use: its `jti` (or, as SPIRE sets none, a digest of the token) is claimed in `replay_claims` (namespace
+     `client_assertion`, keyed by the SPIFFE ID) after the whole request is checked and before the DPoP proof, as the
+     provider orders a private_key_jwt assertion. A JWT-SVID cannot take a self token (`client_credentials`).
+5. **UI.** A "SPIFFE bundle endpoints" card on the workload identities page lists each endpoint with its state (fetching,
+   failing with the code in words, or off), last good fetch and trust window; it sets an endpoint (profile, endpoint
+   SPIFFE ID) and stops a fetch, each confirmed and resent once through the step-up. The bundles card shows each
+   bundle's JWT-SVID keys and whether it was fetched. The route census stays at 0 known UI gaps.
+6. **The SPIFFE egress tripwire** (`oauth/spiffe-egress.test.ts`, S9 follow-ups item (a)) now scans the fetch module
+   itself. Its bare-`fetch` rule reads code with quoted strings blanked and `typeof fetch` removed (an audit rule id,
+   a `source: "fetch"` value and a module specifier are not calls); template literals are left as they are, so
+   `${fetch(u)}` is still caught. New negative controls cover both. The behavioural gate the note asked for is in
+   `oauth/spiffe-bundle-endpoint.test.ts`: a redirect is refused, a host outside the allow-list is refused before any
+   connection, an SVID for another ID and an unanchored chain are refused, and Web PKI is unchanged without the
+   override.
+7. **Tests.**
+   - Offline, `oauth/spiffe-jwt-svid.test.ts` (20): each rule with its code and a positive control (wrong trust domain
+     both ways, a missing, empty, foreign or two-valued `aud`, expired, missing `exp`, too long a lifetime, a future
+     `nbf` or `iat`, an unknown `kid`, a tampered payload, malformed tokens); alg confusion (`none`, HS256 keyed with a
+     public key, EdDSA, an RSA alg against an EC kid and the reverse, ES384 against a P-256 key, a key pinned to PS256
+     used as RS256, an embedded `jwk` or `jku`); the bundle's JWT authority rules; and a **real SPIRE 1.13.3 JWT-SVID**
+     (`testing/spire-1.13.3-jwt/`, minted on a throwaway server with the runbook's steps 1 to 3 plus
+     `spire-server jwt mint`; stored as its three segments because a whole JWT is a gitleaks `jwt` finding, which a
+     local gitleaks 8.30.1 run confirmed) verifying inside its window and refused after it, for another audience, and
+     under another SPIRE server's bundle. Negative controls run: removing the single-audience check, the alg allow-list,
+     the key's own-alg pin or the header allow-list each made its tests fail.
+   - Offline, `oauth/spiffe-bundle-endpoint.test.ts` (11), on a loopback HTTPS endpoint through `createGuardedFetch`:
+     the fetched-body rules, the interval clamp and retry, the URL rules, `https_spiffe` accepted and refused, Web PKI
+     refusing the synthetic CA, a redirect refused, an unlisted host refused unconnected. Negative control: without
+     the `checkServerIdentity` override the `https_spiffe` tests fail.
+   - Database, `zz-adr0188-s9b-spiffe-fetch-jwt-svid.test.ts` (CI only; Postgres is not available where it was
+     written, so it was typechecked and not run): the endpoint route's admin gate, step-up and audited refusals; the
+     first fetch, an unchanged fetch, **a fetch failure keeping the last good bundle** (a 500, an unparseable body, a
+     sequence rollback), the trust window lapsing and coming back, **rotation**, the scheduler pass, a revocation that
+     a fetch cannot undo, an endpoint presenting another ID; JWT-SVID off by default, then a DPoP-bound token from a
+     valid SVID, single use, no DPoP refused without burning the SVID, the refusals with their codes (wrong trust
+     domain, `aud` missing, foreign and two-valued, expired, unknown `kid`, `alg: none`, another workload's ID), a
+     JWT-key rotation, and a bundle revocation revoking the JWT-SVID token. `zz-adr0188-s1-foundation.test.ts` now
+     relaxes `workloadClientAuthMethods` to include `spiffe_jwt_svid`: audited as a relaxation, and an admin API key
+     refused for want of the step-up.
+   - The mocked browser suite covers the endpoints card (list, browser-side refusals, set and stop through the
+     step-up, axe).
+
+Open after this:
+- `docs/deployment/SPIFFE.md` step 3 still says the `jwt-svid` key is counted and not used and that both exports give
+  the same digest. Both stopped being true here (the SPIFFE export's digest now covers its JWT authority). The runbook
+  is outside this slice's surface; the fix is a wording change, and a fetch runbook needs a run on a real deployment
+  first (M-041).
+- The live-chain backstop (`loadLiveChain`) keys on an active bundle, not on the fetched bundle's trust window. A
+  delegated token is short-lived (decision 5) and re-checked against the window at the token endpoint, so a lapsed
+  window stops new tokens at once; existing ones end with their own expiry.
+- A PUT that enables an endpoint fetches at once while the scheduler may claim the same row; both writes go through
+  the compare-and-set, so the worst case is one extra fetch.
+- The migration's journal entry (0209) is the coordinator's to add; until it is, the database suites cannot see the
+  new columns.
+
 ## Test strategy
 
 Every rule gets a red proof (the test fails with the control removed, then passes), in the house style of

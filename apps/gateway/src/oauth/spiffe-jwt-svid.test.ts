@@ -5,10 +5,17 @@
  * the authorities a trust domain serves are injected exactly as
  * `loadSpiffeJwtAuthorities` returns them (public JWKs with a `kid`).
  *
+ * A REAL SPIRE 1.13.3 JWT-SVID and its bundle (`testing/spire-1.13.3-jwt/`, made
+ * by `spire-server jwt mint` and `bundle show -format spiffe` on a throwaway
+ * server, the runbook's steps 1 to 3 plus the mint) verify with RegulAIt's own
+ * code. The token is stored as its three segments (a whole JWT is a secret-scan
+ * finding) and joined here. It was valid from 2026-10-18T14:06:57Z to 14:11:57Z.
+ *
  * The token endpoint path (the replay claim, the DPoP binding, the org setting
  * that turns the method on, the bundle lock) is proved through the real app in
  * `zz-adr0188-s9b-spiffe-fetch-jwt-svid.test.ts`.
  */
+import { readFileSync } from "node:fs";
 import { createHmac, generateKeyPairSync, X509Certificate, type KeyObject } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import { base64url, exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWTPayload } from "jose";
@@ -230,5 +237,37 @@ describe("a bundle's JWT authorities (`parseSpiffeBundle`)", () => {
     expect(refusal(parseSpiffeBundle(bundle({ ...rsa.jwk, alg: "HS256" }), new Date()))).toBe("spiffe_bundle_jwt_key_unsupported");
     // positive control: the same keys, well formed
     expect(refusal(parseSpiffeBundle(bundle(ec.jwk, rsa.jwk), new Date()))).toBe("accepted");
+  });
+});
+
+describe("a REAL SPIRE 1.13.3 JWT-SVID (testing/spire-1.13.3-jwt)", () => {
+  const fixture = (name: string) => readFileSync(new URL(`../testing/spire-1.13.3-jwt/${name}`, import.meta.url), "utf8");
+  const parts = JSON.parse(fixture("jwt-svid.json")) as { protected: string; payload: string; signature: string };
+  const token = [parts.protected, parts.payload, parts.signature].join(".");
+  const SPIRE_AUD = "https://gateway.example.test";
+  const VALID_AT = new Date("2026-10-18T14:08:00Z");
+  const EXPIRED_AT = new Date("2026-10-18T14:13:00Z");
+  const fromBundle = (text: string, at: Date): JwtAuthoritySource => {
+    const p = parseSpiffeBundle(text, at);
+    if (p instanceof IdentityAdminError) throw p;
+    return async (td) => (td === "byoc.example.org" ? { bundleId: "spire", keys: p.jwtAuthorities } : null);
+  };
+
+  it("the bundle keeps SPIRE's JWT authority, and the SVID verifies under it inside its window (positive control)", async () => {
+    const src = fromBundle(fixture("bundle.spiffe.json"), VALID_AT);
+    const r = await verifyJwtSvid(token, { audience: SPIRE_AUD, now: VALID_AT, authorities: src });
+    expect(r).toMatchObject({ ok: true, spiffeId: "spiffe://byoc.example.org/worker/runtime-1", trustDomain: "byoc.example.org", bundleId: "spire" });
+    // SPIRE sets no jti: the replay key is the token's digest
+    expect((r as { replayKey: string }).replayKey).toMatch(/ sha256 /);
+  });
+
+  it("the same SVID: expired after its window, refused for another audience, and unknown under another SPIRE server's bundle", async () => {
+    const src = fromBundle(fixture("bundle.spiffe.json"), VALID_AT);
+    expect(await verifyJwtSvid(token, { audience: SPIRE_AUD, now: EXPIRED_AT, authorities: src })).toEqual({ ok: false, code: "jwt_svid_expired" });
+    expect(await verifyJwtSvid(token, { audience: "https://another.example.test", now: VALID_AT, authorities: src })).toEqual({ ok: false, code: "jwt_svid_aud_mismatch" });
+    // the S9 SPIRE fixture: the same trust domain name, another server, another JWT key
+    const other = readFileSync(new URL("../testing/spire-1.13.3/bundle.spiffe.json", import.meta.url), "utf8");
+    const otherSrc = fromBundle(other, new Date("2026-10-16T00:30:00Z"));
+    expect(await verifyJwtSvid(token, { audience: SPIRE_AUD, now: VALID_AT, authorities: otherSrc })).toEqual({ ok: false, code: "jwt_svid_kid_unknown" });
   });
 });
