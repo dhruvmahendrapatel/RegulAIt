@@ -27,7 +27,7 @@
  */
 import { createHash } from "node:crypto";
 import { stdSerializers } from "pino";
-import { redactLogText } from "./gateway-logger.js";
+import { redactLogText } from "./log-redact.js";
 
 export const WITHHELD = "[withheld: may quote request input]";
 
