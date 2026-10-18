@@ -139,6 +139,7 @@ import {
 import { minReleaseAgeDays, skillReleaseStatus } from "./release-age.js";
 import { skillNameProblem, type McpAdmissionFinding } from "@regulait/shared";
 import { settingTransitions } from "./setting-transitions.js";
+import { databaseNow } from "./db-clock.js";
 import { agentEvidenceHoldRefused, EVIDENCE_HOLD_REFUSED, withAgentEvidenceHold } from "./agent-evidence-hold.js"; // ADR-0182 A12 + D4 DFX2: Art. 73(6) evidence hold (with dependents)
 
 /** ADR-0175 review fix: a skill name is a prompt heading — no line breaks,
@@ -244,7 +245,7 @@ async function userNames(db: Db, ids: Array<string | null | undefined>): Promise
 async function summaries(db: Db, rows: BuilderAgentRow[], viewer: Viewer) {
   if (!rows.length) return [];
   const ids = rows.map((r) => r.id);
-  const since = monthStartUtc();
+  const since = monthStartUtc(await databaseNow(db));
   const modelIds = [...new Set(rows.map((r) => r.modelAgentId).filter((x): x is string => !!x))];
   const [models, names, spend, toolSpend, toolCounts, skillCounts, scheduleCounts] = await Promise.all([
     modelIds.length
@@ -1210,7 +1211,8 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     }
     const isOwner = viewer.userId === agent.ownerUserId;
     const enabled = body.enabled && isOwner;
-    const now = new Date();
+    // M-075: the sweep judges `nextRunAt` against the database clock, so it is computed from that clock
+    const now = await databaseNow(db);
     const [row] = await db
       .insert(builderAgentSchedules)
       .values({
@@ -1260,7 +1262,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     const merged = { ...s, ...Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)) } as BuilderScheduleRow;
     // anyone else's edit to what it does or when switches it OFF for the owner to review
     if (!isOwner && contentChanged) merged.enabled = false;
-    const now = new Date();
+    const now = await databaseNow(db);
     const timingChanged = body.cadence !== undefined || body.timeUtc !== undefined || body.enabled !== undefined;
     const nextRunAt = !merged.enabled
       ? null
@@ -1732,7 +1734,7 @@ export function registerBuilderRoutes(app: FastifyInstance, db: Db, opts: Builde
     if (!t) return;
     const [row] = await db
       .update(builderThreads)
-      .set({ status: body.status, updatedAt: new Date() })
+      .set({ status: body.status, updatedAt: sql`now()` })
       .where(eq(builderThreads.id, t.id))
       .returning();
     const [thread] = await threadSummaries(db, [row!]);

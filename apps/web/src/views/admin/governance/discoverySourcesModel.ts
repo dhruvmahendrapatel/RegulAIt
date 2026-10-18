@@ -188,23 +188,27 @@ export interface SightingView {
   source: string;
   observedAt?: string;
   location?: { path: string; line?: number; commit?: string };
+  /** an MCP server's command basename; never an environment-variable name (ADR-0195 lane A6) */
   names?: string[];
+  /** ADR-0195 lane A6: presence signature ids (the env-variable or CLI name itself is never kept) */
+  presence?: string[];
   actor?: string;
   signatureConfidence?: "high" | "medium" | "low";
 }
 
-/** the sightings in words: at most `max`, only those with a location, names or an actor */
+/** the sightings in words: at most `max`, only those with a location, names, presence ids or an actor */
 export function sightingLines(evidence: readonly SightingView[] | undefined, max = 3): Array<{ text: string; actor: string | null }> {
   const out: Array<{ text: string; actor: string | null }> = [];
   for (const e of evidence ?? []) {
     const lowConfidence = e.signatureConfidence === "low" || e.signatureConfidence === "medium";
-    if (!e.location && !(e.names && e.names.length) && !e.actor && !lowConfidence) continue;
+    if (!e.location && !(e.names && e.names.length) && !(e.presence && e.presence.length) && !e.actor && !lowConfidence) continue;
     const parts: string[] = [];
     if (lowConfidence) parts.push(`${e.signatureConfidence}-confidence signature`);
     if (e.location) {
       parts.push(`${e.location.path}${e.location.line ? `:${e.location.line}` : ""}${e.location.commit ? ` @${e.location.commit.slice(0, 8)}` : ""}`);
     }
     if (e.names && e.names.length) parts.push(`names: ${e.names.slice(0, 10).join(", ")}${e.names.length > 10 ? ", …" : ""}`);
+    if (e.presence && e.presence.length) parts.push(`presence signatures: ${e.presence.slice(0, 10).join(", ")}${e.presence.length > 10 ? ", …" : ""}`);
     out.push({ text: parts.join(" · ") || e.source, actor: e.actor ?? null });
     if (out.length >= max) break;
   }

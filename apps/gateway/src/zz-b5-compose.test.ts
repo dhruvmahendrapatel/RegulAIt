@@ -12,6 +12,19 @@ import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const compose = readFileSync(path.join(root, "docker-compose.yml"), "utf8");
+/**
+ * ENG-IMG: each runner's image reference defaults come from engines/images.lock.json (scripts/engine-images-lock.mjs
+ * writes them): the lock's repository and manifest digest, or the local name and the all-zero digest until a publish.
+ */
+const lock = JSON.parse(readFileSync(path.join(root, "engines/images.lock.json"), "utf8")) as {
+  engines: Record<string, { repository: string | null; manifestDigest: string | null }>;
+};
+function lockedRef(engine: string): { ref: string; digest: string } {
+  const e = lock.engines[engine]!;
+  const up = engine.toUpperCase();
+  const digest = `\${REGULAIT_ENGINE_${up}_DIGEST:-${e.manifestDigest ?? `sha256:${"0".repeat(64)}`}}`;
+  return { ref: `\${REGULAIT_ENGINE_${up}_REPOSITORY:-${e.repository ?? `regulait/engine-${engine}`}}@${digest}`, digest };
+}
 
 /** the text of one top-level block (service at two spaces, or a top-level key) */
 function block(name: string, indent = "  "): string {
@@ -79,8 +92,7 @@ describe("ADR-0187: the engines network and the runner template", () => {
     }
     // PR #205 review [55]: the image is named by digest only, and the image reference, the
     // reference the runner checks and the digest it reports all come from ONE variable
-    const REF = "${REGULAIT_ENGINE_PROMPTFOO_REPOSITORY:-regulait/engine-promptfoo}@${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:" + "0".repeat(64) + "}";
-    const DIGEST = "${REGULAIT_ENGINE_PROMPTFOO_DIGEST:-sha256:" + "0".repeat(64) + "}";
+    const { ref: REF, digest: DIGEST } = lockedRef("promptfoo");
     const line = (k: string) => svc.split("\n").find((l) => l.trimStart().startsWith(`${k}:`))?.trim().slice(k.length + 1).trim();
     expect(line("image")).toBe(REF);
     expect(line("REGULAIT_ENGINE_IMAGE_REF")).toBe(REF);
@@ -118,7 +130,7 @@ describe("ADR-0187: the engines network and the runner template", () => {
     for (const key of ["ports", "networks", "privileged", "cap_add", "profiles", "user", "read_only", "security_opt", "pull_policy", "network_mode", "tmpfs"]) {
       expect(runner, key).not.toMatch(new RegExp(`\\n {4}${key}:`));
     }
-    const REF = "${REGULAIT_ENGINE_" + engine.toUpperCase() + "_REPOSITORY:-regulait/engine-" + engine + "}@${REGULAIT_ENGINE_" + engine.toUpperCase() + "_DIGEST:-sha256:" + "0".repeat(64) + "}";
+    const REF = lockedRef(engine).ref;
     const line = (k: string) => runner.split("\n").find((l) => l.trimStart().startsWith(`${k}:`))?.trim().slice(k.length + 1).trim();
     expect(line("image")).toBe(REF);
     expect(line("REGULAIT_ENGINE_IMAGE_REF")).toBe(REF);

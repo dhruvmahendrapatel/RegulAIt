@@ -94,6 +94,8 @@ const MANIFEST: Record<EngineId, EngineManifestEntry> = {
   ...ENGINE_MANIFEST,
   promptfoo: { ...ENGINE_MANIFEST.promptfoo, imageDigest: PF_DIGEST, sets: { basic: "standard", agentic: "agentic" } },
   garak: { ...ENGINE_MANIFEST.garak, imageDigest: GK_DIGEST, sets: { basic: "standard" } },
+  // ENG-IMG: the shipped lock may record a published modelscan image; this suite needs an unbuilt one
+  modelscan: { ...ENGINE_MANIFEST.modelscan, imageDigest: null, taskImage: null },
 };
 const TAXONOMY: EngineTaxonomy = {
   version: 7,
@@ -403,7 +405,7 @@ describe("secure by default", () => {
     const list = r.json().engines as Array<{ id: string; enabled: boolean; maxConcurrent: number; signature: string }>;
     expect(list.map((e) => e.id).sort()).toEqual(["garak", "modelscan", "promptfoo"]);
     expect(list.every((e) => e.enabled === false && e.maxConcurrent === 1)).toBe(true);
-    // the shipped manifest has no modelscan image: nothing can enable it
+    // this suite's manifest has no modelscan image: nothing can enable it
     expect(list.find((e) => e.id === "modelscan")!.signature).toBe("not_built");
     const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
     expect({

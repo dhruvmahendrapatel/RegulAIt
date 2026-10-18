@@ -321,3 +321,6 @@ export interface DiscoveryReadOutcome {
   detail?: string;
 }
 export const DISCOVERY_READ_OUTCOMES_MAX = 100;
+
+// ADR-0195 lane A6: env-variable-name and CLI presence signatures (pending the admin-catalogue migration)
+export * from "./presence-signatures.js";
