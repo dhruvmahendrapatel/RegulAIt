@@ -10,6 +10,10 @@
  *  - optional: the trail's S3 bucket, read for the data events LookupEvents cannot return (`InvokeAgent`,
  *    `Retrieve`, `RetrieveAndGenerate`). Only when the customer configured data-event selectors and granted read on
  *    the bucket; otherwise reported `not_enabled`.
+ *  - optional (ADR-0195 SD2b): an organisation. From the management or delegated-administrator account,
+ *    Organizations `ListAccounts` (paginated, read-only) lists the member accounts; each ACTIVE member is scanned
+ *    the same way by assuming the role `memberRoleName` in it with the source's external id, chained from the
+ *    source's own credentials. Without a member role name the accounts are listed and reported, not scanned.
  *
  * Every client is built with the guarded request handler (decision 8) and explicit credentials; nothing reads the
  * default credential chain or instance metadata.
@@ -26,6 +30,7 @@ import {
 } from "@aws-sdk/client-bedrock";
 import { BedrockAgentClient, ListAgentsCommand, ListKnowledgeBasesCommand } from "@aws-sdk/client-bedrock-agent";
 import { CloudTrailClient, LookupEventsCommand, type Event as TrailEvent } from "@aws-sdk/client-cloudtrail";
+import { ListAccountsCommand, OrganizationsClient, type Account as OrganizationAccount } from "@aws-sdk/client-organizations";
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { ListEndpointsCommand, ListModelsCommand, SageMakerClient } from "@aws-sdk/client-sagemaker";
 import { fromTemporaryCredentials, fromWebToken } from "@aws-sdk/credential-providers";
@@ -58,6 +63,37 @@ export interface AwsTrailBucket {
   maxObjects?: number;
 }
 
+/** ADR-0195 SD2b: scan an organisation's member accounts from its management or delegated-administrator account */
+export interface AwsOrganizationScan {
+  /** the role every member account holds for RegulAIt (one name in each account); absent = list the accounts only */
+  memberRoleName?: string;
+  /** the source's external id; every member role's trust policy requires it */
+  externalId?: string;
+  /** the ARN partition of the member roles (default `aws`) */
+  partition?: string;
+  /** at most this many member accounts are scanned per run (default AWS_ORG_MAX_MEMBER_ACCOUNTS) */
+  maxAccounts?: number;
+}
+
+/** member accounts scanned per run at most, so one large organisation cannot stall a run */
+export const AWS_ORG_MAX_MEMBER_ACCOUNTS = 50;
+
+/** Organizations `ListAccounts`, page by page (at most `maxPages`), read-only */
+export async function listOrganizationAccounts(client: Pick<OrganizationsClient, "send">, maxPages: number): Promise<OrganizationAccount[]> {
+  return paginate(
+    maxPages,
+    (NextToken) => client.send(new ListAccountsCommand({ NextToken, MaxResults: 20 })),
+    (p) => p.Accounts,
+    (p) => p.NextToken,
+  );
+}
+
+/** an account Organizations reports as active (`State`, or the older `Status` the API is retiring) */
+function accountActive(a: OrganizationAccount): boolean {
+  if (a.State) return a.State === "ACTIVE";
+  return a.Status === "ACTIVE";
+}
+
 export interface AwsScanTarget {
   accountId: string;
   /** region scope; omitted means every region the account has enabled */
@@ -65,6 +101,8 @@ export interface AwsScanTarget {
   /** region of the STS endpoint used for the credential exchange (default us-east-1) */
   stsRegion?: string;
   trailBucket?: AwsTrailBucket;
+  /** ADR-0195 SD2b: list (and, with a member role, scan) the organisation's member accounts */
+  organization?: AwsOrganizationScan;
 }
 
 export interface AwsScannerDeps {
@@ -223,6 +261,7 @@ export class AwsCloudScanner implements CloudScanner {
   readonly #credentials: AwsCredentialIdentityProvider;
   readonly #fetch: GuardedFetch;
   readonly #stsFetch: GuardedFetch;
+  readonly #deps: AwsScannerDeps;
 
   constructor(readonly target: AwsScanTarget, deps: AwsScannerDeps) {
     // SD0 requires a 12-digit account id; the scanner checks the credential belongs to it before reading anything
@@ -231,6 +270,7 @@ export class AwsCloudScanner implements CloudScanner {
     // STS calls (the identity check included) use the credential fetch, like the exchanges
     this.#stsFetch = deps.credentialFetch ?? this.#fetch;
     this.#credentials = awsCredentialProvider(deps, target.stsRegion ?? FALLBACK_REGION);
+    this.#deps = deps;
   }
 
   #config(region: string) {
@@ -247,7 +287,55 @@ export class AwsCloudScanner implements CloudScanner {
       await this.#lookupEvents(c, ctx, region);
     }
     await this.#trailBucket(c, ctx);
+    await this.#organization(c, ctx);
     return c.finish();
+  }
+
+  /**
+   * ADR-0195 SD2b: the organisation's member accounts. Listing needs `organizations:ListAccounts` on the source's
+   * credential (the management or a delegated-administrator account). Each ACTIVE member other than this account
+   * is scanned by a scanner of its own, whose credential is AssumeRole into `memberRoleName` with the external id,
+   * chained from this source's credentials; its reads are reported under `<account>:<scope>`.
+   */
+  async #organization(c: ScanCollector, ctx: CloudScanContext): Promise<void> {
+    const org = this.target.organization;
+    if (!org) return;
+    const client = new OrganizationsClient(this.#config(FALLBACK_REGION));
+    const accounts = await c.attempt("aws.organizations.accounts", null, () => listOrganizationAccounts(client, ctx.maxPagesPerCall), () => undefined, (items) => {
+      const active = items.filter(accountActive).length;
+      return `${items.length} account(s) listed, ${active} active`;
+    });
+    if (!accounts) return;
+    const members = accounts.filter((a) => accountActive(a) && a.Id && a.Id !== this.target.accountId).map((a) => a.Id!);
+    if (!members.length) return;
+    if (!org.memberRoleName) {
+      c.report("aws.organizations.member_scan", null, "skipped", `${members.length} member account(s) listed, not scanned: set the target's memberRoleName to scan them`);
+      return;
+    }
+    if (!org.externalId) {
+      c.report("aws.organizations.member_scan", null, "skipped", "member accounts are scanned only with a federated credential, whose external id their role trust policies require");
+      return;
+    }
+    const max = Math.min(org.maxAccounts ?? AWS_ORG_MAX_MEMBER_ACCOUNTS, AWS_ORG_MAX_MEMBER_ACCOUNTS);
+    const scanned = members.slice(0, max);
+    if (members.length > scanned.length) {
+      c.report("aws.organizations.member_scan", null, "skipped", `${members.length - scanned.length} member account(s) over the per-run cap of ${max} were not scanned`);
+    }
+    const partition = org.partition ?? "aws";
+    for (const accountId of scanned) {
+      if (await shouldStop(ctx)) break;
+      const member = new AwsCloudScanner(
+        { accountId, ...(this.target.regions ? { regions: this.target.regions } : {}), ...(this.target.stsRegion ? { stsRegion: this.target.stsRegion } : {}) },
+        {
+          ...this.#deps,
+          credential: { mode: "aws_assume_role", roleArn: `arn:${partition}:iam::${accountId}:role/${org.memberRoleName}`, externalId: org.externalId },
+          sourceCredentials: this.#credentials,
+        },
+      );
+      const res = await member.scan(ctx);
+      for (const o of res.observations) c.add(o);
+      for (const cap of res.capabilities) c.capabilities.push({ ...cap, scope: `${accountId}:${cap.scope ?? "account"}` });
+    }
   }
 
   /**

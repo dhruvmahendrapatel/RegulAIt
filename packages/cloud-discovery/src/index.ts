@@ -9,7 +9,7 @@ export * from "./types.js";
 export * from "./credentials.js";
 export * from "./transport.js";
 export { classifyError, digestObservations } from "./report.js";
-export { AwsCloudScanner, awsCredentialProvider, AWS_SERVICE_KEYS, AWS_LOOKUP_EVENT_NAMES, type AwsScanTarget, type AwsScannerDeps, type AwsTrailBucket } from "./aws.js";
+export { AwsCloudScanner, awsCredentialProvider, listOrganizationAccounts, AWS_ORG_MAX_MEMBER_ACCOUNTS, AWS_SERVICE_KEYS, AWS_LOOKUP_EVENT_NAMES, type AwsOrganizationScan, type AwsScanTarget, type AwsScannerDeps, type AwsTrailBucket } from "./aws.js";
 export { GcpCloudScanner, gcpAuthClient, GCP_AI_SERVICES, GCP_SERVICE_KEYS, GCP_VERTEX_ASSET_TYPES, type GcpScanTarget, type GcpScannerDeps } from "./gcp.js";
 export { AzureCloudScanner, azureCredential, AZURE_SERVICE_KEYS, type AzureScanTarget, type AzureScannerDeps } from "./azure.js";
 export { CLOUD_AI_SERVICE_SEED, type CloudAiServiceSeedRow } from "./seed.js";
