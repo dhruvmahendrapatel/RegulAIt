@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,8 @@ let upstreamStatus = 200;
 let location: string | undefined;
 let onCall: (() => Promise<void>) | undefined;
 let previousAllow: typeof egressAllowHosts.$inferSelect | undefined;
+/** M-068: the loopback allow entry this file created (none if one was already there), removed by id in afterAll */
+let loopbackAllowHostId: string | undefined;
 
 async function post(url: string, payload: unknown) {
   const result = await app.inject({ method: "POST", url, headers: AUTH, payload: payload as Record<string, unknown> });
@@ -63,8 +66,10 @@ beforeAll(async () => {
   if (!address || typeof address === "string") throw new Error("missing test address");
   baseUrl = `http://127.0.0.1:${address.port}`;
   [previousAllow] = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
-  await db.insert(egressAllowHosts).values({ host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true })
-    .onConflictDoUpdate({ target: egressAllowHosts.host, set: { allowPrivateRanges: true, allowPlaintextHttp: true } });
+  const [allowed] = await db.insert(egressAllowHosts).values({ host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true })
+    .onConflictDoUpdate({ target: egressAllowHosts.host, set: { allowPrivateRanges: true, allowPlaintextHttp: true } })
+    .returning({ id: egressAllowHosts.id });
+  if (!previousAllow) loopbackAllowHostId = allowed!.id;
   userId = (await post("/v1/users", { email: `connector-${RUN}@example.test`, displayName: "Connector tester", isAdmin: true })).id;
   caller = { authorization: `Bearer ${(await post(`/v1/users/${userId}/keys`, { name: "connector tests" })).token}` };
 });
@@ -72,14 +77,20 @@ beforeAll(async () => {
 beforeEach(() => { calls = []; response = { text: RAW }; upstreamStatus = 200; onCall = undefined; location = undefined; });
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => {
-  await restoreAdminKeyMfa?.();
-  await restoreSb1Posture?.();
-  if (previousAllow) await db.update(egressAllowHosts).set(previousAllow).where(eq(egressAllowHosts.id, previousAllow.id));
-  else await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
-  await app?.close();
-  upstream?.closeAllConnections();
-  if (upstream) await new Promise<void>((resolve) => upstream.close(() => resolve()));
-  await db.$client.end();
+  // M-068: remove the loopback allow entry this file created, while the app is up; asserted last. An entry that
+  // was already there is handed back as it was found instead.
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await restoreAdminKeyMfa?.();
+    await restoreSb1Posture?.();
+    if (previousAllow) await db.update(egressAllowHosts).set(previousAllow).where(eq(egressAllowHosts.id, previousAllow.id));
+    await app?.close();
+    upstream?.closeAllConnections();
+    if (upstream) await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await db.$client.end();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 async function fixture(mode = "redact", kind = "http") {

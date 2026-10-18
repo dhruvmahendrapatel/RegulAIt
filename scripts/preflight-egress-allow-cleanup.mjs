@@ -17,27 +17,38 @@
  *  - A file CREATES an entry if it POSTs to `"/v1/egress-allow-hosts"` (a call
  *    whose HTTP method cannot be read counts as a POST) or calls
  *    `.insert(egressAllowHosts)`.
- *  - A file CLEANS UP if a removal is reachable from an `afterAll` callback,
- *    directly or through functions declared in the same file. A removal is
- *    `.delete(egressAllowHosts)`, a request to `/v1/egress-allow-hosts/${id}`
- *    (the only route on that path is DELETE), or `removeEgressAllowEntry(...)`.
- *    A removal at the end of a test body does not count: a failing assertion
- *    before it skips it.
- *  - PER ENTRY (M-078 follow-up): a create INSIDE a test body (`it`/`test`)
- *    also needs a cleanup of its own, because the afterAll removal a file has
- *    for its shared loopback row says nothing about a second host a test
- *    allow-lists. It is accepted when the create is a restore inside a
- *    `finally` block, when its statement passes the host through
- *    `trackHost(...)` and an `afterEach` reaches a removal
- *    (`removeAll(...)` of the tracker, or any removal above), or when the
- *    statement carries the marker comment `egress-allow-cleanup: afterAll`
- *    (a file-scoped entry the file's afterAll removes) or
- *    `egress-allow-cleanup: refused` (a POST the test expects to be refused).
- *    The afterAll marker is not taken on trust: a removal statement reachable
- *    from afterAll must name what the marked statement created, by its host
- *    (the same string literal, or the same identifier, as the create's `host`)
- *    or by its result (the variable the statement declares, or a variable or
- *    list that result is assigned or pushed into, such as the recorded id).
+ *  - FAIL CLOSED BY CONSTRUCTION (#427 review N1): a removal counts only in the
+ *    two forms of the shared helper (`src/testing/egress-allow-cleanup.ts`),
+ *    each imported under its own name from that module. Every other shape (a
+ *    `db.delete(egressAllowHosts)…`, a DELETE request, a helper of the file's
+ *    own) names nothing, so the entry it was meant to remove is reported.
+ *     1. `removeEgressAllowEntry(app, headers, { id: <saved> })`: the DELETE
+ *        route, by the id the create returned. `<saved>` must be a plain name
+ *        or property chain (or a for-of variable over one), and the create's
+ *        result must flow into it by plain reads only: `x = r.json().id`,
+ *        `const { id } = r.json()`, `ids.push(row.id)`, through `await`,
+ *        parentheses, `!`, `as`, a zero-argument `.json()` and `[0]`. A read
+ *        of any property but `id`, arithmetic, a template or any other call
+ *        carries nothing.
+ *     2. `<tracker>.removeAll(...)` of a `const <tracker> = trackEgressAllowHosts()`,
+ *        when every `host:` value of the create is exactly
+ *        `<tracker>.trackHost(...)`. The helper finds the row by the host
+ *        normalised the way the route stores it and deletes it by id.
+ *  - WHERE THE REMOVAL RUNS. A create outside a test body (beforeAll, a
+ *    describe body) needs the removal reachable from an `afterAll`, directly
+ *    or through functions declared in the same file. A create INSIDE a test
+ *    body (`it`/`test`) needs a cleanup of its own: a tracked host with the
+ *    tracker removed from an `afterEach`, or the marker comment
+ *    `egress-allow-cleanup: afterAll` on its statement AND its saved id
+ *    removed from an `afterAll` (form 1). A marked upsert of the same host as
+ *    a covered create in the same test, and a restore inside a `finally` of
+ *    the same host as a covered create in the file, are covered by it (the
+ *    upsert keeps the row id; if a restore makes a new one, the id removal
+ *    returns 404 and the helper's assertRemoved fails the suite). A POST the
+ *    test expects to be refused carries `egress-allow-cleanup: refused`.
+ *  - A create inside a function declared in the file is judged at each place
+ *    that function is called, with the call's result standing for the
+ *    create's when the function returns it.
  *  - A file that creates its entries only on a scratch database it drops is
  *    listed in SCRATCH_DB_FILES with a reason. The listing is checked too: an
  *    exempt file must still create an entry and still drop a scratch database
@@ -57,8 +68,12 @@ export const GATEWAY_SRC = "apps/gateway/src";
 
 const ROUTE = "/v1/egress-allow-hosts";
 const TABLE = "egressAllowHosts";
+/** the shared helper module (src/testing/egress-allow-cleanup.ts), as a test file imports it */
+const isHelperModule = (spec) =>
+  spec.startsWith(".") && (spec.endsWith("/testing/egress-allow-cleanup.js") || spec.endsWith("/testing/egress-allow-cleanup"));
 const HELPER = "removeEgressAllowEntry";
-/** the per-test tracker's removal (src/testing/egress-allow-cleanup.ts) */
+const TRACKER_FACTORY = "trackEgressAllowHosts";
+/** the tracker's methods: record a posted host, and remove every recorded host's row */
 const TRACKER_REMOVAL = "removeAll";
 const TRACKER_ADD = "trackHost";
 export const FILE_SCOPED_MARKER = "egress-allow-cleanup: afterAll";
@@ -132,11 +147,6 @@ const isTableCall = (node, method) =>
   ts.isIdentifier(node.arguments[0]) &&
   node.arguments[0].text === TABLE;
 
-const isRemoval = (node) =>
-  isTableCall(node, "delete") ||
-  (ts.isTemplateExpression(node) && node.head.text.startsWith(`${ROUTE}/`)) ||
-  (ts.isCallExpression(node) && (calleeName(node) === HELPER || calleeName(node) === TRACKER_REMOVAL));
-
 const isHook = (name) => (node) => ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name;
 const isAfterAll = isHook("afterAll");
 const isAfterEach = isHook("afterEach");
@@ -156,8 +166,8 @@ const statementOf = (node) => {
   return n.parent ? n : undefined;
 };
 
-/** where a create sits relative to the test that runs it */
-function createContext(node, sf) {
+/** where a node sits relative to the test that runs it, and the markers on its statement */
+function siteContext(node, sf) {
   let inTestBody = false;
   let inFinally = false;
   let test;
@@ -170,27 +180,20 @@ function createContext(node, sf) {
     }
   }
   const stmt = statementOf(node);
-  let tracked = false;
-  let marked = false;
   let markedAfterAll = false;
+  let markedRefused = false;
   if (stmt) {
-    const scan = (n) => {
-      if (ts.isCallExpression(n) && calleeName(n) === TRACKER_ADD) tracked = true;
-      ts.forEachChild(n, scan);
-    };
-    scan(stmt);
     const leading = stmt.getFullText(sf).slice(0, stmt.getStart(sf) - stmt.getFullStart());
     markedAfterAll = leading.includes(FILE_SCOPED_MARKER);
-    marked = markedAfterAll || leading.includes(REFUSED_MARKER);
+    markedRefused = leading.includes(REFUSED_MARKER);
   }
-  return { inTestBody, inFinally, tracked, marked, markedAfterAll, stmt, test };
+  return { inTestBody, inFinally, markedAfterAll, markedRefused, stmt, test };
 }
 
 /**
- * Name resolution for the afterAll marker check (review L2): names are compared by the SYMBOL the TypeScript checker
- * binds them to, never by spelling, so a shadowed `host` or a reused result name `r` is a different name. A name the
- * file never declares (a global) keys by its spelling. A property chain keys as its root's key plus the property names
- * (`created.allowHosts`).
+ * Name resolution: names are compared by the SYMBOL the TypeScript checker binds them to, never by spelling, so a
+ * shadowed `host` or a reused result name `r` is a different name (review L2). A name the file never declares (a
+ * global) keys by its spelling. A property chain keys as its root's key plus the property names (`created.allowHosts`).
  */
 function makeKeys(checker) {
   const ids = new Map();
@@ -215,98 +218,259 @@ function makeKeys(checker) {
     if (ts.isNonNullExpression(node) || ts.isParenthesizedExpression(node)) return keyOf(node.expression);
     return undefined;
   };
-  const declOf = (node) => {
+  /** every declaration of the symbol an identifier refers to */
+  const declsOf = (node) => {
     const sym = ts.isIdentifier(node) ? symbolOf(node) : undefined;
-    return sym?.valueDeclaration ?? sym?.declarations?.[0];
+    return sym?.declarations ?? [];
   };
-  return { keyOf, declOf, symKey };
+  const declOf = (node) => declsOf(node)[0];
+  return { keyOf, declOf, declsOf };
 }
 
 /** is this identifier a property NAME (`a.b`'s b, `{ b: 1 }`'s b), not a reference? */
 const isPropertyName = (n) =>
   (ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) || (ts.isPropertyAssignment(n.parent) && n.parent.name === n);
 
-/** the keys of every reference under a node: variables and property chains (`created.allowHosts`, and `created`) */
-function refKeys(node, keys, out = new Set()) {
-  if (ts.isIdentifier(node)) {
-    if (!isPropertyName(node)) {
-      const k = keys.keyOf(node);
-      if (k) out.add(k);
-    }
-    return out;
+/** strip what does not change a value: parentheses, `!`, `as`, `satisfies`, `<T>x` */
+function unwrap(e) {
+  for (;;) {
+    if (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)) e = e.expression;
+    else if (ts.isSatisfiesExpression?.(e)) e = e.expression;
+    else return e;
   }
-  if (ts.isPropertyAccessExpression(node)) {
-    const k = keys.keyOf(node);
-    if (k) out.add(k);
-  }
-  ts.forEachChild(node, (c) => {
-    refKeys(c, keys, out);
-  });
-  return out;
 }
 
-/** names bound by a declaration's name: `x`, `[row]`, `{ id }` */
-function boundIdentifiers(name, out = []) {
-  if (ts.isIdentifier(name)) out.push(name);
-  else if (ts.isArrayBindingPattern(name) || ts.isObjectBindingPattern(name)) {
-    for (const el of name.elements) if (ts.isBindingElement(el)) boundIdentifiers(el.name, out);
+/** a plain name or property chain on one (`saved`, `created.allowHosts`), after unwrap; anything else is undefined */
+function strictRef(e) {
+  const u = unwrap(e);
+  let r = u;
+  while (ts.isPropertyAccessExpression(r)) r = r.expression;
+  return ts.isIdentifier(r) ? u : undefined;
+}
+
+/** how many declarations anywhere in the file bind `name` (an import, `import x = require()`, a variable, a parameter, …) */
+const declaredNames = new WeakMap();
+function declarationsNamed(sf, name) {
+  if (!declaredNames.has(sf)) {
+    const counts = new Map();
+    const visit = (n) => {
+      const declName =
+        ts.isImportSpecifier(n) || ts.isImportEqualsDeclaration(n) || ts.isImportClause(n) || ts.isNamespaceImport(n) ||
+        ts.isVariableDeclaration(n) || ts.isBindingElement(n) || ts.isParameter(n) || ts.isFunctionDeclaration(n) ||
+        ts.isClassDeclaration(n) || ts.isEnumDeclaration(n) || ts.isModuleDeclaration(n)
+          ? n.name
+          : undefined;
+      if (declName && ts.isIdentifier(declName)) counts.set(declName.text, (counts.get(declName.text) ?? 0) + 1);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    declaredNames.set(sf, counts);
   }
-  return out;
+  return declaredNames.get(sf).get(name) ?? 0;
 }
 
 /**
- * what a create statement makes: the literal and variable keys of its `host` values, and the keys of the names it
- * declares. A payload passed by name (`const payload = { host }; post(url, payload)`) is read through its
- * object-literal declaration.
+ * is this identifier bound to the shared helper module's export of the same name? Only an un-aliased
+ * `import { name } from ".../testing/egress-allow-cleanup.js"` counts: any other binding (an alias, a local
+ * declaration, a parameter, a destructured element, an import from another module) makes the name say nothing.
  */
-function createdBy(stmt, keys) {
-  const hostLiterals = [];
-  const hostKeys = [];
+function boundToHelper(id, keys, name) {
+  if (!ts.isIdentifier(id) || id.text !== name || declarationsNamed(id.getSourceFile(), name) !== 1) return false;
+  const decls = keys.declsOf(id);
+  if (decls.length !== 1) return false;
+  const d = decls[0];
+  if (!ts.isImportSpecifier(d) || d.propertyName) return false;
+  const decl = d.parent?.parent?.parent;
+  return !!decl && ts.isImportDeclaration(decl) && isHelperModule(stringValue(decl.moduleSpecifier) ?? "");
+}
+
+/** the tracker a `const t = trackEgressAllowHosts()` declares, as the key of `t`, for an identifier naming it */
+function trackerKey(e, keys) {
+  const u = unwrap(e);
+  if (!ts.isIdentifier(u)) return undefined;
+  const decls = keys.declsOf(u);
+  if (decls.length !== 1) return undefined;
+  const d = decls[0];
+  if (!ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name) || !d.initializer) return undefined;
+  if (!(ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const)) return undefined;
+  const init = unwrap(d.initializer);
+  if (!ts.isCallExpression(init) || init.arguments.length !== 0 || !boundToHelper(init.expression, keys, TRACKER_FACTORY)) return undefined;
+  return keys.keyOf(u);
+}
+
+/** `<tracker>.<method>(...)`: the tracker's key, or undefined */
+function trackerCall(n, keys, method) {
+  if (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression) || n.expression.name.text !== method) return undefined;
+  return trackerKey(n.expression.expression, keys);
+}
+
+/**
+ * one removal the helper makes, or undefined for anything else (#427 review N1: an allow-list of the helper's own
+ * forms). `{ ids }` are the keys the saved id is read from (a for-of variable brings its iterable's key);
+ * `{ tracker }` is the key of the tracker whose hosts are removed.
+ */
+function helperRemoval(n, keys) {
+  if (!ts.isCallExpression(n)) return undefined;
+  const tracker = trackerCall(n, keys, TRACKER_REMOVAL);
+  if (tracker) return { ids: new Set(), tracker };
+  if (!boundToHelper(n.expression, keys, HELPER) || n.arguments.length !== 3) return undefined;
+  const target = unwrap(n.arguments[2]);
+  if (!ts.isObjectLiteralExpression(target) || target.properties.length !== 1) return { ids: new Set() };
+  const p = target.properties[0];
+  let ref;
+  if (ts.isShorthandPropertyAssignment(p) && p.name.text === "id" && !p.objectAssignmentInitializer) ref = p.name;
+  else if (ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === "id") ref = strictRef(p.initializer);
+  const ids = new Set();
+  if (ref) {
+    const k = keys.keyOf(ref);
+    if (k) ids.add(k);
+    // a for-of variable stands for each element of its iterable, when that is itself a plain name or chain
+    if (ts.isIdentifier(ref)) {
+      const d = keys.declOf(ref);
+      const list = d && ts.isVariableDeclaration(d) && ts.isIdentifier(d.name) ? d.parent : undefined;
+      const loop = list && ts.isVariableDeclarationList(list) ? list.parent : undefined;
+      if (loop && ts.isForOfStatement(loop)) {
+        const it = strictRef(loop.expression);
+        const ik = it && keys.keyOf(it);
+        if (ik) ids.add(ik);
+      }
+    }
+  }
+  return { ids };
+}
+
+/**
+ * a plain read of a value: its root (a name, or the expression that produced it) and the outermost property read.
+ * Reads through `await`, unwrap, a zero-argument `.json()` and a numeric index; anything else is the root.
+ */
+function plainRead(e) {
+  let lastProp;
+  let n = e;
+  for (;;) {
+    n = unwrap(n);
+    if (ts.isAwaitExpression(n)) n = n.expression;
+    else if (ts.isPropertyAccessExpression(n)) {
+      if (lastProp === undefined) lastProp = n.name.text;
+      n = n.expression;
+    } else if (ts.isElementAccessExpression(n) && ts.isNumericLiteral(n.argumentExpression)) n = n.expression;
+    else if (
+      ts.isCallExpression(n) &&
+      n.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      n.expression.name.text === "json"
+    ) {
+      n = n.expression.expression;
+    } else return { root: n, lastProp };
+  }
+}
+
+/** the function a node sits in, when that function has a name the file can call it by */
+function namedFunctionOf(node) {
+  for (let p = node.parent; p; p = p.parent) {
+    if (ts.isFunctionDeclaration(p)) return p.name ? { fn: p, name: p.name } : undefined;
+    if (ts.isArrowFunction(p) || ts.isFunctionExpression(p)) {
+      // an expression-bodied arrow passed as an argument (`relaxStepUpAround(db, () => post(...))`) is the call's value
+      if (isValueArrow(p)) continue;
+      const d = p.parent;
+      if (ts.isVariableDeclaration(d) && d.initializer === p && ts.isIdentifier(d.name)) return { fn: p, name: d.name };
+      return undefined;
+    }
+    if (ts.isMethodDeclaration(p) || ts.isConstructorDeclaration(p) || ts.isClassDeclaration(p)) return undefined;
+  }
+  return undefined;
+}
+
+/** an arrow with an expression body passed as a call argument: its value is (by convention) what the call returns */
+const isValueArrow = (p) => ts.isArrowFunction(p) && !ts.isBlock(p.body) && ts.isCallExpression(p.parent) && p.parent.arguments.includes(p);
+
+/**
+ * is `inner` inside `outer` without crossing a function boundary below `outer`? An arrow with an expression body
+ * passed as an argument (`relaxStepUpAround(db, () => app.inject(...))`) is crossed: its value is the call's.
+ */
+function within(inner, outer) {
+  for (let p = inner; p; p = p.parent) {
+    if (p === outer) return true;
+    if (p === inner) continue;
+    if (!isValueArrow(p) && (ts.isArrowFunction(p) || ts.isFunctionExpression(p) || ts.isFunctionDeclaration(p))) return false;
+  }
+  return false;
+}
+
+/** the host values a create statement posts: literals and keys of plain names, and whether each is tracked */
+function hostsOf(stmt, keys) {
+  const literals = [];
+  const refs = [];
+  const trackers = [];
+  let untracked = 0;
   const followed = new Set();
   const scan = (n) => {
+    // a payload passed by name (`const payload = { host }; post(url, payload)`) is read through its declaration
     if (ts.isIdentifier(n) && !isPropertyName(n) && !followed.has(n)) {
       followed.add(n);
       const d = keys.declOf(n);
       if (d && ts.isVariableDeclaration(d) && d.initializer && ts.isObjectLiteralExpression(d.initializer)) scan(d.initializer);
     }
-    if (ts.isPropertyAssignment(n) && n.name.getText() === "host") {
-      const v = stringValue(n.initializer);
-      if (v !== undefined) hostLiterals.push(v);
-      else hostKeys.push(...refKeys(n.initializer, keys));
-    }
-    if (ts.isShorthandPropertyAssignment(n) && n.name.text === "host") {
-      const k = keys.keyOf(n.name);
-      if (k) hostKeys.push(k);
+    const value =
+      ts.isPropertyAssignment(n) && n.name.getText() === "host" ? n.initializer : ts.isShorthandPropertyAssignment(n) && n.name.text === "host" ? n.name : undefined;
+    if (value) {
+      const v = stringValue(value);
+      const ref = strictRef(value);
+      const tracker = trackerCall(unwrap(value), keys, TRACKER_ADD);
+      if (tracker) trackers.push(tracker);
+      else untracked += 1;
+      if (v !== undefined) literals.push(v);
+      else if (ref && keys.keyOf(ref)) refs.push(keys.keyOf(ref));
     }
     ts.forEachChild(n, scan);
   };
   scan(stmt);
-  const results = ts.isVariableStatement(stmt)
-    ? stmt.declarationList.declarations.flatMap((d) => boundIdentifiers(d.name)).map((i) => keys.keyOf(i)).filter(Boolean)
-    : [];
-  return { hostLiterals, hostKeys, results };
+  return { literals, refs, trackers, untracked };
 }
 
 /**
- * the keys a created result flows into: `x = <uses result>`, `const x = <uses result>`, `xs.push(<uses result>)`,
- * followed transitively (`const post = …; const first = await post(); id = first.json().id`)
+ * the keys a create's result flows into, by plain reads only (see plainRead): `x = <read>`, `const x = <read>`,
+ * `const { id } = <read>`, `const [row] = <read>`, `xs.push(<read>)`, followed transitively. A read whose outermost
+ * property is not `id` carries nothing, so `x = r.json().host` does not make `x` an id.
  */
-function carriersOf(sf, results, keys) {
-  const names = new Set(results);
-  if (names.size === 0) return names;
-  const mentions = (node) => [...refKeys(node, keys)].some((k) => names.has(k));
+function carriersOf(sf, sources, keys) {
+  const names = new Set();
+  const flows = (expr) => {
+    const { root, lastProp } = plainRead(expr);
+    if (lastProp !== undefined && lastProp !== "id") return false;
+    if (ts.isIdentifier(root)) return names.has(keys.keyOf(root));
+    return sources(root);
+  };
   let grew = true;
-  const add = (k) => {
+  const add = (node) => {
+    const r = node && strictRef(node);
+    const k = r && keys.keyOf(r);
     if (k && !names.has(k)) {
       names.add(k);
       grew = true;
     }
   };
+  const bind = (name) => {
+    if (ts.isIdentifier(name)) add(name);
+    else if (ts.isArrayBindingPattern(name)) {
+      for (const el of name.elements) if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) add(el.name);
+    } else if (ts.isObjectBindingPattern(name)) {
+      for (const el of name.elements) {
+        const prop = el.propertyName ? el.propertyName.getText() : ts.isIdentifier(el.name) ? el.name.text : undefined;
+        if (prop === "id" && ts.isIdentifier(el.name)) add(el.name);
+      }
+    }
+  };
   const visit = (n) => {
-    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && mentions(n.right)) add(keys.keyOf(n.left));
-    if (ts.isVariableDeclaration(n) && n.initializer && mentions(n.initializer)) for (const b of boundIdentifiers(n.name)) add(keys.keyOf(b));
-    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "push" && n.arguments.some(mentions)) {
-      add(keys.keyOf(n.expression.expression));
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && flows(n.right)) add(n.left);
+    if (ts.isVariableDeclaration(n) && n.initializer && flows(n.initializer)) bind(n.name);
+    if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      n.expression.name.text === "push" &&
+      n.arguments.length === 1 &&
+      flows(n.arguments[0])
+    ) {
+      add(n.expression.expression);
     }
     ts.forEachChild(n, visit);
   };
@@ -315,142 +479,6 @@ function carriersOf(sf, results, keys) {
     visit(sf);
   }
   return names;
-}
-
-/**
- * What one removal names, by position (review R1): the host values it removes (`host:` property values, and what is
- * compared with `<table>.host`: `eq(t.host, x)`, `inArray(t.host, xs)`) and the ids it removes (`id:` property values,
- * what is compared with `<table>.id`, and the DELETE url template's substitutions). Only `eq` and `inArray` compare: a
- * negated comparison (`ne`, `notInArray`) or any other call naming the column removes nothing it names. A literal counts only as a host
- * value; a reference counts only in its own position, so a host variable or a recorded id in a `note:` field names
- * nothing. A for-of loop variable in a position brings its iterable into that position (`for (const id of ids)`).
- * The removal is the whole call: a `db.delete(t).where(...)` chain, or the request carrying the DELETE url.
- */
-/** the column comparisons whose rows a removal deletes: the named values themselves */
-const REMOVING_COMPARISONS = new Set(["eq", "inArray"]);
-/** the combinators a removing comparison may sit under: each keeps the rows its comparisons name (#427 review F1) */
-const KEEPING_COMBINATORS = new Set(["and", "or"]);
-const MATCHED_NAMES = new Set([...REMOVING_COMPARISONS, ...KEEPING_COMBINATORS]);
-
-/**
- * does the file bind `eq`/`inArray`/`and`/`or` to something else? An aliased import (`import { ne as eq }`) or a local
- * declaration under one of those names makes the name say nothing about what the call does, so the whole file's
- * comparisons then name nothing (fail closed, #427 review F1).
- */
-const reboundFiles = new WeakMap();
-function rebindsMatchedName(sf) {
-  if (reboundFiles.has(sf)) return reboundFiles.get(sf);
-  let rebound = false;
-  const visit = (n) => {
-    if (rebound) return;
-    if (ts.isImportSpecifier(n) && MATCHED_NAMES.has(n.name.text) && n.propertyName && n.propertyName.text !== n.name.text) rebound = true;
-    if (
-      (ts.isVariableDeclaration(n) || ts.isFunctionDeclaration(n) || ts.isParameter(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) &&
-      n.name &&
-      ts.isIdentifier(n.name) &&
-      MATCHED_NAMES.has(n.name.text)
-    ) {
-      rebound = true;
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(sf);
-  reboundFiles.set(sf, rebound);
-  return rebound;
-}
-
-/**
- * is this comparison reached from a `.where(...)` argument only through `and`/`or` (and parentheses)? Anything else
- * between them (`not(...)`, a `sql` template, a helper, a ternary) may invert or drop it, so it names nothing.
- */
-function underKeepingFilter(n) {
-  let child = n;
-  for (let p = n.parent; p; child = p, p = p.parent) {
-    if (ts.isParenthesizedExpression(p)) continue;
-    if (!ts.isCallExpression(p) || !p.arguments.includes(child)) return false;
-    const name = calleeName(p);
-    if (name === "where" && ts.isPropertyAccessExpression(p.expression)) return true;
-    if (!KEEPING_COMBINATORS.has(name ?? "") || !ts.isIdentifier(p.expression)) return false;
-  }
-  return false;
-}
-
-function removalNames(node, keys) {
-  let call = node;
-  if (!ts.isCallExpression(call)) {
-    while (call.parent && !ts.isCallExpression(call)) call = call.parent;
-  }
-  // the outermost call of a chain: a.delete(t).where(...) → the .where(...) call
-  while (call.parent && ts.isPropertyAccessExpression(call.parent) && call.parent.parent && ts.isCallExpression(call.parent.parent)) {
-    call = call.parent.parent;
-  }
-  const hostLiterals = new Set();
-  const hostRefs = new Set();
-  const idRefs = new Set();
-  /** the references in one position, plus the iterable of each for-of loop variable among them */
-  const collect = (expr, out) => {
-    refKeys(expr, keys, out);
-    const loops = (n) => {
-      if (ts.isIdentifier(n) && !isPropertyName(n)) {
-        const d = keys.declOf(n);
-        const list = d && ts.isVariableDeclaration(d) ? d.parent : undefined;
-        const loop = list && ts.isVariableDeclarationList(list) ? list.parent : undefined;
-        if (loop && (ts.isForOfStatement(loop) || ts.isForInStatement(loop))) refKeys(loop.expression, keys, out);
-      }
-      ts.forEachChild(n, loops);
-    };
-    loops(expr);
-  };
-  const column = (a) => (ts.isPropertyAccessExpression(a) ? a.name.text : undefined);
-  const scan = (n) => {
-    if (ts.isPropertyAssignment(n) && n.name.getText() === "host") {
-      const v = stringValue(n.initializer);
-      if (v !== undefined) hostLiterals.add(v);
-      else collect(n.initializer, hostRefs);
-    }
-    if (ts.isPropertyAssignment(n) && n.name.getText() === "id") collect(n.initializer, idRefs);
-    if (ts.isShorthandPropertyAssignment(n) && n.name.text === "host") collect(n.name, hostRefs);
-    if (ts.isShorthandPropertyAssignment(n) && n.name.text === "id") collect(n.name, idRefs);
-    // only the comparisons that keep the named rows in the removal (`eq`, `inArray`): a negated one (`ne`,
-    // `notInArray`) removes everything EXCEPT them, and any other call merely mentions the column (#414 recheck S1).
-    // Fail closed (#427 review F1): the comparison must be a plain `eq(...)`/`inArray(...)` reached from `.where(...)`
-    // only through `and`/`or`, in a file that does not rebind those names; anything the matcher cannot read names nothing.
-    if (
-      ts.isCallExpression(n) &&
-      ts.isIdentifier(n.expression) &&
-      REMOVING_COMPARISONS.has(n.expression.text) &&
-      underKeepingFilter(n) &&
-      !rebindsMatchedName(n.getSourceFile())
-    ) {
-      const cols = n.arguments.map(column);
-      for (const [col, out] of [
-        ["host", hostRefs],
-        ["id", idRefs],
-      ]) {
-        if (!cols.includes(col)) continue;
-        n.arguments.forEach((a, i) => {
-          if (cols[i] === col) return;
-          const v = stringValue(a);
-          if (v !== undefined) {
-            if (col === "host") hostLiterals.add(v);
-          } else collect(a, out);
-        });
-      }
-    }
-    if (ts.isTemplateExpression(n) && n.head.text.startsWith(`${ROUTE}/`)) for (const sp of n.templateSpans) collect(sp.expression, idRefs);
-    ts.forEachChild(n, scan);
-  };
-  scan(call);
-  return { hostLiterals, hostRefs, idRefs };
-}
-
-/** does any afterAll removal name what the marked create made (by its host, or by its recorded result)? */
-function removalNamesCreate(sf, stmt, removals, keys) {
-  const { hostLiterals, hostKeys, results } = createdBy(stmt, keys);
-  const carriers = carriersOf(sf, results, keys);
-  return removals.some(
-    (r) => hostLiterals.some((h) => r.hostLiterals.has(h)) || hostKeys.some((k) => r.hostRefs.has(k)) || [...carriers].some((k) => r.idRefs.has(k)),
-  );
 }
 
 /** analyse one test file's source */
@@ -463,16 +491,16 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
   host.fileExists = (name) => name === fileName;
   host.readFile = (name) => (name === fileName ? source : undefined);
   const keys = makeKeys(ts.createProgram([fileName], options, host).getTypeChecker());
-  const createLines = [];
-  /** creates inside a test body, with what protects each */
-  const testCreates = [];
+  const line = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+
+  const createNodes = [];
   const afterAllBodies = [];
   const afterEachBodies = [];
   /** name → function-like nodes declared under that name anywhere in the file */
   const functions = new Map();
   const declare = (name, fn) => functions.set(name, [...(functions.get(name) ?? []), fn]);
-
-  const line = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  /** every call, for finding where a function holding a create is called */
+  const calls = [];
   const visit = (node) => {
     const route = stringValue(node);
     let creates = false;
@@ -481,11 +509,7 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
       if (method === undefined || method === "POST") creates = true;
     }
     if (isTableCall(node, "insert")) creates = true;
-    if (creates) {
-      createLines.push(line(node));
-      const ctx = createContext(node, sf);
-      if (ctx.inTestBody) testCreates.push({ line: line(node), ...ctx });
-    }
+    if (creates) createNodes.push(node);
     if (isAfterAll(node) || isAfterEach(node)) {
       const into = isAfterAll(node) ? afterAllBodies : afterEachBodies;
       for (const a of node.arguments) if (ts.isArrowFunction(a) || ts.isFunctionExpression(a)) into.push(a);
@@ -499,33 +523,28 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
     ) {
       declare(node.name.text, node.initializer);
     }
+    if (ts.isCallExpression(node)) calls.push(node);
     ts.forEachChild(node, visit);
   };
   visit(sf);
 
-  // walk everything reachable from the hook callbacks, following calls to
-  // functions declared in this file
+  // walk everything reachable from the hook callbacks, following calls to functions declared in this file
   const reach = (bodies) => {
     const seen = new Set();
     const work = [...bodies];
-    let removes = false;
     let dropsScratchDb = false;
-    /** what each reachable removal names (see removalNames) */
     const removals = [];
     while (work.length > 0) {
       const fn = work.pop();
       if (seen.has(fn)) continue;
       seen.add(fn);
       const scan = (node) => {
-        if (isRemoval(node)) {
-          removes = true;
-          removals.push(removalNames(node, keys));
-        }
+        const r = helperRemoval(node, keys);
+        if (r) removals.push(r);
         // a scratch database dropped by the shared helper or by its own DROP DATABASE statement
         if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node)) && /\bDROP DATABASE\b/i.test(node.text)) dropsScratchDb = true;
         if (ts.isCallExpression(node)) {
-          const name = calleeName(node);
-          if (name === "dropScratchDatabase") dropsScratchDb = true;
+          if (calleeName(node) === "dropScratchDatabase") dropsScratchDb = true;
           if (ts.isIdentifier(node.expression)) for (const f of functions.get(node.expression.text) ?? []) work.push(f);
         }
         // a function passed by name (closeAll([... drop ...]), arr.map(fn))
@@ -536,35 +555,88 @@ export function analyzeTestFile(source, fileName = "x.test.ts") {
       };
       scan(fn);
     }
-    return { removes, dropsScratchDb, removals };
+    const ids = new Set(removals.flatMap((r) => [...r.ids]));
+    const trackers = new Set(removals.map((r) => r.tracker).filter(Boolean));
+    return { dropsScratchDb, removals, ids, trackers };
   };
-  const afterAllReach = reach(afterAllBodies);
-  const cleansInAfterEach = reach(afterEachBodies).removes;
-  const untrackedTestCreates = testCreates
-    .filter((c) => !c.inFinally && !c.marked && !(c.tracked && cleansInAfterEach))
-    .map((c) => c.line);
-  // an afterAll marker whose create no afterAll removal names (by host or by recorded result). A marked
-  // upsert of a host another create in the SAME test records (same host literal or variable) is covered by it.
-  const named = testCreates.filter((c) => c.stmt && removalNamesCreate(sf, c.stmt, afterAllReach.removals, keys));
-  const hostKeys = (c) => {
-    const { hostLiterals, hostKeys: vars } = createdBy(c.stmt, keys);
-    return [...hostLiterals.map((h) => `lit:${h}`), ...vars];
+  const afterAll = reach(afterAllBodies);
+  const afterEach = reach(afterEachBodies);
+
+  /**
+   * the SITES a create is judged at: the create itself, or, when it sits in a function declared in the file, each
+   * call of that function (recursively). A site carries the create's hosts and the nodes whose value is its result.
+   */
+  const sites = [];
+  const expand = (create, node, results, depth, seen) => {
+    const named = depth < 8 ? namedFunctionOf(node) : undefined;
+    if (named && !seen.has(named.fn)) {
+      const key = keys.keyOf(named.name);
+      const callSites = calls.filter((c) => ts.isIdentifier(c.expression) && keys.keyOf(c.expression) === key);
+      // does the function return the create's value (an expression body, or a `return` of it)?
+      const returns =
+        (ts.isArrowFunction(named.fn) && !ts.isBlock(named.fn.body) && results.some((r) => within(r, named.fn.body))) ||
+        results.some((r) => {
+          const st = statementOf(r);
+          return st && ts.isReturnStatement(st) && st.expression && within(r, st.expression) && namedFunctionOf(st)?.fn === named.fn;
+        });
+      if (callSites.length > 0) {
+        const next = new Set(seen).add(named.fn);
+        for (const c of callSites) expand(create, c, returns ? [...results, c] : [create], depth + 1, next);
+        return;
+      }
+    }
+    sites.push({ create, node, results });
   };
-  const coveredBySibling = (c) => {
-    const keys = hostKeys(c);
-    return named.some((d) => d.test === c.test && hostKeys(d).some((k) => keys.includes(k)));
+  for (const c of createNodes) expand(c, c, [c], 0, new Set());
+
+  const judged = sites.map((site) => {
+    const ctx = siteContext(site.node, sf);
+    // the marker may sit on the call of a function that creates, or on the creating statement inside it
+    if (site.node !== site.create) {
+      const inner = siteContext(site.create, sf);
+      ctx.markedAfterAll ||= inner.markedAfterAll;
+      ctx.markedRefused ||= inner.markedRefused;
+    }
+    const hosts = hostsOf(statementOf(site.create) ?? site.create, keys);
+    const sources = (root) => site.results.some((r) => r === root || (ts.isCallExpression(root) && within(r, root)));
+    const carriers = carriersOf(sf, sources, keys);
+    const tracked = hosts.trackers.length > 0 && hosts.untracked === 0;
+    const trackedBy = (reached) => tracked && hosts.trackers.every((t) => reached.trackers.has(t));
+    const byId = [...carriers].some((k) => afterAll.ids.has(k));
+    return { site, ctx, hosts, tracked, trackedBy, byId, line: line(site.node) };
+  });
+  const hostKeys = (j) => [...j.hosts.literals.map((h) => `lit:${h}`), ...j.hosts.refs];
+  const sameHost = (a, b) => hostKeys(a).some((k) => hostKeys(b).includes(k));
+  // a create is covered on its own when the helper removes exactly it
+  const direct = (j) => {
+    if (j.ctx.markedRefused) return true;
+    if (!j.ctx.inTestBody) return j.trackedBy(afterAll) || j.byId;
+    if (j.trackedBy(afterEach)) return true;
+    return j.ctx.markedAfterAll && j.byId;
   };
-  const unmatchedMarkers = [
-    ...new Set(testCreates.filter((c) => !c.inFinally && c.markedAfterAll && !named.includes(c) && !coveredBySibling(c)).map((c) => c.line)),
-  ];
+  const covered = judged.filter(direct);
+  const untrackedTestCreates = [];
+  const unmatchedMarkers = [];
+  const uncoveredCreates = [];
+  for (const j of judged) {
+    if (covered.includes(j)) continue;
+    // an upsert of a covered create's host in the same test, or a restore of a covered create's host
+    if (j.ctx.inTestBody && j.ctx.markedAfterAll && covered.some((d) => d.ctx.test === j.ctx.test && sameHost(d, j))) continue;
+    if (j.ctx.inTestBody && j.ctx.inFinally && covered.some((d) => sameHost(d, j))) continue;
+    if (!j.ctx.inTestBody) uncoveredCreates.push(j.line);
+    else if (j.ctx.markedAfterAll || j.ctx.inFinally) unmatchedMarkers.push(j.line);
+    else untrackedTestCreates.push(j.line);
+  }
+  const uniq = (xs) => [...new Set(xs)].sort((a, b) => a - b);
   return {
-    creates: createLines.length > 0,
-    createLines,
-    cleansInAfterAll: afterAllReach.removes,
-    cleansInAfterEach,
-    untrackedTestCreates,
-    unmatchedMarkers,
-    dropsScratchDb: afterAllReach.dropsScratchDb,
+    creates: createNodes.length > 0,
+    createLines: uniq(createNodes.map(line)),
+    cleansInAfterAll: afterAll.removals.length > 0,
+    cleansInAfterEach: afterEach.removals.length > 0,
+    uncoveredCreates: uniq(uncoveredCreates),
+    untrackedTestCreates: uniq(untrackedTestCreates),
+    unmatchedMarkers: uniq(unmatchedMarkers),
+    dropsScratchDb: afterAll.dropsScratchDb,
   };
 }
 
@@ -590,18 +662,21 @@ export function findEgressAllowLeaks(base = root) {
     const a =
       source.includes(ROUTE) || source.includes(TABLE)
         ? analyzeTestFile(source, rel)
-        : { creates: false, createLines: [], cleansInAfterAll: false, cleansInAfterEach: false, untrackedTestCreates: [], unmatchedMarkers: [], dropsScratchDb: false };
+        : { creates: false, createLines: [], uncoveredCreates: [], untrackedTestCreates: [], unmatchedMarkers: [], dropsScratchDb: false };
     if (a.creates) creators.push(rel);
     if (exempt) {
       if (!a.creates) stale.push(`${rel}: listed in SCRATCH_DB_FILES but creates no allow entry`);
       else if (!a.dropsScratchDb) stale.push(`${rel}: listed in SCRATCH_DB_FILES but no afterAll drops a scratch database`);
       continue;
     }
-    if (a.creates && !a.cleansInAfterAll) leaks.push(`${rel} (creates at line ${a.createLines.join(", ")})`);
-    else if (a.untrackedTestCreates.length > 0) {
+    if (a.uncoveredCreates.length > 0) {
+      leaks.push(`${rel} (creates at line ${a.uncoveredCreates.join(", ")}, and no afterAll removes that entry through the helper)`);
+    }
+    if (a.untrackedTestCreates.length > 0) {
       leaks.push(`${rel} (a test creates an entry with no per-entry cleanup at line ${a.untrackedTestCreates.join(", ")})`);
-    } else if (a.unmatchedMarkers.length > 0) {
-      leaks.push(`${rel} ('${FILE_SCOPED_MARKER}' at line ${a.unmatchedMarkers.join(", ")}, but no afterAll removal names that host or its recorded id)`);
+    }
+    if (a.unmatchedMarkers.length > 0) {
+      leaks.push(`${rel} ('${FILE_SCOPED_MARKER}' or a finally restore at line ${a.unmatchedMarkers.join(", ")}, but no afterAll removal names that entry's saved id)`);
     }
   }
   for (const rel of SCRATCH_DB_FILES.keys()) if (!files.includes(rel)) stale.push(`${rel}: listed in SCRATCH_DB_FILES but no longer exists`);
@@ -615,12 +690,14 @@ function main() {
   for (const s of stale) console.error(`  STALE EXEMPTION  ${s}`);
   if (leaks.length > 0) {
     console.error(
-      "\nEach file above adds an egress allow entry on the shared database and no afterAll\n" +
-        "removes it. Record the id and remove it with removeEgressAllowEntry (src/testing/\n" +
-        "egress-allow-cleanup.ts) in afterAll, asserting the result in a finally (M-068).\n" +
-        "An entry a single test creates is passed through trackEgressAllowHosts().trackHost(...)\n" +
-        "and removed in afterEach; a file-scoped one created in a test carries the comment\n" +
-        `'${FILE_SCOPED_MARKER}', and a POST the test expects refused '${REFUSED_MARKER}'.`,
+      "\nEach entry above is created on the shared database and not removed through the shared\n" +
+        "helper (src/testing/egress-allow-cleanup.ts). Save the id the create returns and remove it\n" +
+        "with removeEgressAllowEntry(app, AUTH, { id: savedId }) in afterAll, asserting the result in\n" +
+        "a finally (M-068). An entry a single test creates posts its host as\n" +
+        "perTest.trackHost(...) of a const perTest = trackEgressAllowHosts(), removed in afterEach; a\n" +
+        `file-scoped one created in a test carries '${FILE_SCOPED_MARKER}' and has its id removed\n` +
+        `in afterAll; a POST the test expects refused carries '${REFUSED_MARKER}'. No other removal\n` +
+        "shape counts (#427 review N1).",
     );
   }
   return leaks.length > 0 || stale.length > 0 ? 1 : 0;

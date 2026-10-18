@@ -17,6 +17,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
@@ -35,7 +36,6 @@ import {
   connectors,
   createDb,
   desc,
-  egressAllowHosts,
   eq,
   gt,
   inArray,
@@ -88,7 +88,7 @@ let restoreGates: () => Promise<void> = async () => {};
 let restorePosture: (() => Promise<void>) | undefined;
 let restoreIdentity: (() => Promise<void>) | undefined;
 let priorMethods: string[] = [];
-let allowHostId: string | null = null;
+let allowHostId: string | undefined;
 const prevPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 const created = { users: [] as string[], servers: [] as string[], connectors: [] as string[], sessions: [] as string[] };
 
@@ -277,6 +277,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  // M-068: the allow entry goes first, through the audited route, while the app is up; asserted at the end
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowHostId });
   try {
     await setAudience("enforce");
     await db.update(orgSettings).set({ mcpProtocolMethods: priorMethods as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
@@ -287,7 +289,6 @@ afterAll(async () => {
       await db.delete(webauthnCredentials).where(inArray(webauthnCredentials.userId, created.users));
     }
     if (created.sessions.length) await db.delete(authSessions).where(inArray(authSessions.id, created.sessions));
-    if (allowHostId) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowHostId));
     // this file's upstreams close below: their rows must not outlive it (a health sweep would probe dead ports)
     if (created.servers.length) await db.delete(mcpServers).where(inArray(mcpServers.id, created.servers));
     if (created.connectors.length) await db.delete(connectors).where(inArray(connectors.id, created.connectors));
@@ -304,6 +305,7 @@ afterAll(async () => {
     collector?.closeAllConnections();
     await new Promise<void>((r) => (upstreamHttp ? upstreamHttp.close(() => r()) : r()));
     await new Promise<void>((r) => (collector ? collector.close(() => r()) : r()));
+    loopback.assertRemoved();
   }
 });
 

@@ -585,7 +585,7 @@ describe("model cards refuse a presentation-scrub marker", () => {
 describe("recheck: spellings, fail-closed import, concurrency and url binding", () => {
   it("a host is bound in its normalised spelling: a grant made for one spelling serves another of the same host", async () => {
     const host = `sds-spell-${RUN}.lan.example.test`;
-    // egress-allow-cleanup: afterAll — the id lands in created.allowHosts, which afterAll removes
+    // egress-allow-cleanup: refused — a relaxation without a grant is prompted, and nothing is written
     const asked = await asAdmin("POST", "/v1/egress-allow-hosts", { host: `${host.toUpperCase()}.`, allowPrivateRanges: true });
     expect(asked.statusCode, asked.body).toBe(403);
     // the facts carry the normalised host (lower case, no trailing dot): by design, the gateway's one spelling

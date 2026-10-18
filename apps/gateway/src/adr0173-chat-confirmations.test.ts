@@ -15,6 +15,7 @@ import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
 import {
   and,
@@ -55,7 +56,8 @@ let colleague: Person;
 let model = "";
 let base = "";
 let upstream: http.Server;
-let createdEgressEntry = false;
+/** M-068: the loopback allow entry this file created (none if one already existed), removed by id in afterAll */
+let egressAllowId: string | undefined;
 const connectionIds: string[] = [];
 const connectorIds: string[] = [];
 
@@ -331,7 +333,7 @@ beforeAll(async () => {
       note: "chat confirmations suite: local fake platform",
     }));
     expect([200, 201]).toContain(allow.statusCode);
-    createdEgressEntry = true;
+    egressAllowId = allow.json().id;
   }
 
   // the tool: a webhook connector the owner and admin may write to
@@ -384,18 +386,23 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await drainBackgroundWork(k.db);
-  await restorePiiFloor?.();
-  delete process.env.REGULAIT_TEAMS_BOT_JWKS_COOLDOWN_SECONDS;
-  if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
-  if (connectorIds.length) {
-    await k.db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, connectorIds));
-    await k.db.delete(connectors).where(inArray(connectors.id, connectorIds));
+  // M-068: through the shared helper, by the id the POST returned, while the app is still up
+  const loopback = await removeEgressAllowEntry(k.app, k.BOOT, { id: egressAllowId });
+  try {
+    await restorePiiFloor?.();
+    delete process.env.REGULAIT_TEAMS_BOT_JWKS_COOLDOWN_SECONDS;
+    if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
+    if (connectorIds.length) {
+      await k.db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, connectorIds));
+      await k.db.delete(connectors).where(inArray(connectors.id, connectorIds));
+    }
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await restoreSb2Gates();
+    await k.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
-  upstream.closeAllConnections();
-  await new Promise<void>((resolve) => upstream.close(() => resolve()));
-  await restoreSb2Gates();
-  await k.close();
 });
 
 describe("Slack: an \"Ask first\" pause carries Approve / Deny", () => {

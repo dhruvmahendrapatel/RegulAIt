@@ -428,7 +428,7 @@ describe("dispatch time: a row that never went through the endpoint is still ref
 // ---------------------------------------------------------------------------
 
 describe("the allow-listed loopback endpoint an air-gapped operator actually wants", () => {
-  let allowHostId: string;
+  let allowHostId: string | undefined;
 
   beforeAll(async () => {
     await clearCredentials();
@@ -449,8 +449,8 @@ describe("the allow-listed loopback endpoint an air-gapped operator actually wan
   });
 
   afterAll(async () => {
-    // by host: the withdraw test re-creates the row under a new id
-    const loopback = await removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1" });
+    // by id: the withdraw test re-creates the row and records its new id in allowHostId
+    const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowHostId });
     try {
       await clearCredentials();
     } finally {

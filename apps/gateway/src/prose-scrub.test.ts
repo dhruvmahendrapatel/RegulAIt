@@ -380,17 +380,14 @@ describe("3. the siting: no route, no helper, and a third write shape", () => {
 
   it("scrubs the UPSERT branch — onConflictDoUpdate({ set }) writes the same columns", async () => {
     const host = `ps-upsert-${randomUUID().slice(0, 8)}.example.com`;
-    // egress-allow-cleanup: afterAll — the first POST's id is recorded in upsertAllowHostId, which afterAll removes
     // ADR-0034 owner amendment 2026-10-16: adding an entry is a stepped-up relaxation; this suite is about the scrub
-    const post = (note: string) =>
-      relaxStepUpAround(db, () => app.inject({
-        method: "POST",
-        headers: AUTH,
-        url: "/v1/egress-allow-hosts",
-        payload: { host, note },
-      }));
-
-    const first = await post("initial registration, reviewed by security");
+    // egress-allow-cleanup: afterAll — the first POST's id is recorded in upsertAllowHostId, which afterAll removes
+    const first = await relaxStepUpAround(db, () => app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/egress-allow-hosts",
+      payload: { host, note: "initial registration, reviewed by security" },
+    }));
     expect(first.statusCode).toBeLessThan(300);
     upsertAllowHostId = first.json().id;
     // the INSERT branch left ordinary prose byte-identical …
@@ -401,7 +398,13 @@ describe("3. the siting: no route, no helper, and a third write shape", () => {
     // scrubs too. `custom-providers.ts` passes the SAME object to `.values()`
     // and to `.onConflictDoUpdate({ set })`, so a fix applied to only one of
     // them would pass the first assertion and fail here.
-    const second = await post(`re-registered with ${AWS_KEY} pasted from the runbook`);
+    // egress-allow-cleanup: afterAll — the same host (an upsert keeps the row id)
+    const second = await relaxStepUpAround(db, () => app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/egress-allow-hosts",
+      payload: { host, note: `re-registered with ${AWS_KEY} pasted from the runbook` },
+    }));
     expect(second.statusCode).toBeLessThan(300);
     const updated = await raw("egress_allow_hosts", second.json().id);
     expect(updated.id).toBe(created.id);

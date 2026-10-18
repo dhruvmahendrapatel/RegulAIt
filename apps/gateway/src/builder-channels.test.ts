@@ -13,6 +13,7 @@
 import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import http from "node:http";
 import {
   and,
@@ -62,7 +63,8 @@ let base = "";
 let upstream: http.Server;
 /** every request that reached the fake platform (token exchanges excluded) */
 const posted: Array<{ url: string; body: Record<string, any> }> = [];
-let createdEgressEntry = false;
+/** M-068: the loopback allow entry this file created (none if one already existed), removed by id in afterAll */
+let egressAllowId: string | undefined;
 const connectionIds: string[] = [];
 const connectorIds: string[] = [];
 
@@ -265,7 +267,7 @@ beforeAll(async () => {
       note: "builder-channels suite: local fake chat platform",
     }));
     expect([200, 201]).toContain(allow.statusCode);
-    createdEgressEntry = true;
+    egressAllowId = allow.json().id;
   }
 
   ({ name: slackConn, id: slackConnId } = await makeConnection("slack", "slack", SECRET));
@@ -286,17 +288,22 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await restoreSb1Posture?.();
-  await drainChannelWork(k.db);
-  if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
-  if (connectorIds.length) {
-    await k.db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, connectorIds));
-    await k.db.delete(connectors).where(inArray(connectors.id, connectorIds));
+  // M-068: through the shared helper, by the id the POST returned, while the app is still up
+  const loopback = await removeEgressAllowEntry(k.app, k.BOOT, { id: egressAllowId });
+  try {
+    await restoreSb1Posture?.();
+    await drainChannelWork(k.db);
+    if (connectionIds.length) await k.db.delete(chatopsConnections).where(inArray(chatopsConnections.id, connectionIds));
+    if (connectorIds.length) {
+      await k.db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, connectorIds));
+      await k.db.delete(connectors).where(inArray(connectors.id, connectorIds));
+    }
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    await restoreSb2Gates();
+    await k.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  if (createdEgressEntry) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
-  await new Promise<void>((resolve) => upstream.close(() => resolve()));
-  await restoreSb2Gates();
-  await k.close();
 });
 
 describe("the first walls: signature and replay", () => {

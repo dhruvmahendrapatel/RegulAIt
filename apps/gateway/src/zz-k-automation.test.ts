@@ -39,6 +39,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { Webhook } from "standardwebhooks";
 import {
   and,
@@ -106,7 +107,7 @@ const createdSubscriptionIds: string[] = [];
 const createdQueueIds: string[] = [];
 const createdDatasetIds: string[] = [];
 const createdEvaluationTraceIds: string[] = [];
-let allowId: string | null = null;
+let allowId: string | undefined;
 let receiver: http.Server | null = null;
 let priorRetentionDays: number | null = null;
 let priorProfileRetention: Array<{ id: string; d: number }> = [];
@@ -241,24 +242,30 @@ afterAll(async () => {
   if (createdQueueIds.length) await db.delete(annotationQueues).where(inArray(annotationQueues.id, createdQueueIds));
   if (createdDatasetIds.length) await db.delete(evalDatasets).where(inArray(evalDatasets.id, createdDatasetIds));
   if (createdEvaluationTraceIds.length) await db.delete(traceEvaluations).where(inArray(traceEvaluations.traceId, createdEvaluationTraceIds));
-  if (allowId) await db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowId));
-  if (receiver) {
-    receiver.closeAllConnections();
-    await new Promise<void>((r) => receiver!.close(() => r()));
+  // M-068: removed through the audited route while the app is up (after the drain, so no delivery is cut short);
+  // asserted only after the rest of the teardown has run
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: allowId });
+  try {
+    if (receiver) {
+      receiver.closeAllConnections();
+      await new Promise<void>((r) => receiver!.close(() => r()));
+    }
+    await db.update(orgSettings).set({ defaultAuditRetentionDays: priorRetentionDays }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    for (const p of priorProfileRetention) {
+      await db.update(complianceProfiles).set({ auditRetentionDays: p.d }).where(eq(complianceProfiles.id, p.id));
+    }
+    if (createdRuleIds.length) await db.delete(automationRules).where(inArray(automationRules.id, createdRuleIds));
+    if (createdSubscriptionIds.length) await db.delete(webhookSubscriptions).where(inArray(webhookSubscriptions.id, createdSubscriptionIds));
+    if (createdUserIds.length) {
+      await db.delete(traces).where(inArray(traces.userId, createdUserIds));
+      await db.delete(automationRules).where(inArray(automationRules.authorUserId, createdUserIds));
+      await db.delete(users).where(inArray(users.id, createdUserIds));
+    }
+    app.server.closeAllConnections();
+    await app.close();
+  } finally {
+    loopback.assertRemoved();
   }
-  await db.update(orgSettings).set({ defaultAuditRetentionDays: priorRetentionDays }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
-  for (const p of priorProfileRetention) {
-    await db.update(complianceProfiles).set({ auditRetentionDays: p.d }).where(eq(complianceProfiles.id, p.id));
-  }
-  if (createdRuleIds.length) await db.delete(automationRules).where(inArray(automationRules.id, createdRuleIds));
-  if (createdSubscriptionIds.length) await db.delete(webhookSubscriptions).where(inArray(webhookSubscriptions.id, createdSubscriptionIds));
-  if (createdUserIds.length) {
-    await db.delete(traces).where(inArray(traces.userId, createdUserIds));
-    await db.delete(automationRules).where(inArray(automationRules.authorUserId, createdUserIds));
-    await db.delete(users).where(inArray(users.id, createdUserIds));
-  }
-  app.server.closeAllConnections();
-  await app.close();
 });
 
 const queueRule = (value: string, extra: Record<string, unknown> = {}) => ({

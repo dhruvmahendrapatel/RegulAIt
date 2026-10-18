@@ -14,7 +14,8 @@ import http from "node:http";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
-import { and, approvals, auditLog, builderAgents, eq, egressAllowHosts, orgSettings, sql } from "@regulait/db";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { and, approvals, auditLog, builderAgents, eq, orgSettings, sql } from "@regulait/db";
 import { builderKit, type BuilderKit, type Person } from "./testing/builder-fixture.js";
 import { resolveToolbox } from "./builder-tools.js";
 import { drainBackgroundWork } from "./background-work.js";
@@ -104,13 +105,18 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await restoreApprovalSigning?.();
-  await k.req("PUT", "/v1/execution/mode", k.BOOT, { mode: "normal", reason: "adr0173 connector approvals: cleanup" });
-  if (allowHostId) await k.db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, allowHostId));
-  receiver.closeAllConnections();
-  await new Promise<void>((r) => receiver.close(() => r()));
-  await restoreSb2Gates();
-  await k.close();
+  // M-068: through the shared helper, by the id the POST returned, while the app is still up
+  const loopback = await removeEgressAllowEntry(k.app, k.BOOT, { id: allowHostId });
+  try {
+    await restoreApprovalSigning?.();
+    await k.req("PUT", "/v1/execution/mode", k.BOOT, { mode: "normal", reason: "adr0173 connector approvals: cleanup" });
+    receiver.closeAllConnections();
+    await new Promise<void>((r) => receiver.close(() => r()));
+    await restoreSb2Gates();
+    await k.close();
+  } finally {
+    loopback.assertRemoved();
+  }
 });
 
 describe("a connector write under the require_approval dial", () => {

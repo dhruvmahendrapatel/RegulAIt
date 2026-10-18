@@ -61,6 +61,7 @@ import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 import { COMPILED_DEFAULT_RULE_ID } from "./compiled-egress.js";
 import { DEPLOY_MODE_ENV, type DeployMode } from "./deploy-posture.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
 
@@ -153,7 +154,7 @@ async function allow(host: string, opts: { privateRanges?: boolean; plaintext?: 
     headers: AUTH,
     url: "/v1/egress-allow-hosts",
     payload: {
-      host,
+      host: perTest.trackHost(host),
       allowPrivateRanges: opts.privateRanges ?? false,
       allowPlaintextHttp: opts.plaintext ?? false,
       note: "ADR-0062 suite",
@@ -443,6 +444,13 @@ afterEach(() => {
   resetHits();
 });
 
+// M-068: every host a test allow-lists is removed after that test, per entry, even
+// when an assertion in it fails, so no later test or file inherits it
+const perTest = trackEgressAllowHosts();
+afterEach(async () => {
+  (await perTest.removeAll(app, AUTH)).assertRemoved();
+});
+
 afterAll(async () => {
   await restoreSb1Posture?.();
   // RESTORE EVERY PIECE OF SHARED STATE THIS FILE TOUCHED. fileParallelism is
@@ -451,7 +459,6 @@ afterAll(async () => {
   if (savedMode === undefined) delete process.env[DEPLOY_MODE_ENV];
   else process.env[DEPLOY_MODE_ENV] = savedMode;
   await setOrgPolicy("strict"); // ADR-0181: hand on the shipped default
-  await db.delete(egressAllowHosts);
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "google"));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "openai"));
   selfHosted.closeAllConnections();

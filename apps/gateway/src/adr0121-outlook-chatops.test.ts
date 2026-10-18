@@ -30,6 +30,7 @@ import {
 } from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { CHATOPS_OUTBOUND_PROVIDERS } from "./chatops.js";
 import { COMPILED_DEFAULT_RULE_ID, decideCompiledDefault } from "./compiled-egress.js";
 import type { EgressAllowEntry } from "./egress-guard.js";
@@ -560,6 +561,7 @@ describe("AER-015 — strict egress admits an outlook connector created without 
   const setPolicy = (egressCompiledDefaultPolicy: "inherit" | "strict") =>
     app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { egressCompiledDefaultPolicy } });
 
+  /** allow-list a host and record the id the POST returned (the local login host, or the compiled Graph host) */
   const allow = async (host: string, local: boolean) => {
     const res = await relaxStepUpAround(db, () => post("/v1/egress-allow-hosts", {
       host,
@@ -568,7 +570,8 @@ describe("AER-015 — strict egress admits an outlook connector created without 
       note: `adr0121 ${RUN}: ${local ? "local fake Entra login host" : "the compiled Graph host"}`,
     }));
     expect(res.statusCode, res.body).toBe(201);
-    return res.json().id as string;
+    if (local) loginAllowId = res.json().id;
+    else graphAllowId = res.json().id;
   };
 
   const invoke = () =>
@@ -627,18 +630,23 @@ describe("AER-015 — strict egress admits an outlook connector created without 
     // strict, with BOTH hosts this invoke names listed: the typed login host
     // and the compiled Graph host
     expect((await setPolicy("strict")).statusCode).toBe(200);
-    loginAllowId = await allow(FAKE_LOGIN_HOST, true);
-    graphAllowId = await allow(hostOf(OUTLOOK_DEFAULT_GRAPH_BASE_URL), false);
+    await allow(FAKE_LOGIN_HOST, true);
+    await allow(hostOf(OUTLOOK_DEFAULT_GRAPH_BASE_URL), false);
   });
 
   afterAll(async () => {
     // RESTORE the shared posture and allow-list: the org singleton and the
     // table outlive this file
-    await setPolicy("strict"); // ADR-0181: hand on the shipped default
-    for (const id of [loginAllowId, graphAllowId].filter(Boolean)) {
-      await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${id}`, headers: AUTH });
+    // M-068: through the shared helper, by the ids the POSTs returned (test 11 clears graphAllowId once it removed it)
+    const login = await removeEgressAllowEntry(app, AUTH, { id: loginAllowId });
+    const graph = await removeEgressAllowEntry(app, AUTH, { id: graphAllowId });
+    try {
+      await setPolicy("strict"); // ADR-0181: hand on the shipped default
+      await new Promise<void>((r) => loginServer.close(() => r()));
+    } finally {
+      login.assertRemoved();
+      graph.assertRemoved();
     }
-    await new Promise<void>((r) => loginServer.close(() => r()));
   });
 
   it("10: the invoke path is ADMITTED — the token exchange reaches the (fake) Entra host", async () => {

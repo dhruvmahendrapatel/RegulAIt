@@ -35,6 +35,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // an opt-in egress allow entry is a stepped-up relaxation (ADR-0186 A): its setup post relaxes step-up for that one call
 import { relaxStepUpAround } from "./testing/step-up-posture.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import http from "node:http";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -109,7 +110,9 @@ let connectorId = "";
 let bareConnectorId = "";
 let requesterId = "";
 let approverId = "";
-const allowIds: Record<string, string> = {};
+/** M-068: the ids of the two allow entries as they stand now (a test that withdraws one re-creates it under a new id) */
+let loginAllowId: string | undefined;
+let graphAllowId: string | undefined;
 const approvalIds: string[] = [];
 let alertId = "";
 let restoreOrg: (() => Promise<void>) | undefined;
@@ -146,13 +149,15 @@ const allow = async (host: string) => {
     note: `adr0183 2.6 ${RUN}: local fake ${host === LOGIN_HOST ? "token endpoint" : "Graph"}`,
   }));
   expect(res.statusCode, res.body).toBe(201);
-  allowIds[host] = res.json().id as string;
+  if (host === LOGIN_HOST) loginAllowId = res.json().id;
+  else graphAllowId = res.json().id;
 };
 const disallow = async (host: string) => {
-  const id = allowIds[host];
+  const id = host === LOGIN_HOST ? loginAllowId : graphAllowId;
   if (!id) return;
   await inject("DELETE", `/v1/egress-allow-hosts/${id}`);
-  delete allowIds[host];
+  if (host === LOGIN_HOST) loginAllowId = undefined;
+  else graphAllowId = undefined;
 };
 
 async function makeApproval(projectId?: string) {
@@ -258,27 +263,34 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  delete process.env.REGULAIT_DEPLOY_MODE;
-  if (priorPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
-  else process.env.REGULAIT_PUBLIC_URL = priorPublicUrl;
-  await restoreOrg?.();
-  if (approvalIds.length) {
-    await db.delete(chatopsMessages).where(inArray(chatopsMessages.approvalId, approvalIds));
-    await db.delete(approvals).where(inArray(approvals.id, approvalIds));
+  // M-068: through the shared helper, by the ids the latest POSTs returned, while the app is still up
+  const login = await removeEgressAllowEntry(app, AUTH, { id: loginAllowId });
+  const graph = await removeEgressAllowEntry(app, AUTH, { id: graphAllowId });
+  try {
+    delete process.env.REGULAIT_DEPLOY_MODE;
+    if (priorPublicUrl === undefined) delete process.env.REGULAIT_PUBLIC_URL;
+    else process.env.REGULAIT_PUBLIC_URL = priorPublicUrl;
+    await restoreOrg?.();
+    if (approvalIds.length) {
+      await db.delete(chatopsMessages).where(inArray(chatopsMessages.approvalId, approvalIds));
+      await db.delete(approvals).where(inArray(approvals.id, approvalIds));
+    }
+    if (alertId) await db.delete(governanceAlerts).where(eq(governanceAlerts.id, alertId));
+    await db.delete(chatopsConnections).where(eq(chatopsConnections.name, CONNECTION));
+    const ids = [connectorId, bareConnectorId].filter(Boolean);
+    if (ids.length) {
+      await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, ids));
+      await db.delete(connectors).where(inArray(connectors.id, ids));
+    }
+    clearOutlookTokenCache();
+    app.server.closeAllConnections();
+    await app.close();
+    await new Promise<void>((r) => loginServer.close(() => r()));
+    await new Promise<void>((r) => graphServer.close(() => r()));
+  } finally {
+    login.assertRemoved();
+    graph.assertRemoved();
   }
-  if (alertId) await db.delete(governanceAlerts).where(eq(governanceAlerts.id, alertId));
-  await db.delete(chatopsConnections).where(eq(chatopsConnections.name, CONNECTION));
-  const ids = [connectorId, bareConnectorId].filter(Boolean);
-  if (ids.length) {
-    await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, ids));
-    await db.delete(connectors).where(inArray(connectors.id, ids));
-  }
-  for (const host of Object.keys(allowIds)) await disallow(host);
-  clearOutlookTokenCache();
-  app.server.closeAllConnections();
-  await app.close();
-  await new Promise<void>((r) => loginServer.close(() => r()));
-  await new Promise<void>((r) => graphServer.close(() => r()));
 });
 
 const register = (over: Record<string, unknown> = {}) =>
@@ -442,6 +454,7 @@ describe("5. both hosts go through the egress guard", () => {
       expect(loginHits.length).toBe(before.login);
       expect(graphHits.length).toBe(before.graph);
     } finally {
+      // egress-allow-cleanup: afterAll — the re-created entry's id lands in graphAllowId
       await allow(GRAPH_HOST);
     }
   });
@@ -463,6 +476,7 @@ describe("5. both hosts go through the egress guard", () => {
       expect(added).toHaveLength(1);
       expect((added[0]!.detail as { phase?: string }).phase).toBe("adapter");
     } finally {
+      // egress-allow-cleanup: afterAll — the re-created entry's id lands in loginAllowId
       await allow(LOGIN_HOST);
     }
   });
@@ -477,6 +491,7 @@ describe("5. both hosts go through the egress guard", () => {
       expect(refused.statusCode, refused.body).toBe(403);
       expect(refused.json().error).toBe("egress_blocked");
       expect(graphHits.length).toBe(before);
+      // egress-allow-cleanup: afterAll — the re-created entry's id lands in graphAllowId
       await allow(GRAPH_HOST);
       const sent = await postCard(await makeApproval());
       expect(sent.statusCode, sent.body).toBe(200);

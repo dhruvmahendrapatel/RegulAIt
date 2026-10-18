@@ -162,16 +162,28 @@ describe("ENG-IMG engine image lock", () => {
       expect(spawnSync(process.execPath, [script, "--check", "--base"], { encoding: "utf8" }).status).toBe(1);
     });
 
-    it("#427 review F2: CI runs the check against main after fetching main's full history", () => {
-      const ci = readFileSync(path.join(path.dirname(PATHS.lock), "..", ".github", "workflows", "ci.yml"), "utf8");
-      const run = ci.indexOf("node scripts/engine-images-lock.mjs --check --base origin/main");
-      const fetch = ci.indexOf("git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main");
-      expect(run).toBeGreaterThan(-1);
-      expect(fetch).toBeGreaterThan(-1);
-      expect(fetch).toBeLessThan(run);
-      // the step's run block is not switched off
-      const step = ci.slice(ci.lastIndexOf("- name:", run), run);
-      expect(step).not.toMatch(/continue-on-error:\s*true|if:\s*\$\{\{\s*false/);
+    it("#427 review F2/N2: CI runs the check against main after fetching main's full history, and nothing switches it off", () => {
+      const ci = readFileSync(path.join(path.dirname(PATHS.lock), "..", ".github", "workflows", "ci.yml"), "utf8").split("\n");
+      const at = ci.findIndex((l) => l.includes("node scripts/engine-images-lock.mjs --check --base"));
+      expect(at).toBeGreaterThan(-1);
+      // the WHOLE step: from its `- name:` line to the next line at or above the step's indentation
+      let start = at;
+      while (start > 0 && !/^\s*- name:/.test(ci[start])) start -= 1;
+      const indent = ci[start].indexOf("-");
+      let end = start + 1;
+      while (end < ci.length && (ci[end].trim() === "" || ci[end].search(/\S/) > indent)) end += 1;
+      const step = ci.slice(start, end);
+      // only these keys: no continue-on-error, no shell override, no working-directory, wherever they sit
+      const keys = step.map((l, i) => (i === 0 ? "name" : l.search(/\S/) === indent + 2 ? l.trim().split(":")[0] : undefined)).filter(Boolean);
+      expect(keys).toEqual(["name", "if", "run"]);
+      expect(step.join("\n")).not.toMatch(/continue-on-error/);
+      // the job's standard guard, exactly: an `if:` that is never true would skip the step
+      expect(step[1].trim()).toBe("if: ${{ !cancelled() && (steps.affordances.outcome == 'success' || steps.affordances.outcome == 'failure') }}");
+      // the run block is exactly these two commands, each a whole line: `|| true`, `; true`, `&` or an extra line fail
+      const run = step.slice(step.findIndex((l) => l.trim() === "run: |") + 1).filter((l) => l.trim() !== "");
+      expect(run).toHaveLength(2);
+      expect(run[0]).toMatch(/^\s+git fetch --no-tags --unshallow origin \+refs\/heads\/main:refs\/remotes\/origin\/main\s*$/);
+      expect(run[1]).toMatch(/^\s+node scripts\/engine-images-lock\.mjs --check --base origin\/main\s*$/);
     });
   });
 });
