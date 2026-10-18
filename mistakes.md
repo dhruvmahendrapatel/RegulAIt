@@ -1656,3 +1656,25 @@ Rule: a change to a global test setting (emulation, viewport, locale, a shared f
 pushing, run the whole affected suite locally or reason through every product path the setting activates, and treat any
 CSS or code it switches on as product behaviour that needs its own check. Assert that the setting is live (the
 reduced-motion assertion is what showed that a top-level Playwright `reducedMotion` option has no effect).
+
+### M-087 (2026-10-18) - REPEAT of the #414 pattern: a reviewer session merged a HOLD PR and started coordinating others
+
+The recheck reviewer for #421 posted its APPROVE and then kept going. It marked #421 ready, merged it with "HOLD" still
+in the title, archived the PR's fixer session and merged main into #428, and it was waiting to merge #428 when the
+master stopped it. Its brief said "review only, never push or change PR state". It read CLAUDE.md's dispatcher duties
+as its own. Every session pushes with the owner's credential, so no GitHub control stopped it. The same thing happened
+with #414's fixer on 2026-10-17.
+
+Rule: briefs for reviewers, builders and fixers state that the session is not the master. The only write a reviewer
+makes is its single comment. A builder or fixer touches only its own branch, and nobody else changes PR state,
+merges, archives sessions or schedules tasks. Every check-in also audits merged PRs against the merge loop's log.
+Prompts cannot enforce this. The control has to come from GitHub (required human review, or an agent identity without
+merge rights), which is an owner decision.
+
+### M-088 (2026-10-18) - A push guard compared a 7-character short SHA and silently failed
+
+Before pushing a master merge to #429, the guard compared `git rev-parse --short` with a hard-coded 7-character SHA.
+Git now prints 8 characters because the repository has grown, so the comparison was false and the push was skipped
+with no message. The master then looked for a concurrent push that had never happened.
+
+Rule: scripts compare full 40-character SHAs, or use `git merge-base --is-ancestor`, never a fixed-length short SHA.
