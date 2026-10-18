@@ -22,9 +22,6 @@
     "apps/web/src/ui/brand.module.css": {
       "declaration-property-unit-disallowed-list": 1
     },
-    "apps/web/src/ui/kit.module.css": {
-      "declaration-property-unit-disallowed-list": 27
-    },
     "apps/web/src/ui/logos/Logo.tsx": {
       "ts-color-literal": 8
     },
@@ -47,14 +44,8 @@
     "apps/web/src/views/account/ModelKeysCard.tsx": {
       "ts-spacing-literal": 1
     },
-    "apps/web/src/views/admin/admin.module.css": {
-      "declaration-property-unit-disallowed-list": 11
-    },
     "apps/web/src/views/admin/cost/CostDashboardPage.tsx": {
       "ts-spacing-literal": 1
-    },
-    "apps/web/src/views/admin/cost/EnergyEstimate.tsx": {
-      "ts-spacing-literal": 2
     },
     "apps/web/src/views/admin/governance/AdmissionReviewPage.tsx": {
       "ts-spacing-literal": 5
@@ -62,31 +53,13 @@
     "apps/web/src/views/admin/governance/AnnotationQueuesPage.tsx": {
       "ts-spacing-literal": 4
     },
-    "apps/web/src/views/admin/governance/ApprovalsAdminPage.tsx": {
-      "ts-spacing-literal": 3
-    },
-    "apps/web/src/views/admin/governance/BomEvidencePanel.tsx": {
-      "ts-spacing-literal": 2
-    },
     "apps/web/src/views/admin/governance/CopilotPage.tsx": {
       "ts-spacing-literal": 1
     },
     "apps/web/src/views/admin/governance/CopilotProposalForm.tsx": {
       "ts-spacing-literal": 2
     },
-    "apps/web/src/views/admin/governance/DecisionRecordTab.tsx": {
-      "ts-spacing-literal": 2
-    },
-    "apps/web/src/views/admin/governance/DecisionRegressionPage.tsx": {
-      "ts-spacing-literal": 31
-    },
     "apps/web/src/views/admin/governance/EvalsPage.tsx": {
-      "ts-spacing-literal": 1
-    },
-    "apps/web/src/views/admin/governance/GovernanceAlertsPage.tsx": {
-      "ts-spacing-literal": 2
-    },
-    "apps/web/src/views/admin/governance/IncidentsTab.tsx": {
       "ts-spacing-literal": 1
     },
     "apps/web/src/views/admin/governance/ModelArtifactsTab.tsx": {
@@ -95,44 +68,14 @@
     "apps/web/src/views/admin/governance/RiskAcceptancePanel.tsx": {
       "ts-spacing-literal": 4
     },
-    "apps/web/src/views/admin/governance/ShadowRemediationPanel.tsx": {
-      "ts-spacing-literal": 1
-    },
-    "apps/web/src/views/admin/governance/UseCaseQuestionnaire.tsx": {
-      "ts-spacing-literal": 4
-    },
     "apps/web/src/views/admin/governance/VendorsPage.tsx": {
       "ts-spacing-literal": 1
-    },
-    "apps/web/src/views/admin/governance/demoGovernance.module.css": {
-      "declaration-property-unit-disallowed-list": 8
-    },
-    "apps/web/src/views/admin/governance/intakeHelp.module.css": {
-      "declaration-property-unit-disallowed-list": 2
-    },
-    "apps/web/src/views/admin/governance/measuredConditions.module.css": {
-      "declaration-property-unit-disallowed-list": 1
     },
     "apps/web/src/views/admin/governance/modelArtifacts.module.css": {
       "declaration-property-unit-disallowed-list": 11
     },
     "apps/web/src/views/admin/governance/modelPolicy.module.css": {
       "declaration-property-unit-disallowed-list": 14
-    },
-    "apps/web/src/views/admin/governance/record.module.css": {
-      "declaration-property-unit-disallowed-list": 21
-    },
-    "apps/web/src/views/admin/governance/recordRound.module.css": {
-      "declaration-property-unit-disallowed-list": 4
-    },
-    "apps/web/src/views/admin/governance/registration.module.css": {
-      "declaration-property-unit-disallowed-list": 2
-    },
-    "apps/web/src/views/admin/governance/registry.module.css": {
-      "declaration-property-unit-disallowed-list": 8
-    },
-    "apps/web/src/views/admin/governance/reviewPolicy.module.css": {
-      "declaration-property-unit-disallowed-list": 12
     },
     "apps/web/src/views/admin/identity/ClientAccessPage.tsx": {
       "ts-spacing-literal": 2
@@ -167,9 +110,6 @@
     "apps/web/src/views/admin/integrations/WebhooksPage.tsx": {
       "ts-spacing-literal": 4
     },
-    "apps/web/src/views/admin/integrations/agentStewardship.module.css": {
-      "declaration-property-unit-disallowed-list": 4
-    },
     "apps/web/src/views/admin/integrations/customProviders.module.css": {
       "declaration-property-unit-disallowed-list": 6
     },
@@ -187,18 +127,6 @@
     },
     "apps/web/src/views/admin/settings/FirstRunPage.tsx": {
       "ts-spacing-literal": 1
-    },
-    "apps/web/src/views/approvals/QuorumProgress.tsx": {
-      "ts-spacing-literal": 3
-    },
-    "apps/web/src/views/approvals/actionReview.module.css": {
-      "declaration-property-unit-disallowed-list": 1
-    },
-    "apps/web/src/views/approvals/review.module.css": {
-      "declaration-property-unit-disallowed-list": 10
-    },
-    "apps/web/src/views/approvals/reviewRound.module.css": {
-      "declaration-property-unit-disallowed-list": 7
     },
     "apps/web/src/views/auth/auth.module.css": {
       "declaration-property-unit-disallowed-list": 3
@@ -274,9 +202,6 @@
     "apps/web/src/views/incidents/IncidentsPage.tsx": {
       "ts-spacing-literal": 4
     },
-    "apps/web/src/views/incidents/ReportIncidentModal.tsx": {
-      "ts-spacing-literal": 1
-    },
     "apps/web/src/views/models/models.module.css": {
       "declaration-property-unit-disallowed-list": 10
     },
@@ -288,9 +213,6 @@
     },
     "apps/web/src/views/spend/spend.module.css": {
       "declaration-property-unit-disallowed-list": 1
-    },
-    "apps/web/src/views/views.module.css": {
-      "declaration-property-unit-disallowed-list": 3
     },
     "apps/web/src/views/workflows/WorkflowDetailPage.tsx": {
       "ts-color-literal": 1

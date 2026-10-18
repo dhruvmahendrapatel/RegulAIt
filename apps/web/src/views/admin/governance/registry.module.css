@@ -16,9 +16,9 @@
 .splitToggle {
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
-  margin-left: 1px;
-  padding-left: 8px;
-  padding-right: 8px;
+  margin-left: var(--s-hair);
+  padding-left: var(--s1);
+  padding-right: var(--s1);
 }
 .chevron {
   display: inline-block;
@@ -45,7 +45,7 @@
 .menuItem {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--s-half);
   padding: var(--s1) var(--s2);
   border-radius: var(--radius-sm);
   color: var(--text);
@@ -104,7 +104,7 @@
   font-weight: 600;
 }
 .tileValue {
-  font-size: 28px;
+  font-size: var(--rg-heading-size);
   line-height: 1.15;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -131,8 +131,8 @@
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
+  gap: var(--s0-5);
+  padding: var(--s0) var(--s1-5);
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--surface-1);
@@ -166,7 +166,7 @@
 .nameCell {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--s-half);
   min-width: 0;
   max-width: 340px;
 }

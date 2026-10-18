@@ -442,6 +442,14 @@
   --s6: 48px;
   --s7: 56px;
   --s8: 64px;
+  /* ADR-0196 U3: the in-between steps dense UI already used as literals
+     (pills, table cells, label stacks). `-hair` is a 1px offset that lines a
+     box up with a border, not a gap. Odd literals snap to the nearest step. */
+  --s-hair: 1px;
+  --s-half: 2px;
+  --s0-5: 6px;
+  --s1-5: 12px;
+  --s2-5: 20px;
 
   --font-sans: var(--rg-font);
   --font-mono: var(--rg-font-mono);

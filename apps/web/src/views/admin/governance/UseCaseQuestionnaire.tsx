@@ -224,9 +224,9 @@ function inline(text: string): ReactNode[] {
   );
 }
 
-const prose: CSSProperties = { margin: 0, fontSize: "var(--text-sm)", lineHeight: 1.6 };
+const prose: CSSProperties = { margin: "0", fontSize: "var(--text-sm)", lineHeight: 1.6 };
 const headingStyle: Record<1 | 2 | 3, CSSProperties> = {
-  1: { margin: 0, fontSize: "var(--text-md)", fontWeight: 650 },
+  1: { margin: "0", fontSize: "var(--text-md)", fontWeight: 650 },
   2: { margin: "var(--s1) 0 0", fontSize: "var(--text-sm)", fontWeight: 650 },
   3: { margin: "var(--s1) 0 0", fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text-dim)" },
 };
@@ -248,7 +248,7 @@ export function QuestionnaireView(props: { content: string }) {
               <blockquote
                 key={i}
                 className={v.dim}
-                style={{ margin: 0, paddingLeft: "var(--s2)", borderLeft: "3px solid var(--border)" }}
+                style={{ margin: "0", paddingLeft: "var(--s2)", borderLeft: "3px solid var(--border)" }}
               >
                 {inline(b.text)}
               </blockquote>
@@ -256,7 +256,7 @@ export function QuestionnaireView(props: { content: string }) {
           case "list": {
             const L = b.ordered ? "ol" : "ul";
             return (
-              <L key={i} style={{ ...prose, paddingLeft: "1.25rem" }}>
+              <L key={i} style={{ ...prose, paddingLeft: "var(--s2-5)" }}>
                 {b.items.map((it, j) => <li key={j}>{inline(it)}</li>)}
               </L>
             );
