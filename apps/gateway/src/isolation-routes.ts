@@ -318,6 +318,7 @@ export function registerIsolationRoutes(app: FastifyInstance, db: Db): void {
       });
     } catch (e) {
       // a concurrent version took the number (the guard serialises versioning per name)
+      // log-safe: matched against fixed trigger wording only, never logged or stored
       const message = String((e as Error)?.message ?? "") + String((e as { cause?: Error })?.cause?.message ?? "");
       if (uniqueViolation(e) || message.includes("must be version")) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
       if (message.includes("is retired")) return reply.status(409).send({ error: "execution_profile_retired", detail: "a retired profile is not versioned again" });

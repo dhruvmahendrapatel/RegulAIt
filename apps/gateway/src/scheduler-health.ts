@@ -23,6 +23,7 @@
  * A tick still never crashes the gateway, and the next tick still retries —
  * the change is that a human can now find out.
  */
+import { safeErrorText } from "./gateway-logger.js";
 import { asc, auditLog, eq, users, type Db } from "@regulait/db";
 
 export type SchedulerName = "audit-prune" | "backup-verify";
@@ -100,7 +101,9 @@ export async function recordSchedulerFailure(
   err: unknown,
   now: Date = new Date(),
 ): Promise<void> {
-  const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  // R1: computed once with the withheld form — the console line, `lastError`
+  // and the durable audit row all carry it
+  const message = safeErrorText(err);
 
   const row = slot(name);
   row.runs++;
@@ -140,9 +143,7 @@ export async function recordSchedulerFailure(
     });
   } catch (auditErr) {
     console.error(
-      `[regulait] could not audit the ${name} failure (health surface still records it): ${
-        auditErr instanceof Error ? auditErr.message : String(auditErr)
-      }`,
+      `[regulait] could not audit the ${name} failure (health surface still records it): ${safeErrorText(auditErr)}`,
     );
   }
 }

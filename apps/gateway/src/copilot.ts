@@ -179,6 +179,7 @@ import { createApprovalRuleRow } from "./rule-creates.js";
 import { applyProjectPatch } from "./projects.js";
 import { loadRuleRow } from "./config-versions.js";
 import { databaseNow } from "./db-clock.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -1822,7 +1823,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         // THE GROUNDED ANSWER STANDS. A narration that failed, or that cited a
         // figure the retrieval never produced, is DISCARDED — never merged in
         // and never allowed to replace the counts.
-        narrationError = err instanceof Error ? err.message : String(err);
+        narrationError = safeErrorMessage(err);
         await audit(
           userId,
           "copilot_query",
