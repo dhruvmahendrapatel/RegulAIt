@@ -46,7 +46,8 @@ function sources(): string[] {
         !e.name.endsWith(".test.ts") &&
         !e.name.endsWith(".d.ts") &&
         !CLI.test(e.name) &&
-        e.name !== "gateway-logger.ts"
+        e.name !== "gateway-logger.ts" &&
+        e.name !== "err-serializer.ts"
       ) {
         out.push(p);
       }

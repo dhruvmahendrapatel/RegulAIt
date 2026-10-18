@@ -10,7 +10,8 @@
  *
  * The logger is resolved HERE and handed in from the boot path (boot.ts), not
  * switched on inside `buildApp`: ~100 test files construct apps and would
- * otherwise spam stdout. pino ships with Fastify, so this adds no dependency.
+ * otherwise spam stdout. pino ships with Fastify; since Q10 it is also a direct,
+ * exact-pinned dependency for its standard error serializer (err-serializer.ts).
  *
  * REDACTION IS THE POINT. The request serializer never sees the Authorization,
  * Cookie or x-api-key headers, and a response's Set-Cookie is masked, so a log
@@ -29,6 +30,7 @@
  * value inside a string) — it stays for the headers; the hook covers values.
  */
 import type { FastifyRequest, FastifyServerOptions } from "fastify";
+import { errMessage, errSerializer } from "./err-serializer.js";
 
 export const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 
@@ -103,11 +105,26 @@ export function resolveGatewayLogger(env: NodeJS.ProcessEnv = process.env): Fast
     level,
     redact: { paths: [...LOG_REDACT_PATHS], censor: "[redacted]" },
     // D4 DFX2 (D4A-05): the whole serialized line, every level and status
-    hooks: { streamWrite: redactLogText },
+    hooks: { streamWrite: redactLogText, logMethod: errorFirstLogMethod },
+    // Q10 (ADR-0197): pino's standard error serializer behind the N8 whitelist,
+    // for whichever key a call site uses (err-serializer.ts)
+    serializers: { err: errSerializer, error: errSerializer },
     // Fastify's default request serializer already omits the body; the
     // headers are the only place a credential would appear, and they are
     // redacted above.
   };
+}
+
+/**
+ * Q10: pino writes a bare error argument's raw message as the line's `msg`
+ * (`log.error(err)`). The error moves under `err` (the serializer) and the
+ * line's text, when the call gave none, is the serialized message.
+ */
+function errorFirstLogMethod(this: unknown, args: unknown[], method: (...a: unknown[]) => void): void {
+  const [first, ...rest] = args;
+  if (!(first instanceof Error)) return method.apply(this, args);
+  if (rest.length === 0) return method.call(this, { err: first }, errMessage(first));
+  return method.apply(this, [{ err: first }, ...rest]);
 }
 
 /** one line of text for the boot posture block */
