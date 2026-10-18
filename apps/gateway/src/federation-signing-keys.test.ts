@@ -96,6 +96,9 @@ describe("signer and JWKS round trip", () => {
     const { generateKeyPairSync } = await import("node:crypto");
     const ec = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "pem", type: "pkcs8" }).toString();
     await expect(signFederationToken({ kid: "k", pkcs8: ec }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toMatchObject({ code: "federation_key_unreadable" });
+    // RSA, but under 2048 bits: the size check, not the key-type check, refuses it (#420 review finding 2)
+    const small = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+    await expect(signFederationToken({ kid: "k", pkcs8: small }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toMatchObject({ code: "federation_key_unreadable" });
     await expect(signFederationToken({ kid: "k", pkcs8: "not a key" }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toBeInstanceOf(FederationError);
   });
 });
