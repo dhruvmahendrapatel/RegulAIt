@@ -709,7 +709,12 @@ function returnFocus(trigger: HTMLElement | null) {
     window.clearTimeout(timer);
     if (parked?.trigger === trigger) parked = null;
   }
-  observer.observe(trigger, { attributes: true, attributeFilter: ["disabled"] });
+  // the trigger can be disabled through an ancestor <fieldset disabled>, so watch the subtree, not the trigger alone
+  observer.observe(holder ?? document.body, {
+    attributes: true,
+    attributeFilter: ["disabled"],
+    subtree: true,
+  });
   document.addEventListener("focusin", onFocus, true);
   parked = { trigger, holder, stop };
 }
