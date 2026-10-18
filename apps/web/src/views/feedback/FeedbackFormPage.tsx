@@ -176,6 +176,17 @@ function SignedInForm(props: { useCaseId: string }) {
   return (
     <>
       <PageHeader title="Report a problem or appeal a decision" sub={name ? `About ${name}` : "About an AI use case"} />
+      {/* the name is optional: a 403/404 (a use case the reader may not see) stays quiet, any other failure says so */}
+      {uc.isLoading && (
+        <p className={v.hint} role="status" aria-busy="true">
+          Looking up the use case…
+        </p>
+      )}
+      {uc.error && ![403, 404].includes((uc.error as { status?: number }).status ?? 0) && (
+        <p className={v.errLine} role="alert">
+          Couldn't look up this use case ({refusalText(uc.error)}). You can still send the report.
+        </p>
+      )}
       <FeedbackForm
         subject={subject}
         allowTrace
