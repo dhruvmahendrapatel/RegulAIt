@@ -4,7 +4,8 @@ import { createBrowserRouter, Navigate, Outlet, Route, RouterProvider, Routes, u
 import { SessionProvider, useSession } from "./session/SessionContext";
 import { ToastProvider } from "./ui/toast";
 import { SkeletonBlock } from "./ui/kit";
-import { RouteFallback } from "./shell/RouteFallback";
+import { RouteFallback, RouteLoadingAnnouncer } from "./shell/RouteFallback";
+import { RootRouteError, ShellRouteBoundary } from "./shell/RouteError";
 import AppShell from "./shell/AppShell";
 import { RequireAdmin } from "./views/admin/adminKit";
 
@@ -171,9 +172,11 @@ function Protected() {
   if (auth.mfaSetupRequired) return <ForcedMfaEnroll />;
   return (
     <AppShell>
-      <Suspense fallback={<RouteFallback />}>
-        <Outlet />
-      </Suspense>
+      <ShellRouteBoundary pathname={location.pathname}>
+        <Suspense fallback={<RouteFallback />}>
+          <Outlet />
+        </Suspense>
+      </ShellRouteBoundary>
     </AppShell>
   );
 }
@@ -352,10 +355,13 @@ function ApplicationRoutes() {
 // for links, programmatic navigation and browser history transitions (X13).
 // The outer boundary covers the screens outside the shell (sign-in, the public feedback link, the forced gates);
 // a signed-in screen suspends to the one in Protected, so the shell and its focus stay put while it loads.
+// A screen that fails to load or render shows RouteError's panel: inside the shell for a signed-in screen, from the
+// root route's errorElement for the rest, never the router's developer page.
 const router = createBrowserRouter(
   [
     {
       path: "*",
+      errorElement: <RootRouteError />,
       element: (
         <Suspense fallback={<RouteFallback />}>
           <ApplicationRoutes />
@@ -372,6 +378,7 @@ export default function App() {
       <ToastProvider>
         <SessionProvider>
           <RouterProvider router={router} />
+          <RouteLoadingAnnouncer />
         </SessionProvider>
       </ToastProvider>
     </QueryClientProvider>

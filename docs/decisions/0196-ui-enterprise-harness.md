@@ -261,13 +261,30 @@ ceilings to the new sizes. No ceiling was raised and no harness constant or gate
   single-file admin areas) imports its file directly.
 - **Loading fallback.** `apps/web/src/shell/RouteFallback.tsx` renders only on a first load. It sits in the same box as
   the auth probe's skeleton in `Protected`, so nothing moves when one hands over to the other. It announces "Loading
-  page" through a polite `aria-live` region, and its skeleton bars are hidden from assistive technology. It
+  page" through `RouteLoadingAnnouncer`, a polite `aria-live` region that is always mounted beside the router (outside
+  `<main>`) and only changes its text while a fallback is up, because many screen readers say nothing for a region
+  that is inserted together with its text. Its skeleton bars are hidden from assistive technology. It
   deliberately has no `role="status"` and no `aria-busy`. Those are what the states check reads as the screen
   announcing its own data loading. A first run with a `role="status"` fallback cleared 21 of the 22 `loading-not-announced`
   findings that the screens had not fixed, because the fallback was in `<main>` while the chunk loaded. That would
   have loosened the gate. It takes no focus. Signed-in screens suspend inside `AppShell` (a boundary around `<Outlet />`), so the shell and the
   skip link stay mounted. The screens outside the shell (sign-in, the public feedback link, the forced gates) suspend
   to a boundary around the router element.
+- **Failed chunks (review fix).** A chunk that fails to load (a tab opened before a gateway upgrade asks for an old
+  hash and gets a 404; a dropped link) used to replace the app with the router's developer page, stack trace and
+  asset URLs included. `apps/web/src/shell/RouteError.tsx` now shows a `role="alert"` panel instead: "This page
+  failed to load" for a failed import (recognised by the Chromium, Firefox and WebKit messages), "Something went
+  wrong on this page" for a screen that threw. It offers **Reload** and a link home, and never shows the error's
+  message or stack (they go to the console). Reload is the recovery because React caches a lazy screen's rejected
+  import, so re-rendering cannot fetch it again. Signed-in screens get the panel inside the shell
+  (`ShellRouteBoundary`, around the `Suspense` in `Protected`), so the shell and skip link stay mounted; it resets
+  when the path changes rather than remounting, so a later navigation still runs in the transition. The rest get it
+  from the root route's `errorElement` (react-router's `useRouteError`). The in-shell boundary is
+  `react-error-boundary` 6.1.6 (MIT, no dependencies, released 2026-09-20), chosen under ADR-0176 over a
+  hand-written class: its `resetKeys` is exactly the reset-on-navigation rule. It does not reload by itself on vite's
+  `vite:preloadError`: a failed client navigation would then throw away the screen the person is on, with anything
+  typed into it. `e2e/enterprise/route-chunks.ent.spec.ts` aborts the chunk on a direct load, on a client
+  navigation and outside the shell, and holds it to check the fallback; each case failed with the fix removed.
 - **Logos are files, not script.** `vite.config.ts` sets `assetsInlineLimit` so `.svg` files are never inlined. The
   72 vendored logos (`src/ui/logos/svg`, loaded by `Logo.tsx` with `?url`) had been inlined into a shared chunk as
   `data:` URIs (43.8 kB gzip of script). They are now hashed files under `/ui/assets`. The gateway already serves
@@ -291,7 +308,9 @@ Bundle (gzip, size-limit 14.2.0, `pnpm --filter @regulait/web size`), main at 71
 The new ceilings are the measured size plus about 3 %, the margin the harness first set. Entry CSS gets about 4 %
 (10.6 kB), because lane U1 (#423) adds a focus-ring rule of about 0.6 kB raw to `global.css`. "All JS" stays at 1,020 kB:
 it grew by 8.8 kB (the per-file gzip cost of 64 files instead of 7), and 1,020 kB is already within 1 % of it. A
-first visit now downloads the entry plus one section chunk instead of all 804 kB.
+first visit now downloads the entry plus one section chunk instead of all 804 kB. After the failed-chunk fix (and
+a merge of main), entry JS measures 134.6 kB (2.1 % under 137.5 kB) and all JS 1,012.2 kB (0.8 % under 1,020 kB);
+no ceiling moved.
 
 Performance (`perf.ent.spec.ts`, Chromium, all 113 screens, this container, mocked API): LCP median 1,248 to
 1,180 ms, p90 1,312 to 1,248 ms, highest 1,368 to 1,300 ms; highest INP 16 ms both times. No screen was over a budget
