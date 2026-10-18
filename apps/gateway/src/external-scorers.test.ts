@@ -624,7 +624,7 @@ describe("a named-but-unusable instrument refuses the run BEFORE any row is writ
       const [restored] = await db
         .insert(egressAllowHosts)
         .values({
-          host: entry!.host,
+          host: "127.0.0.1",
           allowPrivateRanges: entry!.allowPrivateRanges,
           allowPlaintextHttp: entry!.allowPlaintextHttp,
           note: entry!.note,

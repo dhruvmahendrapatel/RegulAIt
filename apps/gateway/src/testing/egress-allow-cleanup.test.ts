@@ -102,6 +102,9 @@ describe("#427 review N1: the helper removes exactly the created row", () => {
     const f = fakeApp([
       { id: "m", host: "metadata.example" },
       { id: "v6", host: "::1" },
+      // a row inserted directly with an unnormalised spelling is matched too (#427 round 3 L3)
+      { id: "raw", host: "Metadata.Example." },
+      { id: "raw6", host: "[::1]" },
       { id: "keep", host: "metadata.example.other" },
     ]);
     (await perTest.removeAll(f.app, {})).assertRemoved();

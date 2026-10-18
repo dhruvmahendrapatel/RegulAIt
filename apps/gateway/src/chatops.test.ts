@@ -675,7 +675,7 @@ describe("outbound posting", () => {
         // egress-allow-cleanup: afterAll — the same row back under its own id, which afterAll removes
         const [back] = await db.insert(egressAllowHosts).values({
           id: row.id,
-          host: row.host,
+          host: "127.0.0.1", // the row selected by that host (unique)
           allowPrivateRanges: row.allowPrivateRanges,
           allowPlaintextHttp: row.allowPlaintextHttp,
           note: row.note,
@@ -810,7 +810,7 @@ describe("ADR-0113: Teams outbound", () => {
         // egress-allow-cleanup: afterAll — the same row back under its own id, which afterAll removes
         const [back] = await db.insert(egressAllowHosts).values({
           id: row.id,
-          host: row.host,
+          host: "127.0.0.1", // the row selected by that host (unique)
           allowPrivateRanges: row.allowPrivateRanges,
           allowPlaintextHttp: row.allowPlaintextHttp,
           note: row.note,

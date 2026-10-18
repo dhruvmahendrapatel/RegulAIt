@@ -13,7 +13,7 @@
  * Under the strict step-up values; global state is put back strict in afterAll (M-068), and the admin's
  * passkey is removed (B4S-06).
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -44,7 +44,7 @@ import { buildApp } from "./app.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
 import { forgetStepUpMethodsForTest, relaxStepUpAround } from "./testing/step-up-posture.js";
-import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { removeEgressAllowEntry, trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { importRegistryEntry } from "./mcp-registry.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -67,6 +67,8 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let restoreIdentity: (() => Promise<void>) | undefined;
 const created = { users: [] as string[], sessions: [] as string[], registries: [] as string[], servers: [] as string[], agents: [] as string[], cards: [] as string[], allowHosts: [] as string[] };
+/** M-068: the entry the add-then-remove test creates, removed from afterEach whether or not its own DELETE ran */
+const perTest = trackEgressAllowHosts();
 let admin: { id: string; key: { authorization: string }; session: { token: string }; auth: SoftAuthenticator };
 
 type Method = "GET" | "PUT" | "POST" | "PATCH";
@@ -167,6 +169,8 @@ beforeAll(async () => {
   const reg = await asAdmin("POST", "/v1/auth/passkeys", { challengeId: opt.json().challengeId, response: admin.auth.register(opt.json().options), label: "sds" });
   expect(reg.statusCode, reg.body).toBe(201);
 }, 120_000);
+
+afterEach(async () => (await perTest.removeAll(app, admin?.key ?? AUTH)).assertRemoved());
 
 afterAll(async () => {
   // M-068: the allow entry goes first, while the app is open; its outcome is asserted after every other restore
@@ -326,7 +330,7 @@ describe("MCP server: opening private ranges is a relaxation", () => {
 describe("egress allow entries: adding one, and turning an opt-in on, are relaxations", () => {
   it("adding a plain entry needs a step-up bound to the host (ADR-0034 owner amendment 2026-10-16); a note edit and removal need nothing", async () => {
     const host = `sds-add-${RUN}.example.test`;
-    const payload = { host, note: "sds: plain entry" };
+    const payload = { host: perTest.trackHost(host), note: "sds: plain entry" };
     const rows = async () => (await db.select({ id: egressAllowHosts.id }).from(egressAllowHosts).where(eq(egressAllowHosts.host, host))).length;
     // egress-allow-cleanup: refused — an API key can never step up, so nothing is written
     const byKey = await viaKey("POST", "/v1/egress-allow-hosts", payload);
@@ -337,25 +341,23 @@ describe("egress allow entries: adding one, and turning an opt-in on, are relaxa
     expect(ungranted.statusCode, ungranted.body).toBe(403);
     expect(ungranted.json().action).toEqual({ kind: "settings_relax", body: { op: "egress_allow_host", host, values: { added: true } } });
     expect(await rows()).toBe(0);
-    // egress-allow-cleanup: afterAll — the id lands in created.allowHosts, which afterAll removes
+    // the tracked host is removed from afterEach (perTest)
     const added = await asAdmin("POST", "/v1/egress-allow-hosts", payload, { [STEP_UP_HEADER]: await grantFor(ungranted.json().action) });
     expect(added.statusCode, added.body).toBe(201);
-    created.allowHosts.push(added.json().id);
     expect(added.json()).toMatchObject({ host, allowPrivateRanges: false, allowPlaintextHttp: false });
     const row = await lastAudit("egress-allow-host-set", added.json().id);
     expect(row!.detail).toMatchObject({ relaxation: true, relaxed: { added: true }, stepUp: "passkey" });
     expect(row!.reason).toContain("added");
 
     // an upsert of the same host that turns nothing on names no new destination: no step-up, even via an API key
-    // egress-allow-cleanup: afterAll — the same host (an upsert), removed in afterAll
-    const noted = await viaKey("POST", "/v1/egress-allow-hosts", { host, note: "sds: note edited" });
+    // the same tracked host (an upsert), removed from afterEach
+    const noted = await viaKey("POST", "/v1/egress-allow-hosts", { host: perTest.trackHost(host), note: "sds: note edited" });
     expect(noted.statusCode, noted.body).toBe(201);
     expect((await lastAudit("egress-allow-host-set", noted.json().id))!.detail).toMatchObject({ relaxation: false, note: "sds: note edited" });
 
     // removing it tightens: no step-up, through an API key, audited
     const removed = await app.inject({ method: "DELETE", url: `/v1/egress-allow-hosts/${added.json().id}`, headers: admin.key });
     expect(removed.statusCode, removed.body).toBe(200);
-    created.allowHosts.splice(created.allowHosts.indexOf(added.json().id), 1); // removed here, not in afterAll
     expect((await lastAudit("egress-allow-host-removed", added.json().id))!.detail).toMatchObject({ removed: host });
   });
 

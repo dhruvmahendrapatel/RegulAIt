@@ -30,7 +30,7 @@ import {
 } from "@regulait/connector-provider";
 import { buildApp } from "./app.js";
 import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
-import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
+import { trackEgressAllowHosts } from "./testing/egress-allow-cleanup.js";
 import { CHATOPS_OUTBOUND_PROVIDERS } from "./chatops.js";
 import { COMPILED_DEFAULT_RULE_ID, decideCompiledDefault } from "./compiled-egress.js";
 import type { EgressAllowEntry } from "./egress-guard.js";
@@ -554,24 +554,25 @@ describe("AER-015 — strict egress admits an outlook connector created without 
   let loginBase = "";
   /** every request the fake Entra login host received */
   const loginHits: string[] = [];
-  let loginAllowId = "";
+  /** M-068: both hosts are tracked and removed by host from afterAll, so test 11's own DELETE of one is covered */
+  const allowed = trackEgressAllowHosts();
+  /** the Graph entry's id, for test 11's own DELETE */
   let graphAllowId = "";
   let requesterAuth: { authorization: string };
 
   const setPolicy = (egressCompiledDefaultPolicy: "inherit" | "strict") =>
     app.inject({ method: "PUT", url: "/v1/org/settings", headers: AUTH, payload: { egressCompiledDefaultPolicy } });
 
-  /** allow-list a host and record the id the POST returned (the local login host, or the compiled Graph host) */
+  /** allow-list a tracked host (the local login host, or the compiled Graph host, whose id test 11 needs) */
   const allow = async (host: string, local: boolean) => {
     const res = await relaxStepUpAround(db, () => post("/v1/egress-allow-hosts", {
-      host,
+      host: allowed.trackHost(host),
       allowPrivateRanges: local,
       allowPlaintextHttp: local,
       note: `adr0121 ${RUN}: ${local ? "local fake Entra login host" : "the compiled Graph host"}`,
     }));
     expect(res.statusCode, res.body).toBe(201);
-    if (local) loginAllowId = res.json().id;
-    else graphAllowId = res.json().id;
+    if (!local) graphAllowId = res.json().id;
   };
 
   const invoke = () =>
@@ -637,15 +638,13 @@ describe("AER-015 — strict egress admits an outlook connector created without 
   afterAll(async () => {
     // RESTORE the shared posture and allow-list: the org singleton and the
     // table outlive this file
-    // M-068: through the shared helper, by the ids the POSTs returned (test 11 clears graphAllowId once it removed it)
-    const login = await removeEgressAllowEntry(app, AUTH, { id: loginAllowId });
-    const graph = await removeEgressAllowEntry(app, AUTH, { id: graphAllowId });
+    // M-068: through the shared helper, every row of each tracked host (test 11 already removed the Graph one)
+    const entries = await allowed.removeAll(app, AUTH);
     try {
       await setPolicy("strict"); // ADR-0181: hand on the shipped default
       await new Promise<void>((r) => loginServer.close(() => r()));
     } finally {
-      login.assertRemoved();
-      graph.assertRemoved();
+      entries.assertRemoved();
     }
   });
 

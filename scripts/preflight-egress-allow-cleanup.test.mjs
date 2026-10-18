@@ -70,7 +70,7 @@ afterAll(async () => { ${teardown} });\n`;
         // a direct insert with returning()
         [`const [row] = await db.insert(egressAllowHosts).values({ host: "127.0.0.1" }).returning({ id: egressAllowHosts.id });\n  saved = row.id;`, REMOVE],
         // pushed into a list the afterAll loop removes
-        [`created.push((await post("/v1/egress-allow-hosts", { host: "127.0.0.1" })).json().id);`, `for (const id of created) await removeEgressAllowEntry(app, AUTH, { id });`],
+        [`created.push((await post("/v1/egress-allow-hosts", { host: "127.0.0.1" })).json().id);`, `for (const id of created) (await removeEgressAllowEntry(app, AUTH, { id })).assertRemoved();`],
         // through a function declared in the file, passed by name
         [POST, `await closeAll([cleanup]);\n});\nasync function cleanup() { (await removeEgressAllowEntry(app, AUTH, { id: saved })).assertRemoved(); }\nvoid (async () => {`],
         // the create in a helper that returns it, judged where the helper is called
@@ -178,7 +178,7 @@ it("upsert", async () => {
       expect(analyzeTestFile(byId.replace("allowId = first.json().id;", "")).unmatchedMarkers).toEqual([7]);
       // a marked upsert of the same host in the same test is covered by its sibling; a different host is not
       const pushed = `${IMPORT}const created = { allowHosts: [] };
-afterAll(async () => { for (const id of created.allowHosts) await removeEgressAllowEntry(app, AUTH, { id }); });
+afterAll(async () => { for (const id of created.allowHosts) (await removeEgressAllowEntry(app, AUTH, { id })).assertRemoved(); });
 it("add, then upsert the same host", async () => {
   const host = "a.example.test";
   const payload = { host, note: "n" };
@@ -199,7 +199,7 @@ it("add, then upsert the same host", async () => {
     const marked = (removal, { prefix = "", host = "IMDS", record = "saved = r.json().id;" } = {}) => `${IMPORT}${prefix}const IMDS = "169.254.169.254";
 const T = egressAllowHosts;
 let saved;
-afterAll(async () => { await ${removal}; });
+afterAll(async () => { (await ${removal}).assertRemoved(); });
 it("imds", async () => {
   // egress-allow-cleanup: afterAll — claimed removed by the afterAll above
   const r = await post("/v1/egress-allow-hosts", { host: ${host} });
@@ -318,6 +318,170 @@ it("imds", async () => {
     });
   });
 
+  describe("#427 round 3 M1: one saved binding per created row (a reused or reassigned binding is flagged)", () => {
+    const REMOVE = "(await removeEgressAllowEntry(app, AUTH, { id: saved })).assertRemoved();";
+    /** two marked creates in two tests, each saving its id with `recordA` / `recordB` */
+    const pair = (hostA, hostB, { recordA = "saved = r.json().id;", recordB = "saved = r2.json().id;", prefix = "" } = {}) => `${IMPORT}${prefix}let saved;
+afterAll(async () => { ${REMOVE} });
+it("a", async () => { // egress-allow-cleanup: afterAll
+  const r = await post("/v1/egress-allow-hosts", { host: ${hostA} }); ${recordA}
+});
+it("b", async () => { // egress-allow-cleanup: afterAll
+  const r2 = await post("/v1/egress-allow-hosts", { host: ${hostB} }); ${recordB}
+});\n`;
+
+    it("the reviewer's probe: two hosts saved into one variable are both flagged (only the last row would be removed)", () => {
+      const src = pair('IMDS', '"metadata.example"', { prefix: 'const IMDS = "169.254.169.254";\n' });
+      expect(analyzeTestFile(src).unmatchedMarkers).toEqual([lineOf(src, "{ host: IMDS }"), lineOf(src, '"metadata.example" }')]);
+      // a host the analysis cannot read is not the same row as anything
+      expect(flagged(analyzeTestFile(pair("cfg.host", "cfg.host")))).toHaveLength(2);
+      expect(flagged(analyzeTestFile(pair('"a.example"', "`a.example`.trim()")))).toHaveLength(2);
+    });
+
+    it("live controls: the same row re-created into one variable (an upsert by host), and different rows pushed to a list", () => {
+      for (const src of [
+        pair('"127.0.0.1"', '"127.0.0.1"'),
+        // a const with the literal is the same row as the literal
+        pair('LOOPBACK', '"127.0.0.1"', { prefix: 'const LOOPBACK = "127.0.0.1";\n' }),
+        // pushed: every row stays named
+        pair('"a.example"', '"b.example"', { recordA: "ids.push(r.json().id);", recordB: "ids.push(r2.json().id);", prefix: "const ids = [];\n" }).replace(
+          REMOVE,
+          "for (const id of ids) (await removeEgressAllowEntry(app, AUTH, { id })).assertRemoved();",
+        ),
+      ]) {
+        expect(flagged(analyzeTestFile(src)), src).toEqual([]);
+      }
+    });
+
+    it("a create in a function is judged per call with the host its argument names", () => {
+      const viaFn = (a, b) => `${IMPORT}let saved;
+const allow = async (h) => { saved = (await post("/v1/egress-allow-hosts", { host: h })).json().id; };
+beforeAll(async () => { await allow(${a}); await allow(${b}); });
+afterAll(async () => { ${REMOVE} });\n`;
+      expect(flagged(analyzeTestFile(viaFn('"127.0.0.1"', '"127.0.0.1"')))).toEqual([]);
+      const two = viaFn('"a.example"', '"b.example"');
+      expect(analyzeTestFile(two).uncoveredCreates).toEqual([lineOf(two, "beforeAll")]);
+    });
+
+    it("a write to the saved binding that is not a create's result is flagged (review L1: the backstop never fires)", () => {
+      for (const later of [
+        "saved = undefined;",
+        'saved = "fixed-id";',
+        "saved ??= other;",
+        "[saved] = [other];",
+        "({ id: saved } = other);",
+        "saved += \"\";",
+      ]) {
+        const src = pair('"127.0.0.1"', '"127.0.0.1"').replace('it("b"', `it("c", () => { ${later} });\nit("b"`);
+        expect(flagged(analyzeTestFile(src)), later).toHaveLength(2);
+      }
+      const list = (later) => `${IMPORT}let ids = [];
+afterAll(async () => { for (const id of ids) (await removeEgressAllowEntry(app, AUTH, { id })).assertRemoved(); });
+beforeAll(async () => { ids.push((await post("/v1/egress-allow-hosts", { host: "a" })).json().id); });
+it("x", () => { ${later} });\n`;
+      expect(flagged(analyzeTestFile(list("expect(1).toBe(1);")))).toEqual([]);
+      for (const later of ["ids = [];", "ids.length = 0;", "ids.splice(0);", "ids.pop();", "ids.shift();"]) {
+        expect(analyzeTestFile(list(later)).uncoveredCreates, later).toEqual([4]);
+      }
+    });
+  });
+
+  describe("#427 round 3 L1: the removal must run, and its result must be asserted", () => {
+    const file = (body) => `${IMPORT}let saved;
+beforeAll(async () => { saved = (await post("/v1/egress-allow-hosts", { host: "127.0.0.1" })).json().id; });
+afterAll(async () => { ${body} });
+async function cleanup() { (await removeEgressAllowEntry(app, AUTH, { id: saved })).assertRemoved(); }\n`;
+    const CALL = "removeEgressAllowEntry(app, AUTH, { id: saved })";
+
+    it("live controls: asserted directly, through a const in a finally, through a pushed list, and through a function called unconditionally", () => {
+      for (const body of [
+        `(await ${CALL}).assertRemoved();`,
+        `const x = await ${CALL}; try { await app.close(); } finally { x.assertRemoved(); }`,
+        `const rs = []; rs.push(await ${CALL}); try { await app.close(); } finally { for (const r of rs) r.assertRemoved(); }`,
+        "await cleanup();",
+        "await closeAll([cleanup]);",
+      ]) {
+        expect(flagged(analyzeTestFile(file(body))), body).toEqual([]);
+      }
+    });
+
+    it("negative fixtures: unasserted, conditional, unreachable, or in a function never called", () => {
+      for (const body of [
+        `await ${CALL};`,
+        `void ${CALL};`,
+        `const x = await ${CALL};`,
+        `let x = await ${CALL}; x.assertRemoved();`,
+        `const x = await ${CALL}; if (ok) x.assertRemoved();`,
+        `const x = await ${CALL}; const later = () => x.assertRemoved();`,
+        `const rs = []; rs.push(await ${CALL});`,
+        `if (false) (await ${CALL}).assertRemoved();`,
+        `flag ? (await ${CALL}).assertRemoved() : 0;`,
+        `flag && (await ${CALL}).assertRemoved();`,
+        `return; (await ${CALL}).assertRemoved();`,
+        `try { await app.close(); (await ${CALL}).assertRemoved(); } finally { }`,
+        `try { await app.close(); } catch { (await ${CALL}).assertRemoved(); }`,
+        `while (more) (await ${CALL}).assertRemoved();`,
+        `const never = async () => (await ${CALL}).assertRemoved();`,
+        `(await ${CALL})?.assertRemoved();`,
+        "if (flag) await cleanup();",
+        "return; await cleanup();",
+      ]) {
+        expect(analyzeTestFile(file(body)).uncoveredCreates, body).toEqual([lineOf(file(body), "beforeAll")]);
+      }
+    });
+
+    it("the tracker's removeAll must be asserted too", () => {
+      const src = (hook) => `${IMPORT}const perTest = trackEgressAllowHosts();
+it("imds", async () => { await post("/v1/egress-allow-hosts", { host: perTest.trackHost(IMDS) }); });
+afterEach(async () => { ${hook} });\n`;
+      expect(flagged(analyzeTestFile(src("(await perTest.removeAll(app, AUTH)).assertRemoved();")))).toEqual([]);
+      expect(analyzeTestFile(src("await perTest.removeAll(app, AUTH);")).untrackedTestCreates).toEqual([lineOf(src(""), "post(")]);
+    });
+
+    it("a marked create in a test is covered by a tracker removed from afterAll; unmarked it still needs afterEach", () => {
+      const src = (marker) => `${IMPORT}const allowed = trackEgressAllowHosts();
+afterAll(async () => { (await allowed.removeAll(app, AUTH)).assertRemoved(); });
+it("withdraw and restore", async () => {
+  ${marker}
+  await post("/v1/egress-allow-hosts", { host: allowed.trackHost(H) });
+});\n`;
+      expect(flagged(analyzeTestFile(src("// egress-allow-cleanup: afterAll")))).toEqual([]);
+      expect(analyzeTestFile(src("")).untrackedTestCreates).toEqual([lineOf(src(""), "post(")]);
+    });
+  });
+
+  it("#427 round 3 L2: only the one real helper module counts, resolved from the test file's directory", () => {
+    const src = (spec) => `import { removeEgressAllowEntry } from "${spec}";
+let saved;
+beforeAll(async () => { saved = (await post("/v1/egress-allow-hosts", { host: "127.0.0.1" })).json().id; });
+afterAll(async () => { (await removeEgressAllowEntry(app, AUTH, { id: saved })).assertRemoved(); });\n`;
+    for (const [spec, fileName] of [
+      ["./testing/egress-allow-cleanup.js", "x.test.ts"],
+      ["./testing/egress-allow-cleanup", "x.test.ts"],
+      ["../testing/egress-allow-cleanup.js", "sub/x.test.ts"],
+    ]) {
+      expect(flagged(analyzeTestFile(src(spec), fileName)), `${fileName}: ${spec}`).toEqual([]);
+    }
+    for (const [spec, fileName] of [
+      ["./fake/testing/egress-allow-cleanup.js", "x.test.ts"],
+      ["./testing/egress-allow-cleanup.js", "sub/x.test.ts"],
+      ["../testing/egress-allow-cleanup.js", "x.test.ts"],
+      ["../../src/testing/egress-allow-cleanup.js", "sub/x.test.ts"],
+      ["/abs/testing/egress-allow-cleanup.js", "x.test.ts"],
+    ]) {
+      expect(analyzeTestFile(src(spec), fileName).uncoveredCreates, `${fileName}: ${spec}`).toEqual([lineOf(src(spec), "beforeAll")]);
+    }
+  });
+
+  it("#427 round 3 L3: a payload with one tracked and one untracked host is flagged (the untracked count guard)", () => {
+    const src = `${IMPORT}const perTest = trackEgressAllowHosts();
+it("imds", async () => {
+  await post("/v1/egress-allow-hosts", flag ? { host: perTest.trackHost("a.example") } : { host: "b.example" });
+});
+afterEach(async () => { (await perTest.removeAll(app, AUTH)).assertRemoved(); });\n`;
+    expect(analyzeTestFile(src).untrackedTestCreates).toEqual([lineOf(src, "post(")]);
+  });
+
   it("review L3: findEgressAllowLeaks reports an unremoved create as a leak (and a removed one as clean)", () => {
     const base = mkdtempSync(path.join(tmpdir(), "egress-preflight-"));
     try {
@@ -325,7 +489,7 @@ it("imds", async () => {
       mkdirSync(dir, { recursive: true });
       const file = (removal) => `${IMPORT}let saved;
 beforeAll(async () => { saved = (await post("/v1/egress-allow-hosts", { host: "127.0.0.1" })).json().id; });
-afterAll(async () => { await ${removal}; });
+afterAll(async () => { (await ${removal}).assertRemoved(); });
 `;
       writeFileSync(path.join(dir, "leaks.test.ts"), file("db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, saved))"));
       writeFileSync(path.join(dir, "clean.test.ts"), file("removeEgressAllowEntry(app, AUTH, { id: saved })"));
