@@ -187,7 +187,7 @@ export async function githubInstallationToken(ctx: GitFederationContext, deps: G
   }
   if (sourceOrigin !== new URL(base).origin) {
     throw new GitFederationError(
-      `a federated GitHub source reads through this deployment's GitHub API (${new URL(base).origin}); the source's baseUrl names another host, so use a static token for it`,
+      `a federated GitHub source reads through this deployment's configured GitHub API (${GITHUB_APP_API_URL_ENV}); the source's baseUrl names another host, so use a static token for it`,
     );
   }
   const repositories = scopedRepositoryNames(ctx.source.scope);
