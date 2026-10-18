@@ -552,10 +552,17 @@ describe("limits", () => {
 describe("ADR-0193 P1: the builder thread is the causal context", () => {
   it("a write after an untrusted read in the same thread is refused before the upstream, and a fresh thread is not", async () => {
     const a = await newAgent(owner, [{ tool: "get_time" }, { tool: "write_it" }]);
-    const first = await chat(owner, a.id, `What time is it? <<use-tool:${modelName("get_time")}>>`);
+    // the thread opens with plain text (the mock reads the first tool sentinel anywhere in a thread's history)
+    const first = await chat(owner, a.id, "hello");
     expect(first.statusCode, first.body).toBe(200);
-    expect(first.json().messages[1].steps[0]).toMatchObject({ name: modelName("get_time"), status: "done" });
     const threadId = first.json().thread.id as string;
+    // untrusted content enters the thread: a read recorded under the thread's own causal context
+    const [agentRow] = await k.db.select().from(builderAgents).where(eq(builderAgents.id, a.id));
+    const box = await resolveToolbox(k.db, agentRow!, owner.id);
+    const read = box.entries.find((e) => e.name === modelName("get_time"))!;
+    const ctx = { userId: owner.id, isAdmin: false, projectId: owner.projectId, trace: null, toolCallId: "t-read", detail: {}, contextId: `builder_thread:${threadId}` };
+    expect((await runGovernedTool(k.db, "a".repeat(64), read, {}, ctx)).status).toBe("done");
+    // the loop's write in that thread is refused before the upstream: the runtime passes the thread as the context
     const before = hits.write_it ?? 0;
     const second = await chat(owner, a.id, `now write it <<use-tool:${modelName("write_it")}>>`, threadId);
     expect(second.statusCode, second.body).toBe(200);
