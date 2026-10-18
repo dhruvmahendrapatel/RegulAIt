@@ -798,6 +798,9 @@ describe("every sweep is registered", () => {
         // ADR-0195 SD4b: commits accepted endpoint agent reports through SD0's fenced path; driven end to end in
         // zz-adr0195-sd4b-endpoint-agent.test.ts (with no endpoint agent source enabled it does nothing)
         SCHEDULER_JOB_NAMES.endpointAgentIngest,
+        // ADR-0188 S9 follow-up: fetches due SPIFFE bundle endpoints; driven end to end in
+        // zz-adr0188-s9b-spiffe-fetch-jwt-svid.test.ts (with no endpoint set it fetches nothing)
+        SCHEDULER_JOB_NAMES.spiffeBundleRefresh,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
