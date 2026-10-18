@@ -8,9 +8,10 @@ scanner needs and gives Terraform you apply in your own account. **RegulAIt neve
 > **Status: pending real-cloud execution (M-041).** The scanners are tested against the real cloud SDKs with a fake
 > network, not against a live AWS, GCP or Azure account. The Terraform files in
 > [`cloud-discovery/`](cloud-discovery/) have not been run through `terraform validate` or applied. The federation
-> token itself (RegulAIt's ADR-0188 issuer minting an RS256 token for these audiences) is not built yet: a source
-> with a federated credential fails its run with that reason, and only the static-credential relaxation runs end
-> to end.
+> issuer is built (ADR-0195 SD2b): RegulAIt's cloud federation issuer `<REGULAIT_PUBLIC_URL>/federation` mints the
+> RS256 tokens for these audiences once an admin turns federation on (Cloud federation card, Discovery sources
+> page). Until then a source with a federated credential fails its run with the reason `federation_off`. No
+> federated run has been made against a real AWS, GCP or Azure account yet.
 >
 > Source fields (one `key=value` per line on the Discovery sources page): AWS target `accountId`, optional
 > `stsRegion`, `trailBucket`, `trailBucketRegion`, `trailPrefix`; scope = regions. GCP target `projectId` or
@@ -37,8 +38,11 @@ scanner needs and gives Terraform you apply in your own account. **RegulAIt neve
 
 ## Credentials
 
-Federated, short-lived credentials are the default. RegulAIt presents an OIDC token from its own workload identity
-issuer (ADR-0188) to your cloud's token exchange, so RegulAIt holds no long-lived key:
+Federated, short-lived credentials are the default. RegulAIt presents an OIDC token from its cloud federation
+issuer to your cloud's token exchange, so RegulAIt holds no long-lived key. **The issuer URL to register is
+`<REGULAIT_PUBLIC_URL>/federation`** (shown on the Cloud federation card), not the bare public URL: that one is the
+Ed25519 workload identity issuer (ADR-0188), which no cloud accepts, and a trust registered against it makes every
+token exchange fail.
 
 | Cloud | Federated (default) | Static (admin relaxation, step-up) |
 |---|---|---|
@@ -53,6 +57,19 @@ Federation tokens are signed with RS256, the one algorithm all three clouds acce
 Your cloud must be able to reach RegulAIt's issuer discovery document and keys (AWS and Azure fetch them over the
 internet; GCP can also take an uploaded key set of up to 8 keys). An air-gapped install has no reachable issuer: use the static
 relaxation through your private endpoints, or leave cloud discovery off (ADR-0195 decision 10).
+
+Keys, rotation and revocation:
+
+- **A generated key is published before it signs.** The issuer's key set (`<issuer>/.well-known/jwks.json`) lists a
+  newly generated key at once, so your cloud can cache it; the key signs nothing until an admin activates it. To
+  rotate, generate a key, wait a few minutes, then activate it. A key retired by rotation stays in the key set for
+  10 minutes so the tokens it signed verify until they expire.
+- **Revocation removes a key from the key set at once**, but it cannot end what was already issued: a token signed
+  before the revocation is valid until it expires (at most 5 minutes), and a cloud session obtained with it runs to
+  its own expiry (RegulAIt asks AWS for 1 hour). To cut access sooner, also revoke the session in your cloud (for
+  example, the AWS role's "Revoke active sessions").
+- **Entra propagation.** A new federated credential on an app registration can take several minutes to apply; until
+  then the exchange fails with `AADSTS70021`. Create the credential well before the first run.
 
 Instance-metadata credentials (the AWS default chain, Azure managed identity, the GCP metadata server) are not
 supported: the egress guard refuses the metadata address unconditionally, and a source must always say which

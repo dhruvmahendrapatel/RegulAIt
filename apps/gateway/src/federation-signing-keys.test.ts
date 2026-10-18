@@ -133,11 +133,13 @@ describe("issuer, discovery document, publication", () => {
     });
   });
 
-  it("publishes the active key and a retired key inside the overlap; never a pending or revoked key", () => {
+  it("publishes a pending key, the active key and a retired key inside the overlap; never a revoked key", () => {
     const now = new Date("2026-10-17T12:00:00Z");
     const t = (s: number) => new Date(now.getTime() - s * 1000);
     expect(isPublished({ activatedAt: t(100), retiredAt: null, revokedAt: null }, now)).toBe(true);
-    expect(isPublished({ activatedAt: null, retiredAt: null, revokedAt: null }, now)).toBe(false);
+    // pending: published before it signs (Q11 review), so a cloud never meets an unknown kid at rotation
+    expect(isPublished({ activatedAt: null, retiredAt: null, revokedAt: null }, now)).toBe(true);
+    expect(isPublished({ activatedAt: null, retiredAt: null, revokedAt: t(1) }, now)).toBe(false);
     expect(isPublished({ activatedAt: t(1000), retiredAt: t(FEDERATION_KEY_OVERLAP_SECONDS - 1), revokedAt: null }, now)).toBe(true);
     expect(isPublished({ activatedAt: t(1000), retiredAt: t(FEDERATION_KEY_OVERLAP_SECONDS + 1), revokedAt: null }, now)).toBe(false);
     expect(isPublished({ activatedAt: t(100), retiredAt: null, revokedAt: t(1) }, now)).toBe(false);

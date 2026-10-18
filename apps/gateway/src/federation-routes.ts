@@ -3,7 +3,7 @@
  *
  * Public (the clouds fetch them to verify a token; public keys and metadata only, nothing secret):
  *   GET  /federation/.well-known/openid-configuration   OIDC discovery for the issuer `<public URL>/federation`
- *   GET  /federation/.well-known/jwks.json              the RS256 public keys (active, and retired inside the overlap)
+ *   GET  /federation/.well-known/jwks.json              the RS256 public keys (pending, active, and retired inside the overlap)
  * Admin (admin-only by default; none is in NON_ADMIN_ROUTES; every write audited):
  *   GET  /v1/discovery/federation                       status, issuer, keys (public halves only), trust values
  *   POST /v1/discovery/federation/keys                  generate a pending key (free: it turns nothing on)

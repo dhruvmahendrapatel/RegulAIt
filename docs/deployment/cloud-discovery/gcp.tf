@@ -3,7 +3,7 @@
 #
 # STATUS: pending execution (M-041). Not yet run through `terraform validate` or applied to a real project.
 #
-# Workload identity federation: a pool provider trusts RegulAIt's ADR-0188 issuer, restricted to this discovery
+# Workload identity federation: a pool provider trusts RegulAIt's cloud federation issuer (<REGULAIT_PUBLIC_URL>/federation), restricted to this discovery
 # source's subject. RegulAIt then impersonates a dedicated service account that holds only the custom role below.
 # For an organisation-wide Asset Inventory scope, grant the same permissions at organization or folder level.
 
@@ -12,7 +12,7 @@ variable "project_id" {
 }
 
 variable "regulait_issuer_url" {
-  description = "RegulAIt workload identity issuer URL (https://...)"
+  description = "RegulAIt cloud federation issuer URL, <REGULAIT_PUBLIC_URL>/federation (https://...), shown on the Cloud federation card"
   type        = string
 }
 

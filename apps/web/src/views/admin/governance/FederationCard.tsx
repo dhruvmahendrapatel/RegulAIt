@@ -1,7 +1,8 @@
 /**
  * ADR-0195 SD2b: the cloud federation issuer, on the Discovery sources page. Federated cloud credentials (AWS,
  * GCP, Entra) present a short-lived RS256 token from this issuer. Off until an admin turns it on:
- *  - Generate key: a pending key (free; it signs nothing).
+ *  - Generate key: a pending key (free; it signs nothing). Its public half is published at once so the clouds can
+ *    cache it before it signs.
  *  - Turn on (first activation) asks you to confirm it's you (`settings_relax`); Rotate to a pending key and Revoke a
  *    key ask too (`key_management`, bound to that key). Turn off is free.
  * The gateway decides which confirmation each act needs; this page only wraps the calls in withStepUp.
@@ -86,6 +87,9 @@ export default function FederationCard() {
           {s?.enabled ? <Badge tone="ok">on</Badge> : <Badge tone="neutral">off</Badge>}{" "}
           Federated AWS, GCP and Entra credentials present a {s?.tokenTtlSeconds ?? 300}-second RS256 token from this issuer.{" "}
           {s?.enabled ? "Rotating or revoking a key asks you to confirm it's you." : "Turning it on asks you to confirm it's you."}
+        </p>
+        <p className={v.faint}>
+          Generated keys are published at once so the clouds can cache them. {s?.enabled ? "Rotate" : "Activate"} after a few minutes.
         </p>
         {s && !s.issuer && <p className={v.faint}>The issuer needs this deployment&apos;s public URL (REGULAIT_PUBLIC_URL); until it is set no token can be minted.</p>}
         {s?.issuer && (
