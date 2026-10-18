@@ -7181,7 +7181,7 @@ export const endpointEnrolmentTokens = pgTable(
     revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
-    uniqueIndex("endpoint_enrolment_tokens_hash_uq").on(t.tokenHash),
+    unique("endpoint_enrolment_tokens_hash_uq").on(t.tokenHash),
     check("endpoint_enrolment_tokens_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
     check("endpoint_enrolment_tokens_label_check", sql`length(${t.label}) BETWEEN 1 AND 100`),
     check("endpoint_enrolment_tokens_cap_check", sql`${t.deviceCap} BETWEEN 1 AND 100000`),
@@ -7217,7 +7217,7 @@ export const endpointDevices = pgTable(
     revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
   },
   (t) => [
-    uniqueIndex("endpoint_devices_ticket_uq").on(t.ticketHash),
+    unique("endpoint_devices_ticket_uq").on(t.ticketHash),
     check("endpoint_devices_ticket_check", sql`${t.ticketHash} ~ '^[0-9a-f]{64}$'`),
     check("endpoint_devices_pseudonym_check", sql`${t.devicePseudonym} ~ '^psn:[0-9a-f]{24}$'`),
     check("endpoint_devices_os_check", sql`${t.os} IN ('linux', 'darwin', 'windows')`),
@@ -7303,7 +7303,7 @@ export const endpointAgentReports = pgTable(
     committedAt: timestamp("committed_at", { withTimezone: true }),
   },
   (t) => [
-    uniqueIndex("endpoint_agent_reports_snapshot_uq").on(t.identityId, t.snapshotId),
+    unique("endpoint_agent_reports_snapshot_uq").on(t.identityId, t.snapshotId),
     check(
       "endpoint_agent_reports_digest_check",
       sql`${t.bodySha256} ~ '^[0-9a-f]{64}$' AND ${t.factsDigest} ~ '^[0-9a-f]{64}$' AND ${t.manifestDigest} ~ '^[0-9a-f]{64}$'`,
@@ -13186,11 +13186,11 @@ export const workloadIdentities = pgTable(
     unique("workload_identities_engine_runner_uq").on(t.engineRunnerId),
     check(
       "workload_identities_kind_check",
-      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp')`,
+      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent')`,
     ),
     check(
       "workload_identities_subject_check",
-      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
+      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
     ),
     check(
       "workload_identities_identifier_check",

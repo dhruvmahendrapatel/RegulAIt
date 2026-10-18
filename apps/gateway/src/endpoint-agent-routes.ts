@@ -411,8 +411,13 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
         if (!locked || locked.row.revokedAt) return "token_revoked" as const;
         if (!locked.live) return "token_expired" as const;
         if (locked.row.devicesEnrolled >= locked.row.deviceCap) return "enrolment_cap_reached" as const;
-        const enrolled = locked.row.devicesEnrolled + 1;
-        await t.update(endpointEnrolmentTokens).set({ devicesEnrolled: enrolled }).where(eq(endpointEnrolmentTokens.id, token.id));
+        // incremented in SQL, so the enrolled <= cap CHECK is a backstop behind the row lock
+        const [bumped] = await t
+          .update(endpointEnrolmentTokens)
+          .set({ devicesEnrolled: sql`${endpointEnrolmentTokens.devicesEnrolled} + 1` })
+          .where(eq(endpointEnrolmentTokens.id, token.id))
+          .returning({ devicesEnrolled: endpointEnrolmentTokens.devicesEnrolled });
+        const enrolled = bumped!.devicesEnrolled;
         const [row] = await t
           .insert(endpointDevices)
           .values({
@@ -537,7 +542,10 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
           keyProvider: body.keyProvider,
           agentVersion: body.agentVersion,
         });
-        await t.update(endpointDevices).set({ identitiesRegistered: locked.identitiesRegistered + 1 }).where(eq(endpointDevices.id, device.id));
+        await t
+          .update(endpointDevices)
+          .set({ identitiesRegistered: sql`${endpointDevices.identitiesRegistered} + 1` })
+          .where(eq(endpointDevices.id, device.id));
         await recordPseudonyms(t, dataKey, [user]);
         await audit(t, NIL_UUID, "discovery_source", source.id, "endpoint-agent-registered", "allow", `an endpoint agent registered a ${body.keyProtection} device key under device ticket ${device.id} (ADR-0195 SD4b)`, {
           deviceId: device.id,
@@ -842,36 +850,43 @@ export function registerEndpointAgentRoutes(app: FastifyInstance, db: Db, opts: 
     const p = uuidParam("deviceId").safeParse(req.params);
     if (!p.success) return reply.status(400).send({ error: "invalid_request", detail: "deviceId must be a uuid" });
     const deviceId = p.data.deviceId as string;
-    const [device] = await db
-      .update(endpointDevices)
-      .set({ revokedAt: sql`GREATEST(now(), ${endpointDevices.createdAt})`, revokedBy: req.authCtx.userId ?? null })
-      .where(and(eq(endpointDevices.id, deviceId), isNull(endpointDevices.revokedAt)))
-      .returning();
-    if (!device) {
+    // one transaction: the device, its identities (their keys and live tokens, ADR-0188 decision 12, each audited by
+    // S6) and the device audit row commit together, so a crash midway leaves no identity showing as active. The device
+    // is refused from the commit on (every agent route and the token endpoint read it).
+    const done = await db.transaction(async (tx) => {
+      const t = tx as unknown as Db;
+      const [device] = await t
+        .update(endpointDevices)
+        .set({ revokedAt: sql`GREATEST(now(), ${endpointDevices.createdAt})`, revokedBy: req.authCtx.userId ?? null })
+        .where(and(eq(endpointDevices.id, deviceId), isNull(endpointDevices.revokedAt)))
+        .returning();
+      if (!device) return null;
+      const links = await t
+        .select({ identityId: endpointAgentIdentities.identityId, status: workloadIdentities.status })
+        .from(endpointAgentIdentities)
+        .innerJoin(workloadIdentities, eq(workloadIdentities.id, endpointAgentIdentities.identityId))
+        .where(eq(endpointAgentIdentities.deviceId, deviceId));
+      let identitiesRevoked = 0;
+      let tokensRevoked = 0;
+      for (const l of links) {
+        if (l.status === "revoked") continue;
+        const r = await revokeWorkloadIdentity(t, l.identityId, actor(req));
+        identitiesRevoked += 1;
+        tokensRevoked += r.tokensRevoked;
+      }
+      await audit(t, actor(req), "discovery_source", device.sourceId, "endpoint-device-revoked", "allow", `endpoint agent device ${device.id} revoked: ${identitiesRevoked} identity(ies) and ${tokensRevoked} token(s) revoked with it; it uploads nothing more (ADR-0195 SD4b)`, {
+        deviceId: device.id,
+        devicePseudonym: device.devicePseudonym,
+        identitiesRevoked,
+        tokensRevoked,
+      });
+      return { device, identitiesRevoked, tokensRevoked };
+    });
+    if (!done) {
       const [exists] = await db.select({ id: endpointDevices.id }).from(endpointDevices).where(eq(endpointDevices.id, deviceId));
       return reply.status(exists ? 409 : 404).send(exists ? { error: "already_revoked", detail: "this device is already revoked" } : { error: "not_found", detail: "no such device" });
     }
-    // the device is refused from this moment (every agent route and the token endpoint read it); its identities, their
-    // keys and live tokens are then revoked on the record (ADR-0188 decision 12), each audited by S6
-    const links = await db
-      .select({ identityId: endpointAgentIdentities.identityId, status: workloadIdentities.status })
-      .from(endpointAgentIdentities)
-      .innerJoin(workloadIdentities, eq(workloadIdentities.id, endpointAgentIdentities.identityId))
-      .where(eq(endpointAgentIdentities.deviceId, deviceId));
-    let identitiesRevoked = 0;
-    let tokensRevoked = 0;
-    for (const l of links) {
-      if (l.status === "revoked") continue;
-      const r = await revokeWorkloadIdentity(db, l.identityId, actor(req));
-      identitiesRevoked += 1;
-      tokensRevoked += r.tokensRevoked;
-    }
-    await audit(db, actor(req), "discovery_source", device.sourceId, "endpoint-device-revoked", "allow", `endpoint agent device ${device.id} revoked: ${identitiesRevoked} identity(ies) and ${tokensRevoked} token(s) revoked with it; it uploads nothing more (ADR-0195 SD4b)`, {
-      deviceId: device.id,
-      devicePseudonym: device.devicePseudonym,
-      identitiesRevoked,
-      tokensRevoked,
-    });
+    const { device, identitiesRevoked, tokensRevoked } = done;
     return reply.send({ deviceId: device.id, revokedAt: device.revokedAt!.toISOString(), identitiesRevoked, tokensRevoked });
   });
 }

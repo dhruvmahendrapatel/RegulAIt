@@ -144,9 +144,21 @@ CREATE TABLE "endpoint_agent_reports" (
 CREATE INDEX "endpoint_agent_reports_pending_idx" ON "endpoint_agent_reports" ("source_id", "received_at") WHERE "status" = 'pending';
 --> statement-breakpoint
 -- a report is evidence: what was received is written once; the only change is its outcome (pending -> committed, or
--- pending -> refused when SD0's observation checks refuse its run)
+-- pending -> refused when SD0's observation checks refuse its run). A row is deleted only as the cascade of its own
+-- identity, device or source, once that parent row is gone (0182/0186's pattern); a plain DELETE is refused.
 CREATE OR REPLACE FUNCTION "regulait_endpoint_agent_report_guard"() RETURNS trigger AS $$
 BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF pg_trigger_depth() > 1 AND (
+         NOT EXISTS (SELECT 1 FROM public."endpoint_agent_identities" WHERE "identity_id" = OLD."identity_id")
+      OR NOT EXISTS (SELECT 1 FROM public."endpoint_devices" WHERE "id" = OLD."device_id")
+      OR NOT EXISTS (SELECT 1 FROM public."discovery_sources" WHERE "id" = OLD."source_id")
+    ) THEN
+      RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'endpoint_agent_reports: a report is evidence; it goes only with its identity, device or source'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
   IF NEW."id" IS DISTINCT FROM OLD."id" OR NEW."identity_id" IS DISTINCT FROM OLD."identity_id"
      OR NEW."device_id" IS DISTINCT FROM OLD."device_id" OR NEW."source_id" IS DISTINCT FROM OLD."source_id"
      OR NEW."snapshot_id" IS DISTINCT FROM OLD."snapshot_id" OR NEW."collected_at" IS DISTINCT FROM OLD."collected_at"
@@ -167,7 +179,7 @@ $$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;
 DROP TRIGGER IF EXISTS "endpoint_agent_reports_guard" ON "endpoint_agent_reports";
 --> statement-breakpoint
 CREATE TRIGGER "endpoint_agent_reports_guard"
-  BEFORE UPDATE ON "endpoint_agent_reports"
+  BEFORE UPDATE OR DELETE ON "endpoint_agent_reports"
   FOR EACH ROW EXECUTE FUNCTION "regulait_endpoint_agent_report_guard"();
 --> statement-breakpoint
 -- migration 0185's rule: a table that refuses a row UPDATE also refuses TRUNCATE (which fires no row trigger)

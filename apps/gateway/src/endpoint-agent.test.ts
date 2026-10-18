@@ -81,6 +81,16 @@ describe("ADR-0195 SD4b: the SD4a wire contract", () => {
     expect(isUuidV4(report.data!.snapshotId)).toBe(true);
   });
 
+  it("takes only a UUID v4 as the snapshot id", () => {
+    expect(isUuidV4(SNAPSHOT)).toBe(true);
+    expect(isUuidV4(SNAPSHOT.toUpperCase())).toBe(true);
+    // v1 and v7 (version nibble), and a v4 with the wrong variant
+    expect(isUuidV4("6f1c2a3b-4d5e-1f60-8a7b-1c2d3e4f5a6b")).toBe(false);
+    expect(isUuidV4("0192f0c4-4d5e-7f60-8a7b-1c2d3e4f5a6b")).toBe(false);
+    expect(isUuidV4("6f1c2a3b-4d5e-4f60-ca7b-1c2d3e4f5a6b")).toBe(false);
+    expect(isUuidV4(`${SNAPSHOT}0`)).toBe(false);
+  });
+
   it("refuses unknown members, a private key member and inconsistent key protection", () => {
     const reg = JSON.parse(golden("register-request.json"));
     expect(registerRequestSchema.safeParse({ ...reg, extra: 1 }).success).toBe(false);
@@ -188,8 +198,22 @@ describe("ADR-0195 SD4b: facts become catalogue sightings only", () => {
   });
 
   it("refuses a port fact whose identifier is not its port", () => {
-    const report = { os: "linux" as const, collectedAt: NOW.toISOString(), facts: [fact({ kind: "local_runtime", matchedOn: "port", identifier: "11434", port: 8080, location: { root: "process_table", path: "" } })] };
-    expect(reduceReportFacts(report, catalogue).sightings).toEqual([]);
+    const portFact = (identifier: string, port: number) =>
+      ({ os: "linux" as const, collectedAt: NOW.toISOString(), facts: [fact({ kind: "local_runtime", matchedOn: "port", identifier, port, location: { root: "process_table", path: "" } })] });
+    // control: the catalogue's port matches when the identifier is the port
+    expect(reduceReportFacts(portFact("11434", 11434), catalogue).sightings.map((s) => s.value)).toEqual(["port:11434"]);
+    // the port alone would match the catalogue here, so only the identifier check refuses it
+    expect(reduceReportFacts(portFact("8080", 11434), catalogue).sightings).toEqual([]);
+    expect(reduceReportFacts(portFact("11434", 8080), catalogue).sightings).toEqual([]);
+  });
+
+  it("refuses a fact matched on an environment-variable name whatever kind it claims", () => {
+    for (const kind of ["assistant_config", "cli", "desktop_app"] as const) {
+      const report = { os: "linux" as const, collectedAt: NOW.toISOString(), facts: [fact({ kind, matchedOn: "envName", identifier: "EXAMPLE_API_KEY", location: { root: "home", path: ".profile" } })] };
+      const out = reduceReportFacts(report, catalogue);
+      expect(out).toEqual({ sightings: [], envRefused: 1, unmatched: 0 });
+      expect(JSON.stringify(out)).not.toContain("EXAMPLE_API_KEY");
+    }
   });
 
   it("reads the extension ecosystem from the location so ecosystem-scoped rows match", () => {

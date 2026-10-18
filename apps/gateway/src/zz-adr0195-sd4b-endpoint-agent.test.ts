@@ -14,7 +14,8 @@
  *  - an environment-variable name, a key name, the hostname and the device user
  *    are never stored in clear (reports, findings, runs, audit);
  *  - key rotation, and device revocation stopping uploads and token minting;
- *  - the report table's guard (migration 0185's rule: no UPDATE of evidence, no TRUNCATE).
+ *  - the report table's guard (no UPDATE of evidence, no DELETE but its parent's cascade, no TRUNCATE: 0185's rule);
+ *  - the device cap and the identity cap under concurrent requests.
  *
  * Everything this suite creates is removed in afterAll.
  */
@@ -29,6 +30,7 @@ import {
   createDb,
   discoveryRuns,
   discoverySources,
+  endpointAgentIdentities,
   endpointAgentReports,
   endpointDevices,
   endpointEnrolmentTokens,
@@ -287,6 +289,9 @@ describe("ADR-0195 SD4b: enrolment", () => {
     const off = await agentSource(false);
     expect((await inject("POST", `/v1/discovery/sources/${off}/enrolment-tokens`, memberKey, { label: "x", deviceCap: 1 })).statusCode).toBe(403);
     expect((await inject("GET", `/v1/discovery/sources/${off}/endpoint-devices`, memberKey)).statusCode).toBe(403);
+    expect((await inject("GET", `/v1/discovery/sources/${off}/enrolment-tokens`, memberKey)).statusCode).toBe(403);
+    expect((await inject("POST", `/v1/discovery/enrolment-tokens/${randomUUID()}/revoke`, memberKey, {})).statusCode).toBe(403);
+    expect((await inject("POST", `/v1/discovery/endpoint-devices/${randomUUID()}/revoke`, memberKey, {})).statusCode).toBe(403);
     const r = await inject("POST", `/v1/discovery/sources/${off}/enrolment-tokens`, AUTH, { label: "x", deviceCap: 1 });
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toBe("source_disabled");
@@ -374,6 +379,39 @@ describe("ADR-0195 SD4b: enrolment", () => {
     expect(late.json()).toEqual({ error: "ticket_expired" });
     expect((await registerReq(`rgat_${"0".repeat(64)}`, await AgentKey.make())).statusCode).toBe(401);
   });
+
+  it("refuses registration under a ticket whose enrolment token was revoked after it was issued", async () => {
+    const sourceId = await agentSource(true);
+    const { enrolFile, token } = await issueToken(sourceId, 2);
+    const t = await ticketReq(enrolFile.token);
+    expect(t.statusCode, t.body).toBe(201);
+    expect((await inject("POST", `/v1/discovery/enrolment-tokens/${token.id}/revoke`, AUTH, {})).statusCode).toBe(200);
+    const r = await registerReq(t.json().ticket as string, await AgentKey.make());
+    expect(r.statusCode).toBe(403);
+    expect(r.json()).toEqual({ error: "token_revoked" });
+  });
+
+  it("holds the device cap and the identity cap under concurrent requests", async () => {
+    const N = 5;
+    const sourceId = await agentSource(true);
+    const { enrolFile, token } = await issueToken(sourceId, 1);
+    const tickets = await Promise.all(Array.from({ length: N }, (_, i) => ticketReq(enrolFile.token, `${HOST}-race-${i}`)));
+    expect(tickets.map((r) => r.statusCode).sort()).toEqual([201, ...Array(N - 1).fill(409)]);
+    for (const r of tickets.filter((x) => x.statusCode === 409)) expect(r.json()).toEqual({ error: "enrolment_cap_reached" });
+    const [tok] = await db.select().from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.id, token.id));
+    expect(tok!.devicesEnrolled).toBe(1);
+    expect((await db.select({ id: endpointDevices.id }).from(endpointDevices).where(eq(endpointDevices.tokenId, token.id))).length).toBe(1);
+
+    const won = tickets.find((r) => r.statusCode === 201)!.json() as { ticket: string; ticketId: string };
+    await db.update(endpointDevices).set({ identityCap: 1 }).where(eq(endpointDevices.id, won.ticketId));
+    const keys = await Promise.all(Array.from({ length: N }, () => AgentKey.make()));
+    const regs = await Promise.all(keys.map((k, i) => registerReq(won.ticket, k, { deviceUser: `${DEVICE_USER}race${i}` })));
+    expect(regs.map((r) => r.statusCode).sort()).toEqual([201, ...Array(N - 1).fill(409)]);
+    for (const r of regs.filter((x) => x.statusCode === 409)) expect(r.json()).toEqual({ error: "ticket_exhausted" });
+    const [dev] = await db.select().from(endpointDevices).where(eq(endpointDevices.id, won.ticketId));
+    expect(dev!.identitiesRegistered).toBe(1);
+    expect((await db.select().from(endpointAgentIdentities).where(eq(endpointAgentIdentities.deviceId, won.ticketId))).length).toBe(1);
+  });
 });
 
 describe("ADR-0195 SD4b: the agent's token and signed reports", () => {
@@ -446,6 +484,9 @@ describe("ADR-0195 SD4b: the agent's token and signed reports", () => {
     // no refusal echoes the device's input
     expect(tooBig.body).not.toContain("xxxx");
     expect((await a.key.report("{not json", id())).json()).toEqual({ error: "invalid_body" });
+    // SD4a's snapshot id is a UUID v4: a v7 one is refused even when correctly signed
+    const v7 = "0192f0c4-4d5e-7f60-8a7b-1c2d3e4f5a6b";
+    expect((await a.key.report(reportBody({ snapshotId: v7 }), v7)).json()).toEqual({ error: "invalid_body" });
   });
 
   it("never stores the environment-variable name, the key name, the hostname or the device user in clear", async () => {
@@ -515,7 +556,7 @@ describe("ADR-0195 SD4b: rotation and revocation", () => {
 });
 
 describe("ADR-0195 SD4b: the report table's guard (migration 0185's rule)", () => {
-  it("refuses rewriting a report's evidence, and refuses TRUNCATE", async () => {
+  it("refuses rewriting or deleting a report's evidence, and refuses TRUNCATE", async () => {
     const a = await enrolled();
     const s = randomUUID();
     expect((await a.key.report(reportBody({ snapshotId: s }), s)).statusCode).toBe(202);
@@ -528,5 +569,11 @@ describe("ADR-0195 SD4b: the report table's guard (migration 0185's rule)", () =
     expect(await refusal(db.execute(sql`update endpoint_agent_reports set sightings = '[]'::jsonb where id = ${row!.id}`))).toMatch(/written once/);
     expect(await refusal(db.execute(sql`update endpoint_agent_reports set status = 'pending', run_id = null, committed_at = null where id = ${row!.id}`))).toMatch(/written once/);
     await expect(db.execute(sql`truncate endpoint_agent_reports`)).rejects.toThrow();
+    // a plain DELETE of evidence is refused too
+    expect(await refusal(db.execute(sql`delete from endpoint_agent_reports where id = ${row!.id}`))).toMatch(/report is evidence/);
+    expect((await db.select({ id: endpointAgentReports.id }).from(endpointAgentReports).where(eq(endpointAgentReports.id, row!.id))).length).toBe(1);
+    // the one DELETE admitted is the cascade of the row's own parent
+    await db.delete(endpointDevices).where(eq(endpointDevices.id, a.deviceId));
+    expect((await db.select({ id: endpointAgentReports.id }).from(endpointAgentReports).where(eq(endpointAgentReports.id, row!.id))).length).toBe(0);
   });
 });
