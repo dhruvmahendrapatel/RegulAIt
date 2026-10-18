@@ -3745,6 +3745,8 @@ export {
 // loads, and the agentic risk-scenario library the risk picker offers.
 export { DEMO_INTAKE_FIXTURES } from "./demo-intake/fixtures.js";
 export { SCENARIO_LIBRARY, type DemoRiskScenario } from "./demo-intake/scenario-library.js";
+// ADR-0197 decision 7: the fallback Shadow-AI discovery dataset demo:prepare seeds
+export { DEMO_SHADOW_DISCOVERY, type DemoShadowDiscoveryDataset } from "./demo-intake/shadow-discovery.js";
 
 // ADR-0156 — the AI-system dependency graph and max-propagation of declared risk.
 export {

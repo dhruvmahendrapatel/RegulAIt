@@ -20,7 +20,7 @@ import { aiPolicyAcknowledgements, aiPolicyDocuments, and, createDb, eq, isNull,
 const like = (col: unknown, pattern: string) => sql`${col} like ${pattern}`;
 import { DEMO_INTAKE_FIXTURES } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { runDemoCheck, type DemoCheck } from "./demo-check-lib.js";
+import { runDemoCheck, SHADOW_DISCOVERY_BEATS, type DemoCheck } from "./demo-check-lib.js";
 import { DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { runDemoGate } from "./demo-gate-lib.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
@@ -108,7 +108,10 @@ describe("demo:check over the real dataset", () => {
   });
 
   it("no beat FAILs", () => {
-    const failing = checks.filter((c) => c.level === "FAIL").map((c) => `${c.beat}: ${c.detail}`);
+    // ADR-0197 decision 7: the Shadow-AI discovery beats need their dataset, whose first phase runs in first-admin
+    // setup, which this shared database is not; demo-shadow-seed.test.ts seeds it on a scratch database and pins them
+    const shadow: readonly string[] = SHADOW_DISCOVERY_BEATS;
+    const failing = checks.filter((c) => c.level === "FAIL" && !shadow.includes(c.beat)).map((c) => `${c.beat}: ${c.detail}`);
     expect(failing).toEqual([]);
   });
 

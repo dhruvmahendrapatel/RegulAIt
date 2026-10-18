@@ -35,6 +35,7 @@ import { and, auditLog, createDb, eq, inArray, licenses, sql, users, type Db } f
 import { buildApp } from "./app.js";
 import { DEMO_PERSONA_EMAILS, isDemoLicense, setDemoPasswords } from "./demo-set-passwords-lib.js";
 import { DEMO_TRAFFIC_KEY_NAME } from "./demo-traffic-lib.js";
+import { DEMO_SECURITY_LEAD } from "./demo-identity.js";
 import { ensureEphemeralLicense, type EphemeralLicenseInject } from "./ephemeral-license.js";
 import { licenseKeyringDir, resolveLicense } from "./licensing.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -519,7 +520,7 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
       .select({ email: users.email, passwordHash: users.passwordHash, mustChange: users.mustChangePassword })
       .from(users)
       .where(inArray(users.email, [...DEMO_PERSONA_EMAILS]));
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4); // Ada, Dana, Avery and Morgan (ADR-0197 addendum)
     for (const r of rows) {
       expect(r.passwordHash, r.email).toBe(hashesBefore[r.email]);
       expect(r.mustChange, r.email).toBe(false);
@@ -554,8 +555,23 @@ describe("re-seeding a demo-licensed database (a gateway restart under Docker)",
     expect(held.json().error).toBe("mfa_enrollment_required");
   });
 
+  it("ADR-0197 addendum: Morgan, the second admin, gets the demo password and her seed-enrolled authenticator is re-provisioned too", async () => {
+    expect(setResult?.lines.join("\n")).toContain(`${DEMO_SECURITY_LEAD.email.padEnd(24)} password set`);
+    const [morgan] = await scratch.select().from(users).where(eq(users.email, DEMO_SECURITY_LEAD.email));
+    expect(morgan!.isAdmin).toBe(true);
+    expect(morgan!.passwordHash).toBe(hashesBefore[DEMO_SECURITY_LEAD.email]);
+    expect(morgan!.mustChangePassword).toBe(false);
+    expect(morgan!.totpEnabled).toBe(false);
+    expect(morgan!.totpSecretCiphertext).toBeNull();
+    const [cleared] = await scratch
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "mfa-cleared-by-admin"), eq(auditLog.objectId, morgan!.id)));
+    expect(cleared!.detail).toMatchObject({ via: "demo:set-passwords", email: DEMO_SECURITY_LEAD.email });
+  });
+
   it("each persona signs in with the demo password after the re-seed", async () => {
-    for (const identifier of ["admin", "dana", "avery"]) {
+    for (const identifier of ["admin", "dana", "avery", DEMO_SECURITY_LEAD.username]) {
       const res = await app!.inject({
         method: "POST",
         url: "/auth/login",

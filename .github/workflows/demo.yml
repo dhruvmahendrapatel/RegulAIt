@@ -146,12 +146,22 @@ jobs:
       # authenticator; the journey signs the personas in with the one-time
       # passwords and the authenticator secret demo:prepare prints ONCE (already in
       # this job's log), read from a copy of that output (E2E_DEMO_PREPARE_LOG)
-      - name: demo:prepare (empty database → 19/19 demo:check)
+      # ADR-0197 decision 7: the fallback dataset enrols an endpoint device through the real SD4b routes, which need
+      # this deployment's public URL and an identity issuer key, as a real install has. Scoped to demo:prepare (and
+      # the installer step that makes the key), so the journey's gateway below runs exactly as before.
+      - name: Identity issuer key (installer step)
+        run: pnpm --filter @regulait/gateway identity-key:init
+        env:
+          REGULAIT_INSTALL_SECRETS_DIR: ${{ runner.temp }}/install-secrets
+
+      - name: demo:prepare (empty database → demo:check, endpoint agent included)
         run: |
           set -o pipefail
           pnpm --filter @regulait/gateway demo:prepare | tee "$RUNNER_TEMP/demo-prepare.log"
         env:
           REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
+          REGULAIT_INSTALL_SECRETS_DIR: ${{ runner.temp }}/install-secrets
+          REGULAIT_PUBLIC_URL: http://127.0.0.1:3105
 
       - name: Start the gateway
         run: |

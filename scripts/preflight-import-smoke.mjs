@@ -55,6 +55,7 @@ export const ENTRY_POINTS = new Map([
   ["demo-export-key.js", "writes the demo export and receipt keys into the home directory"],
   ["demo-gate.js", "runs the demo gate against a database"],
   ["demo-intake-seed.js", "seeds demo intake data"],
+  ["demo-shadow-seed.js", "seeds the demo Shadow-AI discovery dataset"],
   ["demo-mcp-server.js", "starts the demo MCP servers (listens)"],
   ["demo-prepare.js", "runs every demo preparation step"],
   ["demo-set-passwords.js", "sets demo persona passwords in a database"],

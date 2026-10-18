@@ -7,7 +7,7 @@
  * the first activation, as a slow full-suite run can do.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { enrolAdminTotp } from "./demo-identity.js";
+import { enrolAdminsTotp, enrolAdminTotp } from "./demo-identity.js";
 import { totpCode, totpStep } from "./totp.js";
 
 const SECRET = "JBSWY3DPEHPK3PXP"; // synthetic, test-only
@@ -46,5 +46,39 @@ describe("enrolAdminTotp across a TOTP step boundary", () => {
     const out = await enrolAdminTotp(app, "boot", "u1");
     expect(out.status).toBe("enrolled");
     expect(activations).toBe(2);
+  });
+
+  it("enrolAdminsTotp issues every one-time password before the first activation ends first-admin setup", async () => {
+    const order: string[] = [];
+    let windowOpen = true;
+    const app = {
+      inject: async (opts: { method: string; url: string; headers?: Record<string, string>; payload?: object }) => {
+        if (opts.url === "/v1/users")
+          return reply(200, {
+            users: ["u1", "u2"].map((id) => ({ id, email: `${id}@example.test`, totpEnabled: false, hasPassword: false })),
+          });
+        const issue = /^\/v1\/users\/(u\d)\/set-initial-password$/.exec(opts.url);
+        if (issue) {
+          order.push(`issue ${issue[1]}`);
+          // the bootstrap credential's step-up passes only while no admin has an authenticator (B4S-06)
+          return windowOpen ? reply(200, { password: `synthetic-${issue[1]}` }) : reply(403, { error: "step_up_required" });
+        }
+        if (opts.url === "/auth/login") {
+          const who = String((opts.payload as { identifier: string }).identifier).split("@")[0]!;
+          return { ...reply(200), headers: { "set-cookie": [`regulait_session=${who}; Path=/`] } };
+        }
+        if (opts.url === "/auth/totp/enroll") return reply(200, { secret: SECRET, otpauthUri: "otpauth://totp/x" });
+        if (opts.url === "/auth/totp/activate") {
+          order.push(`activate ${opts.headers?.cookie?.split("=")[1]}`);
+          windowOpen = false;
+          return reply(200, {});
+        }
+        if (opts.url === "/auth/logout") return reply(204);
+        throw new Error(`unexpected ${opts.method} ${opts.url}`);
+      },
+    };
+    const out = await enrolAdminsTotp(app, "boot", ["u1", "u2"]);
+    expect(out.map((o) => o.status)).toEqual(["enrolled", "enrolled"]);
+    expect(order).toEqual(["issue u1", "issue u2", "activate u1", "activate u2"]);
   });
 });
