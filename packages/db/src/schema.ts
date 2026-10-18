@@ -7152,6 +7152,179 @@ export const discoveryPseudonyms = pgTable(
 export type DiscoveryPseudonymRow = typeof discoveryPseudonyms.$inferSelect;
 
 // ===========================================================================
+// ADR-0195 SD4b — THE ENDPOINT AGENT'S GATEWAY SIDE (migration 0207)
+//
+// A bulk enrolment token (admin-issued, capped, at most 30 days; only its
+// SHA-256 is kept) is redeemed once per device for a device ticket (at most 7
+// days); each user of the device registers its own key with the ticket as a
+// workload identity of kind `endpoint_agent`. Devices and device users are SD0
+// pseudonyms only. A report keeps digests, counts, fixed gap codes and the
+// sightings that matched the enabled catalogue, never a path, key name or
+// environment-variable name.
+// ===========================================================================
+
+export const endpointEnrolmentTokens = pgTable(
+  "endpoint_enrolment_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    deviceCap: integer("device_cap").notNull(),
+    devicesEnrolled: integer("devices_enrolled").notNull().default(0),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("endpoint_enrolment_tokens_hash_uq").on(t.tokenHash),
+    check("endpoint_enrolment_tokens_hash_check", sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`),
+    check("endpoint_enrolment_tokens_label_check", sql`length(${t.label}) BETWEEN 1 AND 100`),
+    check("endpoint_enrolment_tokens_cap_check", sql`${t.deviceCap} BETWEEN 1 AND 100000`),
+    check("endpoint_enrolment_tokens_enrolled_check", sql`${t.devicesEnrolled} >= 0 AND ${t.devicesEnrolled} <= ${t.deviceCap}`),
+    check("endpoint_enrolment_tokens_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 days'`),
+    check("endpoint_enrolment_tokens_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
+    index("endpoint_enrolment_tokens_source_idx").on(t.sourceId),
+  ],
+);
+export type EndpointEnrolmentTokenRow = typeof endpointEnrolmentTokens.$inferSelect;
+
+export const endpointDevices = pgTable(
+  "endpoint_devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    tokenId: uuid("token_id")
+      .notNull()
+      .references(() => endpointEnrolmentTokens.id, { onDelete: "cascade" }),
+    devicePseudonym: text("device_pseudonym").notNull(),
+    os: text("os", { enum: ["linux", "darwin", "windows"] }).notNull(),
+    arch: text("arch", { enum: ["amd64", "arm64"] }).notNull(),
+    agentVersion: text("agent_version").notNull(),
+    ticketHash: text("ticket_hash").notNull(),
+    ticketExpiresAt: timestamp("ticket_expires_at", { withTimezone: true }).notNull(),
+    identityCap: integer("identity_cap").notNull().default(8),
+    identitiesRegistered: integer("identities_registered").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastReportAt: timestamp("last_report_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    unique("endpoint_devices_ticket_uq").on(t.ticketHash),
+    check("endpoint_devices_ticket_check", sql`${t.ticketHash} ~ '^[0-9a-f]{64}$'`),
+    check("endpoint_devices_pseudonym_check", sql`${t.devicePseudonym} ~ '^psn:[0-9a-f]{24}$'`),
+    check("endpoint_devices_os_check", sql`${t.os} IN ('linux', 'darwin', 'windows')`),
+    check("endpoint_devices_arch_check", sql`${t.arch} IN ('amd64', 'arm64')`),
+    check("endpoint_devices_version_check", sql`${t.agentVersion} ~ '^[0-9A-Za-z.+-]{1,32}$'`),
+    check("endpoint_devices_ticket_expiry_check", sql`${t.ticketExpiresAt} > ${t.createdAt} AND ${t.ticketExpiresAt} <= ${t.createdAt} + interval '7 days'`),
+    check("endpoint_devices_identity_cap_check", sql`${t.identityCap} BETWEEN 1 AND 32`),
+    check("endpoint_devices_registered_check", sql`${t.identitiesRegistered} >= 0 AND ${t.identitiesRegistered} <= ${t.identityCap}`),
+    check("endpoint_devices_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
+    index("endpoint_devices_source_idx").on(t.sourceId, t.createdAt),
+    index("endpoint_devices_token_idx").on(t.tokenId),
+  ],
+);
+export type EndpointDeviceRow = typeof endpointDevices.$inferSelect;
+
+export const endpointAgentIdentities = pgTable(
+  "endpoint_agent_identities",
+  {
+    identityId: uuid("identity_id")
+      .primaryKey()
+      .references((): AnyPgColumn => workloadIdentities.id, { onDelete: "restrict" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    deviceUserPseudonym: text("device_user_pseudonym").notNull(),
+    keyProtection: text("key_protection", { enum: ["hardware", "software"] }).notNull(),
+    keyProvider: text("key_provider", { enum: ["tpm", "tpm_ncrypt", "secure_enclave", "file", "dpapi"] }).notNull(),
+    agentVersion: text("agent_version").notNull(),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+    lastReportAt: timestamp("last_report_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("endpoint_agent_identities_pseudonym_check", sql`${t.deviceUserPseudonym} ~ '^psn:[0-9a-f]{24}$'`),
+    check(
+      "endpoint_agent_identities_protection_check",
+      sql`(${t.keyProtection} = 'hardware' AND ${t.keyProvider} IN ('tpm', 'tpm_ncrypt', 'secure_enclave')) OR (${t.keyProtection} = 'software' AND ${t.keyProvider} IN ('file', 'dpapi'))`,
+    ),
+    check("endpoint_agent_identities_version_check", sql`${t.agentVersion} ~ '^[0-9A-Za-z.+-]{1,32}$'`),
+    index("endpoint_agent_identities_device_idx").on(t.deviceId),
+  ],
+);
+export type EndpointAgentIdentityRow = typeof endpointAgentIdentities.$inferSelect;
+
+/** one matched sighting a report carried: catalogue values only */
+export interface EndpointAgentSighting {
+  kind: string;
+  value: string;
+  provider: string;
+  os: string | null;
+  ecosystem: string | null;
+  count: number;
+}
+
+export const endpointAgentReports = pgTable(
+  "endpoint_agent_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identityId: uuid("identity_id")
+      .notNull()
+      .references(() => endpointAgentIdentities.identityId, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => endpointDevices.id, { onDelete: "cascade" }),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => discoverySources.id, { onDelete: "cascade" }),
+    snapshotId: uuid("snapshot_id").notNull(),
+    collectedAt: timestamp("collected_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    bodySha256: text("body_sha256").notNull(),
+    factsDigest: text("facts_digest").notNull(),
+    manifestVersion: text("manifest_version").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    factsReceived: integer("facts_received").notNull(),
+    factsEnvRefused: integer("facts_env_refused").notNull(),
+    factsUnmatched: integer("facts_unmatched").notNull(),
+    droppedSnapshots: integer("dropped_snapshots").notNull(),
+    gaps: jsonb("gaps").$type<Array<{ kind: string; reason: string }>>().notNull().default(sql`'[]'::jsonb`),
+    sightings: jsonb("sightings").$type<EndpointAgentSighting[]>().notNull().default(sql`'[]'::jsonb`),
+    status: text("status", { enum: ["pending", "committed", "refused"] }).notNull().default("pending"),
+    /** the discovery run that committed it (no foreign key, so a run's deletion never rewrites this row) */
+    runId: uuid("run_id"),
+    committedAt: timestamp("committed_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("endpoint_agent_reports_snapshot_uq").on(t.identityId, t.snapshotId),
+    check(
+      "endpoint_agent_reports_digest_check",
+      sql`${t.bodySha256} ~ '^[0-9a-f]{64}$' AND ${t.factsDigest} ~ '^[0-9a-f]{64}$' AND ${t.manifestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check("endpoint_agent_reports_manifest_version_check", sql`${t.manifestVersion} ~ '^[0-9A-Za-z.+-]{1,32}$'`),
+    check(
+      "endpoint_agent_reports_counts_check",
+      sql`${t.factsReceived} BETWEEN 0 AND 2000 AND ${t.factsEnvRefused} BETWEEN 0 AND ${t.factsReceived} AND ${t.factsUnmatched} BETWEEN 0 AND ${t.factsReceived} AND ${t.droppedSnapshots} BETWEEN 0 AND 1000000`,
+    ),
+    check("endpoint_agent_reports_gaps_check", sql`jsonb_typeof(${t.gaps}) = 'array' AND jsonb_array_length(${t.gaps}) <= 200`),
+    check("endpoint_agent_reports_sightings_check", sql`jsonb_typeof(${t.sightings}) = 'array' AND jsonb_array_length(${t.sightings}) <= 2000`),
+    check(
+      "endpoint_agent_reports_status_check",
+      sql`(${t.status} = 'pending' AND ${t.runId} IS NULL AND ${t.committedAt} IS NULL) OR (${t.status} IN ('committed', 'refused') AND ${t.runId} IS NOT NULL AND ${t.committedAt} IS NOT NULL)`,
+    ),
+    index("endpoint_agent_reports_pending_idx").on(t.sourceId, t.receivedAt).where(sql`${t.status} = 'pending'`),
+  ],
+);
+export type EndpointAgentReportRow = typeof endpointAgentReports.$inferSelect;
+
+// ===========================================================================
 // ADR-0061 — CHATOPS APPROVALS (migration 0069)
 //
 // THERE IS NO chat_approvals TABLE AND NO SECOND STATUS COLUMN. A ChatOps
@@ -13013,11 +13186,11 @@ export const workloadIdentities = pgTable(
     unique("workload_identities_engine_runner_uq").on(t.engineRunnerId),
     check(
       "workload_identities_kind_check",
-      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp')`,
+      sql`${t.kind} IN ('agent', 'builder_agent', 'engine_runner', 'worker_runtime', 'pdp', 'endpoint_agent')`,
     ),
     check(
       "workload_identities_subject_check",
-      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
+      sql`(${t.kind} = 'agent' AND ${t.agentId} IS NOT NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'builder_agent' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NOT NULL AND ${t.engineRunnerId} IS NULL) OR (${t.kind} = 'engine_runner' AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NOT NULL) OR (${t.kind} IN ('worker_runtime', 'pdp', 'endpoint_agent') AND ${t.agentId} IS NULL AND ${t.builderAgentId} IS NULL AND ${t.engineRunnerId} IS NULL)`,
     ),
     check(
       "workload_identities_identifier_check",

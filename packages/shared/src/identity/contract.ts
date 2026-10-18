@@ -19,7 +19,7 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 
 /** what a `workload_identities` row identifies (exactly one subject FK, or none for the external kinds) */
-export const WORKLOAD_IDENTITY_KINDS = ["agent", "builder_agent", "engine_runner", "worker_runtime", "pdp"] as const;
+export const WORKLOAD_IDENTITY_KINDS = ["agent", "builder_agent", "engine_runner", "worker_runtime", "pdp", "endpoint_agent"] as const;
 export type WorkloadIdentityKind = (typeof WORKLOAD_IDENTITY_KINDS)[number];
 
 /** the kinds whose subject is a row of ours, and the column that names it */
@@ -29,6 +29,8 @@ export const WORKLOAD_IDENTITY_SUBJECT_COLUMN: Readonly<Record<WorkloadIdentityK
   engine_runner: "engineRunnerId",
   worker_runtime: null,
   pdp: null,
+  // ADR-0195 SD4b: a device user's agent. Its device is `endpoint_agent_identities` (migration 0207), not a column here
+  endpoint_agent: null,
 };
 
 /** `revoked` is terminal (a trigger in migration 0180 refuses leaving it) */
@@ -400,7 +402,7 @@ export const JWK_THUMBPRINT_URI_PREFIX = "urn:ietf:params:oauth:jwk-thumbprint:s
  * resource (RFC 8707, a path under the issuer) each may name. A runner's token
  * reaches the runner routes; a PDP client's reaches `POST /v1/authz/check`.
  */
-export const WORKLOAD_SELF_RESOURCE_PATHS = { engine_runner: "/v1/engine-runner", pdp: "/v1/authz/check" } as const;
+export const WORKLOAD_SELF_RESOURCE_PATHS = { engine_runner: "/v1/engine-runner", pdp: "/v1/authz/check", endpoint_agent: "/v1/endpoint-agent" } as const;
 export type WorkloadSelfKind = keyof typeof WORKLOAD_SELF_RESOURCE_PATHS;
 export const WORKLOAD_SELF_KINDS = Object.keys(WORKLOAD_SELF_RESOURCE_PATHS) as WorkloadSelfKind[];
 /**
@@ -517,6 +519,8 @@ export const createWorkloadIdentitySchema = z
   })
   .strict()
   .superRefine((v, ctx) => {
+    // ADR-0195 SD4b: an endpoint agent's identity is made only by its own registration with a device ticket
+    if (v.kind === "endpoint_agent") ctx.addIssue({ code: z.ZodIssueCode.custom, message: "an endpoint agent identity is created by the agent's registration", path: ["kind"] });
     const want = WORKLOAD_IDENTITY_SUBJECT_COLUMN[v.kind];
     for (const k of ["agentId", "builderAgentId", "engineRunnerId"] as const) {
       const present = v[k] !== undefined;

@@ -114,6 +114,8 @@ export const SCHEDULER_JOB_NAMES = {
   modelArtifactRetentionSweep: "model-artifact-retention-sweep",
   // ADR-0195 SD0: defined and run by discovery-worker.ts (block at the end)
   discoveryScanSweep: "discovery-scan-sweep",
+  // ADR-0195 SD4b: merges accepted endpoint agent reports into the findings (endpoint-agent-routes.ts)
+  endpointAgentIngest: "endpoint-agent-ingest",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -781,6 +783,7 @@ import { anchorTimestampJobDefinitions } from "./audit-timestamp.js";
 import { engineJobDefinitions } from "./engine-runs.js";
 import { modelArtifactJobDefinitions, type ArtifactStore } from "./model-artifacts.js";
 import { discoveryJobDefinitions } from "./discovery-worker.js";
+import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -794,6 +797,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...engineJobDefinitions(), // ADR-0187: engine-run-sweep, engine-schedule-sweep
     ...modelArtifactJobDefinitions(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }), // ADR-0187 decision 127: model-artifact-retention-sweep
     ...discoveryJobDefinitions({ dataKey: opts.dataKey }), // ADR-0195 SD0: discovery-scan-sweep
+    ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
   ];
 }
 // ===== end ADR-0182 block ====================================================

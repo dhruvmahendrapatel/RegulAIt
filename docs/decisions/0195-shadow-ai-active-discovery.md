@@ -1080,6 +1080,169 @@ be listed: `scripts/check-licences.sh` fails CI otherwise.
    colliding fact and send the rest?
 3. Windows installer: confirm WiX's licence terms, or name another MSI route, so SD4h can build it.
 
+## As built: SD4b (endpoint agent, gateway side)
+
+Built 2026-10-17 on branch `sd4b-endpoint-ingest`. Nothing above is changed. Migration **0207**
+(`0207_endpoint_agent_devices.sql`, hand-written; journal idx 207, added by the master after 0204 to 0206 merged).
+Code: `apps/gateway/src/endpoint-agent.ts` (contract, bounds, report signature, fact mapping) and
+`endpoint-agent-routes.ts` (routes and the ingest job); the admin card is `EndpointAgentCard.tsx` on the Discovery
+sources page.
+
+### What it does
+
+- **Strict default.** Every agent route refuses while the `endpoint_agent` discovery source is disabled, and enabling
+  it is SD0's `settings_relax` step-up (audited). `endpoint_agent` is now an upload-fed kind (`DISCOVERY_KIND_SPECS`),
+  so SD0 never schedules it; its registered scanner observes nothing on "run now".
+- **Enrolment (owner decision 3, R15 §3.2).** An admin issues a per-source bulk token (`rgea_` + 64 hex) with a
+  required device cap (1 to 100,000; no unlimited default) and an expiry of 1 to 30 days (default and maximum 30: there
+  is no lengthening, so no relaxation exists to audit). It is returned once, inside the `regulait.endpoint-enrol/1`
+  file MDM delivers; only its SHA-256 is stored, and no audit row holds it. The install step's
+  `POST /v1/endpoint-agent/enrolment-tickets` counts one device under a row lock and returns a device ticket
+  (`rgat_` + 64 hex, SHA-256 stored, 7 days, 8 identities). Refusals: `401 invalid_token`, `403 token_revoked`,
+  `410 token_expired`, `403 enrolment_disabled`, `409 enrolment_cap_reached`, `400 invalid_body`. Reaching 80 % and
+  100 % of a cap each writes an audit row (`endpoint-enrolment-cap-80`, `-100`); no alert channel beyond the audit log
+  is wired. "Single-use, short-lived" in the build task is met by the ticket: one ticket per redeemed device, 7 days;
+  the bulk token itself is the owner's capped fleet token (a cap of 1 makes it single-use).
+- **Registration.** `POST /v1/endpoint-agent/register` with the ticket binds the agent's P-256 public key (the TPM,
+  NCrypt or DPAPI-protected key SD4a creates; private members refused) through S6's binding path
+  (`bindPreparedCredentialTx`: one key, one identity, ever) to a new workload identity of kind `endpoint_agent`
+  (migration 0207 widens the 0180 kind and subject CHECKs; admins cannot create one through the identity routes). Its
+  steward is the admin who issued the token. Same key again on the same device: idempotent 201. Refusals:
+  `401 invalid_ticket`, `403 device_revoked`, `403 token_revoked`, `410 ticket_expired`, `409 ticket_exhausted`,
+  `409 device_mismatch` (another OS or architecture than the ticket's device), `409 credential_already_registered`,
+  `400 invalid_jwk`, `400 invalid_body` (including hardware protection with a software provider, or a software key
+  without its fallback reason). The fallback reason is required and never stored (it can name a device path); posture
+  keeps `key_protection` and `key_provider` only.
+- **Pseudonyms (decision 20, call 3).** The hostname becomes an SD0 `device` pseudonym at ticket time and the
+  self-reported device user a `device_user` pseudonym at registration; display names are enveloped in
+  `discovery_pseudonyms` and revealed only through SD0's `pseudonym_reveal` step-up. Neither is stored in clear in any
+  SD4b table, reply or audit row (tested).
+- **Token and route ceiling.** `endpoint_agent` joins `WORKLOAD_SELF_RESOURCE_PATHS` (`/v1/endpoint-agent`), so S7's
+  `client_credentials` grant mints its DPoP-bound self token (ES256 private_key_jwt named by the RFC 9278 thumbprint,
+  the same key's DPoP proof, the gateway nonce). It resolves to `via: "endpoint-agent"` and reaches only
+  `GET …/config`, `POST …/reports` and `POST …/credentials` (`403 workload_scope` elsewhere). The token endpoint
+  and the self-token verifier both read the device on every use: a revoked device answers `device_revoked`, which
+  SD4a treats as final.
+- **Key rotation.** `POST /v1/endpoint-agent/credentials` is S7 point 4: the proof is a JWS by the new key with `aud`
+  this route; the runner's rotation transaction is factored into `rotateWorkloadKeyTx` and shared (two live keys at
+  most; the old key mints nothing after). Answer `201 {identityId, clientId}` with the new key's client id.
+- **Config.** `GET /v1/endpoint-agent/config` answers `503 collection_pack_unavailable`: the pack signing key and
+  stage (SD4g) do not exist, and an unsigned pack is never served. Until then no agent reaches the report stage in a
+  real deployment.
+- **Reports.** `POST /v1/endpoint-agent/reports` accepts a body only when, in order: the self token verifies and its
+  device is live and its source enabled; the raw body is at most 1 MiB (`413 report_too_large`); it parses against the
+  strict SD4a schema (at most 2,000 facts, 200 gaps, 50 keys per fact, 512-character identifiers, a UUID v4 snapshot
+  id; `400 invalid_body`); its OS and architecture are the device's (`409 device_mismatch`); `Content-Digest` equals
+  the SHA-256 recomputed over the raw bytes (`400 content_digest_mismatch`); the `Regulait-Report-Signature` JWS
+  verifies under the identity's bound key (ES256 only, `kid` the thumbprint, no embedded key, `iss` its client id,
+  `aud` the reports URL, `snapshotId` and `contentDigest` equal to the body's; `400 invalid_report_signature`) and is
+  at most 5 minutes old (`400 report_signature_stale`); its `jti` is claimed once in the replay store
+  (`400 report_replayed`); and the snapshot was collected within the last day (`422 report_stale`). A retry of a stored
+  snapshot with a fresh signature answers `202 {accepted: true, duplicate: true}`. Every refusal is a fixed code with
+  no detail, and is audited with ids, the code and the body's SHA-256 only. This answers SD4a open question 1 as
+  built: the report signature is required in addition to DPoP (an owner decision may still remove it).
+- **Data minimisation (master decision).** An `env_name` fact, and any fact matched on `envName` whatever kind it
+  claims, is **refused**: counted in `facts_env_refused` and dropped before anything is stored; the name is never
+  stored, logged or echoed (tested with a run-unique name across reports, findings, runs and audit rows; the one log
+  line on this route carries an error code only). Key names inside config facts are dropped too. When this was built
+  PR #419's presence matcher was not on main. #419 has since merged (`matchEnvNames`, lane A6), and the refusal is
+  **kept deliberately** in the review fix round: it is the stricter of the two and needs no catalogue, while mapping a
+  fact to its presence signature id (the #419 as-built note above asks SD4b to do that) is a behaviour change that
+  waits on owner question 4 below. Of every other fact only the catalogue sighting survives: SD3's own matcher
+  (`reduceEndpointObservations`) runs against the enabled catalogue, keeping the matched catalogue value, provider, OS,
+  extension ecosystem (read from the root-relative location, which is then discarded) and a count. Unmatched facts are
+  counted, never stored or recorded as catalogue gaps (a manifest is built from the catalogue). No path, version, port
+  number beyond a matched `port:<n>` value, key name or identifier outside the catalogue is kept.
+- **Commit into SD0.** Accepted reports are stored `pending` in `endpoint_agent_reports`; the route then tries to
+  commit at once, and the scheduler job `endpoint-agent-ingest` (every 60 s) commits the rest. A commit opens one
+  discovery run on the source holding its lease (one live run per source, so replicas never commit a report twice),
+  turns the sightings into SD0 observations (`endpoint_agent` evidence, `device` subject = the device pseudonym, the
+  device user as `actorPseudonym`, `observedAt` = the snapshot time) and commits them through
+  `applyDiscoveryRunObservations`, marking the reports `committed` and stamping the pseudonyms' last-seen time in the
+  same fenced transaction. A batch SD0's checks refuse is marked `refused` (never retried forever). A revoked device's
+  pending reports are never merged. Device findings and pseudonyms follow SD0's 90-day endpoint retention.
+- **Caps under concurrency.** Ticket redemption and registration each lock their token or device row
+  (`SELECT … FOR UPDATE`) before checking the cap, and increment the counter in SQL (`devices_enrolled + 1`,
+  `identities_registered + 1`), so the `<= cap` CHECKs are a backstop behind the lock. Tested with five concurrent
+  redemptions of a cap-1 token and five concurrent registrations on a cap-1 ticket: exactly one succeeds each time.
+- **Revocation.** `POST /v1/discovery/endpoint-devices/:deviceId/revoke` (admin, audited `endpoint-device-revoked`)
+  revokes the device and each of its identities through S6 (`revokeWorkloadIdentity`: keys and live tokens) and
+  writes its audit row in one transaction (review fix round), so a crash midway leaves no identity listed as active;
+  from the commit on the device is refused on every route and at the token endpoint. `POST /v1/discovery/enrolment-tokens/:tokenId/revoke` stops new
+  tickets and new registrations under the token's tickets; enrolled devices keep reporting.
+- **Migration 0207 and the 0185 guard.** Tables `endpoint_enrolment_tokens`, `endpoint_devices`,
+  `endpoint_agent_identities`, `endpoint_agent_reports`, every bound CHECKed (digests, pseudonym shapes, caps, the 30-
+  and 7-day windows, status). One function, `regulait_endpoint_agent_report_guard`, with
+  `SET search_path = pg_catalog, public, pg_temp`: a report's evidence columns are written once and its only change is
+  `pending` to `committed` or `refused`. Because that is a row-level UPDATE refusal, the table also has the
+  statement-level TRUNCATE refusal (`regulait_refuse_truncate`). The same guard refuses a plain row DELETE (review fix
+  round); the one DELETE it admits is the cascade of the row's own identity, device or source once that parent row is
+  gone (`pg_trigger_depth() > 1`, the 0182/0186 pattern), so SD0's source deletion still works. Retention deletion of
+  report rows, when built, goes through the same cascade or needs its own admitted path.
+- **schema.ts matches 0207.** The widened `workload_identities` kind and subject CHECKs carry `endpoint_agent`, and
+  the three UNIQUE constraints are declared with `unique()` as the SQL creates them (review fix round).
+- **Admin UI.** "Endpoint agent enrolment" card: issue a token (cap required, the enrolment file shown once), list and
+  revoke tokens, list devices pseudonymously with each user's key protection (software keys flagged), revoke a device.
+  `KNOWN_UI_GAPS` stays 0; the agent's five routes are one machine-only census pattern.
+
+### Open-source search (ADR-0176)
+
+No new dependency. `jose` (already pinned) verifies the report JWS and computes thumbprints; `oidc-provider` and S7's
+code do the token grant; `zod` validates bodies. The RFC 9530 `Content-Digest` member is one SHA-256 in the
+structured-field byte-sequence form: no maintained module covers only that, and the structured-field parsers found
+would add a dependency to format one fixed string. SD3's matcher is reused for detection rather than a new one.
+
+### Executed (2026-10-17, Linux container, no database or Docker)
+
+- `pnpm -r --workspace-concurrency=1 build`: exit 0.
+- `endpoint-agent.test.ts` (no database, 15 tests): SD4a's golden bodies parse; bounds refuse; the report signature
+  verifies only under the bound runtime-generated P-256 key with the recomputed digest and refuses another device's
+  key, a missing signature, a wrong `kid`, an embedded key, another `typ`, another snapshot id, a stale or future
+  `iat`, and a tampered body; env-name and key-name never survive the reduction. Non-vacuity: letting `env_name`
+  facts through, and removing the `Content-Digest` comparison, each made a test fail.
+- Shared discovery, identity and endpoint-discovery suites; the web governance and identity suites; the route-census
+  and affordance tests; both UI preflights (0 known UI gaps); the gateway's non-database discovery, OAuth and
+  scanner-contract suites.
+- **Typechecked only, run in CI** (needs Postgres and migration 0207's journal entry):
+  `zz-adr0195-sd4b-endpoint-agent.test.ts` (enrolment off by default and admin-only, the token shown once, the device
+  cap, revoked and expired tokens and tickets, idempotent registration and the identity cap, the ES256 self token and
+  its route ceiling, accept and merge as an `endpoint_agent` device finding, duplicate, unsigned, wrong-device,
+  replayed, stale, oversized and mismatched reports, nothing stored in clear, rotation, revocation stopping uploads and
+  minting, the report table's UPDATE and TRUNCATE guard) and the 0185 guard suite over migration 0207. Both ran
+  green in CI once the journal entry landed.
+- **Review fix round (2026-10-18).** `endpoint-agent.test.ts` grew to 17 tests: the port-identifier check now uses a
+  port the catalogue would match, an `envName` match under another kind is refused, and `isUuidV4` refuses v1, v7 and
+  a wrong variant. Mutation probes (each reverted): removing the port-identifier check, the `matchedOn === "envName"`
+  refusal and the version check in `isUuidV4` each made a test fail. The database suite gained the concurrent cap
+  tests, the plain-DELETE refusal with the parent cascade admitted, member refusal on all five admin routes,
+  registration under a revoked token, and a v7 snapshot id (typechecked here, run in CI).
+
+### Pending execution, unverified, and deviations
+
+- **Pending execution:** no real agent binary has enrolled against this gateway; no Windows or macOS device has
+  redeemed a ticket, registered a TPM, NCrypt or DPAPI key or uploaded a report. SD4a's Go fake
+  (`internal/gatewaytest`) and these routes have not been run against each other.
+- The collection pack is not served (above), so end to end the agent stops at config today.
+- `facts_env_refused` refuses rather than maps `env_name` facts, although #419 has merged (above; owner question 4).
+- Rate limiting per identity (R15's `cred:wid:<identityId>` bucket) is not built; the gateway's general limiter
+  applies. An org IP allow-list for programmatic credentials (`api_key_ip_policy`) also binds agents.
+- `endpoint_agent_reports` rows (digests, counts, catalogue sightings, no personal data) are not yet deleted by the
+  endpoint retention pass; their device findings and pseudonyms are.
+- Posture rows for agents (devices behind release, software keys) appear only on the devices list, not yet in
+  `GET /v1/org/posture`.
+- An extension's ecosystem is inferred from its location (`/extensions/` under a VS Code-family or Chromium profile,
+  `extensions.json` for Firefox, a `jetbrains` path): an unusual layout matches only ecosystem-neutral rows.
+- Re-registration of a device user with a new key creates a new identity within the ticket's cap; R15's
+  old-key possession proof for re-registration is not built.
+
+### Open questions for the owner
+
+1. Keep the report signature header required (built), or rely on DPoP and TLS alone (SD4a question 1)?
+2. Should an enrolment token's expiry be lengthenable beyond 30 days as an audited relaxation, or stay capped?
+3. Should revoking an enrolment token also revoke the devices it enrolled (today it stops only new enrolment)?
+4. Now that #419 has merged: map `env_name` facts to presence signature ids with `matchEnvNames` (the name still
+   never stored), or keep refusing them (built, the stricter default)?
+
 ## As built: A4 remediation plan start (2026-10-17, no migration)
 
 Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section records how the remediation plan

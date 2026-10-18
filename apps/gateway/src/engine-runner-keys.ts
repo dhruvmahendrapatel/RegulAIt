@@ -34,6 +34,7 @@ import {
   engineRunnerKeyRotationSchema,
   KEY_ROTATION_PROOF_TYP,
   RUNNER_SUPERSEDE_PROOF_TYP,
+  type WorkloadCredentialView,
   type WorkloadPublicJwk,
 } from "@regulait/shared";
 import { databaseNow } from "./delegation.js";
@@ -147,12 +148,20 @@ export async function verifySupersedeProof(db: Db, jws: string, engineId: string
  * `iat` fresh. Possession of the new key; nobody rotates a runner onto a key
  * it does not hold.
  */
-async function rotationProofValid(proof: string, publicJwk: WorkloadPublicJwk, issuer: string, now: Date, newJkt: string): Promise<boolean> {
+export async function rotationProofValid(
+  proof: string,
+  publicJwk: WorkloadPublicJwk,
+  issuer: string,
+  now: Date,
+  newJkt: string,
+  /** ADR-0195 SD4b: the endpoint agent rotates on its own route, which is then the proof's `aud` */
+  path: string = RUNNER_KEY_ROTATION_PATH,
+): Promise<boolean> {
   try {
     const { payload, protectedHeader } = await jwtVerify(proof, EmbeddedJWK, {
       algorithms: [...WORKLOAD_PROOF_ALGS],
       typ: KEY_ROTATION_PROOF_TYP,
-      audience: `${issuer}${RUNNER_KEY_ROTATION_PATH}`,
+      audience: `${issuer}${path}`,
       currentDate: now,
       requiredClaims: ["iat"],
     });
@@ -163,6 +172,56 @@ async function rotationProofValid(proof: string, publicJwk: WorkloadPublicJwk, i
   } catch {
     return false;
   }
+}
+
+/**
+ * The core of a workload's own key rotation (decision 12), inside the caller's
+ * transaction: lock the identity, require the authenticating key to be live
+ * now, apply the two-live-key cap, bind the new key and end the old key's
+ * window. Shared by the runner route and, in ADR-0195 SD4b, by the endpoint
+ * agent's `POST /v1/endpoint-agent/credentials`. The caller audits.
+ */
+export async function rotateWorkloadKeyTx(
+  t: Db,
+  identityId: string,
+  oldCredentialId: string,
+  prepared: PreparedCredential,
+  now: Date,
+): Promise<{ bound: WorkloadCredentialView; retired: { id: string } | undefined } | IdentityAdminError> {
+  // one rotation at a time per identity: the identity row is locked FOR UPDATE, so a concurrent rotation waits and
+  // then re-reads the authenticating key below, which the first one has already rotated out
+  const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for("update");
+  if (!ident || ident.status !== "active") return new IdentityAdminError("identity_not_active", 409, "this workload's identity is not active");
+  // the key this request authenticated with must still be LIVE, on the database clock (clock_timestamp, not the
+  // transaction's start: a rotation that waited on the lock sees the moment it runs). A token whose key was
+  // already rotated out rotates nothing: any number of live keys is what decision 12 rules out.
+  const [current] = await t
+    .select({ id: workloadCredentials.id })
+    .from(workloadCredentials)
+    .where(
+      and(
+        eq(workloadCredentials.id, oldCredentialId),
+        eq(workloadCredentials.identityId, identityId),
+        isNull(workloadCredentials.revokedAt),
+        sql`${workloadCredentials.notAfter} > clock_timestamp()`,
+      ),
+    )
+    .for("update");
+  if (!current) return new IdentityAdminError("credential_not_live", 409, "the key this token was issued to is no longer live (already rotated, expired or revoked)");
+  // at most RUNNER_MAX_LIVE_KEYS during the overlap: the authenticating key and the new one (the same cap the
+  // admin bind route applies)
+  const limit = await runnerKeyLimitRefusal(t, identityId);
+  if (limit) return limit;
+  const bound = await bindPreparedCredentialTx(t, identityId, prepared, RUNNER_ACTOR_ID, now);
+  if (bound instanceof IdentityAdminError) return bound;
+  // decision 12: rotation is not revocation. The old key's window ends now (it mints nothing new); tokens it
+  // already authenticated live to their own expiry. Database clock, never before the row's own start.
+  const [retired] = await t
+    .update(workloadCredentials)
+    .set({ notAfter: sql`LEAST(${workloadCredentials.notAfter}, GREATEST(clock_timestamp(), ${workloadCredentials.notBefore} + interval '1 microsecond'))` })
+    .where(and(eq(workloadCredentials.id, oldCredentialId), eq(workloadCredentials.identityId, identityId), isNull(workloadCredentials.revokedAt)))
+    .returning({ id: workloadCredentials.id });
+  return { bound, retired };
 }
 
 async function auditRotation(db: Db, identityId: string, effect: "allow" | "deny", detail: Record<string, unknown>, reason: string) {
@@ -206,39 +265,9 @@ export function registerRunnerKeyRotationRoute(app: FastifyInstance, db: Db): vo
     }
     const out = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
-      // one rotation at a time per runner: the identity row is locked FOR UPDATE, so a concurrent rotation waits and
-      // then re-reads the authenticating key below, which the first one has already rotated out
-      const [ident] = await t.select().from(workloadIdentities).where(eq(workloadIdentities.id, identityId)).for("update");
-      if (!ident || ident.status !== "active") return new IdentityAdminError("identity_not_active", 409, "this runner's identity is not active");
-      // the key this request authenticated with must still be LIVE, on the database clock (clock_timestamp, not the
-      // transaction's start: a rotation that waited on the lock sees the moment it runs). A token whose key was
-      // already rotated out rotates nothing: any number of live keys is what decision 12 rules out.
-      const [current] = await t
-        .select({ id: workloadCredentials.id })
-        .from(workloadCredentials)
-        .where(
-          and(
-            eq(workloadCredentials.id, oldCredentialId),
-            eq(workloadCredentials.identityId, identityId),
-            isNull(workloadCredentials.revokedAt),
-            sql`${workloadCredentials.notAfter} > clock_timestamp()`,
-          ),
-        )
-        .for("update");
-      if (!current) return new IdentityAdminError("credential_not_live", 409, "the key this token was issued to is no longer live (already rotated, expired or revoked)");
-      // at most RUNNER_MAX_LIVE_KEYS during the overlap: the authenticating key and the new one (the same cap the
-      // admin bind route applies)
-      const limit = await runnerKeyLimitRefusal(t, identityId);
-      if (limit) return limit;
-      const bound = await bindPreparedCredentialTx(t, identityId, prepared, RUNNER_ACTOR_ID, now);
-      if (bound instanceof IdentityAdminError) return bound;
-      // decision 12: rotation is not revocation. The old key's window ends now (it mints nothing new); tokens it
-      // already authenticated live to their own expiry. Database clock, never before the row's own start.
-      const [retired] = await t
-        .update(workloadCredentials)
-        .set({ notAfter: sql`LEAST(${workloadCredentials.notAfter}, GREATEST(clock_timestamp(), ${workloadCredentials.notBefore} + interval '1 microsecond'))` })
-        .where(and(eq(workloadCredentials.id, oldCredentialId), eq(workloadCredentials.identityId, identityId), isNull(workloadCredentials.revokedAt)))
-        .returning({ id: workloadCredentials.id });
+      const rotated = await rotateWorkloadKeyTx(t, identityId, oldCredentialId, prepared, now);
+      if (rotated instanceof IdentityAdminError) return rotated;
+      const { bound, retired } = rotated;
       await auditRotation(
         t,
         identityId,

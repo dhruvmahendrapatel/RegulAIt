@@ -795,6 +795,9 @@ describe("every sweep is registered", () => {
         // zz-adr0195-sd0-discovery.test.ts (with no source enabled it scans nothing)
         SCHEDULER_JOB_NAMES.discoveryScanSweep,
         // ===== end ADR-0195 SD0 =====
+        // ADR-0195 SD4b: commits accepted endpoint agent reports through SD0's fenced path; driven end to end in
+        // zz-adr0195-sd4b-endpoint-agent.test.ts (with no endpoint agent source enabled it does nothing)
+        SCHEDULER_JOB_NAMES.endpointAgentIngest,
       ].sort(),
     );
     const discovery = registry.get(SCHEDULER_JOB_NAMES.discoveryScanSweep)!;
