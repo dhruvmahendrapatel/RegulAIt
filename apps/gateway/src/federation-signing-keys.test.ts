@@ -17,6 +17,7 @@ import {
   federationTokenMinter,
   isPublished,
   newFederationKeyMaterial,
+  federationKeyAcceptable,
   signFederationToken,
 } from "./federation-signing-keys.js";
 import { federationAudiences, gcpWifAudience } from "./discovery-cloud-scanners.js";
@@ -96,9 +97,13 @@ describe("signer and JWKS round trip", () => {
     const { generateKeyPairSync } = await import("node:crypto");
     const ec = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "pem", type: "pkcs8" }).toString();
     await expect(signFederationToken({ kid: "k", pkcs8: ec }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toMatchObject({ code: "federation_key_unreadable" });
-    // RSA, but under 2048 bits: the size check, not the key-type check, refuses it (#420 review finding 2)
-    const small = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ format: "pem", type: "pkcs8" }).toString();
-    await expect(signFederationToken({ kid: "k", pkcs8: small }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toMatchObject({ code: "federation_key_unreadable" });
+    // RSA, but under 2048 bits: the size check, not the key-type check, refuses it (#420 review finding 2). The key's
+    // details stand in for a generated key, since creating an RSA key under 2048 bits is a SAST finding of its own
+    const rsa = (modulusLength: number) => ({ asymmetricKeyType: "rsa" as const, asymmetricKeyDetails: { modulusLength } });
+    expect(federationKeyAcceptable(rsa(1024))).toBe(false);
+    expect(federationKeyAcceptable(rsa(2047))).toBe(false);
+    expect(federationKeyAcceptable(rsa(2048))).toBe(true);
+    expect(federationKeyAcceptable({ asymmetricKeyType: "ec", asymmetricKeyDetails: { namedCurve: "prime256v1" } })).toBe(false);
     await expect(signFederationToken({ kid: "k", pkcs8: "not a key" }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toBeInstanceOf(FederationError);
   });
 });
