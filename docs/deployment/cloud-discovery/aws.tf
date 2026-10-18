@@ -3,12 +3,12 @@
 #
 # STATUS: pending execution (M-041). Not yet run through `terraform validate` or applied to a real account.
 #
-# Federated (default): RegulAIt's ADR-0188 issuer is registered as an IAM OIDC provider and the role trusts tokens
+# Federated (default): RegulAIt's cloud federation issuer (<REGULAIT_PUBLIC_URL>/federation) is registered as an IAM OIDC provider and the role trusts tokens
 # whose subject is this one discovery source. Set var.regulait_principal_arn and var.external_id instead to use
 # AssumeRole with the external id RegulAIt generated for the source.
 
 variable "regulait_issuer_url" {
-  description = "RegulAIt workload identity issuer URL (https://...), shown on the discovery source page"
+  description = "RegulAIt cloud federation issuer URL, <REGULAIT_PUBLIC_URL>/federation (https://...), shown on the Cloud federation card"
   type        = string
 }
 

@@ -740,6 +740,30 @@ are the cloud SDKs already pinned; the one new dependency is the Organizations c
 end-to-end run against a real cloud account (pending execution, needs a customer trust policy), and federated
 git-provider credentials (SD1 follow-up).
 
+**Q11 design review (2026-10-18, ADR-0197).** The separate issuer `<REGULAIT_PUBLIC_URL>/federation` is kept: RS256
+is the one algorithm AWS, GCP and Entra all accept, and the root JWKS, which third parties trust, stays Ed25519-only.
+Customers configure one trust per cloud. A pending federation key is published before it signs. Revocation cannot
+end cloud sessions already obtained.
+
+**As built: pending key published (2026-10-18, branch `federation-pending-key-jwks`, no migration).** This changes
+item 3's "it signs nothing and is not published": a PENDING key is now in the federation JWKS from the moment it is
+generated, so a cloud can cache it before it signs and a rotation never meets an unknown `kid`.
+- `isPublished` is true for a pending key (not revoked); `publishedFederationKeys` drops the `activated_at IS NOT
+  NULL` condition and keeps `revoked_at IS NULL` and the 600 s retired overlap; the JWKS lists the pending key first
+  (`activated_at DESC NULLS FIRST`). `federationKeyView.published` follows.
+- Signing is unchanged: `mintFederationToken` still reads only the active key (activated, not retired, not
+  revoked), so a pending key signs nothing until activated, and activation switches signing to it.
+- Revoking a pending key still removes it from the JWKS at once and destroys its private half.
+- The Cloud federation card says generated keys are published at once and to activate (or rotate) after a few
+  minutes.
+- `CLOUD_DISCOVERY.md` (status, the issuer to register, rotation, revocation limits, Entra propagation) and the
+  comments and variable descriptions of `docs/deployment/cloud-discovery/{aws,azure,gcp}.tf` now name the federation
+  issuer `<REGULAIT_PUBLIC_URL>/federation` instead of the ADR-0188 issuer.
+- Tests: `federation-signing-keys.test.ts` (a pending key is published, a revoked pending key is not);
+  `zz-adr0195-sd2b-federation.test.ts` (a pending key is in the JWKS route with RSA public members only and mints
+  nothing; during rotation the pending key is published beside the active key, which keeps signing; activation
+  switches signing; revoking a pending key removes it at once; the retired key's overlap is unchanged).
+
 ## As built: lane A6, environment-variable-name and CLI presence signatures (2026-10-17)
 
 **Status: shared matcher, catalogue data, tests and the SD1/SD3 wiring built on branch `sd-env-name-signatures`

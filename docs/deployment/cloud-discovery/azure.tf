@@ -3,7 +3,7 @@
 #
 # STATUS: pending execution (M-041). Not yet run through `terraform validate` or applied to a real tenant.
 #
-# Federated credential: an app registration trusts RegulAIt's ADR-0188 issuer for this one discovery source's
+# Federated credential: an app registration trusts RegulAIt's cloud federation issuer (<REGULAIT_PUBLIC_URL>/federation) for this one discovery source's
 # subject. The service principal holds only the custom role below. `listKeys` is deliberately absent.
 
 variable "subscription_id" {
@@ -11,7 +11,7 @@ variable "subscription_id" {
 }
 
 variable "regulait_issuer_url" {
-  description = "RegulAIt workload identity issuer URL (https://...)"
+  description = "RegulAIt cloud federation issuer URL, <REGULAIT_PUBLIC_URL>/federation (https://...), exactly as shown on the Cloud federation card"
   type        = string
 }
 
