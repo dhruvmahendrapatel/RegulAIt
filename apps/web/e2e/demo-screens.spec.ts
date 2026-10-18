@@ -264,8 +264,19 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
 
   await test.step("S3 Morgan signs the remediation off in the Inbox", async () => {
     const morgan = await personaPage(browser, "morgan");
-    const ok = await signInPrepared(morgan, PERSONA_EMAIL.morgan, MORGAN_PASSWORD, morgan.getByRole("heading", { name: /Welcome back/ }));
+    // Morgan's first sign-in meets the AI-policy acknowledgement gate (enforced in the demo data): she reads and
+    // acknowledges, as the presenter does once while preparing (QA finding F2)
+    const gate = morgan.getByRole("region", { name: "AI policy acknowledgement" });
+    const ok = await signInPrepared(morgan, PERSONA_EMAIL.morgan, MORGAN_PASSWORD, morgan.getByRole("heading", { name: /Welcome back/ }).or(gate));
     expect(ok, "demo:prepare's output names Morgan (the second admin)").toBe(true);
+    if (await gate.isVisible()) {
+      await capture(morgan, MORGAN, "ds-s3g2-morgan-policy-gate", { notes: ["Morgan's first sign-in: the AI-policy acknowledgement gate"] });
+      for (const box of await gate.getByRole("checkbox").all()) await box.check();
+      for (const button of await gate.getByRole("button", { name: "Acknowledge" }).all()) await button.click();
+      // the gate closes once nothing is outstanding; if a document stays open it is deferred, never forced
+      if (!(await gate.waitFor({ state: "hidden", timeout: 5_000 }).then(() => true, () => false))) await gate.getByRole("button", { name: "Not now" }).click();
+      await expect(gate).toBeHidden();
+    }
     await morgan.goto("/ui/inbox");
     await expect(morgan.getByRole("heading", { name: "Inbox" })).toBeVisible();
     const row = morgan
