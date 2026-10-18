@@ -1119,9 +1119,12 @@ Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section
    their own template, which then runs alone. Deleting the rule while the template stays active only makes starting
    fail again (stricter, not looser). The plan reports `assignment.defaultTemplate.state` (`not_installed`, `active`,
    `retired`), and `ruleConfigured` counts only rules whose template is active.
-4. **The unlinked start is server state.** The plan returns `pendingLink`: the newest `shadow-ai-remediation`
-   instance THE VIEWER started, not aborted, whose description carries the finding reference and that no finding
-   links yet. Another user's instance is never offered (they control its description), nor an aborted one. The screen seeds its
+4. **The unlinked start is server state.** "Live" below means any status except the three terminals that leave the
+   finding unremediated, `denied`, `aborted` and `rolled_back` (one constant, `UNSUCCESSFUL_TERMINAL_STATUSES`, used
+   by the plan, the link route and the screen). `completed` is the successful end: it counts as live and stays
+   linkable. The plan returns `pendingLink`: the newest live `shadow-ai-remediation`
+   instance THE VIEWER started whose description carries the finding reference and that no finding
+   links yet. Another user's instance is never offered (they control its description), nor one that is not live. The screen seeds its
    "started but not linked" state from it, so after a reload it still offers only "Retry linking this workflow"; the
    start button and the "link an existing workflow" form stay disabled until the link lands. The screen keeps the
    finding reference on the description whatever the person types. Browser storage is not used.
@@ -1130,9 +1133,16 @@ Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section
      refused);
    - the instance must be a live `shadow-ai-remediation` workflow whose description carries THIS finding's reference
      (422 `workflow_not_linkable`), and not one already linked to another finding (409 `instance_already_linked`);
-   - a link is set once. A finding already linked is refused (409 `already_linked`), and the update is conditional
-     on `remediation_instance_id IS NULL`, so a concurrent second link cannot overwrite the first. There is no
-     replace path; an admin who wants another user's workflow linked asks that user to link it.
+   - a link is set once while it stands. A finding linked to a live workflow is refused (409 `already_linked`).
+   - the one replace path: when the linked workflow ended `denied`, `aborted` or `rolled_back`, it remediates nothing,
+     so a new live workflow may replace it, under every rule above (initiator, change type, reference). The update is
+     conditional on the column still holding that dead instance (or `IS NULL` for a first link), so a concurrent
+     second link cannot overwrite the first. The `shadow-ai-finding-remediation-linked` audit row records
+     `replacedInstanceId` and `replacedInstanceStatus`. A terminal status never changes, so a live link can never be
+     replaced. Without this path a denied plan would dead-end the finding for good (only a database edit could free it).
+     An admin who wants another user's workflow linked asks that user to link it.
+   The plan also returns `currentLink` (`instanceId`, `status`, `replaceable`). The screen keeps start and link
+   disabled while the link stands, and says so; when it is replaceable it offers both and says the replace is audited.
    The screen's "link an existing workflow" list offers only live remediation workflows carrying the reference.
 5. **Open-source check (ADR-0176).** Nothing new to adopt: validation is zod, queries are drizzle, both already pinned.
 6. **Sign-off by a second person (owner question Q1, decided by the master session under ADR-0180; the owner may

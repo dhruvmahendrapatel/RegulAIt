@@ -111,16 +111,37 @@ describe("a workflow that started but never linked (server state)", () => {
   });
 });
 
+describe("a finding that is already linked", () => {
+  it("while the link stands, start and link-another are disabled", () => {
+    const html = render(plan({ currentLink: { instanceId: INSTANCE, status: "blocked_on_plan", replaceable: false } }));
+    expect(html).toContain('data-testid="shadow-current-link"');
+    expect(buttonTag(html, "Start remediation workflow…")).toContain("disabled");
+    expect(buttonTag(html, "Link workflow…")).toContain("disabled");
+  });
+
+  it("a link to a workflow that ended denied can be replaced: both forms are enabled and the replace is announced", () => {
+    const html = render(plan({ currentLink: { instanceId: INSTANCE, status: "denied", replaceable: true } }));
+    expect(html).toContain('data-testid="shadow-current-link"');
+    expect(html).toContain("replaces the old link");
+    expect(buttonTag(html, "Start remediation workflow…")).not.toContain("disabled");
+    expect(buttonTag(html, "Link workflow…")).not.toContain("disabled");
+  });
+});
+
 describe("the link list", () => {
   it("offers only live remediation workflows started from this finding's plan", () => {
     const ref = remediationReference(FINDING);
     const listed = [
       { id: "ok", status: "blocked_on_plan", change: { changeType: "shadow-ai-remediation", description: `x — ${ref}` } },
       { id: "aborted", status: "aborted", change: { changeType: "shadow-ai-remediation", description: `x — ${ref}` } },
+      { id: "denied", status: "denied", change: { changeType: "shadow-ai-remediation", description: `x — ${ref}` } },
+      { id: "rolled-back", status: "rolled_back", change: { changeType: "shadow-ai-remediation", description: `x — ${ref}` } },
+      { id: "completed", status: "completed", change: { changeType: "shadow-ai-remediation", description: `x — ${ref}` } },
       { id: "other-type", status: "running", change: { changeType: "feature", description: `x — ${ref}` } },
       { id: "other-finding", status: "running", change: { changeType: "shadow-ai-remediation", description: "x — shadow-AI finding 0" } },
       { id: "no-change", status: "running" },
     ];
-    expect(linkableInstances(FINDING, listed).map((i) => i.id)).toEqual(["ok"]);
+    // completed is the successful end and stays linkable; denied, aborted and rolled back never are
+    expect(linkableInstances(FINDING, listed).map((i) => i.id)).toEqual(["ok", "completed"]);
   });
 });

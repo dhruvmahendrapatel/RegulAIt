@@ -12,6 +12,8 @@
  *     assignment then decides alone), and a retired default is never re-installed.
  *  6. The default is never installed over an admin's rule for the change type, nor by a start that is refused.
  *  7. The default's sign-off is decided by an admin other than the initiator, never by the initiator.
+ *  8. A workflow that ended denied, aborted or rolled back is never linked; a finding linked to one takes a new
+ *     workflow through the audited replace, and a link to a live workflow is never replaced.
  *
  * Shares one DB with the other gateway suites; everything here is prefixed a4-, and the default template and rule
  * are removed in afterAll so the deployment ends as it started.
@@ -346,6 +348,79 @@ describe("ADR-0195 A4: the remediation plan body starts a workflow", () => {
     const linked = await post(`/v1/shadow-ai/findings/${deviceFindingId}/remediate`, { instanceId: start.json().id }, adminA.auth);
     expect(linked.statusCode).toBe(422);
     expect(linked.json()).toMatchObject({ error: "workflow_not_linkable", detail: "the workflow is aborted" });
+  });
+
+  it("a denied plan is never linkable, and a finding whose linked workflow ended unsuccessfully takes a new one, audited", async () => {
+    const planUrl = `/v1/shadow-ai/findings/${deviceFindingId}/remediation-plan`;
+    const link = (instanceId: string) => post(`/v1/shadow-ai/findings/${deviceFindingId}/remediate`, { instanceId }, adminA.auth);
+    const startOne = async () => {
+      const plan = await get(`${planUrl}?environment=${ENV}`, adminA.auth);
+      const start = await post("/v1/workflows/instances", plan.json().workflowRequest.body, adminA.auth);
+      expect(start.statusCode).toBe(201);
+      return start.json().id as string;
+    };
+    // walk to the sign-off, where admin B (the second approver) denies the plan
+    const deny = async (instanceId: string) => {
+      await post(`/v1/workflows/instances/${instanceId}/advance`, { stageId: "plan" }, adminA.auth);
+      const art = await post(`/v1/workflows/instances/${instanceId}/artifacts`, { stageId: "remediation_plan", content: "# a4 plan" }, adminA.auth);
+      expect(art.json().status).toBe("blocked_on_approval");
+      const [row] = await db
+        .select()
+        .from(approvals)
+        .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending"), eq(approvals.approverUserId, adminB.id)));
+      const denied = await post(`/v1/approvals/${row!.id}/decide`, { decision: "denied", reason: "a4: plan rejected" }, adminB.auth);
+      expect(denied.statusCode).toBe(200);
+      const [instance] = await db.select().from(workflowInstances).where(eq(workflowInstances.id, instanceId));
+      expect(instance!.status).toBe("denied");
+    };
+
+    // denied before the link landed: no longer pending, and the server refuses to link it
+    const rejected = await startOne();
+    expect((await get(planUrl, adminA.auth)).json().pendingLink?.instanceId).toBe(rejected);
+    await deny(rejected);
+    expect((await get(planUrl, adminA.auth)).json().pendingLink).toBeNull();
+    const refused = await link(rejected);
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json()).toMatchObject({ error: "workflow_not_linkable", detail: "the workflow is denied" });
+
+    // linked while live, then denied: the link no longer stands, and a new workflow replaces it
+    const first = await startOne();
+    expect((await link(first)).statusCode).toBe(200);
+    const live = await get(planUrl, adminA.auth);
+    expect(live.json().currentLink).toMatchObject({ instanceId: first, replaceable: false });
+    // a live link is never replaced
+    const early = await startOne();
+    const tooEarly = await link(early);
+    expect(tooEarly.statusCode).toBe(409);
+    expect(tooEarly.json().error).toBe("already_linked");
+    expect((await post(`/v1/workflows/instances/${early}/abort`, {}, adminA.auth)).json().status).toBe("aborted");
+    await deny(first);
+    const dead = await get(planUrl, adminA.auth);
+    expect(dead.json().currentLink).toEqual({ instanceId: first, status: "denied", replaceable: true });
+    expect(dead.json().pendingLink).toBeNull();
+    // a dead workflow never comes back as the replacement
+    expect((await link(rejected)).statusCode).toBe(422);
+    const second = await startOne();
+    expect((await get(planUrl, adminA.auth)).json().pendingLink?.instanceId).toBe(second);
+    // only the initiator replaces, as for any link
+    expect((await post(`/v1/shadow-ai/findings/${deviceFindingId}/remediate`, { instanceId: second }, adminB.auth)).statusCode).toBe(403);
+    const replaced = await link(second);
+    expect(replaced.statusCode).toBe(200);
+    const [row] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.id, deviceFindingId));
+    expect(row!.remediationInstanceId).toBe(second);
+    const audits = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.objectId, deviceFindingId), eq(auditLog.ruleId, "shadow-ai-finding-remediation-linked")));
+    const audit = audits.find((a) => (a.detail as { instanceId?: string } | null)?.instanceId === second);
+    expect(audit?.detail).toMatchObject({ instanceId: second, replacedInstanceId: first, replacedInstanceStatus: "denied" });
+    // the first link carries no replace
+    const firstAudit = audits.find((a) => (a.detail as { instanceId?: string } | null)?.instanceId === first);
+    expect(firstAudit?.detail).not.toHaveProperty("replacedInstanceId");
+    // and the new link stands again
+    const again = await get(planUrl, adminA.auth);
+    expect(again.json().currentLink).toMatchObject({ instanceId: second, replaceable: false });
+    expect((await link(rejected)).statusCode).toBe(409);
   });
 
   it("the sign-off goes to admins other than the initiator, and the initiator can never decide it", async () => {

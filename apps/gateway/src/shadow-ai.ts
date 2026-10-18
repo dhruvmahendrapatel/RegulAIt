@@ -80,7 +80,7 @@ import {
   inArray,
   isNull,
   modelCredentials,
-  ne,
+  notInArray,
   shadowAiFindings,
   shadowAiImports,
   sql,
@@ -139,7 +139,9 @@ import {
   SHADOW_AI_REMEDIATION_CHANGE_TYPE,
   SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
   SHADOW_AI_REMEDIATION_TEMPLATE_NAME,
+  UNSUCCESSFUL_TERMINAL_STATUSES,
   allowedRemediationEnvironments,
+  endedUnsuccessfully,
   remediationReference,
   shadowAiRemediationDefaultState,
 } from "./shadow-ai-remediation.js";
@@ -1398,10 +1400,19 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       .limit(1);
     const assignmentRuleExists = rule !== undefined;
     const defaultTemplate = await shadowAiRemediationDefaultState(db);
+    // the workflow the finding is linked to now, and whether it ended without remediating (then a new one may replace it)
+    const [current] = row.remediationInstanceId
+      ? await db
+          .select({ id: workflowInstances.id, status: workflowInstances.status })
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, row.remediationInstanceId))
+      : [];
+    const replaceable = current !== undefined && endedUnsuccessfully(current.status);
     // a workflow THE VIEWER started for this finding whose link never landed (the screen retries the LINK, never a
-    // second start). Never another user's (they control its description), never an aborted one
+    // second start). Never another user's (they control its description), never one that ended denied, aborted or
+    // rolled back. Looked for only while the finding is unlinked, or linked to a workflow that ended that way
     const viewerId = req.authCtx.userId;
-    const [pendingLink] = row.remediationInstanceId || !viewerId
+    const [pendingLink] = (row.remediationInstanceId && !replaceable) || !viewerId
       ? []
       : await db
           .select({ id: workflowInstances.id, createdAt: workflowInstances.createdAt })
@@ -1409,7 +1420,7 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
           .where(
             and(
               eq(workflowInstances.initiatorUserId, viewerId),
-              ne(workflowInstances.status, "aborted"),
+              notInArray(workflowInstances.status, [...UNSUCCESSFUL_TERMINAL_STATUSES]),
               sql`${workflowInstances.change}->>'changeType' = ${SHADOW_AI_REMEDIATION_CHANGE_TYPE}`,
               sql`strpos(${workflowInstances.change}->>'description', ${remediationReference(row.id)}) > 0`,
               sql`not exists (select 1 from ${shadowAiFindings} f where f.remediation_instance_id = ${workflowInstances.id})`,
@@ -1478,6 +1489,11 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       },
       /** a workflow started for this finding but never linked to it; the screen offers to link it, never to start another */
       pendingLink: pendingLink ? { instanceId: pendingLink.id, startedAt: pendingLink.createdAt } : null,
+      /** the workflow the finding is linked to. `replaceable` when it ended denied, aborted or rolled back: the finding
+       * may then take a new remediation workflow (the link route's audited replace); otherwise the link stands */
+      currentLink: row.remediationInstanceId
+        ? { instanceId: row.remediationInstanceId, status: current?.status ?? null, replaceable }
+        : null,
       note:
         "This module does not start workflows. It composes the plan and hands back the request body for the ONE " +
         "instantiation route, so assignment rules, the compliance cascade and the retired-template refusal all still apply.",
@@ -1504,12 +1520,24 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
         detail: "instanceId names no workflow instance — start one through POST /v1/workflows/instances first",
       });
     }
-    // a link is set once: re-pointing a linked finding would silently swap the workflow that answers for it
+    // a link is set once: re-pointing a linked finding would silently swap the workflow that answers for it. The one
+    // exception is a link to a workflow that ended denied, aborted or rolled back: it remediates nothing, so a new
+    // workflow may replace it (audited with the one it replaces). A terminal status never changes, so the check holds
+    let replaced: { id: string; status: string } | null = null;
     if (row.remediationInstanceId) {
-      return reply.status(409).send({
-        error: "already_linked",
-        detail: `this finding is already linked to remediation workflow ${row.remediationInstanceId}`,
-      });
+      const [current] = await db
+        .select({ id: workflowInstances.id, status: workflowInstances.status })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, row.remediationInstanceId));
+      if (!current || !endedUnsuccessfully(current.status)) {
+        return reply.status(409).send({
+          error: "already_linked",
+          detail:
+            `this finding is already linked to remediation workflow ${row.remediationInstanceId}; a new one can replace ` +
+            `it only once that workflow ends ${UNSUCCESSFUL_TERMINAL_STATUSES.join(", ")}`,
+        });
+      }
+      replaced = current;
     }
     // only the caller's OWN workflow: another user controls that workflow's description and drives its stages. The
     // bootstrap token has no user, so it starts nothing it could link
@@ -1522,8 +1550,8 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
     }
     const change = (instance.change ?? {}) as { changeType?: unknown; description?: unknown };
     const refusal =
-      instance.status === "aborted"
-        ? "the workflow is aborted"
+      endedUnsuccessfully(instance.status)
+        ? `the workflow is ${instance.status === "rolled_back" ? "rolled back" : instance.status}`
         : change.changeType !== SHADOW_AI_REMEDIATION_CHANGE_TYPE
           ? `the workflow's change type is not '${SHADOW_AI_REMEDIATION_CHANGE_TYPE}'`
           : typeof change.description !== "string" || !change.description.includes(remediationReference(row.id))
@@ -1546,18 +1574,34 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       .set({
         remediationInstanceId: body.instanceId,
         disposition: "confirmed",
-        dispositionReason: `remediation workflow ${body.instanceId} opened`,
+        dispositionReason: replaced
+          ? `remediation workflow ${body.instanceId} opened, replacing ${replaced.id} (${replaced.status})`
+          : `remediation workflow ${body.instanceId} opened`,
         dispositionByUserId: req.authCtx.userId ?? null,
         dispositionAt: new Date(),
         updatedAt: new Date(),
       })
       // conditional: a concurrent link that landed first wins, and this one is refused rather than overwriting it
-      .where(and(eq(shadowAiFindings.id, findingId), isNull(shadowAiFindings.remediationInstanceId)))
+      .where(
+        and(
+          eq(shadowAiFindings.id, findingId),
+          replaced
+            ? eq(shadowAiFindings.remediationInstanceId, replaced.id)
+            : isNull(shadowAiFindings.remediationInstanceId),
+        ),
+      )
       .returning();
     if (!updated) return reply.status(409).send({ error: "already_linked", detail: "this finding was linked concurrently" });
     await audit(req.authCtx.userId, "shadow_ai_finding", findingId, SHADOW_AI_RULE_IDS.findingRemediationLinked, "allow",
-      `finding for ${row.provider} on ${row.subject} linked to remediation workflow instance ${body.instanceId}`,
-      { instanceId: body.instanceId, initiatorUserId: instance.initiatorUserId, provider: row.provider, subject: row.subject });
+      `finding for ${row.provider} on ${row.subject} linked to remediation workflow instance ${body.instanceId}` +
+        (replaced ? `, replacing ${replaced.id}, which ended ${replaced.status}` : ""),
+      {
+        instanceId: body.instanceId,
+        initiatorUserId: instance.initiatorUserId,
+        provider: row.provider,
+        subject: row.subject,
+        ...(replaced ? { replacedInstanceId: replaced.id, replacedInstanceStatus: replaced.status } : {}),
+      });
     return updated;
   });
 }

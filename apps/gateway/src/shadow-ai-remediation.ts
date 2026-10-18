@@ -32,6 +32,16 @@ export const SHADOW_AI_REMEDIATION_DEFAULT_INSTALLED = "shadow-ai-remediation-de
 /** the same shape the workload-identity environments CHECK accepts */
 export const REMEDIATION_ENVIRONMENT_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
 
+/**
+ * The terminal workflow statuses that leave a finding unremediated (the engine's terminals are these plus
+ * `completed`). A workflow in one of them is never linked to a finding, and a finding already linked to one may take a
+ * new remediation workflow through the audited replace on the link route. `completed` is the successful end: it stays
+ * linkable and a link to it is never replaced.
+ */
+export const UNSUCCESSFUL_TERMINAL_STATUSES = ["denied", "aborted", "rolled_back"] as const;
+export const endedUnsuccessfully = (status: string): boolean =>
+  (UNSUCCESSFUL_TERMINAL_STATUSES as readonly string[]).includes(status);
+
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 /**

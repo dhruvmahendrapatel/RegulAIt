@@ -9,6 +9,10 @@
  * SERVER (the plan's `pendingLink`), not the browser, so after a reload the
  * screen still offers only to link that workflow: starting another and linking
  * a different one both stay disabled until it is linked.
+ *
+ * R3: while the finding's link stands, both stay disabled too. A link to a
+ * workflow that ended denied, aborted or rolled back does not stand: a new
+ * workflow may replace it, and the server audits the replace.
  */
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -20,6 +24,7 @@ import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../ad
 import { withRefusalCopy } from "./refusalCopy";
 import {
   SHADOW_REMEDIATION_REFUSALS,
+  linkStands,
   linkableInstances,
   startFormFrom,
   startInstanceBody,
@@ -72,6 +77,8 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
   // Seeded from the server, so it survives a reload
   const [startedUnlinked, setStartedUnlinked] = useState<string | null>(p.pendingLink?.instanceId ?? null);
   const ids = { note: useId(), env: useId(), problem: useId() };
+  // linked to a workflow that is still live (or completed): nothing here may start or link another
+  const locked = startedUnlinked !== null || linkStands(p);
   const instances = useQuery({
     queryKey: ["admin", "shadow-ai-link-instances"],
     queryFn: () => api.get<WorkflowListResponse>("/v1/workflows/instances"),
@@ -153,6 +160,19 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
         </p>
       ) : null}
 
+      {p.currentLink && !linked ? (
+        <p role="note" data-testid="shadow-current-link">
+          <Badge tone={p.currentLink.replaceable ? "warn" : "ok"}>linked</Badge>{" "}
+          <span className={v.dim}>
+            This finding is linked to workflow <code>{p.currentLink.instanceId}</code>
+            {p.currentLink.status ? ` (${p.currentLink.status.replace("_", " ")})` : ""}.
+            {p.currentLink.replaceable
+              ? " That workflow ended without remediating the finding, so a new one can be started or linked; it replaces the old link, and the replace is recorded in the audit log."
+              : " A new workflow can replace it only if that one is denied, aborted or rolled back."}
+          </span>
+        </p>
+      ) : null}
+
       <form
         aria-label="Start a remediation workflow"
         aria-describedby={ids.note}
@@ -188,7 +208,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
           <Button
             type="submit"
             variant="primary"
-            disabled={act.busy || startedUnlinked !== null}
+            disabled={act.busy || locked}
             aria-describedby={problem ? ids.problem : undefined}
           >
             Start remediation workflow…
@@ -205,14 +225,14 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
             setProblem("Choose the workflow to link.");
             return;
           }
-          if (startedUnlinked !== null) return;
+          if (locked) return;
           setPending({ kind: "link", instanceId: existing });
         }}
       >
         <Field label="Or link an existing workflow" grow>
           <Select
             value={existing}
-            disabled={startedUnlinked !== null}
+            disabled={locked}
             onChange={(e) => { setProblem(null); setExisting(e.target.value); }}
           >
             {optionEls(
@@ -224,7 +244,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
             )}
           </Select>
         </Field>
-        <Button type="submit" disabled={act.busy || startedUnlinked !== null}>
+        <Button type="submit" disabled={act.busy || locked}>
           Link workflow…
         </Button>
       </form>
