@@ -807,12 +807,13 @@ export interface RecordAttestationArgs {
 }
 
 /**
- * ADR-0197 Q6: recording a custody attestation is a `key_management` step-up, bound to the act, the key it is about
- * (its fingerprint) and the method claimed. A grant of another kind, or for another key or op, is refused unspent.
+ * ADR-0197 Q6: recording a custody attestation is a `key_management` step-up, bound to `{op, keyId}` as every key
+ * operation is: the act and the key it is about (its fingerprint). A grant of another kind, or for another key or op,
+ * is refused unspent. The method claimed is not a step-up fact: the claim itself is recorded and audited.
  */
-export const dataKeyAttestStepUp = (fingerprint: string, method: DataKeyAttestationMethod): StepUpCheckArgs => ({
+export const dataKeyAttestStepUp = (fingerprint: string): StepUpCheckArgs => ({
   kind: "key_management",
-  facts: { op: "data_key_attest", keyId: fingerprint, method },
+  facts: { op: "data_key_attest", keyId: fingerprint },
 });
 
 /**
@@ -1064,7 +1065,7 @@ export function registerDataKeyRoutes(
 
     // ADR-0197 Q6: a fresh `key_management` step-up for exactly this key and method (never an API key; the
     // bootstrap credential only during first-admin setup, as for every step-up)
-    const su = await requireStepUp(db, req, reply, dataKeyAttestStepUp(fingerprint, body.method));
+    const su = await requireStepUp(db, req, reply, dataKeyAttestStepUp(fingerprint));
     if (!su.ok) return reply;
 
     const actorUserId = req.authCtx.userId;

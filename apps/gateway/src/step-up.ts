@@ -58,7 +58,7 @@
  * (decision-receipts.ts), `signing_key_rotate` (the key rotated TO, resolved
  * before the step-up) and `signing_key_revoke` (identity-routes.ts); and
  * (ADR-0197 Q6) `data_key_attest`, recording a data-key custody attestation,
- * bound to the key's fingerprint and the method claimed (data-key.ts). A grant
+ * bound to the key's fingerprint (data-key.ts). A grant
  * of another kind is never valid for one, nor a key_management grant for
  * another op or key; neither is spent.
  *

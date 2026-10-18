@@ -758,11 +758,10 @@ describe("custody attestation", () => {
     expect(await db.select().from(dataKeyAttestations)).toHaveLength(0);
   });
 
-  it("Q6: a grant of another kind, or for another key or method, is refused and not spent", async () => {
+  it("Q6: a grant of another kind, or for another key or op, is refused and not spent", async () => {
     for (const args of [
-      { kind: "settings_relax" as const, facts: dataKeyAttestStepUp(FP_A, "password_manager").facts },
-      dataKeyAttestStepUp(FP_B, "password_manager"),
-      dataKeyAttestStepUp(FP_A, "kms"),
+      { kind: "settings_relax" as const, facts: dataKeyAttestStepUp(FP_A).facts },
+      dataKeyAttestStepUp(FP_B),
       { kind: "key_management" as const, facts: { op: "receipt_key_retire", keyId: FP_A } },
     ]) {
       const { res, g } = await attestWith(args);
@@ -774,7 +773,7 @@ describe("custody attestation", () => {
   });
 
   it("records an attestation with the ACTOR and the fingerprint, and audits it", async () => {
-    const { res, g } = await attestWith(dataKeyAttestStepUp(FP_A, "password_manager"));
+    const { res, g } = await attestWith(dataKeyAttestStepUp(FP_A));
     expect(res.statusCode, res.body).toBe(201);
     expect(await grantSpent(db, g.grantId)).toBe(true);
     expect(res.json().fingerprint).toBe(FP_A);
