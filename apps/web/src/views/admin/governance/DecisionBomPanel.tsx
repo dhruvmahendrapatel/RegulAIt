@@ -161,10 +161,25 @@ export function RelaxationRecord({ record, names }: { record: RelaxationRecordVi
         "Not found: the audit row may have been pruned by the retention policy"
       ),
     },
+    // ADR-0197 Q3: a relaxation expires; the expiry shown is the one in force today (a renewal moves it)
+    {
+      key: "expires",
+      label: "Expires",
+      value:
+        record.expiresAt === undefined
+          ? "Not reported: this gateway does not say when the relaxation expires"
+          : record.renewedAt && record.renewedBy
+            ? `${shownTime(record.expiresAt)} (renewed ${shownTime(record.renewedAt)} by ${actorLabel(record.renewedBy, names)})`
+            : shownTime(record.expiresAt),
+    },
     {
       key: "state",
       label: "Today",
-      value: record.clearedAt ? `Cleared ${shownTime(record.clearedAt)} by ${actorLabel(record.clearedBy, names)}; L3 applies again` : "Still in force",
+      value: record.clearedAt
+        ? `Cleared ${shownTime(record.clearedAt)} by ${actorLabel(record.clearedBy, names)}; L3 applies again`
+        : record.expiresAt !== undefined && Date.parse(record.expiresAt) <= Date.now()
+          ? `Expired ${shownTime(record.expiresAt)}; L3 applies again until an admin renews it`
+          : "Still in force",
     },
   ];
   return (

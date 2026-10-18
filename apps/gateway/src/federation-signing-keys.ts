@@ -12,7 +12,8 @@
  * data-key re-encryption walk covers it, and it is destroyed in the same update that retires or revokes the key.
  *
  * LIFECYCLE (every change audited, `object_type` `federation_signing_key`):
- *  - generate (admin, free): a PENDING key. It signs nothing and is not published. At most one pending key.
+ *  - generate (admin, free): a PENDING key. It signs nothing, but its public half is published at once so the
+ *    clouds can cache it before it signs (no unknown-`kid` failure at rotation). At most one pending key.
  *  - activate with no active key = TURNING FEDERATION ON: a `settings_relax` step-up `{op: "federation_enable",
  *    keyId}` (ADR-0180: off by default, enabling is a relaxation).
  *  - activate with an active key = ROTATION: a `key_management` step-up `{op: "federation_key_rotate", keyId}`; the
@@ -31,7 +32,7 @@
  * Open source first (ADR-0176): key generation and parsing are Node's `crypto`; the thumbprint and the JWS are
  * `jose` 6.2.12 (already exact-pinned). No cryptography is written here.
  */
-import { createPrivateKey, generateKeyPairSync, randomUUID } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, randomUUID, type KeyObject } from "node:crypto";
 import { calculateJwkThumbprint, SignJWT } from "jose";
 import { and, auditLog, desc, eq, federationSigningKeys, isNull, sql, type Db, type FederationSigningKeyRow } from "@regulait/db";
 import {
@@ -110,9 +111,12 @@ export interface FederationPublicJwk {
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 
-/** is this key in the JWKS at `now` (database clock): active, or retired inside the overlap; never revoked */
+/**
+ * is this key in the JWKS at `now` (database clock): pending (published before it signs, Q11 review), active, or
+ * retired inside the overlap; never revoked. Publishing is not signing: minting reads the active key only.
+ */
 export function isPublished(row: Pick<FederationSigningKeyRow, "activatedAt" | "retiredAt" | "revokedAt">, now: Date): boolean {
-  if (row.revokedAt || !row.activatedAt) return false;
+  if (row.revokedAt) return false;
   if (!row.retiredAt) return true;
   return now.getTime() - row.retiredAt.getTime() < FEDERATION_KEY_OVERLAP_SECONDS * 1000;
 }
@@ -130,19 +134,18 @@ export function federationKeyView(row: FederationSigningKeyRow, now: Date): Fede
   };
 }
 
-/** the public halves the federation JWKS serves now (database clock) */
+/** the public halves the federation JWKS serves now (database clock): pending first, then active, then retired */
 export async function publishedFederationKeys(db: Db): Promise<FederationSigningKeyRow[]> {
   return db
     .select()
     .from(federationSigningKeys)
     .where(
       and(
-        sql`${federationSigningKeys.activatedAt} IS NOT NULL`,
         isNull(federationSigningKeys.revokedAt),
         sql`(${federationSigningKeys.retiredAt} IS NULL OR ${federationSigningKeys.retiredAt} > now() - make_interval(secs => ${FEDERATION_KEY_OVERLAP_SECONDS}))`,
       ),
     )
-    .orderBy(desc(federationSigningKeys.activatedAt));
+    .orderBy(sql`${federationSigningKeys.activatedAt} DESC NULLS FIRST`);
 }
 
 /** the JWKS document: public RSA members only (`kty`, `n`, `e`), never a private member */
@@ -217,7 +220,7 @@ export async function newFederationKeyMaterial(): Promise<{ kid: string; publicJ
   return { kid: await calculateJwkThumbprint(publicJwk, "sha256"), publicJwk, pkcs8: privateKey.export({ format: "pem", type: "pkcs8" }).toString() };
 }
 
-/** generate a PENDING key (signs nothing, unpublished). Free: it turns nothing on. At most one pending key. */
+/** generate a PENDING key (published, signs nothing until activated). Free: it turns nothing on. At most one pending key. */
 export async function generateFederationKey(db: Db, opts: { dataKey: string | undefined; actorUserId: string }): Promise<FederationKeyView> {
   if (!opts.dataKey) throw new FederationError("data_key_unavailable", "the data key is not configured, so a federation private key cannot be stored");
   const material = await newFederationKeyMaterial();
@@ -233,7 +236,7 @@ export async function generateFederationKey(db: Db, opts: { dataKey: string | un
       .insert(federationSigningKeys)
       .values({ kid: material.kid, publicJwk: material.publicJwk, privateKeyCiphertext: ciphertext, createdBy: opts.actorUserId, createdAt: sql`now()` })
       .returning();
-    await auditFederation(tx, opts.actorUserId, inserted!.id, "federation-key-generated", "federation signing key generated (pending: it signs nothing until activated)", {
+    await auditFederation(tx, opts.actorUserId, inserted!.id, "federation-key-generated", "federation signing key generated (pending: published at once, it signs nothing until activated)", {
       kid: material.kid,
       algorithm: FEDERATION_JWS_ALG,
     });
@@ -383,6 +386,11 @@ export async function mintFederationToken(
   return signFederationToken({ kid: active.kid, pkcs8 }, { issuer, subject: opts.subject, audience: opts.audience, ...(opts.now ? { now: opts.now } : {}) });
 }
 
+/** a federation key is RSA with a modulus of at least RSA_MODULUS_BITS (exported for tests) */
+export function federationKeyAcceptable(key: Pick<KeyObject, "asymmetricKeyType" | "asymmetricKeyDetails">): boolean {
+  return key.asymmetricKeyType === "rsa" && (key.asymmetricKeyDetails?.modulusLength ?? 0) >= RSA_MODULUS_BITS;
+}
+
 /** sign one federation token with a key's PKCS#8 private half (no database): RS256, at most FEDERATION_TOKEN_TTL_SECONDS */
 export async function signFederationToken(
   key: { kid: string; pkcs8: string },
@@ -394,7 +402,7 @@ export async function signFederationToken(
   } catch {
     throw new FederationError("federation_key_unreadable", "the federation key is not a readable private key");
   }
-  if (privateKey.asymmetricKeyType !== "rsa" || (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < RSA_MODULUS_BITS) {
+  if (!federationKeyAcceptable(privateKey)) {
     throw new FederationError("federation_key_unreadable", "the federation key is not an RSA key of at least 2048 bits");
   }
   const iat = Math.floor((claims.now ?? new Date()).getTime() / 1000);

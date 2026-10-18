@@ -17,6 +17,7 @@ import {
   federationTokenMinter,
   isPublished,
   newFederationKeyMaterial,
+  federationKeyAcceptable,
   signFederationToken,
 } from "./federation-signing-keys.js";
 import { federationAudiences, gcpWifAudience } from "./discovery-cloud-scanners.js";
@@ -96,6 +97,13 @@ describe("signer and JWKS round trip", () => {
     const { generateKeyPairSync } = await import("node:crypto");
     const ec = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ format: "pem", type: "pkcs8" }).toString();
     await expect(signFederationToken({ kid: "k", pkcs8: ec }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toMatchObject({ code: "federation_key_unreadable" });
+    // RSA, but under 2048 bits: the size check, not the key-type check, refuses it (#420 review finding 2). The key's
+    // details stand in for a generated key, since creating an RSA key under 2048 bits is a SAST finding of its own
+    const rsa = (modulusLength: number) => ({ asymmetricKeyType: "rsa" as const, asymmetricKeyDetails: { modulusLength } });
+    expect(federationKeyAcceptable(rsa(1024))).toBe(false);
+    expect(federationKeyAcceptable(rsa(2047))).toBe(false);
+    expect(federationKeyAcceptable(rsa(2048))).toBe(true);
+    expect(federationKeyAcceptable({ asymmetricKeyType: "ec", asymmetricKeyDetails: { namedCurve: "prime256v1" } })).toBe(false);
     await expect(signFederationToken({ kid: "k", pkcs8: "not a key" }, { issuer: ISSUER, subject: SUB, audience: AWS_AUD })).rejects.toBeInstanceOf(FederationError);
   });
 });
@@ -133,11 +141,13 @@ describe("issuer, discovery document, publication", () => {
     });
   });
 
-  it("publishes the active key and a retired key inside the overlap; never a pending or revoked key", () => {
+  it("publishes a pending key, the active key and a retired key inside the overlap; never a revoked key", () => {
     const now = new Date("2026-10-17T12:00:00Z");
     const t = (s: number) => new Date(now.getTime() - s * 1000);
     expect(isPublished({ activatedAt: t(100), retiredAt: null, revokedAt: null }, now)).toBe(true);
-    expect(isPublished({ activatedAt: null, retiredAt: null, revokedAt: null }, now)).toBe(false);
+    // pending: published before it signs (Q11 review), so a cloud never meets an unknown kid at rotation
+    expect(isPublished({ activatedAt: null, retiredAt: null, revokedAt: null }, now)).toBe(true);
+    expect(isPublished({ activatedAt: null, retiredAt: null, revokedAt: t(1) }, now)).toBe(false);
     expect(isPublished({ activatedAt: t(1000), retiredAt: t(FEDERATION_KEY_OVERLAP_SECONDS - 1), revokedAt: null }, now)).toBe(true);
     expect(isPublished({ activatedAt: t(1000), retiredAt: t(FEDERATION_KEY_OVERLAP_SECONDS + 1), revokedAt: null }, now)).toBe(false);
     expect(isPublished({ activatedAt: t(100), retiredAt: null, revokedAt: t(1) }, now)).toBe(false);

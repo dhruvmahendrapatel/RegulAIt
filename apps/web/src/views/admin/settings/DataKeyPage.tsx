@@ -25,7 +25,8 @@
  *
  * And it is honest about the attestation's limit in the UI itself, not only in
  * the ADR: submitting the form records a CLAIM. RegulAIt cannot look inside a
- * password manager and does not pretend to.
+ * password manager and does not pretend to. Recording one asks the person to
+ * confirm it is them (a `key_management` step-up, ADR-0197 Q6).
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -36,6 +37,7 @@ import { KV, QueryGate, Stat, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { ReencryptionStatusCard } from "./ReencryptionStatusCard";
+import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 
 interface Attestation {
   id: string;
@@ -91,12 +93,14 @@ export default function DataKeyPage() {
 
   const attest = () =>
     void act.run(async () => {
-      await api.post("/v1/security/data-key/attestations", {
+      const body = {
         method,
         ...(locationHint.trim() ? { locationHint: locationHint.trim() } : {}),
         ...(note.trim() ? { note: note.trim() } : {}),
         confirmRecordedOutOfBand: true,
-      });
+      };
+      // ADR-0197 Q6: the gateway asks for a `key_management` step-up; the same body is resent with the grant
+      await withStepUp((h) => stepUpApi.post("/v1/security/data-key/attestations", body, h));
       setLocationHint("");
       setNote("");
       await status.refetch();

@@ -37,7 +37,7 @@ import {
   type BuiltinEvalDatasetSpec,
   type BuiltinEvalScorer,
 } from "@regulait/shared";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 /** the system actor on audit rows (the column is NOT NULL; the seeder has no person) */
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -80,7 +80,7 @@ export function loadBuiltinEvalDataset(spec: BuiltinEvalDatasetSpec, dir = built
   try {
     bytes = readFileSync(path.join(dir, file.path));
   } catch (e) {
-    throw new BuiltinEvalDatasetUnverifiable(`${spec.key}: vendored file ${file.path} cannot be read (${safeErrorMessage(e)})`);
+    throw new BuiltinEvalDatasetUnverifiable(`${spec.key}: vendored file ${file.path} cannot be read (${errMessage(e)})`);
   }
   const actual = vendoredFileSha256(bytes);
   if (actual !== file.sha256) {
@@ -92,7 +92,7 @@ export function loadBuiltinEvalDataset(spec: BuiltinEvalDatasetSpec, dir = built
   try {
     cases = builtinEvalCases(spec, JSON.parse(bytes.toString("utf8")) as unknown);
   } catch (e) {
-    throw new BuiltinEvalDatasetUnverifiable(`${spec.key}: ${safeErrorMessage(e)}`);
+    throw new BuiltinEvalDatasetUnverifiable(`${spec.key}: ${errMessage(e)}`);
   }
   const scorer = builtinEvalScorer(spec);
   const out = { spec, scorer, cases, digest: evalCaseSetDigest(scorer, cases) };
@@ -155,7 +155,7 @@ export async function seedBuiltinEvalDatasets(
     try {
       want = loadBuiltinEvalDataset(spec, opts.dir);
     } catch (e) {
-      const detail = safeErrorMessage(e);
+      const detail = errMessage(e);
       await db.insert(auditLog).values({
         userId: SYSTEM_USER_ID,
         objectType: "eval_run",
@@ -295,7 +295,7 @@ export async function checkBuiltinEvalDatasetForRun(db: Db, dataset: EvalDataset
   try {
     want = loadBuiltinEvalDataset(spec, dir);
   } catch (e) {
-    return { builtin: true, spec, refusal: { status: 409, error: "builtin_dataset_unverifiable", detail: safeErrorMessage(e) } };
+    return { builtin: true, spec, refusal: { status: 409, error: "builtin_dataset_unverifiable", detail: errMessage(e) } };
   }
   const stored = await storedEvalCaseSetDigest(db, dataset);
   if (stored.digest !== want.digest) {

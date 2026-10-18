@@ -75,7 +75,7 @@
  * recorded and the next tick tries again — the right shape for a sweep, and the
  * wrong shape for anything that needs to run for hours. See the ADR.
  */
-import { safeErrorText } from "./gateway-logger.js";
+import { errLine } from "./err-serializer.js";
 import { randomUUID } from "node:crypto";
 import {
   and,
@@ -499,7 +499,7 @@ export async function auditSchedulerEvent(
   } catch (err) {
     console.error(
       `[regulait] could not audit scheduler event ${ev.ruleId} for '${ev.jobName}': ` +
-        safeErrorText(err),
+        errLine(err),
     );
   }
 }
@@ -633,11 +633,11 @@ export async function runSchedulerJob(
     };
   } catch (err) {
     // R1: the persisted job error carries the same withheld form as the line
-    const message = safeErrorText(err).slice(0, 2000);
+    const message = errLine(err).slice(0, 2000);
     // The console line ALWAYS happens and happens first — it is the signal most
     // likely to survive whatever broke (see scheduler-health.ts for the same
     // ordering argument).
-    console.error(`[regulait] scheduled job '${def.name}' FAILED: ${safeErrorText(err)}`);
+    console.error(`[regulait] scheduled job '${def.name}' FAILED: ${errLine(err)}`);
     try {
       await releaseJob(db, def.name, run.id, "failed", {
         startedAt: run.startedAt,
@@ -650,7 +650,7 @@ export async function runSchedulerJob(
       // second exception thrown at the tick loop.
       console.error(
         `[regulait] could not record the failure of '${def.name}' (its lease expires on its own): ` +
-          safeErrorText(releaseErr),
+          errLine(releaseErr),
       );
     }
     await auditSchedulerEvent(db, {
@@ -787,8 +787,8 @@ export class Scheduler {
       } catch (err) {
         // runSchedulerJob does not throw. If it somehow did — a database that
         // refuses the claim transaction, say — the tick still continues.
-        const message = safeErrorText(err);
-        console.error(`[regulait] scheduler tick could not attempt '${def.name}': ${safeErrorText(err)}`);
+        const message = errLine(err);
+        console.error(`[regulait] scheduler tick could not attempt '${def.name}': ${errLine(err)}`);
         recordJobRun(def.name, "failed");
         results.push({
           job: def.name,
@@ -811,7 +811,7 @@ export class Scheduler {
     const p = this.tick()
       .catch((err: unknown) => {
         console.error(
-          `[regulait] scheduler tick failed outright: ${safeErrorText(err)}`,
+          `[regulait] scheduler tick failed outright: ${errLine(err)}`,
         );
         return { at: new Date().toISOString(), results: [] } satisfies TickSummary;
       })

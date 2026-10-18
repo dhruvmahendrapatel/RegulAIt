@@ -409,6 +409,14 @@ it("x", () => { ${later} });\n`;
   ${CREATE("h")}
 });`),
         file(`describe.each(["a.example", "b.example"])("d %s", (h) => { beforeAll(async () => { ${CREATE("h")} }); });`),
+        // vitest's `.for`, the each-variant that passes the row unspread (#427 recheck 4 L-1)
+        file(`it.for(["a.example", "b.example"])("x %s", async (h) => { // egress-allow-cleanup: afterAll
+  ${CREATE("h")}
+});`),
+        file(`test.for(["a.example", "b.example"])("x %s", async (h) => { // egress-allow-cleanup: afterAll
+  ${CREATE("h")}
+});`),
+        file(`describe.for(["a.example", "b.example"])("d %s", (h) => { beforeAll(async () => { ${CREATE("h")} }); });`),
       ]) {
         expect(flagged(analyzeTestFile(src)), src).toHaveLength(1);
       }

@@ -10,6 +10,8 @@
  *    grant is spent once. Generating a key and turning federation off are free. Every change is audited.
  *  - ROUND TRIP: a minted token verifies against the JWKS route's body with its issuer and audience; a rotated-out
  *    key stays published inside the overlap with its private half destroyed; a revoked key leaves the JWKS at once.
+ *  - PENDING KEYS (Q11 review, 2026-10-18): a generated key is in the JWKS before it signs, signs nothing until it is
+ *    activated, activation switches signing to it, and revoking it removes it at once. The JWKS holds RSA keys only.
  *
  * Global state (M-068): federation is turned off and org settings are put back in afterAll. Keys and grants are
  * this run's own.
@@ -118,7 +120,7 @@ async function expectRefusedUnspent(url: string, args: StepUpCheckArgs, wantKind
 const generate = async (): Promise<string> => {
   const res = await app.inject({ method: "POST", url: "/v1/discovery/federation/keys", headers: { ...AUTH, ...CSRF }, payload: {} });
   expect(res.statusCode, res.body).toBe(201);
-  expect(res.json()).toMatchObject({ state: "pending", published: false, algorithm: "RS256" });
+  expect(res.json()).toMatchObject({ state: "pending", published: true, algorithm: "RS256" });
   return res.json().kid as string;
 };
 const jwks = async () => {
@@ -168,12 +170,18 @@ describe("ADR-0195 SD2b: the federation signer", () => {
     try {
       await refusedWith(db.execute(sql`delete from federation_signing_keys where kid = ${kid}`), /never deleted/);
       await refusedWith(db.execute(sql`truncate federation_signing_keys`), /TRUNCATE/);
+      // the guard itself (not a CHECK) keeps the public half fixed (#420 review finding 1)
+      const other = JSON.stringify({ kty: "RSA", e: "AQAB", n: "y".repeat(342) });
+      await refusedWith(db.execute(sql`update federation_signing_keys set public_jwk = ${other}::jsonb where kid = ${kid}`), /written once/);
     } finally {
       // never leave this pending fixture behind: a pending key blocks every later generate
       await db.execute(sql`update federation_signing_keys set revoked_at = now(), private_key_ciphertext = null where kid = ${kid} and revoked_at is null`);
     }
     await expect(db.execute(sql`update federation_signing_keys set private_key_ciphertext = 'c' where kid = ${kid}`)).rejects.toThrow();
     await refusedWith(db.execute(sql`update federation_signing_keys set revoked_at = now() + interval '1 day' where kid = ${kid}`), /written once/);
+    // activated_at is written once too: the first stamp is allowed, a second is refused (no CHECK is in play here)
+    await db.execute(sql`update federation_signing_keys set activated_at = now() where kid = ${kid}`);
+    await refusedWith(db.execute(sql`update federation_signing_keys set activated_at = now() + interval '1 hour' where kid = ${kid}`), /written once/);
     const fn = await db.execute(sql`select array_to_string(proconfig, ',') as c from pg_proc where proname = 'regulait_federation_signing_key_guard'`);
     expect(rows<{ c: string }>(fn)[0]!.c).toContain("search_path=pg_catalog, public, pg_temp");
   });
@@ -191,7 +199,7 @@ describe("ADR-0195 SD2b: the federation signer", () => {
   let kidA = "";
   let kidB = "";
 
-  it("generate is free and leaves a pending key; a second pending key is refused", async () => {
+  it("generate is free and leaves a pending key, published but signing nothing; a second pending key is refused", async () => {
     kidA = await generate();
     const again = await app.inject({ method: "POST", url: "/v1/discovery/federation/keys", headers: { ...AUTH, ...CSRF }, payload: {} });
     expect(again.statusCode).toBe(409);
@@ -199,7 +207,11 @@ describe("ADR-0195 SD2b: the federation signer", () => {
     const row = await keyRow(kidA);
     expect(row.privateKeyCiphertext).not.toBeNull();
     expect(row.privateKeyCiphertext).not.toContain("PRIVATE");
-    expect((await jwks()).keys.map((k) => k.kid)).not.toContain(kidA);
+    // published before it signs, so a cloud can cache it; RSA public members only
+    expect((await jwks()).keys).toEqual([{ kty: "RSA", n: row.publicJwk.n, e: "AQAB", kid: kidA, alg: "RS256", use: "sig" }]);
+    // a pending key signs nothing: federation is still off
+    await expect(mintFederationToken(db, { dataKey: DATA_KEY, subject: SUBJECT, audience: "sts.amazonaws.com" })).rejects.toMatchObject({ code: "federation_off" });
+    expect((await app.inject({ method: "GET", url: "/v1/discovery/federation", headers: AUTH })).json()).toMatchObject({ enabled: false });
     expect(await lastAudit("federation-key-generated")).toMatchObject({ objectType: "federation_signing_key", objectId: row.id });
   });
 
@@ -233,6 +245,10 @@ describe("ADR-0195 SD2b: the federation signer", () => {
 
   it("rotation is a key_management step-up bound to the new key; the old key stays published with its private half destroyed", async () => {
     kidB = await generate();
+    // the pending key is published beside the active one, and the active key still does all the signing
+    expect((await jwks()).keys.map((k) => k.kid)).toEqual([kidB, kidA]);
+    const before = await mintFederationToken(db, { dataKey: DATA_KEY, subject: SUBJECT, audience: "sts.amazonaws.com" });
+    expect((await jwtVerify(before, createLocalJWKSet((await jwks()) as Parameters<typeof createLocalJWKSet>[0]), { issuer: ISSUER, audience: "sts.amazonaws.com" })).protectedHeader.kid).toBe(kidA);
     const url = `/v1/discovery/federation/keys/${kidB}/activate`;
     await expectRefusedUnspent(url, { kind: "settings_relax", facts: { op: "federation_enable", keyId: kidB } }, "key_management");
     await expectRefusedUnspent(url, { kind: "key_management", facts: { op: "federation_key_rotate", keyId: kidA } }, "key_management");
@@ -245,6 +261,9 @@ describe("ADR-0195 SD2b: the federation signer", () => {
     expect(a.retiredAt).not.toBeNull();
     expect(a.privateKeyCiphertext).toBeNull();
     expect((await jwks()).keys.map((k) => k.kid)).toEqual([kidB, kidA]);
+    // activation switched signing to the new key
+    const after = await mintFederationToken(db, { dataKey: DATA_KEY, subject: SUBJECT, audience: "sts.amazonaws.com" });
+    expect((await jwtVerify(after, createLocalJWKSet((await jwks()) as Parameters<typeof createLocalJWKSet>[0]), { issuer: ISSUER, audience: "sts.amazonaws.com" })).protectedHeader.kid).toBe(kidB);
     expect((await lastAudit("federation-key-rotated"))!.detail).toMatchObject({ kid: kidB, previousKid: kidA, stepUpKind: "key_management" });
   });
 
@@ -262,6 +281,21 @@ describe("ADR-0195 SD2b: the federation signer", () => {
     const again = await app.inject({ method: "POST", url, headers: { ...AUTH, ...CSRF }, payload: {} });
     expect(again.statusCode).toBe(409);
     expect(again.json().error).toBe("federation_key_already_revoked");
+  });
+
+  it("revoking a pending key removes it from the JWKS at once; the active key keeps signing", async () => {
+    const kidC = await generate();
+    expect((await jwks()).keys.map((k) => k.kid)).toEqual([kidC, kidB]);
+    const su = await grantFor({ kind: "key_management", facts: { op: "federation_key_revoke", keyId: kidC } });
+    const ok = await post(`/v1/discovery/federation/keys/${kidC}/revoke`, su);
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toMatchObject({ kid: kidC, wasActive: false, enabled: true });
+    expect((await keyRow(kidC)).privateKeyCiphertext).toBeNull();
+    const set = await jwks();
+    expect(set.keys.map((k) => k.kid)).toEqual([kidB]);
+    expect(set.keys.every((k) => k.kty === "RSA" && k.alg === "RS256" && k.d === undefined)).toBe(true);
+    const token = await mintFederationToken(db, { dataKey: DATA_KEY, subject: SUBJECT, audience: "sts.amazonaws.com" });
+    expect((await jwtVerify(token, createLocalJWKSet(set as Parameters<typeof createLocalJWKSet>[0]), { issuer: ISSUER, audience: "sts.amazonaws.com" })).protectedHeader.kid).toBe(kidB);
   });
 
   it("turning federation off is free and audited; then nothing can be minted", async () => {

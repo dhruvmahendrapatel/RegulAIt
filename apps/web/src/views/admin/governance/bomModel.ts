@@ -568,8 +568,15 @@ export interface RelaxationRecordView {
   clearedAt: string | null;
   /** the `execution-person-stdio-relaxed` audit row; null when it is no longer found (audit retention) */
   setAuditId: string | null;
+  /** ADR-0197 Q3: when it stops applying (undefined = a gateway before Q3 did not report it) */
+  expiresAt?: string;
+  /** the latest renewal, or null when it was never renewed (undefined = not reported) */
+  renewedBy?: string | null;
+  renewedAt?: string | null;
 }
 const RELAXATION_RECORD_KEYS = ["id", "scopeKind", "scopeId", "setBy", "setAt", "clearedBy", "clearedAt", "setAuditId"] as const;
+/** reported by a gateway with ADR-0197 Q3 (all three together) */
+const RELAXATION_EXPIRY_KEYS = ["expiresAt", "renewedBy", "renewedAt"] as const;
 
 /**
  * The read response's relaxation record, bound to the signed facts: it must be exactly the row they name (id and
@@ -580,15 +587,22 @@ export function readRelaxationRecord(value: unknown, signed: ExecutionView["rela
   if (value === null) return signed === null ? null : unreadable("The Decision BOM");
   const r = obj(value);
   if (
-    !r || !signed || !exactKeys(r, RELAXATION_RECORD_KEYS) || !uuid(r.id) || !uuid(r.scopeId) || !uuid(r.setBy) || !time(r.setAt) ||
+    !r || !signed || !(exactKeys(r, RELAXATION_RECORD_KEYS) || exactKeys(r, [...RELAXATION_RECORD_KEYS, ...RELAXATION_EXPIRY_KEYS])) || !uuid(r.id) || !uuid(r.scopeId) || !uuid(r.setBy) || !time(r.setAt) ||
     !nullOr(r.clearedBy, uuid) || !(r.clearedAt === null || time(r.clearedAt)) || (r.clearedBy === null) !== (r.clearedAt === null) || !nullOr(r.setAuditId, uuid) ||
     // cleared after it was set, as the shared contract requires
     (r.clearedAt !== null && Date.parse(r.clearedAt as string) < Date.parse(r.setAt as string)) ||
+    // ADR-0197 Q3, as the shared contract requires: it expires after it was set; renewed by someone at a time, after the set
+    ("expiresAt" in r &&
+      (!time(r.expiresAt) || Date.parse(r.expiresAt as string) <= Date.parse(r.setAt as string) || !nullOr(r.renewedBy, uuid) ||
+        !(r.renewedAt === null || time(r.renewedAt)) || (r.renewedBy === null) !== (r.renewedAt === null) ||
+        (r.renewedAt !== null && Date.parse(r.renewedAt as string) < Date.parse(r.setAt as string)))) ||
     r.id !== signed.relaxationId || r.scopeKind !== signed.scopeKind || r.scopeId !== signed.scopeId
   ) {
     return unreadable("The Decision BOM");
   }
-  return { id: r.id, scopeKind: signed.scopeKind, scopeId: r.scopeId, setBy: r.setBy, setAt: r.setAt, clearedBy: r.clearedBy as string | null, clearedAt: r.clearedAt as string | null, setAuditId: r.setAuditId };
+  const base: RelaxationRecordView = { id: r.id, scopeKind: signed.scopeKind, scopeId: r.scopeId, setBy: r.setBy, setAt: r.setAt, clearedBy: r.clearedBy as string | null, clearedAt: r.clearedAt as string | null, setAuditId: r.setAuditId };
+  if (!("expiresAt" in r)) return base;
+  return { ...base, expiresAt: r.expiresAt as string, renewedBy: r.renewedBy as string | null, renewedAt: r.renewedAt as string | null };
 }
 
 /** the audit log filtered to one row: the target of an evidence link (`GET /v1/audit?id=`) */

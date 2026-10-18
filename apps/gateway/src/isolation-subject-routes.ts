@@ -3,7 +3,7 @@
  * rather than to the org. Registered by `registerIsolationRoutes`; every route is an admin route (`ISOLATION_ROUTES`).
  *
  *   GET /v1/execution-person-stdio-relaxations
- *   PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId      body { relaxed: boolean }
+ *   PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId      body { relaxed: boolean, renew?: true }
  *       Owner decision C, "a person's own stdio call": the unknown-agent floor of an `mcp_stdio` call with NO agent,
  *       made by a person in an INTERACTIVE session, lowered from L3 to L2 for one stdio MCP server or one project
  *       (never org-wide). Setting it is a relaxation: a `settings_relax` step-up, audited
@@ -11,6 +11,11 @@
  *       `execution-person-stdio-relaxation-cleared`, no step-up. The rows are never deleted (migration 0201's
  *       guard): a cleared row keeps its id, so the decisions that relied on it still name it. Enforced in
  *       `resolveRequirement` (execution-placement.ts), never here: this only records the admin's choice.
+ *       ADR-0197 Q3: a relaxation expires `PERSON_STDIO_RELAXATION_DAYS` (30) after it is set, and an expired one no
+ *       longer applies (fail closed, read on the database clock). `{relaxed: true, renew: true}` renews it (in force
+ *       or expired) for 30 days from now: a `settings_relax` step-up bound to the row (op `person_stdio_renew`),
+ *       audited `execution-person-stdio-relaxation-renewed`. Setting `true` where the relaxation has expired is
+ *       refused 409 `relaxation_expired`: the admin renews it, so the renewal is never an implied side effect.
  *
  *   GET /v1/execution-project-sensitivities
  *   PUT /v1/execution-project-sensitivities/:projectId                    body { sensitivity: ... | null }
@@ -37,6 +42,7 @@ import {
   type ExecutionPersonStdioRelaxationRow,
 } from "@regulait/db";
 import {
+  PERSON_STDIO_RELAXATION_DAYS,
   PERSON_STDIO_RELAXATION_KIND,
   PERSON_STDIO_RELAXATION_SCOPES,
   PERSON_STDIO_RELAXED_FLOOR,
@@ -59,7 +65,13 @@ const uniqueViolation = (e: unknown): boolean => {
   return (err?.code ?? err?.cause?.code) === "23505";
 };
 
-function relaxationView(row: ExecutionPersonStdioRelaxationRow, scopeName: string | null) {
+/** the database clock: expiry is decided on it everywhere (placement reads `expires_at > now()`) */
+async function dbNow(db: Db): Promise<Date> {
+  const r = (await db.execute(sql`SELECT now() AS now`)) as unknown as { rows: Array<{ now: Date | string }> };
+  return new Date(r.rows[0]!.now);
+}
+
+function relaxationView(row: ExecutionPersonStdioRelaxationRow, scopeName: string | null, now: Date) {
   return {
     id: row.id,
     kind: PERSON_STDIO_RELAXATION_KIND,
@@ -72,6 +84,11 @@ function relaxationView(row: ExecutionPersonStdioRelaxationRow, scopeName: strin
     to: PERSON_STDIO_RELAXED_FLOOR,
     createdByUserId: row.createdByUserId,
     createdAt: row.createdAt.toISOString(),
+    /** ADR-0197 Q3: in force only before this; an expired relaxation lowers nothing until it is renewed */
+    expiresAt: row.expiresAt.toISOString(),
+    expired: row.expiresAt.getTime() <= now.getTime(),
+    renewedByUserId: row.renewedByUserId,
+    renewedAt: row.renewedAt ? row.renewedAt.toISOString() : null,
   };
 }
 
@@ -152,15 +169,75 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
     return { kind: "project", id: proj.id, name: proj.name };
   }
 
+  /**
+   * ADR-0197 Q3: renew a relaxation (in force or expired, never a cleared one) for `PERSON_STDIO_RELAXATION_DAYS` from
+   * now. A relaxation again: a `settings_relax` step-up bound to the row and, for a server, to the stdio program (as a
+   * set is), audited with the expiry before and after. Compare-and-set on the row still uncleared.
+   */
+  async function renew(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    scope: { kind: PersonStdioRelaxationScope; id: string; name: string; programDigest?: string | null },
+    current: ExecutionPersonStdioRelaxationRow,
+  ) {
+    const programDigest = scope.kind === "mcp_server" ? (scope.programDigest ?? null) : undefined;
+    const su = await requireStepUp(db, req, reply, {
+      kind: "settings_relax",
+      facts: { op: "person_stdio_renew", relaxationId: current.id, scopeKind: scope.kind, scopeId: scope.id, ...(programDigest !== undefined ? { stdioCommandDigest: programDigest } : {}) },
+    });
+    if (!su.ok) return reply;
+    const row = await db.transaction(async (tx) => {
+      if (programDigest !== undefined) {
+        const locked = await tx.execute(sql`SELECT stdio_command_digest AS d FROM mcp_servers WHERE id = ${scope.id} FOR UPDATE`);
+        const now = (locked as unknown as { rows: Array<{ d: string | null }> }).rows[0];
+        if (!now || now.d !== programDigest) return null;
+      }
+      const [renewed] = await tx
+        .update(executionPersonStdioRelaxations)
+        .set({ renewedAt: sql`now()`, renewedByUserId: actor(req), expiresAt: sql`now() + make_interval(days => ${PERSON_STDIO_RELAXATION_DAYS})` })
+        .where(and(eq(executionPersonStdioRelaxations.id, current.id), isNull(executionPersonStdioRelaxations.clearedAt)))
+        .returning();
+      if (!renewed) return null;
+      await auditExecutor(tx as unknown as Db, {
+        userId: actor(req),
+        objectType: scope.kind,
+        objectId: scope.id,
+        ruleId: "execution-person-stdio-relaxation-renewed",
+        detail: {
+          relaxationId: current.id,
+          kind: PERSON_STDIO_RELAXATION_KIND,
+          subjectKind: PERSON_STDIO_SUBJECT_KIND,
+          scopeKind: scope.kind,
+          scopeId: scope.id,
+          ...(programDigest !== undefined ? { stdioCommandDigest: programDigest } : {}),
+          from: UNKNOWN_AGENT_FLOOR,
+          to: PERSON_STDIO_RELAXED_FLOOR,
+          relaxation: true,
+          previousExpiresAt: current.expiresAt.toISOString(),
+          expiresAt: renewed.expiresAt.toISOString(),
+          stepUp: su.method,
+        },
+        reason:
+          `a person's own stdio call on ${scope.kind} ${scope.name} may run at L2 instead of L3 until ${renewed.expiresAt.toISOString()} ` +
+          `(renewed; it was due to expire at ${current.expiresAt.toISOString()}; step-up ${su.method}) (ADR-0190 owner decision C; ADR-0197 Q3)`,
+      });
+      return renewed;
+    });
+    if (!row) return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
+    return reply.send({ relaxation: relaxationView(row, scope.name, await dbNow(db)), changed: true, renewed: true });
+  }
+
   // ---- owner decision C ------------------------------------------------------------------------------------------
   app.get("/v1/execution-person-stdio-relaxations", async (_req, reply) => {
+    // every uncleared row, expired ones too (flagged `expired`), so an admin can see and renew them
     const rows = await db.select().from(executionPersonStdioRelaxations).where(isNull(executionPersonStdioRelaxations.clearedAt));
+    const now = await dbNow(db);
     const serverNames = new Map((await db.select({ id: mcpServers.id, name: mcpServers.name }).from(mcpServers)).map((s) => [s.id, s.name]));
     const projectNames = new Map((await db.select({ id: projects.id, name: projects.name }).from(projects)).map((p) => [p.id, p.name]));
     const relaxations = rows
-      .map((r) => relaxationView(r, (r.scopeKind === "mcp_server" ? serverNames.get(r.scopeId) : projectNames.get(r.scopeId)) ?? null))
+      .map((r) => relaxationView(r, (r.scopeKind === "mcp_server" ? serverNames.get(r.scopeId) : projectNames.get(r.scopeId)) ?? null, now))
       .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : 1));
-    return reply.send({ relaxations, default: UNKNOWN_AGENT_FLOOR, relaxedTo: PERSON_STDIO_RELAXED_FLOOR });
+    return reply.send({ relaxations, default: UNKNOWN_AGENT_FLOOR, relaxedTo: PERSON_STDIO_RELAXED_FLOOR, expiresAfterDays: PERSON_STDIO_RELAXATION_DAYS });
   });
 
   app.put("/v1/execution-person-stdio-relaxations/:scopeKind/:scopeId", async (req, reply) => {
@@ -180,8 +257,22 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
     if (!scope) return reply;
     if (!b.success) return reply.status(400).send({ error: "invalid_body", issues: b.error.issues });
     const current = orphan ?? (await activeRelaxation(db, scope.kind, scope.id));
+    if (b.data.relaxed && b.data.renew) {
+      if (!current) return reply.status(404).send({ error: "no_relaxation", detail: "there is no relaxation on this scope to renew; set one instead" });
+      return renew(req, reply, scope, current);
+    }
     if (b.data.relaxed) {
-      if (current) return reply.send({ relaxation: relaxationView(current, scope.name), changed: false });
+      if (current) {
+        const now = await dbNow(db);
+        if (current.expiresAt.getTime() <= now.getTime()) {
+          return reply.status(409).send({
+            error: "relaxation_expired",
+            detail: `this relaxation expired at ${current.expiresAt.toISOString()} and no longer applies; renew it (send renew: true), which asks you to confirm it's you and is audited (ADR-0197 Q3)`,
+            relaxation: relaxationView(current, scope.name, now),
+          });
+        }
+        return reply.send({ relaxation: relaxationView(current, scope.name, now), changed: false });
+      }
       // the relaxation: a fresh step-up bound to this scope (ADR-0180; owner decision C) and, for a server, to the
       // stdio program it was decided on (review: a set racing a program change never lands on the new program)
       const programDigest = scope.kind === "mcp_server" ? (scope.programDigest ?? null) : undefined;
@@ -201,7 +292,10 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
             if (!now || now.d !== programDigest) return "program_changed" as const;
           }
           // compare-and-set: the partial unique index admits one active row per scope, so a racing set fails here
-          const [inserted] = await tx.insert(executionPersonStdioRelaxations).values({ scopeKind: scope.kind, scopeId: scope.id, createdByUserId: actor(req) }).returning();
+          const [inserted] = await tx
+            .insert(executionPersonStdioRelaxations)
+            .values({ scopeKind: scope.kind, scopeId: scope.id, createdByUserId: actor(req), expiresAt: sql`now() + make_interval(days => ${PERSON_STDIO_RELAXATION_DAYS})` })
+            .returning();
           await auditExecutor(tx as unknown as Db, {
             userId: actor(req),
             objectType: scope.kind,
@@ -217,11 +311,12 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
               from: UNKNOWN_AGENT_FLOOR,
               to: PERSON_STDIO_RELAXED_FLOOR,
               relaxation: true,
+              expiresAt: inserted!.expiresAt.toISOString(),
               stepUp: su.method,
             },
             reason:
               `a person's own stdio call (no agent, interactive session only, never an API key) on ${scope.kind} ${scope.name} ` +
-              `may now run at L2 instead of L3 (step-up ${su.method}); every other floor still applies (ADR-0190 owner decision C)`,
+              `may now run at L2 instead of L3 until ${inserted!.expiresAt.toISOString()} (step-up ${su.method}); every other floor still applies (ADR-0190 owner decision C; ADR-0197 Q3)`,
           });
           return inserted!;
         });
@@ -230,7 +325,7 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
         throw e;
       }
       if (row === "program_changed") return reply.status(CHANGED_CONCURRENTLY.status).send(CHANGED_CONCURRENTLY.body);
-      return reply.send({ relaxation: relaxationView(row, scope.name), changed: true });
+      return reply.send({ relaxation: relaxationView(row, scope.name, await dbNow(db)), changed: true });
     }
     if (!current) return reply.send({ relaxation: null, changed: false });
     // clearing tightens: no step-up. Compare-and-set on the row read (cleared once, by the guard too)
@@ -270,7 +365,7 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
     const relaxed = await db
       .select({ id: executionPersonStdioRelaxations.id, scopeId: executionPersonStdioRelaxations.scopeId })
       .from(executionPersonStdioRelaxations)
-      .where(and(eq(executionPersonStdioRelaxations.scopeKind, "project"), isNull(executionPersonStdioRelaxations.clearedAt)));
+      .where(and(eq(executionPersonStdioRelaxations.scopeKind, "project"), isNull(executionPersonStdioRelaxations.clearedAt), sql`${executionPersonStdioRelaxations.expiresAt} > now()`));
     const relaxedBy = new Map(relaxed.map((r) => [r.scopeId, r.id]));
     return list.map((p) => {
       const cases = byProject.get(p.id) ?? [];
@@ -284,7 +379,7 @@ export function registerIsolationSubjectRoutes(app: FastifyInstance, db: Db): vo
         adminSensitivity: p.field,
         /** MAX of the two; null = the fact does not resolve and an isolable call in this project is refused */
         effectiveSensitivity: projectIsolationSensitivity(cases, p.field) ?? null,
-        /** owner decision C: the active project-scope relaxation's id, or null */
+        /** owner decision C: the project-scope relaxation in force (not cleared, not expired: ADR-0197 Q3), or null */
         personStdioRelaxationId: relaxedBy.get(p.id) ?? null,
       };
     });

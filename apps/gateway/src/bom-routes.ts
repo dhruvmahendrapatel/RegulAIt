@@ -158,6 +158,10 @@ export async function decisionExecutionRelaxationRecord(db: Db, document: unknow
     clearedBy: row.clearedByUserId,
     clearedAt: row.clearedAt ? row.clearedAt.toISOString() : null,
     setAuditId: audits.length === 1 ? audits[0]!.id : null,
+    // ADR-0197 Q3: the expiry in force today (a renewal moves it), and the latest renewal
+    expiresAt: row.expiresAt.toISOString(),
+    renewedBy: row.renewedByUserId,
+    renewedAt: row.renewedAt ? row.renewedAt.toISOString() : null,
   };
 }
 

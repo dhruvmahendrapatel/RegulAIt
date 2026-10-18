@@ -932,3 +932,24 @@ grant then completes the change. A success spends the grant once, and a replay i
 with one grant make one transition. Not changed here: `POST /v1/agents/:id/owner` (`agents-connectors.ts`) still
 spends on the root handle before its compare-and-set. It is outside this slice's file surface and is listed as a
 follow-up.
+
+## As built — 2026-10-18: recording a data-key custody attestation is a `key_management` step-up (ADR-0197 Q6)
+
+ADR-0197 Q6 (owner, 2026-10-18): "recording a data-key custody attestation requires the `key_management` step-up."
+
+- `POST /v1/security/data-key/attestations` (data-key.ts) now asks for `key_management`, bound to `{op:
+  "data_key_attest", keyId: <the running key's fingerprint>}` (`dataKeyAttestStepUp`), the same `{op, keyId}` shape as
+  every other key operation. The claimed method is not a step-up fact; it is recorded and audited with the claim.
+  (A first draft also bound the method; CodeQL's `js/insufficient-password-hash` read the `password_manager` value as
+  a password reaching the digest's SHA-256, so the method was dropped rather than allow-listed.)
+- The step-up is checked after the body checks: an implied confirmation, no data key, and key material in a field are
+  still refused 400 before any step-up is asked or spent.
+- As for the other `key_management` ops, a grant of another kind (`settings_relax` with the same facts), or for
+  another key or op, is refused and not spent. An API key can never record one. The bootstrap credential can
+  only during first-admin setup.
+- The `data-key-custody-attested` audit row gains `stepUp` and `stepUpKind: "key_management"`.
+- The Data key custody page sends the attestation through `withStepUp`. The step-up dialog's line for the kind reads
+  "changing a signing key or recording a key's custody".
+- No migration: the kind exists since 0203.
+- Tests (`data-key-custody.test.ts`, database): an API key is refused `step_up_required` and nothing is recorded; three
+  wrong grants are refused unspent; the exact grant is spent once and audited with the kind.

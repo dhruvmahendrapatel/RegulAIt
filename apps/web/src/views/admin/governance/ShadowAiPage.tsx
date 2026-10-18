@@ -997,7 +997,7 @@ export default function ShadowAiPage() {
         <Field label="Evidence JSON" grow>
           <Textarea rows={10} value={evidence} onChange={(e) => setEvidence(e.target.value)} spellCheck={false} />
         </Field>
-        {act.error ? <p className={v.errLine}>{act.error}</p> : null}
+        {act.error ? <p className={v.errLine} role="alert">{act.error}</p> : null}
         <div className={v.row}>
           <Button disabled={act.busy} onClick={() => void submitEvidence("dry_run")}>
             Analyze (dry run)

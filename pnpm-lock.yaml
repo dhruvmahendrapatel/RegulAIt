@@ -185,6 +185,9 @@ importers:
       otpauth:
         specifier: 9.5.2
         version: 9.5.2
+      pino:
+        specifier: 10.4.0
+        version: 10.4.0
       pkijs:
         specifier: 3.4.1
         version: 3.4.1

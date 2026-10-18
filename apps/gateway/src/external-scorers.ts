@@ -49,7 +49,7 @@ import {
   egressRefusal,
   type EgressResolver,
 } from "./egress-guard.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -169,7 +169,7 @@ export async function callExternalScorer(
       cur = (cur as { cause?: unknown }).cause;
     }
     throw new Error(
-      `external scorer '${scorer.row.name}' request failed: ${safeErrorMessage(err)}`,
+      `external scorer '${scorer.row.name}' request failed: ${errMessage(err)}`,
     );
   }
   const text = await res.text();
@@ -408,7 +408,7 @@ export function registerExternalScorerRoutes(
       );
       return { ok: true, score: verdict.score, reasons: verdict.reasons };
     } catch (err) {
-      const message = safeErrorMessage(err);
+      const message = errMessage(err);
       await recordTest(scorerId, message);
       await audit(
         actor(req),

@@ -18,6 +18,9 @@ on:
       - scripts/build-engine-image.sh
       - .github/workflows/engine-images.yml
       - .github/workflows/engine-images-build.yml
+      # a lock or signature change (the lock-update bot's PR) builds nothing new
+      - '!engines/images.lock.json'
+      - '!engines/signatures/**'
 
 permissions:
   contents: read
