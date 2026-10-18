@@ -1,9 +1,11 @@
 -- ADR-0193 (I4) first slice, P0 and P1: content provenance and trust tiers. Hand-authored (never drizzle-kit
--- generate). The journal entry is added by the master session once 0204 and 0205 have merged.
+-- generate). Journaled at idx 206, after 0204 and 0205.
 --
 --   content_digest_keys         the per-tenant HMAC key for keyed (pii) content digests: 32 random bytes as a
---                               data-key envelope, made on first use, one live row (decision 3). Stored, not derived,
---                               so a data-key rotation (which re-encrypts it) does not change any digest.
+--                               data-key envelope, made on first use (decision 3). One row per data key, found by
+--                               the envelope's key-fingerprint segment: a deployment runs one data key (boot-gated),
+--                               so one row, and each record names the row it was keyed under. Stored, not derived, so
+--                               a data-key rotation (which re-encrypts it) does not change any digest.
 --   content_trust_tiers         an admin-set tier per source (MCP server, connector). No row = `untrusted`
 --                               (decision 7, ADR-0180); every change is a step-up and audited by the gateway.
 --   content_trust_settings      one row: the write floor, `trusted` by default; `standard` is a relaxation.
@@ -17,9 +19,6 @@ CREATE TABLE IF NOT EXISTS "content_digest_keys" (
   "key_ciphertext" text NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
---> statement-breakpoint
--- one key per tenant: a second concurrent first use loses the race and reads the winner's key
-CREATE UNIQUE INDEX IF NOT EXISTS "content_digest_keys_one_uq" ON "content_digest_keys" ((true));
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "content_trust_tiers" (
   "source_kind" text NOT NULL,

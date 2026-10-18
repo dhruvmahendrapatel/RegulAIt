@@ -75,26 +75,35 @@ export slice and are not installed yet.
 
 ### P0: the label and the digests (decisions 1, 3 and 4)
 
-- **Where.** At two governed return paths: the MCP tool result (`executeGovernedToolCall`, so the proxy route, the
-  orchestration worker loop and the builder all pass through it) and the connector result
-  (`executeGovernedConnectorCall`). Each records its evidence *before* it delivers anything, and a failure to record
+- **Where.** At three governed return paths: the MCP tool result (`executeGovernedToolCall`, so the proxy route, the
+  orchestration worker loop and the builder all pass through it), the connector result
+  (`executeGovernedConnectorCall`), and the result of an allowed MCP protocol method (`executeGovernedProtocolCall`:
+  `resources/read`, `prompts/get`, `completion/complete`, the listings and `logging/setLevel`, recorded as source
+  `mcp_tool` with the method as its tool name; added in the review fix round, finding F2). Each records its evidence *before* it delivers anything, and a failure to record
   throws, so no unrecorded result leaves the gateway. On the connector path the evidence is written in the existing
   output-evidence transaction.
 - **Not yet covered:** model output (`dispatchAttempt`, the compat surfaces) and retrieved shared context
-  (`resolveSuppliedContext`). R14 §4 P0 lists both. They are follow-ups for the next slice. Streaming digests over the
+  (`resolveSuppliedContext`). Upstream notifications relayed during a protocol call (`notifications/message`,
+  `notifications/progress`, off unless the org enables `logging/setLevel`) pass the output scans but are not recorded. R14 §4 P0 lists both. They are follow-ups for the next slice. Streaming digests over the
   full stream at close belong with model output.
 - **Both byte sets (decision 3).** `upstream` is what the upstream returned. `delivered` is what the caller receives
   after redaction, masking or a withheld marker. A string is digested as its UTF-8 bytes. Anything else (an MCP
   `CallToolResult`, a connector JSON body) is digested as the audit chain's canonical JSON, so key order does not
   matter. The label records which form was used (`bytes`) and whether the two differ (`transformed`).
 - **Keyed digest for `pii` (decision 3).** The classification is `pii` when the PII scan found PII or withheld the
-  result for it, `clean` when a scan ran and found none, and `unscanned` when none ran. `unscanned` covers an
-  unattributed call, which has no PII mode, and encoded content the scanner could not read. Only `clean` gets a plain
+  result for it, `clean` when a scan ran and found none, and `unscanned` when none ran. `unscanned` covers a
+  call with no PII mode (an unattributed call falls back to the org default, `org_settings.default_pii_mode`, so it is
+  scanned, and can be `clean`, when that default is set) and encoded content the scanner could not read. Only `clean` gets a plain
   SHA-256. `pii` and `unscanned` get an HMAC-SHA-256 under the per-tenant key, because the strict reading of "pii"
   (ADR-0180) is "not shown to be free of PII".
   - The key lives in `content_digest_keys`. It is 32 random bytes, stored as a data-key envelope and made on first
     use, as ADR-0195's pseudonym key is. It is registered in `CIPHERTEXT_COLUMNS`, so data-key rotation re-encrypts it
     and does not change any digest.
+  - The row is found by the envelope's key-fingerprint segment, so it is the key sealed under the running data key.
+    A deployment runs one data key (the ADR-0063 boot gate refuses another), so it has one row. The first build held
+    one row for the whole database, and a database written under two data keys (the shared test database) could not
+    open it. If a call runs under a new data key before the re-encryption walk reaches the row, it makes a second row,
+    and the oldest row wins from then on. Every record names the row it was keyed under, so both stay verifiable.
   - The record names the key's row id. The key never leaves the control plane.
   - When no data key is configured, a keyed digest cannot be made. The digest is then `unavailable` and no digest is
     stored at all, never an unkeyed digest of content that may be PII. A database CHECK enforces the pairing of
@@ -165,9 +174,9 @@ harness runs axe, perf, responsive and states on the new route with no baseline 
 
 ### Migration 0206 (`0206_content_provenance.sql`)
 
-- Tables: `content_digest_keys` (one row), `content_trust_tiers`, `content_trust_settings` (one row, seeded `trusted`)
+- Tables: `content_digest_keys` (one row per data key), `content_trust_tiers`, `content_trust_settings` (one row, seeded `trusted`)
   and `content_provenance_records` (append-only, with its guard function and TRUNCATE refusal).
-- It is hand-written. Its journal entry is added by the master session after 0204 and 0205.
+- It is hand-written, and journaled at idx 206, after 0204 and 0205.
 
 ### Open questions for the owner
 

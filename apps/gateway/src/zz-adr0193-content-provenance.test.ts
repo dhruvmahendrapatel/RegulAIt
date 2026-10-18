@@ -10,6 +10,10 @@
  *    floor, standard) content is refused before the upstream is contacted, audited under `content-trust-floor`; a read
  *    never is; a fresh context is not; a source raised to `trusted` lets a new context write; demoting a source takes
  *    effect for content already in a context, promoting one does not.
+ *  - THE CONNECTOR PATH (review F1): a connector result is recorded inside the call's evidence transaction (a failure
+ *    to record rolls the usage row back and delivers nothing); a connector write after a connector read in one builder
+ *    thread is refused before the provider, audited. (The builder loop's own thread context is in builder-tools.test.ts.)
+ *  - THE PROTOCOL METHODS (review F2): a `resources/read` result is recorded under the method's name.
  *  - THE ROUTES: changing a tier, either way, and the write floor needs a `settings_relax` step-up and is audited.
  *
  * Shared database (M-068): step-up is relaxed only inside the helper that says so and put back in `finally`; every
@@ -30,18 +34,26 @@ import {
   contentTrustTiers,
   createDb,
   eq,
+  orgSettings,
+  ORG_SETTINGS_ID,
   runMigrations,
   sql,
+  usageEvents,
   type Db,
 } from "@regulait/db";
-import { contentMatchesDigest, runContextId, type ContentProvenanceLabel } from "@regulait/shared";
+import { builderThreadContextId, contentMatchesDigest, runContextId, type ContentProvenanceLabel } from "@regulait/shared";
 import { buildApp } from "./app.js";
+import { runGovernedTool, type ToolEntry, type ToolRunContext } from "./builder-tools.js";
+import { executeGovernedConnectorCall } from "./connector-call.js";
 import { contentDigestKey } from "./content-provenance.js";
+import { executeGovernedProtocolCall } from "./mcp-protocol.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
-import { relaxStepUpForTest } from "./testing/step-up-posture.js";
+import { relaxStepUpAround, relaxStepUpForTest } from "./testing/step-up-posture.js";
 import { relaxStrictAdmissionForTest } from "./testing/strict-admission.js";
+import { relaxDataPostureForTest } from "./testing/strict-data-posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -56,8 +68,15 @@ const CLEAN = `cp_clean_${RUN}`;
 const WRITE = `cp_write_${RUN}`;
 const EMAIL = `jane.${RUN}@example.com`;
 const PROFILE_TAG = `cp-log-${RUN}`;
+const RESOURCE_URI = `file:///cp/${RUN}.md`;
 
 const hits = { write: 0 };
+/** every request the connector's provider received */
+const providerHits: string[] = [];
+let connectorId: string;
+let connectorClose: () => Promise<void>;
+let loopbackAllowHostId: string | undefined;
+let priorMethods: string[] = [];
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let upstreamClose: () => Promise<void>;
@@ -89,6 +108,9 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
           hits.write++;
           return { content: [{ type: "text", text: "written" }] };
         });
+        server.registerResource("cp-note", RESOURCE_URI, { mimeType: "text/markdown" }, async (uri) => ({
+          contents: [{ uri: uri.href, text: "# a note" }],
+        }));
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         await server.connect(transport);
         await transport.handleRequest(req, res, body ? JSON.parse(body) : undefined);
@@ -110,8 +132,46 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
   };
 }
 
-const call = (toolName: string, contextId: string | null, projectId: string | null = null) =>
-  executeGovernedToolCall(db, DATA_KEY, { userId, serverId, toolName, arguments: {}, contextId, projectId });
+/** a plain HTTP provider for the connector: counts every request it is sent */
+async function startProvider(): Promise<{ url: string; close: () => Promise<void> }> {
+  const s = http.createServer((req, res) => {
+    req.on("data", () => undefined);
+    req.on("end", () => {
+      providerHits.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ records: [{ id: 1, status: "ok" }] }));
+    });
+  });
+  await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
+  const a = s.address();
+  if (typeof a !== "object" || !a) throw new Error("no address");
+  return { url: `http://127.0.0.1:${a.port}`, close: () => new Promise((r) => { s.closeAllConnections(); s.close(() => r()); }) };
+}
+
+const call = (toolName: string, contextId: string | null, projectId: string | null = null, dataKey: string | undefined = DATA_KEY) =>
+  executeGovernedToolCall(db, dataKey, { userId, serverId, toolName, arguments: {}, contextId, projectId });
+
+/** the connector as a builder agent's toolbox carries it */
+const connectorEntry = (): ToolEntry => ({
+  name: `connector__cp-${RUN}`,
+  displayName: `cp-${RUN}`,
+  kind: "connector",
+  refId: connectorId,
+  requiresApproval: false,
+  provider: "http",
+  def: { name: `connector__cp-${RUN}`, inputSchema: {} },
+  operations: ["read", "write"],
+});
+const toolCtx = (contextId: string): ToolRunContext => ({
+  userId,
+  isAdmin: false,
+  projectId: null,
+  trace: null,
+  toolCallId: randomUUID(),
+  detail: {},
+  contextId,
+});
+const connectorRecords = () =>
+  db.select().from(contentProvenanceRecords).where(and(eq(contentProvenanceRecords.sourceKind, "connector"), eq(contentProvenanceRecords.sourceId, connectorId)));
 
 const recordsOf = (contextId: string) => db.select().from(contentProvenanceRecords).where(eq(contentProvenanceRecords.contextId, contextId));
 
@@ -139,7 +199,9 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   restores.push(await relaxStrictAdmissionForTest(db));
   restores.push(await relaxIdentityForTest(db, { mfaRequired: "off" }));
-  restores.push(await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false }));
+  restores.push(await relaxGovernanceGatesForTest(db, { mrmEnforced: false, dispatchAttributionRequired: false, requireMcpAttribution: false, requireProjectAttribution: false }));
+  // an unattributed call is then unscanned (no org PII floor), the case the keyed digest exists for
+  restores.push(await relaxDataPostureForTest(db, { org: { defaultPiiMode: "none" }, interception: false, guardrails: false }));
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   const up = await startUpstream();
   upstreamClose = up.close;
@@ -160,15 +222,38 @@ beforeAll(async () => {
   adminAuth = { authorization: `Bearer ${key.json().token}` };
   const profile = await app.inject({ method: "POST", headers: AUTH, url: "/v1/compliance/profiles", payload: { tag: PROFILE_TAG, piiMode: "log" } });
   expect(profile.statusCode, profile.body).toBe(201);
+  // the connector: a plain HTTP provider on loopback (its own egress allow entry, removed in afterAll, M-068)
+  const provider = await startProvider();
+  connectorClose = provider.close;
+  const allow = await relaxStepUpAround(db, () =>
+    app.inject({ method: "POST", headers: AUTH, url: "/v1/egress-allow-hosts", payload: { host: "127.0.0.1", allowPrivateRanges: true, allowPlaintextHttp: true, note: `cp suite ${RUN}: local doubles` } }),
+  );
+  expect(allow.statusCode, allow.body).toBe(201);
+  loopbackAllowHostId = allow.json().id;
+  const c = await app.inject({ method: "POST", headers: AUTH, url: "/v1/connectors", payload: { name: `cp-${RUN}`, kind: "data", providerKind: "http", baseUrl: provider.url } });
+  expect(c.statusCode, c.body).toBe(201);
+  connectorId = c.json().id;
+  const g = await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/connectors", payload: { userId, connectorId, mode: "readwrite" } });
+  expect(g.statusCode, g.body).toBe(201);
+  const [org] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  priorMethods = (org?.mcpProtocolMethods ?? []) as string[];
 }, 120_000);
 
 afterAll(async () => {
-  await db.update(contentTrustSettings).set({ writeFloor: "trusted" }).where(eq(contentTrustSettings.id, 1));
-  await db.delete(contentTrustTiers).where(eq(contentTrustTiers.sourceId, serverId));
-  for (const r of restores.reverse()) await r();
-  app.server.closeAllConnections();
-  await app.close();
-  await upstreamClose();
+  // M-068: the loopback allow entry goes first, while the app is open; its outcome is asserted after the rest
+  const loopback = await removeEgressAllowEntry(app, AUTH, { id: loopbackAllowHostId });
+  try {
+    await db.update(orgSettings).set({ mcpProtocolMethods: priorMethods as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    await db.update(contentTrustSettings).set({ writeFloor: "trusted" }).where(eq(contentTrustSettings.id, 1));
+    await db.delete(contentTrustTiers).where(eq(contentTrustTiers.sourceId, serverId));
+    for (const r of restores.reverse()) await r();
+    app.server.closeAllConnections();
+    await app.close();
+  } finally {
+    await upstreamClose();
+    await connectorClose?.();
+    loopback.assertRemoved();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -252,6 +337,31 @@ describe("ADR-0193 P0: the label and digests of a governed tool result", () => {
     expect((rec!.label as ContentProvenanceLabel).transformed).toBe(false);
   });
 
+  it("PII-bearing content (an attributed project under a log-mode profile): classified pii, a keyed digest", async () => {
+    const p = await app.inject({ method: "POST", headers: AUTH, url: "/v1/projects", payload: { name: `cp-pii-project-${RUN}` } });
+    expect(p.statusCode, p.body).toBe(201);
+    const projectId = p.json().id as string;
+    await db.execute(sql`update projects set classifications = ${JSON.stringify([PROFILE_TAG])}::jsonb where id = ${projectId}`);
+    const ctx = runContextId(randomUUID());
+    const out = await call(READ, ctx, projectId);
+    expect(out.kind).toBe("allowed");
+    if (out.kind !== "allowed") return;
+    const [rec] = await recordsOf(ctx);
+    expect(rec).toMatchObject({ classification: "pii", digestAlg: "hmac-sha256" });
+    const key = await contentDigestKey(db, DATA_KEY);
+    expect(rec!.digestKeyId).toBe(key!.id);
+    expect(contentMatchesDigest(out.content, rec!.deliveredDigest!, "hmac-sha256", key!.bytes)).toBe(true);
+    expect(JSON.stringify(rec)).not.toContain(EMAIL);
+  });
+
+  it("with no data key there is no keyed digest: the record says `unavailable` and stores no digest", async () => {
+    const ctx = runContextId(randomUUID());
+    const out = await call(READ, ctx, null, undefined);
+    expect(out.kind).toBe("allowed");
+    const [rec] = await recordsOf(ctx);
+    expect(rec).toMatchObject({ classification: "unscanned", digestAlg: "unavailable", digestKeyId: null, upstreamDigest: null, deliveredDigest: null });
+  });
+
   it("the evidence view lists the record with its covering anchor (null until one covers it)", async () => {
     const ctx = runContextId(randomUUID());
     await call(READ, ctx);
@@ -293,8 +403,10 @@ describe("ADR-0193 P1: the trust-tier policy in the decision path", () => {
     await call(READ, ctx);
     expect((await call(READ, ctx)).kind).toBe("allowed");
     for (const c of [runContextId(randomUUID()), null]) {
+      const before = hits.write;
       const out = await call(WRITE, c);
-      if (out.kind === "denied") expect(out.decision.ruleId).not.toBe("content-trust-floor");
+      expect(out.kind, JSON.stringify(out)).toBe("allowed");
+      expect(hits.write).toBe(before + 1);
     }
   });
 
@@ -307,8 +419,10 @@ describe("ADR-0193 P1: the trust-tier policy in the decision path", () => {
       await call(READ, fresh);
       const [rec] = await recordsOf(fresh);
       expect(rec!.trustTier).toBe("trusted");
+      const before = hits.write;
       const ok = await call(WRITE, fresh);
-      if (ok.kind === "denied") expect(ok.decision.ruleId).not.toBe("content-trust-floor");
+      expect(ok.kind, JSON.stringify(ok)).toBe("allowed");
+      expect(hits.write).toBe(before + 1);
       const stale = await call(WRITE, old);
       expect(stale.kind === "denied" && stale.decision.ruleId).toBe("content-trust-floor");
       // demoting takes effect for content already in a context
@@ -328,12 +442,88 @@ describe("ADR-0193 P1: the trust-tier policy in the decision path", () => {
       const refused = await call(WRITE, ctx);
       expect(refused.kind === "denied" && refused.decision.ruleId).toBe("content-trust-floor");
       await setFloor("standard");
+      const before = hits.write;
       const ok = await call(WRITE, ctx);
-      if (ok.kind === "denied") expect(ok.decision.ruleId).not.toBe("content-trust-floor");
+      expect(ok.kind, JSON.stringify(ok)).toBe("allowed");
+      expect(hits.write).toBe(before + 1);
     } finally {
       await setFloor("trusted");
       await setTier("untrusted");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("ADR-0193 the connector path (review F1)", () => {
+  it("P0: a connector result writes one provenance record and its audit row, naming the decision", async () => {
+    const ctx = builderThreadContextId(randomUUID());
+    const out = await executeGovernedConnectorCall(db, DATA_KEY, { userId, isAdmin: false, connectorId, operation: "read", object: "records", contextId: ctx });
+    expect(out.status, JSON.stringify(out.body)).toBe(200);
+    const recs = await recordsOf(ctx);
+    expect(recs).toHaveLength(1);
+    const rec = recs[0]!;
+    expect(rec).toMatchObject({ sourceKind: "connector", sourceId: connectorId, sourceDetail: "read:records", trustTier: "untrusted", classification: "unscanned", digestAlg: "hmac-sha256" });
+    const key = await contentDigestKey(db, DATA_KEY);
+    const delivered = (out.body as { result: { body: unknown } }).result.body;
+    expect(contentMatchesDigest(delivered, rec.deliveredDigest!, "hmac-sha256", key!.bytes)).toBe(true);
+    const rows = await db.select().from(auditLog).where(and(eq(auditLog.objectType, "content_provenance"), eq(auditLog.objectId, rec.id)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: rec.auditId, ruleId: "content-provenance", effect: "allow" });
+    expect((rows[0]!.detail as { contentProvenance: ContentProvenanceLabel }).contentProvenance).toEqual(rec.label);
+    const [decision] = await db.select().from(auditLog).where(eq(auditLog.id, rec.decisionAuditId));
+    expect(decision).toMatchObject({ objectType: "connector", objectId: connectorId, effect: "allow" });
+    expect(JSON.stringify(rec)).not.toContain('"status":"ok"');
+  });
+
+  it("P0: the record is written in the evidence transaction: when it cannot be written, the usage row rolls back and nothing is delivered", async () => {
+    const usageOf = async () => (await db.select({ id: usageEvents.id }).from(usageEvents).where(eq(usageEvents.connectorId, connectorId))).length;
+    const before = { usage: await usageOf(), records: (await connectorRecords()).length, hits: providerHits.length };
+    // an unusable data key cannot key the (unscanned) result's digest, so recording throws after the provider ran
+    const out = executeGovernedConnectorCall(db, "z".repeat(64), { userId, isAdmin: false, connectorId, operation: "read", object: "records" });
+    await expect(out).rejects.toThrow();
+    expect(providerHits.length).toBe(before.hits + 1);
+    expect(await usageOf()).toBe(before.usage);
+    expect((await connectorRecords()).length).toBe(before.records);
+  });
+
+  it("P1: a connector write after a connector read in one builder thread is refused before the provider, and audited", async () => {
+    const ctx = builderThreadContextId(randomUUID());
+    const read = await runGovernedTool(db, DATA_KEY, connectorEntry(), { operation: "read", object: "records" }, toolCtx(ctx));
+    expect(read.status, read.detail ?? "").toBe("done");
+    const before = providerHits.length;
+    const write = await runGovernedTool(db, DATA_KEY, connectorEntry(), { operation: "write", object: "records", payload: { x: 1 } }, toolCtx(ctx));
+    expect(write).toMatchObject({ status: "denied", code: "content_trust_refused" });
+    expect(providerHits.length).toBe(before);
+    const rows = await db.select().from(auditLog).where(and(eq(auditLog.ruleId, "content-trust-floor"), eq(auditLog.objectType, "connector"), eq(auditLog.objectId, connectorId)));
+    const mine = rows.filter((r) => (r.detail as { contextId?: string }).contextId === ctx);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.detail).toMatchObject({ code: "content_trust_refused", lowestTier: "untrusted", writeFloor: "trusted", operation: "write", receiptClass: "decision" });
+    // the control: the same write in a fresh thread reaches the provider
+    const fresh = await runGovernedTool(db, DATA_KEY, connectorEntry(), { operation: "write", object: "records", payload: { x: 1 } }, toolCtx(builderThreadContextId(randomUUID())));
+    expect(fresh.status, fresh.detail ?? "").toBe("done");
+    expect(providerHits.length).toBe(before + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("ADR-0193 P0: the MCP protocol methods (review F2)", () => {
+  it("a resources/read result is recorded under the method's name, keyed, before it is delivered", async () => {
+    await db.update(orgSettings).set({ mcpProtocolMethods: ["resources/read"] as never }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const g = await app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/tools", payload: { userId, serverId, toolName: "mcp:resources" } });
+    expect(g.statusCode, g.body).toBeLessThan(300);
+    const out = await executeGovernedProtocolCall(db, { userId, serverId, method: "resources/read", params: { uri: RESOURCE_URI }, dataKey: DATA_KEY });
+    expect(out.kind, JSON.stringify(out)).toBe("allowed");
+    if (out.kind !== "allowed") return;
+    const recs = await db
+      .select()
+      .from(contentProvenanceRecords)
+      .where(and(eq(contentProvenanceRecords.sourceId, serverId), eq(contentProvenanceRecords.sourceDetail, "resources/read")));
+    expect(recs).toHaveLength(1);
+    expect(recs[0]).toMatchObject({ sourceKind: "mcp_server", contextId: null, classification: "unscanned", digestAlg: "hmac-sha256" });
+    const key = await contentDigestKey(db, DATA_KEY);
+    expect(contentMatchesDigest(out.result, recs[0]!.deliveredDigest!, "hmac-sha256", key!.bytes)).toBe(true);
+    const [decision] = await db.select().from(auditLog).where(eq(auditLog.id, recs[0]!.decisionAuditId));
+    expect(decision).toMatchObject({ toolName: "mcp:resources", serverId, effect: "allow" });
   });
 });
 

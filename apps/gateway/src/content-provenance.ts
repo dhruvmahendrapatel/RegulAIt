@@ -17,6 +17,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   and,
+  asc,
   auditLog,
   contentDigestKeys,
   contentProvenanceRecords,
@@ -43,18 +44,30 @@ import {
   type ContentTrustVerdict,
   type ContentTrustWriteFloor,
 } from "@regulait/shared";
-import { decryptSecret, encryptSecret } from "./secrets.js";
+import { dataKeyFingerprint, decryptSecret, encryptSecret, FINGERPRINT_PREFIX } from "./secrets.js";
 
-/** the per-tenant content digest key, made on first use; null when no data key is configured */
+/**
+ * The per-tenant content digest key, made on first use; null when no data key is configured. Found by the envelope's
+ * key-fingerprint segment, so it is the key sealed under THIS data key: a deployment runs one data key (the boot gate
+ * refuses another), so there is one row. After a re-encryption walk the row carries the new key's marker; a call made
+ * under the new key before the walk reached the row makes a second one, and the oldest wins from then on. Every record
+ * names the row it was keyed under, so both stay verifiable.
+ */
 export async function contentDigestKey(db: Db, dataKey: string | undefined): Promise<{ id: string; bytes: Buffer } | null> {
   if (!dataKey) return null;
-  const read = async () => (await db.select().from(contentDigestKeys).limit(1))[0];
+  const marker = dataKeyFingerprint(dataKey).slice(FINGERPRINT_PREFIX.length);
+  const read = async () =>
+    (
+      await db
+        .select()
+        .from(contentDigestKeys)
+        .where(sql`split_part(${contentDigestKeys.keyCiphertext}, '.', 4) = ${marker}`)
+        .orderBy(asc(contentDigestKeys.createdAt), asc(contentDigestKeys.id))
+        .limit(1)
+    )[0];
   let row = await read();
   if (!row) {
-    await db
-      .insert(contentDigestKeys)
-      .values({ keyCiphertext: encryptSecret(dataKey, randomBytes(32).toString("hex")) })
-      .onConflictDoNothing();
+    await db.insert(contentDigestKeys).values({ keyCiphertext: encryptSecret(dataKey, randomBytes(32).toString("hex")) });
     row = await read();
   }
   if (!row) throw new Error("the content digest key could not be created");

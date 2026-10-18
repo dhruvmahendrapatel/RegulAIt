@@ -13986,16 +13986,15 @@ export type ExecutionOfferRow = typeof executionOffers.$inferSelect;
 // ADR-0193 (I4) P0 and P1, migration 0206: content provenance and trust tiers
 // ---------------------------------------------------------------------------------------------------------------
 
-/** ADR-0193 decision 3: the per-tenant content digest HMAC key (32 random bytes, a data-key envelope), one row */
-export const contentDigestKeys = pgTable(
-  "content_digest_keys",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    keyCiphertext: text("key_ciphertext").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  () => [uniqueIndex("content_digest_keys_one_uq").on(sql`(true)`)],
-);
+/**
+ * ADR-0193 decision 3: the per-tenant content digest HMAC key (32 random bytes, a data-key envelope). One row per data
+ * key, found by the envelope's key-fingerprint segment: a deployment runs one data key (boot-gated), so one row.
+ */
+export const contentDigestKeys = pgTable("content_digest_keys", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  keyCiphertext: text("key_ciphertext").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 export type ContentDigestKeyRow = typeof contentDigestKeys.$inferSelect;
 
 /** ADR-0193 decision 7: an admin-set source tier; a source with no row is `untrusted` (ADR-0180) */
