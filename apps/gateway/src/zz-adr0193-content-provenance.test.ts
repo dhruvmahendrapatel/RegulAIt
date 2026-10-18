@@ -147,8 +147,8 @@ async function startProvider(): Promise<{ url: string; close: () => Promise<void
   return { url: `http://127.0.0.1:${a.port}`, close: () => new Promise((r) => { s.closeAllConnections(); s.close(() => r()); }) };
 }
 
-const call = (toolName: string, contextId: string | null, projectId: string | null = null, dataKey: string | undefined = DATA_KEY) =>
-  executeGovernedToolCall(db, dataKey, { userId, serverId, toolName, arguments: {}, contextId, projectId });
+const call = (toolName: string, contextId: string | null, projectId: string | null = null) =>
+  executeGovernedToolCall(db, DATA_KEY, { userId, serverId, toolName, arguments: {}, contextId, projectId });
 
 /** the connector as a builder agent's toolbox carries it */
 const connectorEntry = (): ToolEntry => ({
@@ -356,7 +356,7 @@ describe("ADR-0193 P0: the label and digests of a governed tool result", () => {
 
   it("with no data key there is no keyed digest: the record says `unavailable` and stores no digest", async () => {
     const ctx = runContextId(randomUUID());
-    const out = await call(READ, ctx, null, undefined);
+    const out = await executeGovernedToolCall(db, undefined, { userId, serverId, toolName: READ, arguments: {}, contextId: ctx, projectId: null });
     expect(out.kind).toBe("allowed");
     const [rec] = await recordsOf(ctx);
     expect(rec).toMatchObject({ classification: "unscanned", digestAlg: "unavailable", digestKeyId: null, upstreamDigest: null, deliveredDigest: null });
