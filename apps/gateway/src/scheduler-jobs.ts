@@ -114,6 +114,8 @@ export const SCHEDULER_JOB_NAMES = {
   modelArtifactRetentionSweep: "model-artifact-retention-sweep",
   // ADR-0195 SD0: defined and run by discovery-worker.ts (block at the end)
   discoveryScanSweep: "discovery-scan-sweep",
+  // ADR-0195 SD4b: merges accepted endpoint agent reports into the findings (endpoint-agent-routes.ts)
+  endpointAgentIngest: "endpoint-agent-ingest",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
