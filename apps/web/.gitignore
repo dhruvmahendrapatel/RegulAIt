@@ -9,3 +9,4 @@ e2e/.e2e-totp.json
 e2e/.e2e-totp.json.*.tmp
 e2e/.e2e-passwords.json
 e2e/.e2e-passwords.json.*.tmp
+e2e/artifacts/demo-screens/
