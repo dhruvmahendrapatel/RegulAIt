@@ -21,8 +21,8 @@
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
+  gap: var(--s0-5);
+  padding: var(--s0) var(--s1-5);
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--surface-1);
@@ -47,7 +47,7 @@
 .nameCell {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--s-half);
 }
 .nameText { font-weight: 600; color: var(--text); }
 .sub { color: var(--text-faint); font-size: var(--text-xs); }

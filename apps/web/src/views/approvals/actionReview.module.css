@@ -14,7 +14,7 @@
 .controls { min-width: 0; }
 .controls > * { flex-wrap: wrap; }
 @media (max-width: 540px) {
-  .facts { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .facts { grid-template-columns: minmax(0, 1fr); gap: var(--s-half); }
   .facts dd { margin-bottom: var(--s1); }
 }
 .dialog { display: flex; flex-direction: column; text-align: start; }

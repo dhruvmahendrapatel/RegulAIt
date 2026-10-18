@@ -5,7 +5,7 @@
 .bandPrimary {
   display: inline-flex;
   align-items: center;
-  padding: 7px 14px;
+  padding: var(--s1) var(--s1-5);
   border: 1px solid var(--rg-signal-400);
   border-radius: var(--rg-r-sm);
   background: var(--rg-signal-400);
@@ -25,7 +25,7 @@
 
 .returned {
   margin: 0;
-  padding: 12px var(--s2);
+  padding: var(--s1-5) var(--s2);
   border-left: 3px solid var(--rg-medium);
   border-radius: var(--rg-r-sm);
   background: var(--surface-1);
@@ -43,7 +43,7 @@
 }
 .accepted li {
   display: grid;
-  gap: 2px;
+  gap: var(--s-half);
 }
 .acceptedTitle {
   font-weight: 600;

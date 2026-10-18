@@ -122,7 +122,7 @@ export function IncidentsTab(props: { useCaseId: string }) {
               key: "sev",
               header: "Severity",
               render: (r) => (
-                <span style={{ display: "inline-flex", gap: 4 }}>
+                <span style={{ display: "inline-flex", gap: "var(--s0)" }}>
                   <SeverityBadge severity={r.severity} />
                   {r.serious && <Badge tone="danger">serious</Badge>}
                 </span>

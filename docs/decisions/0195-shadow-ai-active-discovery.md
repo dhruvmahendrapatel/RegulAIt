@@ -668,10 +668,9 @@ Nothing above has been run (no Postgres in the build environment). It follows th
 
 ## As built: SD2b federation signer (2026-10-17, migration 0205)
 
-**Status: built on branch `sd2b-federation-signer`.** Migration `0205_federation_signing_keys.sql` is hand-written;
-its journal entry is NOT in this branch (0204 merges first; the master adds
-`{"idx": 205, "version": "7", "when": 1785140000000, "tag": "0205_federation_signing_keys", "breakpoints": true}`).
-Until then the database tests that need the table fail in CI.
+**Status: merged (#420).** Migration `0205_federation_signing_keys.sql` is hand-written; its journal entry
+(`{"idx": 205, "version": "7", "when": 1785140000000, "tag": "0205_federation_signing_keys", "breakpoints": true}`)
+landed with the PR after 0204, and the database tests that need the table run in CI.
 
 Why a separate table. The RS256 key is generated in the product and its private half kept under the data key. The
 Ed25519 issuer store (`identity_signing_keys`) CHECKs `algorithm = 'Ed25519'` and an `OKP` JWK, has one global
@@ -700,7 +699,11 @@ Loosening it would weaken the delegated-token verifier's invariants, so `federat
      `{op: "federation_key_rotate", keyId}`; the previous key is retired, its private half destroyed, and it stays
      published for 600 s (token life plus skew).
    - `POST …/keys/:kid/revoke`: `key_management` step-up `{op: "federation_key_revoke", keyId}`; the key leaves the
-     JWKS at once (revoking the active key turns federation off).
+     JWKS at the origin at once (revoking the active key turns federation off). The JWKS is served with
+     `cache-control: public, max-age=60`, and each cloud keeps its own copy of the JWKS, refreshed on its own schedule,
+     so a stolen private key can still mint tokens a cloud accepts until that cloud refreshes. For a real compromise,
+     also remove or narrow the trust policy (or federated credential) on the customer's side. (#420 review finding 5;
+     the revoke confirmation in the web card should say the same, a follow-up for the discovery UI lane.)
    - `POST /v1/discovery/federation/disable`: free (a tightening); the active key is retired.
    The step-up is decided on an unlocked read and re-checked under the table lock; if the active key moved, nothing
    is written (409 `changed_concurrently`, ADR-0186 A). A refused act spends no grant.
@@ -1284,7 +1287,7 @@ Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section
    `retired`), and `ruleConfigured` counts only rules whose template is active.
 4. **The unlinked start is server state.** "Live" below means any status except the three terminals that leave the
    finding unremediated, `denied`, `aborted` and `rolled_back` (one constant, `UNSUCCESSFUL_TERMINAL_STATUSES`, used
-   by the plan, the link route and the screen). `completed` is the successful end: it counts as live and stays
+   by the plan and the link route, and mirrored on the screen in `shadowRemediationModel.ts`). `completed` is the successful end: it counts as live and stays
    linkable. The plan returns `pendingLink`: the newest live `shadow-ai-remediation`
    instance THE VIEWER started whose description carries the finding reference and that no finding
    links yet. Another user's instance is never offered (they control its description), nor one that is not live. The screen seeds its

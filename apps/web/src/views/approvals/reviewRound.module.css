@@ -3,7 +3,7 @@
 
 .otherReviews {
   display: grid;
-  gap: 4px;
+  gap: var(--s0);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -12,7 +12,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: var(--s0-5);
 }
 
 .acceptance {
@@ -26,13 +26,13 @@
 .acceptToggle {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--s1);
   font-weight: 600;
   color: var(--rg-ink);
 }
 .riskChoices {
   display: grid;
-  gap: 6px;
+  gap: var(--s0-5);
   margin: 0;
   padding: 0;
   border: 0;
@@ -40,7 +40,7 @@
 }
 .riskChoices legend {
   padding: 0;
-  margin-bottom: 4px;
+  margin-bottom: var(--s0);
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--rg-ink-label);
@@ -48,9 +48,9 @@
 .riskChoice {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--s1);
   color: var(--rg-ink);
 }
 .riskChoice input {
-  margin-top: 3px;
+  margin-top: var(--s-half);
 }
