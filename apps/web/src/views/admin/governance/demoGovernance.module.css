@@ -59,7 +59,7 @@
 .heatmap {
   display: grid;
   grid-template-columns: auto repeat(3, minmax(70px, 1fr));
-  gap: 4px;
+  gap: var(--s0);
   align-items: stretch;
 }
 
@@ -121,7 +121,7 @@
 .monitorLink {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s0-5);
 }
 
 .dimensionList {
@@ -326,7 +326,7 @@
 .fact {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--s0);
   min-width: 0;
   padding: 0 var(--s3);
   border-left: 1px solid var(--border);
@@ -346,7 +346,7 @@
 .fact dd {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s0-5);
   margin: 0;
   font-size: var(--text-md);
 }
@@ -436,12 +436,12 @@
 
 .alertRow {
   display: grid;
-  gap: 4px;
+  gap: var(--s0);
   width: 100%;
   border: 0;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
-  padding: 10px 16px;
+  padding: var(--s1-5) var(--s2);
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -683,7 +683,7 @@
 }
 
 .statLine strong {
-  margin-right: 4px;
+  margin-right: var(--s0);
   color: var(--text);
   font-size: var(--text-md);
   font-weight: 600;

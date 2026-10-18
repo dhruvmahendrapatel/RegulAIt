@@ -273,7 +273,7 @@ export default function DiscoverySourcesPage() {
                 </div>
               </div>
             )}
-            {act.error && <div className={v.errLine}>{act.error}</div>}
+            {act.error && <div className={v.errLine} role="alert">{act.error}</div>}
           </Card>
 
           <Card title="Sources">

@@ -704,7 +704,7 @@ function AgentCard({ id, fallback }: { id: string; fallback: OverviewResponse["s
         {/* model-card approval is stated once, in the Model cards section below */}
         {fallback.halted ? <Badge tone="danger">Halted</Badge> : <span className={v.faint}>{humanize(fallback.lifecycleStatus)}</span>}
       </div>
-      {card.isError ? <p className={v.errLine}>Agent card could not be loaded: {(card.error as Error).message}</p> : card.data ? (
+      {card.isError ? <p className={v.errLine} role="alert">Agent card could not be loaded: {(card.error as Error).message}</p> : card.data ? (
         <div className={v.stack}>
           <p className={v.dim}>
             {providerLabel(card.data.agent.provider)} · {card.data.agent.model ?? "default model"}
