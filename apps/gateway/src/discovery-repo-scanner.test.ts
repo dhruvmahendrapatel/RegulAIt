@@ -267,7 +267,12 @@ const CLIENT = "00000000-0000-4000-8000-0000000000b2";
 const ADO = "https://dev.azure.com/acme";
 
 /** the GitHub fake plus the installation-token exchange (POST) and the installation's repository list */
-function githubAppFake(grant: Record<string, string> = { contents: "read", metadata: "read" }, status = 201) {
+function githubAppFake(
+  grant: Record<string, string> = { contents: "read", metadata: "read" },
+  status = 201,
+  /** the n-th exchange's answer (0-based), in place of the default */
+  answer?: (n: number, minted: string) => Response | undefined,
+) {
   const fake = githubFake((u) =>
     u.pathname === "/installation/repositories" ? json({ total_count: 1, repositories: [{ full_name: "acme/app", default_branch: "main" }] }) : undefined,
   );
@@ -279,6 +284,8 @@ function githubAppFake(grant: Record<string, string> = { contents: "read", metad
     const auth = new Headers(init?.headers).get("authorization") ?? "";
     if (init?.method === "POST" && u.pathname === `/app/installations/${INSTALLATION}/access_tokens`) {
       exchanges.push({ url: u.href, auth, body: JSON.parse(String(init.body)) });
+      const own = answer?.(exchanges.length - 1, minted);
+      if (own) return own;
       return status === 201
         ? json({ token: minted, expires_at: "2099-01-01T00:00:00Z", permissions: grant, repository_selection: "selected" }, 201)
         : json({ message: "Bad credentials" }, status);
@@ -296,7 +303,7 @@ describe("ADR-0195 A5 federated git credentials", () => {
     const key = appKey();
     const fake = githubAppFake();
     const t = ctx(fake.fetchImpl, { credential: ghFederated, source: { id: randomUUID(), name: "src", kind: "repo_github", target: { baseUrl: API }, scope: { orgLevel: true, include: [] } } });
-    const res = await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key }) } }).run(t.c);
+    const res = await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) } }).run(t.c);
     expect(fake.exchanges).toHaveLength(1);
     const ex = fake.exchanges[0]!;
     expect(ex.url).toBe(`${API}/app/installations/${INSTALLATION}/access_tokens`);
@@ -319,7 +326,7 @@ describe("ADR-0195 A5 federated git credentials", () => {
 
   it("GitHub: refuses a credential naming another App (wrong audience), a write grant, and a rejected JWT", async () => {
     const key = appKey();
-    const app = { githubApp: () => ({ appId: APP_ID, privateKey: key }) };
+    const app = { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) };
     const other = githubAppFake();
     await expect(
       repoScanner("repo_github", { federation: app }).run(ctx(other.fetchImpl, { credential: { ...ghFederated, publicConfig: { appId: "999", installationId: INSTALLATION } } }).c),
@@ -343,8 +350,80 @@ describe("ADR-0195 A5 federated git credentials", () => {
     const fake = githubAppFake();
     const clock = Date.parse("2099-01-01T00:00:00Z") - 4 * 60_000; // inside the refresh margin of the token's expiry
     const t = ctx(fake.fetchImpl, { credential: ghFederated });
-    await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key }), now: () => clock } }).run(t.c);
+    await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }), now: () => clock } }).run(t.c);
     expect(fake.exchanges.length).toBe(2);
+  });
+
+  it("GitHub: a refreshed token that grants write is refused, and nothing is read with it", async () => {
+    const key = appKey();
+    let readsAtRefresh = -1;
+    const fake = githubAppFake(undefined, 201, (n, minted) => {
+      if (n !== 1) return undefined;
+      readsAtRefresh = fake.calls.length;
+      return json({ token: `${minted}x`, expires_at: "2099-01-01T00:00:00Z", permissions: { contents: "write", metadata: "read" } }, 201);
+    });
+    const clock = Date.parse("2099-01-01T00:00:00Z") - 4 * 60_000;
+    const t = ctx(fake.fetchImpl, { credential: ghFederated });
+    const err = await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }), now: () => clock } })
+      .run(t.c)
+      .catch((e: Error) => e);
+    expect(String(err)).toMatch(/credential_unusable: the refreshed federated token grants write scope/);
+    expect(fake.exchanges).toHaveLength(2);
+    expect(readsAtRefresh).toBeGreaterThanOrEqual(0);
+    expect(fake.calls.length).toBe(readsAtRefresh);
+  });
+
+  it("GitHub: the App JWT goes only to the deployment's GitHub API; a source on another host is refused before signing", async () => {
+    const key = appKey();
+    const app = { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) };
+    for (const target of [{ baseUrl: "https://collector.example.test" }, {}] as Array<Record<string, string>>) {
+      const fake = githubAppFake();
+      const t = ctx(fake.fetchImpl, { credential: ghFederated }, target);
+      await expect(repoScanner("repo_github", { federation: app }).run(t.c), JSON.stringify(target)).rejects.toThrow(
+        /^credential_unusable: a federated GitHub source reads through this deployment's GitHub API \(https:\/\/git\.example\.test\)/,
+      );
+      expect(fake.exchanges).toEqual([]);
+      expect(fake.calls).toEqual([]);
+      // nothing was signed: no JWT was registered
+      expect(t.registered).toEqual([]);
+    }
+  });
+
+  it("GitHub: a repo-level scope narrows the installation token to its repositories", async () => {
+    const key = appKey();
+    const fake = githubAppFake();
+    const t = ctx(fake.fetchImpl, {
+      credential: ghFederated,
+      source: { id: randomUUID(), name: "src", kind: "repo_github", target: { baseUrl: API }, scope: { orgLevel: false, include: ["acme/app", " acme/app ", "acme/lib"] } },
+    });
+    await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) } }).run(t.c).catch(() => null);
+    expect(fake.exchanges[0]!.body).toEqual({ repositories: ["app", "lib"], permissions: { contents: "read", metadata: "read" } });
+  });
+
+  it("GitHub: a token GitHub reports no permissions for is refused (write scope cannot be verified)", async () => {
+    const key = appKey();
+    const app = { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) };
+    for (const permissions of [undefined, {}, ["contents"]]) {
+      const fake = githubAppFake(undefined, 201, (_n, minted) => json({ token: minted, expires_at: "2099-01-01T00:00:00Z", ...(permissions ? { permissions } : {}) }, 201));
+      const t = ctx(fake.fetchImpl, { credential: ghFederated });
+      await expect(repoScanner("repo_github", { federation: app }).run(t.c), JSON.stringify(permissions)).rejects.toThrow(
+        /^credential_unusable: GitHub reported no permissions for the installation token/,
+      );
+      expect(fake.calls).toEqual([]);
+    }
+  });
+
+  it("GitHub: a failed exchange that still carries a token registers it for scrubbing and never echoes it", async () => {
+    const key = appKey();
+    const fake = githubAppFake(undefined, 201, (_n, minted) => json({ token: minted, message: `internal error for ${minted}` }, 500));
+    const t = ctx(fake.fetchImpl, { credential: ghFederated });
+    const err = await repoScanner("repo_github", { federation: { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) } })
+      .run(t.c)
+      .catch((e: Error) => e);
+    expect(String(err)).toMatch(/credential_unusable: the installation token exchange failed: GitHub answered 500/);
+    expect(String(err)).not.toContain(fake.minted);
+    expect(t.registered).toContain(fake.minted);
+    expect(fake.calls).toEqual([]);
   });
 
   /** a reader stub that records how the scanner built it */

@@ -122,5 +122,8 @@ export const AZURE_DEVOPS_ENTRA_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.d
 /** the deployment variables naming RegulAIt's GitHub App: its numeric App id and the path of its private key PEM */
 export const GITHUB_APP_ID_ENV = "REGULAIT_GITHUB_APP_ID";
 export const GITHUB_APP_PRIVATE_KEY_FILE_ENV = "REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE";
+/** the deployment's GitHub API, where the App JWT is sent (a source's own `baseUrl` never decides that) */
+export const GITHUB_APP_API_URL_ENV = "REGULAIT_GITHUB_APP_API_URL";
+export const GITHUB_APP_API_URL_DEFAULT = "https://api.github.com";
 /** the only permissions an installation token is requested with; any other granted permission is refused */
 export const GITHUB_APP_READ_PERMISSIONS = Object.freeze({ contents: "read", metadata: "read" } as const);

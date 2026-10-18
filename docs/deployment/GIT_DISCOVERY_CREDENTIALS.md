@@ -53,8 +53,9 @@ configured, and federation is turned on (Discovery sources → Cloud federation:
 GitHub accepts no external OIDC token, so RegulAIt authenticates as a GitHub App. The App's private key is a
 deploy-time file the operator provides, like the identity issuer key: it is never stored in the database and never
 returned by a route. Each run signs a short JWT with it and exchanges it for an installation token scoped to the
-repositories the App is installed on, requested read-only. If GitHub grants anything beyond read, the credential is
-refused as write scope.
+repositories the App is installed on (narrowed to the source's repositories when its scope names them), requested
+read-only. If GitHub grants anything beyond read, or reports no permissions at all, the credential is refused. The JWT
+is sent only to the deployment's GitHub API, never to a host a source names.
 
 Operator (once per deployment):
 
@@ -63,7 +64,8 @@ Operator (once per deployment):
 2. Generate a private key for it and put the PEM file where the gateway can read it (mode 0600).
 3. Set `REGULAIT_GITHUB_APP_ID` (the numeric App id) and `REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE` (the path) for the
    gateway. Setting one without the other, or a file that is not an RSA key of 2048 bits or more, refuses every
-   federated GitHub run.
+   federated GitHub run. For GitHub Enterprise Server, also set `REGULAIT_GITHUB_APP_API_URL` to its API base
+   (`https://<host>/api/v3`); it defaults to `https://api.github.com` and must be an https URL.
 
 Customer admin (per organisation):
 
@@ -71,6 +73,8 @@ Customer admin (per organisation):
    installation's settings URL).
 5. In RegulAIt, on the source: credential federated, public config `appId` (must be the deployment's App id) and
    `installationId`. For GitHub Enterprise Server, set the target `baseUrl` to the API base (`https://<host>/api/v3`).
+   A federated source whose `baseUrl` (or, without one, `https://api.github.com`) is on another host than
+   `REGULAIT_GITHUB_APP_API_URL` is refused before anything is signed; use a static token for such a source.
 6. Allow-list `api.github.com` (or your server's host).
 
 Fallback: a fine-grained personal access token with read-only Contents and Metadata, in static mode (a relaxation).

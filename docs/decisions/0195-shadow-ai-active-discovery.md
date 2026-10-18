@@ -1481,3 +1481,22 @@ JWT is `jose` 6.2.12, key parsing is Node `crypto`. No provider SDK is added, as
   does not configure an App keeps the static fine-grained token fallback.
 - **Web**: no change. The Discovery sources page already offers "federated (default)" and free-form public config;
   choosing federated for GitLab or Bitbucket now gets the refusal text.
+
+### Review fixes (2026-10-18)
+
+- **The App JWT goes only to the deployment's GitHub API** (review M1). The JWT was sent to the source's
+  `target.baseUrl`, so a source admin could name an allow-listed host of theirs and capture a deployment-level
+  credential. `REGULAIT_GITHUB_APP_API_URL` (default `https://api.github.com`, https only, no credentials, query or
+  fragment) is now part of the configured App (`GitHubAppKey.apiUrl`) and is the only base the exchange uses. A
+  federated GitHub source whose `baseUrl` (or, without one, `https://api.github.com`) is on another origin is refused
+  `credential_unusable` before anything is signed.
+- **No reported permissions refuses** (review L4, ADR-0180): an installation token GitHub reports no `permissions`
+  object for is refused `credential_unusable`, instead of being used with write scope "unverified". A federated GitHub
+  token is therefore always `read_only` or refused.
+- **Narrowed to the scope's repositories** (review L3): a repo-level scope sends `repositories` (the names, without
+  the owner, deduplicated, at most 500) in the token request; an org-level scope sends none.
+- **Tests** (reviews L1, L2, L5): a refresh whose second exchange grants `contents: write` fails `credential_unusable`
+  with no read after it; `federationAudiences` for `repo_azure_devops`, `repo_gitlab` and `repo_bitbucket`; a failed
+  (500) exchange that still carries a token registers it for scrubbing and does not echo it; the foreign-host refusal
+  with no exchange, no request and nothing signed; the scope narrowing; the missing-permissions refusal; and
+  `REGULAIT_GITHUB_APP_API_URL` parsing. Each guard was broken once to see its test fail, then restored.

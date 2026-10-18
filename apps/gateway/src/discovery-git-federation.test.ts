@@ -30,6 +30,18 @@ describe("ADR-0195 A5 GitHub App key configuration", () => {
     expect(configuredGitHubApp({ REGULAIT_GITHUB_APP_ID: "43", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: pkcs8 })?.privateKey.asymmetricKeyType).toBe("rsa");
   });
 
+  it("sends the App JWT to the configured GitHub API only, https://api.github.com by default", () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = write("api.pem", privateKey.export({ type: "pkcs1", format: "pem" }).toString());
+    expect(configuredGitHubApp({ REGULAIT_GITHUB_APP_ID: "42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: pem })?.apiUrl).toBe("https://api.github.com");
+    expect(
+      configuredGitHubApp({ REGULAIT_GITHUB_APP_ID: "42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: pem, REGULAIT_GITHUB_APP_API_URL: "https://ghe.example.test/api/v3/" })?.apiUrl,
+    ).toBe("https://ghe.example.test/api/v3");
+    for (const bad of ["http://ghe.example.test", "https://u:p@ghe.example.test", "https://ghe.example.test/?x=1", "not a url"]) {
+      expect(() => configuredGitHubApp({ REGULAIT_GITHUB_APP_ID: "42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: pem, REGULAIT_GITHUB_APP_API_URL: bad }), bad).toThrow(GitFederationError);
+    }
+  });
+
   it("fails closed on half a configuration, a missing file, a non-RSA or short key, and never echoes the file", () => {
     const ed = write("ed.pem", generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString());
     const junk = write("junk.pem", "not a key synthetic-content-marker");
