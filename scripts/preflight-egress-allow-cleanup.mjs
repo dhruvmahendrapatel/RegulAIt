@@ -174,12 +174,12 @@ const isHook = (name) => (node) => ts.isCallExpression(node) && ts.isIdentifier(
 const isAfterAll = isHook("afterAll");
 const isAfterEach = isHook("afterEach");
 
-/** a call that runs its callback once: `it`, `test`, `describe`, `beforeAll`, `afterAll` and their modifiers, never `.each` */
+/** a call that runs its callback once: `it`, `test`, `describe`, `beforeAll`, `afterAll` and their modifiers, never `.each` or `.for` */
 const ONCE_FNS = new Set(["it", "test", "describe", "beforeAll", "afterAll"]);
 const runsOnce = (call) => {
   let e = call.expression;
   while (ts.isPropertyAccessExpression(e) || ts.isCallExpression(e)) {
-    if (ts.isPropertyAccessExpression(e) && e.name.text === "each") return false;
+    if (ts.isPropertyAccessExpression(e) && (e.name.text === "each" || e.name.text === "for")) return false;
     e = e.expression;
   }
   return ts.isIdentifier(e) && ONCE_FNS.has(e.text);
