@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { configuredGitHubApp, federatedGitToken, GitFederationError } from "./discovery-git-federation.js";
+import { configuredGitHubApp, federatedGitToken, GitFederationError, isAcceptableAppKey } from "./discovery-git-federation.js";
 
 const dir = mkdtempSync(path.join(tmpdir(), "a5-app-key-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -32,7 +32,6 @@ describe("ADR-0195 A5 GitHub App key configuration", () => {
 
   it("fails closed on half a configuration, a missing file, a non-RSA or short key, and never echoes the file", () => {
     const ed = write("ed.pem", generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString());
-    const short = write("short.pem", generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ type: "pkcs1", format: "pem" }).toString());
     const junk = write("junk.pem", "not a key synthetic-content-marker");
     for (const env of [
       { REGULAIT_GITHUB_APP_ID: "42" },
@@ -40,7 +39,6 @@ describe("ADR-0195 A5 GitHub App key configuration", () => {
       { REGULAIT_GITHUB_APP_ID: "x42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: junk },
       { REGULAIT_GITHUB_APP_ID: "42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: path.join(dir, "absent.pem") },
       { REGULAIT_GITHUB_APP_ID: "42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: ed },
-      { REGULAIT_GITHUB_APP_ID: "42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: short },
       { REGULAIT_GITHUB_APP_ID: "42", REGULAIT_GITHUB_APP_PRIVATE_KEY_FILE: junk },
     ]) {
       const err = (() => {
@@ -54,6 +52,14 @@ describe("ADR-0195 A5 GitHub App key configuration", () => {
       expect(err, JSON.stringify(env)).toBeInstanceOf(GitFederationError);
       expect(err!.message).not.toContain("synthetic-content-marker");
     }
+  });
+
+  it("refuses an RSA key shorter than 2048 bits (no weak key is generated: the check is fed the key's details)", () => {
+    expect(isAcceptableAppKey({ asymmetricKeyType: "rsa", asymmetricKeyDetails: { modulusLength: 1024 } })).toBe(false);
+    expect(isAcceptableAppKey({ asymmetricKeyType: "rsa", asymmetricKeyDetails: { modulusLength: 2047 } })).toBe(false);
+    expect(isAcceptableAppKey({ asymmetricKeyType: "rsa", asymmetricKeyDetails: {} })).toBe(false);
+    expect(isAcceptableAppKey({ asymmetricKeyType: "ec", asymmetricKeyDetails: { namedCurve: "prime256v1" } })).toBe(false);
+    expect(isAcceptableAppKey({ asymmetricKeyType: "rsa", asymmetricKeyDetails: { modulusLength: 2048 } })).toBe(true);
   });
 
   it("refuses a kind with no inbound federation before any call", async () => {

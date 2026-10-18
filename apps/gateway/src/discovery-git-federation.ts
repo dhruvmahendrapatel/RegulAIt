@@ -110,10 +110,15 @@ export function configuredGitHubApp(env: NodeJS.ProcessEnv = process.env): GitHu
   } catch {
     throw bad();
   }
-  if (privateKey.asymmetricKeyType !== "rsa" || (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) throw bad();
+  if (!isAcceptableAppKey(privateKey)) throw bad();
   const key = { appId, privateKey };
   appMemo = { file, appId, mtimeMs: st.mtimeMs, size: st.size, key };
   return key;
+}
+
+/** an RSA key of at least 2048 bits (GitHub's App keys are RSA; anything shorter is refused) */
+export function isAcceptableAppKey(key: Pick<KeyObject, "asymmetricKeyType" | "asymmetricKeyDetails">): boolean {
+  return key.asymmetricKeyType === "rsa" && (key.asymmetricKeyDetails?.modulusLength ?? 0) >= 2048;
 }
 
 const GITHUB_JWT_LIFETIME_SECONDS = 540;
