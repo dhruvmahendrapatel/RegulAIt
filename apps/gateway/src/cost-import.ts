@@ -138,6 +138,7 @@ import {
 } from "./org-settings.js";
 import { reinstateLinesSupersededBy } from "./cost-reconcile.js";
 import { securityHeaders } from "./security-headers.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -1415,7 +1416,7 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     try {
       window = resolveWindow(q);
     } catch (e) {
-      return reply.status(400).send({ error: "invalid_window", detail: (e as Error).message });
+      return reply.status(400).send({ error: "invalid_window", detail: safeErrorMessage(e) });
     }
     const result = await buildConsolidated(window, q.by, null);
     await audit(req.authCtx.userId, "cost_import_batch", null, COST_IMPORT_RULE_IDS.consolidatedRead, "allow",
@@ -1448,7 +1449,7 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     try {
       window = resolveWindow(q);
     } catch (e) {
-      return reply.status(400).send({ error: "invalid_window", detail: (e as Error).message });
+      return reply.status(400).send({ error: "invalid_window", detail: safeErrorMessage(e) });
     }
     const result = await buildConsolidated(window, "user", userId);
     if (q.format === "csv") {

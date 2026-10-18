@@ -78,7 +78,7 @@ import {
   type Db,
 } from "@regulait/db";
 import type { ModelChatMessage, ModelContentBlock } from "@regulait/model-provider";
-import { BUILDER_LIMITS, nextScheduleRun, skillPromptSection, type BuilderCadenceValue } from "@regulait/shared";
+import { BUILDER_LIMITS, builderThreadContextId, nextScheduleRun, skillPromptSection, type BuilderCadenceValue } from "@regulait/shared";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { agentDecision } from "./copilot.js";
 import { BUILDER_MODEL_FEATURE, loadVisibleAgent, skillVisible } from "./builder-access.js";
@@ -99,6 +99,7 @@ import { loadOrgSettings } from "./org-settings.js";
 import type { DelegationScopeItem } from "@regulait/policy-kernel";
 import { loadActorEntitlements } from "./actor-entitlements.js";
 import { actorEntitlementsReach, DelegationRefusedError, sponsorGrantsMiss } from "./delegation.js";
+import { databaseNow } from "./db-clock.js";
 import {
   agentScopeItem,
   connectorScopeItem,
@@ -115,6 +116,7 @@ import { assertProjectAttribution, piiInternationalCategories, projectPiiMode } 
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { beginTrace, childContext, finishTrace, recordSpan, type TraceContext } from "./tracing.js";
 import type { VirtualKeyContext } from "./virtual-keys.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 /** how much prior conversation a turn replays to the model */
@@ -482,7 +484,7 @@ async function limitRefusal(db: Db, agent: BuilderAgentRow, userId: string, sour
     .where(eq(builderAgents.id, agent.id));
   const limit = fresh?.monthlyLimitUsd ?? null;
   if (limit == null) return null;
-  const spent = await builderAgentSpend(db, agent.id, monthStartUtc());
+  const spent = await builderAgentSpend(db, agent.id, monthStartUtc(await databaseNow(db)));
   if (spent < limit) return null;
   const detail =
     `builder agent '${agent.name}' has spent $${spent.toFixed(4)} of its $${limit.toFixed(2)} ` +
@@ -810,7 +812,7 @@ async function systemNote(seg: Segment, content: string, status: "needs_attentio
   seg.touched.add(row!.id);
   await seg.db
     .update(builderThreads)
-    .set({ updatedAt: new Date(), ...(status ? { status } : {}) })
+    .set({ updatedAt: sql`now()`, ...(status ? { status } : {}) })
     .where(eq(builderThreads.id, seg.thread.id));
 }
 
@@ -973,7 +975,7 @@ async function builderChainCap(db: Db, agent: BuilderAgentRow): Promise<number |
   const [fresh] = await db.select({ monthlyLimitUsd: builderAgents.monthlyLimitUsd }).from(builderAgents).where(eq(builderAgents.id, agent.id));
   const limit = fresh?.monthlyLimitUsd ?? null;
   if (limit == null) return null;
-  return usdToMicros(Math.max(0, limit - (await builderAgentSpend(db, agent.id, monthStartUtc()))));
+  return usdToMicros(Math.max(0, limit - (await builderAgentSpend(db, agent.id, monthStartUtc(await databaseNow(db))))));
 }
 
 /** the toolbox as this segment's chain was granted it: anything else is unavailable to the model */
@@ -1265,6 +1267,8 @@ async function runQueue(seg: Segment, state: LoopState, box: Toolbox): Promise<T
       toolCallId: call.id,
       detail: { ...seg.baseDetail, builderStepId: stepId },
       delegationGrantId: seg.delegation?.grantId,
+      // ADR-0193 P1: the thread is the causal context its tool results flow into
+      contextId: builderThreadContextId(seg.thread.id),
     });
     const latencyMs = Date.now() - started;
     if (run.approvalId) {
@@ -1417,7 +1421,7 @@ async function pause(
   const thread = await db.transaction(async (tx) => {
     const [t] = await tx
       .update(builderThreads)
-      .set({ pendingTurnCiphertext: ciphertext, status: "needs_attention", updatedAt: new Date() })
+      .set({ pendingTurnCiphertext: ciphertext, status: "needs_attention", updatedAt: sql`now()` })
       .where(eq(builderThreads.id, seg.thread.id))
       .returning();
     await tx
@@ -1428,7 +1432,7 @@ async function pause(
         outcomeCode: extra.code ?? null,
         outcomeDetail: extra.detail ?? null,
         ...(extra.latencyMs !== undefined ? { latencyMs: extra.latencyMs } : {}),
-        updatedAt: new Date(),
+        updatedAt: sql`now()`,
       })
       .where(eq(builderToolSteps.id, stepRow.id));
     return t;
@@ -1447,7 +1451,7 @@ async function pause(
     if (ap && (ap.status === "approved" || ap.status === "denied" || ap.status === "returned")) {
       const claimed = await db
         .update(builderToolSteps)
-        .set({ status: "running", decidedByUserId: ap.decidedBy, updatedAt: new Date() })
+        .set({ status: "running", decidedByUserId: ap.decidedBy, updatedAt: sql`now()` })
         .where(and(eq(builderToolSteps.id, stepRow.id), eq(builderToolSteps.status, "pending_approval")))
         .returning({ id: builderToolSteps.id });
       if (claimed.length) {
@@ -1520,7 +1524,7 @@ async function finishTurn(seg: Segment, state: LoopState, traceStatus: "ok" | "d
     .update(builderThreads)
     .set({
       pendingTurnCiphertext: null,
-      updatedAt: new Date(),
+      updatedAt: sql`now()`,
       ...(seg.source === "schedule" ? { status: "needs_attention" as const } : seg.resumed ? { status: "active" as const } : {}),
     })
     .where(eq(builderThreads.id, seg.thread.id));
@@ -1623,7 +1627,7 @@ export async function resumeBuilderStep(db: Db, dataKey: string | undefined, arg
         .returning();
       const [t] = await db
         .update(builderThreads)
-        .set({ pendingTurnCiphertext: null, status: "needs_attention", updatedAt: new Date() })
+        .set({ pendingTurnCiphertext: null, status: "needs_attention", updatedAt: sql`now()` })
         .where(eq(builderThreads.id, thread.id))
         .returning();
       const [s] = await db.select().from(builderToolSteps).where(eq(builderToolSteps.id, step.id));
@@ -1672,7 +1676,7 @@ async function resumeUnderGate(
     if (claim) {
       const claimed = await db
         .update(builderToolSteps)
-        .set({ status: "running", decidedByUserId: args.deciderUserId, updatedAt: new Date() })
+        .set({ status: "running", decidedByUserId: args.deciderUserId, updatedAt: sql`now()` })
         .where(and(eq(builderToolSteps.id, step.id), eq(builderToolSteps.status, expected)))
         .returning({ id: builderToolSteps.id });
       if (!claimed.length) return { ok: false, status: 409, error: "step_not_pending", threadId: thread.id };
@@ -1730,7 +1734,7 @@ async function resumeUnderGate(
       // state is cleared, the failure is audited
       // one line, no query text: a database error's `cause` is the driver's
       // own message (the wrapper's message embeds the SQL and its parameters)
-      const msg = (err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err))
+      const msg = (safeErrorMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err))
         .replace(/\s+/g, " ")
         .slice(0, 300);
       const now = sql`now()`; // the database clock
@@ -1875,19 +1879,19 @@ export async function cancelBuilderStep(
 export async function settleLapsedApprovalPause(db: Db, thread: BuilderThreadRow): Promise<boolean> {
   if (!thread.pendingTurnCiphertext) return false;
   const waiting = await db
-    .select({ step: builderToolSteps, apStatus: approvals.status, apExpiresAt: approvals.expiresAt })
+    // M-075: the expiry is judged on the database clock, against the row the database stamped
+    .select({ step: builderToolSteps, apStatus: approvals.status, apExpired: sql<boolean>`coalesce(${approvals.expiresAt} <= now(), false)` })
     .from(builderToolSteps)
     .leftJoin(approvals, eq(builderToolSteps.approvalId, approvals.id))
     .where(and(eq(builderToolSteps.threadId, thread.id), eq(builderToolSteps.status, "pending_approval")));
   let ended = false;
   for (const w of waiting) {
-    const now = Date.now();
     const lapsed =
       w.apStatus == null
         ? "gone"
         : w.apStatus === "superseded"
           ? "superseded"
-          : (w.apStatus === "pending" || w.apStatus === "approved") && w.apExpiresAt && w.apExpiresAt.getTime() <= now
+          : (w.apStatus === "pending" || w.apStatus === "approved") && w.apExpired
             ? "expired"
             : null;
     if (!lapsed) continue;
@@ -2028,7 +2032,8 @@ export async function runBuilderScheduleSweep(
   dataKey: string | undefined,
   opts: { now?: Date } = {},
 ): Promise<BuilderScheduleSweepResult> {
-  const now = opts.now ?? new Date();
+  // M-075: due-ness, `lastRunAt` and the next run are all judged against rows the database stamped
+  const now = opts.now ?? (await databaseNow(db));
   const out: BuilderScheduleSweepResult = { due: 0, ran: 0, refused: 0, skipped: [], deferred: 0, skippedNeedsProject: 0, threadIds: [] };
   const due = await db
     .select({ s: builderAgentSchedules, ownerUserId: builderAgents.ownerUserId })

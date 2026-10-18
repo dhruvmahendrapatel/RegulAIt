@@ -57,7 +57,9 @@ const mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
 /** invocations per tool, counted by the upstream itself */
 const hits: Record<string, number> = {};
-const TOOLS = ["get_time", "ask_first", "needs_approval", "early_approval", "flip_halt", "priced", "looper"] as const;
+const TOOLS = ["get_time", "ask_first", "needs_approval", "early_approval", "flip_halt", "priced", "looper", "write_it"] as const;
+/** the one WRITE tool (ADR-0193 P1: a write in a thread that already holds untrusted content is refused) */
+const WRITE_TOOLS: ReadonlySet<string> = new Set(["write_it"]);
 type ToolName = (typeof TOOLS)[number];
 const toolIds: Partial<Record<ToolName, string>> = {};
 const toolGrants: Partial<Record<ToolName, string>> = {};
@@ -68,7 +70,7 @@ const modelName = (t: ToolName) => `${serverName}__${t}`;
 function buildUpstream(): McpServer {
   const server = new McpServer({ name: "builder-tools-upstream", version: "0.0.1" });
   for (const name of TOOLS) {
-    server.registerTool(name, { description: `test tool ${name}`, inputSchema: {}, annotations: { readOnlyHint: true } }, async () => {
+    server.registerTool(name, { description: `test tool ${name}`, inputSchema: {}, annotations: { readOnlyHint: !WRITE_TOOLS.has(name) } }, async () => {
       hits[name] = (hits[name] ?? 0) + 1;
       if (name === "flip_halt") {
         // the kill switch is thrown WHILE the loop is mid-turn
@@ -172,7 +174,7 @@ beforeAll(async () => {
   expect(s.statusCode, s.body).toBeLessThan(300);
   serverId = s.json().id;
   for (const t of TOOLS) {
-    const r = await k.req("POST", `/v1/servers/${serverId}/tools`, k.BOOT, { name: t, kind: "read", description: `test tool ${t}` });
+    const r = await k.req("POST", `/v1/servers/${serverId}/tools`, k.BOOT, { name: t, kind: WRITE_TOOLS.has(t) ? "write" : "read", description: `test tool ${t}` });
     expect(r.statusCode, r.body).toBe(201);
     toolIds[t] = r.json().id;
     toolGrants[t] = await grantTool(owner.id, t);
@@ -544,6 +546,36 @@ describe("limits", () => {
     const usage = (await k.req("GET", "/v1/builder/usage?days=7", owner.auth)).json();
     expect(usage.byAgent.find((x: { agentId: string }) => x.agentId === a.id).spendUsd).toBeGreaterThanOrEqual(1);
     expect(limitedModel).toBe(model);
+  });
+});
+
+describe("ADR-0193 P1: the builder thread is the causal context", () => {
+  it("a write after an untrusted read in the same thread is refused before the upstream, and a fresh thread is not", async () => {
+    const a = await newAgent(owner, [{ tool: "get_time" }, { tool: "write_it" }]);
+    // the thread opens with plain text (the mock reads the first tool sentinel anywhere in a thread's history)
+    const first = await chat(owner, a.id, "hello");
+    expect(first.statusCode, first.body).toBe(200);
+    const threadId = first.json().thread.id as string;
+    // untrusted content enters the thread: a read recorded under the thread's own causal context
+    const [agentRow] = await k.db.select().from(builderAgents).where(eq(builderAgents.id, a.id));
+    const box = await resolveToolbox(k.db, agentRow!, owner.id);
+    const read = box.entries.find((e) => e.name === modelName("get_time"))!;
+    const ctx = { userId: owner.id, isAdmin: false, projectId: owner.projectId, trace: null, toolCallId: "t-read", detail: {}, contextId: `builder_thread:${threadId}` };
+    expect((await runGovernedTool(k.db, "a".repeat(64), read, {}, ctx)).status).toBe("done");
+    // the loop's write in that thread is refused before the upstream: the runtime passes the thread as the context
+    const before = hits.write_it ?? 0;
+    const second = await chat(owner, a.id, `now write it <<use-tool:${modelName("write_it")}>>`, threadId);
+    expect(second.statusCode, second.body).toBe(200);
+    const refusedStep = (second.json().messages as Array<{ steps: any[] }>).at(-1)!.steps[0];
+    expect(refusedStep).toMatchObject({ name: modelName("write_it"), status: "denied", outcomeCode: "content-trust-floor" });
+    expect(hits.write_it ?? 0).toBe(before);
+    const refusals = await k.db.select().from(auditLog).where(and(eq(auditLog.ruleId, "content-trust-floor"), eq(auditLog.toolName, "write_it")));
+    expect(refusals.filter((r) => (r.detail as { contextId?: string }).contextId === `builder_thread:${threadId}`)).toHaveLength(1);
+    // the control: a fresh thread holds no content, so the same write runs
+    const fresh = await chat(owner, a.id, `write it <<use-tool:${modelName("write_it")}>>`);
+    expect(fresh.statusCode, fresh.body).toBe(200);
+    expect(fresh.json().messages[1].steps[0]).toMatchObject({ name: modelName("write_it"), status: "done" });
+    expect(hits.write_it ?? 0).toBe(before + 1);
   });
 });
 

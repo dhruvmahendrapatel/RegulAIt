@@ -47,7 +47,11 @@ import {
   type PreparedPiiApproval,
   type ScannableTool,
   type McpUpstreamTransport,
+  CONTENT_TRUST_REFUSAL_CODE,
+  CONTENT_TRUST_RULE_ID,
+  contentTrustRefusalReason,
 } from "@regulait/shared";
+import { classifyScannedContent, contentTrustGate, recordContentProvenance } from "./content-provenance.js";
 // ADR-0070 — the tool span. A governed tool call is the other half of what a
 // trace tree must show: which tool the model asked for, with which arguments,
 // what came back, and — the row that matters — the ones governance refused.
@@ -132,6 +136,7 @@ import {
   type PiiMode,
 } from "./projects.js";
 import { z } from "zod";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
 /**
@@ -637,6 +642,13 @@ export async function executeGovernedToolCall(
      * person's own call (`actor: null`), byte-identical.
      */
     delegationGrantId?: string | undefined;
+    /**
+     * ADR-0193 P1 — the causal context this call runs in (`run:<id>` for an orchestration run,
+     * `builder_thread:<id>` for a builder thread). The tool's result is recorded under it, and a WRITE is refused
+     * when the context already holds content from a source below the write floor. Absent = a call whose context
+     * the gateway cannot see (the direct proxy route): its result is still recorded (P0), and nothing is gated.
+     */
+    contextId?: string | null | undefined;
   },
 ): Promise<GovernedToolCallOutcome> {
   // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
@@ -859,7 +871,7 @@ async function executeGovernedToolCallInner(
     if (classifyUpstreamError(err).why === "our_own_refusal") return;
     await recordUpstreamFailure(db, serverRow, redactActive
       ? "MCP upstream failed during PII-redacted dispatch"
-      : err instanceof Error ? err.message : String(err));
+      : safeErrorMessage(err));
   };
 
   try {
@@ -1150,6 +1162,38 @@ async function executeGovernedToolCallInner(
           kind: "denied",
           decision: { effect: "deny", ruleId: "mcp-default-mode", ruleChain: [], reason },
         };
+      }
+    }
+
+    // ADR-0193 P1 — CONTENT TRUST. A write whose causal context already holds content from a source below the
+    // write floor is refused: low-trust content cannot carry high action authority. Like the read_only posture
+    // above it is categorical, so it beats approval (no approver can sign away where the instruction came from)
+    // and comes before the budget gate, the queue and the upstream: a refused write executes and bills nothing.
+    if (kind === "write" && args.contextId) {
+      const trust = await contentTrustGate(db, "write", args.contextId);
+      if (!trust.ok) {
+        const reason = contentTrustRefusalReason(trust.lowest, trust.floor, `${serverRow.name}.${toolName}`);
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          toolName,
+          detail: {
+            ...(args.detail ?? {}),
+            phase: "content-trust",
+            code: CONTENT_TRUST_REFUSAL_CODE,
+            contextId: args.contextId,
+            lowestTier: trust.lowest,
+            writeFloor: trust.floor,
+            toolKind: kind,
+            projectId,
+            receiptClass: "decision",
+          },
+          effect: "deny",
+          ruleId: CONTENT_TRUST_RULE_ID,
+          ruleChain: [],
+          reason,
+        });
+        return { kind: "denied", decision: { effect: "deny", ruleId: CONTENT_TRUST_RULE_ID, ruleChain: [], reason } };
       }
     }
 
@@ -1585,6 +1629,23 @@ async function executeGovernedToolCallInner(
       });
     }
 
+    // ADR-0193 P0 — the provenance label and both digests (what upstream returned, what is delivered), written as
+    // evidence before anything is delivered; a failure to record throws, so nothing unrecorded leaves.
+    await recordContentProvenance(db, dataKey, {
+      userId,
+      source: { kind: "mcp_tool", serverId, toolName },
+      upstream: content,
+      delivered: resultContent,
+      classification: classifyScannedContent({
+        scanned: Boolean(preparedPii || piiMode) && !blobWithheld,
+        piiHits: outputHits.length,
+        piiWithheld: withheld && !blobWithheld,
+      }),
+      decisionAuditId,
+      contextId: args.contextId ?? null,
+      projectId,
+    });
+
     return {
       kind: "allowed",
       content: resultContent,
@@ -2000,7 +2061,7 @@ export async function resolveNodeToolContext(
         upstreamTools = await syncUpstreamTools(db, serverId, upstream, "sync", serverRow.transport);
       } catch (err) {
         if (classifyUpstreamError(err).why !== "our_own_refusal") {
-          await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+          await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
         }
         throw err;
       }
@@ -2407,7 +2468,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db, opts: { dataKey?:
             throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
           }
           if (classifyUpstreamError(err).why !== "our_own_refusal") {
-            await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+            await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
           }
           throw err;
         });

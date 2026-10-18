@@ -584,7 +584,8 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       adr: "ADR-0172",
       defaultIntervalSeconds: 5 * 60,
       run: async (ctx) => {
-        const out = await runBuilderScheduleSweep(ctx.db, opts.dataKey, { now: ctx.now });
+        // M-075: due-ness is judged on the database clock; the scheduler's clock is used only when a test injected it
+        const out = await runBuilderScheduleSweep(ctx.db, opts.dataKey, ctx.clockInjected ? { now: ctx.now } : {});
         return {
           itemsProcessed: out.ran + out.refused,
           detail: { due: out.due, ran: out.ran, refused: out.refused, skipped: out.skipped.length, deferred: out.deferred },

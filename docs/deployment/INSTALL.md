@@ -178,8 +178,9 @@ override pins `image: regulait/gateway:<version>` with `pull_policy: never`.
 Container Registry, so log in to `ghcr.io` first with a token that can read them. The bundle refuses an engine the lock
 has no published image for, pulls each image by its digest, checks its image id against the lock, and saves it under
 the digest reference and the tag `regulait/engine-<engine>:bundled`. The air-gapped install runs those tags (never
-pulled) and checks each loaded tag's id against the lock. **Pending execution (M-041):** no engine image has been
-published yet, and neither the bundle with `--with-engines` nor its `docker load` round trip has been run.
+pulled) and checks each loaded tag's id against the lock. The first publish is recorded in the lock (ADR-0190 "As
+built: first engine image publish recorded"). **Pending execution (M-041):** neither the bundle with `--with-engines`
+nor its `docker load` round trip has been run.
 
 If integrity across the gap matters (it should), ship the image tarball **inside a signed update
 bundle** rather than loose:
@@ -484,7 +485,7 @@ route, method, client IP and the **kind** of credential presented (never the cre
 |---|---|
 | `LOG_LEVEL` | `fatal` … `trace`; default `info`. `warn` keeps only refusals and failures. |
 | `REGULAIT_LOG=off` | Silences the process entirely (the boot posture block still says so). |
-| `DEBUG_ERRORS=1` | Additionally prints every unhandled 500 to stderr, even with logging off — a dev convenience, not a log. |
+| `DEBUG_ERRORS=1` | Additionally prints every unhandled 500 to stderr, even with logging off — a dev convenience, not a log. It prints the same fields as the log line plus the stack frames: a failed query's bound values and a parse error's quoted input stay withheld. |
 
 The boot posture block (`proxy / hsts / egress / data key / bootstrap / secrets / database /
 logging / scheduler`) is printed once at startup; `secrets: DEV-GRADE` lines mean the
@@ -646,8 +647,8 @@ the comment above them in `docker-compose.yml`) so you can check the Dockerfiles
 - The modelscan runner no longer downloads the artifact: the gateway streams it to the executor's input volume.
 
 Under real gVisor an engine task still waits on the `runsc` re-pin (ADR-0190 I5). **Pending execution (M-041):**
-none of this has been run on a Docker host yet, and no publish has run; record what you find against ADR-0190 "As
-built: engine task images".
+the first publish ran on GitHub's runners and is recorded in the lock, but no image has been pulled or run on a Docker
+host yet; record what you find against ADR-0190 "As built: first engine image publish recorded".
 
 Do not set `REGULAIT_OFFLINE_CHECKS` on an install. It is the demo's declaration that a workflow
 check nobody reported may be auto-passed (labelled) where a template opts in; unset — and always

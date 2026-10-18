@@ -547,6 +547,293 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
 
+## As built: SD2b federation signer (2026-10-17): BLOCKED on a migration
+
+**Superseded (2026-10-17):** migration 0205 was assigned and SD2b was built; see "As built: SD2b federation signer" below. This
+section is kept as the record of the plan that the as-built section deviates from.
+
+**Status: not built. Blocked on a migration number from the master.** Branch `sd2b-federation-signer`.
+
+Why a migration is unavoidable. The RS256 federation key must be generated in the product and its private half kept
+encrypted under the data key. The existing issuer key store cannot hold it:
+
+- `identity_signing_keys` CHECKs `algorithm = 'Ed25519'` and an `OKP`/`Ed25519` public JWK;
+- it has one global "one active key" index, so an active RS256 key would collide with the active Ed25519 signer;
+- it has no private-key column (the Ed25519 private halves are a deploy-time file, ADR-0188 decision 5);
+- the data-key re-encryption sweep (`data-key-reencrypt.ts`) updates ciphertext rows `WHERE id = …`, so a key table
+  needs an `id` column.
+
+Loosening the Ed25519 table's CHECKs would weaken the delegated-token verifier's invariants, which `issued_tokens`
+references by `kid`. A separate table leaves them untouched.
+
+Design the migration below supports (to be built once a number is assigned):
+
+- `federation_signing_keys`: generated in-product (Node `crypto`, RSA 2048-bit, e = 65537; `kid` is the RFC 7638
+  thumbprint through `jose`), the PKCS#8 private half enveloped under the data key and listed in
+  `CIPHERTEXT_COLUMNS`. A retired or revoked key's private half is destroyed in the same update (CHECK).
+- Federation is off until an admin generates and activates the first key. That first activation is a
+  `settings_relax` step-up, because it turns federation on. Rotating and revoking go through the issuer-key
+  management routes under the `identity_manage` step-up those routes require today. PR #415's `key_management` kind
+  is not on main. Revoking is compromise handling: the key leaves the JWKS at once.
+- The public halves (active, plus retired keys inside the overlap) are published as `alg: RS256` entries in
+  `/.well-known/jwks.json` beside the Ed25519 keys. The Ed25519 verifier never accepts an RS256 `kid`.
+- Federation JWTs: `iss` = the issuer, `sub` = `discovery-source:<sourceId>`, `aud` bound per target (AWS
+  `sts.amazonaws.com`, the GCP pool provider resource, Entra `api://AzureADTokenExchange`), at most 5 minutes, `jti`
+  random. AWS `AssumeRoleWithWebIdentity` uses `@aws-sdk/client-sts`, GCP STS uses `google-auth-library`'s external
+  account client (with the SD2 transporter workaround), and Entra uses `@azure/identity`'s `ClientAssertionCredential`.
+  All of them are already pinned in `packages/cloud-discovery`, and every call goes through the guarded fetch.
+- AWS Organizations `ListAccounts` (paginated, read-only) for organisation-level AWS sources, from RegulAIt's own AWS
+  principal (`assume_role` with the per-source external ID).
+
+Exact SQL proposed (number `NNNN` to be assigned by the master; hand-written, no journal entry added here):
+
+```sql
+-- ADR-0195 SD2b: the issuer's RS256 federation signing keys (cloud workload identity federation).
+-- Hand-authored (never drizzle-kit generate). Separate from identity_signing_keys so the Ed25519 verifier's
+-- CHECKs, its one-active index and the issued_tokens FK are untouched.
+CREATE TABLE "federation_signing_keys" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "kid" text NOT NULL,
+  "algorithm" text DEFAULT 'RS256' NOT NULL,
+  "public_jwk" jsonb NOT NULL,
+  "private_key_ciphertext" text,
+  "created_by" uuid NOT NULL,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  "activated_at" timestamp with time zone,
+  "retired_at" timestamp with time zone,
+  "revoked_at" timestamp with time zone,
+  CONSTRAINT "federation_signing_keys_kid_uq" UNIQUE ("kid"),
+  CONSTRAINT "federation_signing_keys_kid_check" CHECK ("kid" ~ '^[A-Za-z0-9._:-]{1,128}$'),
+  CONSTRAINT "federation_signing_keys_algorithm_check" CHECK ("algorithm" = 'RS256'),
+  CONSTRAINT "federation_signing_keys_public_only_check" CHECK (
+    COALESCE(
+      jsonb_typeof("public_jwk") = 'object'
+      AND "public_jwk" ->> 'kty' = 'RSA'
+      AND "public_jwk" ->> 'e' = 'AQAB'
+      AND jsonb_typeof("public_jwk" -> 'n') = 'string'
+      AND length("public_jwk" ->> 'n') BETWEEN 342 AND 683
+      AND NOT ("public_jwk" ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']),
+      false
+    )
+  ),
+  -- a live key holds its private half; a retired or revoked key never does
+  CONSTRAINT "federation_signing_keys_private_check" CHECK (
+    ("retired_at" IS NULL AND "revoked_at" IS NULL) = ("private_key_ciphertext" IS NOT NULL)
+  ),
+  CONSTRAINT "federation_signing_keys_order_check" CHECK (
+    ("activated_at" IS NULL OR "activated_at" >= "created_at")
+    AND ("retired_at" IS NULL OR ("activated_at" IS NOT NULL AND "retired_at" >= "activated_at"))
+    AND ("revoked_at" IS NULL OR "revoked_at" >= "created_at")
+  )
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "federation_signing_keys_one_active_uq" ON "federation_signing_keys" ((true))
+  WHERE "activated_at" IS NOT NULL AND "retired_at" IS NULL AND "revoked_at" IS NULL;
+--> statement-breakpoint
+-- never deleted; identity and each lifecycle stamp written once; the ciphertext may be re-encrypted (data-key
+-- rotation) while live, and once destroyed it never comes back
+CREATE OR REPLACE FUNCTION public."regulait_federation_signing_key_guard"() RETURNS trigger
+  SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'federation_signing_keys: a signing key is never deleted'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF NEW."id" IS DISTINCT FROM OLD."id" OR NEW."kid" IS DISTINCT FROM OLD."kid"
+     OR NEW."algorithm" IS DISTINCT FROM OLD."algorithm" OR NEW."public_jwk" IS DISTINCT FROM OLD."public_jwk"
+     OR NEW."created_by" IS DISTINCT FROM OLD."created_by" OR NEW."created_at" IS DISTINCT FROM OLD."created_at"
+     OR (OLD."activated_at" IS NOT NULL AND NEW."activated_at" IS DISTINCT FROM OLD."activated_at")
+     OR (OLD."retired_at" IS NOT NULL AND NEW."retired_at" IS DISTINCT FROM OLD."retired_at")
+     OR (OLD."revoked_at" IS NOT NULL AND NEW."revoked_at" IS DISTINCT FROM OLD."revoked_at")
+     OR (OLD."private_key_ciphertext" IS NULL AND NEW."private_key_ciphertext" IS NOT NULL) THEN
+    RAISE EXCEPTION 'federation_signing_keys: a key and each of its lifecycle stamps are written once'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER "federation_signing_keys_guard"
+  BEFORE UPDATE OR DELETE ON "federation_signing_keys"
+  FOR EACH ROW EXECUTE FUNCTION public."regulait_federation_signing_key_guard"();
+--> statement-breakpoint
+CREATE TRIGGER "federation_signing_keys_no_truncate" BEFORE TRUNCATE ON public."federation_signing_keys"
+  FOR EACH STATEMENT EXECUTE FUNCTION public.regulait_refuse_truncate();
+```
+
+Nothing above has been run (no Postgres in the build environment). It follows the 0185 guard rules (pinned
+`search_path`, TRUNCATE refused beside the row guard), and the code side adds the `CIPHERTEXT_COLUMNS` entry and the
+`schema.ts` declaration with the same CHECKs.
+
+## As built: SD2b federation signer (2026-10-17, migration 0205)
+
+**Status: built on branch `sd2b-federation-signer`.** Migration `0205_federation_signing_keys.sql` is hand-written;
+its journal entry is NOT in this branch (0204 merges first; the master adds
+`{"idx": 205, "version": "7", "when": 1785140000000, "tag": "0205_federation_signing_keys", "breakpoints": true}`).
+Until then the database tests that need the table fail in CI.
+
+Why a separate table. The RS256 key is generated in the product and its private half kept under the data key. The
+Ed25519 issuer store (`identity_signing_keys`) CHECKs `algorithm = 'Ed25519'` and an `OKP` JWK, has one global
+"one active key" index, has no private-key column (ADR-0188 decision 5) and no `id` for the re-encryption sweep.
+Loosening it would weaken the delegated-token verifier's invariants, so `federation_signing_keys` stands alone.
+
+1. **Migration 0205** (`federation_signing_keys`): `id` (the data-key re-encryption walk updates by it), `kid`
+   (RFC 7638 thumbprint, unique), `algorithm` = RS256, a public-only RSA JWK (e = AQAB, 2048 to 4096 bits, no
+   private member; CHECK), `private_key_ciphertext` (PKCS#8 under the data key, in `CIPHERTEXT_COLUMNS`), lifecycle
+   stamps. A live key holds its private half and a retired or revoked key never does (CHECK); at most one active
+   key (partial unique index); never deleted, each stamp written once, a destroyed private half never returns
+   (trigger, `search_path` pinned); TRUNCATE refused (0185 rules).
+2. **A separate issuer (deviation from the plan above).** The plan published the RS256 keys beside the Ed25519 keys in
+   `/.well-known/jwks.json`. As built, federation has its own issuer `<REGULAIT_PUBLIC_URL>/federation`, with its own
+   OIDC discovery document (`/federation/.well-known/openid-configuration`, which AWS IAM and Entra require) and its
+   own JWKS (`/federation/.well-known/jwks.json`, RS256 only). Reasons: AWS, GCP and Entra parse every key of the
+   JWKS they are given, and an `OKP` entry is not one they all accept; and with a different `iss` and different keys
+   a federation token never verifies at RegulAIt's own delegated-token verifier, nor an issuer token at a cloud. The
+   Ed25519 JWKS is unchanged. Both new routes are public (auth-exempt, `NON_ADMIN_ROUTES`), public data only.
+3. **Lifecycle** (`federation-signing-keys.ts`, routes in `federation-routes.ts`, admin-only, every change audited
+   as `federation_signing_key`):
+   - `POST /v1/discovery/federation/keys` generates a PENDING key (RSA 2048, Node `crypto`; free, it signs nothing
+     and is not published; at most one pending key).
+   - `POST …/keys/:kid/activate` with no active key TURNS FEDERATION ON: `settings_relax` step-up
+     `{op: "federation_enable", keyId}`. With an active key it ROTATES: `key_management` step-up
+     `{op: "federation_key_rotate", keyId}`; the previous key is retired, its private half destroyed, and it stays
+     published for 600 s (token life plus skew).
+   - `POST …/keys/:kid/revoke`: `key_management` step-up `{op: "federation_key_revoke", keyId}`; the key leaves the
+     JWKS at once (revoking the active key turns federation off).
+   - `POST /v1/discovery/federation/disable`: free (a tightening); the active key is retired.
+   The step-up is decided on an unlocked read and re-checked under the table lock; if the active key moved, nothing
+   is written (409 `changed_concurrently`, ADR-0186 A). A refused act spends no grant.
+4. **Tokens**: RS256, `iss` the federation issuer, `sub` `regulait:discovery-source:<sourceId>` (or
+   `regulait:aws-principal`), `aud` exactly one per target (AWS `sts.amazonaws.com`, Entra
+   `api://AzureADTokenExchange`, GCP `https://iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`
+   from the credential), `iat` = `nbf`, `exp` 300 s later, random `jti`. `federationTokenMinter` refuses any
+   audience the credential does not name before reading the database. Minting refuses while federation is off,
+   while `REGULAIT_PUBLIC_URL` is unset, or when the data key cannot open the key.
+5. **Scanner wiring**: the worker gives a FEDERATED credential's run `ctx.federation` (source token bound to the
+   source and its audiences; RegulAIt's own AWS principal when configured). The token exchanges stay the SD2 SDK
+   paths (`fromWebToken`, `fromTemporaryCredentials`, `IdentityPoolClient`, `ClientAssertionCredential`), every
+   call on the guarded fetch; minted tokens are registered for scrubbing and exchange bodies are never digested.
+6. **RegulAIt's own AWS principal**: `REGULAIT_AWS_PRINCIPAL_ROLE_ARN` names an IAM role that trusts the federation
+   issuer for `sub = regulait:aws-principal`. A `cloud_aws` target `federation=principal` reaches that role by web
+   identity and then `AssumeRole`s into the customer's role with the source's SD0-generated external id;
+   `federation=oidc` (the default) is AssumeRoleWithWebIdentity straight into the customer's role. No long-lived
+   key and no default credential chain anywhere.
+7. **AWS Organizations**: a `cloud_aws` target `organizationAccounts=true` calls Organizations `ListAccounts`
+   (paginated, page cap per call, read-only; `@aws-sdk/client-organizations` 3.1152.0, Apache-2.0, added to
+   `THIRD_PARTY.md`) from the source's account. With `memberRoleName` each ACTIVE member (at most 50 per run) is
+   scanned by the SD2 AWS scanner through `AssumeRole` into that role with the external id (federated credentials
+   only), reads reported as `<account>:<scope>`; without it the accounts are listed and reported as not scanned.
+8. **Web**: a "Cloud federation" card on Discovery sources (generate, turn on, rotate, revoke, turn off; issuer,
+   subject and audiences to put in a trust policy). Both UI preflights pass with `KNOWN_UI_GAPS` 0.
+9. **Tests**: `federation-signing-keys.test.ts` (signer/JWKS round trip, audience and expiry binding, refusals,
+   publication overlap; no database), `discovery-cloud-scanners.test.ts` (federated AWS, principal, Organizations
+   pagination and member scan, egress refusal, malformed targets), `zz-adr0195-sd2b-federation.test.ts` (database:
+   CHECKs, guard and TRUNCATE, off by default, each step-up with negative controls that are not spent, round trip
+   against the JWKS route, rotate, revoke, disable).
+
+Open source first: key generation is Node `crypto`, the thumbprint and JWS are `jose` 6.2.12, the token exchanges
+are the cloud SDKs already pinned; the one new dependency is the Organizations client. Not built: an
+end-to-end run against a real cloud account (pending execution, needs a customer trust policy), and federated
+git-provider credentials (SD1 follow-up).
+
+## As built: lane A6, environment-variable-name and CLI presence signatures (2026-10-17)
+
+**Status: shared matcher, catalogue data, tests and the SD1/SD3 wiring built on branch `sd-env-name-signatures`
+(review fix round, 2026-10-17). The admin-catalogue `env_name` and `cli` kinds are BLOCKED on a migration number
+(below).** Nothing above is changed.
+
+1. **Master decision (data minimisation).** A presence match records only that a signature matched and the
+   signature's id. The variable names themselves and any values are never stored as evidence. Values are never read
+   beyond what matching needs: `envNamePresenceInText` slices only the candidate name on each line (before its `=` or
+   `:`) and moves to the next line with `indexOf`, so no value substring is ever created. `matchEnvNames`,
+   `matchCliNames` and `envNamePresenceInText` return `{signatureId, provider, kind, confidence}` and nothing else.
+2. **Kinds.** `PRESENCE_SIGNATURE_KINDS = ["env_name", "cli"]` (`packages/shared/src/discovery/presence-signatures.ts`).
+   Decision 18 lists AI CLIs and the names (never values) of AI-related environment variables among the endpoint
+   facts, and decision 14 lists `.env.example` names among the repo facts. No SD0 kind fits either (`local_runtime` is
+   a model runtime), so both are added.
+3. **Name shape.** An env name must match the endpoint agent's pattern `^[A-Z][A-Z0-9_]*$` and be at most 128
+   characters. Anything else is skipped and never matched. Matching is whole-name, case-sensitive equality. A CLI
+   name is the base name of a path (`/` or `\`), lower-cased, without `.exe`, checked against
+   `^[a-z0-9][a-z0-9._-]{0,63}$`, then compared whole. No regex comes from data. Inputs are bounded: at most 5,000 names
+   per call and 2,000,000 characters per text. Going over the bound throws an error; the input is never silently cut.
+4. **Text formats.** `dotenv` (`[export] NAME=`), `dockerfile` (`ENV`/`ARG NAME`, `NAME=` or `NAME value`) and
+   `ci_yaml` (`NAME:`, `- NAME=`, `- NAME:`, `name: NAME`). Stated limits: one name per line, so `ENV A=1 B=2` yields
+   only `A`; continuation lines and YAML flow mappings are not parsed; commented-out lines do not match.
+5. **Catalogue data (`PRESENCE_SIGNATURES_V1`, 16 rows, pinned by count and SHA-256 in the test).** There are 13
+   env names and 3 CLI names. All are taken from the `env_vars` and `cli.binaries` fields of the Apache-2.0 registry
+   that the open-source evaluation above names, at commit `12b7bbf733032d7822b2fb16e88b0f7a1399d1da`. Its LICENSE and
+   NOTICE are kept in `src/discovery/vendor/shadow-ai-guard/`, and `THIRD_PARTY.md` lists the registry. Each row cites
+   the commit. A generic cloud-platform key name is low confidence. The three short CLI names are medium confidence,
+   because other programs may share them. Open source first: the registry is the data source; no maintained library
+   matches env-name presence with these minimisation rules, so the matcher is ours.
+6. **BLOCKED: migration needed.** Migration 0202 closes `ai_endpoint_signatures_kind_ck` and
+   `ai_endpoint_signatures_kind_match_ck`, so `env_name` and `cli` rows cannot be stored, and `AI_SIGNATURE_KINDS`
+   does not list them. A test asserts that they are not listed. The SQL the follow-up needs is below. It is not
+   written as a migration, and it is pending execution:
+   ```sql
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_ck" CHECK ("kind" IN (
+     'hostname', 'sdk_package', 'api_key_prefix', 'web_app',
+     'cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime', 'assistant_config',
+     'env_name', 'cli'));
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_match_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_match_ck" CHECK (
+     ("kind" = 'sdk_package') = ("match_type" = 'package')
+     AND ("kind" = 'api_key_prefix') = ("match_type" = 'key_prefix')
+     AND ("kind" IN ('cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime',
+                     'assistant_config', 'env_name', 'cli')) = ("match_type" = 'identifier')
+   );
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_presence_value_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_presence_value_ck" CHECK (
+     ("kind" <> 'env_name' OR ("value" ~ '^[A-Z][A-Z0-9_]*$' AND char_length("value") <= 128))
+     AND ("kind" <> 'cli' OR "value" ~ '^[a-z0-9][a-z0-9._-]{0,63}$')
+   );
+   ```
+   The statements create no function and no trigger, so the 0185 guard has nothing new to check. `schema.ts` would
+   declare the new value CHECK for parity, as SD0 did.
+7. **Wiring (built in the review fix round of #419).**
+   - **SD1.** `analyseRepo` reads `.env.example`-style templates, Dockerfiles (`Dockerfile`, `Containerfile`,
+     `Dockerfile.*`, `*.dockerfile`) and CI YAML (`.github/workflows/*.yml|yaml`, `.gitlab-ci.yml`,
+     `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `.circleci/config.yml`) with `envNamePresenceInText`, and emits
+     `env_presence` observations that carry a signature id only. The repo scanner sends one observation per file with
+     `presence: [ids]`. It no longer sends env names in `names`; `names` keeps only an MCP server's command basename,
+     and an env-shaped basename is not sent.
+   - **SD3.** `reduceEndpointObservations` runs `matchEnvNames` over a row's env-variable keys and `matchCliNames` over
+     its CLI binaries before the artifact match. A match becomes a sighting whose value is the signature id, sent as
+     `presence`. An env-variable name is never an artifact candidate and never a catalogue-gap sample. A CLI binary
+     the presence catalogue does not know (for example a local runtime) is still matched as an artifact.
+   - **SD0.** `ScanObservation.presence` and `Observation.presence` carry ids, checked against the presence
+     catalogue (an unknown id is refused). `checkObservations` refuses a `names` entry shaped like an env name
+     (`^[A-Z][A-Z0-9_]*$`), and its refusal messages no longer echo the refused text. No SD0 refusal echoes a scanner-supplied value: the
+     evidence-kind, subject-kind, artifact-kind and read-status refusals name the index and the field only (recheck of
+     #419, F1). `classifyObservation` has a
+     presence step: an id counts only when an ENABLED `identifier` row of a backing kind carries the same value
+     (`PRESENCE_BACKING_KINDS`: `assistant_config`/`local_runtime` for env names, `desktop_app`/`local_runtime` for
+     CLI names, the kinds SD3's seed stores them as). Disabling that row turns the detection off. The finding's
+     `matchedValue` is the id, its evidence keeps `presence: [ids]`, and the confidence is the lower of the two rows'.
+     The web view shows the ids as "presence signatures".
+   - **Catalogue validation.** `isPresenceSignature` and `assertPresenceCatalogue` check every row (id pattern and
+     kind prefix, value shape, provider, tool id, confidence, unique ids) once per catalogue. Every matcher refuses a
+     malformed catalogue rather than match against it. The migration follow-up reuses them for admin rows.
+
+   **Still missing (follow-ups):** (a) the kind migration above; (b) adding `env_name` and `cli` to
+   `AI_SIGNATURE_KINDS`, `catalogueSignatureSchema` and `PRESENCE_BACKING_KINDS`, with seed rows from
+   `PRESENCE_SIGNATURES_V1` carrying `tool_id` and `confidence`; (c) SD4's agent rows calling the same matchers.
+   SD4a (merged in #411) already emits `env_name` facts whose `identifier` is the env-variable name
+   (`agents/endpoint/internal/collect/configs.go`). When the SD4b gateway intake is built, it must map each such fact
+   to its presence signature id (`matchEnvNames`) and send it as `presence`; it must never pass the name through
+   `names` (which `checkObservations` refuses) or as an artifact value.
+   Coverage note: the SD1 repo path now detects only the env names in `PRESENCE_SIGNATURES_V1` (the same 13 that
+   SD3's seed carries); an admin-added env name cannot be matched until (b), because the scanner no longer handles
+   names.
+8. **Decision recorded (was an open question).** The master decision answers it: environment-variable names are
+   never stored as evidence, from any scanner. SD0 addition 12 (`ScanObservation.names` into
+   `FindingEvidence.names`) is limited to non-env identifiers (an MCP command basename). Env-name presence is reported
+   only as A6 signature ids. No stored evidence on main depended on env names in `names`: the SD1 env-name
+   observation carried no matchable value, so it never reached a finding. SD3's env-variable findings stored the
+   catalogue's env name as `matchedValue`; they now store the signature id.
+
 ## SD3 build notes (2026-10-17)
 
 - The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
@@ -933,3 +1220,89 @@ would add a dependency to format one fixed string. SD3's matcher is reused for d
 1. Keep the report signature header required (built), or rely on DPoP and TLS alone (SD4a question 1)?
 2. Should an enrolment token's expiry be lengthenable beyond 30 days as an audited relaxation, or stay capped?
 3. Should revoking an enrolment token also revoke the devices it enrolled (today it stops only new enrolment)?
+
+## As built: A4 remediation plan start (2026-10-17, no migration)
+
+Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section records how the remediation plan
+(decision 5a: "the remediation plan works unchanged") was made to start a workflow with the discovery subject kinds.
+
+1. **The plan body is the start body.** `GET /v1/shadow-ai/findings/:id/remediation-plan` returns a
+   `workflowRequest.body` that `startInstanceSchema` (and the strict change descriptor) accepts as it stands; a gateway
+   test posts it to `POST /v1/workflows/instances` unchanged and gets 201. The old `repoPath` shape was already gone
+   (#378); A4 completes it:
+   - the description names the subject and provider, or only the subject kind ("a device (pseudonymised)") when the
+     subject is a pseudonym (`device`, `cloud_principal`, or any `psn:` value), and always ends with the finding
+     reference `shadow-AI finding <id>`;
+   - `paths` are the repo and the repo-relative `location.path` values of its sightings (decision 6), at most 20. A
+     path that climbs (`..`), is absolute, home or drive-rooted (starts with `/`, `\`, `~` or `X:`; it names a
+     person), carries a pseudonym, or that the audit scrubber would change (credential-shaped) is dropped. Non-repo findings have no paths: a device's home-relative config path is not a repo path and is personal;
+   - `targetSystem` is the subject only when it is not pseudonymised.
+2. **Environment, fail closed.** `?environment=` is optional. It must match `^[a-z0-9][a-z0-9_.-]{0,63}$` and be one an
+   admin has already given a meaning to: an environment named on a deploy target or a workflow assignment rule. There
+   is no shipped list, so with none configured every stated value is refused (400 `environment_not_allowed`, with the
+   allowed list). Without it the body keeps `unstated` and `needsInput: ["change.environment"]`. The start route
+   applies the same rule to a `shadow-ai-remediation` change: `unstated` in any case is refused (422
+   `environment_unstated`), and any other value must match the pattern and the allowed list (422
+   `environment_not_allowed`), so a workflow never starts in a placeholder or a made-up environment.
+3. **A strict default workflow ships.** `apps/gateway/src/shadow-ai-remediation.ts` holds the template
+   `shadow-ai-remediation`: intake, the ADR-0079 plan-only stage, a `shadow_ai_remediation_plan` artifact and a
+   sign-off by an admin other than the initiator (point 6). The start route installs it, with a rule on the change
+   type, the first time a remediation starts (the ADR-0080 "minted on first use" pattern, so no migration; race-safe
+   on the unique template name; audited once as `shadow-ai-remediation-default-installed`). The install runs only
+   after that start's own checks pass (environment, project attribution, a second admin exists), so a refused start
+   installs nothing. It is never installed:
+   - over an admin's decision: when any assignment rule already names the change type (checked inside the install
+     transaction), that rule decides alone and the default's stages are never unioned into it;
+   - again once the name exists, active or retired.
+   An admin relaxes it by retiring the template (`POST /v1/workflows/templates/:id/retire`). For this template the
+   retirement also deletes its change-type rule in the same transaction, and the `workflow-template-retired` audit
+   row records it (`ruleId`, `ruleIds`). Starts then answer 422 `no_workflow_matches_change` until the admin assigns
+   their own template, which then runs alone. Deleting the rule while the template stays active only makes starting
+   fail again (stricter, not looser). The plan reports `assignment.defaultTemplate.state` (`not_installed`, `active`,
+   `retired`), and `ruleConfigured` counts only rules whose template is active.
+4. **The unlinked start is server state.** "Live" below means any status except the three terminals that leave the
+   finding unremediated, `denied`, `aborted` and `rolled_back` (one constant, `UNSUCCESSFUL_TERMINAL_STATUSES`, used
+   by the plan, the link route and the screen). `completed` is the successful end: it counts as live and stays
+   linkable. The plan returns `pendingLink`: the newest live `shadow-ai-remediation`
+   instance THE VIEWER started whose description carries the finding reference and that no finding
+   links yet. Another user's instance is never offered (they control its description), nor one that is not live. The screen seeds its
+   "started but not linked" state from it, so after a reload it still offers only "Retry linking this workflow"; the
+   start button and the "link an existing workflow" form stay disabled until the link lands. The screen keeps the
+   finding reference on the description whatever the person types. Browser storage is not used.
+   The link route (`POST /v1/shadow-ai/findings/:id/remediate`) enforces the same on the server:
+   - only the instance's own initiator may link it (403 `not_your_workflow`; the bootstrap token has no user and is
+     refused);
+   - the instance must be a live `shadow-ai-remediation` workflow whose description carries THIS finding's reference
+     (422 `workflow_not_linkable`), and not one already linked to another finding (409 `instance_already_linked`);
+   - a link is set once while it stands. A finding linked to a live workflow is refused (409 `already_linked`).
+   - the one replace path: when the linked workflow ended `denied`, `aborted` or `rolled_back`, it remediates nothing,
+     so a new live workflow may replace it, under every rule above (initiator, change type, reference). The update is
+     conditional on the column still holding that dead instance (or `IS NULL` for a first link), so a concurrent
+     second link cannot overwrite the first. The `shadow-ai-finding-remediation-linked` audit row records
+     `replacedInstanceId` and `replacedInstanceStatus`. A terminal status never changes, so a live link can never be
+     replaced. Without this path a denied plan would dead-end the finding for good (only a database edit could free it).
+     An admin who wants another user's workflow linked asks that user to link it.
+   The plan also returns `currentLink` (`instanceId`, `status`, `replaceable`). The screen keeps start and link
+   disabled while the link stands, and says so; when it is replaceable it offers both and says the replace is audited.
+   The screen's "link an existing workflow" list offers only live remediation workflows carrying the reference.
+5. **Open-source check (ADR-0176).** Nothing new to adopt: validation is zod, queries are drizzle, both already pinned.
+6. **Sign-off by a second person (owner question Q1, decided by the master session under ADR-0180; the owner may
+   overrule).** The engine had no per-template separation of duties for a workflow sign-off: a `requesting_user`
+   approver decides their own gate with a recorded reason (stamped `selfReview`). The default instead names a new
+   approver placeholder, `admin_not_initiator` (`apps/gateway/src/workflow-approvers.ts`), with quorum `any`:
+   - at the stage it resolves to one approval row per active org admin other than the initiator, so one other admin
+     decides it through the existing approvals queue;
+   - the decide path refuses the initiator on such a stage by any route (named approver, delegate or admin override),
+     keyed on the decider: 403 `initiator_cannot_sign_off`;
+   - a start is refused (422 `second_approver_unavailable`) when no other active admin exists, since the stage could
+     never be decided.
+   An admin who wants the initiator to sign off authors their own template (`requesting_user`) through the existing
+   audited template path and retires the default.
+
+**Limits and open points (A4):**
+- The `admin_not_initiator` rows are written when the instance reaches its sign-off, from the admins active then. An
+  admin added later is not added to a sign-off already waiting, and one demoted later can still decide the row they
+  were named on (the existing named-approver rule); the initiator never can.
+- `pendingLink` matches on the description text, but only among the viewer's own instances, so another user's
+  description cannot steer it.
+- The gateway tests for 1 to 4 run against Postgres in CI only (typechecked locally).

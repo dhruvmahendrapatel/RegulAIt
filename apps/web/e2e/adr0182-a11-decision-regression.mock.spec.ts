@@ -271,7 +271,7 @@ test("X14 keyboard: decision regression tabs and retirement dialog preserve focu
   await activate(page, trigger);
   await activate(page, dialog.getByRole("button", { name: "Retire case", exact: true }));
   await expect.poll(() => cap.caseDeletes).toEqual([CASE]);
-  await expect(page.locator('[aria-live="polite"]')).toContainText("Case retired");
+  await expect(page.locator('[aria-live="polite"]').filter({ hasText: "Case retired" })).toContainText("Case retired");
 });
 
 // ADR-0186 A: the write goes through withStepUp — refused, confirmed in the dialog, the SAME PUT resent once

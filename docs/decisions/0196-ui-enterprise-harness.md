@@ -199,3 +199,160 @@ These add to the subsection above; where they differ, this one ships.
 4. **Census gaps closed.** An index route is tested to throw. A splat route (`path="/x/*"`) whose element renders no
    inline `<Routes>` now throws, because its screens would live in a file the census never reads; the top-level
    catch-all and a splat `<Navigate>` redirect are exempt.
+
+### As built: lane U1, accessibility and keyboard fixes
+
+The first fix lane against the bar 1 baselines. Nothing in the harness changed: no constant, gate, tag list or budget.
+Fixes went into the shared kit and the global styles, so each fix covers every screen that uses them.
+
+1. **A dialog hands focus back to a trigger that is busy** (`dialog-focus-not-restored`, all three browsers, settings
+   step-up). A dialog's confirm usually starts work that disables the control which opened it (a page's `busy`), and
+   a disabled control cannot take focus, so `Modal` dropped focus on `<body>`. The step-up dialog, opened by that
+   same work, then recorded `<body>` as its trigger. `Modal` now parks focus on the trigger's `<main>` (the skip-link
+   target, `tabindex="-1"`) and hands it back to the trigger once the trigger is enabled, which it watches with a
+   `MutationObserver` on `disabled`. The hand-back is dropped if focus moves anywhere else first, or after 60 s. A
+   dialog opened while focus is parked returns focus to the original trigger. Checked in Chromium: after Escape on the
+   step-up, focus is on the page's Resume button.
+2. **`<select>`, checkbox, radio and date fields show an outline ring on `:focus`** (`focus-not-visible`, WebKit: 7
+   on approvals, 1 on intake, 4 on the step-up journey; all of them selects plus one non-text input). WebKit does not
+   match `:focus-visible` on these controls when they are reached with Option+Tab. It also drops `box-shadow` on a
+   control drawn with its native appearance: a first fix that only switched them to `:focus` with the box-shadow
+   ring still read `none` in the WebKit run, so that is inferred from the result. `global.css` therefore gives
+   `select:focus` and the non-text input types `outline: 2px solid var(--rg-signal-ring)` with `box-shadow: none`,
+   so Chromium and Firefox do not draw two rings. The kit's `.select` keeps only its border colour on focus, and the
+   three tiles that draw the ring for an inner input (`.providerTile`, `.outcome`, `.choice`) use `:focus`. Text
+   fields keep the box-shadow ring. A mouse-focused select or checkbox now also shows the ring, which is acceptable
+   under WCAG 2.4.7 and 2.4.11.
+3. **axe stays at 0** serious or critical on every screen in both themes. Its baseline was already empty, so U1
+   had nothing there to shrink.
+
+Open-source search (ADR-0176): `focus-trap` and `focus-trap-react` (MIT) manage focus inside a container. Their
+`returnFocusOnDeactivate` focuses the saved element or skips it when it is disabled; neither waits for the element to
+be enabled again. Native `<dialog>` (already used) restores focus to the previously focused element and does the same.
+No package covers "hand back once enabled", so the hand-back is about 40 lines in `kit.tsx`. The `:focus-visible`
+polyfill (W3C/WICG, MIT) changes how `:focus-visible` matches with a class, not which controls it covers, so it would
+not fix the WebKit gap. A plain CSS selector does.
+
+Result: the keyboard baseline went from 15 findings in 5 keys to 0. The counts came from CI runs at a24c234 (Chromium,
+Firefox, WebKit), applied with `ui-enterprise-baseline.mjs --update`, and the `--guard` against main passes. Before:
+`dialog-focus-not-restored` 1 on the settings step-up in each browser, and WebKit `focus-not-visible` 7 on approvals,
+1 on intake and 4 on the step-up. The axe baseline stays empty.
+
+Not in U1: the 29 `states` findings (loading and error announcements) and the design-token ratchet belong to bar 3,
+and responsive belongs to U2.
+
+### As built: U2, responsive and state fixes (lane U2)
+
+What the U2 lane found and changed against the harness. The harness itself (specs, constants, `VIEWPORTS`, gates,
+census) is unchanged.
+
+1. **Responsive (bar 2) was already at zero in all three browsers.** `baselines/responsive.json` was empty on main and
+   the harness's CI run on #410 passed Chromium, Firefox and WebKit against it, so no layout finding at 1280, 1440,
+   1920, 1024 or 768 existed to shrink. A wider probe (not committed) looked for more than sideways page scroll at the
+   five widths in Chromium: any visible element past the viewport edge with no scrolling ancestor, and any
+   `overflow: hidden`/`clip` box whose content is cut off without an ellipsis or line clamp. It found nothing on any of
+   the 113 screens in the census. The kit's `Table` already scrolls inside its own `tableWrap` (`overflow-x: auto`), and the shell's
+   nav becomes a drawer at 960 px and below. **Caveat:** like the harness, the probe saw each screen's error state
+   (every call answers 503). Populated tables, charts and long values are not covered until the feature-baseline
+   fixtures land in `mock-api.ts`; that is where a real responsive defect would most likely show.
+2. **States (bar 3): 29 findings down to 2** (Chromium, the only browser the states spec runs in).
+   - `loading-not-announced` on 17 screens had one cause: the kit's `Table` drew skeleton rows with no busy state.
+     The `<table>` now carries `aria-busy="true"` while `loading`, the same signal `SkeletonBlock` gives with
+     `role="status"`.
+   - A failed read shown as an empty one (the UXJ-01 pattern) on five screens:
+     - `/chat` said "No conversations yet" and "No agents are granted to your account" on a 503. It now shows
+       `ErrorState` for each, and the composer stays disabled while the agent list has failed.
+     - `/admin/custom-providers` said "An empty allow-list is the default-deny posture, not a problem" when the
+       allow-list read failed. Both of its tables now get `error` and `onRetry`.
+     - `/admin/teams` said "No teams yet" (and showed nothing while loading). It now shows a skeleton, then
+       `ErrorState`.
+     - `/admin/prompt-versions` showed an empty agent picker and "Pick an agent" when the agent list failed. It now
+       shows a skeleton, then `ErrorState` above the picker.
+     - `/feedback/:useCaseId`: the use case's name is optional (anyone may report), so a 403 or 404 stays quiet.
+       Any other failure now shows a one-line alert that the report can still be sent, and the lookup is announced
+       while it runs.
+   - `/builder/playground`: the model list now announces its loading and shows an alert when it fails, beside the
+     picker (the shared `ModelPicker` is unchanged).
+   - `/admin/governance/intake`: the similar-use-cases rail's summary is `role="status"` (it was `aria-live`
+     only, which the states check does not read), and a failed registry read is `role="alert"`.
+3. **The 2 that stay** are `error-not-shown` on `/builder/playground` and `/admin/governance/intake`. Both screens do
+   show their alert, about 1.1 s after load: the app's query client retries a 503 once after the default 1 s backoff
+   (`App.tsx`), and on these two screens nothing else is in flight during that second, so Playwright's
+   `networkidle` (500 ms quiet) fires inside the retry gap and the check counts before the retry lands. A run that
+   waited for the alert saw it on both by 1.5 s. Making the check wait for the alert (as the loading check already
+   waits up to `LOADING_MS`) is a harness change, so it is left to the owner; the baseline keeps both at 1.
+
+### As built: U4 performance (route-level code splitting)
+
+Bar 4 says "JS bundle-size ceilings per entry, enforced in CI". U4 shrinks what the entry loads and then lowers the
+ceilings to the new sizes. No ceiling was raised and no harness constant or gate changed.
+
+- **Screens load on demand.** `apps/web/src/App.tsx` declares every screen with `React.lazy`. The router is the
+  repo's own (react-router 7, `createBrowserRouter`), so no dependency was added (ADR-0176). Its default wraps every
+  navigation in a React transition, so the screen being left stays up until the next one has loaded, and focus does
+  not move. The router's own `lazy` route property was not used: the screens are declared as JSX `<Route>`s, and the
+  route census (`scripts/ui-spa-routes.mjs`) reads them there.
+- **One chunk per console section, not per screen.** `apps/web/src/screens/*.ts` re-export the screens of one admin
+  section (the groups in `shell/suites.tsx`) or one workspace area. Each module is the dynamic-import target for its
+  screens, so a section's shared code ships once, and code shared between sections stays in the entry or in a shared
+  chunk. A chunk per screen (174 files) measured 1,144.8 kB on the "all JS" entry, over its 1,020 kB ceiling. Gzip
+  loses its dictionary at each file boundary, and that entry adds up per-file sizes. One chunk per source directory
+  measured 1,000.7 kB, but its governance chunk was 201 kB. The section grouping measures 1,010.1 kB, and its largest
+  screen chunk is 86.7 kB (AI Governance). A single-screen area (home, chat, models, spend, account, the two
+  single-file admin areas) imports its file directly.
+- **Loading fallback.** `apps/web/src/shell/RouteFallback.tsx` renders only on a first load. It sits in the same box as
+  the auth probe's skeleton in `Protected`, so nothing moves when one hands over to the other. It announces "Loading
+  page" through `RouteLoadingAnnouncer`, a polite `aria-live` region that is always mounted beside the router (outside
+  `<main>`) and only changes its text while a fallback is up, because many screen readers say nothing for a region
+  that is inserted together with its text. Its skeleton bars are hidden from assistive technology. It
+  deliberately has no `role="status"` and no `aria-busy`. Those are what the states check reads as the screen
+  announcing its own data loading. A first run with a `role="status"` fallback cleared 21 of the 22 `loading-not-announced`
+  findings that the screens had not fixed, because the fallback was in `<main>` while the chunk loaded. That would
+  have loosened the gate. It takes no focus. Signed-in screens suspend inside `AppShell` (a boundary around `<Outlet />`), so the shell and the
+  skip link stay mounted. The screens outside the shell (sign-in, the public feedback link, the forced gates) suspend
+  to a boundary around the router element.
+- **Failed chunks (review fix).** A chunk that fails to load (a tab opened before a gateway upgrade asks for an old
+  hash and gets a 404; a dropped link) used to replace the app with the router's developer page, stack trace and
+  asset URLs included. `apps/web/src/shell/RouteError.tsx` now shows a `role="alert"` panel instead: "This page
+  failed to load" for a failed import (recognised by the Chromium, Firefox and WebKit messages), "Something went
+  wrong on this page" for a screen that threw. It offers **Reload** and a link home, and never shows the error's
+  message or stack (they go to the console). Reload is the recovery because React caches a lazy screen's rejected
+  import, so re-rendering cannot fetch it again. Signed-in screens get the panel inside the shell
+  (`ShellRouteBoundary`, around the `Suspense` in `Protected`), so the shell and skip link stay mounted; it resets
+  when the path changes rather than remounting, so a later navigation still runs in the transition. The rest get it
+  from the root route's `errorElement` (react-router's `useRouteError`). The in-shell boundary is
+  `react-error-boundary` 6.1.6 (MIT, no dependencies, released 2026-09-20), chosen under ADR-0176 over a
+  hand-written class: its `resetKeys` is exactly the reset-on-navigation rule. It does not reload by itself on vite's
+  `vite:preloadError`: a failed client navigation would then throw away the screen the person is on, with anything
+  typed into it. `e2e/enterprise/route-chunks.ent.spec.ts` aborts the chunk on a direct load, on a client
+  navigation and outside the shell, and holds it to check the fallback; each case failed with the fix removed.
+- **Logos are files, not script.** `vite.config.ts` sets `assetsInlineLimit` so `.svg` files are never inlined. The
+  72 vendored logos (`src/ui/logos/svg`, loaded by `Logo.tsx` with `?url`) had been inlined into a shared chunk as
+  `data:` URIs (43.8 kB gzip of script). They are now hashed files under `/ui/assets`. The gateway already serves
+  `.svg` as `image/svg+xml` with immutable caching, and they stay air-gapped. A screen fetches only the marks it
+  draws.
+- **Heavy libraries.** recharts (`SeriesLineChart`) and @xyflow/dagre (`RunGraphCanvas`) were already lazy, behind
+  their own boundaries. They stay separate chunks, so the two `lazy:` entries keep matching their files. The
+  react-router package exports only its development build. Its production build has the same size, so aliasing it
+  was not worth a resolver override.
+
+Bundle (gzip, size-limit 14.2.0, `pnpm --filter @regulait/web size`), main at 71d0aff and then this branch:
+
+| entry | before | after | ceiling before | ceiling after |
+|---|---|---|---|---|
+| entry JS (index) | 804.1 kB | 133.4 kB | 817 kB | 137.5 kB |
+| entry CSS (index) | 28.6 kB | 10.2 kB | 30 kB | 10.6 kB |
+| lazy: SeriesLineChart | 106.1 kB | 106.1 kB | 110 kB | 109 kB |
+| lazy: RunGraphCanvas | 75.9 kB | 75.9 kB | 79 kB | 78 kB |
+| all JS | 1,001.3 kB | 1,010.1 kB | 1,020 kB | 1,020 kB (unchanged) |
+
+The new ceilings are the measured size plus about 3 %, the margin the harness first set. Entry CSS gets about 4 %
+(10.6 kB), because lane U1 (#423) adds a focus-ring rule of about 0.6 kB raw to `global.css`. "All JS" stays at 1,020 kB:
+it grew by 8.8 kB (the per-file gzip cost of 64 files instead of 7), and 1,020 kB is already within 1 % of it. A
+first visit now downloads the entry plus one section chunk instead of all 804 kB. After the failed-chunk fix (and
+a merge of main), entry JS measures 134.6 kB (2.1 % under 137.5 kB) and all JS 1,012.2 kB (0.8 % under 1,020 kB);
+no ceiling moved.
+
+Performance (`perf.ent.spec.ts`, Chromium, all 113 screens, this container, mocked API): LCP median 1,248 to
+1,180 ms, p90 1,312 to 1,248 ms, highest 1,368 to 1,300 ms; highest INP 16 ms both times. No screen was over a budget
+before or after, so `baselines/perf.json` stays empty: `--update` rewrote it with 0 keys and no diff.

@@ -56,6 +56,15 @@ import {
 } from "./compiled-egress.js";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { redactLogText, safeErrorMessage } from "./gateway-logger.js";
+
+/** N8 S4 — a provider's refusal text embeds the provider's own response body,
+ * which can echo the work-item payload we sent: it is bounded and scrubbed
+ * before it is stored in an audit row or returned */
+const PROVIDER_TEXT_MAX = 300;
+function providerErrorText(err: PmProviderError): string {
+  return redactLogText(err.message).slice(0, PROVIDER_TEXT_MAX);
+}
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -238,7 +247,7 @@ export async function mirrorNodeStatus(
   } catch (err) {
     // §3 "never drift silently": the failure is returned to the caller and
     // the link's lastSyncedAt stays stale — visible, not hidden.
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -350,7 +359,7 @@ export async function mirrorApprovalDecision(
     });
     return { ok: true, action: action.kind };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -548,7 +557,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       } catch (repairErr) {
         if (!(repairErr instanceof PmProviderError)) throw repairErr;
         await db.update(pmLinks).set({ orphanedAt: new Date() }).where(eq(pmLinks.id, link.id));
-        orphaned.push({ nodeId: link.nodeId, externalId: link.externalId, error: repairErr.message });
+        orphaned.push({ nodeId: link.nodeId, externalId: link.externalId, error: providerErrorText(repairErr) });
         await db.insert(auditLog).values({
           userId: req.authCtx.userId,
           objectType: "pm_work_item",
@@ -557,7 +566,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           effect: "allow",
           ruleId: "pm-link-orphaned",
           ruleChain: [],
-          reason: `work item '${link.externalId}' could not be verified or repaired (${repairErr.message}); link marked orphaned`,
+          reason: `work item '${link.externalId}' could not be verified or repaired (${providerErrorText(repairErr)}); link marked orphaned`,
         });
       }
     }
@@ -740,9 +749,9 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           effect: "allow",
           ruleId: "pm-link-orphaned",
           ruleChain: [],
-          reason: `work item '${existing.externalId}' could not be verified or repaired (${repairErr.message}); link marked orphaned`,
+          reason: `work item '${existing.externalId}' could not be verified or repaired (${providerErrorText(repairErr)}); link marked orphaned`,
         });
-        return reply.status(200).send({ ...base, orphaned: true, error: repairErr.message });
+        return reply.status(200).send({ ...base, orphaned: true, error: providerErrorText(repairErr) });
       }
     }
 
@@ -910,8 +919,8 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
               } catch (err) {
                 // the push failed — the drift stays SURFACED, never hidden
                 await auditDrift(
-                  { autoResolveFailed: err instanceof Error ? err.message : String(err) },
-                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${err instanceof Error ? err.message : String(err)}); drift stays surfaced, state machine untouched`,
+                  { autoResolveFailed: safeErrorMessage(err) },
+                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${safeErrorMessage(err)}); drift stays surfaced, state machine untouched`,
                 );
               }
             } else if (conn.driftResolution === "prefer_pm") {
@@ -1172,7 +1181,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
             reason: `decision mirrored as ${pmMirror.action}`,
           });
         } catch (err) {
-          pmMirror = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          pmMirror = { ok: false, error: safeErrorMessage(err) };
         }
       }
     }
@@ -1346,7 +1355,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           const item = await liveProvider.getWorkItem(conn.project, link.externalId);
           return { ...link, live: { state: item.state, fields: item.fields, comments: item.comments } };
         } catch (err) {
-          return { ...link, live: null, liveError: err instanceof Error ? err.message : String(err) };
+          return { ...link, live: null, liveError: safeErrorMessage(err) };
         }
       }),
     );
@@ -1467,7 +1476,7 @@ export async function fileGovernanceAlertTicket(
         return { outcome: "refused" as const, status: 409, error: "external_writes_paused", detail: err.message };
       }
       if (err instanceof PmProviderError) {
-        return { outcome: "refused" as const, status: 502, error: "pm_provider_failed", detail: err.message };
+        return { outcome: "refused" as const, status: 502, error: "pm_provider_failed", detail: providerErrorText(err) };
       }
       throw err;
     }

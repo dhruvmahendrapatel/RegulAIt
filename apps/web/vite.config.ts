@@ -12,6 +12,9 @@ export default defineConfig({
     outDir: "dist",
     sourcemap: false,
     chunkSizeWarningLimit: 900,
+    // ADR-0196 U4: the vendored logos (src/ui/logos/svg) stay files under /ui/assets instead of data: URIs inside
+    // the JS, so a screen fetches only the marks it draws, as cacheable images, and parses no logo bytes as script
+    assetsInlineLimit: (file) => (file.endsWith(".svg") ? false : undefined),
   },
   server: {
     port: 5173,

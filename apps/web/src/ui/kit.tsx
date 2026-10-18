@@ -552,7 +552,8 @@ export function Table<T>(props: {
 
   return (
     <div className={s.tableWrap}>
-      <table className={s.table}>
+      {/* aria-busy while the skeleton rows stand in for data, so the wait is announced like SkeletonBlock's */}
+      <table className={s.table} aria-busy={props.loading || undefined}>
         <thead>
           <tr>
             {props.columns.map((c) => {
@@ -667,6 +668,57 @@ export function Table<T>(props: {
 
 // ---- Modal ----------------------------------------------------------------
 
+/**
+ * A focus hand-back still waiting for its trigger. A dialog's confirm button
+ * usually starts work that disables the control which opened the dialog (a
+ * page's `busy`), and a disabled control cannot take focus: focus would fall
+ * to <body>. Instead it is parked on the trigger's <main> (a skip-link target,
+ * so tabindex -1) and handed back once the trigger is enabled again, unless
+ * the person has moved focus in the meantime. A dialog opened from the parked
+ * spot (the step-up dialog, opened by that same work) hands back to the
+ * original trigger too.
+ */
+let parked: { trigger: HTMLElement; holder: HTMLElement | null; stop: () => void } | null = null;
+
+const focusIsLost = (holder: HTMLElement | null) =>
+  document.activeElement === null || document.activeElement === document.body || document.activeElement === holder;
+
+function returnFocus(trigger: HTMLElement | null) {
+  parked?.stop();
+  if (!trigger?.isConnected || trigger === document.body) return;
+  if (!trigger.matches(":disabled")) {
+    trigger.focus();
+    return;
+  }
+  const holder = trigger.closest<HTMLElement>("main[tabindex]");
+  holder?.focus({ preventScroll: true });
+  const observer = new MutationObserver(() => {
+    if (!trigger.isConnected) return stop();
+    if (trigger.matches(":disabled")) return;
+    const lost = focusIsLost(holder);
+    stop();
+    if (lost) trigger.focus();
+  });
+  const onFocus = (event: FocusEvent) => {
+    if (event.target !== holder) stop();
+  };
+  const timer = window.setTimeout(() => stop(), 60_000);
+  function stop() {
+    observer.disconnect();
+    document.removeEventListener("focusin", onFocus, true);
+    window.clearTimeout(timer);
+    if (parked?.trigger === trigger) parked = null;
+  }
+  // the trigger can be disabled through an ancestor <fieldset disabled>, so watch the subtree, not the trigger alone
+  observer.observe(holder ?? document.body, {
+    attributes: true,
+    attributeFilter: ["disabled"],
+    subtree: true,
+  });
+  document.addEventListener("focusin", onFocus, true);
+  parked = { trigger, holder, stop };
+}
+
 export function Modal(props: {
   open: boolean;
   title: string;
@@ -682,15 +734,17 @@ export function Modal(props: {
     if (!props.open) return;
     const dialog = ref.current;
     if (!dialog) return;
-    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // opened while focus was parked for an earlier dialog's trigger: hand back to that trigger
+    const trigger = parked && focusIsLost(parked.holder) ? parked.trigger : active;
     // Native modality makes the background inert and owns the focus cycle.
     // Open only on a visibility change: editing must not reset focus.
     dialog.showModal();
     return () => {
+      const inside = dialog.contains(document.activeElement);
       dialog.close();
-      if (trigger?.isConnected && (document.activeElement === document.body || dialog.contains(document.activeElement))) {
-        trigger.focus();
-      }
+      const holder = trigger?.closest<HTMLElement>("main[tabindex]") ?? null;
+      if (inside || focusIsLost(holder)) returnFocus(trigger);
     };
   }, [props.open]);
   if (!props.open) return null;

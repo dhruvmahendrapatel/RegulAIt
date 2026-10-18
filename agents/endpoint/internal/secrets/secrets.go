@@ -3,7 +3,7 @@
 // R15 call 2 and §2.3: the patterns come from the gitleaks-derived `dlp.secret.*` set in
 // packages/shared/src/guardrails.ts (CREDENTIAL_MATERIAL_RULES), so there is one list of "what a key looks like".
 // They are compiled here, never delivered in the collection manifest (ADR-0195 decision 5: no regex taken from
-// data). Go's regexp is RE2 (linear time, no lookaround), so the three rules that use lookaround in JavaScript
+// data). Go's regexp is RE2 (linear time, no lookaround), so the rules that use lookaround in JavaScript
 // are rewritten as an RE2 match plus a check in code; testdata/vectors.json runs the same inputs through both
 // engines (this package's test and agents/endpoint/scripts/check-secret-rules.mjs).
 //
@@ -64,6 +64,10 @@ var rules = []rule{
 	// JS: (?![\w-]) after the 39-character key — RE2 consumes the following character or the end instead
 	{id: "dlp.secret.google_api_key", re: regexp.MustCompile(`\bAIza[\w-]{35}(?:[^\w-]|$)`)},
 	{id: "dlp.secret.gitlab_pat", re: regexp.MustCompile(`\bglpat-[\w-]{20,300}(?:\.[0-9a-z]{9})?`)},
+	// JS: (?![A-Za-z0-9_]) after the 34-letter body — as for google_api_key, RE2 consumes the following character or
+	// the end instead. The leading \b is ASCII in both engines, so the same two misses hold: a token glued after
+	// `_` or a letter, and the first of two tokens written back to back (the second is then glued after a letter).
+	{id: "dlp.secret.huggingface_token", re: regexp.MustCompile(`\b(?:hf|api_org)_[A-Za-z]{34}(?:[^A-Za-z0-9_]|$)`)},
 	{id: "dlp.secret.regulait_token", re: regexp.MustCompile(`\brgl(?:v|s|scim)?_[A-Fa-f0-9]{24,}\b`)},
 }
 

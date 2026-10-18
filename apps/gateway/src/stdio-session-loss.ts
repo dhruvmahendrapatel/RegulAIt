@@ -2,9 +2,8 @@
  * ADR-0190 slice I4 (review M3, recheck N2) — a LOST stdio session is the gateway's own refusal, never the
  * upstream's failure.
  *
- * When the gateway loses the executor side of a placed stdio session (the executor ended the offer under a live
- * session, typically because a window or its stdout reached a replica that does not hold the session), the call
- * fails at once. The MCP SDK would otherwise reject every pending request with a generic "Connection closed", which
+ * When the gateway loses the executor side of a placed stdio session (the offer was withdrawn under a live
+ * session, or the holding replica's lease on the session lapsed: `stdio-relay.ts`), the call fails at once. The MCP SDK would otherwise reject every pending request with a generic "Connection closed", which
  * the breaker charges to the upstream. Instead, the session's transport answers each pending request itself.
  *
  * The decision is IN-PROCESS STATE, never something a caller or a server can present: each answer carries a fresh

@@ -36,6 +36,7 @@ import { BlockList, isIP, SocketAddress } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { pinnedFetch } from "./pinned-fetch.js";
 import { timeouts } from "./timeouts.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 // ---------------------------------------------------------------------------
 // types
@@ -488,7 +489,7 @@ export async function checkEgress(
       return {
         ok: false,
         code: "dns_resolution_failed",
-        reason: `could not resolve '${host}': ${err instanceof Error ? err.message : String(err)}`,
+        reason: `could not resolve '${host}': ${safeErrorMessage(err)}`,
         host,
       };
     }
@@ -565,7 +566,7 @@ async function checkPrivateLanAware(
       return {
         ok: false,
         code: "dns_resolution_failed",
-        reason: `could not resolve '${host}': ${err instanceof Error ? err.message : String(err)}`,
+        reason: `could not resolve '${host}': ${safeErrorMessage(err)}`,
         host,
       };
     }

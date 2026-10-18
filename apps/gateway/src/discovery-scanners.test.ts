@@ -26,6 +26,28 @@ describe("ADR-0195 SD0 scanner contract", () => {
     expect(() => checkObservations("endpoint_agent", [{ evidenceKind: "endpoint_agent", subjectKind: "device", subject: "janes-laptop" }], NOW)).toThrow(ObservationRefused);
   });
 
+  it("a refusal names the index and field only, never the scanner-supplied value (review of #419, F1)", () => {
+    const envName = "OPENAI_API_KEY";
+    const message = (f: () => unknown) => {
+      try {
+        f();
+      } catch (e) {
+        expect(e).toBeInstanceOf(ObservationRefused);
+        return (e as Error).message;
+      }
+      throw new Error("expected a refusal");
+    };
+    const device = { evidenceKind: "endpoint_agent" as const, subjectKind: "device" as const, subject: `psn:${"0b".repeat(12)}` };
+    const refusals = [
+      message(() => checkObservations("endpoint_agent", [{ ...device, artifact: { kind: envName as never, value: "x" } }], NOW)),
+      message(() => checkObservations("repo_github", [{ evidenceKind: envName as never, subjectKind: "repo", subject: "r" }], NOW)),
+      message(() => checkObservations("repo_github", [{ evidenceKind: "repo_scan", subjectKind: envName as never, subject: "r" }], NOW)),
+      message(() => checkReadOutcomes([{ read: "x", status: envName as never }], [])),
+    ];
+    expect(refusals[0]).toMatch(/observation 0: artifact\.kind/);
+    for (const m of refusals) expect(m).not.toContain(envName);
+  });
+
   it("bounds subjects and values, and keeps only 8 characters of a key", () => {
     expect(() => checkObservations("repo_github", [{ evidenceKind: "repo_scan", subjectKind: "repo", subject: "" }], NOW)).toThrow(ObservationRefused);
     expect(() => checkObservations("repo_github", [{ evidenceKind: "repo_scan", subjectKind: "repo", subject: "r", packageName: "x".repeat(600) }], NOW)).toThrow(ObservationRefused);
@@ -41,9 +63,9 @@ describe("ADR-0195 SD0 scanner contract", () => {
 
   it("sighting location, names and actor: normalised, bounded, names never values, actor a pseudonym", () => {
     const base = { evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject: "r" };
-    const [o] = checkObservations("repo_github", [{ ...base, location: { path: ".\\src\\a.ts", line: 4, commit: "0123abc" }, names: ["OPENAI_API_KEY"] }], NOW);
+    const [o] = checkObservations("repo_github", [{ ...base, location: { path: ".\\src\\a.ts", line: 4, commit: "0123abc" }, names: ["npx"] }], NOW);
     expect(o!.location).toEqual({ path: "src/a.ts", line: 4, commit: "0123abc" });
-    expect(o!.names).toEqual(["OPENAI_API_KEY"]);
+    expect(o!.names).toEqual(["npx"]);
     expect(() => checkObservations("repo_github", [{ ...base, location: { path: "a/../../etc/passwd" } }], NOW)).toThrow(ObservationRefused);
     expect(() => checkObservations("repo_github", [{ ...base, location: { path: "a", commit: "zz" } }], NOW)).toThrow(ObservationRefused);
     expect(() => checkObservations("repo_github", [{ ...base, names: ["OPENAI_API_KEY=abc123"] }], NOW)).toThrow(ObservationRefused);
@@ -64,7 +86,35 @@ describe("ADR-0195 SD0 scanner contract", () => {
     expect(() => checkObservations("repo_github", [{ ...base, os: 1 as never }], NOW)).toThrow(ObservationRefused);
     expect(() => checkObservations("repo_github", [{ ...base, ecosystem: {} as never }], NOW)).toThrow(ObservationRefused);
     // ordinary names, paths and subjects pass
-    expect(() => checkObservations("repo_github", [{ ...base, names: ["OPENAI_API_KEY"], location: { path: "src/app.ts" }, packageName: "openai" }], NOW, [keyRow])).not.toThrow();
+    expect(() => checkObservations("repo_github", [{ ...base, names: ["uvx"], location: { path: "src/app.ts" }, packageName: "openai" }], NOW, [keyRow])).not.toThrow();
+  });
+
+  it("ADR-0195 lane A6: refuses an env-variable-shaped name; presence travels as known signature ids only", () => {
+    const base = { evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject: "acme/web" };
+    for (const n of ["OPENAI_API_KEY", "HF_TOKEN", "A", "DATABASE_URL"]) {
+      expect(() => checkObservations("repo_github", [{ ...base, names: [n] }], NOW), n).toThrow(/environment-variable name/);
+    }
+    const [o] = checkObservations("repo_github", [{ ...base, presence: ["env.openai.api-key", "env.anthropic.api-key", "env.openai.api-key"] }], NOW);
+    expect(o!.presence).toEqual(["env.anthropic.api-key", "env.openai.api-key"]);
+    expect(o!.names).toBeNull();
+    expect(() => checkObservations("repo_github", [{ ...base, presence: ["env.acme.unknown"] }], NOW)).toThrow(/not a known presence signature id/);
+    expect(() => checkObservations("repo_github", [{ ...base, presence: ["OPENAI_API_KEY"] }], NOW)).toThrow(ObservationRefused);
+    expect(() => checkObservations("repo_github", [{ ...base, presence: Array(51).fill("env.openai.api-key") }], NOW)).toThrow(/at most 50/);
+  });
+
+  it("a refusal never echoes the refused name or ecosystem (review of #419)", () => {
+    const base = { evidenceKind: "repo_scan" as const, subjectKind: "repo" as const, subject: "acme/web" };
+    const value = "sensitive" + "valuepart";
+    for (const bad of [{ names: [`KEY=${value}`] }, { names: [`x ${value}`] }, { ecosystem: `${value} !` }]) {
+      let message = "";
+      try {
+        checkObservations("repo_github", [{ ...base, ...bad }], NOW);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toMatch(/^observation 0: /);
+      expect(message).not.toContain(value.slice(0, 5));
+    }
   });
 
   it("scrubs the run's secret, URL query strings and credential shapes from stored text, and caps it", () => {

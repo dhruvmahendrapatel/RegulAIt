@@ -89,7 +89,7 @@ import {
   resolveRateLimitConfig,
   type RateLimitConfig,
 } from "./rate-limit.js";
-import { requestLogFields } from "./gateway-logger.js";
+import { framesOnly, parserRefusal, parserRefusalLogFields, redactLogText, requestLogFields, safeErrorMessage, safeErrorText, unhandledErrorLogFields } from "./gateway-logger.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -512,6 +512,8 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerContentTrustRoutes } from "./content-trust-routes.js";
+import { registerFederationRoutes } from "./federation-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import { registerEndpointAgentRoutes } from "./endpoint-agent-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -545,7 +547,8 @@ import {
   exportBundleMaxCsvRows,
   resolveExportSigningKey,
 } from "./export-bundle.js";
-import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
+import { MergeConflictError, WorkflowStateError, type WorkflowDefinition } from "@regulait/workflow-kernel";
+import { stageExcludesInitiator } from "./workflow-approvers.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -894,72 +897,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // guarded `/metrics` route when REGULAIT_METRICS_ON_MAIN_LISTENER is set
   registerMetricsHooks(app);
 
-  app.setErrorHandler((err, req, reply) => {
-    if (err instanceof z.ZodError) {
-      return reply.status(400).send({ error: "validation", issues: err.issues });
-    }
-    // Postgres constraint violations surface as DrizzleQueryError wrapping the
-    // pg error; map them to client errors instead of a generic 500.
-    if (err instanceof WorkflowStateError) {
-      return reply.status(409).send({ error: "invalid_workflow_state", detail: err.message });
-    }
-    if (err instanceof RunStateError) {
-      return reply.status(409).send({ error: "invalid_run_state", detail: err.message });
-    }
-    if (err instanceof MergeConflictError) {
-      return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
-    }
-    // ADR-0073: a governance artifact has stored versions but none is active.
-    // A real refusal with the reason stated, never a call that proceeds with the
-    // rule/profile silently absent.
-    if (err instanceof ConfigVersionUnresolvableError) {
-      return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
-    }
-    // ADR-0186 A: an approval-rule write whose pool can never reach its quorum
-    if (err instanceof ApprovalRuleWriteRefusedError) {
-      return reply.status(err.status).send(err.body);
-    }
-    if (err instanceof ExternalEffectBlockedError) {
-      return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
-    }
-    // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be
-    // signed (409 bom_signing_unavailable); its transaction has already rolled back
-    if (err instanceof AiBomError) {
-      return reply.status(err.status).send({ ...(err.extra ?? {}), error: err.code, detail: err.message });
-    }
-    const pgCode = (err as { cause?: { code?: string } }).cause?.code;
-    if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
-    if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
-    // ADR-0167 (SEC-03): Fastify's OWN client-side refusals — a body over the
-    // limit (413), a malformed JSON body (400), an unknown content type (415)
-    // — are FastifyErrors carrying `code: FST_ERR_*` and a 4xx statusCode.
-    // They used to fall through to the 500 below, which reported a client
-    // fault as a server fault, discarded the reason, and made the two import
-    // routes' honest "payloads are bounded at N bytes" messages unreachable.
-    // Scoped to the FST_ERR_ prefix on purpose: a third-party error that
-    // happens to carry a statusCode (an undici or provider error) must not
-    // have its message echoed to the caller by this branch.
-    const fastifyErr = err as { code?: unknown; statusCode?: unknown };
-    if (
-      typeof fastifyErr.code === "string" &&
-      fastifyErr.code.startsWith("FST_ERR_") &&
-      typeof fastifyErr.statusCode === "number" &&
-      fastifyErr.statusCode >= 400 &&
-      fastifyErr.statusCode < 500
-    ) {
-      const detail = err instanceof Error ? err.message : String(err);
-      req.log.warn({ code: fastifyErr.code, status: fastifyErr.statusCode }, detail);
-      return reply.status(fastifyErr.statusCode).send({
-        error: fastifyErr.code.replace(/^FST_ERR_(CTP_)?/, "").toLowerCase(),
-        detail,
-      });
-    }
-    req.log.error({ err, method: req.method, url: req.url }, "unhandled error");
-    // DEBUG_ERRORS=1 additionally prints the stack to stderr even when the
-    // logger is off — documented in docs/deployment/INSTALL.md.
-    if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);
-    return reply.status(500).send({ error: "internal" });
-  });
+  app.setErrorHandler(handleGatewayError);
 
   // ADR-0031 item 5 — security headers on every response. The gateway serves
   // the SPA itself and is directly reachable (the compose port, and every dev
@@ -4255,7 +4193,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           ruleId: "builder-tool-step-resume-failed",
           ruleChain: [],
           reason: `the builder turn waiting on approval ${updated.id} could not resume: ${
-            err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err)
+            safeErrorMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err)
           }`
             .replace(/\s+/g, " ")
             .slice(0, 1000),
@@ -4398,6 +4336,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         pmMirror = await mirrorApprovalDecision(db, opts.dataKey, decided.finalized, deciderUserId);
       }
       return { ok: true as const, body: { ...decided.body, ...(pmMirror ? { pmMirror } : {}) } };
+    }
+    // ADR-0195 A4: a stage owed to an admin OTHER than the initiator (`admin_not_initiator`) is never decided by
+    // the initiator, by any route: as a named approver, a delegate or an admin override. Keyed on the DECIDER.
+    if (row.objectType === "workflow" && row.instanceId) {
+      const [owner] = await db
+        .select({ initiatorUserId: workflowInstances.initiatorUserId, definition: workflowInstances.definition })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, row.instanceId));
+      if (
+        owner &&
+        stageExcludesInitiator(owner.definition as WorkflowDefinition, row.stageId) &&
+        (deciderUserId === owner.initiatorUserId || deciderUserId === row.userId)
+      ) {
+        return fail(403, {
+          error: "initiator_cannot_sign_off",
+          detail: "this sign-off must be decided by an admin other than the person who started the workflow",
+        });
+      }
     }
     // Only the rule's named approver may decide (§3) — with two sanctioned
     // widenings: (a) ADR-0022 delegation — an ACTIVE delegation window from
@@ -4978,7 +4934,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         const w = extra && typeof extra === "object" ? (extra as { executionWarning?: Record<string, unknown> }).executionWarning : undefined;
         if (w) executionWarning = { ...(executionWarning ?? {}), ...w };
       } catch (err) {
-        executionError ??= err instanceof Error ? err.message : String(err);
+        executionError ??= safeErrorMessage(err);
       }
     }
     // ADR-0189 R25 items 5 and 7: the owed AI BOM snapshots, after commit; a failure
@@ -5487,6 +5443,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0193 (I4) P1 — content source trust tiers, the write floor (both step-up, audited) and the P0 provenance
+  // evidence view. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
+  registerContentTrustRoutes(app, db);
+  // ADR-0195 SD2b — the cloud federation issuer: its public OIDC discovery document and RS256 JWKS (the clouds
+  // fetch them), and the admin key lifecycle (off by default; on is a `settings_relax` step-up, rotate and revoke
+  // are `key_management` step-ups). The admin routes are admin-only by default (none is in NON_ADMIN_ROUTES).
+  registerFederationRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0195 SD3 — no-agent endpoint evidence (osquery results, MDM/EDR inventory) imported into an endpoint source,
   // and the endpoint signature seed. Admin-only by default.
   registerEndpointImportRoutes(app, db, {
@@ -5947,4 +5910,73 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   return app;
+}
+
+/**
+ * The gateway's global error handler (registered by `buildApp`). Exported so
+ * `log-leak.test.ts` drives the real mapping offline (N8 F5): what reaches
+ * the caller and what reaches the log for every error shape.
+ */
+export function handleGatewayError(err: unknown, req: FastifyRequest, reply: FastifyReply): FastifyReply {
+  if (err instanceof z.ZodError) {
+    return reply.status(400).send({ error: "validation", issues: err.issues });
+  }
+  // Postgres constraint violations surface as DrizzleQueryError wrapping the
+  // pg error; map them to client errors instead of a generic 500.
+  if (err instanceof WorkflowStateError) {
+    return reply.status(409).send({ error: "invalid_workflow_state", detail: err.message });
+  }
+  if (err instanceof RunStateError) {
+    return reply.status(409).send({ error: "invalid_run_state", detail: err.message });
+  }
+  if (err instanceof MergeConflictError) {
+    return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
+  }
+  // ADR-0073: a governance artifact has stored versions but none is active.
+  // A real refusal with the reason stated, never a call that proceeds with the
+  // rule/profile silently absent.
+  if (err instanceof ConfigVersionUnresolvableError) {
+    return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
+  }
+  // ADR-0186 A: an approval-rule write whose pool can never reach its quorum
+  if (err instanceof ApprovalRuleWriteRefusedError) {
+    return reply.status(err.status).send(err.body);
+  }
+  if (err instanceof ExternalEffectBlockedError) {
+    return reply.status(err.statusCode).send({ error: err.code, detail: err.message });
+  }
+  // ADR-0189 R25 item 6: a sign-off refused because its AI BOM snapshot cannot be
+  // signed (409 bom_signing_unavailable); its transaction has already rolled back
+  if (err instanceof AiBomError) {
+    return reply.status(err.status).send({ ...(err.extra ?? {}), error: err.code, detail: err.message });
+  }
+  const pgCode = (err as { cause?: { code?: string } }).cause?.code;
+  if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
+  if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
+  // ADR-0167 (SEC-03): Fastify's OWN client-side refusals — a body over the
+  // limit (413), a malformed JSON body (400), an unknown content type (415)
+  // — are FastifyErrors carrying `code: FST_ERR_*` and a 4xx statusCode.
+  // They used to fall through to the 500 below, which reported a client
+  // fault as a server fault, discarded the reason, and made the two import
+  // routes' honest "payloads are bounded at N bytes" messages unreachable.
+  // N8 (2026-10-17): neither the line nor the response carries the parser's
+  // message, which can quote the uploaded body — a fixed sentence per code
+  // to the caller, the code, route and status (and pino's reqId) to the log.
+  const refusal = parserRefusal(err);
+  if (refusal) {
+    req.log.warn(parserRefusalLogFields(req, refusal), "request body refused");
+    return reply.status(refusal.status).send(refusal.body);
+  }
+  const fields = unhandledErrorLogFields(req, err);
+  req.log.error(fields, "unhandled error");
+  // DEBUG_ERRORS=1 additionally prints the line and the stack to stderr even
+  // when the logger is off — documented in docs/deployment/INSTALL.md. N8 F1:
+  // the same withheld fields as the log line, never the raw error (a failed
+  // query's bound values, a SyntaxError's quoted body): turning a debug knob
+  // on must not relax what reaches a collector (ADR-0180).
+  if (process.env.DEBUG_ERRORS) {
+    const shown = { ...fields, err: fields.err === undefined ? undefined : safeErrorText(fields.err) };
+    console.error("GATEWAY ERR:", redactLogText(JSON.stringify(shown)), `\n${err instanceof Error ? framesOnly(err) : ""}`);
+  }
+  return reply.status(500).send({ error: "internal" });
 }

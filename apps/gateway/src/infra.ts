@@ -67,6 +67,7 @@ import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects
 import { loadOrgSettings, type SchedulerTickState } from "./org-settings.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { ExternalEffectBlockedError, runExternalWrite } from "./external-effects.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -638,7 +639,7 @@ async function applyInfraActionDecision(
         // finding re-opened for re-proposal) instead of aborting the decide.
         // patch/backup keep the pre-O6 contract: a provider throw propagates.
         if (action !== "cert_rotate") throw err;
-        providerError = err instanceof Error ? err.message : String(err);
+        providerError = safeErrorMessage(err);
       }
     }
     if (action === "cert_rotate" && providerError !== null) {

@@ -73,6 +73,8 @@ export const MACHINE_ONLY = new Map([
   ["GET /.well-known/oauth-protected-resource", "auth plumbing: RFC 9728 protected-resource metadata, fetched by MCP/OAuth clients"],
   ["GET /.well-known/oauth-protected-resource/mcp/:serverId", "auth plumbing: RFC 9728 metadata for one MCP server, fetched by MCP clients"],
   ["GET /.well-known/jwks.json", "auth plumbing: the issuer's public JWKS, fetched by relying parties"],
+  ["GET /federation/.well-known/openid-configuration", "auth plumbing: the cloud federation issuer's OIDC discovery document, fetched by AWS, GCP and Entra"],
+  ["GET /federation/.well-known/jwks.json", "auth plumbing: the cloud federation issuer's RS256 JWKS, fetched by AWS, GCP and Entra"],
   ["POST /oauth/token", "auth plumbing: RFC 6749 token endpoint for workload clients"],
   ["POST /oauth/token/revocation", "auth plumbing: RFC 7009 token revocation for workload clients"],
   ["POST /oauth/token/introspection", "auth plumbing: RFC 7662 token introspection for resource servers"],

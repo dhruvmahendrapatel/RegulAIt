@@ -94,6 +94,7 @@ import { traceFilterConditions } from "./trace-scores.js";
 import { loadTraceTags, registerTraceTagRoutes } from "./trace-tags.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { checkEgress, createGuardedFetch } from "./egress-guard.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 /**
  * The subset of the drizzle client the RECORDER uses, declared structurally so
@@ -842,12 +843,12 @@ export function registerTracingRoutes(app: FastifyInstance, db: Db, opts: { data
         null,
         TRACE_RULE_IDS.exportRefused,
         "deny",
-        `trace export to ${endpoint} failed: ${(e as Error).message}`,
+        `trace export to ${endpoint} failed: ${safeErrorMessage(e)}`,
         { endpoint, traceCount: payload.traceCount },
       );
       return reply.status(502).send({
         error: "otlp_export_failed",
-        detail: `POST to the configured OTLP endpoint failed: ${(e as Error).message}. Nothing was ` +
+        detail: `POST to the configured OTLP endpoint failed: ${safeErrorMessage(e)}. Nothing was ` +
           `spooled and nothing will be retried — re-run the export.`,
       });
     }

@@ -123,7 +123,9 @@ import {
   type StdioSession,
 } from "./executor-stdio.js";
 import { checkStdioClosure } from "./mcp-transports.js";
+import { classifyScannedContent, recordContentProvenance } from "./content-provenance.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
  * (`mcp:resources`, ...), so no upstream TOOL may carry it: a tool so named
@@ -637,7 +639,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
-        await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
       }
       throw err;
     }
@@ -714,7 +716,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       )) as Record<string, unknown>;
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
-        await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
       }
       throw err;
     }
@@ -792,6 +794,20 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
         };
       }
     }
+    // ADR-0193 P0 — what a protocol method returns is upstream content (a resource body, a prompt, a completion, a
+    // listing's names and descriptions), so it is recorded as a tool result is: the label and both digests, under the
+    // method's name, before anything is delivered. A failure to record throws, so nothing unrecorded leaves. These
+    // calls carry no causal context (only the direct proxy reaches them), so the record is not gated on (P1).
+    await recordContentProvenance(db, args.dataKey, {
+      userId,
+      source: { kind: "mcp_tool", serverId, toolName: methodLabel(method) },
+      upstream: result,
+      delivered: released,
+      classification: classifyScannedContent({ scanned: Boolean(piiMode), piiHits: outputHits.length, piiWithheld: false }),
+      decisionAuditId,
+      contextId: null,
+      projectId,
+    });
     return { kind: "allowed", result: released };
   } finally {
     if (upstream) await upstream.close();

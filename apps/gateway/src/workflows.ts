@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { safeErrorMessage, safeErrorText, safeLogObject } from "./gateway-logger.js";
 import type { FastifyInstance } from "fastify";
 // ADR-0187: loaded lazily where used (engine-runs.ts reaches back into this module)
 import type { EngineCheckOutcome } from "./engine-runs.js";
@@ -69,6 +70,17 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import {
+  REMEDIATION_ENVIRONMENT_PATTERN,
+  SHADOW_AI_REMEDIATION_CHANGE_TYPE,
+  SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED,
+  allowedRemediationEnvironments,
+  deleteRulesOfRetiredDefault,
+  ensureShadowAiRemediationDefault,
+  shadowAiRemediationDefaultState,
+  shadowAiRemediationDefinition,
+} from "./shadow-ai-remediation.js";
+import { APPROVER_ADMIN_NOT_INITIATOR, adminsOtherThan, secondApproverMissing } from "./workflow-approvers.js";
 import { networkFacingSignal } from "./dev-secrets.js";
 import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
@@ -338,13 +350,23 @@ async function applyEvent(
 
     for (const effect of effects) {
       if (effect.kind === "request_approval") {
+        // ADR-0195 A4: `admin_not_initiator` is one row per active admin other than the initiator (deduplicated
+        // against any approver the stage also names)
+        const approverIds: string[] = [];
         for (const approver of effect.approvers) {
+          const ids =
+            approver === APPROVER_ADMIN_NOT_INITIATOR
+              ? await adminsOtherThan(tx as unknown as Db, instance.initiatorUserId)
+              : [resolveApprover(approver, instance.initiatorUserId)];
+          for (const id of ids) if (!approverIds.includes(id)) approverIds.push(id);
+        }
+        for (const approverUserId of approverIds) {
           await tx.insert(approvals).values({
             userId: instance.initiatorUserId,
             objectType: "workflow",
             instanceId: instance.id,
             stageId: effect.stageId,
-            approverUserId: resolveApprover(approver, instance.initiatorUserId),
+            approverUserId,
           });
         }
       }
@@ -381,7 +403,7 @@ async function recordDeferredSpan(db: Db, span: DeferredSpan | undefined): Promi
   try {
     await recordWorkflowStageSpan(db, span.instanceId, span.event, span.applied);
   } catch (err) {
-    console.error(`workflow_stage span for ${span.instanceId} not recorded: ${(err as Error).message}`);
+    console.error(`workflow_stage span for ${span.instanceId} not recorded: ${safeErrorText(err)}`);
   }
 }
 
@@ -836,11 +858,12 @@ async function mirrorAfterExecutor(db: Db, instanceId: string, actorUserId: stri
   try {
     const { mirrorInstanceTransition } = await import("./use-cases.js");
     return await mirrorInstanceTransition(db, instanceId, actorUserId, {
-      warn: (obj, msg) => console.warn(msg ?? "", obj),
-      error: (obj, msg) => console.error(msg ?? "", obj),
+      // N8 F1: the object can carry an error; a console write skips pino's redaction
+      warn: (obj, msg) => console.warn(msg ?? "", safeLogObject(obj)),
+      error: (obj, msg) => console.error(msg ?? "", safeLogObject(obj)),
     });
   } catch (err) {
-    console.error(`use-case mirror after the executor of ${instanceId} failed: ${(err as Error).message}`);
+    console.error(`use-case mirror after the executor of ${instanceId} failed: ${safeErrorText(err)}`);
     return undefined;
   }
 }
@@ -1169,7 +1192,7 @@ async function runStageEvalChecks(
         },
       });
     } catch (e) {
-      fail(`eval '${binding.dataset}' errored: ${(e as Error).message}`);
+      fail(`eval '${binding.dataset}' errored: ${safeErrorMessage(e)}`);
     }
   }
   return out;
@@ -1317,7 +1340,7 @@ async function runGitExecutions(
         await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId: stage.id }], actorUserId, dataKey, 1, hooks);
       } catch (err) {
         if (!(err instanceof WorkflowStateError)) {
-          console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${(err as Error).message}`);
+          console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${safeErrorText(err)}`);
         }
       }
     };
@@ -1688,7 +1711,7 @@ async function runGitExecutions(
         }
       } catch (err) {
         executionControlRefused = err instanceof ExternalEffectBlockedError;
-        deployErr = err instanceof Error ? err.message : String(err);
+        deployErr = safeErrorMessage(err);
       }
       releaseStageClaim(context);
       if (deployErr === null) delete context.lastError;
@@ -1790,7 +1813,7 @@ async function runGitExecutions(
               : { ...res, target: target.name };
         }
       } catch (err) {
-        rbErr = err instanceof Error ? err.message : String(err);
+        rbErr = safeErrorMessage(err);
       }
       releaseStageClaim(context);
       if (rbErr === null) delete context.lastError;
@@ -2007,7 +2030,7 @@ ${latestArtifact.content}`
         context.mergeSha = result.sha;
       }
     } catch (err) {
-      executionError = err instanceof Error ? err.message : String(err);
+      executionError = safeErrorMessage(err);
     }
 
     // Release the claim; record outcome. The kernel event application sits
@@ -2521,7 +2544,7 @@ export async function createWorkflowTemplateValidated(
   const definition = validateDefinition(body.definition);
   const named = definition.stages
     .flatMap((st) => st.approvers ?? [])
-    .filter((a) => a !== "requesting_user");
+    .filter((a) => a !== "requesting_user" && a !== APPROVER_ADMIN_NOT_INITIATOR);
   if (named.length > 0) {
     const uuidCheck = z.string().uuid();
     if (named.some((a) => !uuidCheck.safeParse(a).success)) {
@@ -2564,6 +2587,16 @@ export async function createWorkflowTemplateValidated(
     .values({ name: body.name, definition })
     .returning();
   return { ok: true, row: row! };
+}
+
+/** the refusal when a sign-off owed by someone other than the initiator has nobody to go to */
+function secondApproverUnavailable(): Record<string, unknown> {
+  return {
+    error: "second_approver_unavailable",
+    detail:
+      "this workflow's sign-off must be decided by an admin other than the person who starts it, and there is no other " +
+      "active admin: add one, or have an admin assign a different template",
+  };
 }
 
 /**
@@ -2620,6 +2653,12 @@ export async function startWorkflowInstanceWithTemplates(
   // merge in matched order (deterministic: matchTemplates preserves rule order)
   const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
   const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
+
+  // ADR-0195 A4: a sign-off owed by an admin other than the initiator needs one to exist, or the stage could never
+  // be decided: refused before anything is written
+  if (await secondApproverMissing(db, merged, initiatorUserId)) {
+    return { ok: false, status: 422, body: secondApproverUnavailable() };
+  }
 
   // ADR-0187 (PR #203 review [16]): an engine run's model calls are pinned to a
   // project, so a workflow whose checks run engines cannot start without one —
@@ -2865,11 +2904,13 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         .set({ retiredAt: new Date(), retiredReason: body.reason })
         .where(eq(workflowTemplates.id, templateId))
         .returning();
+      const ruleIds = await deleteRulesOfRetiredDefault(tx, tpl);
       await tx.insert(auditLog).values({
         userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
         objectType: "workflow_template",
         objectId: templateId,
-        detail: { phase: "template-retired", name: tpl.name, reason: body.reason },
+        // ADR-0195 A4: retiring the shadow-AI default also deletes its rules (an empty list for any other template)
+        detail: { phase: "template-retired", name: tpl.name, reason: body.reason, ...(ruleIds.length > 0 ? { ruleId: ruleIds[0], ruleIds } : {}) },
         effect: "allow",
         ruleId: "workflow-template-retired",
         ruleChain: [],
@@ -2967,6 +3008,40 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // accepts neither — but rebuild explicitly.
     const change = { ...body.change, initiatorRoles, dataSensitivities };
 
+    // ADR-0195 A4: a shadow-AI remediation never starts in the plan's placeholder environment (fail closed), and
+    // its strict default workflow is installed the first time one is started (an admin relaxes it by retiring it)
+    if (change.changeType === SHADOW_AI_REMEDIATION_CHANGE_TYPE) {
+      const environment = change.environment.trim();
+      if (environment.toLowerCase() === SHADOW_AI_REMEDIATION_ENVIRONMENT_UNSTATED) {
+        return reply.status(422).send({
+          error: "environment_unstated",
+          detail:
+            "the remediation plan's environment is a placeholder: state where the ungoverned usage runs " +
+            "(change.environment) before starting the workflow",
+        });
+      }
+      // the same allow-list the plan route applies: only an environment an admin has already given a meaning to
+      const allowed = await allowedRemediationEnvironments(db);
+      if (!REMEDIATION_ENVIRONMENT_PATTERN.test(environment) || !allowed.includes(environment)) {
+        return reply.status(422).send({
+          error: "environment_not_allowed",
+          allowed,
+          detail: "name one of the environments a deploy target or workflow assignment rule already uses",
+        });
+      }
+      // the install runs only once this start's own checks pass, so a refused start installs nothing
+      if (!body.templateId && (await shadowAiRemediationDefaultState(db)) === "not_installed") {
+        if (body.projectId) {
+          const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
+          if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
+        }
+        if (await secondApproverMissing(db, shadowAiRemediationDefinition(), userId)) {
+          return reply.status(422).send(secondApproverUnavailable());
+        }
+        await ensureShadowAiRemediationDefault(db, userId);
+      }
+    }
+
     let templateIds: string[];
     if (body.templateId) {
       if (!req.authCtx.isAdmin) {
@@ -2989,7 +3064,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
     }
     if (templateIds.length === 0) {
-      // no workflow is ever assigned on an admin's behalf (no shipped default rules): say who can fix it
+      // no workflow is assigned on an admin's behalf (the one shipped default is ADR-0195 A4's shadow-AI remediation
+      // rule, installed above): say who can fix it
       return reply.status(422).send({
         error: "no_workflow_matches_change",
         changeType: change.changeType,

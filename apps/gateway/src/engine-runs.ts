@@ -117,8 +117,10 @@ import { encryptSecret } from "./secrets.js";
 import { engineKeyName, generateVirtualKeyToken } from "./virtual-keys.js";
 import { AGENT_HEADER, COMPAT_MODE, PROJECT_HEADER } from "./compat-core.js";
 import { DelegationRefusedError, revokeDelegationGrant } from "./delegation.js";
+import { databaseNow, databaseWallNow } from "./db-clock.js";
 import { agentScopeItem, ensureIdentityFor, startInProcessChain, usdToMicros } from "./in-process-delegation.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type AgentRow = typeof agents.$inferSelect;
@@ -407,7 +409,6 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
   const checked = await validateEngineRunRequest(db, input, ctx);
   if (!checked.ok) return checked;
   const { manifest, targetAgent, judgeAgent } = checked.prepared;
-  const now = new Date();
   const configHash = engineRunConfigHash(input);
   await engineRunTestHooks.beforeCreateTx?.();
   const created = await db.transaction(async (tx) => {
@@ -421,6 +422,9 @@ export async function createEngineRun(db: Db, input: CreateEngineRunInput, ctx: 
     // are now, and only this decision is acted on
     const [orgRow] = await tx.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID)).for("share");
     const [engine] = await tx.select().from(engines).where(eq(engines.id, input.engineId)).for("share");
+    // N11 fix round N1 (M-075): the self-test age, the run's creation and its queue expiry (compared with SQL
+    // `now()` at lease pick-up) on the database's wall clock, sampled once the locks are held
+    const now = await databaseWallNow(tx);
     if (engine && engineManifestOutdated(engine, manifest)) {
       return { kind: "refused" as const, refusal: { ok: false as const, status: 409, ...engineManifestOutdatedRefusal(manifest.id, engine, manifest) } };
     }
@@ -571,13 +575,15 @@ export async function finishEngineRun(
    * PR #205 review round 11 (sweep): the condition the caller decided on, re-checked on the LOCKED
    * row (a sweep's "the lease expired" or "the queue expired" read without a lock may no longer hold)
    */
-  stillApplies?: (locked: EngineRunRow) => boolean,
+  stillApplies?: (locked: EngineRunRow, now: Date) => boolean,
 ): Promise<EngineRunRow | null> {
-  const now = new Date();
   const out = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
     if (!locked || !from.includes(locked.status)) return null;
-    if (stillApplies && !stillApplies(locked)) return null;
+    // N11 fix round B1 (M-075): the database's wall clock once the row is locked, as the run's
+    // deadline, lease and queue expiry were stamped
+    const now = await databaseWallNow(tx);
+    if (stillApplies && !stillApplies(locked, now)) return null;
     return endLockedRun(tx, locked, given, now);
   });
   if (out && out.workflowInstanceId) await notifyWorkflowOfEngineRun(db, out);
@@ -710,7 +716,7 @@ export async function cancelEngineRunsOfInstance(
     )
     .orderBy(asc(engineRuns.id))
     .for("update");
-  const now = new Date();
+  const now = await databaseWallNow(tx);
   const actor = actorUserId ?? NO_IDENTITY;
   for (const run of live) {
     await tx.update(engineRuns).set({ cancelRequestedAt: now, cancelRequestedByUserId: actorUserId }).where(eq(engineRuns.id, run.id));
@@ -752,7 +758,8 @@ export async function endRunsHeldByRevokedRunnersTx(tx: Tx, engineId: EngineId, 
     )
     .orderBy(asc(engineRuns.id))
     .for("update");
-  const now = new Date();
+  // M-075: the database wall clock, read once the rows are locked (finished_at feeds the SQL-clock retention purge)
+  const now = await databaseWallNow(tx);
   const ended: EngineRunRow[] = [];
   for (const run of held) {
     ended.push(
@@ -782,7 +789,8 @@ export async function endActiveRunsOfEngineTx(tx: Tx, engineId: EngineId, reason
     .where(and(eq(engineRuns.engineId, engineId), inArray(engineRuns.status, ["queued", "awaiting_approval", "leased"])))
     .orderBy(asc(engineRuns.id))
     .for("update");
-  const now = new Date();
+  // M-075: the database wall clock, read once the rows are locked
+  const now = await databaseWallNow(tx);
   const ended: EngineRunRow[] = [];
   for (const run of waiting) {
     ended.push(
@@ -826,7 +834,8 @@ export async function applyEngineRunApprovalDecision(
 ): Promise<((db: Db) => Promise<void>) | null> {
   const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.approvalId, approval.id)).for("update");
   if (!run || run.status !== "awaiting_approval") return null;
-  const now = new Date();
+  // N11 fix round N1 (M-075): the queue expiry is compared with SQL `now()` at lease pick-up
+  const now = await databaseWallNow(tx);
   if (decision === "approved") {
     await tx
       .update(engineRuns)
@@ -874,6 +883,10 @@ export const engineRunTestHooks: {
   beforeWorkflowNotify?: (runId: string) => void;
   /** runs after the lease route's pre-checks, before its transaction (PR #203 review round 2 [17]) */
   beforeLeaseTx?: (runnerId: string) => Promise<void> | void;
+  /** N11 fix round: runs once the lease request is authenticated, before its fast path */
+  beforeLeaseAdmission?: (runnerId: string) => Promise<void> | void;
+  /** N11 fix round: runs once the heartbeat request is authenticated, before its transaction */
+  beforeHeartbeatTx?: (runId: string) => Promise<void> | void;
   /** runs after the self-test route's pre-checks, before its transaction (PR #205 review round 4 [65]) */
   beforeSelfTestTx?: (runnerId: string) => Promise<void> | void;
   /** runs just before a due schedule creates its run (PR #203 review round 2 [23]) */
@@ -1037,18 +1050,19 @@ export async function stageEngineCheckOutcomes(
 // Sweeps (the runner is never trusted to stop itself)
 // ---------------------------------------------------------------------------
 
-export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?: string | null } = {}) {
-  const now = opts.now ?? new Date();
+export async function runEngineRunSweep(db: Db, opts: { actorUserId?: string | null } = {}) {
+  // N11 fix round B1 (M-075): every expiry is judged on the database clock the rows were stamped by, never
+  // the scheduler's process clock: SQL `now()` in the reads, the wall clock under the row lock in the re-checks
   const actor = opts.actorUserId ?? NO_IDENTITY;
   const out = { timedOut: 0, leaseExpired: 0, queueExpired: 0, rawReportsPurged: 0, workflowsNotified: 0 };
   const overdue = await db
-    .select({ id: engineRuns.id, deadlineAt: engineRuns.deadlineAt, leaseExpiresAt: engineRuns.leaseExpiresAt })
+    .select({ id: engineRuns.id, deadlinePassed: sql<boolean>`coalesce(${engineRuns.deadlineAt} < now(), false)` })
     .from(engineRuns)
-    .where(and(eq(engineRuns.status, "leased"), or(lt(engineRuns.deadlineAt, now), lt(engineRuns.leaseExpiresAt, now))))
+    .where(and(eq(engineRuns.status, "leased"), or(lt(engineRuns.deadlineAt, sql`now()`), lt(engineRuns.leaseExpiresAt, sql`now()`))))
     .limit(500);
   for (const r of overdue) {
     await engineRunTestHooks.beforeSweepEnd?.(r.id);
-    const deadline = r.deadlineAt !== null && r.deadlineAt < now;
+    const deadline = r.deadlinePassed === true;
     // round 11 (sweep): still overdue on the locked row (a heartbeat may have renewed the lease since)
     const done = await finishEngineRun(
       db,
@@ -1061,7 +1075,7 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
         cause: deadline ? "deadline_passed" : "lease_expired",
         actorUserId: actor,
       },
-      (locked) =>
+      (locked, now) =>
         (deadline && locked.deadlineAt !== null && locked.deadlineAt < now) || (!deadline && locked.leaseExpiresAt !== null && locked.leaseExpiresAt < now),
     );
     if (done) {
@@ -1072,7 +1086,7 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
   const stale = await db
     .select({ id: engineRuns.id })
     .from(engineRuns)
-    .where(and(eq(engineRuns.status, "queued"), lt(engineRuns.queueExpiresAt, now)))
+    .where(and(eq(engineRuns.status, "queued"), lt(engineRuns.queueExpiresAt, sql`now()`)))
     .limit(500);
   for (const r of stale) {
     const done = await finishEngineRun(
@@ -1086,7 +1100,7 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
         cause: "no_runner",
         actorUserId: actor,
       },
-      (locked) => locked.queueExpiresAt !== null && locked.queueExpiresAt < now,
+      (locked, now) => locked.queueExpiresAt !== null && locked.queueExpiresAt < now,
     );
     if (done) out.queueExpired += 1;
   }
@@ -1129,8 +1143,8 @@ export async function runEngineRunSweep(db: Db, opts: { now?: Date; actorUserId?
       and(
         isNotNull(engineRuns.rawReportCiphertext),
         or(
-          lt(engineRuns.rawReportExpiresAt, now),
-          sql`COALESCE(${engineRuns.finishedAt}, ${engineRuns.createdAt}) + make_interval(days => ${org.engineRawReportRetentionDays}) < ${now.toISOString()}::timestamptz`,
+          lt(engineRuns.rawReportExpiresAt, sql`now()`),
+          sql`COALESCE(${engineRuns.finishedAt}, ${engineRuns.createdAt}) + make_interval(days => ${org.engineRawReportRetentionDays}) < now()`,
         ),
       ),
     )
@@ -1184,7 +1198,7 @@ export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) 
         if (created.ok) runId = created.run.id;
         else skip = `${created.error}${created.detail ? `: ${created.detail}` : ""}`;
       } catch (err) {
-        skip = `the run could not be created: ${err instanceof Error ? err.message : String(err)}`;
+        skip = `the run could not be created: ${safeErrorMessage(err)}`;
       }
     }
     // round 11 (sweep): the schedule's outcome and its skip audit commit together
@@ -1219,7 +1233,7 @@ export function engineJobDefinitions(): SchedulerJobDefinition[] {
       adr: "ADR-0187",
       defaultIntervalSeconds: 60,
       run: async (ctx) => {
-        const out = await runEngineRunSweep(ctx.db, { now: ctx.now, actorUserId: ctx.actorUserId });
+        const out = await runEngineRunSweep(ctx.db, { actorUserId: ctx.actorUserId });
         return { itemsProcessed: out.timedOut + out.leaseExpired + out.queueExpired, detail: { ...out } };
       },
     },
@@ -1518,7 +1532,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     const out = await db.transaction(async (tx) => {
       const [locked] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
       if (!locked || !["awaiting_approval", "queued", "leased"].includes(locked.status)) return { kind: "finished" as const, status: locked?.status ?? "unknown" };
-      const now = new Date();
+      // M-075: the database wall clock, read under the row lock
+      const now = await databaseWallNow(tx);
       await tx
         .update(engineRuns)
         .set({ cancelRequestedAt: locked.cancelRequestedAt ?? now, cancelRequestedByUserId: locked.cancelRequestedByUserId ?? req.authCtx.userId })
@@ -1620,6 +1635,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
   app.post("/v1/engine-runner/lease", async (req, reply) => {
     const runnerId = req.authCtx.engineRunnerId!;
     const engineId = req.authCtx.engineId as EngineId;
+    await engineRunTestHooks.beforeLeaseAdmission?.(runnerId);
     // round 5 [67]: the runner says which build it is running now
     const build = engineRunnerLeaseSchema.parse(req.body);
     await syncEngineManifest(db, manifest);
@@ -1627,7 +1643,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     if (!runner) return reply.status(401).send({ error: "engine_runner_token_required", next: "revoked" satisfies EngineRunnerNext });
     const [engine] = await db.select().from(engines).where(eq(engines.id, engineId));
     const m = manifest[engineId];
-    const now = new Date();
+    // N11 (M-075): the fast path judges self-test freshness by the database clock, the clock the runner's and the
+    // engine's self-test rows are stamped by (engines.ts)
+    const now = await databaseNow(db);
     // the order and meaning of each refusal: `leaseAdmission` (ADR-0187 decisions 67, 69 and 71)
     // ADR-0190 I5 (recheck L4): the executor attestation the worker switches may rest on, read ONCE per poll, named
     // on every refusal (attested and why) and recorded whole on the lease's audit row
@@ -1661,6 +1679,9 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       const [live] = await tx.select().from(engineRunners).where(eq(engineRunners.id, runnerId)).for("update");
       if (!live || live.revokedAt !== null) return { kind: "revoked" as const };
       const [lockedEngine] = await tx.select().from(engines).where(eq(engines.id, engineId)).for("share");
+      // N11 (M-075): every admission, deadline and lease stamp in this transaction is the database's wall clock,
+      // sampled once the runner and engine locks are held (a wait on a lock must not leave `now()` behind)
+      const now = await databaseWallNow(tx);
       const workerAttested = workerBasis.attested;
       // PR #205 review round 13 [94]: an IDEMPOTENT lease. A retry of an attempt whose response was
       // lost (a timeout, a dropped connection) presents the same request id; the run that attempt
@@ -1680,7 +1701,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           .where(and(eq(engineRuns.runnerId, runnerId), eq(engineRuns.leaseRequestId, build.requestId)))
           .for("update");
         if (prior) {
-          const at = new Date();
+          const at = now;
           // the run already ended (cancelled, disabled, timed out): nothing to re-issue. The runner is told
           // why, if the lease would be refused now, else there is no work (its next attempt is a new one)
           if (prior.status !== "leased") {
@@ -1717,7 +1738,7 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           return { kind: "leased" as const, ...(await reissueLeaseTx(tx, prior, engineId, m, runnerId, at)) };
         }
       }
-      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, new Date(), workerAttested);
+      const refusalNow = leaseAdmission(live, lockedEngine ?? null, build, m, now, workerAttested);
       if (refusalNow) return { kind: "not_admitted" as const, refusal: refusalNow };
       const engine = lockedEngine!;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`engine-lease:${engineId}`}))`);
@@ -1914,10 +1935,13 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
     // PR #203 review round 2 [20]: decided under the run's row lock — a lease
     // that has expired (or a deadline that has passed) is never renewed; the
     // run ends as a timeout, its key is revoked, and the runner is told 409
-    const now = new Date();
+    await engineRunTestHooks.beforeHeartbeatTx?.(runId);
     const beat = await db.transaction(async (tx) => {
       const [run] = await tx.select().from(engineRuns).where(eq(engineRuns.id, runId)).for("update");
       if (!run || run.runnerId !== runnerId) return { kind: "not_leased" as const };
+      // N11 fix round B1 (M-075): the lease and deadline were stamped on the database clock, so they are
+      // judged and renewed on it, sampled once the run row is locked
+      const now = await databaseWallNow(tx);
       // an ended run (cancelled, timed out) tells its runner to stop
       if (run.status !== "leased") return { kind: "ended" as const, status: run.status };
       const deadlinePassed = run.deadlineAt !== null && run.deadlineAt.getTime() <= now.getTime();
