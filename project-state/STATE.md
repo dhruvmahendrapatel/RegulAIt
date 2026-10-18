@@ -21,6 +21,12 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-10-18 (late morning) - demo plan for 2026-11-01 (ADR-0197).** The owner answered questions 1-15 and chose
+real-account Shadow AI discovery: GitLab, a new AWS sandbox account and Azure, all through keyless federation, with
+the demo on the hosted dev instance. A seeded discovery dataset is the fallback. Code freeze is 2026-10-29, and the
+story opens with Shadow AI. All open PRs except #385 are merged, and main is at migration 0207. P0, P1 and P2 lanes
+start in parallel; see ADR-0197 for the work plan and the owner actions.
+
 **2026-10-18 (night) - ADR-0195 SD2b, SD4a, A4 and A6, ADR-0193 I4 (content provenance P0 and trust tiers P1),
 ADR-0196 U1/U2/U4, the N2/N4/N8/N11/N12/N13 tail and engine image digests are merged.** Full record:
 [sessions/2026-10-18-session-01.md](sessions/2026-10-18-session-01.md). This paragraph supersedes the "Last
