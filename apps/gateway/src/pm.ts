@@ -62,8 +62,8 @@ import { redactLogText } from "./gateway-logger.js";
 /** N8 S4 — a provider's refusal text embeds the provider's own response body,
  * which can echo the work-item payload we sent: it is bounded and scrubbed
  * before it is stored in an audit row or returned */
-const PROVIDER_TEXT_MAX = 300;
-function providerErrorText(err: PmProviderError): string {
+export const PROVIDER_TEXT_MAX = 300;
+export function providerErrorText(err: PmProviderError): string {
   return redactLogText(err.message).slice(0, PROVIDER_TEXT_MAX);
 }
 

@@ -56,7 +56,9 @@
  * `key_management` (migration 0203): every signing-key operation, bound to
  * `{op, keyId}` naming the exact act and key: `receipt_key_retire`
  * (decision-receipts.ts), `signing_key_rotate` (the key rotated TO, resolved
- * before the step-up) and `signing_key_revoke` (identity-routes.ts). A grant
+ * before the step-up), `signing_key_revoke` (identity-routes.ts), and
+ * `federation_key_rotate` (the key rotated TO) and `federation_key_revoke`
+ * (federation-signing-keys.ts, ADR-0195 SD2b). A grant
  * of another kind is never valid for one, nor a key_management grant for
  * another op or key; neither is spent.
  *
@@ -70,7 +72,9 @@
  * private ranges), `egress_allow_host` (adding an allow entry, `values.added`,
  * or turning an entry's private-range or plaintext opt-in on; ADR-0034 owner
  * amendment 2026-10-16), `agent_expected_served_model` and
- * `agent_create_expected_served_model` (relaxing the served-model drift check).
+ * `agent_create_expected_served_model` (relaxing the served-model drift check),
+ * and `federation_enable` (turning workload-identity federation on with the
+ * named key; federation-signing-keys.ts, ADR-0195 SD2b).
  *
  * METHODS: `passkey` (an enrolled, unrevoked passkey and a configured
  * relying party), `totp` (an enrolled authenticator; replay-protected by the

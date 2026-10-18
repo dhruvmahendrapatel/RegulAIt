@@ -21,7 +21,7 @@
  */
 import http from "node:http";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -29,11 +29,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   and,
   auditLog,
+  contentDigestKeys,
   contentProvenanceRecords,
   contentTrustSettings,
   contentTrustTiers,
   createDb,
   eq,
+  inArray,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
@@ -48,6 +50,7 @@ import { executeGovernedConnectorCall } from "./connector-call.js";
 import { contentDigestKey } from "./content-provenance.js";
 import { executeGovernedProtocolCall } from "./mcp-protocol.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
+import { dataKeyFingerprint, FINGERPRINT_PREFIX } from "./secrets.js";
 import { removeEgressAllowEntry } from "./testing/egress-allow-cleanup.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -293,6 +296,32 @@ describe("ADR-0193 migration 0206", () => {
       }),
     );
     expect(plain).toMatch(/content_provenance_records_digest_check/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("ADR-0193 the content digest key (review R1 on PR #428)", () => {
+  it("concurrent first uses of a data key create exactly one key row, inside a caller's transaction or not", async () => {
+    // a data key no other test uses, so this test's marker has no row yet and every call below is a first use
+    const dataKey = randomBytes(32).toString("hex");
+    const marker = dataKeyFingerprint(dataKey).slice(FINGERPRINT_PREFIX.length);
+    const ofMarker = sql`split_part(${contentDigestKeys.keyCiphertext}, '.', 4) = ${marker}`;
+    expect(await db.select().from(contentDigestKeys).where(ofMarker)).toHaveLength(0);
+    try {
+      // half run inside a transaction of their own, as the connector path's evidence write does
+      const keys = await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          i % 2 === 0 ? contentDigestKey(db, dataKey) : db.transaction((tx) => contentDigestKey(tx as unknown as Db, dataKey)),
+        ),
+      );
+      const rows = await db.select().from(contentDigestKeys).where(ofMarker);
+      expect(rows).toHaveLength(1);
+      expect(new Set(keys.map((k) => k!.id))).toEqual(new Set([rows[0]!.id]));
+      expect(new Set(keys.map((k) => k!.bytes.toString("hex"))).size).toBe(1);
+    } finally {
+      const ids = (await db.select({ id: contentDigestKeys.id }).from(contentDigestKeys).where(ofMarker)).map((r) => r.id);
+      if (ids.length) await db.delete(contentDigestKeys).where(inArray(contentDigestKeys.id, ids));
+    }
   });
 });
 

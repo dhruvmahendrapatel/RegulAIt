@@ -11,13 +11,14 @@
  * the rule: in every non-CLI gateway module,
  *  - the generic forms `x instanceof Error ? x.message : …` (or
  *    `` `${x.name}: ${x.message}` ``) and `(x as Error).message` /
- *    `(x as Error)?.message` / `(x as { message?: … })?.message` are refused anywhere: an error of unknown shape goes
+ *    `(x as Error)?.message` / `(x as { message?: … })?.message` / `(x as any).message` /
+ *    `(x as Error & { … }).message` and `String(err)` are refused anywhere: an error of unknown shape goes
  *    through the serializer (err-serializer.ts, Q10): `{ err }` to pino, `errMessage` for a stored copy or a
  *    refusal, `errLine` for a line written outside pino;
  *  - `err.stack ?? err.message` is refused (a stack's first line is the message);
- *  - inside a `console.*(…)`, `log(…)` or `*.log.<level>(…)` call, an error's
- *    `.message` / `.stack`, `String(err)`, `${err}` and a raw error argument
- *    are refused;
+ *  - inside a `console.*(…)`, `process.std{err,out}.write(…)`, `log(…)` or
+ *    `*.log.<level>(…)` call, an error's `.message` / `.stack`, `${err}` and a
+ *    raw error argument are refused;
  *  - inside a log call, an error under any key but `err` / `error` (`{ e }`, `{ reason: err }`) is refused:
  *    the serializer is configured for those two keys only, and pino writes an unserialized error's enumerable
  *    fields (drizzle's `params`) as they are;
@@ -75,15 +76,19 @@ const ANYWHERE: ReadonlyArray<readonly [string, RegExp]> = [
   // the true branch of the ternary, up to its end: catches `x.message` and the
   // template `${x.name}: ${x.message}` alike (S2)
   ["generic instanceof message", new RegExp(String.raw`\b(\w+)\s+instanceof\s+Error\s*\?[^;\n]{0,200}?\b\1\.(?:message|stack)\b`)],
-  // `(e as Error).message`, `(e as Error)?.message`, `(e as { message?: string } | null)?.message` (S1)
-  ["cast message", new RegExp(String.raw`\(\s*\w+\s+as\s+(?:Error|\{[^}]*\})(?:\s*\|\s*(?:null|undefined))*\s*\)\s*\??\.(?:message|stack)\b`)],
+  // `(e as Error).message`, `(e as Error)?.message`, `(e as { message?: string } | null)?.message` (S1),
+  // `(e as any).message`, `(e as Error & { code?: string }).message` (#413 recheck L1)
+  ["cast message", new RegExp(String.raw`\(\s*\w+\s+as\s+(?:Error(?:\s*&\s*\{[^}]*\})?|any|\{[^}]*\})(?:\s*\|\s*(?:null|undefined))*\s*\)\s*\??\.(?:message|stack)\b`)],
   ["stack-or-message", new RegExp(String.raw`\.stack\s*\?\?\s*\w+\.message\b`)],
   ["raw message assignment", new RegExp(String.raw`\b(?:const|let|var)\s+\w+\s*=\s*${ERR}\.message\b`)],
+  // `Error.prototype.toString` is `name: message`, so `String(err)` stored in a field (`error: String(e).slice(…)`)
+  // is the raw message too; in a log call it is the same leak (#413 recheck L1). `new Error(String(e))` only wraps a
+  // non-Error throw into an Error value and is judged where that value is used
+  ["String(err)", new RegExp(String.raw`(?<!\bnew Error\()\bString\(\s*${ERR}\s*\)`)],
 ];
 
 const IN_LOG_CALL: ReadonlyArray<readonly [string, RegExp]> = [
   ["error message in a log call", new RegExp(String.raw`\b${ERR}\.(?:message|stack)\b`)],
-  ["String(err) in a log call", new RegExp(String.raw`\bString\(\s*${ERR}\s*\)`)],
   ["${err} in a log call", new RegExp(String.raw`\$\{\s*${ERR}\s*\}`)],
   ["raw error argument", new RegExp(String.raw`,\s*${ERR}\s*\)$`)],
   // Q10: the serializer covers `err` and `error` only
@@ -93,7 +98,7 @@ const IN_LOG_CALL: ReadonlyArray<readonly [string, RegExp]> = [
   ],
 ];
 
-const LOG_CALL = /(?:\bconsole\.(?:log|info|warn|error|debug|trace)|(?<![\w.$])log|\.log\.(?:warn|error|info|debug|fatal|trace))\s*\(/g;
+const LOG_CALL = /(?:\bconsole\.(?:log|info|warn|error|debug|trace)|\bprocess\.std(?:err|out)\.write|(?<![\w.$])log|\.log\.(?:warn|error|info|debug|fatal|trace))\s*\(/g;
 
 /** the text of each log call, from its name to its balanced closing paren */
 function logCalls(code: string): Array<{ text: string; at: number }> {
@@ -156,17 +161,23 @@ describe("no raw error text in a gateway log line or stored copy (ADR-0167 N8 R1
   });
 
   it("negative controls: each form is caught, and the safe forms are not", () => {
-    expect(violations("const m = err instanceof Error ? err.message : String(err);")).toEqual(["generic instanceof message @ 1"]);
+    expect(violations("const m = err instanceof Error ? err.message : String(err);")).toEqual(["generic instanceof message @ 1", "String(err) @ 1"]);
     expect(violations("x = (e as Error).message;")).toEqual(["cast message @ 1"]);
     expect(violations("x = (e as Error)?.message;")).toEqual(["cast message @ 1"]);
     expect(violations("x = (e as { message?: string })?.message;")).toEqual(["cast message @ 1"]);
     expect(violations("x = (e as { message?: unknown } | null)?.message;")).toEqual(["cast message @ 1"]);
-    expect(violations("const m = err instanceof Error ? `${err.name}: ${err.message}` : String(err);")).toEqual(["generic instanceof message @ 1"]);
-    expect(violations("const m = (err instanceof Error ? `${err.name}: ${err.message}` : String(err)).slice(0, 2000);")).toEqual(["generic instanceof message @ 1"]);
+    expect(violations("const m = err instanceof Error ? `${err.name}: ${err.message}` : String(err);")).toEqual(["generic instanceof message @ 1", "String(err) @ 1"]);
+    expect(violations("const m = (err instanceof Error ? `${err.name}: ${err.message}` : String(err)).slice(0, 2000);")).toEqual(["generic instanceof message @ 1", "String(err) @ 1"]);
     expect(violations("log(`boom: ${err.stack ?? err.message}`);")).toEqual(["stack-or-message @ 1", "error message in a log call @ 1"]);
     expect(violations("const message = err.message;")).toEqual(["raw message assignment @ 1"]);
     expect(violations("log(`sweep skipped — ${err.message}`);")).toEqual(["error message in a log call @ 1"]);
-    expect(violations("console.error(\n  `failed: ${String(err)}`,\n);")).toEqual(["String(err) in a log call @ 1"]);
+    expect(violations("console.error(\n  `failed: ${String(err)}`,\n);")).toEqual(["String(err) @ 2"]);
+    // #413 recheck L1: a stored field, the `any` and intersection casts, and a raw stream write
+    expect(violations("await db.update(jobs).set({ error: String(e).slice(0, 500) });")).toEqual(["String(err) @ 1"]);
+    expect(violations("x = (err as any).message;")).toEqual(["cast message @ 1"]);
+    expect(violations("x = (err as Error & { code?: string }).message;")).toEqual(["cast message @ 1"]);
+    expect(violations("process.stderr.write(`boot failed: ${err.message}\\n`);")).toEqual(["error message in a log call @ 1"]);
+    expect(violations("process.stdout.write(`x ${err}`);")).toEqual(["${err} in a log call @ 1"]);
     expect(violations("console.warn(`failed: ${e}`);")).toEqual(["${err} in a log call @ 1"]);
     expect(violations('console.error("failed", err)')).toEqual(["raw error argument @ 1"]);
     expect(violations("app.log.error(`x ${auditErr.message}`);")).toEqual(["error message in a log call @ 1"]);
@@ -182,5 +193,9 @@ describe("no raw error text in a gateway log line or stored copy (ADR-0167 N8 R1
     expect(violations("log(`             ${dataKey.message}`);")).toEqual([]);
     expect(violations("// log-safe: our own refusal text\nconst m = err.message;")).toEqual([]);
     expect(violations("// a comment quoting err.message is not a use\nconst a = 1;")).toEqual([]);
+    expect(violations("throw new Error(String(reason));")).toEqual([]);
+    expect(violations("return e instanceof Error ? e : new Error(String(e));")).toEqual([]);
+    expect(violations("x = (err as Error & { code?: string }).code;")).toEqual([]);
+    expect(violations("process.stderr.write(`boot failed: ${safeErrorText(err)}\\n`);")).toEqual([]);
   });
 });
