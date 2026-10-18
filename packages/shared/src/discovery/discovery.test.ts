@@ -5,6 +5,7 @@ import {
   DISCOVERY_KIND_SPECS,
   DISCOVERY_SOURCE_KINDS,
   publicConfigProblem,
+  defaultCredentialMode,
   scopeWidens,
 } from "./index.js";
 import {
@@ -75,8 +76,16 @@ describe("credential public config: an allowlist per kind and mode (review of #4
     for (const k of ["externalId", "ExternalId", "external_id", "EXTERNALID"]) {
       expect(publicConfigProblem("cloud_aws", "federated", { roleArn: "arn:aws:iam::000000000000:role/r", [k]: "x" })).not.toBeNull();
     }
-    expect(publicConfigProblem("repo_gitlab", "federated", { audience: "https://a.example.test/?token=x" })).toMatch(/not a valid/);
-    expect(publicConfigProblem("repo_gitlab", "federated", { audience: "http://a.example.test/" })).toMatch(/not a valid/);
+    // ADR-0195 A5: GitLab and Bitbucket take no external OIDC token, so a federated credential is refused outright
+    expect(publicConfigProblem("repo_gitlab", "federated", { audience: "https://a.example.test/" })).toMatch(/accepts no external OIDC token/);
+    expect(publicConfigProblem("repo_bitbucket", "federated", {})).toMatch(/accepts no external OIDC token/);
+    expect(publicConfigProblem("repo_azure_devops", "federated", { tenantId: "00000000-0000-4000-8000-000000000001", clientId: "00000000-0000-4000-8000-000000000002" })).toBeNull();
+    expect(publicConfigProblem("repo_github", "federated", { appId: "12345", installationId: "67890" })).toBeNull();
+    expect(defaultCredentialMode("repo_gitlab")).toBe("static");
+    expect(defaultCredentialMode("repo_bitbucket")).toBe("static");
+    expect(defaultCredentialMode("repo_github")).toBe("federated");
+    expect(defaultCredentialMode("repo_azure_devops")).toBe("federated");
+    expect(defaultCredentialMode("cloud_aws")).toBe("federated");
     for (const k of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
       expect(publicConfigProblem("repo_gitlab", "static", JSON.parse(`{"${k}": "x"}`) as Record<string, string>)).toMatch(/not a public config field/);
     }

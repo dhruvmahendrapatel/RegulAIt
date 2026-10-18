@@ -1,5 +1,6 @@
 // GitHub (and GitHub Enterprise Server) read-only reader, REST v3.
 
+import { GitProviderError } from "../types.js";
 import {
   assertCommitSha,
   base64EnvelopeCap,
@@ -74,10 +75,15 @@ export class GitHubRepoReader implements RepoReader {
   private readonly http: ReadClient;
   /** only whether the token has a classic prefix is kept, never the token */
   private readonly classicToken: boolean;
+  /** ADR-0195 A5: a GitHub App installation token (repos come from /installation/repositories; /user is not readable) */
+  private readonly installation: boolean;
 
   constructor(opts: RepoReaderOptions) {
+    const kind = opts.credentialKind ?? "token";
+    if (kind !== "token" && kind !== "github_app_installation") throw new GitProviderError(`github does not take a ${kind} credential`);
+    this.installation = kind === "github_app_installation";
     this.historyEnabled = opts.allowHistory === true;
-    this.classicToken = opts.token.startsWith("ghp_") || opts.token.startsWith("gho_");
+    this.classicToken = !this.installation && (opts.token.startsWith("ghp_") || opts.token.startsWith("gho_"));
     this.http = new ReadClient({
       label: "github",
       baseUrl: opts.baseUrl ?? "https://api.github.com",
@@ -91,13 +97,17 @@ export class GitHubRepoReader implements RepoReader {
     const max = clampLimit(opts.maxRepos, REPO_READ_DEFAULTS.maxRepos);
     let next: string | null = opts.namespace
       ? `/orgs/${encodeURIComponent(opts.namespace)}/repos?per_page=100&type=all`
-      : "/user/repos?per_page=100&affiliation=owner,collaborator,organization_member";
+      : this.installation
+        ? "/installation/repositories?per_page=100"
+        : "/user/repos?per_page=100&affiliation=owner,collaborator,organization_member";
     const repos: RepoListResult["repos"] = [];
     let pages = 0;
     while (next) {
       if (pages++ >= this.http.maxPages || repos.length >= max) return { repos: repos.slice(0, max), truncated: true };
-      const { body, res } = await this.http.getJson<GhRepo[]>(next, hint);
-      for (const r of Array.isArray(body) ? body : []) {
+      const { body, res } = await this.http.getJson<GhRepo[] | { repositories?: GhRepo[] }>(next, hint);
+      // an installation's listing wraps the repositories in an object
+      const page = Array.isArray(body) ? body : Array.isArray(body?.repositories) ? body.repositories : [];
+      for (const r of page) {
         if (typeof r.full_name !== "string") continue;
         repos.push({ fullName: r.full_name, defaultBranch: r.default_branch ?? null, archived: r.archived === true });
       }
@@ -165,6 +175,10 @@ export class GitHubRepoReader implements RepoReader {
   }
 
   async inspectCredential(): Promise<CredentialScopeReport> {
+    // an installation token cannot read /user; its permissions are what the token exchange granted (the caller checks them)
+    if (this.installation) {
+      return { status: "unverified", scopes: [], detail: "a GitHub App installation token reports its permissions only at the token exchange" };
+    }
     const res = await this.http.getOk("/user", hint);
     const raw = this.http.header(res, "x-oauth-scopes");
     const scopes = (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);

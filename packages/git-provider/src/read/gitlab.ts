@@ -1,6 +1,7 @@
 // GitLab (gitlab.com and self-managed) read-only reader, REST v4.
 // Pagination follows the offset `x-next-page` header (empty on the last page).
 
+import { GitProviderError } from "../types.js";
 import {
   assertCommitSha,
   base64EnvelopeCap,
@@ -56,6 +57,8 @@ export class GitLabRepoReader implements RepoReader {
   private readonly http: ReadClient;
 
   constructor(opts: RepoReaderOptions) {
+    // ADR-0195 A5: this provider takes no federated credential, only a stored token
+    if ((opts.credentialKind ?? "token") !== "token") throw new GitProviderError(`gitlab does not take a ${opts.credentialKind} credential`);
     this.historyEnabled = opts.allowHistory === true;
     const root = trimTrailingSlashes(opts.baseUrl ?? "https://gitlab.com/api/v4");
     this.http = new ReadClient({
