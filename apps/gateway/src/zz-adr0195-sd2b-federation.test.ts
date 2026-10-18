@@ -168,12 +168,18 @@ describe("ADR-0195 SD2b: the federation signer", () => {
     try {
       await refusedWith(db.execute(sql`delete from federation_signing_keys where kid = ${kid}`), /never deleted/);
       await refusedWith(db.execute(sql`truncate federation_signing_keys`), /TRUNCATE/);
+      // the guard itself (not a CHECK) keeps the public half fixed (#420 review finding 1)
+      const other = JSON.stringify({ kty: "RSA", e: "AQAB", n: "y".repeat(342) });
+      await refusedWith(db.execute(sql`update federation_signing_keys set public_jwk = ${other}::jsonb where kid = ${kid}`), /written once/);
     } finally {
       // never leave this pending fixture behind: a pending key blocks every later generate
       await db.execute(sql`update federation_signing_keys set revoked_at = now(), private_key_ciphertext = null where kid = ${kid} and revoked_at is null`);
     }
     await expect(db.execute(sql`update federation_signing_keys set private_key_ciphertext = 'c' where kid = ${kid}`)).rejects.toThrow();
     await refusedWith(db.execute(sql`update federation_signing_keys set revoked_at = now() + interval '1 day' where kid = ${kid}`), /written once/);
+    // activated_at is written once too: the first stamp is allowed, a second is refused (no CHECK is in play here)
+    await db.execute(sql`update federation_signing_keys set activated_at = now() where kid = ${kid}`);
+    await refusedWith(db.execute(sql`update federation_signing_keys set activated_at = now() + interval '1 hour' where kid = ${kid}`), /written once/);
     const fn = await db.execute(sql`select array_to_string(proconfig, ',') as c from pg_proc where proname = 'regulait_federation_signing_key_guard'`);
     expect(rows<{ c: string }>(fn)[0]!.c).toContain("search_path=pg_catalog, public, pg_temp");
   });
