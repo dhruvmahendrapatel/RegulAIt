@@ -83,9 +83,10 @@ export slice and are not installed yet.
   throws, so no unrecorded result leaves the gateway. On the connector path the evidence is written in the existing
   output-evidence transaction.
 - **Not yet covered:** model output (`dispatchAttempt`, the compat surfaces) and retrieved shared context
-  (`resolveSuppliedContext`). Upstream notifications relayed during a protocol call (`notifications/message`,
-  `notifications/progress`, off unless the org enables `logging/setLevel`) pass the output scans but are not recorded. R14 §4 P0 lists both. They are follow-ups for the next slice. Streaming digests over the
-  full stream at close belong with model output.
+  (`resolveSuppliedContext`). R14 §4 P0 lists both. They are follow-ups for the next slice. Streaming digests over the
+  full stream at close belong with model output. Upstream notifications relayed during a protocol call
+  (`notifications/message`, `notifications/progress`, off unless the org enables `logging/setLevel`) pass the output
+  scans but are not recorded either.
 - **Both byte sets (decision 3).** `upstream` is what the upstream returned. `delivered` is what the caller receives
   after redaction, masking or a withheld marker. A string is digested as its UTF-8 bytes. Anything else (an MCP
   `CallToolResult`, a connector JSON body) is digested as the audit chain's canonical JSON, so key order does not
