@@ -104,7 +104,9 @@ export function validateLock(lock) {
  * The lock against the base's copy (#425 review, medium): the main-only and generation rules must hold however the
  * lock was changed, not only through `--apply`. Every published entry's sourceCommit is on main (`onMain`, default
  * `assertCommitOnMain`), an engine whose image changed moves its `publishGeneration` to exactly the base's + 1, and an
- * engine whose image did not change keeps its whole entry. `base` is the lock on the base ref (origin/main).
+ * engine whose image did not change keeps its whole entry, and a new image's `publishedAt` is later than the base's.
+ * `base` is the lock on the base ref (origin/main). This proves the SHAPE of a change, not that `--apply` made it:
+ * provenance rests on the signed publish (#427 review F3).
  */
 export function checkLockTransition(base, lock, { onMain = (c) => assertCommitOnMain(c) } = {}) {
   validateLock(base);
@@ -116,6 +118,10 @@ export function checkLockTransition(base, lock, { onMain = (c) => assertCommitOn
     const changed = b.manifestDigest !== e.manifestDigest || b.imageId !== e.imageId || b.repository !== e.repository;
     if (changed && e.publishGeneration !== b.publishGeneration + 1) {
       throw new LockError(`${id}: a new image moves publishGeneration to exactly ${b.publishGeneration + 1} (the base's + 1), not ${e.publishGeneration}`);
+    }
+    // #427 review F3: `--apply` stamps a fresh publishedAt, so a new image recorded no later than the base's is a hand edit
+    if (changed && e.publishedAt !== null && b.publishedAt !== null && Date.parse(e.publishedAt) <= Date.parse(b.publishedAt)) {
+      throw new LockError(`${id}: a new image is published later than the base's (${b.publishedAt}), not at ${e.publishedAt}`);
     }
     if (!changed && JSON.stringify(e) !== JSON.stringify(b)) throw new LockError(`${id}: an engine whose image did not change keeps its whole entry`);
   }

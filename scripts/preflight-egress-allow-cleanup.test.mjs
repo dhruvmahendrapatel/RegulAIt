@@ -234,16 +234,45 @@ it("imds", async () => {
         'db.delete(egressAllowHosts).where(ne(egressAllowHosts.host, "169.254.169.254"))',
         "db.delete(egressAllowHosts).where(ne(egressAllowHosts.id, saved))",
         'removeEgressAllowEntry(app, AUTH, { host: "127.0.0.1", note: fmt(cfg.host, IMDS) })',
+        // #427 review F1: a negation through not(), or anything else the matcher cannot read, names nothing (fail closed)
+        "db.delete(egressAllowHosts).where(not(eq(egressAllowHosts.host, IMDS)))",
+        "db.delete(egressAllowHosts).where(not(inArray(egressAllowHosts.id, [saved])))",
+        "db.delete(egressAllowHosts).where(and(not(eq(egressAllowHosts.host, IMDS))))",
+        "db.delete(egressAllowHosts).where(not(and(eq(egressAllowHosts.host, IMDS), eq(egressAllowHosts.id, saved))))",
+        "db.delete(egressAllowHosts).where(keep(eq(egressAllowHosts.host, IMDS)))",
+        "db.delete(egressAllowHosts).where(flag ? eq(egressAllowHosts.host, IMDS) : ne(egressAllowHosts.host, IMDS))",
+        "db.delete(egressAllowHosts).where(sql`NOT ${eq(egressAllowHosts.host, IMDS)}`)",
+        "db.delete(egressAllowHosts).where(d.eq(egressAllowHosts.host, IMDS))",
+        "db.delete(egressAllowHosts).where([eq(egressAllowHosts.host, IMDS)][0])",
       ]) {
         expect(analyzeTestFile(marked(removal)).unmatchedMarkers, removal).toEqual([6]);
+      }
+      // #427 review F1 (Low): a file that rebinds eq/inArray/and/or (an aliased import or a local declaration) names nothing
+      for (const rebinding of [
+        'import { ne as eq } from "drizzle-orm";\n',
+        'import { notInArray as inArray } from "drizzle-orm";\n',
+        'import { not as and } from "drizzle-orm";\n',
+        "const eq = (a, b) => ne(a, b);\n",
+        "function or(...c) { return not(c[0]); }\n",
+      ]) {
+        for (const removal of [
+          "db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, IMDS))",
+          "db.delete(egressAllowHosts).where(inArray(egressAllowHosts.host, [IMDS]))",
+        ]) {
+          expect(analyzeTestFile(rebinding + marked(removal)).unmatchedMarkers, rebinding + removal).toEqual([7]);
+        }
       }
       // live controls: the same removals through eq / inArray name the posted row
       for (const removal of [
         "db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, IMDS))",
         "db.delete(egressAllowHosts).where(inArray(egressAllowHosts.host, [IMDS]))",
         "db.delete(egressAllowHosts).where(eq(egressAllowHosts.id, saved))",
+        "db.delete(egressAllowHosts).where(and(eq(egressAllowHosts.host, IMDS), eq(egressAllowHosts.id, saved)))",
+        "db.delete(egressAllowHosts).where(or(eq(egressAllowHosts.host, \"other\"), (eq(egressAllowHosts.host, IMDS))))",
       ]) {
         expect(analyzeTestFile(marked(removal)).unmatchedMarkers, removal).toEqual([]);
+        // an import under its own name is not a rebinding
+        expect(analyzeTestFile('import { and, eq, inArray, or } from "drizzle-orm";\n' + marked(removal)).unmatchedMarkers, removal).toEqual([]);
       }
     });
 

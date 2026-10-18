@@ -2,7 +2,9 @@
  * ENG-IMG — the engine image lock: the committed lock is valid, its derived files are current (CI's `--check`), and
  * `--apply` records a publish only in the shape the workflow writes, moving the generation with every new build.
  */
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { applyPublish, assertCommitOnMain, checkLockTransition, ENGINE_IDS, GHCR_OWNER, LockError, PATHS, readLockAt, renderCompose, renderTs, repositoryOwner, UNSET_DIGEST, validateLock } from "./engine-images-lock.mjs";
 
@@ -16,11 +18,6 @@ const blank = () => {
 const hex = (c) => `sha256:${c.repeat(64)}`;
 const commit = "a".repeat(40);
 const publish = (engines, sourceCommit = commit) => ({ sourceCommit, publishedAt: "2026-10-17T05:00:00.000Z", engines });
-/** the never-published lock: every entry null */
-const blank = () => ({
-  schema: "regulait.engine-images-lock.v1",
-  engines: Object.fromEntries(ENGINE_IDS.map((id) => [id, { repository: null, manifestDigest: null, imageId: null, publishGeneration: 0, sourceCommit: null, publishedAt: null }])),
-});
 const entry = (id, d = "1", i = "2") => ({ repository: `ghcr.io/${GHCR_OWNER}/regulait-engine-${id}`, manifestDigest: hex(d), imageId: hex(i) });
 
 describe("ENG-IMG engine image lock", () => {
@@ -107,7 +104,7 @@ describe("ENG-IMG engine image lock", () => {
 
     it("accepts what --apply writes: a new build one generation up, of a commit on main", () => {
       expect(checkLockTransition(blank(), published(), { onMain: onMain([commit]) })).toEqual(published());
-      const next = applyPublish(published(), publish({ garak: entry("garak", "3", "4") }, "b".repeat(40)));
+      const next = applyPublish(published(), { ...publish({ garak: entry("garak", "3", "4") }, "b".repeat(40)), publishedAt: "2026-10-18T05:00:00.000Z" });
       expect(checkLockTransition(published(), next, { onMain: onMain([commit, "b".repeat(40)]) })).toEqual(next);
       // an unchanged lock is unchanged
       expect(checkLockTransition(published(), published(), { onMain: onMain([commit]) })).toEqual(published());
@@ -133,6 +130,16 @@ describe("ENG-IMG engine image lock", () => {
       expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toThrow(/keeps its whole entry/);
     });
 
+    it("#427 review F3: a new image is published later than the base's (a hand edit that keeps the old publishedAt is refused)", () => {
+      const edited = published();
+      Object.assign(edited.engines.garak, { manifestDigest: hex("6"), publishGeneration: 2 });
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toThrow(/published later than the base's/);
+      edited.engines.garak.publishedAt = "2026-10-17T04:00:00.000Z";
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toThrow(/published later than the base's/);
+      edited.engines.garak.publishedAt = "2026-10-18T05:00:00.000Z";
+      expect(checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toEqual(edited);
+    });
+
     it("every published sourceCommit is asked about, changed or not", () => {
       const asked = [];
       checkLockTransition(published(), published(), { onMain: (c) => asked.push(c) });
@@ -144,6 +151,27 @@ describe("ENG-IMG engine image lock", () => {
       const base = readLockAt("origin/main", { git: (args) => (seen.push(args), JSON.stringify(blank())) });
       expect(base).toEqual(blank());
       expect(seen).toEqual([["show", "origin/main:engines/images.lock.json"]]);
+    });
+
+    it("#427 review F2: the CLI's --check --base reads the base lock, so a base it cannot read fails the check", () => {
+      const script = path.join(path.dirname(PATHS.lock), "..", "scripts", "engine-images-lock.mjs");
+      const run = spawnSync(process.execPath, [script, "--check", "--base", "refs/does-not-exist"], { encoding: "utf8" });
+      expect(run.status).toBe(1);
+      expect(run.stderr).toMatch(/refs\/does-not-exist/);
+      expect(run.stdout).not.toMatch(/every published build/);
+      expect(spawnSync(process.execPath, [script, "--check", "--base"], { encoding: "utf8" }).status).toBe(1);
+    });
+
+    it("#427 review F2: CI runs the check against main after fetching main's full history", () => {
+      const ci = readFileSync(path.join(path.dirname(PATHS.lock), "..", ".github", "workflows", "ci.yml"), "utf8");
+      const run = ci.indexOf("node scripts/engine-images-lock.mjs --check --base origin/main");
+      const fetch = ci.indexOf("git fetch --no-tags --unshallow origin +refs/heads/main:refs/remotes/origin/main");
+      expect(run).toBeGreaterThan(-1);
+      expect(fetch).toBeGreaterThan(-1);
+      expect(fetch).toBeLessThan(run);
+      // the step's run block is not switched off
+      const step = ci.slice(ci.lastIndexOf("- name:", run), run);
+      expect(step).not.toMatch(/continue-on-error:\s*true|if:\s*\$\{\{\s*false/);
     });
   });
 });

@@ -328,6 +328,52 @@ function carriersOf(sf, results, keys) {
  */
 /** the column comparisons whose rows a removal deletes: the named values themselves */
 const REMOVING_COMPARISONS = new Set(["eq", "inArray"]);
+/** the combinators a removing comparison may sit under: each keeps the rows its comparisons name (#427 review F1) */
+const KEEPING_COMBINATORS = new Set(["and", "or"]);
+const MATCHED_NAMES = new Set([...REMOVING_COMPARISONS, ...KEEPING_COMBINATORS]);
+
+/**
+ * does the file bind `eq`/`inArray`/`and`/`or` to something else? An aliased import (`import { ne as eq }`) or a local
+ * declaration under one of those names makes the name say nothing about what the call does, so the whole file's
+ * comparisons then name nothing (fail closed, #427 review F1).
+ */
+const reboundFiles = new WeakMap();
+function rebindsMatchedName(sf) {
+  if (reboundFiles.has(sf)) return reboundFiles.get(sf);
+  let rebound = false;
+  const visit = (n) => {
+    if (rebound) return;
+    if (ts.isImportSpecifier(n) && MATCHED_NAMES.has(n.name.text) && n.propertyName && n.propertyName.text !== n.name.text) rebound = true;
+    if (
+      (ts.isVariableDeclaration(n) || ts.isFunctionDeclaration(n) || ts.isParameter(n) || ts.isImportClause(n) || ts.isNamespaceImport(n)) &&
+      n.name &&
+      ts.isIdentifier(n.name) &&
+      MATCHED_NAMES.has(n.name.text)
+    ) {
+      rebound = true;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  reboundFiles.set(sf, rebound);
+  return rebound;
+}
+
+/**
+ * is this comparison reached from a `.where(...)` argument only through `and`/`or` (and parentheses)? Anything else
+ * between them (`not(...)`, a `sql` template, a helper, a ternary) may invert or drop it, so it names nothing.
+ */
+function underKeepingFilter(n) {
+  let child = n;
+  for (let p = n.parent; p; child = p, p = p.parent) {
+    if (ts.isParenthesizedExpression(p)) continue;
+    if (!ts.isCallExpression(p) || !p.arguments.includes(child)) return false;
+    const name = calleeName(p);
+    if (name === "where" && ts.isPropertyAccessExpression(p.expression)) return true;
+    if (!KEEPING_COMBINATORS.has(name ?? "") || !ts.isIdentifier(p.expression)) return false;
+  }
+  return false;
+}
 
 function removalNames(node, keys) {
   let call = node;
@@ -366,8 +412,16 @@ function removalNames(node, keys) {
     if (ts.isShorthandPropertyAssignment(n) && n.name.text === "host") collect(n.name, hostRefs);
     if (ts.isShorthandPropertyAssignment(n) && n.name.text === "id") collect(n.name, idRefs);
     // only the comparisons that keep the named rows in the removal (`eq`, `inArray`): a negated one (`ne`,
-    // `notInArray`) removes everything EXCEPT them, and any other call merely mentions the column (#414 recheck S1)
-    if (ts.isCallExpression(n) && REMOVING_COMPARISONS.has(calleeName(n) ?? "")) {
+    // `notInArray`) removes everything EXCEPT them, and any other call merely mentions the column (#414 recheck S1).
+    // Fail closed (#427 review F1): the comparison must be a plain `eq(...)`/`inArray(...)` reached from `.where(...)`
+    // only through `and`/`or`, in a file that does not rebind those names; anything the matcher cannot read names nothing.
+    if (
+      ts.isCallExpression(n) &&
+      ts.isIdentifier(n.expression) &&
+      REMOVING_COMPARISONS.has(n.expression.text) &&
+      underKeepingFilter(n) &&
+      !rebindsMatchedName(n.getSourceFile())
+    ) {
       const cols = n.arguments.map(column);
       for (const [col, out] of [
         ["host", hostRefs],
