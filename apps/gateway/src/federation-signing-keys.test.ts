@@ -124,6 +124,10 @@ describe("audience binding at mint", () => {
     expect(federationAudiences("cloud_gcp", cfg)).toEqual([`https:${gcpWifAudience("123", "regulait", "oidc")}`]);
     expect(federationAudiences("cloud_gcp", { projectNumber: "123" })).toEqual([]);
     expect(federationAudiences("repo_github", {})).toEqual([]);
+    // ADR-0195 A5: Azure DevOps federates through Entra; GitLab and Bitbucket have no inbound federation
+    expect(federationAudiences("repo_azure_devops", { tenantId: "t", clientId: "c" })).toEqual(["api://AzureADTokenExchange"]);
+    expect(federationAudiences("repo_gitlab", {})).toEqual([]);
+    expect(federationAudiences("repo_bitbucket", {})).toEqual([]);
   });
 });
 

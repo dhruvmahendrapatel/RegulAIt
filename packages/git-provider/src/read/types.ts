@@ -128,8 +128,17 @@ export interface RepoReader {
   getTreeAt(repo: string, commitSha: string, opts?: TreeOptions): Promise<RepoTree>;
 }
 
+/**
+ * ADR-0195 A5: what a reader's `token` is. `token` (the default): a provider token the admin stored.
+ * `github_app_installation`: a GitHub App installation access token (GitHub only). `entra_access_token`: a Microsoft
+ * Entra ID access token for Azure DevOps (Azure DevOps only). Both short-lived kinds are obtained per run by the caller.
+ */
+export type RepoCredentialKind = "token" | "github_app_installation" | "entra_access_token";
+
 export interface RepoReaderOptions {
   token: string;
+  /** ADR-0195 A5: defaults to `token`; a kind the provider does not take is refused by the reader */
+  credentialKind?: RepoCredentialKind;
   baseUrl?: string;
   fetchImpl: ReadFetchLike;
   /**

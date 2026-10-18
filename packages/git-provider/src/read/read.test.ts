@@ -499,4 +499,36 @@ describe("repo readers (ADR-0195 SD1)", () => {
     expect(parseRetryAfterMs("not a date", 0)).toBeNull();
     expect(parseRetryAfterMs(new Date(10_000).toUTCString(), 0)).toBe(10_000);
   });
+
+  describe("federated credential kinds (ADR-0195 A5)", () => {
+    const build = (kind: RepoReaderKind, credentialKind: "token" | "github_app_installation" | "entra_access_token", baseUrl = upstream.baseUrl) =>
+      resolveRepoReader(kind, { token, credentialKind, baseUrl, fetchImpl, allowInsecureHttpForTests: true });
+
+    it("Azure DevOps sends an Entra access token as Bearer (a PAT stays Basic)", async () => {
+      upstream.route("GET", "/org/_apis/git/repositories?api-version=7.1", { status: 200, body: { value: [] } });
+      await build("azure_devops", "entra_access_token", `${upstream.baseUrl}/org`).listRepos();
+      await build("azure_devops", "token", `${upstream.baseUrl}/org`).listRepos();
+      expect(upstream.requests.map((r) => r.headers.authorization)).toEqual([`Bearer ${token}`, `Basic ${b64(`:${token}`)}`]);
+      expect((await build("azure_devops", "entra_access_token", `${upstream.baseUrl}/org`).inspectCredential()).status).toBe("unverified");
+    });
+
+    it("GitHub lists an installation's repositories and never asks /user with an installation token", async () => {
+      upstream.route("GET", "/installation/repositories?per_page=100", {
+        status: 200,
+        body: { total_count: 1, repositories: [{ full_name: "acme/app", default_branch: "main", archived: false }] },
+      });
+      const r = build("github", "github_app_installation");
+      expect((await r.listRepos()).repos).toEqual([{ fullName: "acme/app", defaultBranch: "main", archived: false }]);
+      expect((await r.inspectCredential()).status).toBe("unverified");
+      expect(upstream.requests.map((q) => q.url)).toEqual(["/installation/repositories?per_page=100"]);
+      onlyGets();
+    });
+
+    it("refuses a credential kind the provider does not take", () => {
+      expect(() => build("github", "entra_access_token")).toThrow(GitProviderError);
+      expect(() => build("azure_devops", "github_app_installation", `${upstream.baseUrl}/org`)).toThrow(/does not take/);
+      expect(() => build("gitlab", "github_app_installation")).toThrow(/does not take/);
+      expect(() => build("bitbucket", "entra_access_token")).toThrow(/does not take/);
+    });
+  });
 });

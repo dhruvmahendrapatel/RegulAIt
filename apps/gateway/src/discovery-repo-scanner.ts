@@ -18,8 +18,13 @@
  *   historyDepth commits per repo when history is on (default 20, at most 200)
  * The scope's `include` names repos (`owner/name`); an org-level scope lists them.
  *
- * CREDENTIALS: a static read-only token only. A federated credential is
- * refused (`credential_unusable`) until git-provider federation exists.
+ * CREDENTIALS (ADR-0195 A5): federated by default where the provider supports
+ * it (`discovery-git-federation.ts`): Azure DevOps through Entra workload
+ * identity federation, GitHub through the deployment's GitHub App
+ * (installation tokens downscoped to read-only). Short-lived tokens are
+ * re-exchanged before they expire. GitLab and Bitbucket take no external OIDC
+ * token, so their stored read-only token (static mode) is the explicit
+ * fallback; a source with neither is refused (`credential_unusable`).
  *
  * WHAT IT USES OF THE CONTEXT: `ctx.fetch` only (the egress-guarded fetch);
  * `ctx.throttle()` before every request and `ctx.backoff(res)` on 429/503;
@@ -59,6 +64,7 @@ import {
   type RepoReaderKind,
   type RepoTree,
 } from "@regulait/git-provider";
+import { federatedGitToken, GitFederationError, type FederatedGitToken, type GitFederationDeps } from "./discovery-git-federation.js";
 
 /**
  * The parts of SD0's `ScanContext` / `ScanObservation` / `Scanner` this module
@@ -101,6 +107,8 @@ export interface RepoScanContext {
   heartbeat: () => Promise<boolean>;
   signal: AbortSignal;
   catalogue: { matches: (observation: RepoScanObservation) => boolean };
+  /** ADR-0195 SD2b: present for a federated credential only */
+  federation?: { sourceToken: (audience: string) => Promise<string> };
 }
 
 export interface RepoScanResult {
@@ -404,43 +412,83 @@ async function alive(ctx: RepoScanContext): Promise<void> {
   if (!(await ctx.heartbeat())) throw new RepoScanError("lease_lost", "the run's lease was lost; another worker owns it");
 }
 
-export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeof resolveRepoReader } = {}): RepoScanner {
+/** a federated token is exchanged again this long before it expires */
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
+
+export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeof resolveRepoReader; federation?: GitFederationDeps } = {}): RepoScanner {
   const resolve = deps.resolveReader ?? resolveRepoReader;
+  const now = deps.federation?.now ?? Date.now;
   return {
     kind,
     requiresCredential: true,
     validateTarget: (target, scope) => repoTargetProblem(kind, target) ?? repoScopeProblem(kind, scope),
     run: async (ctx) => {
-      const token = ctx.credential?.mode === "static" ? ctx.credential.secret : null;
-      if (!token) {
+      const cred = ctx.credential;
+      if (!cred || (cred.mode === "static" && !cred.secret)) {
         throw new RepoScanError(
           "credential_unusable",
-          "a repo source needs a static read-only token; federated git credentials are not supported by the repo scanner yet",
+          "a repo source needs a credential: federated (Azure DevOps, or GitHub through this deployment's GitHub App) or a stored read-only token",
         );
       }
       const target = ctx.source.target;
       const problem = repoTargetProblem(kind, target) ?? repoScopeProblem(kind, ctx.source.scope);
       if (problem) throw new RepoScanError("target_invalid", problem);
-      // the auth header forms derived from the token (Basic base64) are secrets too: scrub them from any stored text
-      ctx.registerSecret(Buffer.from(token, "utf8").toString("base64"));
-      ctx.registerSecret(Buffer.from(`:${token}`, "utf8").toString("base64"));
       const history = target.history === "true";
       const depth = history ? historyDepth(target) : 0;
-      const reader = resolve(PROVIDER_OF[kind], {
-        token,
-        ...(target.baseUrl ? { baseUrl: target.baseUrl } : {}),
-        fetchImpl: scanFetch(ctx),
-        allowHistory: history,
-        // 429/503 waits are SD0's (ctx.backoff); a limit still hit after them fails the run
-        maxRetries: 0,
-      });
+
+      // ADR-0195 A5: a federated credential is exchanged for a short-lived token, again before it expires
+      const fed: { token: FederatedGitToken | null } = { token: null };
+      const exchange = async (): Promise<FederatedGitToken> => {
+        try {
+          fed.token = await federatedGitToken({ ...ctx, credential: cred }, deps.federation);
+        } catch (err) {
+          if (err instanceof GitFederationError) throw new RepoScanError("credential_unusable", err.message);
+          throw err;
+        }
+        return fed.token;
+      };
+      const build = (token: string, credentialKind: "token" | "github_app_installation" | "entra_access_token") => {
+        // the auth header forms derived from the token (Basic base64) are secrets too: scrub them from any stored text
+        ctx.registerSecret(token);
+        ctx.registerSecret(Buffer.from(token, "utf8").toString("base64"));
+        ctx.registerSecret(Buffer.from(`:${token}`, "utf8").toString("base64"));
+        return resolve(PROVIDER_OF[kind], {
+          token,
+          credentialKind,
+          ...(target.baseUrl ? { baseUrl: target.baseUrl } : {}),
+          fetchImpl: scanFetch(ctx),
+          allowHistory: history,
+          // 429/503 waits are SD0's (ctx.backoff); a limit still hit after them fails the run
+          maxRetries: 0,
+        });
+      };
+      let reader: RepoReader;
+      if (cred.mode === "static") {
+        reader = build(cred.secret!, "token");
+      } else {
+        const t = await exchange();
+        if (t.writeScope === "write") return { observations: [], credentialWriteScope: "write" };
+        reader = build(t.token, t.credentialKind);
+      }
+      /** the reader to use now: rebuilt with a fresh token when a federated one is about to expire */
+      const current = async (): Promise<RepoReader> => {
+        if (fed.token && now() >= fed.token.expiresAt - TOKEN_REFRESH_MARGIN_MS) {
+          const t = await exchange();
+          if (t.writeScope === "write") throw new RepoScanError("credential_unusable", "the refreshed federated token grants write scope; the credential is refused");
+          reader = build(t.token, t.credentialKind);
+        }
+        return reader;
+      };
       const outcomes: DiscoveryReadOutcome[] = [];
       const outcome = (o: DiscoveryReadOutcome) => {
         if (outcomes.length < REPO_SCAN_LIMITS.readOutcomesMax) outcomes.push(o);
       };
 
       try {
-        const scope = await reader.inspectCredential();
+        // a federated token's scope is what its exchange granted; a stored token is asked
+        const scope = fed.token
+          ? { status: fed.token.writeScope === "read_only" ? ("read_only" as const) : ("unverified" as const) }
+          : await reader.inspectCredential();
         if (scope.status === "write_scope") return { observations: [], credentialWriteScope: "write" };
 
         let repos: string[];
@@ -463,6 +511,7 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
             continue;
           }
           await alive(ctx);
+          reader = await current();
           const subject = `${subjectPrefix}:${repo}`;
           const tree = await reader.getTree(repo);
           if (!tree.commitSha) {
@@ -480,6 +529,7 @@ export function repoScanner(kind: RepoScannerKind, deps: { resolveReader?: typeo
             for (const c of commits) {
               if (c.sha === tree.commitSha || out.length >= EVIDENCE_MAX_ROWS) continue;
               await alive(ctx);
+              reader = await current();
               const old = await reader.getTreeAt(repo, c.sha);
               const past = await analyseTree(ctx, reader, repo, subject, { ...old, author: c.author ?? old.author });
               out.push(...toScanObservations(subject, past.analysis, past.actor));

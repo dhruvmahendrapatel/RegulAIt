@@ -33,15 +33,18 @@
 import { readFileSync } from "node:fs";
 import { and, authMfaPending, authSessions, auditLog, eq, inArray, isNull, users, type Db } from "@regulait/db";
 import { checkPasswordPolicy, hashPassword } from "./auth.js";
+import { DEMO_SECURITY_LEAD } from "./demo-identity.js";
 import { networkFacingSignal } from "./dev-secrets.js";
 import { resolveLicense } from "./licensing.js";
 import { loadOrgSettings } from "./org-settings.js";
 
-/** the personas `seed` / `demo:intake` create (Ada, Dana, Avery) */
+/** the personas `seed` / `demo:intake` create (Ada, Dana, Avery, and Morgan,
+ * the second admin of the ADR-0197 addendum) */
 export const DEMO_PERSONA_EMAILS = [
   "admin@regulait.local",
   "dana@regulait.local",
   "avery@regulait.local",
+  DEMO_SECURITY_LEAD.email,
 ] as const;
 
 export const DEMO_PASSWORD_ENV = "REGULAIT_DEMO_USER_PASSWORD";

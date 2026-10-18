@@ -12,6 +12,7 @@
  *   DELETE /v1/discovery/sources/:sourceId                a disabled source with no live run
  *   PUT    /v1/discovery/sources/:sourceId/credential     federated: free; static: `settings_relax` step-up. CAS on
  *                                                         `replacesCredentialId`. The secret is never returned.
+ *                                                         An omitted `mode` is the kind's secure default (A5).
  *   DELETE /v1/discovery/sources/:sourceId/credential     revoke: free; the stored secret is destroyed
  *   POST   /v1/discovery/sources/:sourceId/runs           run now (queues a run; the scan worker takes it)
  *   GET    /v1/discovery/runs                             recent runs, optionally for one source
@@ -65,6 +66,7 @@ import {
   DISCOVERY_STEP_UP_KEYS,
   credentialTargetMatch,
   publicConfigProblem,
+  defaultCredentialMode,
   scopeWidens,
 } from "@regulait/shared";
 import { checkStepUp, isStepUpPrompt, type StepUpCheckArgs } from "./step-up.js";
@@ -114,7 +116,8 @@ const patchSchema = z
 const versionSchema = z.object({ version: z.number().int().min(1) }).strict();
 const credentialSchema = z
   .object({
-    mode: z.enum(DISCOVERY_CREDENTIAL_MODES),
+    // ADR-0195 A5: omitted = the kind's secure default (federated where the provider supports it)
+    mode: z.enum(DISCOVERY_CREDENTIAL_MODES).optional(),
     // checked against the kind's allowlist (DISCOVERY_PUBLIC_CONFIG) in the route
     publicConfig: z
       .record(configKey, z.string().trim().min(1).max(1024))
@@ -560,18 +563,29 @@ export function registerDiscoveryRoutes(app: FastifyInstance, db: Db, opts: { da
     if (!p.success) return badRequest(reply, p.error);
     const parsed = credentialSchema.safeParse(req.body ?? {});
     if (!parsed.success) return badRequest(reply, parsed.error);
-    const body = parsed.data;
-    if (body.mode === "federated" && body.secret !== undefined) {
-      return send(reply, refusal(400, "federated_has_no_secret", "a federated credential is short-lived and has no stored secret; use static mode for a stored secret (a relaxation)"));
-    }
-    if (body.mode === "static" && body.secret === undefined) return send(reply, refusal(400, "secret_required", "a static credential needs its secret"));
-    if (body.mode === "static" && !opts.dataKey) {
-      return send(reply, refusal(503, "data_key_unavailable", "the data key is not configured, so a secret cannot be stored encrypted"));
+    const parsedBody = parsed.data;
+    const modeProblem = (mode: "federated" | "static"): Refusal | null => {
+      if (mode === "federated" && parsedBody.secret !== undefined) {
+        return refusal(400, "federated_has_no_secret", "a federated credential is short-lived and has no stored secret; use static mode for a stored secret (a relaxation)");
+      }
+      if (mode === "static" && parsedBody.secret === undefined) return refusal(400, "secret_required", "a static credential needs its secret");
+      if (mode === "static" && !opts.dataKey) return refusal(503, "data_key_unavailable", "the data key is not configured, so a secret cannot be stored encrypted");
+      return null;
+    };
+    if (parsedBody.mode !== undefined) {
+      const early = modeProblem(parsedBody.mode);
+      if (early) return send(reply, early);
     }
     const out = await db.transaction(async (tx): Promise<Refusal | DiscoveryCredentialRow> => {
       const t = tx as unknown as Db;
       const s = await lockSource(t, p.data.sourceId);
       if (!s) return refusal(404, "not_found", "no such discovery source");
+      // ADR-0195 A5 (secure by default): an omitted mode is federated wherever the provider supports it
+      const body = { ...parsedBody, mode: parsedBody.mode ?? defaultCredentialMode(s.kind) };
+      if (parsedBody.mode === undefined) {
+        const late = modeProblem(body.mode);
+        if (late) return late;
+      }
       // review of #403: an ALLOWLIST of identifier fields per kind and mode, each shape-checked; anything else
       // (a key, a token, a service-account file, the server-generated externalId in any spelling) is refused
       const configProblem = publicConfigProblem(s.kind, body.mode, body.publicConfig);
