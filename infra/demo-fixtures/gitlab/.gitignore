@@ -1,0 +1,3 @@
+# The fixtures need their .env.example files (names only, empty values) committed:
+# the repo scanner reads them. The root .gitignore excludes .env.* everywhere else.
+!.env.example

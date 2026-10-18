@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ticket-queue": {
+      "command": "node",
+      "args": ["tools/ticket-queue-mcp.js"]
+    },
+    "stock-search": {
+      "type": "http",
+      "url": "https://mcp.larkfield-outfitters.example/stock"
+    }
+  }
+}

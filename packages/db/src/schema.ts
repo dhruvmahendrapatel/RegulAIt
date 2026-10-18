@@ -7179,6 +7179,11 @@ export const endpointEnrolmentTokens = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     revokedBy: uuid("revoked_by").references(() => users.id, { onDelete: "set null" }),
+    /** ADR-0197 Q13 (migration 0208): the admin who relaxed the 30-day expiry (up to 90 days), with their step-up */
+    expiryRelaxedBy: uuid("expiry_relaxed_by").references(() => users.id, { onDelete: "set null" }),
+    expiryRelaxationStepUp: text("expiry_relaxation_step_up"),
+    /** the `endpoint-enrolment-token-expiry-relaxed` audit row the issue wrote (no foreign key: retention may prune it) */
+    expiryRelaxationAuditId: uuid("expiry_relaxation_audit_id"),
   },
   (t) => [
     unique("endpoint_enrolment_tokens_hash_uq").on(t.tokenHash),
@@ -7186,7 +7191,11 @@ export const endpointEnrolmentTokens = pgTable(
     check("endpoint_enrolment_tokens_label_check", sql`length(${t.label}) BETWEEN 1 AND 100`),
     check("endpoint_enrolment_tokens_cap_check", sql`${t.deviceCap} BETWEEN 1 AND 100000`),
     check("endpoint_enrolment_tokens_enrolled_check", sql`${t.devicesEnrolled} >= 0 AND ${t.devicesEnrolled} <= ${t.deviceCap}`),
-    check("endpoint_enrolment_tokens_expiry_check", sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 days'`),
+    check(
+      "endpoint_enrolment_tokens_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND (${t.expiresAt} <= ${t.createdAt} + interval '30 days' OR (${t.expiryRelaxationAuditId} IS NOT NULL AND ${t.expiryRelaxationStepUp} IS NOT NULL AND ${t.expiresAt} <= ${t.createdAt} + interval '90 days'))`,
+    ),
+    check("endpoint_enrolment_tokens_expiry_relaxation_check", sql`(${t.expiryRelaxationAuditId} IS NULL) = (${t.expiryRelaxationStepUp} IS NULL)`),
     check("endpoint_enrolment_tokens_revoked_check", sql`${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt}`),
     index("endpoint_enrolment_tokens_source_idx").on(t.sourceId),
   ],
@@ -14046,10 +14055,22 @@ export const executionPersonStdioRelaxations = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     clearedAt: timestamp("cleared_at", { withTimezone: true }),
     clearedByUserId: uuid("cleared_by_user_id"),
+    /** ADR-0197 Q3 (migration 0208): in force only before this; at most 30 days from the set or the latest renewal */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull().default(sql`(now() + interval '30 days')`),
+    renewedAt: timestamp("renewed_at", { withTimezone: true }),
+    renewedByUserId: uuid("renewed_by_user_id"),
   },
   (t) => [
     check("execution_person_stdio_relaxations_scope_kind_check", sql`${t.scopeKind} IN ('mcp_server', 'project')`),
     check("execution_person_stdio_relaxations_cleared_check", sql`(${t.clearedAt} IS NULL) = (${t.clearedByUserId} IS NULL)`),
+    check(
+      "execution_person_stdio_relaxations_expiry_check",
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= COALESCE(${t.renewedAt}, ${t.createdAt}) + interval '30 days'`,
+    ),
+    check(
+      "execution_person_stdio_relaxations_renewed_check",
+      sql`(${t.renewedAt} IS NULL) = (${t.renewedByUserId} IS NULL) AND (${t.renewedAt} IS NULL OR ${t.renewedAt} >= ${t.createdAt})`,
+    ),
     uniqueIndex("execution_person_stdio_relaxations_active_uq").on(t.scopeKind, t.scopeId).where(sql`${t.clearedAt} IS NULL`),
   ],
 );

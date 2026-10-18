@@ -36,7 +36,7 @@ import { executeGovernedConnectorCall } from "./connector-call.js";
 import { executeGovernedToolCall } from "./mcp-proxy.js";
 import type { PiiMode } from "./projects.js";
 import type { TraceContext } from "./tracing.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 /** the longest tool name every provider accepts (`^[a-zA-Z0-9_-]{1,64}$`) */
 const TOOL_NAME_MAX = 64;
@@ -445,7 +445,7 @@ export async function runGovernedTool(
       contextId: ctx.contextId,
     });
   } catch (err) {
-    const msg = safeErrorMessage(err);
+    const msg = errMessage(err);
     return {
       status: "error",
       code: "tool_call_failed",

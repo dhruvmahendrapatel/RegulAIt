@@ -79,7 +79,7 @@ import {
   loadPolicySimulationSettings,
   versionHasBlastRadiusPreview,
 } from "./policy-simulation.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 export type { AbacPrincipalContext };
 
@@ -382,7 +382,7 @@ export async function evaluateAbacForChain(
         ? abacEngine.evaluate(v4, request)
         : actorEngineError(`agent identity ${link.identityId} was not found`);
     } catch (err) {
-      verdict = actorEngineError(safeErrorMessage(err));
+      verdict = actorEngineError(errMessage(err));
     }
     links.push({ ...link, abacDecision: verdict.effect === "permit" ? null : verdict });
   }

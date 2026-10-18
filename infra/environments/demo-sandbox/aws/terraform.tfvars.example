@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
+management_sso_profile         = "<management-sso-profile-name>"
+sandbox_account_id             = "<output sandbox_account_id of ../account>"
+regulait_federation_issuer_url = "https://<demo-instance-host>/federation"
+aws_discovery_source_id        = "<uuid of the cloud_aws discovery source>"
+bedrock_model_id               = "<lowest-priced on-demand text model id enabled in the region>"

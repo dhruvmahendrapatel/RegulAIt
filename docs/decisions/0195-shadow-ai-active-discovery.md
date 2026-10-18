@@ -740,6 +740,30 @@ are the cloud SDKs already pinned; the one new dependency is the Organizations c
 end-to-end run against a real cloud account (pending execution, needs a customer trust policy), and federated
 git-provider credentials (SD1 follow-up).
 
+**Q11 design review (2026-10-18, ADR-0197).** The separate issuer `<REGULAIT_PUBLIC_URL>/federation` is kept: RS256
+is the one algorithm AWS, GCP and Entra all accept, and the root JWKS, which third parties trust, stays Ed25519-only.
+Customers configure one trust per cloud. A pending federation key is published before it signs. Revocation cannot
+end cloud sessions already obtained.
+
+**As built: pending key published (2026-10-18, branch `federation-pending-key-jwks`, no migration).** This changes
+item 3's "it signs nothing and is not published": a PENDING key is now in the federation JWKS from the moment it is
+generated, so a cloud can cache it before it signs and a rotation never meets an unknown `kid`.
+- `isPublished` is true for a pending key (not revoked); `publishedFederationKeys` drops the `activated_at IS NOT
+  NULL` condition and keeps `revoked_at IS NULL` and the 600 s retired overlap; the JWKS lists the pending key first
+  (`activated_at DESC NULLS FIRST`). `federationKeyView.published` follows.
+- Signing is unchanged: `mintFederationToken` still reads only the active key (activated, not retired, not
+  revoked), so a pending key signs nothing until activated, and activation switches signing to it.
+- Revoking a pending key still removes it from the JWKS at once and destroys its private half.
+- The Cloud federation card says generated keys are published at once and to activate (or rotate) after a few
+  minutes.
+- `CLOUD_DISCOVERY.md` (status, the issuer to register, rotation, revocation limits, Entra propagation) and the
+  comments and variable descriptions of `docs/deployment/cloud-discovery/{aws,azure,gcp}.tf` now name the federation
+  issuer `<REGULAIT_PUBLIC_URL>/federation` instead of the ADR-0188 issuer.
+- Tests: `federation-signing-keys.test.ts` (a pending key is published, a revoked pending key is not);
+  `zz-adr0195-sd2b-federation.test.ts` (a pending key is in the JWKS route with RSA public members only and mints
+  nothing; during rotation the pending key is published beside the active key, which keeps signing; activation
+  switches signing; revoking a pending key removes it at once; the retired key's overlap is unchanged).
+
 ## As built: lane A6, environment-variable-name and CLI presence signatures (2026-10-17)
 
 **Status: shared matcher, catalogue data, tests and the SD1/SD3 wiring built on branch `sd-env-name-signatures`
@@ -1331,3 +1355,52 @@ Branch `shadow-ai-remediation-plan`. Owner text above is unchanged; this section
 - `pendingLink` matches on the description text, but only among the viewer's own instances, so another user's
   description cannot steer it.
 - The gateway tests for 1 to 4 run against Postgres in CI only (typechecked locally).
+
+## As built: ADR-0197 Q13 and Q14, enrolment token expiry cap and revocation choice (2026-10-18, migration 0208)
+
+ADR-0197 (owner, 2026-10-18):
+- Q13: "an enrolment token may be extended beyond 30 days only as an audited step-up relaxation. The default stays
+  30 days."
+- Q14: "revoking an enrolment token stops new enrolments. The revoke dialog also offers 'revoke the devices it
+  enrolled' as a separate choice."
+
+**Q13, the cap.** The default and the strict maximum stay at **30 days**. An admin may issue one token for up to
+**90 days** (`ENDPOINT_TOKEN_RELAXED_MAX_DAYS`). Past 90 days is refused 400 whatever the step-up.
+- Issuing past 30 days is a `settings_relax` step-up bound to everything issued:
+  `{op: "endpoint_enrolment_token_long_expiry", sourceId, label, deviceCap, expiresInDays}`. A grant for another cap,
+  expiry, source or kind is refused and not spent, and nothing is issued.
+- In the issuing transaction, an `endpoint-enrolment-token-expiry-relaxed` audit row is written first. The token row
+  records the relaxation:
+  - `expiry_relaxed_by`;
+  - `expiry_relaxation_step_up` (the method);
+  - `expiry_relaxation_audit_id` (that audit row; no foreign key, because retention may prune it).
+- **Enforced by the server.** Migration 0208 replaces 0207's expiry CHECK: at most 30 days after `created_at`, or
+  at most 90 when the relaxation is recorded (both the step-up and the audit id; a second CHECK refuses one without
+  the other). A token cannot later be lengthened past 30 days, nor lose its recorded relaxation.
+- The token view gains `expiryRelaxed`. The card's expiry field says that past 30 days, up to 90, asks you to confirm
+  it is you, and sends the issue through `withStepUp`.
+
+**Q14, revocation.** `POST /v1/discovery/enrolment-tokens/:tokenId/revoke` takes `{revokeDevices?: boolean}`
+(strict body, default `false`).
+- With `false` (or no body) it is as before: the token redeems no new ticket and registers no new identity, and the
+  devices it enrolled keep reporting.
+- With `true`, the same transaction revokes every device of that token that is not revoked yet. Each one goes with
+  its identities, their keys and live tokens (the device route's own code, now `revokeDeviceTx`). Each device writes
+  its `endpoint-device-revoked` row with `cause: "enrolment_token_revoked"` and the token id, and the token's
+  `endpoint-enrolment-token-revoked` row records `revokeDevices` and the counts. Either all of it commits or none of
+  it does.
+- The answer reports `devicesRevoked`, `identitiesRevoked` and `tokensRevoked`. The token list gains `devicesActive`
+  (unrevoked devices per token).
+- The card's revoke dialog adds an unchecked checkbox, "Also revoke the N device(s) it enrolled". It resets each time
+  the dialog closes, and the confirm button then reads "Revoke token and devices". No styling changed.
+
+**Tests** (`zz-adr0195-sd4b-endpoint-agent.test.ts`, database):
+- the 30-day default;
+- past 30 days refused with no grant or a mismatched one (unspent), with nothing issued;
+- 90 days with the exact grant, recorded and audited;
+- the 0208 CHECKs (31 days without a relaxation, 91 with one, a half relaxation, lengthening and stripping refused);
+- a revoke that leaves devices active;
+- a cascading revoke that revokes only that token's live devices and their identities, audits each, and shares one
+  transaction timestamp.
+The earlier "31 days is refused" check is now 91. The database tests typecheck but did not run in the building
+session, and need 0208's journal entry, which the master adds.

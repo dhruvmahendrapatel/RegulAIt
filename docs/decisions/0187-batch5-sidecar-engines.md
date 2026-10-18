@@ -2763,3 +2763,19 @@ Tests (`zz-b5-engines`, "N11"):
   database clock.
 
 **Not verified here:** these tests need Postgres and have run only in CI.
+
+## As built: decision 55's deploy-time admission (2026-10-18)
+
+Decision 55's open item, "real admission is verifying the image's signature at deploy time", is built for the engine
+images, as owner decision Q2 settled it (ADR-0197). Full record: ADR-0190, "As built: engine image signing and the
+lock-update bot".
+- The publish workflow signs each engine image digest keylessly. The signed statement also names the image id and
+  the source commit.
+- `engine-images-lock.mjs --apply`, `build-image-bundle.sh --with-engines` and the air-gapped installer verify the
+  signature with the pinned cosign before an image is recorded, bundled or run. Each pins the publish workflow on
+  `main` as the identity and checks against a trust root file, so the check runs air-gapped too.
+- Decision 95 is unchanged: the lock-update bot's PR moves an engine's `publishGeneration` by exactly one per new
+  image, through `--apply`.
+- What decision 55 says of the runner stands. Its reported digest is a consistency check, and the verification
+  happens at deploy time, outside the container.
+

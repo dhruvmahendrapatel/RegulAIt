@@ -28,7 +28,7 @@
  * (CLAUDE.md rule 4). The identifier is a SPIFFE ID (decision 2); the scope
  * algebra is the kernel's.
  */
-import { safeErrorText } from "./gateway-logger.js";
+import { errLine } from "./err-serializer.js";
 import { randomUUID } from "node:crypto";
 import {
   agents,
@@ -339,7 +339,7 @@ export async function endInProcessChain(db: Db, chain: Pick<InProcessChain, "roo
   } catch (err) {
     // called from `finally`: a failed revoke must never replace the work's real result. The grant still
     // expires on its own (at most `IN_PROCESS_GRANT_TTL_MS`) and the allocation sweep closes its edges.
-    console.error(`[regulait] in-process delegation chain ${chain.rootGrantId} not revoked at end of work: ${safeErrorText(err)}`);
+    console.error(`[regulait] in-process delegation chain ${chain.rootGrantId} not revoked at end of work: ${errLine(err)}`);
   }
 }
 

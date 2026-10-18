@@ -97,10 +97,18 @@ export const decisionExecutionRelaxationRecordSchema = z
     clearedBy: bomUuidSchema.nullable(),
     clearedAt: bomTimeSchema.nullable(),
     setAuditId: bomUuidSchema.nullable(),
+    // ADR-0197 Q3 (migration 0208): when it stops applying, and its latest renewal. Absent from a gateway before Q3.
+    expiresAt: bomTimeSchema.optional(),
+    renewedBy: bomUuidSchema.nullable().optional(),
+    renewedAt: bomTimeSchema.nullable().optional(),
   })
   .strict()
   .refine((r) => (r.clearedBy === null) === (r.clearedAt === null), "a relaxation is cleared by someone at a time, or not at all")
-  .refine((r) => r.clearedAt === null || Date.parse(r.clearedAt) >= Date.parse(r.setAt), "a relaxation is cleared after it was set");
+  .refine((r) => r.clearedAt === null || Date.parse(r.clearedAt) >= Date.parse(r.setAt), "a relaxation is cleared after it was set")
+  .refine((r) => (r.expiresAt === undefined) === (r.renewedBy === undefined) && (r.expiresAt === undefined) === (r.renewedAt === undefined), "the expiry and the renewal are reported together")
+  .refine((r) => r.expiresAt === undefined || Date.parse(r.expiresAt) > Date.parse(r.setAt), "a relaxation expires after it was set")
+  .refine((r) => ((r.renewedBy ?? null) === null) === ((r.renewedAt ?? null) === null), "a relaxation is renewed by someone at a time, or not at all")
+  .refine((r) => (r.renewedAt ?? null) === null || Date.parse(r.renewedAt as string) >= Date.parse(r.setAt), "a relaxation is renewed after it was set");
 export type DecisionExecutionRelaxationRecord = z.infer<typeof decisionExecutionRelaxationRecordSchema>;
 
 // ---------------------------------------------------------------------------

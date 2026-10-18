@@ -56,6 +56,7 @@ import {
   isNull,
   mcpServers,
   projects,
+  sql,
   workloadIdentities,
   type Db,
   type ExecutionProfileRow,
@@ -208,6 +209,8 @@ export async function projectSensitivity(db: Db, projectId: string | null): Prom
 /**
  * Owner decision C: the active relaxation in scope for this call (the server's first, then the project's), or null.
  * Only for an `mcp_stdio` call with no agent, no grant and an interactive person; nothing else ever reads one.
+ * ADR-0197 Q3: active = not cleared AND not expired, on the database clock; an expired row is no relaxation (fail
+ * closed: the call is back at L3 until an admin renews it).
  */
 async function personStdioRelaxation(db: Db, req: PlacementRequest): Promise<PersonStdioRelaxationUse | null> {
   if (req.workloadKind !== "mcp_stdio" || req.agent !== null || req.interactivePerson !== true || req.parentGrantId) return null;
@@ -218,7 +221,14 @@ async function personStdioRelaxation(db: Db, req: PlacementRequest): Promise<Per
     const [row] = await db
       .select({ id: executionPersonStdioRelaxations.id })
       .from(executionPersonStdioRelaxations)
-      .where(and(eq(executionPersonStdioRelaxations.scopeKind, s.kind), eq(executionPersonStdioRelaxations.scopeId, s.id), isNull(executionPersonStdioRelaxations.clearedAt)));
+      .where(
+        and(
+          eq(executionPersonStdioRelaxations.scopeKind, s.kind),
+          eq(executionPersonStdioRelaxations.scopeId, s.id),
+          isNull(executionPersonStdioRelaxations.clearedAt),
+          sql`${executionPersonStdioRelaxations.expiresAt} > now()`,
+        ),
+      );
     if (row) return { kind: PERSON_STDIO_RELAXATION_KIND, subjectKind: PERSON_STDIO_SUBJECT_KIND, relaxationId: row.id, scopeKind: s.kind, scopeId: s.id };
   }
   return null;

@@ -359,9 +359,18 @@ export const setExecutionProfileAssignmentSchema = z.object({ profileId: z.strin
 
 /**
  * PUT /v1/execution-person-stdio-relaxations/:scopeKind/:scopeId (owner decision C): `true` sets the relaxation
- * (a `settings_relax` step-up, audited), `false` clears it (a tightening: audited, no step-up).
+ * (a `settings_relax` step-up, audited), `false` clears it (a tightening: audited, no step-up). ADR-0197 Q3: a
+ * relaxation expires `PERSON_STDIO_RELAXATION_DAYS` after it is set; `{relaxed: true, renew: true}` renews the one
+ * in force or expired for that long again, which is another `settings_relax` step-up (op `person_stdio_renew`),
+ * audited. Setting `true` on a scope whose relaxation has expired is refused 409 `relaxation_expired` (renew it).
  */
-export const setPersonStdioRelaxationSchema = z.object({ relaxed: z.boolean() }).strict();
+export const setPersonStdioRelaxationSchema = z
+  .object({ relaxed: z.boolean(), renew: z.literal(true).optional() })
+  .strict()
+  .refine((b) => b.relaxed || b.renew === undefined, "only a relaxation can be renewed");
+
+/** ADR-0197 Q3: a person's own stdio call relaxation is in force for at most this long after its set or renewal */
+export const PERSON_STDIO_RELAXATION_DAYS = 30;
 
 /**
  * PUT /v1/execution-project-sensitivities/:projectId (owner decision D): the admin-set project sensitivity, or null

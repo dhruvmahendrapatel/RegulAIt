@@ -120,7 +120,7 @@ import { DelegationRefusedError, revokeDelegationGrant } from "./delegation.js";
 import { databaseNow, databaseWallNow } from "./db-clock.js";
 import { agentScopeItem, ensureIdentityFor, startInProcessChain, usdToMicros } from "./in-process-delegation.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type AgentRow = typeof agents.$inferSelect;
@@ -1198,7 +1198,7 @@ export async function runEngineScheduleSweep(db: Db, opts: { now?: Date } = {}) 
         if (created.ok) runId = created.run.id;
         else skip = `${created.error}${created.detail ? `: ${created.detail}` : ""}`;
       } catch (err) {
-        skip = `the run could not be created: ${safeErrorMessage(err)}`;
+        skip = `the run could not be created: ${errMessage(err)}`;
       }
     }
     // round 11 (sweep): the schedule's outcome and its skip audit commit together

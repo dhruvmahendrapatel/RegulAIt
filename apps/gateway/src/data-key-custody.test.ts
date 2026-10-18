@@ -68,7 +68,9 @@ import {
   fingerprintsMatch,
   probeCiphertext,
   verifyDataKeyOnBoot,
+  dataKeyAttestStepUp,
 } from "./data-key.js";
+import { grantSpent, grantStepUpForTest, stepUpRequest } from "./testing/step-up-grant.js";
 import { dataKeyFormatError, encryptSecret } from "./secrets.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
@@ -741,19 +743,39 @@ describe("custody attestation", () => {
     expect(JSON.stringify(body)).not.toContain(KEY_A);
   });
 
+  // ADR-0197 Q6: recording an attestation is a `key_management` step-up bound to the key and the method
+  const ATTEST = { method: "password_manager", locationHint: "1Password vault: Platform Ops", note: "restore rehearsal 2026-08", confirmRecordedOutOfBand: true };
+  const attestWith = async (args: Parameters<typeof grantStepUpForTest>[2]) => {
+    const g = await grantStepUpForTest(db, adminUserId, args);
+    const res = await app.inject({ method: "POST", url: "/v1/security/data-key/attestations", ...stepUpRequest(g), payload: ATTEST });
+    return { res, g };
+  };
+
+  it("Q6: an API key can never record one: refused step_up_required, nothing recorded", async () => {
+    const res = await app.inject({ method: "POST", headers: adminAuth, url: "/v1/security/data-key/attestations", payload: ATTEST });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json()).toMatchObject({ error: "step_up_required", actionKind: "key_management" });
+    expect(await db.select().from(dataKeyAttestations)).toHaveLength(0);
+  });
+
+  it("Q6: a grant of another kind, or for another key or op, is refused and not spent", async () => {
+    for (const args of [
+      { kind: "settings_relax" as const, facts: dataKeyAttestStepUp(FP_A).facts },
+      dataKeyAttestStepUp(FP_B),
+      { kind: "key_management" as const, facts: { op: "receipt_key_retire", keyId: FP_A } },
+    ]) {
+      const { res, g } = await attestWith(args);
+      expect(res.statusCode, `${args.kind} ${JSON.stringify(args.facts)}: ${res.body}`).toBe(422);
+      expect(res.json()).toMatchObject({ error: "step_up_unavailable", actionKind: "key_management" });
+      expect(await grantSpent(db, g.grantId)).toBe(false);
+    }
+    expect(await db.select().from(dataKeyAttestations)).toHaveLength(0);
+  });
+
   it("records an attestation with the ACTOR and the fingerprint, and audits it", async () => {
-    const res = await app.inject({
-      method: "POST",
-      headers: adminAuth,
-      url: "/v1/security/data-key/attestations",
-      payload: {
-        method: "password_manager",
-        locationHint: "1Password vault: Platform Ops",
-        note: "restore rehearsal 2026-08",
-        confirmRecordedOutOfBand: true,
-      },
-    });
-    expect(res.statusCode).toBe(201);
+    const { res, g } = await attestWith(dataKeyAttestStepUp(FP_A));
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await grantSpent(db, g.grantId)).toBe(true);
     expect(res.json().fingerprint).toBe(FP_A);
     expect(res.json().limits).toContain("does not verify custody");
 
@@ -765,6 +787,7 @@ describe("custody attestation", () => {
     const audited = await lastAudit(DATA_KEY_RULE_IDS.attested);
     expect(audited?.userId).toBe(adminUserId);
     expect((audited?.detail as { fingerprint?: string }).fingerprint).toBe(FP_A);
+    expect(audited?.detail).toMatchObject({ stepUp: "totp", stepUpKind: "key_management" });
     expect(audited?.reason).toContain("cannot verify custody");
   });
 
