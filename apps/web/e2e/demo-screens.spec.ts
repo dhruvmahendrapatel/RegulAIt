@@ -99,7 +99,8 @@ async function capture(page: Page, persona: { key: string; displayName: string }
     const truncated = Array.from(document.querySelectorAll("body *"))
       .filter((el) => {
         const he = el as HTMLElement;
-        if (!he.textContent?.trim() || he.children.length > 0) return false;
+        // visible text only: the collapsed navigation rail and screen-reader-only labels clip on purpose
+        if (!he.textContent?.trim() || he.children.length > 0 || he.clientWidth < 24 || he.closest("nav")) return false;
         const cs = getComputedStyle(he);
         return he.scrollWidth > he.clientWidth + 1 && (cs.textOverflow === "ellipsis" || cs.overflowX === "hidden");
       })
@@ -226,7 +227,9 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await ada.getByRole("button", { name: `Remediation plan for ${subject}`, exact: true }).click();
     const panel = ada.getByTestId("shadow-remediation");
     await expect(panel).toBeVisible();
-    await panel.getByLabel("Environment").fill("sandbox");
+    // the script says `sandbox`, but the product accepts only an environment a deploy target or assignment rule uses;
+    // the seed's demo company deploys to `staging` (QA finding F1 in DEMO_SCREENS_QA_2026-11-01.md)
+    await panel.getByLabel("Environment").fill("staging");
     await capture(ada, ADA, "ds-s3b-remediation-plan-live");
     await panel.getByRole("button", { name: "Start remediation workflow…" }).click();
     const dialog = ada.getByRole("dialog", { name: "Start a remediation workflow?" });

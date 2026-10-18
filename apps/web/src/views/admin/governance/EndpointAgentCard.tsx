@@ -60,7 +60,9 @@ const TOKEN_RELAXED_DAYS = 90;
 export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySourceView[] }) {
   const act = useAction();
   const targets = sources.filter((s) => s.kind === "endpoint_agent");
-  const [sourceId, setSourceId] = useState("");
+  const [picked, setPicked] = useState("");
+  // with one endpoint agent source there is nothing to choose: its devices show without a click
+  const sourceId = picked || (targets.length === 1 ? targets[0]!.id : "");
   const [label, setLabel] = useState("");
   const [deviceCap, setDeviceCap] = useState("");
   const [days, setDays] = useState("30");
@@ -133,7 +135,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
         ) : (
           <>
             <Field label="Endpoint agent source" error={error}>
-              <Select value={sourceId} onChange={(e) => { setSourceId(e.target.value); setEnrolFile(null); }}>
+              <Select value={sourceId} onChange={(e) => { setPicked(e.target.value); setEnrolFile(null); }}>
                 <option value="">Choose a source</option>
                 {targets.map((s) => (
                   <option key={s.id} value={s.id}>
