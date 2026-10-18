@@ -1394,6 +1394,13 @@
       "when": 1785143000000,
       "tag": "0208_owner_decisions_relaxation_expiry_enrolment_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1785144000000,
+      "tag": "0209_spiffe_bundle_fetch_jwt_svid",
+      "breakpoints": true
     }
   ]
 }
