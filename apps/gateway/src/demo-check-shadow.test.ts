@@ -41,7 +41,6 @@ function world() {
       signalSources: i === 1 ? ["endpoint_inventory", "endpoint_agent"] : ["endpoint_inventory"],
       observationCount: 1,
     })),
-    { id: "f-cli", subjectKind: "endpoint_app", subject: "claude", signalSources: ["endpoint_agent"], signatures: ["cli.anthropic.claude"], observationCount: 1 },
   ];
   return {
     sources,
@@ -101,7 +100,7 @@ describe("checkShadowDiscovery FAILs a step that silently produced nothing", () 
     ["one recorded repository has no finding", "1 Sightings", (w) => void (w.findings = w.findings.filter((f) => f.id !== "f-repo-1"))],
     ["the AWS principal has no audit-log finding", "1 Sightings", (w) => void (w.findings = w.findings.filter((f) => f.id !== "f-principal"))],
     ["an MDM row has no finding", "1 Sightings", (w) => void (w.findings = w.findings.filter((f) => f.id !== "f-mdm-2"))],
-    ["the CLI signature hit is missing", "1 Sightings", (w) => void (w.findings = w.findings.filter((f) => f.id !== "f-cli"))],
+    ["the env signature hit is missing", "1 Sightings", (w) => void (w.findings = w.findings.map((f) => ({ ...f, signatures: [] })))],
     ["a device reports with 0 agent findings", "1 Endpoint agent", (w) => void (w.findings = w.findings.map((f) => ({ ...f, signalSources: f.signalSources.filter((k: string) => k !== "endpoint_agent") })))],
     ["no device enrolled", "1 Endpoint agent", (w) => void (w.devices = [])],
     ["no federation key", "1 Federation", (w) => void (w.keys = [])],

@@ -160,9 +160,8 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     for (const beat of SHADOW_DISCOVERY_BEATS) {
       expect(checks.find((c) => c.beat === beat)?.level, `${beat}: ${checks.find((c) => c.beat === beat)?.detail}`).toBe("PASS");
     }
-    // ADR-0195 lane A6: the repo's env names and the agent's CLI name are presence signature hits, never stored names
-    expect(JSON.stringify(findings)).toContain("env.anthropic.api-key");
-    expect(JSON.stringify(findings)).toContain("cli.anthropic.claude");
+    // ADR-0195 lane A6: the repo's env names are presence signature hits, never stored names
+    for (const id of D.presenceSignatures) expect(JSON.stringify(findings), id).toContain(id);
     // ...and no env-variable name or value, device name or device user is in any stored evidence of the seeded device or
     // its runs, in the audit log, or in what either seeder phase printed (its report)
     const never = demoShadowNeverStored(D);
