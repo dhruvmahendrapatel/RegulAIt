@@ -541,3 +541,31 @@ so reverting `scheduler-health.ts` or `scheduler.ts` to that form stayed green. 
    `redactLogText(message)` cut at 300 characters. The provider's own text is kept for diagnosis, so it is not withheld.
 
 The Open note above (pino's generic `{ err }` serializer) stands.
+
+### As built 2026-10-18 — the gateway error serializer (owner decision Q10, ADR-0197)
+
+Q10 replaces the hand-written error-to-text helpers from #413 (`safeErrorText`, `safeErrorMessage`, `safeLogObject`,
+`framesOnly` and the per-shape fields of the 500 line) with pino's standard serializer, and closes the Open note above
+(pino's generic `{ err }` serializer folding a cause's message in). Branch `q10-pino-err-serializer`.
+
+1. **One serializer.** `err-serializer.ts` runs pino's `stdSerializers.errWithCause` (type, cause chain, aggregate
+   errors, cycle safety) and keeps a whitelist of its output: `type`, `code`, `sqlState`, `constraint`/`table`/`column`
+   names, a stable `errorId` (a fingerprint of type, code and first frame), the stack frames without the message line,
+   and a `message`. The message is withheld when the error or any link of its cause chain is a `SyntaxError`, a failed
+   query or a driver error (trigger RAISE text included: Q9 keeps withholding); otherwise it is the error's own message
+   through `redactLogText`, never pino's folded cause text. `cause` and `aggregateErrors` follow the same rules, bounded.
+   Everything else pino copies (drizzle's `params` and `query`, Postgres's `detail`, an HTTP client's `config`,
+   `request` and `response`) is dropped. pino 10.4.0 is now a direct, exact-pinned dependency (`THIRD_PARTY.md`).
+2. **Configured on the logger.** `resolveGatewayLogger` sets it for the `err` and `error` keys, and a `logMethod` hook
+   moves a bare error argument (`log.error(err)`) under `err`: pino otherwise writes that error's raw message as the
+   line's `msg`, a leak the old helpers did not cover.
+3. **Call sites.** Pino lines log `{ err }`. A stored copy or refusal uses `errMessage` (the serialized message; a withheld shape keeps its type and SQLSTATE,
+   as `safeErrorMessage` did), a
+   line written outside pino uses `errLine` (`Type (cause X) [SQLSTATE n]: message`) and a console field bag
+   `errFields`; all three derive from the serializer. The 500 line is `{ status, method, route, path, err }`.
+   **Deviation:** the failed query's SQL text (`sql`) and the `params` count are no longer on the 500 line: the
+   whitelist names no SQL field (a raw SQL fragment can inline a value), and `errorId` plus the frames locate the call.
+4. **Scan guard.** `log-error-text.test.ts` keeps every N8 rule and adds one: inside a log call, an error under any key
+   but `err`/`error` is refused, because the serializer covers those two keys only. `err-serializer.test.ts` covers a
+   DB error with row data in its message, a fetch error whose URL carries a token, a nested cause, a RAISE, a bare
+   error argument, the error id, idempotence and cycles.

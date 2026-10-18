@@ -129,7 +129,7 @@ import {
   withSignInInvariant,
   type SignInInvariantSite,
 } from "./break-glass.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 export interface SamlRouteOptions {
   dataKey?: string;
@@ -701,7 +701,7 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
     } catch (err) {
       return refuse(401, "saml_validation_failed", "saml-reauth-failed",
         `SAML step-up assertion validation failed for provider '${provider.name}'`,
-        { error: safeErrorMessage(err) });
+        { error: errMessage(err) });
     }
     if (profile.inResponseTo !== row.nonce) {
       return refuse(403, "idp_initiated_not_allowed", "saml-reauth-failed",
@@ -882,7 +882,7 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         if (!result.profile) throw new Error("no profile in SAML response");
         profile = result.profile;
       } catch (err) {
-        const message = safeErrorMessage(err);
+        const message = errMessage(err);
         // ADR-0181 (FX2, review finding 12): migration 0156 turned
         // wantAuthnResponseSigned on for every provider. An IdP that signs only
         // the assertion now fails here, and the refusal NAMES the setting so an

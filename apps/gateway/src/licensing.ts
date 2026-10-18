@@ -95,7 +95,7 @@ import {
   type SeatDecision,
 } from "@regulait/shared";
 import { countActiveSeats } from "./billing.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 const idParam = z.object({ id: z.string().uuid() });
@@ -215,7 +215,7 @@ export function verifyLicenseArtifact(input: {
     return {
       ok: false,
       ruleId: "license-verification-error",
-      reason: `verification could not be performed with ${input.signingKeyId}: ${safeErrorMessage(err)}`,
+      reason: `verification could not be performed with ${input.signingKeyId}: ${errMessage(err)}`,
     };
   }
   if (!verified) {
@@ -243,7 +243,7 @@ export function verifyLicenseArtifact(input: {
       ruleId: "license-document-malformed",
       reason:
         "the signature verified, but the document is not a well-formed regulait.license/1 body: " +
-        `${safeErrorMessage(err)}`,
+        `${errMessage(err)}`,
     };
   }
 

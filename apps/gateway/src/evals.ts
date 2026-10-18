@@ -141,7 +141,7 @@ import { refuseRunStartWithoutLiteracy } from "./ai-literacy.js";
 import { checkBuiltinEvalDatasetForRun, isBuiltinEvalDataset } from "./eval-builtin-datasets.js";
 import { holdOffensiveBuiltinRun } from "./eval-run-approvals.js";
 import { loadOrgSettings } from "./org-settings.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -1329,7 +1329,7 @@ export async function runEvalSuite(
         // score 0 with the error named, no method stamp, never a fabricated
         // measurement presented as the instrument's verdict.
         scored = { score: 0, passed: false, detail: { externalScorer: config.externalScorer, failed: true } };
-        caseError = `external_scorer_failed: ${safeErrorMessage(e)}`;
+        caseError = `external_scorer_failed: ${errMessage(e)}`;
       }
     } else if (usesPanelPath && (panelMembers.length > 0 || judge)) {
       // ADR-0173 batch 2c — A PANEL (or one judge, repeated). Every judge
@@ -1379,7 +1379,7 @@ export async function runEvalSuite(
               score: null,
               passed: null,
               rationale: null,
-              error: `judge_failed: ${safeErrorMessage(e)}`.slice(0, 2000),
+              error: `judge_failed: ${errMessage(e)}`.slice(0, 2000),
             });
           }
         }
@@ -1452,7 +1452,7 @@ export async function runEvalSuite(
         rationale = verdict.rationale;
       } catch (e) {
         scored = { score: 0, passed: false, detail: { judge: judge.id, failed: true } };
-        caseError = `judge_failed: ${safeErrorMessage(e)}`;
+        caseError = `judge_failed: ${errMessage(e)}`;
       }
     }
 

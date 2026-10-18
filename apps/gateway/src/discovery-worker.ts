@@ -91,7 +91,7 @@ import { DISCOVERY_SCANNERS, type ScanFederation, type ScanObservation, type Sca
 import { federationAudiences } from "./discovery-cloud-scanners.js";
 import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -717,7 +717,7 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
     if (err instanceof EgressBlockedError || err instanceof EgressRedirectError) return fail("egress_blocked", err.message);
     if (maxRun.aborted) return fail("timed_out", `the scan did not finish within ${maxRunSeconds} s`);
     // a scanner's error text is bounded and kept as a record; it must never carry a secret (scanner contract)
-    return fail("scanner_error", safeErrorMessage(err));
+    return fail("scanner_error", errMessage(err));
   } finally {
     clearInterval(renewTimer);
   }

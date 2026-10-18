@@ -22,7 +22,7 @@ export function QuorumProgress(props: { approval: Approval }) {
   const decisions = r.decisions ?? [];
   const mode = signatureModeOf(r);
   return (
-    <div className={v.stack} style={{ gap: 4 }} data-testid={`quorum-${r.id}`}>
+    <div className={v.stack} style={{ gap: "var(--s0)" }} data-testid={`quorum-${r.id}`}>
       <span className={v.rowTight} style={{ flexWrap: "wrap" }}>
         <Badge tone={progress.count >= progress.quorum ? "ok" : progress.quorum > 1 ? "warn" : "neutral"}>
           {progress.label}
@@ -32,7 +32,7 @@ export function QuorumProgress(props: { approval: Approval }) {
         </span>
       </span>
       {decisions.length > 0 && (
-        <ul aria-label="Decisions so far" style={{ margin: 0, paddingLeft: "1.1em" }}>
+        <ul aria-label="Decisions so far" style={{ margin: "0", paddingLeft: "var(--s2)" }}>
           {decisions.map((d) => (
             <li key={`${d.principalUserId ?? "?"}-${d.at}`} className={v.dim}>
               {d.principalName ?? d.principalUserId ?? "someone"} {d.decision}

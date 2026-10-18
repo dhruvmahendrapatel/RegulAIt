@@ -56,13 +56,14 @@ import {
 } from "./compiled-egress.js";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
-import { redactLogText, safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
+import { redactLogText } from "./gateway-logger.js";
 
 /** N8 S4 — a provider's refusal text embeds the provider's own response body,
  * which can echo the work-item payload we sent: it is bounded and scrubbed
  * before it is stored in an audit row or returned */
-const PROVIDER_TEXT_MAX = 300;
-function providerErrorText(err: PmProviderError): string {
+export const PROVIDER_TEXT_MAX = 300;
+export function providerErrorText(err: PmProviderError): string {
   return redactLogText(err.message).slice(0, PROVIDER_TEXT_MAX);
 }
 
@@ -247,7 +248,7 @@ export async function mirrorNodeStatus(
   } catch (err) {
     // §3 "never drift silently": the failure is returned to the caller and
     // the link's lastSyncedAt stays stale — visible, not hidden.
-    return { ok: false, error: safeErrorMessage(err) };
+    return { ok: false, error: errMessage(err) };
   }
 }
 
@@ -359,7 +360,7 @@ export async function mirrorApprovalDecision(
     });
     return { ok: true, action: action.kind };
   } catch (err) {
-    return { ok: false, error: safeErrorMessage(err) };
+    return { ok: false, error: errMessage(err) };
   }
 }
 
@@ -919,8 +920,8 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
               } catch (err) {
                 // the push failed — the drift stays SURFACED, never hidden
                 await auditDrift(
-                  { autoResolveFailed: safeErrorMessage(err) },
-                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${safeErrorMessage(err)}); drift stays surfaced, state machine untouched`,
+                  { autoResolveFailed: errMessage(err) },
+                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${errMessage(err)}); drift stays surfaced, state machine untouched`,
                 );
               }
             } else if (conn.driftResolution === "prefer_pm") {
@@ -1181,7 +1182,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
             reason: `decision mirrored as ${pmMirror.action}`,
           });
         } catch (err) {
-          pmMirror = { ok: false, error: safeErrorMessage(err) };
+          pmMirror = { ok: false, error: errMessage(err) };
         }
       }
     }
@@ -1355,7 +1356,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           const item = await liveProvider.getWorkItem(conn.project, link.externalId);
           return { ...link, live: { state: item.state, fields: item.fields, comments: item.comments } };
         } catch (err) {
-          return { ...link, live: null, liveError: safeErrorMessage(err) };
+          return { ...link, live: null, liveError: errMessage(err) };
         }
       }),
     );

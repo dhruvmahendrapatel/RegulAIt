@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { safeErrorMessage, safeErrorText, safeLogObject } from "./gateway-logger.js";
+import { errFields, errLine, errMessage } from "./err-serializer.js";
 import type { FastifyInstance } from "fastify";
 // ADR-0187: loaded lazily where used (engine-runs.ts reaches back into this module)
 import type { EngineCheckOutcome } from "./engine-runs.js";
@@ -403,7 +403,7 @@ async function recordDeferredSpan(db: Db, span: DeferredSpan | undefined): Promi
   try {
     await recordWorkflowStageSpan(db, span.instanceId, span.event, span.applied);
   } catch (err) {
-    console.error(`workflow_stage span for ${span.instanceId} not recorded: ${safeErrorText(err)}`);
+    console.error(`workflow_stage span for ${span.instanceId} not recorded: ${errLine(err)}`);
   }
 }
 
@@ -859,11 +859,11 @@ async function mirrorAfterExecutor(db: Db, instanceId: string, actorUserId: stri
     const { mirrorInstanceTransition } = await import("./use-cases.js");
     return await mirrorInstanceTransition(db, instanceId, actorUserId, {
       // N8 F1: the object can carry an error; a console write skips pino's redaction
-      warn: (obj, msg) => console.warn(msg ?? "", safeLogObject(obj)),
-      error: (obj, msg) => console.error(msg ?? "", safeLogObject(obj)),
+      warn: (obj, msg) => console.warn(msg ?? "", errFields(obj)),
+      error: (obj, msg) => console.error(msg ?? "", errFields(obj)),
     });
   } catch (err) {
-    console.error(`use-case mirror after the executor of ${instanceId} failed: ${safeErrorText(err)}`);
+    console.error(`use-case mirror after the executor of ${instanceId} failed: ${errLine(err)}`);
     return undefined;
   }
 }
@@ -1192,7 +1192,7 @@ async function runStageEvalChecks(
         },
       });
     } catch (e) {
-      fail(`eval '${binding.dataset}' errored: ${safeErrorMessage(e)}`);
+      fail(`eval '${binding.dataset}' errored: ${errMessage(e)}`);
     }
   }
   return out;
@@ -1340,7 +1340,7 @@ async function runGitExecutions(
         await runGitExecutions(db, instanceId, [{ kind: "execute_stage", stageId: stage.id }], actorUserId, dataKey, 1, hooks);
       } catch (err) {
         if (!(err instanceof WorkflowStateError)) {
-          console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${safeErrorText(err)}`);
+          console.error(`re-evaluation of '${stage.id}' on ${instanceId} failed: ${errLine(err)}`);
         }
       }
     };
@@ -1711,7 +1711,7 @@ async function runGitExecutions(
         }
       } catch (err) {
         executionControlRefused = err instanceof ExternalEffectBlockedError;
-        deployErr = safeErrorMessage(err);
+        deployErr = errMessage(err);
       }
       releaseStageClaim(context);
       if (deployErr === null) delete context.lastError;
@@ -1813,7 +1813,7 @@ async function runGitExecutions(
               : { ...res, target: target.name };
         }
       } catch (err) {
-        rbErr = safeErrorMessage(err);
+        rbErr = errMessage(err);
       }
       releaseStageClaim(context);
       if (rbErr === null) delete context.lastError;
@@ -2030,7 +2030,7 @@ ${latestArtifact.content}`
         context.mergeSha = result.sha;
       }
     } catch (err) {
-      executionError = safeErrorMessage(err);
+      executionError = errMessage(err);
     }
 
     // Release the claim; record outcome. The kernel event application sits

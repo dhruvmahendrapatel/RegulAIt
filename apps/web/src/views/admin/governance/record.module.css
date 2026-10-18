@@ -8,7 +8,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--s3);
-  padding: 20px var(--s3) 22px;
+  padding: var(--s2-5) var(--s3) var(--s3);
   margin-bottom: var(--s3);
   border: 1px solid var(--rg-dark-line);
   border-radius: var(--rg-r-card);
@@ -25,8 +25,8 @@
 .crumbs {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 10px;
+  gap: var(--s0-5);
+  margin: 0 0 var(--s1-5);
   padding: 0;
   list-style: none;
   font-size: var(--text-sm);
@@ -34,7 +34,7 @@
 }
 .crumbs li + li::before {
   content: "/";
-  margin-right: 6px;
+  margin-right: var(--s0-5);
 }
 .crumbs a {
   color: var(--rg-dark-ink);
@@ -51,12 +51,12 @@
 .titleRow {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--s1-5);
   flex-wrap: wrap;
 }
 .typeTag {
   display: inline-block;
-  padding: 3px 8px;
+  padding: var(--s-half) var(--s1);
   border-radius: var(--rg-r-xs);
   background: var(--rg-signal-400);
   color: var(--rg-dark-surface);
@@ -76,7 +76,7 @@
   outline: none;
 }
 .sub {
-  margin: 6px 0 0;
+  margin: var(--s0-5) 0 0;
   max-width: 72ch;
   color: var(--rg-dark-muted);
   font-size: var(--text-md);
@@ -85,8 +85,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 10px;
-  margin: 12px 0 0;
+  gap: var(--s1) var(--s1-5);
+  margin: var(--s1-5) 0 0;
   padding: 0;
   list-style: none;
   font-size: var(--text-sm);
@@ -94,8 +94,8 @@
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
+  gap: var(--s0-5);
+  padding: var(--s-half) var(--s1-5);
   border: 1px solid var(--rg-dark-line);
   border-radius: var(--rg-r-pill);
   background: var(--rg-dark-raised);
@@ -127,7 +127,7 @@
 .bandAction {
   display: inline-flex;
   align-items: center;
-  padding: 7px 14px;
+  padding: var(--s1) var(--s1-5);
   border: 1px solid var(--rg-dark-line);
   border-radius: var(--rg-r-sm);
   background: var(--rg-dark-raised);
@@ -154,7 +154,7 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--s1-5);
   padding-right: var(--s2);
   font-size: var(--text-md);
   color: var(--rg-ink-muted);
@@ -217,7 +217,7 @@
 }
 .activityDetail {
   display: block;
-  margin-top: 2px;
+  margin-top: var(--s-half);
   color: var(--rg-ink-muted);
   font-size: var(--text-sm);
 }
@@ -244,7 +244,7 @@
 
 .expired {
   margin: 0;
-  padding: 12px var(--s2);
+  padding: var(--s1-5) var(--s2);
   border-left: 3px solid var(--rg-critical);
   border-radius: var(--rg-r-sm);
   background: var(--rg-critical-tint);
@@ -274,7 +274,7 @@
   position: absolute;
   width: 1px;
   height: 1px;
-  margin: -1px;
+  margin: calc(-1 * var(--s-hair));
   padding: 0;
   overflow: hidden;
   clip: rect(0 0 0 0);

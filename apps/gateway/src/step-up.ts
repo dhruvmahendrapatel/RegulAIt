@@ -56,7 +56,11 @@
  * `key_management` (migration 0203): every signing-key operation, bound to
  * `{op, keyId}` naming the exact act and key: `receipt_key_retire`
  * (decision-receipts.ts), `signing_key_rotate` (the key rotated TO, resolved
- * before the step-up) and `signing_key_revoke` (identity-routes.ts). A grant
+ * before the step-up), `signing_key_revoke` (identity-routes.ts), and
+ * `federation_key_rotate` (the key rotated TO) and `federation_key_revoke`
+ * (federation-signing-keys.ts, ADR-0195 SD2b); and (ADR-0197 Q6)
+ * `data_key_attest`, recording a data-key custody attestation, bound to the
+ * key's fingerprint (data-key.ts). A grant
  * of another kind is never valid for one, nor a key_management grant for
  * another op or key; neither is spent.
  *
@@ -70,7 +74,12 @@
  * private ranges), `egress_allow_host` (adding an allow entry, `values.added`,
  * or turning an entry's private-range or plaintext opt-in on; ADR-0034 owner
  * amendment 2026-10-16), `agent_expected_served_model` and
- * `agent_create_expected_served_model` (relaxing the served-model drift check).
+ * `agent_create_expected_served_model` (relaxing the served-model drift check),
+ * `person_stdio_relax` and (ADR-0197 Q3) `person_stdio_renew` (a person's own
+ * stdio call relaxation and its renewal), (ADR-0197 Q13)
+ * `endpoint_enrolment_token_long_expiry` (an enrolment token past 30 days),
+ * and `federation_enable` (turning workload-identity federation on with the
+ * named key; federation-signing-keys.ts, ADR-0195 SD2b).
  *
  * METHODS: `passkey` (an enrolled, unrevoked passkey and a configured
  * relying party), `totp` (an enrolled authenticator; replay-protected by the
@@ -128,7 +137,7 @@ import { stepUpRateLimitUserKey } from "./rate-limit.js";
 import { decryptSecret } from "./secrets.js";
 import { resolvePublicUrl } from "./public-url.js";
 import { ApprovalRuleWriteRefusedError, type ApprovalRuleStepUp } from "./approval-pool.js";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 
 
 
@@ -1171,7 +1180,7 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
         await auditStepUpFailure(db, caller.userId, "sso", "start_failed", {
           providerKind: sso.kind,
           providerId: sso.providerId,
-          error: safeErrorMessage(err).slice(0, 300),
+          error: errMessage(err).slice(0, 300),
         });
         ssoStart = null;
       }
@@ -1292,7 +1301,7 @@ export function registerStepUpRoutes(app: FastifyInstance, db: Db, opts: { dataK
         requireUserVerification: true,
       });
     } catch (err) {
-      return invalid(`verification_error: ${safeErrorMessage(err).slice(0, 200)}`);
+      return invalid(`verification_error: ${errMessage(err).slice(0, 200)}`);
     }
     if (!verified.verified || !verified.authenticationInfo.userVerified) return invalid("not_verified");
     // the counter moves forward once: a concurrent use of the same assertion matches no row

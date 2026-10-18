@@ -120,7 +120,7 @@ import {
   type MonitorAssuranceInput,
   type MonitorAssuranceSubject,
 } from "@regulait/shared";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 import { evaluatePack } from "./compliance-packs.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { measureTraceMetricForScope } from "./kri.js";
@@ -680,7 +680,7 @@ export async function evaluateConditionsDetailed(
         reopenFor = { row: written.row, counted: written.counted };
       }
     } catch (err) {
-      out.skipped.push({ conditionId: c.id, reason: safeErrorMessage(err).slice(0, 300) });
+      out.skipped.push({ conditionId: c.id, reason: errMessage(err).slice(0, 300) });
       out.verdicts.push(verdictOf(c, m, now));
     }
   }
@@ -961,7 +961,7 @@ export async function runConditionEvaluationSweep(
       for (const s of r.skipped) out.skipped.push({ useCaseId: id, reason: `${s.conditionId}: ${s.reason}` });
     } catch (err) {
       // ONE failing use case never aborts the sweep
-      const message = safeErrorMessage(err);
+      const message = errMessage(err);
       log(`condition evaluation sweep: use case ${id} skipped — ${message}`);
       out.skipped.push({ useCaseId: id, reason: message.slice(0, 300) });
     }

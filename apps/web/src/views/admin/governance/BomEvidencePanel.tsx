@@ -52,7 +52,7 @@ const OUTCOME_TONE: Record<VerifyView["outcome"], Tone> = { valid: "ok", unverif
 const STATUS_TONE: Record<string, Tone> = { valid: "ok", unverifiable: "warn", invalid: "danger" };
 
 /** visually hidden, still read by assistive technology */
-const SR_ONLY: CSSProperties = { position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap", border: 0 };
+const SR_ONLY: CSSProperties = { position: "absolute", width: 1, height: 1, padding: "0", margin: "calc(-1 * var(--s-hair))", overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap", border: 0 };
 
 /** a digest, shortened for the eye; the whole value is the title and is read out in full to assistive technology */
 export function Digest({ value }: { value: string }) {

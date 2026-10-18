@@ -60,7 +60,7 @@ export function DecisionRecordTab(props: { useCaseId: string }) {
   });
   return (
     <Card title="Decision records">
-      <p className={v.dim} style={{ marginTop: 0 }}>
+      <p className={`${v.dim} ${v.flushTop}`}>
         Each sign-off decision is recorded with the versions that produced it, so the decision can be reproduced later:
         the review policy, the required AI tests, the intake template, the screening rules and the suggestion rules.
         Digests identify a configuration exactly; the same digest means the same content.
@@ -101,7 +101,7 @@ export function DecisionRecordTab(props: { useCaseId: string }) {
                 { key: "answers", header: "Answers", render: (r) => <Digest value={r.answersDigest} label="Answers digest" /> },
               ]}
             />
-            <p className={v.dim} style={{ marginBottom: 0 }}>
+            <p className={`${v.dim} ${v.flushBottom}`}>
               Current rules: screening v{q.data.current.euAiActRulesetVersion}, suggestions {q.data.current.intakeAssistVersion}.
             </p>
           </>

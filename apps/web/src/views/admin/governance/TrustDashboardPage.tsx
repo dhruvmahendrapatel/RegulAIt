@@ -338,8 +338,8 @@ export function TrustSnapshotCard() {
   const q = useQuery(trustQuery());
   return (
     <Card title="Trust evidence" actions={<Link to="/admin/governance/trust">Open dashboard</Link>}>
-      {q.isLoading ? <p className={v.faint}>Loading evidence coverage…</p> : q.isError ? (
-        <p className={v.faint}>Trust evidence could not be loaded. Open the dashboard to retry.</p>
+      {q.isLoading ? <p className={v.faint} role="status">Loading evidence coverage…</p> : q.isError ? (
+        <p className={v.errLine} role="alert">Trust evidence could not be loaded. Open the dashboard to retry.</p>
       ) : q.data ? (
         <div className={v.stack}>
           <div className={v.grid3}>

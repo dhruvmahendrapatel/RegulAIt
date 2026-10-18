@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { bundleFor } from "./engine-images-lock-fixtures.mjs";
 import { applyPublish, assertCommitOnMain, checkLockTransition, ENGINE_IDS, GHCR_OWNER, LockError, PATHS, readLockAt, renderCompose, renderTs, repositoryOwner, UNSET_DIGEST, validateLock } from "./engine-images-lock.mjs";
 
 const lock = () => JSON.parse(readFileSync(PATHS.lock, "utf8"));
@@ -101,13 +102,15 @@ describe("ENG-IMG engine image lock", () => {
     const onMain = (main) => (c) => {
       if (!main.includes(c)) throw new LockError(`${c} is not reachable from origin/main`);
     };
+    /** ADR-0197 Q2: every new image carries its signature; these tests sign exactly what the checked lock records */
+    const signed = (l) => (id) => bundleFor(l.engines[id]);
 
     it("accepts what --apply writes: a new build one generation up, of a commit on main", () => {
-      expect(checkLockTransition(blank(), published(), { onMain: onMain([commit]) })).toEqual(published());
+      expect(checkLockTransition(blank(), published(), { onMain: onMain([commit]), bundleFor: signed(published()) })).toEqual(published());
       const next = applyPublish(published(), { ...publish({ garak: entry("garak", "3", "4") }, "b".repeat(40)), publishedAt: "2026-10-18T05:00:00.000Z" });
-      expect(checkLockTransition(published(), next, { onMain: onMain([commit, "b".repeat(40)]) })).toEqual(next);
+      expect(checkLockTransition(published(), next, { onMain: onMain([commit, "b".repeat(40)]), bundleFor: signed(next) })).toEqual(next);
       // an unchanged lock is unchanged
-      expect(checkLockTransition(published(), published(), { onMain: onMain([commit]) })).toEqual(published());
+      expect(checkLockTransition(published(), published(), { onMain: onMain([commit]), bundleFor: signed(published()) })).toEqual(published());
     });
 
     it("refuses the reviewer's hand edit: a new digest from a branch commit, publishGeneration left as it was", () => {
@@ -116,33 +119,33 @@ describe("ENG-IMG engine image lock", () => {
       // the edit is a valid lock on its own (so --write and the derived-file check pass) ...
       expect(validateLock(edited)).toBe(edited);
       // ... and is refused against main: the branch commit is not on main
-      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toThrow(/not reachable from origin\/main/);
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]), bundleFor: signed(edited) })).toThrow(/not reachable from origin\/main/);
       // with the commit on main, the generation that did not move is refused
-      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit, "c".repeat(40)]) })).toThrow(/exactly 2/);
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit, "c".repeat(40)]), bundleFor: signed(edited) })).toThrow(/exactly 2/);
       // a generation moved by more than one is refused too
       edited.engines.garak.publishGeneration = 3;
-      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit, "c".repeat(40)]) })).toThrow(/exactly 2/);
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit, "c".repeat(40)]), bundleFor: signed(edited) })).toThrow(/exactly 2/);
     });
 
     it("refuses an engine whose image did not change but whose entry did", () => {
       const edited = published();
       edited.engines.garak.publishGeneration = 2;
-      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toThrow(/keeps its whole entry/);
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]), bundleFor: signed(edited) })).toThrow(/keeps its whole entry/);
     });
 
     it("#427 review F3: a new image is published later than the base's (a hand edit that keeps the old publishedAt is refused)", () => {
       const edited = published();
       Object.assign(edited.engines.garak, { manifestDigest: hex("6"), publishGeneration: 2 });
-      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toThrow(/published later than the base's/);
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]), bundleFor: signed(edited) })).toThrow(/published later than the base's/);
       edited.engines.garak.publishedAt = "2026-10-17T04:00:00.000Z";
-      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toThrow(/published later than the base's/);
+      expect(() => checkLockTransition(published(), edited, { onMain: onMain([commit]), bundleFor: signed(edited) })).toThrow(/published later than the base's/);
       edited.engines.garak.publishedAt = "2026-10-18T05:00:00.000Z";
-      expect(checkLockTransition(published(), edited, { onMain: onMain([commit]) })).toEqual(edited);
+      expect(checkLockTransition(published(), edited, { onMain: onMain([commit]), bundleFor: signed(edited) })).toEqual(edited);
     });
 
     it("every published sourceCommit is asked about, changed or not", () => {
       const asked = [];
-      checkLockTransition(published(), published(), { onMain: (c) => asked.push(c) });
+      checkLockTransition(published(), published(), { onMain: (c) => asked.push(c), bundleFor: signed(published()) });
       expect(asked).toEqual([commit]);
     });
 

@@ -15,7 +15,12 @@
  *    are never stored in clear (reports, findings, runs, audit);
  *  - key rotation, and device revocation stopping uploads and token minting;
  *  - the report table's guard (no UPDATE of evidence, no DELETE but its parent's cascade, no TRUNCATE: 0185's rule);
- *  - the device cap and the identity cap under concurrent requests.
+ *  - the device cap and the identity cap under concurrent requests;
+ *  - ADR-0197 Q13: a token lives 30 days by default and at most; up to 90 only with a `settings_relax` step-up bound
+ *    to what is issued (a missing or mismatched grant is refused and nothing is issued), and migration 0208's CHECK
+ *    holds the cap server-side with the relaxation recorded on the row;
+ *  - ADR-0197 Q14: revoking a token leaves its devices reporting unless the admin also asks to revoke them, which
+ *    revokes every live device it enrolled (identities too), in one transaction, audited.
  *
  * Everything this suite creates is removed in afterAll.
  */
@@ -46,8 +51,9 @@ import {
 import { buildApp } from "./app.js";
 import { deriveIdentitySecrets, issueDpopNonce } from "./delegated-token.js";
 import { contentDigestOf, ENDPOINT_REPORT_MAX_BYTES } from "./endpoint-agent.js";
-import { runEndpointAgentIngest } from "./endpoint-agent-routes.js";
+import { enrolmentTokenLongExpiryStepUp, runEndpointAgentIngest } from "./endpoint-agent-routes.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
+import { grantSpent, grantStepUpForTest, sessionRequest, stepUpRequest } from "./testing/step-up-grant.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -295,10 +301,11 @@ describe("ADR-0195 SD4b: enrolment", () => {
     const r = await inject("POST", `/v1/discovery/sources/${off}/enrolment-tokens`, AUTH, { label: "x", deviceCap: 1 });
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toBe("source_disabled");
-    // there is no unlimited default: the cap is required, and expiry is at most 30 days
+    // there is no unlimited default: the cap is required, and expiry is never past 90 days (ADR-0197 Q13; past 30
+    // needs a step-up, covered below)
     const on = await agentSource(true);
     expect((await inject("POST", `/v1/discovery/sources/${on}/enrolment-tokens`, AUTH, { label: "x" })).statusCode).toBe(400);
-    expect((await inject("POST", `/v1/discovery/sources/${on}/enrolment-tokens`, AUTH, { label: "x", deviceCap: 1, expiresInDays: 31 })).statusCode).toBe(400);
+    expect((await inject("POST", `/v1/discovery/sources/${on}/enrolment-tokens`, AUTH, { label: "x", deviceCap: 1, expiresInDays: 91 })).statusCode).toBe(400);
     // a token of a source disabled after issue redeems nothing
     const { enrolFile } = await issueToken(on, 3);
     await db.update(discoverySources).set({ enabled: false, enabledAt: null, enabledBy: null }).where(eq(discoverySources.id, on));
@@ -543,7 +550,10 @@ describe("ADR-0195 SD4b: rotation and revocation", () => {
     expect(after.statusCode).toBe(401);
     expect(after.json().error).toBe("device_revoked");
     a.key.reset();
-    expect((await a.key.tokenRequest()).statusCode).not.toBe(200);
+    // the token endpoint refuses the revoked device's client outright (not a 500, not a token)
+    const minted = await a.key.tokenRequest();
+    expect(minted.statusCode, minted.body).toBe(401);
+    expect(minted.json().error).toBe("invalid_client");
     // registering again with the device's ticket is refused too
     expect((await registerReq(a.ticket, await AgentKey.make())).json()).toEqual({ error: "device_revoked" });
     const audited = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-device-revoked' AND ${auditLog.detail}->>'deviceId' = ${a.deviceId}`);
@@ -575,5 +585,150 @@ describe("ADR-0195 SD4b: the report table's guard (migration 0185's rule)", () =
     // the one DELETE admitted is the cascade of the row's own parent
     await db.delete(endpointDevices).where(eq(endpointDevices.id, a.deviceId));
     expect((await db.select({ id: endpointAgentReports.id }).from(endpointAgentReports).where(eq(endpointAgentReports.id, row!.id))).length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("ADR-0197 Q13: the enrolment token's expiry cap", () => {
+  const DAY = 86_400_000;
+  const tokensOf = async (sourceId: string) => db.select().from(endpointEnrolmentTokens).where(eq(endpointEnrolmentTokens.sourceId, sourceId));
+
+  it("defaults to 30 days with no relaxation recorded", async () => {
+    const sourceId = await agentSource(true);
+    const r = await inject("POST", `/v1/discovery/sources/${sourceId}/enrolment-tokens`, AUTH, { label: `q13-${RUN}`, deviceCap: 1 });
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json().token.expiryRelaxed).toBe(false);
+    const [row] = await tokensOf(sourceId);
+    expect(row!.expiresAt.getTime() - row!.createdAt.getTime()).toBe(30 * DAY);
+    expect(row).toMatchObject({ expiryRelaxedBy: null, expiryRelaxationStepUp: null, expiryRelaxationAuditId: null });
+  });
+
+  it("past 30 days: refused without a step-up, and a grant for another token is refused unspent; nothing is issued", async () => {
+    const sourceId = await agentSource(true);
+    const body = { label: `q13-long-${RUN}`, deviceCap: 3, expiresInDays: 60 };
+    const url = `/v1/discovery/sources/${sourceId}/enrolment-tokens`;
+    // a person's session with no grant (this admin has no enrolled method, so the refusal is step_up_unavailable)
+    const bare = await grantStepUpForTest(db, adminId, enrolmentTokenLongExpiryStepUp({ sourceId, ...body, deviceCap: 99 }));
+    const none = await app.inject({ method: "POST", url, ...sessionRequest(bare), payload: body });
+    expect(none.statusCode, none.body).toBe(422);
+    expect(none.json()).toMatchObject({ error: "step_up_unavailable", actionKind: "settings_relax" });
+    // grants made for another cap, another expiry, another source, or another kind
+    for (const args of [
+      enrolmentTokenLongExpiryStepUp({ sourceId, ...body, deviceCap: 4 }),
+      enrolmentTokenLongExpiryStepUp({ sourceId, ...body, expiresInDays: 90 }),
+      enrolmentTokenLongExpiryStepUp({ sourceId: randomUUID(), ...body }),
+      { kind: "key_management" as const, facts: enrolmentTokenLongExpiryStepUp({ sourceId, ...body }).facts },
+    ]) {
+      const g = await grantStepUpForTest(db, adminId, args);
+      const res = await app.inject({ method: "POST", url, ...stepUpRequest(g), payload: body });
+      expect(res.statusCode, `${JSON.stringify(args.facts)}: ${res.body}`).toBe(422);
+      expect(await grantSpent(db, g.grantId)).toBe(false);
+    }
+    expect(await tokensOf(sourceId)).toHaveLength(0);
+  });
+
+  it("up to 90 days with the exact step-up: issued, the relaxation recorded on the row and audited", async () => {
+    const sourceId = await agentSource(true);
+    const body = { label: `q13-90-${RUN}`, deviceCap: 2, expiresInDays: 90 };
+    const g = await grantStepUpForTest(db, adminId, enrolmentTokenLongExpiryStepUp({ sourceId, ...body }));
+    const r = await app.inject({ method: "POST", url: `/v1/discovery/sources/${sourceId}/enrolment-tokens`, ...stepUpRequest(g), payload: body });
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json().token.expiryRelaxed).toBe(true);
+    expect(await grantSpent(db, g.grantId)).toBe(true);
+    const [row] = await tokensOf(sourceId);
+    expect(row!.expiresAt.getTime() - row!.createdAt.getTime()).toBe(90 * DAY);
+    expect(row).toMatchObject({ expiryRelaxedBy: adminId, expiryRelaxationStepUp: "totp" });
+    const [relaxed] = await db.select().from(auditLog).where(eq(auditLog.id, row!.expiryRelaxationAuditId!));
+    expect(relaxed).toMatchObject({ ruleId: "endpoint-enrolment-token-expiry-relaxed", userId: adminId, objectId: sourceId, effect: "allow" });
+    expect(relaxed!.detail).toMatchObject({ tokenId: row!.id, expiresInDays: 90, relaxation: true, stepUp: "totp" });
+  });
+
+  it("the cap is the server's (migration 0208): 30 days without a recorded relaxation, 90 with one, never more", async () => {
+    const sourceId = await agentSource(true);
+    const insert = (days: number, relaxed: boolean) =>
+      db.execute(sql`insert into endpoint_enrolment_tokens (source_id, label, token_hash, device_cap, expires_at, expiry_relaxation_step_up, expiry_relaxation_audit_id)
+                     values (${sourceId}, 'q13-db', ${randomBytes(32).toString("hex")}, 1, now() + make_interval(days => ${days}),
+                             ${relaxed ? "totp" : null}, ${relaxed ? randomUUID() : null})`);
+    const refused = async (p: Promise<unknown>) => expect(await p.then(() => "", (e: unknown) => String((e as Error).message) + String((e as { cause?: Error }).cause?.message ?? ""))).toMatch(/expiry_check|expiry_relaxation_check/);
+    await refused(insert(31, false));
+    await refused(insert(91, true));
+    await insert(30, false);
+    await insert(90, true);
+    // half a relaxation is refused
+    await refused(db.execute(sql`insert into endpoint_enrolment_tokens (source_id, label, token_hash, device_cap, expires_at, expiry_relaxation_step_up)
+                                 values (${sourceId}, 'q13-db', ${randomBytes(32).toString("hex")}, 1, now() + interval '1 day', 'totp')`));
+    // a default token cannot be lengthened past 30 days afterwards, nor its relaxation removed from a long one
+    const [short] = await tokensOf(sourceId).then((r) => r.filter((t) => t.expiryRelaxationStepUp === null));
+    await refused(db.execute(sql`update endpoint_enrolment_tokens set expires_at = created_at + interval '31 days' where id = ${short!.id}`));
+    const [long] = await tokensOf(sourceId).then((r) => r.filter((t) => t.expiryRelaxationStepUp !== null));
+    await refused(db.execute(sql`update endpoint_enrolment_tokens set expiry_relaxation_step_up = null, expiry_relaxation_audit_id = null where id = ${long!.id}`));
+  });
+});
+
+describe("ADR-0197 Q14: revoking a token, and separately the devices it enrolled", () => {
+  /** a token with `n` enrolled devices, each with one registered identity */
+  async function tokenWithDevices(n: number) {
+    const sourceId = await agentSource(true);
+    const { enrolFile, token } = await issueToken(sourceId, n + 1);
+    const devices: Array<{ deviceId: string; identityId: string }> = [];
+    for (let i = 0; i < n; i++) {
+      const t = await ticketReq(enrolFile.token, `${HOST}-q14-${i}`);
+      expect(t.statusCode, t.body).toBe(201);
+      const r = await registerReq(t.json().ticket as string, await AgentKey.make());
+      expect(r.statusCode, r.body).toBe(201);
+      devices.push({ deviceId: t.json().ticketId as string, identityId: r.json().identityId as string });
+    }
+    return { sourceId, tokenId: token.id, bulk: enrolFile.token, devices };
+  }
+  const deviceRevoked = async (id: string) => (await db.select().from(endpointDevices).where(eq(endpointDevices.id, id)))[0]!.revokedAt !== null;
+  const identityStatus = async (id: string) => rows<{ status: string }>(await db.execute(sql`select status from workload_identities where id = ${id}`))[0]!.status;
+  const rows = <R>(r: unknown) => (r as { rows: R[] }).rows;
+
+  it("by default stops new enrolments only: the devices it enrolled keep their identities", async () => {
+    const t = await tokenWithDevices(2);
+    const list = await inject("GET", `/v1/discovery/sources/${t.sourceId}/enrolment-tokens`, AUTH);
+    expect(list.json().tokens[0]).toMatchObject({ id: t.tokenId, devicesActive: 2 });
+    const r = await inject("POST", `/v1/discovery/enrolment-tokens/${t.tokenId}/revoke`, AUTH, {});
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ devicesRevoked: 0, identitiesRevoked: 0 });
+    expect((await ticketReq(t.bulk, `${HOST}-q14-late`)).json()).toEqual({ error: "token_revoked" });
+    for (const d of t.devices) {
+      expect(await deviceRevoked(d.deviceId)).toBe(false);
+      expect(await identityStatus(d.identityId)).toBe("active");
+    }
+    const [a] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-enrolment-token-revoked' AND ${auditLog.detail}->>'tokenId' = ${t.tokenId}`);
+    expect(a!.detail).toMatchObject({ revokeDevices: false, devicesRevoked: 0 });
+    // explicit false is the same choice; the flag must be a boolean
+    const u = await tokenWithDevices(1);
+    expect((await inject("POST", `/v1/discovery/enrolment-tokens/${u.tokenId}/revoke`, AUTH, { revokeDevices: "yes" })).statusCode).toBe(400);
+    expect((await inject("POST", `/v1/discovery/enrolment-tokens/${u.tokenId}/revoke`, AUTH, { revokeDevices: false })).json()).toMatchObject({ devicesRevoked: 0 });
+    expect(await deviceRevoked(u.devices[0]!.deviceId)).toBe(false);
+  });
+
+  it("with revokeDevices: every live device it enrolled and its identities are revoked with the token, audited; other tokens' devices are not", async () => {
+    const t = await tokenWithDevices(3);
+    const other = await tokenWithDevices(1);
+    // one device already revoked on its own: not revoked (or audited) twice
+    expect((await inject("POST", `/v1/discovery/endpoint-devices/${t.devices[0]!.deviceId}/revoke`, AUTH, {})).statusCode).toBe(200);
+    const r = await inject("POST", `/v1/discovery/enrolment-tokens/${t.tokenId}/revoke`, AUTH, { revokeDevices: true });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ devicesRevoked: 2, identitiesRevoked: 2 });
+    expect(r.json().token.revokedAt).not.toBeNull();
+    for (const d of t.devices) {
+      expect(await deviceRevoked(d.deviceId)).toBe(true);
+      expect(await identityStatus(d.identityId)).toBe("revoked");
+    }
+    expect(await deviceRevoked(other.devices[0]!.deviceId)).toBe(false);
+    expect(await identityStatus(other.devices[0]!.identityId)).toBe("active");
+    const perDevice = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-device-revoked' AND ${auditLog.detail}->>'tokenId' = ${t.tokenId}`);
+    expect(perDevice.map((a) => (a.detail as { deviceId: string }).deviceId).sort()).toEqual([t.devices[1]!.deviceId, t.devices[2]!.deviceId].sort());
+    expect(perDevice.every((a) => (a.detail as { cause?: string }).cause === "enrolment_token_revoked")).toBe(true);
+    const [a] = await db.select().from(auditLog).where(sql`${auditLog.ruleId} = 'endpoint-enrolment-token-revoked' AND ${auditLog.detail}->>'tokenId' = ${t.tokenId}`);
+    expect(a!.detail).toMatchObject({ revokeDevices: true, devicesRevoked: 2, identitiesRevoked: 2 });
+    // the token, its devices and the audit rows share one transaction's timestamp
+    const stamps = rows<{ t: string; d: string }>(await db.execute(sql`select t.revoked_at::text as t, d.revoked_at::text as d from endpoint_enrolment_tokens t join endpoint_devices d on d.token_id = t.id where t.id = ${t.tokenId} and d.id <> ${t.devices[0]!.deviceId}`));
+    expect(stamps.every((s) => s.t === s.d)).toBe(true);
+    // revoking again is refused, and revokes nothing
+    expect((await inject("POST", `/v1/discovery/enrolment-tokens/${t.tokenId}/revoke`, AUTH, { revokeDevices: true })).statusCode).toBe(409);
   });
 });

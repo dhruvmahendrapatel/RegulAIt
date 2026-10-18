@@ -92,9 +92,10 @@ import {
   type ToleranceRowInput,
 } from "@regulait/shared";
 import { z } from "zod";
-import { safeErrorMessage } from "./gateway-logger.js";
+import { errMessage } from "./err-serializer.js";
 // IMPORT-CYCLE RULE: this file has NO module-level import of another gateway
-// module. `risks.ts` imports it, and `inventory.ts` imports `risks.ts`; a
+// module except the leaf `gateway-logger.ts` (it imports only types from
+// fastify, so it can close no cycle). `risks.ts` imports it, and `inventory.ts` imports `risks.ts`; a
 // static edge from here to ./review-policy.js (→ workflows → evals → … → mrm
 // → mrm-autofill) or ./governance-monitor.js (→ inventory, autonomy, mrm …)
 // closes an ESM cycle that evaluates `mrm-autofill` before `inventory` has
@@ -540,7 +541,7 @@ export async function runRiskAcceptanceExpirySweep(
           detail: {
             phase: "acceptance-expiry-failed",
             acceptanceId: id,
-            error: safeErrorMessage(e).slice(0, 500),
+            error: errMessage(e).slice(0, 500),
             ...actorDetail,
           },
           effect: "deny",

@@ -20,7 +20,7 @@ export interface ReportPrefill {
 }
 
 const ROW = { display: "flex", gap: "var(--s2)", alignItems: "center", minHeight: 32 } as const;
-const BOX = { width: 18, height: 18, margin: 0, flex: "none" } as const;
+const BOX = { width: 18, height: 18, margin: "0", flex: "none" } as const;
 
 export function ReportIncidentModal(props: { open: boolean; prefill?: ReportPrefill; lockUseCase?: boolean; onClose: () => void; onCreated?: (id: string) => void }) {
   const act = useAction();
