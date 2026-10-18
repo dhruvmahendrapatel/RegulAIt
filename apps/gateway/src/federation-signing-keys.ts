@@ -31,7 +31,7 @@
  * Open source first (ADR-0176): key generation and parsing are Node's `crypto`; the thumbprint and the JWS are
  * `jose` 6.2.12 (already exact-pinned). No cryptography is written here.
  */
-import { createPrivateKey, generateKeyPairSync, randomUUID } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, randomUUID, type KeyObject } from "node:crypto";
 import { calculateJwkThumbprint, SignJWT } from "jose";
 import { and, auditLog, desc, eq, federationSigningKeys, isNull, sql, type Db, type FederationSigningKeyRow } from "@regulait/db";
 import {
@@ -383,6 +383,11 @@ export async function mintFederationToken(
   return signFederationToken({ kid: active.kid, pkcs8 }, { issuer, subject: opts.subject, audience: opts.audience, ...(opts.now ? { now: opts.now } : {}) });
 }
 
+/** a federation key is RSA with a modulus of at least RSA_MODULUS_BITS (exported for tests) */
+export function federationKeyAcceptable(key: Pick<KeyObject, "asymmetricKeyType" | "asymmetricKeyDetails">): boolean {
+  return key.asymmetricKeyType === "rsa" && (key.asymmetricKeyDetails?.modulusLength ?? 0) >= RSA_MODULUS_BITS;
+}
+
 /** sign one federation token with a key's PKCS#8 private half (no database): RS256, at most FEDERATION_TOKEN_TTL_SECONDS */
 export async function signFederationToken(
   key: { kid: string; pkcs8: string },
@@ -394,7 +399,7 @@ export async function signFederationToken(
   } catch {
     throw new FederationError("federation_key_unreadable", "the federation key is not a readable private key");
   }
-  if (privateKey.asymmetricKeyType !== "rsa" || (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < RSA_MODULUS_BITS) {
+  if (!federationKeyAcceptable(privateKey)) {
     throw new FederationError("federation_key_unreadable", "the federation key is not an RSA key of at least 2048 bits");
   }
   const iat = Math.floor((claims.now ?? new Date()).getTime() / 1000);

@@ -290,9 +290,10 @@ const stsCreds = (tag: string, accessKeyId: string) => {
  * A fake AWS for federated runs. STS answers AssumeRoleWithWebIdentity and AssumeRole with session credentials whose
  * access key id names the account they belong to (`ASIA<account>`), and GetCallerIdentity reads that id back from
  * the request's signature, so a member account's scanner sees its own account. Organizations answers ListAccounts in
- * two pages.
+ * two pages, or the given accounts in one. A request signed with a static key (not `ASIA…`) is answered as
+ * `callerAccount`.
  */
-function fakeFederatedAws() {
+function fakeFederatedAws(opts: { accounts?: Array<{ Id: string; State: string }>; callerAccount?: string } = {}) {
   const hosts: string[] = [];
   const sts: Array<Record<string, string>> = [];
   const orgPages: Array<string | null> = [];
@@ -305,12 +306,13 @@ function fakeFederatedAws() {
       if (form.Action === "AssumeRoleWithWebIdentity") return stsCreds("AssumeRoleWithWebIdentity", `ASIA${form.RoleArn!.split(":")[4]}`);
       if (form.Action === "AssumeRole") return stsCreds("AssumeRole", `ASIA${form.RoleArn!.split(":")[4]}`);
       const auth = new Headers(init?.headers).get("authorization") ?? "";
-      const account = /Credential=ASIA([0-9]{12})\//.exec(auth)?.[1] ?? "000000000000";
+      const account = /Credential=ASIA([0-9]{12})\//.exec(auth)?.[1] ?? opts.callerAccount ?? "000000000000";
       return new Response(`<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:sts::${account}:assumed-role/r/s</Arn><UserId>U</UserId><Account>${account}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`, { headers: { "content-type": "text/xml" } });
     }
     if (url.hostname.startsWith("organizations.")) {
       const body = JSON.parse(bodyText(init) || "{}") as { NextToken?: string };
       orgPages.push(body.NextToken ?? null);
+      if (opts.accounts) return json({ Accounts: opts.accounts });
       if (!body.NextToken) return json({ Accounts: [{ Id: ACCOUNT, State: "ACTIVE" }, { Id: MEMBER_A, State: "ACTIVE" }], NextToken: "page-2" });
       return json({ Accounts: [{ Id: MEMBER_B, Status: "ACTIVE" }, { Id: SUSPENDED, State: "SUSPENDED" }] });
     }
@@ -416,6 +418,34 @@ describe("ADR-0195 SD2b: federated cloud credentials and AWS Organizations", () 
     const res = await cloudScanner("cloud_aws").run(ctx);
     expect(res.readOutcomes?.find((o) => o.read === "aws.organizations.member_scan")).toMatchObject({ status: "skipped" });
     expect(cloud.sts.filter((r) => r.Action === "AssumeRole")).toEqual([]);
+  });
+
+  it("Organizations with a static credential: members are listed but not scanned, since there is no external id (#420 review finding 3)", async () => {
+    const cloud = fakeFederatedAws({ callerAccount: ACCOUNT });
+    const { ctx } = ctxFor({
+      fetch: cloud.f,
+      source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT, organizationAccounts: "true", memberRoleName: "RegulaitReader" }, scope: { orgLevel: false, include: ["us-east-1"] } },
+    });
+    const res = await cloudScanner("cloud_aws").run(ctx);
+    expect(res.readOutcomes?.find((o) => o.read === "aws.sts.caller_identity")?.status).toBe("read");
+    expect(res.readOutcomes?.find((o) => o.read === "aws.organizations.member_scan")).toMatchObject({ status: "skipped", detail: expect.stringMatching(/external id/) });
+    expect(cloud.sts.filter((r) => r.Action === "AssumeRole")).toEqual([]);
+  });
+
+  it("Organizations scans at most the per-run cap of member accounts and reports the rest as skipped (#420 review finding 3)", async () => {
+    const members = Array.from({ length: 51 }, (_, i) => ({ Id: String(500000000000 + i), State: "ACTIVE" }));
+    const cloud = fakeFederatedAws({ accounts: [{ Id: ACCOUNT, State: "ACTIVE" }, ...members] });
+    const { ctx } = ctxFor({
+      fetch: cloud.f,
+      source: { id: "s1", name: "aws", kind: "cloud_aws", target: { accountId: ACCOUNT, organizationAccounts: "true", memberRoleName: "RegulaitReader" }, scope: { orgLevel: false, include: ["us-east-1"] } },
+      credential: { mode: "federated", publicConfig: { roleArn, externalId }, secret: null },
+      federation: federationHook([]),
+    });
+    const res = await cloudScanner("cloud_aws").run(ctx);
+    const assumed = cloud.sts.filter((r) => r.Action === "AssumeRole").map((r) => r.RoleArn);
+    expect(assumed).toHaveLength(50);
+    expect(assumed).not.toContain(`arn:aws:iam::${members[50]!.Id}:role/RegulaitReader`);
+    expect(res.readOutcomes?.find((o) => o.read === "aws.organizations.member_scan")).toMatchObject({ status: "skipped", detail: expect.stringMatching(/^1 member account\(s\) over the per-run cap of 50/) });
   });
 
   it("Organizations through the egress guard: a refused host is reported unreachable, the account scan still stands", async () => {
