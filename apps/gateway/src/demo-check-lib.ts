@@ -20,7 +20,7 @@
  * would be flagged over-scoped by the very monitor pass this check reports.
  */
 import type { FastifyInstance } from "fastify";
-import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, DEMO_SECURITY_LEAD, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import { DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
 
@@ -319,12 +319,53 @@ export const SHADOW_DISCOVERY_BEATS = [
   "3 Content trust",
 ] as const;
 
+/** every string value anywhere in a JSON value (keys excluded) */
+function stringValues(v: unknown, out: string[] = []): string[] {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) for (const x of v) stringValues(x, out);
+  else if (v && typeof v === "object") for (const x of Object.values(v)) stringValues(x, out);
+  return out;
+}
+
 /**
- * ADR-0197 decision 7: every Shadow-AI screen the story opens with has data — the discovery sources of each family
- * with a run that succeeded, sightings from each family, the federation card, the endpoint import and agent cards,
- * a remediation plan waiting on its sign-off, and content-provenance records with their trust tiers. It also checks
- * the data-minimisation rule on what was seeded: no environment-variable name, device name or device user of the
- * dataset is stored on any finding (ADR-0195 decision 20, lane A6).
+ * The names and values of the dataset that must never be stored: environment-variable names and values, device names
+ * and users, and a cloud principal's raw identifier (ADR-0195 decision 20, lane A6). Not a CLI's or an app's own
+ * identifier: that is the catalogue value the matcher keeps on purpose.
+ */
+export function demoShadowNeverStored(data: DemoShadowDiscoveryDataset = DEMO_SHADOW_DISCOVERY): string[] {
+  const envLines = data.gitlab.repos.flatMap((r) => r.files.filter((f) => f.path.endsWith(".env.example")).flatMap((f) => f.content.split("\n")));
+  const csvRows = data.inventory.csv.split("\n").slice(1).map((l) => l.split(","));
+  return [
+    ...envLines.flatMap((l) => [l.split("=")[0]!, l.slice(l.indexOf("=") + 1)]),
+    ...data.agent.facts.filter((f) => f.kind === "env_name").map((f) => f.identifier),
+    data.agent.hostname,
+    data.agent.deviceUser,
+    ...csvRows.flatMap((c) => [c[0]!, c[3]!]),
+    ...data.aws.observations.filter((o) => o.subjectKind === "cloud_principal").map((o) => o.subject),
+  ].filter((n, i, all) => n && all.indexOf(n) === i);
+}
+
+/**
+ * Which never-stored names appear in `payload`: a string value equal to one (whatever its length), or containing one
+ * long enough to be unambiguous (8+ characters with a `_` or `-`; a short name like `PORT` would match ordinary words).
+ */
+export function leakedShadowNames(payload: unknown, names: readonly string[]): string[] {
+  const values = stringValues(payload);
+  const exact = new Set(values);
+  const long = (n: string) => n.length >= 8 && (n.includes("_") || n.includes("-"));
+  return names.filter((n) => exact.has(n) || (long(n) && values.some((v) => v.includes(n))));
+}
+
+/**
+ * ADR-0197 decision 7: every Shadow-AI screen the story opens with has data, in concrete minimum counts, so a step
+ * that silently produced nothing FAILs: each network source's last run succeeded AND matched something; a finding per
+ * recorded repository, AWS resource, Azure resource and MDM row, the AWS principal's audit-log finding, and the
+ * presence signatures kept in place of names; the enrolled device reporting with agent findings; a federation key; the
+ * remediation workflow waiting (`blocked_on_approval`) on the security lead's sign-off — Morgan, the second admin
+ * (ADR-0197 addendum), active with MFA enrolled, never the initiator; and a provenance record, trusted, for each read
+ * of the policy library. It also checks the data-minimisation rule on what was seeded: no environment-variable name or
+ * value, device name, device user or principal of the dataset is in any finding, device row or run the API returns
+ * (ADR-0195 decision 20, lane A6).
  */
 export async function checkShadowDiscovery(
   get: (url: string) => Promise<{ status: number; body: Json }>,
@@ -337,49 +378,68 @@ export async function checkShadowDiscovery(
 
   const sources: Json[] = (await get("/v1/discovery/sources")).body.sources ?? [];
   const named = (n: string) => sources.find((s) => s.name === n);
+  const runsOf = new Map<string, Json[]>();
   const problems: string[] = [];
   const facts: string[] = [];
-  for (const [label, name, needsRun] of [
+  for (const [label, name, network] of [
     ["GitLab", data.gitlab.name, true],
     ["AWS", data.aws.name, true],
     ["Azure", data.azure.name, true],
-    ["MDM import", data.inventory.name, true],
+    ["MDM import", data.inventory.name, false],
     ["endpoint agent", data.agent.name, false],
   ] as const) {
     const s = named(name);
-    if (!s) problems.push(`${label} source missing`);
-    else if (!s.enabled) problems.push(`${label} source disabled`);
-    else if (needsRun && s.lastRun?.status !== "succeeded") problems.push(`${label} source's last run ${s.lastRun?.status ?? "never ran"}`);
-    else facts.push(label);
+    if (!s) {
+      problems.push(`${label} source missing`);
+      continue;
+    }
+    const runs: Json[] = (await get(`/v1/discovery/runs?sourceId=${s.id}&limit=20`)).body.runs ?? [];
+    runsOf.set(s.id, runs);
+    const ok = runs.find((r) => r.status === "succeeded");
+    if (!s.enabled) problems.push(`${label} source disabled`);
+    else if (label === "endpoint agent") facts.push(label);
+    else if (!ok) problems.push(`${label} source has no run that succeeded (last: ${runs[0]?.status ?? "never ran"})`);
+    else if (network && !(Number(ok.matched) > 0)) problems.push(`${label} source's run succeeded but matched nothing`);
+    else facts.push(network ? `${label} (${Number(ok.matched)} matched)` : label);
   }
   if (problems.length) add("1 Discovery sources", "FAIL", problems.join("; "), RERUN);
   else add("1 Discovery sources", "PASS", `${facts.length} demo sources enabled, each scanned: ${facts.join(", ")}`);
 
+  // a finding per item the dataset recorded, per family: nothing folds an empty source into a full one
   const has = (f: Json, kinds: string[]) => (f.signalSources ?? []).some((k: string) => kinds.includes(k));
-  const families: Array<[string, string[]]> = [
-    ["repo", ["repo_scan"]],
-    ["cloud", ["cloud_inventory", "cloud_audit_log"]],
-    ["endpoint import", ["endpoint_inventory"]],
-  ];
-  const counts = families.map(([label, kinds]) => [label, findings.filter((f) => has(f, kinds))] as const);
-  const missing = counts.filter(([, fs]) => fs.length === 0).map(([l]) => l);
-  const sightings = counts.reduce((n, [, fs]) => n + fs.reduce((m, f) => m + Number(f.observationCount ?? 0), 0), 0);
-  if (missing.length) add("1 Sightings", "FAIL", `no ${missing.join(", ")} finding(s)`, RERUN);
-  else add("1 Sightings", "PASS", `${counts.map(([l, fs]) => `${fs.length} ${l}`).join(", ")} finding(s), ${sightings} sighting(s)`);
-
-  // names are matched, never stored: none of the dataset's env names, devices or device users is on a finding
+  const subjectOf = (f: Json) => String(f.subject ?? "").toLowerCase();
+  const cloud = findings.filter((f) => has(f, ["cloud_inventory", "cloud_audit_log"]));
+  const resourcesFound = (obs: DemoShadowDiscoveryDataset["aws"]["observations"]) =>
+    obs.filter((o) => o.subjectKind === "cloud_resource" && cloud.some((f) => subjectOf(f) === o.subject.toLowerCase())).length;
+  const want = (o: DemoShadowDiscoveryDataset["aws"]["observations"]) => o.filter((x) => x.subjectKind === "cloud_resource").length;
   const stored = JSON.stringify(findings);
-  const names = [
-    ...data.gitlab.repos.flatMap((r) => r.files.filter((f) => f.path.endsWith(".env.example")).flatMap((f) => f.content.split("\n").map((l) => l.split("=")[0]!))),
-    ...data.agent.facts.filter((f) => f.kind === "env_name").map((f) => f.identifier),
-    data.agent.hostname,
-    data.agent.deviceUser,
-    ...data.inventory.csv.split("\n").slice(1).flatMap((l) => [l.split(",")[0]!, l.split(",")[3]!]),
-    ...data.aws.observations.filter((o) => o.subjectKind === "cloud_principal").map((o) => o.subject),
-  ].filter((n) => n && (n.includes("_") || n.includes("-")) && n.length >= 8);
-  const leaked = names.filter((n) => stored.includes(n));
-  if (leaked.length) add("1 Data minimisation", "FAIL", `${leaked.length} name(s) of the dataset stored in clear on a finding`, "a scanner or importer stored a name it must only match: stop and report it");
-  else add("1 Data minimisation", "PASS", "no environment-variable name, device, device user or cloud principal of the dataset is stored in clear on a finding");
+  const families: Array<[string, number, number]> = [
+    ["repo", data.gitlab.repos.filter((r) => findings.some((f) => f.subject === `gitlab:${r.fullName}`)).length, data.gitlab.repos.length],
+    ["AWS resource", resourcesFound(data.aws.observations), want(data.aws.observations)],
+    ["AWS principal", cloud.filter((f) => has(f, ["cloud_audit_log"])).length, data.aws.observations.filter((o) => o.subjectKind === "cloud_principal").length],
+    ["Azure resource", resourcesFound(data.azure.observations), want(data.azure.observations)],
+    ["endpoint import", findings.filter((f) => has(f, ["endpoint_inventory"])).length, data.inventory.csv.split("\n").length - 1],
+    ["presence signature", data.presenceSignatures.filter((id) => stored.includes(id)).length, data.presenceSignatures.length],
+  ];
+  const short = families.filter(([, n, min]) => n < min);
+  const sightings = findings.reduce((m, f) => m + Number(f.observationCount ?? 0), 0);
+  if (short.length) {
+    const missingSigs = data.presenceSignatures.filter((id) => !stored.includes(id));
+    add(
+      "1 Sightings",
+      "FAIL",
+      short.map(([l, n, min]) => `${n}/${min} ${l} finding(s)`).join(", ") + (missingSigs.length ? ` (missing: ${missingSigs.join(", ")})` : ""),
+      RERUN,
+    );
+  } else add("1 Sightings", "PASS", `${families.map(([l, n]) => `${n} ${l}`).join(", ")}; ${sightings} sighting(s)`);
+
+  // names are matched, never stored: none is on a finding, the agent's device rows, or any run of the dataset
+  const agent = named(data.agent.name);
+  const devicesRes = agent ? await get(`/v1/discovery/sources/${agent.id}/endpoint-devices`) : { status: 0, body: {} as Json };
+  const devices: Json[] = devicesRes.body.devices ?? [];
+  const leaked = leakedShadowNames({ findings, devices, runs: [...runsOf.values()] }, demoShadowNeverStored(data));
+  if (leaked.length) add("1 Data minimisation", "FAIL", `${leaked.length} name(s) or value(s) of the dataset returned in clear by the API`, "a scanner or importer stored a name it must only match: stop and report it");
+  else add("1 Data minimisation", "PASS", "no environment-variable name or value, device, device user or cloud principal of the dataset is in a finding, device row or run");
 
   const fed = await get("/v1/discovery/federation");
   if (fed.status !== 200) add("1 Federation", "FAIL", `federation status ${fed.status}`);
@@ -387,49 +447,72 @@ export async function checkShadowDiscovery(
     const keys: Json[] = fed.body.keys ?? [];
     add(
       "1 Federation",
-      keys.length ? "PASS" : "WARN",
+      keys.length ? "PASS" : "FAIL",
       `${keys.length} signing key(s); federation ${fed.body.enabled ? "on" : "off"}${fed.body.issuer ? ` at ${fed.body.issuer}` : " (no public URL)"}`,
       keys.length ? undefined : RERUN,
     );
   }
 
-  const agent = named(data.agent.name);
-  if (agent?.enabled) {
-    const d = await get(`/v1/discovery/sources/${agent.id}/endpoint-devices`);
-    const devices: Json[] = d.body.devices ?? [];
+  if (agent) {
     const reporting = devices.filter((x) => !x.revokedAt && x.lastReportAt);
     const agentFindings = findings.filter((f) => has(f, ["endpoint_agent"]));
-    if (reporting.length) add("1 Endpoint agent", "PASS", `${reporting.length} enrolled device(s) reporting, ${agentFindings.length} agent finding(s)`);
+    if (reporting.length && agentFindings.length) add("1 Endpoint agent", "PASS", `${reporting.length} enrolled device(s) reporting, ${agentFindings.length} agent finding(s)`);
     else
       add(
         "1 Endpoint agent",
-        "WARN",
-        devices.length ? `${devices.length} device(s) enrolled, none has reported` : "no enrolled device",
-        "the agent needs this deployment's public URL (REGULAIT_PUBLIC_URL) and identity signing key (`identity-key:init`); set them and re-run `demo:shadow`",
+        "FAIL",
+        reporting.length
+          ? `${reporting.length} device(s) reporting but 0 agent findings`
+          : devices.length
+            ? `${devices.length} device(s) enrolled, none has reported`
+            : "no enrolled device",
+        "the agent needs this deployment's public URL (REGULAIT_PUBLIC_URL) and identity signing key (`identity-key:init`); set them and re-run `demo:prepare` on an empty database",
       );
   }
 
   const repoFinding = findings.find((f) => f.subjectKind === "repo" && f.subject === `gitlab:${data.remediation.repo}`);
+  const users: Json[] = (await get("/v1/users")).body.users ?? [];
+  const lead = users.find((u) => u.email === DEMO_SECURITY_LEAD.email);
+  const LEAD = `${DEMO_SECURITY_LEAD.displayName} (${DEMO_SECURITY_LEAD.role})`;
   if (!repoFinding) add("1 Remediation plan", "FAIL", `no finding for gitlab:${data.remediation.repo}`, RERUN);
-  else {
+  else if (!lead || !lead.isAdmin || lead.disabledAt || lead.totpEnabled !== true) {
+    add(
+      "1 Remediation plan",
+      "FAIL",
+      `${DEMO_SECURITY_LEAD.email} ${!lead ? "missing" : !lead.isAdmin ? "is not an admin" : lead.disabledAt ? "is deactivated" : "has no TOTP enrolled"}: the remediation sign-off needs a second admin with MFA`,
+      "`seed` creates and enrols her during first-admin setup: run `demo:prepare` on an empty database",
+    );
+  } else {
     const plan = await get(`/v1/shadow-ai/findings/${repoFinding.id}/remediation-plan`);
     const link = plan.body.currentLink;
     if (plan.status !== 200) add("1 Remediation plan", "FAIL", `remediation plan ${plan.status}`);
     else if (!link || link.replaceable) add("1 Remediation plan", "FAIL", `gitlab:${data.remediation.repo} has no live remediation workflow`, "re-run `demo:shadow`");
-    else add("1 Remediation plan", "PASS", `gitlab:${data.remediation.repo} → remediation workflow ${link.status}`);
+    else if (link.status !== "blocked_on_approval") add("1 Remediation plan", "FAIL", `gitlab:${data.remediation.repo} → remediation workflow ${link.status}, not waiting on its sign-off`, "re-run `demo:shadow`");
+    else {
+      const inst = await get(`/v1/workflows/instances/${link.instanceId}`);
+      const approvers = [...new Set(((inst.body.pendingApprovals ?? []) as Json[]).map((a) => String(a.approverUserId)))];
+      if (approvers.length !== 1 || approvers[0] !== lead.id) {
+        add("1 Remediation plan", "FAIL", `the remediation sign-off waits on ${approvers.length} approver(s), not on ${LEAD} alone`, RERUN);
+      } else if (inst.body.instance?.initiatorUserId === lead.id) {
+        add("1 Remediation plan", "FAIL", `${LEAD} initiated the remediation she is to sign off`, RERUN);
+      } else add("1 Remediation plan", "PASS", `gitlab:${data.remediation.repo} → remediation workflow ${link.status}, waiting on ${LEAD}, admin with MFA`);
+    }
   }
 
+  const connectors: Json[] = (await get("/v1/connectors")).body.connectors ?? [];
+  const library = connectors.find((c) => c.name === data.contentTrust.connectorName);
   const rec = await get("/v1/content-provenance/records?limit=200");
   if (rec.status !== 200) add("3 Content trust", "FAIL", `provenance records ${rec.status}`);
   else {
     const records: Json[] = rec.body.records ?? [];
+    const ours = library ? records.filter((r) => r.sourceId === library.id) : [];
+    const trusted = ours.filter((r) => r.trustTier === "trusted").length;
     const tiers = [...new Set(records.map((r) => String(r.trustTier)))].sort();
-    add(
-      "3 Content trust",
-      records.length === 0 ? "FAIL" : tiers.length > 1 ? "PASS" : "WARN",
-      `${records.length} provenance record(s); tiers ${tiers.join(", ") || "none"}`,
-      records.length === 0 || tiers.length < 2 ? "re-run `demo:shadow` (it reads the trusted policy library as Dana)" : undefined,
-    );
+    const min = data.contentTrust.objects.length;
+    const detail = `${records.length} provenance record(s), ${trusted}/${min} trusted read(s) of '${data.contentTrust.connectorName}'; tiers ${tiers.join(", ") || "none"}`;
+    const fix = "re-run `demo:shadow` (it reads the trusted policy library as Dana)";
+    if (trusted < min) add("3 Content trust", "FAIL", detail, fix);
+    else add("3 Content trust", tiers.length > 1 ? "PASS" : "WARN", detail, tiers.length > 1 ? undefined : fix);
   }
   return out;
 }

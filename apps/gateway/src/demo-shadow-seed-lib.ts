@@ -32,7 +32,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { calculateJwkThumbprint, exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
-import type { Db } from "@regulait/db";
+import { and, contentProvenanceRecords, eq, type Db } from "@regulait/db";
 import { DISCOVERY_SCHEDULE_MAX_SECONDS, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import type { RepoReader, RepoTree } from "@regulait/git-provider";
 import { DISCOVERY_SCANNERS, scannerRegistry, type Scanner, type ScanResult } from "./discovery-scanners.js";
@@ -40,7 +40,7 @@ import { repoScanner } from "./discovery-repo-scanner.js";
 import { toReadOutcomes, toScanObservation } from "./discovery-cloud-scanners.js";
 import { runDiscoveryPass } from "./discovery-worker.js";
 import { contentDigestOf, ENDPOINT_AGENT_PATHS, ENDPOINT_REPORT_SCHEMA } from "./endpoint-agent.js";
-import { DEMO_SCRIPT_KEY_TTL_DAYS, demoKeyExpiresAt, enrolAdminTotp, revokeScriptKeys } from "./demo-identity.js";
+import { DEMO_SCRIPT_KEY_TTL_DAYS, DEMO_SECURITY_LEAD, demoKeyExpiresAt, enrolAdminTotp, revokeScriptKeys } from "./demo-identity.js";
 
 type Json = Record<string, any>;
 type Headers = Record<string, string>;
@@ -150,8 +150,10 @@ function withRecordedOutcome(r: ScanResult): ScanResult {
 }
 
 /**
- * The registry the seeder's passes run with: the production registry, except that a run of one of the dataset's own
- * network-bound sources (by id) replays its recording. Any other source runs its production scanner.
+ * The registry the seeder's passes run with: a run of one of the dataset's own network-bound sources (by id) replays
+ * its recording, and ANY other source's run is refused, never scanned: the seeder must not reach a real provider for a
+ * source that is not its own (ensureRecordedRuns also runs no pass while such a source is enabled; this is the guard
+ * behind that check, for a source enabled in between).
  */
 export function recordedDiscoveryRegistry(data: DemoShadowDiscoveryDataset, recordedSourceIds: ReadonlySet<string>) {
   const recorded: Record<"repo_gitlab" | "cloud_aws" | "cloud_azure", Scanner> = {
@@ -162,8 +164,13 @@ export function recordedDiscoveryRegistry(data: DemoShadowDiscoveryDataset, reco
   return scannerRegistry(
     [...DISCOVERY_SCANNERS.values()].map((prod): Scanner => {
       const rec = (recorded as Record<string, Scanner | undefined>)[prod.kind];
-      if (!rec) return prod;
-      return { ...prod, run: (ctx) => (recordedSourceIds.has(ctx.source.id) ? rec.run(ctx) : prod.run(ctx)) };
+      return {
+        ...prod,
+        run: (ctx) => {
+          if (rec && recordedSourceIds.has(ctx.source.id)) return rec.run(ctx);
+          throw new Error("not a source of the demo dataset: demo:prepare never scans it (the gateway's own worker does)");
+        },
+      };
     }),
   );
 }
@@ -345,6 +352,22 @@ async function ensureRecordedRuns(h: Harness, db: Db, data: DemoShadowDiscoveryD
     wanted.push(s);
   }
   if (wanted.length === 0) return;
+  // A pass enqueues every due enabled source and claims queued runs of ANY source, oldest first. So it runs only while
+  // the dataset's own sources are the only enabled ones: anything else is the gateway worker's to scan, not ours.
+  const ours = new Set(demoSourceSpecs(data).map((s) => s.name));
+  const others = (await listSources(h)).filter((s) => s.enabled && !ours.has(s.name));
+  if (others.length) {
+    for (const s of wanted) {
+      h.fail(`recorded run of '${s.name}'`, {
+        status: 0,
+        body: {
+          error: "other_sources_enabled",
+          detail: `${others.length} discovery source(s) outside the demo dataset are enabled; the seeder runs no discovery pass beside them (the gateway's worker would scan them)`,
+        },
+      });
+    }
+    return;
+  }
   const registry = recordedDiscoveryRegistry(data, new Set(wanted.map((s) => s.id as string)));
   // a pass claims up to five queued runs, oldest first; a few passes reach ours behind any other queued run
   for (let pass = 0; pass < 4; pass++) {
@@ -660,9 +683,19 @@ export async function seedShadowStory(app: FastifyInstance, db: Db, data: DemoSh
     };
     const ada = await persona("admin@regulait.local", "Ada Admin", true);
     const dana = await persona("dana@regulait.local", "Dana Developer", false);
-    const avery = await persona("avery@regulait.local", "Avery Approver", false);
-    if (ada && avery) await ensureRemediation(h, data, ada, avery);
-    if (dana && connectorId) await ensureProvenance(h, data, connectorId, dana);
+    // the remediation sign-off is owed to an admin other than the initiator (ADR-0195 A4, ADR-0197 addendum): Morgan,
+    // the second admin, whom `seed` creates and enrols beside Ada during first-admin setup. She needs no key here.
+    const morgan = users.find((x) => x.email === DEMO_SECURITY_LEAD.email);
+    if (!morgan?.isAdmin || morgan.totpEnabled !== true || morgan.disabledAt) {
+      h.fail("remediation approver", {
+        status: 0,
+        body: {
+          error: "security_lead_missing",
+          detail: `${DEMO_SECURITY_LEAD.email} must be an active admin with TOTP enrolled — \`seed\` creates her during first-admin setup; run \`demo:prepare\` on an empty database`,
+        },
+      });
+    } else if (ada) await ensureRemediation(h, data, ada, { id: String(morgan.id) });
+    if (dana && connectorId) await ensureProvenance(h, db, data, connectorId, dana);
   } finally {
     h.report.notes.push(...(await revokeScriptKeys(app, opts.bootstrapToken, minted)));
   }
@@ -670,10 +703,10 @@ export async function seedShadowStory(app: FastifyInstance, db: Db, data: DemoSh
 }
 
 // ---------------------------------------------------------------------------
-// the remediation workflow (ADR-0195 A4): started from the plan's own body, waiting on Avery
+// the remediation workflow (ADR-0195 A4): started from the plan's own body, waiting on Morgan (the second admin)
 // ---------------------------------------------------------------------------
 
-async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, ada: { id: string; auth: Headers }, avery: { id: string }) {
+async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, ada: { id: string; auth: Headers }, approver: { id: string }) {
   const rem = data.remediation;
   // the environment is one an admin gave a meaning to: the demo company's staging deploy target (mock)
   const targets: Json[] = (await h.call("GET", "/v1/deploy/targets")).body.targets ?? [];
@@ -683,10 +716,10 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
     h.report.created.push(`deploy target '${rem.deployTargetName}' (mock, ${rem.environment})`);
   }
 
-  // The demo names a governance owner for remediation sign-offs, as it does for use cases (demo-intake): the
-  // deployment's own template routes the sign-off to Avery, never to the initiator. It is assigned before any
-  // remediation starts, so the shipped default (an admin other than the initiator) is never installed over it; where
-  // a rule for the change type already exists, it decides and nothing is added.
+  // The shipped default owes the sign-off to an admin other than the initiator; the demo names WHICH one, the security
+  // lead, so the Inbox it lands in is known before the demo. The deployment's own template routes it to Morgan, never
+  // to the initiator. It is assigned before any remediation starts, so the shipped default is never installed over it;
+  // where a rule for the change type already exists, it decides and nothing is added.
   const changeType = "shadow-ai-remediation";
   const rules: Json[] = (await h.call("GET", "/v1/workflows/assignment-rules")).body.rules ?? [];
   const templates: Json[] = (await h.call("GET", "/v1/workflows/templates")).body.templates ?? [];
@@ -702,13 +735,13 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
             { id: "intake", type: "trigger" },
             { id: "plan", type: "planning" },
             { id: "remediation_plan", type: "artifact_generation", output: "shadow_ai_remediation_plan" },
-            { id: "signoff", type: "human_approval", approvers: [avery.id] },
+            { id: "signoff", type: "human_approval", approvers: [approver.id] },
           ],
         },
       });
       if (!h.ok(t.status)) return h.fail(`workflow template '${rem.templateName}'`, t);
       templateId = t.body.id as string;
-      h.report.created.push(`workflow template '${rem.templateName}' (sign-off: Avery)`);
+      h.report.created.push(`workflow template '${rem.templateName}' (sign-off: ${DEMO_SECURITY_LEAD.displayName}, ${DEMO_SECURITY_LEAD.role})`);
     }
     const rule = await h.call("POST", "/v1/workflows/assignment-rules", { templateId, changeType });
     if (!h.ok(rule.status)) return h.fail("remediation assignment rule", rule);
@@ -754,7 +787,7 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
   if (now?.type === "artifact_generation") {
     const art = await h.call("POST", `/v1/workflows/instances/${instanceId}/artifacts`, { stageId: now.id, content: rem.plan }, ada.auth);
     if (!h.ok(art.status)) return h.fail("remediation plan artifact", art);
-    h.report.created.push("remediation plan submitted; the sign-off waits on Avery");
+    h.report.created.push(`remediation plan submitted; the sign-off waits on ${DEMO_SECURITY_LEAD.displayName}`);
   }
   const link = await h.call("POST", `/v1/shadow-ai/findings/${finding.id}/remediate`, { instanceId }, ada.auth);
   if (h.ok(link.status)) h.report.created.push(`finding gitlab:${rem.repo} linked to its remediation workflow`);
@@ -765,9 +798,14 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
 // content provenance (ADR-0193 I4): two reads of the trusted policy library by Dana
 // ---------------------------------------------------------------------------
 
-async function ensureProvenance(h: Harness, data: DemoShadowDiscoveryDataset, connectorId: string, dana: { id: string; auth: Headers }) {
-  const records: Json[] = (await h.call("GET", "/v1/content-provenance/records?limit=200")).body.records ?? [];
-  if (records.some((r) => r.sourceId === connectorId)) {
+async function ensureProvenance(h: Harness, db: Db, data: DemoShadowDiscoveryDataset, connectorId: string, dana: { id: string; auth: Headers }) {
+  // read by source, not from the records route's newest page, which a busy database can push ours off (a read only)
+  const ours = await db
+    .select({ id: contentProvenanceRecords.id })
+    .from(contentProvenanceRecords)
+    .where(and(eq(contentProvenanceRecords.sourceKind, "connector"), eq(contentProvenanceRecords.sourceId, connectorId)))
+    .limit(1);
+  if (ours.length) {
     h.report.skipped.push(`provenance records of '${data.contentTrust.connectorName}'`);
     return;
   }

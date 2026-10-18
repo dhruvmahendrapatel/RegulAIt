@@ -108,6 +108,11 @@ export interface DemoShadowDiscoveryDataset {
   };
   /** a keyless mock connector an admin marked trusted, read twice so the content-trust page has provenance records */
   contentTrust: { connectorName: string; connectorKind: string; objects: string[] };
+  /**
+   * the presence signature ids the matchers must report from the recorded `.env.example` and the agent's CLI fact:
+   * what is kept in place of the names (ADR-0195 lane A6). demo:check fails when one is missing.
+   */
+  presenceSignatures: string[];
 }
 
 const SUFFIX = " (demo dataset)";
@@ -293,4 +298,5 @@ export const DEMO_SHADOW_DISCOVERY: DemoShadowDiscoveryDataset = {
     connectorKind: "knowledge-base",
     objects: ["lending-policy", "complaints-handling-policy"],
   },
+  presenceSignatures: ["env.anthropic.api-key", "cli.anthropic.claude"],
 };

@@ -2,7 +2,8 @@
  * ADR-0197 decision 7 — the fallback Shadow-AI discovery dataset, end to end on its own scratch database through the
  * real app: the first-admin-setup phase (sources created disabled and enabled through the step-up route, recorded
  * runs through the real worker, the MDM import, an endpoint device enrolled and reporting), then the story phase
- * (personas, the remediation workflow waiting on Avery, provenance reads). Then both phases again: nothing new is
+ * (personas, the remediation workflow waiting on Morgan — the second admin — and provenance reads). Between them the
+ * test creates Ada and Morgan and enrols both, as `seed` does in the same first-admin-setup window. Then both phases again: nothing new is
  * created, and every count is unchanged. `checkShadowDiscovery` (demo:check) finds every new screen populated and
  * no name of the dataset stored in clear.
  *
@@ -16,7 +17,8 @@ import { fileURLToPath } from "node:url";
 import { auditLog, createDb, discoverySources, endpointDevices, eq, runMigrations, shadowAiFindings, sql, workflowInstances, type Db } from "@regulait/db";
 import { DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { checkShadowDiscovery } from "./demo-check-lib.js";
+import { checkShadowDiscovery, demoShadowNeverStored, leakedShadowNames, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
+import { DEMO_SECURITY_LEAD, enrolAdminsTotp } from "./demo-identity.js";
 import { RECORDED_RUN_OUTCOME, seedShadowSetup, seedShadowStory } from "./demo-shadow-seed-lib.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 import { useTestIssuerKey } from "./testing/workload-client.js";
@@ -101,9 +103,11 @@ afterAll(async () => {
 
 describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => {
   let first: Record<string, number>;
+  let setupReport: unknown;
 
   it("first-admin setup: sources enabled through the step-up route, recorded runs, the import and an enrolled device", async () => {
     const r = await seedShadowSetup(app, db, D, OPTS);
+    setupReport = r;
     expect(r.failed, r.failed.join("\n")).toEqual([]);
     const rows = await db.select().from(discoverySources);
     expect(rows.map((s) => s.name).sort()).toEqual([D.gitlab.name, D.aws.name, D.azure.name, D.inventory.name, D.agent.name].sort());
@@ -119,9 +123,22 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     // the device registered with a software key (the truth about a simulated device) and reported
     const [device] = await db.select().from(endpointDevices);
     expect(device?.lastReportAt).not.toBeNull();
+    // every network source's recorded run matched something: no family is empty
+    for (const kind of ["cloud_aws", "cloud_azure", "repo_gitlab"]) {
+      expect(Number(recorded.find((x) => x.kind === kind)?.matched), kind).toBeGreaterThan(0);
+    }
+    // what `seed` does next, in the same first-admin-setup window: Ada and the security lead, both admins, MFA enrolled
+    const ids: string[] = [];
+    for (const [email, displayName] of [["admin@regulait.local", "Ada Admin"], [DEMO_SECURITY_LEAD.email, DEMO_SECURITY_LEAD.displayName]]) {
+      const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email, displayName, isAdmin: true } });
+      expect(u.statusCode, u.body).toBe(201);
+      ids.push(u.json().id);
+    }
+    const mfa = await enrolAdminsTotp(app, BOOT, ids);
+    expect(mfa.map((m) => m.status)).toEqual(["enrolled", "enrolled"]);
   }, 180_000);
 
-  it("story: the remediation workflow is linked and waits on Avery; the trusted library's reads are provenance-recorded", async () => {
+  it("story: the remediation workflow is linked and waits on Morgan; the trusted library's reads are provenance-recorded", async () => {
     const r = await seedShadowStory(app, db, D, OPTS);
     expect(r.failed, r.failed.join("\n")).toEqual([]);
     const [finding] = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.subject, `gitlab:${D.remediation.repo}`));
@@ -130,19 +147,31 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     const stages = (instance!.definition as { stages: Array<{ id: string; type: string; approvers?: string[] }> }).stages;
     const state = instance!.state as { currentStageIndex: number };
     expect(stages[state.currentStageIndex]?.type).toBe("human_approval");
-    const avery = (await get("/v1/users")).body.users.find((u: { email: string }) => u.email === "avery@regulait.local");
-    expect(stages[state.currentStageIndex]?.approvers).toEqual([avery.id]);
-    expect(instance!.initiatorUserId).not.toBe(avery.id);
+    const morgan = (await get("/v1/users")).body.users.find((u: { email: string }) => u.email === DEMO_SECURITY_LEAD.email);
+    expect(morgan).toMatchObject({ isAdmin: true, totpEnabled: true });
+    expect(instance!.status).toBe("blocked_on_approval");
+    expect(stages[state.currentStageIndex]?.approvers).toEqual([morgan.id]);
+    expect(instance!.initiatorUserId).not.toBe(morgan.id);
 
     const findings = (await get("/v1/shadow-ai/findings")).body.findings;
     const checks = await checkShadowDiscovery(get, findings, D);
     const bad = checks.filter((c) => c.level === "FAIL");
     expect(bad, JSON.stringify(bad)).toEqual([]);
-    for (const beat of ["1 Discovery sources", "1 Sightings", "1 Data minimisation", "1 Federation", "1 Endpoint agent", "1 Remediation plan"]) {
-      expect(checks.find((c) => c.beat === beat)?.level, beat).toBe("PASS");
+    for (const beat of SHADOW_DISCOVERY_BEATS) {
+      expect(checks.find((c) => c.beat === beat)?.level, `${beat}: ${checks.find((c) => c.beat === beat)?.detail}`).toBe("PASS");
     }
     // ADR-0195 lane A6: the repo's env names and the agent's CLI name are presence signature hits, never stored names
-    expect(JSON.stringify(findings)).toMatch(/env\.anthropic\.api-key|cli\.anthropic\.claude/);
+    expect(JSON.stringify(findings)).toContain("env.anthropic.api-key");
+    expect(JSON.stringify(findings)).toContain("cli.anthropic.claude");
+    // ...and no env-variable name or value, device name or device user is in any stored evidence of the seeded device or
+    // its runs, in the audit log, or in what either seeder phase printed (its report)
+    const never = demoShadowNeverStored(D);
+    for (const table of ["endpoint_devices", "endpoint_agent_reports", "endpoint_agent_identities", "discovery_runs", "shadow_ai_findings", "audit_log"]) {
+      const res = (await db.execute(sql.raw(`SELECT to_jsonb(t) AS row FROM ${table} t`))) as unknown as { rows: Array<{ row: unknown }> };
+      expect(leakedShadowNames(res.rows.map((x) => x.row), never), table).toEqual([]);
+    }
+    expect(leakedShadowNames(setupReport, never), "the setup phase's report").toEqual([]);
+    expect(leakedShadowNames(r, never), "the story phase's report").toEqual([]);
     first = await counts();
     expect(first.provenance).toBeGreaterThanOrEqual(D.contentTrust.objects.length);
   }, 180_000);
