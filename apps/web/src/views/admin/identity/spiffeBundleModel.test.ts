@@ -99,5 +99,8 @@ describe("ADR-0188 S9 follow-up — SPIFFE bundle endpoints in the browser", () 
     // a bundle refusal raised through a fetch reads in the bundle's words
     expect(spiffeEndpointCode("spiffe_bundle_sequence_rollback")).toMatch(/older/);
     expect(spiffeEndpointCode("step_up_required")).toBeNull();
+    // the other endpoint codes read as their own words
+    expect(spiffeEndpointCode("spiffe_bundle_fetch_timeout")).toBe("Failed: timeout.");
+    expect(spiffeEndpointCode("spiffe_endpoint_certificate_is_ca")).toBe("Failed: certificate is ca.");
   });
 });

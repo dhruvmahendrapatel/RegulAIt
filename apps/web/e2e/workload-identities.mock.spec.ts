@@ -479,9 +479,8 @@ test.describe("ADR-0188 S9: SPIFFE trust bundles", () => {
     const m = await mockApi(page, { legacyEnv: true });
     await page.goto("/ui/admin/workload-identities");
     const c = card(page);
-    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("1 JWT-SVID key(s): jwt-k1");
-    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("fetched, sequence 4");
-    await expect(c.getByRole("row", { name: /superseded/ })).toContainText("1 JWT-SVID key(s) not kept");
+    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("1 JWT-SVID key(s)");
+    await expect(c.getByRole("row", { name: /byoc\.example\.test.*active/ }).first()).toContainText("fetched");
     await expect(c.getByRole("row", { name: /superseded/ })).toContainText("Replaced");
     await expect(c.getByRole("note")).toContainText("REGULAIT_SPIFFE_TRUST_BUNDLES");
     await c.getByLabel("Trust domain", { exact: true }).fill("new.example.test");
@@ -562,7 +561,7 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
   const card = (page: Page) => page.getByTestId("spiffe-bundle-endpoints");
   const endpointPuts = (m: Mock) => m.calls.filter((c) => c.method === "PUT" && c.path.startsWith("/v1/identity/spiffe-bundle-endpoints/"));
 
-  test("lists the endpoint with its fetch state, and refuses a non-https URL and a missing server ID in the browser", async ({ page }) => {
+  test("lists the endpoint with its fetch state, and refuses a non-https URL and a malformed server ID in the browser", async ({ page }) => {
     const m = await mockApi(page);
     await page.goto("/ui/admin/workload-identities");
     const c = card(page);
@@ -572,9 +571,9 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
     await c.getByLabel("Bundle endpoint URL").fill("http://bundle.new.example.test/new");
     await c.getByLabel("Endpoint server SPIFFE ID").fill("spiffe://new.example.test/spire/server");
     await c.getByRole("button", { name: "Save and fetch" }).click();
-    await expect(c.getByText("A bundle endpoint URL is https.")).toBeVisible();
+    await expect(c.getByText("Use an https URL with no user name, password or #fragment.")).toBeVisible();
     await c.getByLabel("Bundle endpoint URL").fill("https://bundle.new.example.test/new");
-    await c.getByLabel("Endpoint server SPIFFE ID").fill("");
+    await c.getByLabel("Endpoint server SPIFFE ID").fill("https://new.example.test/spire/server");
     await c.getByRole("button", { name: "Save and fetch" }).click();
     await expect(c.getByText("Name the endpoint server's SPIFFE ID")).toBeVisible();
     expect(endpointPuts(m)).toHaveLength(0);
@@ -588,7 +587,7 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
     const c = card(page);
     await c.getByLabel("Trust domain to fetch").fill("new.example.test");
     await c.getByLabel("Bundle endpoint URL").fill("https://bundle.new.example.test/new");
-    await c.getByLabel("Endpoint profile").selectOption("https_web");
+    // no server SPIFFE ID: Web PKI (https_web)
     await c.getByRole("button", { name: "Save and fetch" }).click();
     const confirm = page.getByRole("dialog", { name: "Fetch the bundle of new.example.test?" });
     await expect(confirm).toContainText("whoever controls this endpoint decides");

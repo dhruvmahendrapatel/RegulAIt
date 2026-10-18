@@ -23,7 +23,7 @@ import {
 } from "./spiffeBundleModel";
 import s from "./workloadIdentities.module.css";
 
-const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
+export const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
 const STATUS_TONE = { active: "ok", superseded: "neutral", revoked: "danger" } as const;
 
 /** a bundle refusal in the page's words, else the client's own reading */
@@ -65,14 +65,12 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
     >
       <div data-testid="spiffe-trust-bundles">
         <p>
-          A workload whose SPIRE issues it an X.509-SVID can authenticate to the token endpoint with it, once its trust domain&apos;s CA certificates are
-          uploaded here and its SPIFFE ID is bound as a credential of its identity. SPIFFE is off until a bundle is uploaded. Paste the output of{" "}
-          <code>spire-server bundle show -format spiffe</code> (or <code>-format pem</code>). Only public keys and CA certificates are accepted.
+          SPIFFE sign-in is off until a domain&apos;s bundle is here and the SPIFFE ID is bound to an identity. Paste{" "}
+          <code>spire-server bundle show -format spiffe</code> (or <code>-format pem</code>) output: public keys and CA certificates only.
         </p>
         {list?.legacyEnvironmentIgnored && (
           <p role="note">
-            <Badge tone="warn">Ignored</Badge> The deployment still sets <code>REGULAIT_SPIFFE_TRUST_BUNDLES</code>. It is not read any more: upload each
-            bundle here instead, then ask the operator to remove the variable.
+            <Badge tone="warn">Ignored</Badge> <code>REGULAIT_SPIFFE_TRUST_BUNDLES</code> is set but not read: upload bundles here, then remove it.
           </p>
         )}
         <form
@@ -178,13 +176,12 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                 render: (b) => (
                   <>
                     {b.authorities.length} (earliest expiry {dateLabel(earliestAuthorityExpiry(b))})
-                    {(b.jwtAuthorities?.length ?? 0) > 0 && <div>{b.jwtAuthorities.length} JWT-SVID key(s): {b.jwtAuthorities.map((j) => j.kid).join(", ")}</div>}
-                    {b.jwtAuthoritiesIgnored > 0 && <div>{b.jwtAuthoritiesIgnored} JWT-SVID key(s) not kept</div>}
+                    {(b.jwtAuthorities?.length ?? 0) > 0 && <div>{b.jwtAuthorities.length} JWT-SVID key(s)</div>}
                   </>
                 ),
               },
               { key: "digest", header: "Digest", render: (b) => <code title={b.digest}>{b.digest.slice(0, 12)}…</code> },
-              { key: "created", header: "Added", render: (b) => <>{dateLabel(b.createdAt)}{b.source === "fetch" && <div>fetched{b.sequence !== null ? `, sequence ${b.sequence}` : ""}</div>}</> },
+              { key: "created", header: "Added", render: (b) => <>{dateLabel(b.createdAt)}{b.source === "fetch" && <div>fetched</div>}</> },
               {
                 key: "actions",
                 header: "Actions",

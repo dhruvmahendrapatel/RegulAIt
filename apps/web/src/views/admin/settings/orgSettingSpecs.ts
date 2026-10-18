@@ -118,7 +118,7 @@ export const WORKLOAD_CLIENT_AUTH_METHODS: readonly Choice[] = [
   { value: "tls_client_auth", label: "CA-issued client certificate (tls_client_auth)" },
   { value: "self_signed_tls_client_auth", label: "Registered self-signed certificate (self_signed_tls_client_auth)" },
   { value: "spiffe_svid", label: "SPIFFE identity (spiffe_svid)" },
-  { value: "spiffe_jwt_svid", label: "SPIFFE JWT identity, a bearer token (spiffe_jwt_svid)" },
+  { value: "spiffe_jwt_svid", label: "SPIFFE JWT bearer token (spiffe_jwt_svid)" },
 ];
 export const INTERNATIONAL_PII_CATEGORIES: readonly Choice[] = [
   { value: "aadhaar", label: "India: Aadhaar number" },

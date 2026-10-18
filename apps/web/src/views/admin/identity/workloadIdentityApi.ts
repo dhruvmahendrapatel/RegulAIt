@@ -37,8 +37,6 @@ import {
 import { kidOk, type DelegationGrantDetailView, type IdentitySigningKeyListView } from "./signingKeyModel";
 import {
   bundleDraftError,
-  endpointDraftError,
-  trustDomainOk,
   type PutSpiffeBundleEndpointBody,
   type SpiffeBundleEndpointListView,
   type SpiffeBundleEndpointView,
@@ -253,9 +251,7 @@ export interface SetSpiffeBundleEndpointResult {
 }
 
 export function setSpiffeBundleEndpoint(trustDomain: string, input: PutSpiffeBundleEndpointBody): Promise<SetSpiffeBundleEndpointResult> {
-  if (!trustDomainOk(trustDomain)) return Promise.reject(new Error("That trust domain could not be read. Refresh the list."));
-  const problem = endpointDraftError({ trustDomain, url: input.url, profile: input.profile, endpointSpiffeId: input.endpointSpiffeId ?? "" });
-  if (problem) return Promise.reject(new Error(problem));
+  // the form checked the draft (endpointDraftError); the gateway checks it again, exactly
   const body = deepFreeze({ url: input.url, profile: input.profile, endpointSpiffeId: input.profile === "https_spiffe" ? input.endpointSpiffeId : null, enabled: input.enabled });
   return withStepUp((h) => stepUpApi.put<SetSpiffeBundleEndpointResult>(`/v1/identity/spiffe-bundle-endpoints/${encodeURIComponent(trustDomain)}`, body, h));
 }

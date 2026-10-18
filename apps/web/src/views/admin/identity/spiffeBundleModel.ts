@@ -102,9 +102,9 @@ export function bundleDraftError(draft: { trustDomain: string; bundle: string })
 }
 
 export const SPIFFE_BUNDLE_STATUS_TEXT: Readonly<Record<SpiffeBundleStatus, string>> = {
-  active: "Trusted now: X.509-SVIDs of this domain can authenticate their registered SPIFFE IDs.",
-  superseded: "Replaced by a newer bundle. Nothing was revoked; tokens already issued lived to their own expiry.",
-  revoked: "Revoked: the domain's tokens and grants were ended. Never undone.",
+  active: "Trusted now.",
+  superseded: "Replaced; nothing revoked.",
+  revoked: "Revoked; tokens and grants ended.",
 };
 
 /** the earliest expiry of a bundle's authorities, for the list (ISO), or null */
@@ -116,19 +116,19 @@ export function earliestAuthorityExpiry(b: Pick<SpiffeTrustBundleView, "authorit
 
 /** the refusal codes, in words (pinned to spiffe-bundles.ts by the test) */
 export const SPIFFE_BUNDLE_REFUSALS: Readonly<Record<string, string>> = {
-  spiffe_bundle_invalid: "That bundle could not be read. Paste PEM CA certificates or the SPIFFE bundle JSON (for example from `spire-server bundle show -format spiffe`).",
-  spiffe_bundle_private_material: "The bundle contains a private key. Nothing was stored. Paste only the public CA certificates.",
-  spiffe_bundle_key_mismatch: "A key in the SPIFFE bundle does not match its own certificate. Export the bundle again.",
-  spiffe_bundle_authority_not_ca: "One certificate is not a CA with certificate signing. A workload's own certificate is never a trust anchor.",
-  spiffe_bundle_authority_time: "One CA certificate is expired or not yet valid. Export a current bundle.",
-  spiffe_bundle_not_certificate: "The bundle holds a PEM block that is not a certificate (a key, a CRL or a request). Paste the CA certificates only.",
-  spiffe_bundle_duplicate:"The same CA certificate appears twice in the bundle.",
-  spiffe_bundle_too_large: "The bundle holds more than 64 CA certificates.",
-  spiffe_bundle_conflict: "The trust domain's bundle changed since this page read it. Refresh, then replace the current bundle.",
-  spiffe_bundle_unchanged: "The active bundle already holds exactly these certificates. Nothing was changed.",
-  spiffe_bundle_not_found: "That bundle no longer exists. Refresh the list.",
-  spiffe_bundle_already_revoked: "That bundle is already revoked.",
-  spiffe_bundle_not_active: "That bundle was replaced. Revoke the domain's active bundle to end its trust.",
+  spiffe_bundle_invalid: "Unreadable bundle: paste PEM CA certificates or SPIFFE bundle JSON.",
+  spiffe_bundle_private_material: "Contains a private key; nothing stored.",
+  spiffe_bundle_key_mismatch: "A key does not match its certificate.",
+  spiffe_bundle_authority_not_ca: "A certificate is not a signing CA.",
+  spiffe_bundle_authority_time: "A CA certificate is expired or not yet valid.",
+  spiffe_bundle_not_certificate: "A PEM block is not a certificate.",
+  spiffe_bundle_duplicate: "A CA certificate appears twice.",
+  spiffe_bundle_too_large: "Over 64 CA certificates.",
+  spiffe_bundle_conflict: "Changed since read. Refresh and retry.",
+  spiffe_bundle_unchanged: "Unchanged; nothing done.",
+  spiffe_bundle_not_found: "Gone. Refresh the list.",
+  spiffe_bundle_already_revoked: "Already revoked.",
+  spiffe_bundle_not_active: "Replaced; revoke the active bundle.",
   spiffe_bundle_jwt_key_unsupported: "Unsupported JWT-SVID key.",
   spiffe_bundle_sequence_rollback: "Fetched bundle is older (sequence went backwards).",
 };
@@ -171,11 +171,6 @@ export interface PutSpiffeBundleEndpointBody {
   enabled: boolean;
 }
 
-export const SPIFFE_ENDPOINT_PROFILE_TEXT: Readonly<Record<SpiffeBundleEndpointProfile, string>> = {
-  https_web: "Web PKI.",
-  https_spiffe: "The server's SVID must be this ID, under its domain's bundle (upload that first).",
-};
-
 export function isEndpointList(v: unknown): v is SpiffeBundleEndpointListView {
   return !!v && typeof v === "object" && Array.isArray((v as { items?: unknown }).items);
 }
@@ -196,33 +191,27 @@ export function endpointDraftError(draft: { trustDomain: string; url: string; pr
   } catch {
     // reported below
   }
-  if (u?.protocol !== "https:") return "A bundle endpoint URL is https.";
-  if (u.username || u.password) return "A bundle endpoint URL carries no user name or password.";
-  if (u.hash) return "A bundle endpoint URL carries no #fragment.";
-  if (draft.profile === "https_spiffe" && !spiffeIdOk(draft.endpointSpiffeId)) return "Name the endpoint server's SPIFFE ID, for example spiffe://example.org/spire/server.";
+  if (u?.protocol !== "https:" || u.username || u.password || u.hash) return "Use an https URL with no user name, password or #fragment.";
+  if (draft.profile === "https_spiffe" && !spiffeIdOk(draft.endpointSpiffeId)) return "Name the endpoint server's SPIFFE ID.";
   return null;
 }
 
-/** the endpoint refusal and failure codes, in words (pinned to spiffe-bundle-endpoint.ts by the test) */
+/** the endpoint codes that need more than their own name (pinned to spiffe-bundle-endpoint.ts by the test) */
 export const SPIFFE_ENDPOINT_CODES: Readonly<Record<string, string>> = {
-  spiffe_endpoint_url_invalid: "URL refused.",
   spiffe_endpoint_trust_domain_unknown: "Upload the endpoint ID's domain bundle first.",
   egress_blocked: "Host not on the egress allow-list.",
-  spiffe_bundle_fetch_format: "Not a SPIFFE bundle.",
-  spiffe_bundle_fetch_too_large: "Over 256 KB.",
-  spiffe_bundle_fetch_encoding: "Not UTF-8.",
-  spiffe_bundle_fetch_redirect: "Redirect refused.",
-  spiffe_bundle_fetch_status: "Not 200.",
   spiffe_bundle_fetch_tls: "Certificate not trusted.",
-  spiffe_bundle_fetch_timeout: "Timed out.",
-  spiffe_bundle_fetch_network: "Unreachable.",
   spiffe_endpoint_id_mismatch: "SVID for another ID.",
-  spiffe_endpoint_certificate_is_ca: "CA certificate as leaf.",
   spiffe_bundle_revoked: "Bundle revoked; save the endpoint again.",
 };
+
+const ENDPOINT_CODE_PREFIXES = ["spiffe_bundle_fetch_", "spiffe_endpoint_"];
 
 export function spiffeEndpointCode(code: unknown): string | null {
   if (typeof code !== "string") return null;
   if (Object.hasOwn(SPIFFE_ENDPOINT_CODES, code)) return SPIFFE_ENDPOINT_CODES[code]!;
+  // the rest read well enough as their own words: spiffe_bundle_fetch_timeout -> "Failed: timeout."
+  const prefix = ENDPOINT_CODE_PREFIXES.find((p) => code.startsWith(p));
+  if (prefix) return `Failed: ${code.slice(prefix.length).split("_").join(" ")}.`;
   return spiffeBundleRefusal(code);
 }

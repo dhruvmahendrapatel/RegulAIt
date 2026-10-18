@@ -11,63 +11,53 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../api/client";
-import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, SkeletonBlock, Table } from "../../../ui/kit";
 import type { AskConfirmation } from "./IssuerSigningKeys";
+import { dateLabel } from "./SpiffeTrustBundles";
 import { listSpiffeBundleEndpoints, setSpiffeBundleEndpoint, spiffeBundleKeys, spiffeEndpointKeys } from "./workloadIdentityApi";
 import {
   endpointDraftError,
   isEndpointList,
-  SPIFFE_ENDPOINT_PROFILE_TEXT,
   spiffeEndpointCode,
   type SpiffeBundleEndpointProfile,
   type SpiffeBundleEndpointView,
 } from "./spiffeBundleModel";
 import s from "./workloadIdentities.module.css";
 
-const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
-
-/** an endpoint refusal in the page's words, else the client's own reading */
-async function endpointCall<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (e) {
-    const text = e instanceof ApiError ? spiffeEndpointCode(e.payload.error ?? e.payload.code) : null;
-    throw text ? new Error(text) : e;
-  }
-}
-
 export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskConfirmation) => void }) {
   const q = useQuery({ queryKey: spiffeEndpointKeys.list, queryFn: listSpiffeBundleEndpoints });
   const qc = useQueryClient();
   const [trustDomain, setTrustDomain] = useState("");
   const [url, setUrl] = useState("");
-  const [profile, setProfile] = useState<SpiffeBundleEndpointProfile>("https_spiffe");
   const [endpointSpiffeId, setEndpointSpiffeId] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const list = isEndpointList(q.data) ? q.data : null;
 
   const save = async (td: string, body: Parameters<typeof setSpiffeBundleEndpoint>[1]) => {
-    const out = await endpointCall(() => setSpiffeBundleEndpoint(td, body));
+    // an endpoint refusal in the page's words, else the client's own reading
+    const out = await setSpiffeBundleEndpoint(td, body).catch((e: unknown) => {
+      const text = e instanceof ApiError ? spiffeEndpointCode(e.payload.error ?? e.payload.code) : null;
+      throw text ? new Error(text) : e;
+    });
     // a fetch may have written a new bundle: both lists are read again
     void qc.invalidateQueries({ queryKey: spiffeEndpointKeys.list });
     void qc.invalidateQueries({ queryKey: spiffeBundleKeys.list });
-    if (out.refresh?.outcome === "failed") throw new Error(`Saved; the fetch failed: ${spiffeEndpointCode(out.refresh.code) ?? out.refresh.code}`);
+    if (out.refresh?.outcome === "failed") throw new Error(`Saved; ${spiffeEndpointCode(out.refresh.code) ?? out.refresh.code}`);
     return out;
   };
 
   return (
     <Card title="SPIFFE bundle endpoints">
       <div data-testid="spiffe-bundle-endpoints">
-        <p>
-          Fetch a domain&apos;s bundle from its SPIFFE bundle endpoint, through the egress allow-list. Off until set. After a failed fetch the last good
-          bundle is kept for 24 hours at most. Air-gapped: leave empty and upload. Saving a listed domain changes its endpoint.
-        </p>
         <form
           className={s.stack}
           onSubmit={(e) => {
             e.preventDefault();
             const td = trustDomain.trim();
-            const draft = { trustDomain: td, url: url.trim(), profile, endpointSpiffeId: endpointSpiffeId.trim() };
+            const id = endpointSpiffeId.trim();
+            // a server SPIFFE ID means https_spiffe; none means Web PKI (https_web)
+            const profile: SpiffeBundleEndpointProfile = id ? "https_spiffe" : "https_web";
+            const draft = { trustDomain: td, url: url.trim(), profile, endpointSpiffeId: id };
             const problem = endpointDraftError(draft);
             setFormError(problem);
             if (problem) return;
@@ -78,11 +68,10 @@ export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskCo
               okMessage: "Endpoint saved.",
               body: (
                 <>
-                  A fetched bundle replaces the active one without asking: whoever controls this endpoint decides which SVIDs of <code>{td}</code>{" "}
-                  authenticate.
+                  {profile}: each fetch replaces the bundle, so whoever controls this endpoint decides who of {td} signs in.
                 </>
               ),
-              run: () => save(td, { url: draft.url, profile, endpointSpiffeId: profile === "https_spiffe" ? draft.endpointSpiffeId : null, enabled: true }),
+              run: () => save(td, { url: draft.url, profile, endpointSpiffeId: id || null, enabled: true }),
             });
           }}
         >
@@ -92,18 +81,9 @@ export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskCo
           <Field label="Bundle endpoint URL">
             <Input value={url} type="url" maxLength={2048} spellCheck={false} onChange={(e) => setUrl(e.target.value)} />
           </Field>
-          <Field label="Endpoint profile">
-            <Select value={profile} onChange={(e) => setProfile(e.target.value as SpiffeBundleEndpointProfile)}>
-              <option value="https_spiffe">https_spiffe</option>
-              <option value="https_web">https_web</option>
-            </Select>
+          <Field label="Endpoint server SPIFFE ID (https_spiffe; blank for Web PKI)">
+            <Input value={endpointSpiffeId} maxLength={2048} spellCheck={false} onChange={(e) => setEndpointSpiffeId(e.target.value)} />
           </Field>
-          {profile === "https_spiffe" && (
-            <Field label="Endpoint server SPIFFE ID">
-              <Input value={endpointSpiffeId} maxLength={2048} spellCheck={false} onChange={(e) => setEndpointSpiffeId(e.target.value)} />
-            </Field>
-          )}
-          <p>{SPIFFE_ENDPOINT_PROFILE_TEXT[profile]}</p>
           <Button type="submit" variant="primary" disabled={props.busy}>
             Save and fetch
           </Button>
@@ -118,19 +98,17 @@ export function SpiffeBundleEndpointsCard(props: { busy: boolean; ask: (c: AskCo
             rowKey={(x) => x.trustDomain}
             empty={<EmptyState title="No bundle endpoint" />}
             columns={[
-              { key: "domain", header: "Trust domain", render: (x) => <code>{x.trustDomain}</code> },
-              { key: "source", header: "Endpoint", render: (x) => `${x.url} (${x.profile}${x.endpointSpiffeId ? `, ${x.endpointSpiffeId}` : ""})` },
+              { key: "source", header: "Trust domain and endpoint", render: (x) => `${x.trustDomain}: ${x.url} (${x.profile} ${x.endpointSpiffeId ?? ""})` },
               {
                 key: "state",
                 header: "State",
                 render: (x) => (
                   <>
                     <Badge tone={!x.enabled ? "neutral" : x.lastErrorCode ? "warn" : "ok"}>{!x.enabled ? "off" : x.lastErrorCode ? "failing" : "fetching"}</Badge>
-                    {x.lastErrorCode && <div>{spiffeEndpointCode(x.lastErrorCode) ?? x.lastErrorCode}</div>}
+                    <div>{x.lastErrorCode ? spiffeEndpointCode(x.lastErrorCode) ?? x.lastErrorCode : `trusted until ${dateLabel(x.trustUntil)}`}</div>
                   </>
                 ),
               },
-              { key: "until", header: "Trusted until", render: (x) => dateLabel(x.trustUntil) },
               {
                 key: "actions",
                 header: "Actions",
