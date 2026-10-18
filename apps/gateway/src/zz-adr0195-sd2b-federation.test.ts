@@ -62,6 +62,16 @@ const restores: Array<() => Promise<void>> = [];
 const previousPublicUrl = process.env.REGULAIT_PUBLIC_URL;
 
 const rows = <R>(r: unknown) => (r as { rows: R[] }).rows;
+/** drizzle wraps a database error as "Failed query: ..." and keeps the server's message in `cause` */
+const errText = (e: unknown) => `${String((e as Error)?.message ?? e)} ${String((e as { cause?: Error })?.cause?.message ?? "")}`;
+async function refusedWith(p: Promise<unknown>, re: RegExp): Promise<void> {
+  const err = await p.then(
+    () => null,
+    (e: unknown) => e,
+  );
+  expect(err, `expected a refusal matching ${re}`).not.toBeNull();
+  expect(errText(err)).toMatch(re);
+}
 
 async function grantFor(args: StepUpCheckArgs) {
   const sessionToken = "rgls_" + randomBytes(32).toString("hex");
@@ -155,11 +165,15 @@ describe("ADR-0195 SD2b: the federation signer", () => {
     await expect(db.execute(sql`insert into federation_signing_keys (kid, public_jwk, private_key_ciphertext, created_by) values (${`t-${RUN}-nopriv`}, ${JSON.stringify({ kty: "RSA", e: "AQAB", n })}::jsonb, null, ${adminId})`)).rejects.toThrow();
     const kid = `t-${RUN}-g`;
     await db.execute(sql`insert into federation_signing_keys (kid, public_jwk, private_key_ciphertext, created_by) values (${kid}, ${JSON.stringify({ kty: "RSA", e: "AQAB", n })}::jsonb, 'c', ${adminId})`);
-    await expect(db.execute(sql`delete from federation_signing_keys where kid = ${kid}`)).rejects.toThrow(/never deleted/);
-    await expect(db.execute(sql`truncate federation_signing_keys`)).rejects.toThrow(/TRUNCATE/);
-    await db.execute(sql`update federation_signing_keys set revoked_at = now(), private_key_ciphertext = null where kid = ${kid}`);
+    try {
+      await refusedWith(db.execute(sql`delete from federation_signing_keys where kid = ${kid}`), /never deleted/);
+      await refusedWith(db.execute(sql`truncate federation_signing_keys`), /TRUNCATE/);
+    } finally {
+      // never leave this pending fixture behind: a pending key blocks every later generate
+      await db.execute(sql`update federation_signing_keys set revoked_at = now(), private_key_ciphertext = null where kid = ${kid} and revoked_at is null`);
+    }
     await expect(db.execute(sql`update federation_signing_keys set private_key_ciphertext = 'c' where kid = ${kid}`)).rejects.toThrow();
-    await expect(db.execute(sql`update federation_signing_keys set revoked_at = now() + interval '1 day' where kid = ${kid}`)).rejects.toThrow(/written once/);
+    await refusedWith(db.execute(sql`update federation_signing_keys set revoked_at = now() + interval '1 day' where kid = ${kid}`), /written once/);
     const fn = await db.execute(sql`select array_to_string(proconfig, ',') as c from pg_proc where proname = 'regulait_federation_signing_key_guard'`);
     expect(rows<{ c: string }>(fn)[0]!.c).toContain("search_path=pg_catalog, public, pg_temp");
   });
