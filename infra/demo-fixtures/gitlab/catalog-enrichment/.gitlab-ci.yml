@@ -1,0 +1,13 @@
+# Nightly enrichment job (CI is disabled on the demo project; kept to show the
+# variable names the job expects from the project's CI/CD settings).
+variables:
+  MISTRAL_API_KEY: ""
+  CO_API_KEY: ""
+
+enrich:
+  image: python:3.12-slim
+  script:
+    - pip install -r requirements.txt
+    - python -m enrichment.describe
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
