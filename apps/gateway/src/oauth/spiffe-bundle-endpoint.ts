@@ -356,18 +356,18 @@ export async function refreshSpiffeBundleEndpoint(db: Db, endpoint: SpiffeBundle
       source: "fetch",
       sequence: fetched.sequence,
       endpointUrl: endpoint.url,
-      inTx: async (t) => {
+      inTx: async (t, bundleId) => {
         // a revocation is never undone by a fetch: refused when a bundle of the domain was revoked at or after the
         // endpoint was last set by an admin (the revocation also disabled it; only a stepped-up PUT re-enables it)
         const revoked = await t.execute<{ n: number }>(sql`
           select count(*)::int as n from spiffe_trust_bundles b join spiffe_bundle_endpoints e on e.trust_domain = b.trust_domain
           where b.trust_domain = ${endpoint.trustDomain} and b.revoked_at is not null and b.revoked_at >= e.updated_at`);
         if ((revoked.rows[0]?.n ?? 0) > 0) throw new IdentityAdminError("spiffe_bundle_revoked", 409, `a bundle of ${endpoint.trustDomain} was revoked; an admin must set its endpoint again`);
-        // an admin's upload is never silently replaced by a fetch: refused while the active bundle is an upload made at
-        // or after the endpoint was last set (setting the endpoint again, stepped up, hands the domain back to it)
+        // an admin's upload is never silently replaced by a fetch: refused when the bundle this write supersedes (inTx runs
+        // after the supersede) is an upload made at or after the endpoint was last set (setting it again hands it back)
         const uploaded = await t.execute<{ n: number }>(sql`
           select count(*)::int as n from spiffe_trust_bundles b join spiffe_bundle_endpoints e on e.trust_domain = b.trust_domain
-          where b.trust_domain = ${endpoint.trustDomain} and b.source = 'upload' and b.superseded_at is null and b.revoked_at is null
+          where b.trust_domain = ${endpoint.trustDomain} and b.superseded_by_bundle_id = ${bundleId} and b.source = 'upload'
             and b.created_at >= e.updated_at`);
         if ((uploaded.rows[0]?.n ?? 0) > 0)
           throw new IdentityAdminError("spiffe_bundle_upload_newer", 409, `the active bundle of ${endpoint.trustDomain} was uploaded after its endpoint was set; an admin must set the endpoint again`);
