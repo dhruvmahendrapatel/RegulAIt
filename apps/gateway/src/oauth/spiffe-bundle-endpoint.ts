@@ -46,8 +46,8 @@
  *
  * AN UPLOAD IS NOT SILENTLY SUPERSEDED. A fetched write over an active uploaded
  * bundle made at or after the endpoint was last set is refused
- * (`spiffe_bundle_upload_newer`): an admin sets the endpoint again to hand the
- * domain back to it.
+ * (`spiffe_bundle_upload_newer`), recorded once: the endpoint is parked (no
+ * further fetch) until an admin sets it again to hand the domain back to it.
  *
  * A REVOCATION IS NOT UNDONE BY A FETCH. Revoking a domain's bundle disables its
  * endpoint in the same transaction (`revokeSpiffeTrustBundle`), and a fetched
@@ -106,8 +106,10 @@ export function refreshIntervalSeconds(hint: number | null): number {
 }
 
 /** the next attempt after a failure: the polling interval (Federation §5.3), but never more than five minutes, so a
- * long hint cannot let the last good bundle lapse unretried */
-export function retryDelaySeconds(lastIntervalSeconds: number): number {
+ * long hint cannot let the last good bundle lapse unretried. A newer upload parks the endpoint (null: no further
+ * fetch, so one audited refusal, not one every five minutes) until an admin sets it again */
+export function retryDelaySeconds(lastIntervalSeconds: number, code?: string): number | null {
+  if (code === "spiffe_bundle_upload_newer") return null;
   return Math.max(SPIFFE_REFRESH_HINT_FLOOR_SECONDS, Math.min(lastIntervalSeconds, SPIFFE_REFRESH_DEFAULT_SECONDS));
 }
 
@@ -286,6 +288,7 @@ export type RefreshOutcome =
   | { trustDomain: string; outcome: "skipped" };
 
 const secondsFromNow = (s: number) => sql`now() + make_interval(secs => ${s}::double precision)`;
+const retryOrPark = (s: number | null) => (s === null ? null : secondsFromNow(s));
 
 async function recordFailure(db: Db, endpoint: SpiffeBundleEndpointRow, code: string, intervalSeconds: number): Promise<RefreshOutcome> {
   await db
@@ -294,7 +297,7 @@ async function recordFailure(db: Db, endpoint: SpiffeBundleEndpointRow, code: st
       lastAttemptAt: sql`now()`,
       lastErrorCode: code,
       consecutiveFailures: sql`${spiffeBundleEndpoints.consecutiveFailures} + 1`,
-      nextRefreshAt: secondsFromNow(retryDelaySeconds(intervalSeconds)),
+      nextRefreshAt: retryOrPark(retryDelaySeconds(intervalSeconds, code)),
     })
     .where(and(eq(spiffeBundleEndpoints.trustDomain, endpoint.trustDomain), eq(spiffeBundleEndpoints.enabled, true)));
   await db.insert(auditLog).values({

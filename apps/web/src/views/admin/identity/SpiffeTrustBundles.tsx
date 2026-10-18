@@ -26,15 +26,12 @@ import s from "./workloadIdentities.module.css";
 export const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
 const STATUS_TONE = { active: "ok", superseded: "neutral", revoked: "danger" } as const;
 
-/** a bundle refusal in the page's words, else the client's own reading */
-async function bundleCall<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (e) {
-    const text = e instanceof ApiError ? spiffeBundleRefusal(e.payload.error) : null;
+/** a refusal in the page's words (`words` reads its code; bundle refusals by default), else the client's own reading */
+export const inWords = <T,>(call: Promise<T>, words: (code: unknown) => string | null = spiffeBundleRefusal): Promise<T> =>
+  call.catch((e: unknown) => {
+    const text = e instanceof ApiError ? words(e.payload.error ?? e.payload.code) : null;
     throw text ? new Error(text) : e;
-  }
-}
+  });
 
 export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfirmation) => void }) {
   const q = useQuery({ queryKey: spiffeBundleKeys.list, queryFn: listSpiffeTrustBundles });
@@ -104,7 +101,7 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                 </>
               ),
               run: async () => {
-                await bundleCall(() => uploadSpiffeTrustBundle(body));
+                await inWords(uploadSpiffeTrustBundle(body));
                 setBundle("");
                 setReplaces(null);
               },
@@ -176,7 +173,7 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                 render: (b) => (
                   <>
                     {b.authorities.length} (earliest expiry {dateLabel(earliestAuthorityExpiry(b))})
-                    {(b.jwtAuthorities?.length ?? 0) > 0 && <div>{b.jwtAuthorities.length} JWT-SVID key(s)</div>}
+                    {!!b.jwtAuthorities?.length && <div>{b.jwtAuthorities.length} JWT-SVID key(s)</div>}
                   </>
                 ),
               },
@@ -211,7 +208,7 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                                 cannot be undone.
                               </>
                             ),
-                            run: () => bundleCall(() => revokeSpiffeTrustBundle(b.id)),
+                            run: () => inWords(revokeSpiffeTrustBundle(b.id)),
                           })
                         }
                       >

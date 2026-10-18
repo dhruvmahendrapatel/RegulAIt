@@ -105,10 +105,12 @@ interface Mock {
   listFails: boolean;
   /** S9: the deployment still sets the retired bundle variable */
   legacyEnv: boolean;
+  /** S9 follow-up: the active bundle is an admin's upload (pinned), not the fetched one */
+  pinnedUpload: boolean;
 }
 
 async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
-  const m: Mock = { calls: [], unmatched: [], grantsRevision: 4, listFails: false, legacyEnv: false, ...opts };
+  const m: Mock = { calls: [], unmatched: [], grantsRevision: 4, listFails: false, legacyEnv: false, pinnedUpload: false, ...opts };
   current = m;
   const me = { userId: STEWARD.id, isAdmin: true, user: { id: STEWARD.id, email: STEWARD.email, displayName: STEWARD.displayName } };
   await page.route("**/*", async (route) => {
@@ -131,7 +133,7 @@ async function mockApi(page: Page, opts: Partial<Mock> = {}): Promise<Mock> {
     if (p === "/v1/connectors") return json(route, { connectors: [] });
     if (p === "/v1/identity/signing-keys") return json(route, { items: [] });
     // ADR-0188 S9: the SPIFFE trust bundles card
-    if (p === "/v1/identity/spiffe-trust-bundles" && method === "GET") return json(route, { items: [BUNDLE, OLD_BUNDLE], legacyEnvironmentIgnored: m.legacyEnv });
+    if (p === "/v1/identity/spiffe-trust-bundles" && method === "GET") return json(route, { items: [{ ...BUNDLE, source: m.pinnedUpload ? "upload" : "fetch" }, OLD_BUNDLE], legacyEnvironmentIgnored: m.legacyEnv });
     if (p === "/v1/identity/spiffe-trust-bundles" && method === "POST") {
       const body = req.postDataJSON() as { trustDomain: string; replacesBundleId: string | null };
       return json(route, { ...BUNDLE, id: U(72), trustDomain: body.trustDomain, digest: "c".repeat(64) }, 201);
@@ -561,18 +563,25 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
   const card = (page: Page) => page.getByTestId("spiffe-bundle-endpoints");
   const endpointPuts = (m: Mock) => m.calls.filter((c) => c.method === "PUT" && c.path.startsWith("/v1/identity/spiffe-bundle-endpoints/"));
 
-  test("lists the endpoint with its fetch state, and refuses a non-https URL and a malformed server ID in the browser", async ({ page }) => {
+  test("lists the endpoint with its fetch state, and refuses a non-https URL, a missing server ID and a malformed one in the browser", async ({ page }) => {
     const m = await mockApi(page);
     await page.goto("/ui/admin/workload-identities");
     const c = card(page);
     await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("fetching");
-    await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("spiffe://byoc.example.test/spire/server");
+    await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("(https_spiffe spiffe://byoc.example.test/spire/server)");
+    await expect(c.getByRole("row", { name: /byoc\.example\.test/ })).toContainText("trusted until");
+    // Web PKI is never the default: unticked, and a blank server ID is refused rather than read as https_web
+    await expect(c.getByLabel("Use Web PKI (no server SPIFFE ID)")).not.toBeChecked();
     await c.getByLabel("Trust domain to fetch").fill("new.example.test");
     await c.getByLabel("Bundle endpoint URL").fill("http://bundle.new.example.test/new");
     await c.getByLabel("Endpoint server SPIFFE ID").fill("spiffe://new.example.test/spire/server");
     await c.getByRole("button", { name: "Save and fetch" }).click();
     await expect(c.getByText("Use an https URL with no user name, password or #fragment.")).toBeVisible();
     await c.getByLabel("Bundle endpoint URL").fill("https://bundle.new.example.test/new");
+    await c.getByLabel("Endpoint server SPIFFE ID").fill("");
+    await c.getByRole("button", { name: "Save and fetch" }).click();
+    await expect(c.getByText("Name the endpoint server's SPIFFE ID")).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await c.getByLabel("Endpoint server SPIFFE ID").fill("https://new.example.test/spire/server");
     await c.getByRole("button", { name: "Save and fetch" }).click();
     await expect(c.getByText("Name the endpoint server's SPIFFE ID")).toBeVisible();
@@ -587,15 +596,26 @@ test.describe("ADR-0188 S9 follow-up: SPIFFE bundle endpoints", () => {
     const c = card(page);
     await c.getByLabel("Trust domain to fetch").fill("new.example.test");
     await c.getByLabel("Bundle endpoint URL").fill("https://bundle.new.example.test/new");
-    // no server SPIFFE ID: Web PKI (https_web)
+    // Web PKI only when ticked: the server ID field goes, and none is sent
+    await c.getByLabel("Use Web PKI (no server SPIFFE ID)").check();
+    await expect(c.getByLabel("Endpoint server SPIFFE ID")).toHaveCount(0);
     await c.getByRole("button", { name: "Save and fetch" }).click();
     const confirm = page.getByRole("dialog", { name: "Fetch the bundle of new.example.test?" });
+    await expect(confirm).toContainText("https_web: each fetch replaces the bundle");
     await expect(confirm).toContainText("whoever controls this endpoint decides");
     await confirm.getByRole("button", { name: "Save and fetch" }).click();
     await confirmStepUp(page);
     await su.expectResentOnce();
     expect(su.attempts[1]!.body).toEqual({ url: "https://bundle.new.example.test/new", profile: "https_web", endpointSpiffeId: null, enabled: true });
     await expect(page.getByText("Endpoint saved.")).toBeVisible();
+  });
+
+  test("an active uploaded bundle is pinned: the endpoint row does not show the fetch trust window as its limit", async ({ page }) => {
+    await mockApi(page, { pinnedUpload: true });
+    await page.goto("/ui/admin/workload-identities");
+    const row = card(page).getByRole("row", { name: /byoc\.example\.test/ });
+    await expect(row).toContainText("uploaded bundle in use (pinned)");
+    await expect(row).not.toContainText("trusted until");
   });
 
   test("stopping a fetch keeps the endpoint and says the last fetched bundle stops authenticating at once", async ({ page }) => {

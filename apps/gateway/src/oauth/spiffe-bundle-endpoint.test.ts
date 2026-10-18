@@ -22,7 +22,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { X509Certificate } from "node:crypto";
 import { exportJWK } from "jose";
 import { egressAllowHosts, type Db } from "@regulait/db";
-import { SPIFFE_BUNDLE_MAX_BYTES } from "@regulait/shared";
+import { putSpiffeBundleEndpointSchema, SPIFFE_BUNDLE_MAX_BYTES } from "@regulait/shared";
 import { createGuardedFetch, EgressRedirectError, type EgressResolver } from "../egress-guard.js";
 import { bundleEndpointServer, type BundleEndpointFixture } from "../testing/spiffe-endpoint-fixture.js";
 import { makeCert, type TestCert } from "../testing/x509-fixtures.js";
@@ -93,6 +93,20 @@ describe("a fetched bundle", () => {
   it("the refresh interval follows the hint inside [60 s, 24 h], five minutes without one; a failure retries within five minutes", () => {
     expect([refreshIntervalSeconds(null), refreshIntervalSeconds(10), refreshIntervalSeconds(600), refreshIntervalSeconds(2_419_200)]).toEqual([300, 60, 600, 86_400]);
     expect([retryDelaySeconds(60), retryDelaySeconds(600), retryDelaySeconds(86_400)]).toEqual([60, 300, 300]);
+    expect(retryDelaySeconds(600, "spiffe_bundle_fetch_timeout")).toBe(300);
+  });
+
+  it("a newer upload parks the endpoint (no retry, so one audited refusal) until an admin sets it again", () => {
+    expect(retryDelaySeconds(60, "spiffe_bundle_upload_newer")).toBeNull();
+  });
+
+  it("the PUT names its profile: none is inferred, so an omitted profile or ID is refused, never read as https_web", () => {
+    const body = { url: "https://bundle.example.test/b", enabled: true };
+    expect(putSpiffeBundleEndpointSchema.safeParse({ ...body, endpointSpiffeId: null }).success).toBe(false);
+    expect(putSpiffeBundleEndpointSchema.safeParse({ ...body, profile: "https_web" }).success).toBe(false);
+    expect(putSpiffeBundleEndpointSchema.safeParse({ ...body, profile: "https_spiffe", endpointSpiffeId: null }).success).toBe(false);
+    // positive control: Web PKI chosen explicitly
+    expect(putSpiffeBundleEndpointSchema.safeParse({ ...body, profile: "https_web", endpointSpiffeId: null }).success).toBe(true);
   });
 
   it("an endpoint URL is https, with a host, no userinfo and no fragment", () => {

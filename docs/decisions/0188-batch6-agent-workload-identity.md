@@ -1911,11 +1911,20 @@ Corrections to the text above (left as written):
 - **Journal.** Point 1 and the last "open" item say the 0209 journal entry is left to the coordinator and that the
   database suites cannot see the new columns. Both are stale: the entry is journaled (idx 209), and the database suites
   run against the new columns in CI.
-- **`client_id`.** Point 2 says `client_id` "is taken from `sub`". That overstates it. When the form has no
+- **`client_id`.** Point 4 says `client_id` "is taken from `sub`". That overstates it. When the form has no
   `client_id`, the token endpoint reads the assertion's `sub` as the client ID, but `findWorkloadClient` looks the
   client up by its workload identifier (or a JWK-thumbprint URI), never by SPIFFE ID. A workload that omits
   `client_id` authenticates only when its identifier is literally its SPIFFE ID; otherwise it is `client_unknown`.
   Sending `client_id` is the supported form.
+- **UI: Web PKI is an explicit choice (second review round).** Point 5 says a blank server SPIFFE ID selects
+  `https_web`. That made Web PKI, which trusts any public CA, the default of an empty field (an ADR-0180 regression,
+  reverted). The form now has a "Use Web PKI (no server SPIFFE ID)" checkbox, unticked by default. Unticked, the
+  profile is `https_spiffe` and a blank or malformed server ID is refused in the browser ("Name the endpoint server's
+  SPIFFE ID"); ticked, the ID field is hidden and `https_web` is sent with no ID. The gateway never inferred a profile:
+  `putSpiffeBundleEndpointSchema` requires `profile`, and `https_spiffe` without an ID (or `https_web` with one) is
+  refused; an offline test now pins that. The endpoint row reads "(https_web)" with no trailing space when there is no
+  ID, and says "uploaded bundle in use (pinned)" instead of the fetch trust window when the domain's active bundle is
+  an upload. To stay under the "all JS" ceiling, the two cards share one refusal-to-words helper (`inWords`).
 
 Changes (review items 4 and 5, code only):
 - **Disabling an endpoint ends trust at once (secure by default, ADR-0180).** Setting `enabled: false` sets the
@@ -1927,6 +1936,11 @@ Changes (review items 4 and 5, code only):
   endpoint was last set is refused `spiffe_bundle_upload_newer` (recorded and audited as a fetch failure; the upload
   stays active). Setting the endpoint again, stepped up, hands the domain back to the fetch. This compares
   `created_at` with the endpoint's `updated_at`, as the revocation check does, so no schema change was needed.
+- **The upload-newer refusal is recorded once (second review round).** The refusal used to be retried every five
+  minutes, each with a deny audit row (about 288 a day per domain) and a network fetch. Now it parks the endpoint:
+  `next_refresh_at` is cleared, so the scheduler (which claims only a due `next_refresh_at`) does not fetch it again
+  until an admin sets the endpoint again, which schedules a fetch at once. The row keeps the code, so the card says
+  why.
 
 Tests added: `fetchBundleText` refusing a body over 256 KiB by its declared `content-length` (the response is left open,
 so only the declared check can answer) and by what actually streams (chunked, no `content-length`), and mapping a

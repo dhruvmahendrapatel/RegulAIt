@@ -470,6 +470,9 @@ describe("S9 follow-up — fetching a domain's bundle", () => {
     endpoint.set(await bundleDoc([fca], [jwtKey], { spiffe_sequence: 4 }));
     expect(await refreshSpiffeBundleEndpoint(db, await endpointRow())).toMatchObject({ outcome: "failed", code: "spiffe_bundle_upload_newer" });
     expect((await activeBundle(FTD))!).toMatchObject({ id: up.json().id, source: "upload" });
+    // parked: no further fetch is scheduled (the sweep claims only a due next_refresh_at), so the refusal is audited
+    // once, not every five minutes
+    expect((await endpointRow()).nextRefreshAt).toBeNull();
     const again = await inject("PUT", `${ENDPOINTS}/${FTD}`, AUTH, endpointBody());
     expect(again.statusCode, again.body).toBe(200);
     expect(again.json().refresh).toMatchObject({ outcome: "changed", sequence: 4 });
