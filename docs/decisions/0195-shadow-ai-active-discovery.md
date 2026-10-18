@@ -668,10 +668,9 @@ Nothing above has been run (no Postgres in the build environment). It follows th
 
 ## As built: SD2b federation signer (2026-10-17, migration 0205)
 
-**Status: built on branch `sd2b-federation-signer`.** Migration `0205_federation_signing_keys.sql` is hand-written;
-its journal entry is NOT in this branch (0204 merges first; the master adds
-`{"idx": 205, "version": "7", "when": 1785140000000, "tag": "0205_federation_signing_keys", "breakpoints": true}`).
-Until then the database tests that need the table fail in CI.
+**Status: merged (#420).** Migration `0205_federation_signing_keys.sql` is hand-written; its journal entry
+(`{"idx": 205, "version": "7", "when": 1785140000000, "tag": "0205_federation_signing_keys", "breakpoints": true}`)
+landed with the PR after 0204, and the database tests that need the table run in CI.
 
 Why a separate table. The RS256 key is generated in the product and its private half kept under the data key. The
 Ed25519 issuer store (`identity_signing_keys`) CHECKs `algorithm = 'Ed25519'` and an `OKP` JWK, has one global
