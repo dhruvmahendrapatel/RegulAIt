@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values.
+# The provider token is NOT set here: export GITLAB_TOKEN in the shell instead.
+gitlab_group_full_path = "<demo-group-path>"
+# create_group_access_token = false   # GitLab.com group without Premium or Ultimate
