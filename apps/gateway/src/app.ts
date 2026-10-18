@@ -512,6 +512,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerDiscoveryRoutes } from "./discovery-routes.js";
+import { registerContentTrustRoutes } from "./content-trust-routes.js";
 import { registerFederationRoutes } from "./federation-routes.js";
 import { registerEndpointImportRoutes } from "./endpoint-import-routes.js";
 import type { ScannerRegistry } from "./discovery-scanners.js";
@@ -5441,6 +5442,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     dataKey: opts.dataKey,
     ...(opts.discoveryScanners === undefined ? {} : { registry: opts.discoveryScanners }),
   });
+  // ADR-0193 (I4) P1 — content source trust tiers, the write floor (both step-up, audited) and the P0 provenance
+  // evidence view. Admin-only by default (none of these routes is in NON_ADMIN_ROUTES).
+  registerContentTrustRoutes(app, db);
   // ADR-0195 SD2b — the cloud federation issuer: its public OIDC discovery document and RS256 JWKS (the clouds
   // fetch them), and the admin key lifecycle (off by default; on is a `settings_relax` step-up, rotate and revoke
   // are `key_management` step-ups). The admin routes are admin-only by default (none is in NON_ADMIN_ROUTES).

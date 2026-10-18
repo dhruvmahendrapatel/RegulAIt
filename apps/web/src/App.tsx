@@ -63,6 +63,7 @@ const RulesEnginePage = screen(() => import("./screens/admin-policies-gates"), "
 const SimulationPage = screen(() => import("./screens/admin-policies-gates"), "SimulationPage");
 const AbacPoliciesPage = screen(() => import("./screens/admin-policies-gates"), "AbacPoliciesPage");
 const GuardrailsPage = screen(() => import("./screens/admin-policies-gates"), "GuardrailsPage");
+const ContentTrustPage = screen(() => import("./screens/admin-policies-gates"), "ContentTrustPage");
 const ModelPolicyPage = screen(() => import("./screens/admin-policies-gates"), "ModelPolicyPage");
 const EvalsPage = screen(() => import("./screens/admin-quality-security"), "EvalsPage");
 const ModelRiskPage = screen(() => import("./screens/admin-ai-governance"), "ModelRiskPage");
@@ -248,6 +249,8 @@ function ApplicationRoutes() {
                 <Route path="simulation" element={<SimulationPage />} />
                 <Route path="abac-policies" element={<AbacPoliciesPage />} />
                 <Route path="guardrails" element={<GuardrailsPage />} />
+                {/* ADR-0193 (I4) P0/P1 */}
+                <Route path="content-trust" element={<ContentTrustPage />} />
                 {/* ADR-0173 §3 */}
                 <Route path="model-policy" element={<ModelPolicyPage />} />
                 <Route path="evals" element={<EvalsPage />} />

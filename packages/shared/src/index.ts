@@ -4691,3 +4691,5 @@ export * from "./repo-analysis.js";
 export * from "./discovery/index.js";
 // ADR-0195 SD3: endpoint discovery without an agent (osquery pack, importers, endpoint signature seed).
 export * from "./endpoint-discovery/index.js";
+// ADR-0193 (I4) P0/P1: the content provenance label and digest, and the trust-tier policy
+export * from "./provenance/index.js";
