@@ -389,7 +389,7 @@
   border-color: var(--rg-signal-700);
   box-shadow: 0 0 0 1px var(--rg-signal-700);
 }
-.choice:has(input:focus-visible) {
+.choice:has(input:focus) {
   box-shadow: var(--focus-ring);
 }
 .choice input {

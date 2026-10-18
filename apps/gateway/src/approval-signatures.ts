@@ -113,6 +113,7 @@ export {
 } from "./approval-pool.js";
 import { projectPiiMode } from "./projects.js";
 import { applyRuleVersions, loadVersionsForArtifacts } from "./rule-versions.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 type ApprovalRow = typeof approvals.$inferSelect;
 /** what a transaction handle and the pool have in common, for the helpers below */
@@ -744,7 +745,7 @@ export async function decideToolCallApproval(db: Db, input: ToolCallDecideInput)
         requireUserVerification: true,
       });
     } catch (err) {
-      return invalid(`verification_error: ${err instanceof Error ? err.message.slice(0, 200) : "unknown"}`);
+      return invalid(`verification_error: ${safeErrorMessage(err).slice(0, 200)}`);
     }
     if (!verified.verified || !verified.authenticationInfo.userVerified) return invalid("not_verified");
     method = "passkey";

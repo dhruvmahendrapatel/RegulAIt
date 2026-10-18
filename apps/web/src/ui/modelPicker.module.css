@@ -239,7 +239,7 @@
   box-shadow: inset 0 0 0 1px var(--primary);
   background: var(--surface-2);
 }
-.providerTile:has(.providerRadio:focus-visible) {
+.providerTile:has(.providerRadio:focus) {
   box-shadow: var(--focus-ring);
 }
 /* invisible but covering the whole tile, so a click anywhere on it lands on

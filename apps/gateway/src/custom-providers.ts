@@ -55,6 +55,7 @@ import {
   type EgressDecision,
   type EgressResolver,
 } from "./egress-guard.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -674,7 +675,7 @@ export function registerCustomProviderRoutes(
       // ADR-0034: an egress refusal raised INSIDE the adapter (a redirect, or
       // the guarded fetch re-checking) is a governance decision. The SDK
       // flattens it to "Connection error."; report the real reason.
-      const message = egressRefusal(err) ?? (err instanceof Error ? err.message : String(err));
+      const message = egressRefusal(err) ?? (safeErrorMessage(err));
       await recordTest(providerId, message);
       await audit(
         actor(req),

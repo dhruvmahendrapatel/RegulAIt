@@ -127,13 +127,13 @@ test("client access: config generation and copy outcomes are announced", async (
   await page.goto("/ui/admin/client-access");
   await selectAt(page, page.getByLabel("MCP server", { exact: true }), "s");
   await activate(page, page.getByRole("button", { name: "Generate", exact: true }));
-  await expect(page.locator('[aria-live="polite"]')).toContainText("Client configuration generated");
+  await expect(page.locator('[aria-live="polite"]').filter({ hasText: "Client configuration generated" })).toContainText("Client configuration generated");
   await expect(page.getByTestId("client-config")).toContainText("s");
   await activate(page, page.getByRole("button", { name: "Copy", exact: true }));
-  await expect(page.locator('[aria-live="polite"]')).toContainText("Clipboard unavailable");
+  await expect(page.locator('[aria-live="polite"]').filter({ hasText: "Clipboard unavailable" })).toContainText("Clipboard unavailable");
   await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } }));
   await activate(page, page.getByRole("button", { name: "Copy", exact: true }));
-  await expect(page.locator('[aria-live="polite"]')).toContainText("Client configuration copied");
+  await expect(page.locator('[aria-live="polite"]').filter({ hasText: "Client configuration copied" })).toContainText("Client configuration copied");
   await expectAxeClean(page, "client access");
 });
 

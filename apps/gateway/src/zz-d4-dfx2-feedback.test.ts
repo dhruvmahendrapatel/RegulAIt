@@ -183,10 +183,16 @@ describe("D4G-03: retention never purges evidence of an incident that is not clo
 describe("D4A-05: a public link token never reaches a log line, at any status", () => {
   it("requestLogFields redacts the token segment", () => {
     const token = `rglf_${"0123456789abcdef".repeat(4)}`;
+    // matched: the route template only (N8: no raw path on a matched route)
     const req = { method: "POST", url: `/v1/feedback/l/${token}?x=1`, routeOptions: { url: "/v1/feedback/l/:token" }, ip: "203.0.113.9", headers: {} } as unknown as FastifyRequest;
     const fields = requestLogFields(req, 400);
     expect(JSON.stringify(fields)).not.toContain("rglf_0");
-    expect(fields.path).toBe("/v1/feedback/l/[redacted]");
+    expect(fields.path).toBeUndefined();
+    // unmatched: the raw path, redacted
+    const stray = { method: "POST", url: `/v1/feedback/l/${token}/x?x=1`, routeOptions: {}, ip: "203.0.113.9", headers: {} } as unknown as FastifyRequest;
+    const strayFields = requestLogFields(stray, 404);
+    expect(JSON.stringify(strayFields)).not.toContain("rglf_0");
+    expect(strayFields.path).toBe("/v1/feedback/l/[redacted]/x");
   });
 
   it("400, 404, 410 and 503 refusals, and any other line, are captured without the token", async () => {

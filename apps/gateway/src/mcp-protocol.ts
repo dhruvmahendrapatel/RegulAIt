@@ -125,6 +125,7 @@ import {
 import { checkStdioClosure } from "./mcp-transports.js";
 import { classifyScannedContent, recordContentProvenance } from "./content-provenance.js";
 import { stdioRefusalSentence } from "./mcp-egress.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 /** ADR-0185 G3: the reserved tool-name prefix. Protocol grants live under it
  * (`mcp:resources`, ...), so no upstream TOOL may carry it: a tool so named
@@ -638,7 +639,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       upstream = await connectUpstream(db, serverRow, { outboundIdentity, placement: { userId, projectId, delegationGrantId: args.delegationGrantId ?? null, linkedOfferId, principal: args.principal ?? null } });
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
-        await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
       }
       throw err;
     }
@@ -715,7 +716,7 @@ async function executeInner(db: Db, args: GovernedProtocolCallArgs, stdioHold: {
       )) as Record<string, unknown>;
     } catch (err) {
       if (classifyUpstreamError(err).why !== "our_own_refusal") {
-        await recordUpstreamFailure(db, serverRow, err instanceof Error ? err.message : String(err));
+        await recordUpstreamFailure(db, serverRow, safeErrorMessage(err));
       }
       throw err;
     }

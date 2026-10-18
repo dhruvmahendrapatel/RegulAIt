@@ -1,129 +1,143 @@
+import { lazy, Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createBrowserRouter, Navigate, Outlet, Route, RouterProvider, Routes, useLocation } from "react-router-dom";
 import { SessionProvider, useSession } from "./session/SessionContext";
 import { ToastProvider } from "./ui/toast";
 import { SkeletonBlock } from "./ui/kit";
+import { RouteFallback, RouteLoadingAnnouncer } from "./shell/RouteFallback";
+import { RootRouteError, ShellRouteBoundary } from "./shell/RouteError";
 import AppShell from "./shell/AppShell";
-import LoginPage from "./views/auth/LoginPage";
-import ForcedPasswordChange from "./views/auth/ForcedPasswordChange";
-import ForcedMfaEnroll from "./views/auth/ForcedMfaEnroll";
-import HomePage from "./views/home/HomePage";
-import ChatPage from "./views/chat/ChatPage";
-import BuilderChatPage from "./views/builder/BuilderChatPage";
-import BuilderInboxPage from "./views/builder/BuilderInboxPage";
-import BuilderAgentsPage from "./views/builder/BuilderAgentsPage";
-import BuilderAgentEditorPage from "./views/builder/BuilderAgentEditorPage";
-import BuilderTemplatesPage from "./views/builder/BuilderTemplatesPage";
-import BuilderTemplateDetailPage from "./views/builder/BuilderTemplateDetailPage";
-import BuilderIntegrationsPage from "./views/builder/BuilderIntegrationsPage";
-import BuilderSkillsPage from "./views/builder/BuilderSkillsPage";
-import BuilderUsagePage from "./views/builder/BuilderUsagePage";
-// ADR-0173 batch 2b — the governed prompt registry, the playground and outbound webhooks
-import BuilderPromptsPage from "./views/builder/BuilderPromptsPage";
-import BuilderPromptDetailPage from "./views/builder/BuilderPromptDetailPage";
-import BuilderPlaygroundPage from "./views/builder/BuilderPlaygroundPage";
-import WebhooksPage from "./views/admin/integrations/WebhooksPage";
-import ModelsPage from "./views/models/ModelsPage";
-import RunsPage from "./views/runs/RunsPage";
-import RunDetailPage from "./views/runs/RunDetailPage";
-import WorkflowsPage from "./views/workflows/WorkflowsPage";
-import WorkflowDetailPage from "./views/workflows/WorkflowDetailPage";
-import InboxPage from "./views/inbox/InboxPage";
-// ADR-0173 batch 2c (Q): annotation queues (admin setup) and the reviewer view
-import AnnotationReviewPage from "./views/inbox/AnnotationReviewPage";
-import AnnotationQueuesPage from "./views/admin/governance/AnnotationQueuesPage";
-import ProjectsPage from "./views/projects/ProjectsPage";
-import ProjectDetailPage from "./views/projects/ProjectDetailPage";
-import ProjectContextPage from "./views/projects/ProjectContextPage";
-import ContextGraphPage from "./views/projects/ContextGraphPage";
-import ContextIndexPage from "./views/projects/ContextIndexPage";
-import SpendPage from "./views/spend/SpendPage";
-import AccountPage from "./views/account/AccountPage";
 import { RequireAdmin } from "./views/admin/adminKit";
-import UsersPage from "./views/admin/identity/UsersPage";
-import RolesPage from "./views/admin/identity/RolesPage";
-import TeamsPage from "./views/admin/identity/TeamsPage";
-import ClientAccessPage from "./views/admin/identity/ClientAccessPage";
-import SsoPage from "./views/admin/identity/SsoPage";
-import ScimPage from "./views/admin/identity/ScimPage";
-import CredentialsPage from "./views/admin/identity/CredentialsPage";
-import GroupMappingsPage from "./views/admin/identity/GroupMappingsPage";
-import VirtualKeysPage from "./views/admin/identity/VirtualKeysPage";
-import WorkloadIdentitiesPage from "./views/admin/identity/WorkloadIdentitiesPage";
-import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
-import SimulationPage from "./views/admin/governance/SimulationPage";
-import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
-import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
-import ContentTrustPage from "./views/admin/governance/ContentTrustPage";
-import ModelPolicyPage from "./views/admin/governance/ModelPolicyPage";
-import EvalsPage from "./views/admin/governance/EvalsPage";
-import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
-import UseCasesPage from "./views/admin/governance/UseCasesPage";
-import IntakeWizardPage from "./views/admin/governance/IntakeWizardPage";
-import ReviewPolicyPage from "./views/admin/governance/ReviewPolicyPage";
-import TrustDashboardPage from "./views/admin/governance/TrustDashboardPage";
-import UseCaseOverviewPage from "./views/admin/governance/UseCaseOverviewPage";
-import GovernanceAlertsPage from "./views/admin/governance/GovernanceAlertsPage";
-import DependencyGraphPage from "./views/admin/governance/DependencyGraphPage";
-import RegulatoryIntelligencePage from "./views/admin/governance/RegulatoryIntelligencePage";
-import VendorsPage from "./views/admin/governance/VendorsPage";
-import RisksPage from "./views/admin/governance/RisksPage";
-import InventoryPage from "./views/admin/governance/InventoryPage";
-import CampaignsPage from "./views/admin/governance/CampaignsPage";
-import RecommendationsPage from "./views/admin/governance/RecommendationsPage";
-import SodRulesPage from "./views/admin/governance/SodRulesPage";
-import PosturePage from "./views/admin/governance/PosturePage";
-import RedTeamPage from "./views/admin/governance/RedTeamPage";
-import AdmissionReviewPage from "./views/admin/governance/AdmissionReviewPage";
-import ReportsPage from "./views/admin/cost/ReportsPage";
-import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
-import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
-import ReviewWorkbenchPage from "./views/admin/governance/ReviewWorkbenchPage";
-import AuditLogPage from "./views/admin/governance/AuditLogPage";
-import ShadowAiPage from "./views/admin/governance/ShadowAiPage";
-import DiscoverySourcesPage from "./views/admin/governance/DiscoverySourcesPage";
-import CopilotPage from "./views/admin/governance/CopilotPage";
-import ChatOpsPage from "./views/admin/governance/ChatOpsPage";
-import LineagePage from "./views/admin/governance/LineagePage";
-import RegulAItLlmPage from "./views/admin/llm/RegulAItLlmPage";
-import TracesPage from "./views/admin/observability/TracesPage";
+
+// ADR-0196 U4: the screens load on demand. Each module under ./screens is one chunk, the screens of one console
+// section (the admin groups in shell/suites.tsx) or one workspace area; a section's screens share their code, so
+// a chunk per screen would cost more in total than it saves on a first visit. A navigation runs in a transition
+// (the router's default), so the current screen stays up while the next one loads; RouteFallback shows only on a
+// first load, inside the shell.
+const LoginPage = screen(() => import("./screens/auth"), "LoginPage");
+const ForcedPasswordChange = screen(() => import("./screens/auth"), "ForcedPasswordChange");
+const ForcedMfaEnroll = screen(() => import("./screens/auth"), "ForcedMfaEnroll");
+const HomePage = lazy(() => import("./views/home/HomePage"));
+const ChatPage = lazy(() => import("./views/chat/ChatPage"));
+const BuilderChatPage = screen(() => import("./screens/builder"), "BuilderChatPage");
+const BuilderInboxPage = screen(() => import("./screens/builder"), "BuilderInboxPage");
+const BuilderAgentsPage = screen(() => import("./screens/builder"), "BuilderAgentsPage");
+const BuilderAgentEditorPage = screen(() => import("./screens/builder"), "BuilderAgentEditorPage");
+const BuilderTemplatesPage = screen(() => import("./screens/builder"), "BuilderTemplatesPage");
+const BuilderTemplateDetailPage = screen(() => import("./screens/builder"), "BuilderTemplateDetailPage");
+const BuilderIntegrationsPage = screen(() => import("./screens/builder"), "BuilderIntegrationsPage");
+const BuilderSkillsPage = screen(() => import("./screens/builder"), "BuilderSkillsPage");
+const BuilderUsagePage = screen(() => import("./screens/builder"), "BuilderUsagePage");
+// ADR-0173 batch 2b — the governed prompt registry, the playground and outbound webhooks
+const BuilderPromptsPage = screen(() => import("./screens/builder"), "BuilderPromptsPage");
+const BuilderPromptDetailPage = screen(() => import("./screens/builder"), "BuilderPromptDetailPage");
+const BuilderPlaygroundPage = screen(() => import("./screens/builder"), "BuilderPlaygroundPage");
+const WebhooksPage = screen(() => import("./screens/admin-integrations"), "WebhooksPage");
+const ModelsPage = lazy(() => import("./views/models/ModelsPage"));
+const RunsPage = screen(() => import("./screens/runs"), "RunsPage");
+const RunDetailPage = screen(() => import("./screens/runs"), "RunDetailPage");
+const WorkflowsPage = screen(() => import("./screens/workflows"), "WorkflowsPage");
+const WorkflowDetailPage = screen(() => import("./screens/workflows"), "WorkflowDetailPage");
+const InboxPage = screen(() => import("./screens/inbox"), "InboxPage");
+// ADR-0173 batch 2c (Q): annotation queues (admin setup) and the reviewer view
+const AnnotationReviewPage = screen(() => import("./screens/inbox"), "AnnotationReviewPage");
+const AnnotationQueuesPage = screen(() => import("./screens/admin-quality-security"), "AnnotationQueuesPage");
+const ProjectsPage = screen(() => import("./screens/projects"), "ProjectsPage");
+const ProjectDetailPage = screen(() => import("./screens/projects"), "ProjectDetailPage");
+const ProjectContextPage = screen(() => import("./screens/projects"), "ProjectContextPage");
+const ContextGraphPage = screen(() => import("./screens/projects"), "ContextGraphPage");
+const ContextIndexPage = screen(() => import("./screens/projects"), "ContextIndexPage");
+const SpendPage = lazy(() => import("./views/spend/SpendPage"));
+const AccountPage = lazy(() => import("./views/account/AccountPage"));
+const UsersPage = screen(() => import("./screens/admin-identity-access"), "UsersPage");
+const RolesPage = screen(() => import("./screens/admin-identity-access"), "RolesPage");
+const TeamsPage = screen(() => import("./screens/admin-identity-access"), "TeamsPage");
+const ClientAccessPage = screen(() => import("./screens/admin-identity-access"), "ClientAccessPage");
+const SsoPage = screen(() => import("./screens/admin-identity-access"), "SsoPage");
+const ScimPage = screen(() => import("./screens/admin-identity-access"), "ScimPage");
+const CredentialsPage = screen(() => import("./screens/admin-identity-access"), "CredentialsPage");
+const GroupMappingsPage = screen(() => import("./screens/admin-identity-access"), "GroupMappingsPage");
+const VirtualKeysPage = screen(() => import("./screens/admin-identity-access"), "VirtualKeysPage");
+const WorkloadIdentitiesPage = screen(() => import("./screens/admin-identity-access"), "WorkloadIdentitiesPage");
+const RulesEnginePage = screen(() => import("./screens/admin-policies-gates"), "RulesEnginePage");
+const SimulationPage = screen(() => import("./screens/admin-policies-gates"), "SimulationPage");
+const AbacPoliciesPage = screen(() => import("./screens/admin-policies-gates"), "AbacPoliciesPage");
+const GuardrailsPage = screen(() => import("./screens/admin-policies-gates"), "GuardrailsPage");
+const ContentTrustPage = screen(() => import("./screens/admin-policies-gates"), "ContentTrustPage");
+const ModelPolicyPage = screen(() => import("./screens/admin-policies-gates"), "ModelPolicyPage");
+const EvalsPage = screen(() => import("./screens/admin-quality-security"), "EvalsPage");
+const ModelRiskPage = screen(() => import("./screens/admin-ai-governance"), "ModelRiskPage");
+const UseCasesPage = screen(() => import("./screens/admin-ai-governance"), "UseCasesPage");
+const IntakeWizardPage = screen(() => import("./screens/admin-ai-governance"), "IntakeWizardPage");
+const ReviewPolicyPage = screen(() => import("./screens/admin-ai-governance"), "ReviewPolicyPage");
+const TrustDashboardPage = screen(() => import("./screens/admin-overview"), "TrustDashboardPage");
+const UseCaseOverviewPage = screen(() => import("./screens/admin-ai-governance"), "UseCaseOverviewPage");
+const GovernanceAlertsPage = screen(() => import("./screens/admin-overview"), "GovernanceAlertsPage");
+const DependencyGraphPage = screen(() => import("./screens/admin-ai-governance"), "DependencyGraphPage");
+const RegulatoryIntelligencePage = screen(() => import("./screens/admin-ai-governance"), "RegulatoryIntelligencePage");
+const VendorsPage = screen(() => import("./screens/admin-ai-governance"), "VendorsPage");
+const RisksPage = screen(() => import("./screens/admin-ai-governance"), "RisksPage");
+const InventoryPage = screen(() => import("./screens/admin-access-reviews"), "InventoryPage");
+const CampaignsPage = screen(() => import("./screens/admin-access-reviews"), "CampaignsPage");
+const RecommendationsPage = screen(() => import("./screens/admin-access-reviews"), "RecommendationsPage");
+const SodRulesPage = screen(() => import("./screens/admin-access-reviews"), "SodRulesPage");
+const PosturePage = screen(() => import("./screens/admin-overview"), "PosturePage");
+const RedTeamPage = screen(() => import("./screens/admin-quality-security"), "RedTeamPage");
+const AdmissionReviewPage = screen(() => import("./screens/admin-integrations"), "AdmissionReviewPage");
+const ReportsPage = screen(() => import("./screens/admin-overview"), "ReportsPage");
+const PromptVersionsPage = screen(() => import("./screens/admin-policies-gates"), "PromptVersionsPage");
+const ApprovalsAdminPage = screen(() => import("./screens/admin-approvals-audit"), "ApprovalsAdminPage");
+const ReviewWorkbenchPage = screen(() => import("./screens/admin-approvals-audit"), "ReviewWorkbenchPage");
+const AuditLogPage = screen(() => import("./screens/admin-approvals-audit"), "AuditLogPage");
+const ShadowAiPage = screen(() => import("./screens/admin-ai-governance"), "ShadowAiPage");
+const DiscoverySourcesPage = screen(() => import("./screens/admin-ai-governance"), "DiscoverySourcesPage");
+const CopilotPage = screen(() => import("./screens/admin-overview"), "CopilotPage");
+const ChatOpsPage = screen(() => import("./screens/admin-approvals-audit"), "ChatOpsPage");
+const LineagePage = screen(() => import("./screens/admin-approvals-audit"), "LineagePage");
+const RegulAItLlmPage = screen(() => import("./screens/admin-integrations"), "RegulAItLlmPage");
+const TracesPage = screen(() => import("./screens/admin-approvals-audit"), "TracesPage");
 // ADR-0173 batch 2c (K)
-import MonitoringPage from "./views/admin/observability/MonitoringPage";
-import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
-import AgentsPage from "./views/admin/integrations/AgentsPage";
-import ModelCredentialsPage from "./views/admin/integrations/ModelCredentialsPage";
-import CustomProvidersPage from "./views/admin/integrations/CustomProvidersPage";
-import ExternalScorersPage from "./views/admin/integrations/ExternalScorersPage";
-import ConnectorsPage from "./views/admin/integrations/ConnectorsPage";
-import McpServersPage from "./views/admin/integrations/McpServersPage";
-import GitConnectionsPage from "./views/admin/integrations/GitConnectionsPage";
-import PmConnectionsPage from "./views/admin/integrations/PmConnectionsPage";
-import DeployTargetsPage from "./views/admin/integrations/DeployTargetsPage";
-import EnginesPage from "./views/admin/integrations/EnginesPage";
-import CostDashboardPage from "./views/admin/cost/CostDashboardPage";
-import CostConsolidationPage from "./views/admin/cost/CostConsolidationPage";
-import SpendMonitorPage from "./views/admin/cost/SpendMonitorPage";
-import BillingPage from "./views/admin/cost/BillingPage";
-import OptimizationPage from "./views/admin/cost/OptimizationPage";
-import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesPage";
-import CompliancePacksPage from "./views/admin/compliance/CompliancePacksPage";
-import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
-import OrganizationPage from "./views/admin/settings/OrganizationPage";
-import RetentionPage from "./views/admin/settings/RetentionPage";
-import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
-import FirstRunPage from "./views/admin/settings/FirstRunPage";
-import LicensingPage from "./views/admin/settings/LicensingPage";
-import DataKeyPage from "./views/admin/settings/DataKeyPage";
-import SchedulerPage from "./views/admin/settings/SchedulerPage";
-import EnforcementPosturePage from "./views/admin/settings/EnforcementPosturePage";
-import ExecutionControlPage from "./views/admin/settings/ExecutionControlPage";
+const MonitoringPage = screen(() => import("./screens/admin-overview"), "MonitoringPage");
+const WorkflowTemplatesPage = screen(() => import("./screens/admin-policies-gates"), "WorkflowTemplatesPage");
+const AgentsPage = screen(() => import("./screens/admin-integrations"), "AgentsPage");
+const ModelCredentialsPage = screen(() => import("./screens/admin-integrations"), "ModelCredentialsPage");
+const CustomProvidersPage = screen(() => import("./screens/admin-integrations"), "CustomProvidersPage");
+const ExternalScorersPage = screen(() => import("./screens/admin-quality-security"), "ExternalScorersPage");
+const ConnectorsPage = screen(() => import("./screens/admin-integrations"), "ConnectorsPage");
+const McpServersPage = screen(() => import("./screens/admin-integrations"), "McpServersPage");
+const GitConnectionsPage = screen(() => import("./screens/admin-integrations"), "GitConnectionsPage");
+const PmConnectionsPage = screen(() => import("./screens/admin-integrations"), "PmConnectionsPage");
+const DeployTargetsPage = screen(() => import("./screens/admin-integrations"), "DeployTargetsPage");
+const EnginesPage = screen(() => import("./screens/admin-integrations"), "EnginesPage");
+const CostDashboardPage = screen(() => import("./screens/admin-cost-optimization"), "CostDashboardPage");
+const CostConsolidationPage = screen(() => import("./screens/admin-cost-optimization"), "CostConsolidationPage");
+const SpendMonitorPage = screen(() => import("./screens/admin-cost-optimization"), "SpendMonitorPage");
+const BillingPage = screen(() => import("./screens/admin-cost-optimization"), "BillingPage");
+const OptimizationPage = screen(() => import("./screens/admin-cost-optimization"), "OptimizationPage");
+const ComplianceProfilesPage = screen(() => import("./screens/admin-compliance-infra"), "ComplianceProfilesPage");
+const CompliancePacksPage = screen(() => import("./screens/admin-compliance-infra"), "CompliancePacksPage");
+const InfrastructurePage = screen(() => import("./screens/admin-compliance-infra"), "InfrastructurePage");
+const OrganizationPage = screen(() => import("./screens/admin-settings"), "OrganizationPage");
+const RetentionPage = screen(() => import("./screens/admin-settings"), "RetentionPage");
+const GettingStartedPage = screen(() => import("./screens/admin-settings"), "GettingStartedPage");
+const FirstRunPage = screen(() => import("./screens/admin-settings"), "FirstRunPage");
+const LicensingPage = screen(() => import("./screens/admin-settings"), "LicensingPage");
+const DataKeyPage = screen(() => import("./screens/admin-settings"), "DataKeyPage");
+const SchedulerPage = screen(() => import("./screens/admin-settings"), "SchedulerPage");
+const EnforcementPosturePage = screen(() => import("./screens/admin-settings"), "EnforcementPosturePage");
+const ExecutionControlPage = screen(() => import("./screens/admin-settings"), "ExecutionControlPage");
 // ADR-0182 (ADR-0175 batch D4) — each page is its slice's file (P0 stubs)
-import DecisionRegressionPage from "./views/admin/governance/DecisionRegressionPage";
-import LiteracyPage from "./views/admin/governance/LiteracyPage";
-import IncidentsPage from "./views/incidents/IncidentsPage";
-import IncidentDetailPage from "./views/incidents/IncidentDetailPage";
-import FeedbackPage from "./views/feedback/FeedbackPage";
-import FeedbackFormPage from "./views/feedback/FeedbackFormPage";
+const DecisionRegressionPage = screen(() => import("./screens/admin-ai-governance"), "DecisionRegressionPage");
+const LiteracyPage = screen(() => import("./screens/admin-ai-governance"), "LiteracyPage");
+const IncidentsPage = screen(() => import("./screens/incidents"), "IncidentsPage");
+const IncidentDetailPage = screen(() => import("./screens/incidents"), "IncidentDetailPage");
+const FeedbackPage = screen(() => import("./screens/feedback"), "FeedbackPage");
+const FeedbackFormPage = screen(() => import("./screens/feedback"), "FeedbackFormPage");
+
+/** one screen of a ./screens chunk, as a lazy component */
+function screen<M extends Record<K, ComponentType<any>>, K extends keyof M & string>(load: () => Promise<M>, name: K) {
+  return lazy(() => load().then((m) => ({ default: m[name] })));
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -159,7 +173,11 @@ function Protected() {
   if (auth.mfaSetupRequired) return <ForcedMfaEnroll />;
   return (
     <AppShell>
-      <Outlet />
+      <ShellRouteBoundary pathname={location.pathname}>
+        <Suspense fallback={<RouteFallback />}>
+          <Outlet />
+        </Suspense>
+      </ShellRouteBoundary>
     </AppShell>
   );
 }
@@ -338,8 +356,22 @@ function ApplicationRoutes() {
 
 // Keep the existing route tree while enabling the router's supported blocker
 // for links, programmatic navigation and browser history transitions (X13).
+// The outer boundary covers the screens outside the shell (sign-in, the public feedback link, the forced gates);
+// a signed-in screen suspends to the one in Protected, so the shell and its focus stay put while it loads.
+// A screen that fails to load or render shows RouteError's panel: inside the shell for a signed-in screen, from the
+// root route's errorElement for the rest, never the router's developer page.
 const router = createBrowserRouter(
-  [{ path: "*", element: <ApplicationRoutes /> }],
+  [
+    {
+      path: "*",
+      errorElement: <RootRouteError />,
+      element: (
+        <Suspense fallback={<RouteFallback />}>
+          <ApplicationRoutes />
+        </Suspense>
+      ),
+    },
+  ],
   { basename: "/ui" },
 );
 
@@ -349,6 +381,7 @@ export default function App() {
       <ToastProvider>
         <SessionProvider>
           <RouterProvider router={router} />
+          <RouteLoadingAnnouncer />
         </SessionProvider>
       </ToastProvider>
     </QueryClientProvider>

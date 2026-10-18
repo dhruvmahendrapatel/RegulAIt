@@ -74,6 +74,7 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { checkEgress, createGuardedFetch, egressRefusal, type EgressResolver } from "./egress-guard.js";
 import { scheduleBackgroundWork } from "./background-work.js";
+import { safeErrorMessage } from "./gateway-logger.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 /** one attempt's claim; well past the send deadline (WEBHOOK_LIMITS.timeoutMs) */
@@ -268,7 +269,7 @@ export async function sendSignedWebhook(
       }
       cur = (cur as { cause?: unknown }).cause;
     }
-    const msg = err instanceof Error ? (err.cause instanceof Error ? err.cause.message : err.message) : String(err);
+    const msg = safeErrorMessage(err instanceof Error && err.cause instanceof Error ? err.cause : err);
     return { ok: false, responseCode: null, error: `request failed: ${msg}`.slice(0, 500) };
   }
 }

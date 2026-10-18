@@ -10,7 +10,10 @@ import { describe, expect, it } from "vitest";
 import { changeDescriptorSchema, createModelCardSchema, scrubAuditText, startInstanceSchema, updateModelCardSchema } from "@regulait/shared";
 import { privateRangesRelaxation, registryCreateRelaxations, registryUpdateRelaxations } from "./mcp-registry.js";
 import { cardFieldsWithScrubMarker } from "./mrm.js";
-import { remediationStartBody, SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai.js";
+import { remediationStartBody, repoRelativePath, SHADOW_AI_REMEDIATION_CHANGE_TYPE } from "./shadow-ai.js";
+import { shadowAiRemediationDefinition } from "./shadow-ai-remediation.js";
+import { APPROVER_ADMIN_NOT_INITIATOR, secondApproverMissing, stageExcludesInitiator } from "./workflow-approvers.js";
+import type { Db } from "@regulait/db";
 import { isStepUpPrompt } from "./step-up.js";
 
 describe("MCP registry relaxations", () => {
@@ -120,6 +123,72 @@ describe("shadow-AI remediation plan body", () => {
     expect(changeDescriptorSchema.strict().safeParse(body.change).success).toBe(true);
   });
 
+  it("paths come from the repo's evidence locations; nothing pseudonymised or credential-shaped rides along", () => {
+    const evidence = [
+      { location: { path: "src/llm.ts", line: 3 }, actor: "psn:0123456789abcdef01234567" },
+      { location: { path: "src/llm.ts" } },
+      { location: { path: "../outside.ts" } },
+      { location: { path: "psn:0123456789abcdef01234567/x.ts" } },
+      { location: { path: `config/${"sk-" + "a".repeat(40)}` } },
+    ];
+    const body = remediationStartBody({ ...finding, evidence }, "staging");
+    expect(body.change.paths).toEqual(["acme/billing", "src/llm.ts"]);
+    expect(body.change.environment).toBe("staging");
+    expect(JSON.stringify(body)).not.toContain("psn:");
+    expect(changeDescriptorSchema.strict().safeParse(body.change).success).toBe(true);
+  });
+
+  it("a pseudonymised subject is named only by its kind", () => {
+    for (const row of [
+      { ...finding, subjectKind: "device", subject: "psn:0123456789abcdef01234567" },
+      { ...finding, subjectKind: "cloud_principal", subject: "psn:0123456789abcdef01234567" },
+      { ...finding, subjectKind: "host", subject: "psn:0123456789abcdef01234567" },
+    ]) {
+      const body = remediationStartBody({ ...row, evidence: [{ location: { path: "~/.config/app.json" } }] });
+      expect(JSON.stringify(body)).not.toContain("psn:");
+      expect(body.change.paths).toEqual([]);
+      expect(body.change).not.toHaveProperty("targetSystem");
+      expect(body.change.description).toContain("(pseudonymised)");
+      expect(body.change.description).toContain(finding.id);
+      expect(startInstanceSchema.safeParse(body).success).toBe(true);
+    }
+  });
+
+  it("absolute, home and drive paths never ride along (they name a person)", () => {
+    for (const p of ["/home/alice/.config/x.json", "\\server\\share\\a.ts", "~/notes.txt", "C:\\Users\\bob\\a.ts", "c:/Users/bob/a.ts", "a/../../b.ts"]) {
+      expect(repoRelativePath(p)).toBe(false);
+    }
+    for (const p of ["src/llm.ts", "packages/x/index.ts", "a~b/c.ts"]) expect(repoRelativePath(p)).toBe(true);
+    const evidence = ["/home/alice/.config/x.json", "~/notes.txt", "C:\\Users\\bob\\a.ts", "\\srv\\a.ts", "src/ok.ts"].map((path) => ({ location: { path } }));
+    const body = remediationStartBody({ ...finding, evidence });
+    expect(body.change.paths).toEqual(["acme/billing", "src/ok.ts"]);
+    expect(JSON.stringify(body)).not.toMatch(/alice|bob/);
+  });
+
+  it("a device subject that is not pseudonym-shaped is still never named (the kind decides)", () => {
+    const body = remediationStartBody({ ...finding, subjectKind: "device", subject: "alice-macbook" });
+    expect(JSON.stringify(body)).not.toContain("alice");
+    expect(body.change).not.toHaveProperty("targetSystem");
+    expect(body.change.description).toContain("a device (pseudonymised)");
+  });
+
+  it("a credential-shaped subject is never copied into the body", () => {
+    const secret = "sk-" + "b".repeat(40);
+    const body = remediationStartBody({ ...finding, subject: `acme/${secret}` });
+    expect(JSON.stringify(body)).not.toContain(secret);
+    expect(body.change.paths).toEqual([]);
+    expect(body.change).not.toHaveProperty("targetSystem");
+  });
+
+  it("the default's sign-off is owed to an admin other than the initiator, and one is enough", () => {
+    const def = shadowAiRemediationDefinition();
+    const signoff = def.stages.find((s) => s.type === "human_approval")!;
+    expect(signoff.approvers).toEqual([APPROVER_ADMIN_NOT_INITIATOR]);
+    expect(signoff.quorum).toBe("any");
+    expect(stageExcludesInitiator(def, signoff.id)).toBe(true);
+    expect(stageExcludesInitiator(def, "plan")).toBe(false);
+  });
+
   it("the negative control: the old body shape does not validate", () => {
     const old = { change: { targetSystem: "acme/billing", changeType: SHADOW_AI_REMEDIATION_CHANGE_TYPE, repoPath: "acme/billing" } };
     expect(startInstanceSchema.safeParse(old).success).toBe(false);
@@ -133,5 +202,33 @@ describe("a step-up prompt is not a deny", () => {
     expect(isStepUpPrompt({ error: "step_up_required", methods: [], credential: "bootstrap" })).toBe(false);
     expect(isStepUpPrompt({ error: "step_up_unavailable", methods: [] })).toBe(false);
     expect(isStepUpPrompt({ error: "chatops_step_up_required", methods: [] })).toBe(false);
+  });
+});
+
+describe("ADR-0195 A4: a sign-off nobody but the initiator could decide is refused at start", () => {
+  /** a database whose admin query answers `rows`; `calls` counts the queries */
+  function adminsDb(rows: Array<{ id: string }>) {
+    const state = { calls: 0 };
+    const db = { select: () => ({ from: () => ({ where: async () => (state.calls++, rows) }) }) } as unknown as Db;
+    return { db, state };
+  }
+
+  it("refuses the default when no other active admin exists, and allows it when one does", async () => {
+    const none = adminsDb([]);
+    expect(await secondApproverMissing(none.db, shadowAiRemediationDefinition(), "initiator")).toBe(true);
+    expect(none.state.calls).toBe(1);
+    const one = adminsDb([{ id: "other-admin" }]);
+    expect(await secondApproverMissing(one.db, shadowAiRemediationDefinition(), "initiator")).toBe(false);
+  });
+
+  it("never asks for a second admin when no stage needs one", async () => {
+    const definition = shadowAiRemediationDefinition();
+    const relaxed = {
+      ...definition,
+      stages: definition.stages.map((s) => (s.type === "human_approval" ? { ...s, approvers: ["requesting_user"] } : s)),
+    };
+    const none = adminsDb([]);
+    expect(await secondApproverMissing(none.db, relaxed, "initiator")).toBe(false);
+    expect(none.state.calls).toBe(0);
   });
 });

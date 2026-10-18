@@ -485,7 +485,7 @@ route, method, client IP and the **kind** of credential presented (never the cre
 |---|---|
 | `LOG_LEVEL` | `fatal` … `trace`; default `info`. `warn` keeps only refusals and failures. |
 | `REGULAIT_LOG=off` | Silences the process entirely (the boot posture block still says so). |
-| `DEBUG_ERRORS=1` | Additionally prints every unhandled 500 to stderr, even with logging off — a dev convenience, not a log. |
+| `DEBUG_ERRORS=1` | Additionally prints every unhandled 500 to stderr, even with logging off — a dev convenience, not a log. It prints the same fields as the log line plus the stack frames: a failed query's bound values and a parse error's quoted input stay withheld. |
 
 The boot posture block (`proxy / hsts / egress / data key / bootstrap / secrets / database /
 logging / scheduler`) is printed once at startup; `secrets: DEV-GRADE` lines mean the

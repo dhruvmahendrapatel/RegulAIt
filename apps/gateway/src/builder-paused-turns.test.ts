@@ -459,13 +459,19 @@ describe("2. a paused thread is never stuck", () => {
       await k.db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${fn} ON builder_tool_steps`));
       await k.db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${fn}()`));
     }
-    expect(await stepRow(stepId)).toMatchObject({ status: "error", outcomeCode: "resume_failed", outcomeDetail: "injected failure" });
+    // ADR-0167 N8 R5: a bare driver error's message can quote values, so the
+    // stored detail gives its name and SQLSTATE, never its text
+    const step = await stepRow(stepId);
+    expect(step).toMatchObject({ status: "error", outcomeCode: "resume_failed" });
+    expect(step!.outcomeDetail).toContain("SQLSTATE P0001");
+    expect(step!.outcomeDetail).not.toContain("injected failure");
     // the audit row says what failed on ONE line, without the query text
     const [failed] = await k.db
       .select()
       .from(auditLog)
       .where(and(eq(auditLog.ruleId, "builder-tool-step-resume-failed"), sql`${auditLog.detail}->>'builderStepId' = ${stepId}`));
-    expect(failed!.reason).toContain("injected failure");
+    expect(failed!.reason).toContain("SQLSTATE P0001");
+    expect(failed!.reason).not.toContain("injected failure");
     expect(failed!.reason).not.toMatch(/[\n\r]|update "builder_tool_steps"/);
     expect((await threadRow(body.thread.id)).pendingTurnCiphertext).toBeNull();
     const next = await chat(owner, agentId, "hello", body.thread.id);
