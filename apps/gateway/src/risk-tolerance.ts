@@ -94,7 +94,8 @@ import {
 import { z } from "zod";
 import { safeErrorMessage } from "./gateway-logger.js";
 // IMPORT-CYCLE RULE: this file has NO module-level import of another gateway
-// module. `risks.ts` imports it, and `inventory.ts` imports `risks.ts`; a
+// module except the leaf `gateway-logger.ts` (it imports only types from
+// fastify, so it can close no cycle). `risks.ts` imports it, and `inventory.ts` imports `risks.ts`; a
 // static edge from here to ./review-policy.js (→ workflows → evals → … → mrm
 // → mrm-autofill) or ./governance-monitor.js (→ inventory, autonomy, mrm …)
 // closes an ESM cycle that evaluates `mrm-autofill` before `inventory` has
