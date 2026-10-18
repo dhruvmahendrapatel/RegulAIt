@@ -38,6 +38,7 @@ import {
   isShippedEndpointProvenance,
   reduceEndpointObservations,
   type DiscoveryPseudonymKind,
+  type EndpointArtifactSighting,
   type EndpointImportResult,
   type EndpointPseudonymHook,
 } from "@regulait/shared";
@@ -61,6 +62,14 @@ export const GAP_PLACEHOLDER_SUBJECT = "psn:000000000000000000000000";
 
 /** device names are pseudonymised under SD0's `device` kind (decision 20) */
 export const DEVICE_PSEUDONYM_KIND: DiscoveryPseudonymKind = "device";
+
+/**
+ * What a matched sighting carries as evidence. ADR-0195 lane A6: an env-variable or CLI name travels as its presence
+ * signature id, never the name; any other sighting travels as its artifact.
+ */
+export function sightingEvidence(m: EndpointArtifactSighting): Pick<ScanObservation, "presence" | "artifact"> {
+  return m.presenceSignatureId ? { presence: [m.presenceSignatureId] } : { artifact: { kind: m.kind, value: m.value } };
+}
 
 const IMPORT_KINDS = ["endpoint_osquery", "endpoint_inventory"] as const;
 type ImportKind = (typeof IMPORT_KINDS)[number];
@@ -283,7 +292,7 @@ export function registerEndpointImportRoutes(
           subject: await pseudonymOf(DEVICE_PSEUDONYM_KIND, m.device),
           ...(m.observedAt ? { observedAt: m.observedAt } : {}),
           count: m.count,
-          artifact: { kind: m.kind, value: m.value },
+          ...sightingEvidence(m),
           ...(m.os ? { os: m.os } : {}),
           ...(m.ecosystem ? { ecosystem: m.ecosystem } : {}),
           ...(m.user ? { actorPseudonym: await pseudonymOf("device_user", m.user) } : {}),

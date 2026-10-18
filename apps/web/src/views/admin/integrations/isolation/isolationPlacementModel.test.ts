@@ -9,6 +9,7 @@ import {
   assignableProfiles,
   parseAssignment,
   parsePlacements,
+  placementsPageUrl,
   parseProfiles,
   parseProfileVersion,
   profileText,
@@ -164,6 +165,16 @@ describe("placements", () => {
     expect(out.unrecorded[0]).toMatchObject({ code: "policy_unresolved", unresolvedFact: "sensitivity" });
     expect(out.unrecorded[1]).toEqual({ unreadable: true, index: 1 });
     for (const bad of [null, {}, { placements: [] }, { placements: {}, refusalsWithoutPlacement: [] }]) expect(parsePlacements(bad)).toBeNull();
+  });
+
+  it("N11: reads each list's keyset cursor, and a next page carries only the cursors it has", () => {
+    const out = parsePlacements({ placements: [placed], refusalsWithoutPlacement: [], nextCursor: "c1", refusalsNextCursor: null })!;
+    expect(out).toMatchObject({ nextCursor: "c1", refusalsNextCursor: null });
+    // a cursor that is not a short string ends paging rather than being guessed at
+    for (const bad of [42, "", "x".repeat(257), {}]) expect(parsePlacements({ placements: [], refusalsWithoutPlacement: [], nextCursor: bad })!.nextCursor).toBeNull();
+    expect(placementsPageUrl(null)).toBe("/v1/execution-placements?limit=50");
+    expect(placementsPageUrl({ cursor: "c1", refusalsCursor: null })).toBe("/v1/execution-placements?limit=50&cursor=c1");
+    expect(placementsPageUrl({ cursor: null, refusalsCursor: "r 1" })).toBe("/v1/execution-placements?limit=50&refusalsCursor=r+1");
   });
 
   it("I4: a governed stdio call's placement offered and awaiting its report reads as offered, with the class it was offered at", () => {

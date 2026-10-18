@@ -113,10 +113,16 @@ export interface ScanObservation {
    */
   location?: { path: string; line?: number; commit?: string };
   /**
-   * Optional (decision 6): NAMES only, never values: `.env.example` variable names, an MCP server's command
-   * basename. At most 50, each at most 128 characters of `[A-Za-z0-9_.-]` starting with a letter or `_`.
+   * Optional (decision 6): NAMES only, never values: an MCP server's command basename. At most 50, each at most 128
+   * characters of `[A-Za-z0-9_.-]` starting with a letter or `_`. An environment-variable-shaped name
+   * (`^[A-Z][A-Z0-9_]*$`) is refused: env names are never stored (ADR-0195 lane A6); send `presence` instead.
    */
   names?: string[];
+  /**
+   * Optional (ADR-0195 lane A6): the ids of the presence signatures the sighting matched (`envNamePresenceInText`,
+   * `matchEnvNames`, `matchCliNames`), never the names. At most 50; an unknown id is refused.
+   */
+  presence?: string[];
   /** Optional (decision 20): the person behind the sighting, from `ctx.pseudonymise` (`psn:` + 24 hex) */
   actorPseudonym?: string;
   /** Optional: the OS the sighting came from; a catalogue row scoped to an OS matches only it */

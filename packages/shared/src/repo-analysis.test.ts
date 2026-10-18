@@ -82,7 +82,8 @@ describe("analyseRepo", () => {
       { name: "remote", transport: "http", command: null, host: "mcp.example.test" },
     ]);
     expect(by("ide_extension").map((o) => o.extensionId)).toEqual(["github.copilot"]);
-    expect(by("env_var_name").map((o) => o.envVarName)).toEqual(["OPENAI_API_KEY"]);
+    // ADR-0195 lane A6: the presence signature id only, never the variable name
+    expect(by("env_presence").map((o) => `${o.path}:${o.presenceSignatureId}`)).toEqual([".env.example:env.openai.api-key"]);
     expect(by("endpoint_reference").map((o) => `${o.path}:${o.host}`)).toContain("src/app.py:api.groq.com");
 
     const keys = by("ai_key");
@@ -105,6 +106,36 @@ describe("analyseRepo", () => {
     expect(r.reads).not.toContain("node_modules/openai/package.json");
     expect(r.reads).not.toContain("README.md");
     expect(res.observations.every((o) => o.commitSha === SHA)).toBe(true);
+  });
+
+  it("reports env-variable presence in .env templates, Dockerfiles and CI YAML as signature ids only (lane A6)", async () => {
+    const value = "VALUE" + "MUSTNOTLEAK";
+    const r = repo({
+      ".env.sample": `export ANTHROPIC_API_KEY=${value}\nUNRELATED_NAME=1\n`,
+      "Dockerfile": `FROM scratch\nENV OPENAI_API_KEY=${value}\nARG HF_TOKEN\n`,
+      "svc/api.dockerfile": "ENV MISTRAL_API_KEY x\n",
+      ".github/workflows/ci.yml": `jobs:\n  t:\n    env:\n      GEMINI_API_KEY: \${{ secrets.${value} }}\n`,
+      ".github/workflows/nested/skip.yml": "env:\n  DEEPSEEK_API_KEY: x\n",
+      ".gitlab-ci.yml": "variables:\n  - name: PERPLEXITY_API_KEY\n",
+      "docs/notes.yml": "CURSOR_API_KEY: x\n",
+    });
+    const res = await analyseRepo({ repo: "a/b", commitSha: SHA, entries: r.entries, readFile: r.readFile });
+    const presence = res.observations.filter((o) => o.kind === "env_presence").map((o) => `${o.path}:${o.presenceSignatureId}`);
+    expect(presence.sort()).toEqual(
+      [
+        ".env.sample:env.anthropic.api-key",
+        ".github/workflows/ci.yml:env.google.gemini-api-key",
+        ".gitlab-ci.yml:env.perplexity.api-key",
+        "Dockerfile:env.huggingface.token",
+        "Dockerfile:env.openai.api-key",
+        "svc/api.dockerfile:env.mistral.api-key",
+      ].sort(),
+    );
+    // a nested workflow folder and a non-CI YAML are not CI configs; neither is scanned for env names
+    const serialised = JSON.stringify(res);
+    for (const forbidden of [value, "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "HF_TOKEN", "UNRELATED_NAME", "DEEPSEEK", "CURSOR"]) {
+      expect(serialised.includes(forbidden), forbidden).toBe(false);
+    }
   });
 
   it("takes the program's basename from the FIRST token, never an argument fragment", async () => {

@@ -1235,8 +1235,8 @@ export function registerExecutorChannelRoutes(app: FastifyInstance, db: Db, opts
         return true;
       });
       if (!ended) return refused(reply, 409, "offer_unavailable", row);
-      // I4: a stdio session this process holds ends with its sandbox
-      endStdioSession(p.data.offerId);
+      // I4: a stdio session this process holds ends with its sandbox (another replica's ends when its relay sees this)
+      await endStdioSession(db, p.data.offerId);
       return reply.status(204).send();
     });
 

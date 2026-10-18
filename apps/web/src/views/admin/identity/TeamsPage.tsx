@@ -10,7 +10,7 @@ import { api, ApiError } from "../../../api/client";
 import { withStepUp } from "../../../stepup/stepUp";
 import type { Team } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Select } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ErrorState, Field, Input, Select, SkeletonBlock } from "../../../ui/kit";
 import {
   ReasonModal,
   optionEls,
@@ -167,7 +167,16 @@ export default function TeamsPage() {
         </Card>
 
         <Card title="Teams & members">
-          {(teams.data?.teams ?? []).length === 0 && !teams.isLoading ? (
+          {teams.isLoading ? (
+            <SkeletonBlock lines={3} />
+          ) : teams.error && !teams.data ? (
+            <ErrorState
+              title="Couldn't load the teams"
+              message={teams.error instanceof Error ? teams.error.message : String(teams.error)}
+              access={(teams.error as { status?: number }).status === 403}
+              onRetry={() => void teams.refetch()}
+            />
+          ) : (teams.data?.teams ?? []).length === 0 ? (
             <EmptyState title="No teams yet" body="Create the first team above." />
           ) : (
             (teams.data?.teams ?? []).map((team) => (

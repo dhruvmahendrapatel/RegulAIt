@@ -199,6 +199,35 @@ describe("ADR-0195 SD3 endpoint imports into SD0", () => {
     expect(all.includes(USERNAME)).toBe(false);
   });
 
+  it("an env-variable row is stored as its presence id: the name appears in no run, evidence or audit row (review of #419, F2)", async () => {
+    const id = await endpointSource("endpoint_osquery");
+    const envName = "OPENAI_API_KEY";
+    const file = JSON.stringify({
+      name: "pack/regulait_ai_discovery/ai_env_var_names_posix",
+      hostIdentifier: `${HOST}-env`,
+      unixTime: 1790000200,
+      columns: { process_name: `sd3proc${RUN}`, key: envName },
+      action: "added",
+    });
+    const r = await inject("POST", `/v1/discovery/sources/${id}/endpoint-imports`, AUTH, { content: file, mode: "apply" });
+    expect(r.statusCode, r.body).toBe(201);
+    expect(r.json().findingsCreated).toBeGreaterThanOrEqual(1);
+    expect(r.body.includes(envName)).toBe(false);
+    const [run] = await db.select().from(discoveryRuns).where(eq(discoveryRuns.id, r.json().runId));
+    expect(run?.status).toBe("succeeded");
+    expect(JSON.stringify(run).includes(envName)).toBe(false);
+    const imports = await db.select().from(shadowAiImports).where(eq(shadowAiImports.discoveryRunId, run!.id));
+    const findings = await db.select().from(shadowAiFindings).where(eq(shadowAiFindings.lastImportId, imports[0]!.id));
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+    const evidence = findings.flatMap((f) => f.evidence as Array<{ presence?: string[] }>);
+    expect(evidence.some((e) => e.presence?.includes("env.openai.api-key"))).toBe(true);
+    expect(JSON.stringify(findings).includes(envName)).toBe(false);
+    expect(JSON.stringify(imports).includes(envName)).toBe(false);
+    const audits = await db.select().from(auditLog).where(inArray(auditLog.objectId, [id, run!.id]));
+    expect(audits.length).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(audits).includes(envName)).toBe(false);
+  });
+
   it("an unmatched-only import records a catalogue gap and creates no pseudonym at all", async () => {
     const id = await endpointSource("endpoint_osquery");
     const lonely = `sd3-lonely-${RUN}`;

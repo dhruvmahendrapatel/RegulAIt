@@ -914,3 +914,21 @@ facts would therefore have been valid for a key operation. Both now ask for the 
 Open (not built): an emergency retire of the key in use. Today retiring the key this gateway signs with is refused
 (`receipt_key_in_use`, accepted as the stricter posture in STATE). After a compromise, the operator must configure a
 replacement and restart, and only then retire it. A recommendation is in the builder report on the PR.
+
+## As built — 2026-10-17: the owner-change grant is claimed after the compare-and-set (N12)
+
+`PUT /v1/servers/:serverId/owner` and `PUT /v1/connectors/:connectorId/owner` (`changeOwner` in `ownership.ts`) used
+to spend the `owner_change` grant on the root handle before the Class A compare-and-set. A compare-and-set lost to a
+concurrent owner change answered 409 `changed_concurrently` with the grant already burned. They now follow the
+pattern the egress allow-list writer uses: the grant is looked at (`spend: false`) before the write, so a request
+without one is answered at once; it is spent inside the write's own transaction, on its connection, after the
+compare-and-set, and before the `*-owner-changed` audit row (now written in the same transaction). A lost
+compare-and-set returns 409 and leaves the grant unspent. A refused claim rolls the write back, and a second look
+records the `step-up-grant-refused` row again outside the rolled-back transaction. `ownerChangeGate` takes
+`{ db, spend }`; without it, it spends on the root handle as before.
+
+`zz-owner-change-claim-in-tx.test.ts` covers three cases. A lost compare-and-set leaves the grant unspent, and the same
+grant then completes the change. A success spends the grant once, and a replay is refused. Four concurrent requests
+with one grant make one transition. Not changed here: `POST /v1/agents/:id/owner` (`agents-connectors.ts`) still
+spends on the root handle before its compare-and-set. It is outside this slice's file surface and is listed as a
+follow-up.
