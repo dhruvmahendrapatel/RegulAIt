@@ -691,8 +691,8 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
   const rules: Json[] = (await h.call("GET", "/v1/workflows/assignment-rules")).body.rules ?? [];
   const templates: Json[] = (await h.call("GET", "/v1/workflows/templates")).body.templates ?? [];
   const ours = templates.find((t) => t.name === rem.templateName);
+  let templateId = ours?.id as string | undefined;
   if (!rules.some((r) => r.changeType === changeType)) {
-    let templateId = ours?.id as string | undefined;
     if (!templateId) {
       const t = await h.call("POST", "/v1/workflows/templates", {
         name: rem.templateName,
@@ -714,6 +714,7 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
     if (!h.ok(rule.status)) return h.fail("remediation assignment rule", rule);
     h.report.created.push(`assignment rule ${changeType} → '${rem.templateName}'`);
   } else if (!rules.some((r) => r.changeType === changeType && r.templateId === ours?.id)) {
+    templateId = undefined;
     h.report.notes.push(`a workflow assignment rule for '${changeType}' already exists; it decides who signs the remediation off`);
   }
 
@@ -731,7 +732,11 @@ async function ensureRemediation(h: Harness, data: DemoShadowDiscoveryDataset, a
   if (!instanceId) {
     const plan = await h.call("GET", `${planUrl}?environment=${encodeURIComponent(rem.environment)}`, undefined, ada.auth);
     if (!h.ok(plan.status)) return h.fail("remediation plan body", plan);
-    const start = await h.call("POST", "/v1/workflows/instances", plan.body.workflowRequest.body, ada.auth);
+    // The demo's template is named explicitly (the admin-only path). Without it, the start route checks the SHIPPED
+    // default's sign-off rule (an admin other than the initiator) before it sees that an admin's rule decides, and
+    // refuses on a deployment with one admin (`second_approver_unavailable`) even though the default is never used.
+    const startBody = { ...plan.body.workflowRequest.body, ...(templateId ? { templateId } : {}) };
+    const start = await h.call("POST", "/v1/workflows/instances", startBody, ada.auth);
     if (!h.ok(start.status)) return h.fail("start the remediation workflow", start);
     instanceId = start.body.id as string;
     h.report.created.push(`remediation workflow started from the plan's body (${start.body.status})`);
