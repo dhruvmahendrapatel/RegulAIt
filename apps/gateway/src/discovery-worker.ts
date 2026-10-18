@@ -77,13 +77,19 @@ import {
   type DiscoveryEvidenceKind,
   type DiscoveryPseudonymKind,
   type Observation,
+  FEDERATION_AUDIENCES,
+  FEDERATION_AWS_PRINCIPAL_SUBJECT,
+  federationSourceSubject,
+  type DiscoverySourceKind,
 } from "@regulait/shared";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { createGuardedFetch, EgressBlockedError, EgressRedirectError, type EgressResolver } from "./egress-guard.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { upsertFindings } from "./shadow-ai.js";
 import { loadDiscoverySettings } from "./discovery-posture.js";
-import { DISCOVERY_SCANNERS, type ScanObservation, type ScannerRegistry, type ScanResult } from "./discovery-scanners.js";
+import { DISCOVERY_SCANNERS, type ScanFederation, type ScanObservation, type ScannerRegistry, type ScanResult } from "./discovery-scanners.js";
+import { federationAudiences } from "./discovery-cloud-scanners.js";
+import { awsPrincipalRoleArn, federationTokenMinter } from "./federation-signing-keys.js";
 import type { SchedulerJobDefinition } from "./scheduler.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -569,6 +575,22 @@ export const loadEnabledCatalogue = async (db: Db): Promise<AiSignature[]> =>
 
 export type RunVerdict = "succeeded" | "failed" | "lease_lost";
 
+/**
+ * ADR-0195 SD2b: the federation hooks of one run. Tokens are minted on demand (federation may be turned off between
+ * mints, and each call reads the active key), each for this source's subject and only for the audience its
+ * credential names; RegulAIt's own AWS principal token only for AWS STS.
+ */
+function scanFederation(db: Db, dataKey: string | undefined, sourceId: string, kind: DiscoverySourceKind, publicConfig: Readonly<Record<string, string>>): ScanFederation {
+  const roleArn = awsPrincipalRoleArn();
+  return {
+    sourceToken: federationTokenMinter(db, { dataKey, subject: federationSourceSubject(sourceId), allowedAudiences: federationAudiences(kind, publicConfig) }),
+    awsPrincipal:
+      kind === "cloud_aws" && roleArn
+        ? { roleArn, token: federationTokenMinter(db, { dataKey, subject: FEDERATION_AWS_PRINCIPAL_SUBJECT, allowedAudiences: [FEDERATION_AUDIENCES.aws] }) }
+        : null,
+  };
+}
+
 async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Required<Pick<DiscoveryWorkerOptions, "registry" | "rateLimiter" | "leaseSeconds">> & DiscoveryWorkerOptions): Promise<RunVerdict> {
   const secrets: string[] = [];
   const fail = async (code: string, detail: string, extra: Record<string, unknown> = {}): Promise<RunVerdict> =>
@@ -661,6 +683,8 @@ async function processRun(db: Db, run: DiscoveryRunRow, owner: string, opts: Req
         scope: { orgLevel: source.scope.orgLevel === true, include: [...(source.scope.include ?? [])] },
       },
       credential: cred ? { mode: cred.credentialMode, publicConfig: { ...cred.publicConfig }, secret } : null,
+      // ADR-0195 SD2b: federation tokens, for a federated credential only, bound to this source and its audiences
+      ...(cred?.credentialMode === "federated" ? { federation: scanFederation(db, opts.dataKey, source.id, source.kind, cred.publicConfig) } : {}),
       fetch: ((input: string | URL | Request, init?: RequestInit) =>
         guarded(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline })) as typeof fetch,
       throttle: () => opts.rateLimiter.acquire(source.id, deadline),

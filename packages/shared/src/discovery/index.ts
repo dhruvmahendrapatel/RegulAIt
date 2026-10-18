@@ -322,5 +322,7 @@ export interface DiscoveryReadOutcome {
 }
 export const DISCOVERY_READ_OUTCOMES_MAX = 100;
 
+// ADR-0195 SD2b: the cloud workload identity federation issuer (RS256 keys, JWKS, per-target audiences)
+export * from "./federation.js";
 // ADR-0195 lane A6: env-variable-name and CLI presence signatures (pending the admin-catalogue migration)
 export * from "./presence-signatures.js";
