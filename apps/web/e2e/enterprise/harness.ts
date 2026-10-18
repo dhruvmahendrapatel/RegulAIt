@@ -51,7 +51,9 @@ export const SETTLE_TIMEOUT_MS = 30_000;
 
 /**
  * Open a screen and wait until it has settled: no request has been open for QUIET_MS (the mock's error answers and
- * every lazy chunk have landed), every <img> has loaded or failed, fonts are loaded and no animation is running. The
+ * every lazy chunk have landed), every <img> has loaded or failed, fonts are loaded and no animation is running
+ * (the loading skeleton has unmounted). With `idle: false` (the mock's "loading" mode) only the fonts and the finite
+ * animations are waited for. The
  * screen must still be the one asked for: a redirect (a public screen opened signed in, a signed-in screen opened
  * signed out) fails here rather than auditing another screen under this route's name. Open a `route.public` screen
  * with `mockApi(page, { signedOut: true })`.
@@ -74,15 +76,23 @@ export async function openRoute(page: Page, route: SpaRoute, opts: { idle?: bool
   } finally {
     settle?.stop();
   }
-  await page.evaluate(async () => {
-    await Promise.all(
-      Array.from(document.images, (img) =>
-        img.complete ? undefined : new Promise((r) => { img.addEventListener("load", r, { once: true }); img.addEventListener("error", r, { once: true }); }),
-      ),
-    );
+  await page.evaluate(async (images) => {
+    // only once settled: a screen opened in the mock's "loading" mode may hold an image's request open on purpose
+    if (images) {
+      await Promise.all(
+        Array.from(document.images, (img) =>
+          img.complete ? undefined : new Promise((r) => { img.addEventListener("load", r, { once: true }); img.addEventListener("error", r, { once: true }); }),
+        ),
+      );
+    }
     await document.fonts.ready;
-    await Promise.all(document.getAnimations().map((a) => a.finished.catch(() => undefined)));
-  });
+    // Settled, an infinite animation is waited for too: the loading skeleton's shimmer (when a spec does not emulate
+    // reduced motion) ends only when the skeleton unmounts, which cancels it, and that is how the mock's retried
+    // answers are waited out. In the "loading" mode the skeleton never unmounts, so its infinite animations are left
+    // out: waiting on them hung `states /runs` for the whole test timeout whenever the skeleton was already up.
+    const animations = document.getAnimations().filter((a) => images || a.effect?.getTiming().iterations !== Infinity);
+    await Promise.all(animations.map((a) => a.finished.catch(() => undefined)));
+  }, settle !== null);
   expect(new URL(page.url()).pathname, `${route.path} redirected instead of rendering`).toBe(`/ui${route.url}`);
 }
 
