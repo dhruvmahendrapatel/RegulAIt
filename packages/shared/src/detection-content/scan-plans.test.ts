@@ -7,7 +7,10 @@
  *     per-group digests in scrub-equivalence.snapshot.json (generated from that implementation, never from this).
  *     Regenerated once since, for a deliberate behaviour change only: ADR-0189 B7's review added the credential
  *     scrub-only rule `bearer_token`, which redacts the corpus's `Bearer <token>` strings (the snapshot's
- *     `regenerated` field names the groups). The differential tests above, which prove the plan exact, did not change.
+ *     `regenerated` field names the groups). Regenerated again for N4: the credential rule
+ *     `dlp.secret.huggingface_token` redacts the corpus's Hugging Face tokens, and a `huggingface` group was added; with
+ *     that rule removed, every earlier group still produced the previous digest. The differential tests above, which
+ *     prove the plan exact, did not change.
  * Correctness corpora, not latency budgets: the budgets live in scrub-dense.test.ts (timing project).
  */
 import { describe, expect, it } from "vitest";

@@ -7,6 +7,12 @@ import { describe, expect, it } from "vitest";
 import { applyPublish, assertCommitOnMain, ENGINE_IDS, GHCR_OWNER, LockError, PATHS, renderCompose, renderTs, repositoryOwner, UNSET_DIGEST, validateLock } from "./engine-images-lock.mjs";
 
 const lock = () => JSON.parse(readFileSync(PATHS.lock, "utf8"));
+/** the committed lock with every engine unpublished (the apply tests start from no publish, whatever is recorded) */
+const blank = () => {
+  const l = lock();
+  for (const id of ENGINE_IDS) l.engines[id] = { repository: null, manifestDigest: null, imageId: null, publishGeneration: 0, sourceCommit: null, publishedAt: null };
+  return l;
+};
 const hex = (c) => `sha256:${c.repeat(64)}`;
 const commit = "a".repeat(40);
 const publish = (engines, sourceCommit = commit) => ({ sourceCommit, publishedAt: "2026-10-17T05:00:00.000Z", engines });
@@ -30,9 +36,9 @@ describe("ENG-IMG engine image lock", () => {
   });
 
   it("a publish fills the entry, bumps its generation once per new build, and leaves other engines alone", () => {
-    const first = applyPublish(lock(), publish({ modelscan: entry("modelscan") }));
+    const first = applyPublish(blank(), publish({ modelscan: entry("modelscan") }));
     expect(first.engines.modelscan).toMatchObject({ ...entry("modelscan"), publishGeneration: 1, sourceCommit: commit });
-    expect(first.engines.garak).toEqual(lock().engines.garak);
+    expect(first.engines.garak).toEqual(blank().engines.garak);
     // the same digests again: no new build, no new generation
     const same = applyPublish(first, publish({ modelscan: entry("modelscan") }, "b".repeat(40)));
     expect(same.engines.modelscan).toMatchObject({ publishGeneration: 1, sourceCommit: commit });
@@ -59,8 +65,8 @@ describe("ENG-IMG engine image lock", () => {
       publish({ modelscan: entry("modelscan") }, "abc"),
       publish({}),
     ];
-    for (const p of bad) expect(() => applyPublish(lock(), p)).toThrow(LockError);
-    const partial = lock();
+    for (const p of bad) expect(() => applyPublish(blank(), p)).toThrow(LockError);
+    const partial = blank();
     partial.engines.garak.manifestDigest = hex("5");
     expect(() => validateLock(partial)).toThrow(/all null/);
   });

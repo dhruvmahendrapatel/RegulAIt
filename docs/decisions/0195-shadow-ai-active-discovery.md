@@ -547,6 +547,103 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
 - **Language.** The agent is written in Go: a static build for Windows and Linux, and a cgo build on the macOS runner
   for darwin.
 
+## As built: lane A6, environment-variable-name and CLI presence signatures (2026-10-17)
+
+**Status: shared matcher, catalogue data, tests and the SD1/SD3 wiring built on branch `sd-env-name-signatures`
+(review fix round, 2026-10-17). The admin-catalogue `env_name` and `cli` kinds are BLOCKED on a migration number
+(below).** Nothing above is changed.
+
+1. **Master decision (data minimisation).** A presence match records only that a signature matched and the
+   signature's id. The variable names themselves and any values are never stored as evidence. Values are never read
+   beyond what matching needs: `envNamePresenceInText` slices only the candidate name on each line (before its `=` or
+   `:`) and moves to the next line with `indexOf`, so no value substring is ever created. `matchEnvNames`,
+   `matchCliNames` and `envNamePresenceInText` return `{signatureId, provider, kind, confidence}` and nothing else.
+2. **Kinds.** `PRESENCE_SIGNATURE_KINDS = ["env_name", "cli"]` (`packages/shared/src/discovery/presence-signatures.ts`).
+   Decision 18 lists AI CLIs and the names (never values) of AI-related environment variables among the endpoint
+   facts, and decision 14 lists `.env.example` names among the repo facts. No SD0 kind fits either (`local_runtime` is
+   a model runtime), so both are added.
+3. **Name shape.** An env name must match the endpoint agent's pattern `^[A-Z][A-Z0-9_]*$` and be at most 128
+   characters. Anything else is skipped and never matched. Matching is whole-name, case-sensitive equality. A CLI
+   name is the base name of a path (`/` or `\`), lower-cased, without `.exe`, checked against
+   `^[a-z0-9][a-z0-9._-]{0,63}$`, then compared whole. No regex comes from data. Inputs are bounded: at most 5,000 names
+   per call and 2,000,000 characters per text. Going over the bound throws an error; the input is never silently cut.
+4. **Text formats.** `dotenv` (`[export] NAME=`), `dockerfile` (`ENV`/`ARG NAME`, `NAME=` or `NAME value`) and
+   `ci_yaml` (`NAME:`, `- NAME=`, `- NAME:`, `name: NAME`). Stated limits: one name per line, so `ENV A=1 B=2` yields
+   only `A`; continuation lines and YAML flow mappings are not parsed; commented-out lines do not match.
+5. **Catalogue data (`PRESENCE_SIGNATURES_V1`, 16 rows, pinned by count and SHA-256 in the test).** There are 13
+   env names and 3 CLI names. All are taken from the `env_vars` and `cli.binaries` fields of the Apache-2.0 registry
+   that the open-source evaluation above names, at commit `12b7bbf733032d7822b2fb16e88b0f7a1399d1da`. Its LICENSE and
+   NOTICE are kept in `src/discovery/vendor/shadow-ai-guard/`, and `THIRD_PARTY.md` lists the registry. Each row cites
+   the commit. A generic cloud-platform key name is low confidence. The three short CLI names are medium confidence,
+   because other programs may share them. Open source first: the registry is the data source; no maintained library
+   matches env-name presence with these minimisation rules, so the matcher is ours.
+6. **BLOCKED: migration needed.** Migration 0202 closes `ai_endpoint_signatures_kind_ck` and
+   `ai_endpoint_signatures_kind_match_ck`, so `env_name` and `cli` rows cannot be stored, and `AI_SIGNATURE_KINDS`
+   does not list them. A test asserts that they are not listed. The SQL the follow-up needs is below. It is not
+   written as a migration, and it is pending execution:
+   ```sql
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_ck" CHECK ("kind" IN (
+     'hostname', 'sdk_package', 'api_key_prefix', 'web_app',
+     'cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime', 'assistant_config',
+     'env_name', 'cli'));
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_kind_match_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_kind_match_ck" CHECK (
+     ("kind" = 'sdk_package') = ("match_type" = 'package')
+     AND ("kind" = 'api_key_prefix') = ("match_type" = 'key_prefix')
+     AND ("kind" IN ('cloud_ai_service', 'desktop_app', 'ide_extension', 'browser_extension', 'local_runtime',
+                     'assistant_config', 'env_name', 'cli')) = ("match_type" = 'identifier')
+   );
+   ALTER TABLE "ai_endpoint_signatures" DROP CONSTRAINT IF EXISTS "ai_endpoint_signatures_presence_value_ck";
+   ALTER TABLE "ai_endpoint_signatures" ADD CONSTRAINT "ai_endpoint_signatures_presence_value_ck" CHECK (
+     ("kind" <> 'env_name' OR ("value" ~ '^[A-Z][A-Z0-9_]*$' AND char_length("value") <= 128))
+     AND ("kind" <> 'cli' OR "value" ~ '^[a-z0-9][a-z0-9._-]{0,63}$')
+   );
+   ```
+   The statements create no function and no trigger, so the 0185 guard has nothing new to check. `schema.ts` would
+   declare the new value CHECK for parity, as SD0 did.
+7. **Wiring (built in the review fix round of #419).**
+   - **SD1.** `analyseRepo` reads `.env.example`-style templates, Dockerfiles (`Dockerfile`, `Containerfile`,
+     `Dockerfile.*`, `*.dockerfile`) and CI YAML (`.github/workflows/*.yml|yaml`, `.gitlab-ci.yml`,
+     `azure-pipelines.yml`, `bitbucket-pipelines.yml`, `.circleci/config.yml`) with `envNamePresenceInText`, and emits
+     `env_presence` observations that carry a signature id only. The repo scanner sends one observation per file with
+     `presence: [ids]`. It no longer sends env names in `names`; `names` keeps only an MCP server's command basename,
+     and an env-shaped basename is not sent.
+   - **SD3.** `reduceEndpointObservations` runs `matchEnvNames` over a row's env-variable keys and `matchCliNames` over
+     its CLI binaries before the artifact match. A match becomes a sighting whose value is the signature id, sent as
+     `presence`. An env-variable name is never an artifact candidate and never a catalogue-gap sample. A CLI binary
+     the presence catalogue does not know (for example a local runtime) is still matched as an artifact.
+   - **SD0.** `ScanObservation.presence` and `Observation.presence` carry ids, checked against the presence
+     catalogue (an unknown id is refused). `checkObservations` refuses a `names` entry shaped like an env name
+     (`^[A-Z][A-Z0-9_]*$`), and its refusal messages no longer echo the refused text. No SD0 refusal echoes a scanner-supplied value: the
+     evidence-kind, subject-kind, artifact-kind and read-status refusals name the index and the field only (recheck of
+     #419, F1). `classifyObservation` has a
+     presence step: an id counts only when an ENABLED `identifier` row of a backing kind carries the same value
+     (`PRESENCE_BACKING_KINDS`: `assistant_config`/`local_runtime` for env names, `desktop_app`/`local_runtime` for
+     CLI names, the kinds SD3's seed stores them as). Disabling that row turns the detection off. The finding's
+     `matchedValue` is the id, its evidence keeps `presence: [ids]`, and the confidence is the lower of the two rows'.
+     The web view shows the ids as "presence signatures".
+   - **Catalogue validation.** `isPresenceSignature` and `assertPresenceCatalogue` check every row (id pattern and
+     kind prefix, value shape, provider, tool id, confidence, unique ids) once per catalogue. Every matcher refuses a
+     malformed catalogue rather than match against it. The migration follow-up reuses them for admin rows.
+
+   **Still missing (follow-ups):** (a) the kind migration above; (b) adding `env_name` and `cli` to
+   `AI_SIGNATURE_KINDS`, `catalogueSignatureSchema` and `PRESENCE_BACKING_KINDS`, with seed rows from
+   `PRESENCE_SIGNATURES_V1` carrying `tool_id` and `confidence`; (c) SD4's agent rows calling the same matchers.
+   SD4a (merged in #411) already emits `env_name` facts whose `identifier` is the env-variable name
+   (`agents/endpoint/internal/collect/configs.go`). When the SD4b gateway intake is built, it must map each such fact
+   to its presence signature id (`matchEnvNames`) and send it as `presence`; it must never pass the name through
+   `names` (which `checkObservations` refuses) or as an artifact value.
+   Coverage note: the SD1 repo path now detects only the env names in `PRESENCE_SIGNATURES_V1` (the same 13 that
+   SD3's seed carries); an admin-added env name cannot be matched until (b), because the scanner no longer handles
+   names.
+8. **Decision recorded (was an open question).** The master decision answers it: environment-variable names are
+   never stored as evidence, from any scanner. SD0 addition 12 (`ScanObservation.names` into
+   `FindingEvidence.names`) is limited to non-env identifiers (an MCP command basename). Env-name presence is reported
+   only as A6 signature ids. No stored evidence on main depended on env names in `names`: the SD1 env-name
+   observation carried no matchable value, so it never reached a finding. SD3's env-variable findings stored the
+   catalogue's env name as `matchedValue`; they now store the signature id.
+
 ## SD3 build notes (2026-10-17)
 
 - The query pack is generated from the enabled endpoint signature seed (`packages/shared/src/endpoint-discovery/`), so a
@@ -580,3 +677,215 @@ Appended after the SD4 design spike ([R15](../research/R15-endpoint-agent-sd4-sp
   OS-scoped row matches only a sighting whose OS is known and equal, so an inventory export without an OS column
   matches only the OS-neutral rows.
 
+## As built: SD4a (endpoint agent, agent side)
+
+Built 2026-10-17 on branch `sd4a-endpoint-agent`, in `agents/endpoint/` (a Go module outside the pnpm workspace; Go
+1.27.2 toolchain). Nothing above is changed. "SD4a" here is the master's name for this build slice; it covers R15's
+SD4c (agent core), most of SD4d (collectors), the drop counter, jitter and backoff of SD4f, the build and licence
+check of SD4g, the unsigned packages of SD4h, and the Linux and Windows parts of SD4j. No gateway, `packages/shared`
+or web code is touched, and there is no migration.
+
+### What it does
+
+- **Collectors** (`internal/collect`) for every decision-18 fact, driven only by the signed collection manifest:
+  desktop apps (macOS `Info.plist` bundle ids, Linux desktop file ids, Windows uninstall display names), IDE
+  extensions (VS Code-family `package.json` ids, plugin directory names), browser extensions (Chromium-family
+  extension directories, Firefox-family `extensions.json`), local runtimes (process names and listening ports), AI
+  tool config files, CLIs on `PATH`, and environment-variable names in start-up files and the Windows registry.
+  Matching is equality on catalogue identifiers (case-insensitive where the OS is); no pattern from data is ever
+  evaluated. Every read goes through an `os.Root`, so a symlink cannot lead out of the home directory, and each file
+  read is capped at 256 KiB (4 MiB for `extensions.json`). Collector failures become fixed gap codes, never error
+  strings, because an OS error carries the absolute path.
+- **Key presence only** (call 2). Values are checked on the device against patterns compiled from the shared
+  `dlp.secret.*` set (`internal/secrets`, Go RE2) and dropped. A fact carries `{keyName, ruleId, present}`. A
+  manifest-listed name is reported in the manifest's own spelling; any other name only when it is an
+  environment-variable-style identifier (`^[A-Z][A-Z0-9_]*$`, at most 128 characters), and otherwise as `(unnamed)`,
+  so a lower-case, dotted or free-text name (a login such as `alice.smith`, a JSON key) never leaves the device
+  (security review L3, 2026-10-17). The three shared rules that use lookaround
+  (`jwt`, `stripe_key`, `google_api_key`) are an RE2 match plus a check in code. `testdata/vectors.json` runs the
+  same inputs through the Go table and through the shared JavaScript rules (`scripts/check-secret-rules.mjs`, CI job
+  `secret-rules`), which also fails when a shared rule is added, removed or changed.
+- **The collection manifest** (`internal/pack`): `regulait.endpoint-collection/1` inside a pack in the ADR-0041
+  manifest format (`schema regulait.update-bundle/1`, `product regulait-endpoint-pack`), Ed25519 over the exact
+  manifest bytes. Refused: no signature, an unknown key id, a bad signature, a modified, missing or unlisted file, a
+  downgrade below the last accepted version or below the build's compiled minimum (`pack.MinimumVersion`, 1.0.0, so
+  a new user or lost state cannot accept an older signed pack; security review L2), an unknown kind or member, a field of another kind, and any name or path
+  with a pattern character (`^ $ | \ [ ] { } ( ) +`, globs in names, `**`, `..`, absolute paths, including
+  drive-letter and backslash roots). A braced GUID is the
+  one allowed use of braces (Firefox add-on ids). The compiled pack keyring is **empty** until the pack key exists,
+  so every pack is refused today: the strict default. The `cli` and `env_name` kinds are accepted; SD0/SD3 decide
+  whether the catalogue adopts them.
+- **Pseudonymity** (decision 20, call 3). Reports carry only catalogue identifiers, root-relative paths, versions,
+  ports and key names. The hostname is sent only to the ticket route and the self-reported user name only to the
+  register route, both for the gateway to keyed-hash. A guard (`internal/privacy`) refuses to send any report that
+  contains the home directory's path, or the user or host name as a whole token; a refusal is logged and nothing is
+  sent.
+- **Local config** (`/etc/regulait-agent/config.json`, `/Library/Application Support/RegulAIt/Agent/config.json`,
+  `%ProgramData%\RegulAIt\Agent\config.json`): root-owned, not writable by others, unknown members refused. It names
+  the issuer (https only, never plain http), an optional pinned CA bundle (which then replaces the OS store), and
+  kinds to turn off. It cannot relax anything: every limit is compiled in, and the org policy the gateway serves is
+  clamped (interval 1 h to 7 d, default daily; kinds can only be turned off).
+- **Enrolment.** `redeem-ticket` is the package's install step, run once as root: it redeems the bulk token only when
+  the device holds no ticket valid for at least another hour, refuses a token file that is not root-only `0600` or is
+  a symlink, refuses a token whose `expiresAt` has passed (it is never sent), checks the token's issuer against the
+  config, writes the ticket `0640` to group `regulait-agent` through an exclusive temporary file, records the outcome
+  in a world-readable status file holding no secret, and always exits 0. `register` (first run as each user) refuses a
+  missing, expired, foreign-issuer or world-readable ticket with "waiting for enrolment ticket", creates the device
+  key and registers its public JWK; it is idempotent, and a key created by a registration whose answer was lost is
+  reused.
+- **Device keys** (owner decision d; `internal/devicekey`), all P-256/ES256. Hardware is chosen when it probes
+  usable; the software fallback only when the probe says there is no hardware, logged at warn level and sent as
+  `keyProtection: software` with the reason; hardware that is present but failing is an error, never a fallback.
+  - Linux: the TPM through `go-tpm` over `/dev/tpmrm0` (a P-256 key under the re-derived TCG ECC SRK; only its
+    TPM-wrapped blob is stored, `0600`), used only where the user can already open the device; otherwise a `0600`
+    PKCS#8 file, created exclusively, never opened through a symlink, in a `0700` directory.
+  - Windows: the Platform Crypto Provider (NCrypt), per-user and non-exportable; otherwise a DPAPI-protected file.
+    Only `NTE_DEVICE_NOT_FOUND` (0x80090035), `NTE_PROV_DLL_NOT_FOUND` (0x8009001E) or a missing `ncrypt.dll` count
+    as "no hardware"; every other status from opening the provider (access denied, a TPM present but not ready, a
+    failing provider DLL) is an error and the agent refuses, never falling back to DPAPI (security review M2;
+    `classifyProviderOpen`, unit-tested on every OS). One exception, observed on the CI Windows runner: a machine
+    with no TPM answers `NTE_DEVICE_NOT_READY` (0x80090030), the same status as a TPM that is present but not
+    ready. That status, and `TBS_E_TPM_NOT_FOUND` (0x8028400F) if the provider passes it through, counts as "no
+    hardware" only when TBS (`Tbsi_GetDeviceInfo`) itself answers `TBS_E_TPM_NOT_FOUND`; a TPM that TBS reports
+    present, any other TBS error, or no `tbs.dll` keeps it a refusal. The TBS answer is injected into
+    `classifyProviderOpen` (`tpmPresent func() (bool, error)`), so every combination, including the runner's
+    observed 0x80090030 with no TPM, is a unit-test row on every OS.
+  - macOS: **refuses to create a key.** The Secure Enclave store needs the cgo build on the macOS runner (SD4j), and
+    falling back to software on hardware every supported Mac has would break decision d.
+- **Tokens and upload** (ADR-0188 S7 reused; `internal/auth`, `internal/transport`): `client_credentials` with an
+  ES256 `private_key_jwt` (aud the token endpoint, 60 s) and a DPoP proof by the same key, one nonce retry, a fresh
+  proof per request with `ath`, one retry with a new token after another 401. The HTTP client reaches only the issuer
+  (checked per request before dialling), requires TLS 1.3, honours the proxy settings and never follows a redirect.
+  Each report is sent with an RFC 9530 `Content-Digest` and a report signature (below). Rotation follows S7 point 4:
+  the new key is saved as pending before the request, and a lost answer is recovered by trying the pending key.
+- **Schedule.** `run` repeats the cycle on the org's interval with ±30 min jitter, backing off from 5 min to 6 h after
+  a failure. There is no buffer yet (SD4f): a snapshot that cannot be delivered is dropped and counted in the next
+  report's `droppedSnapshots`.
+- **`preview -manifest FILE`** runs the collectors against a local, unsigned manifest and prints the facts. It sends
+  nothing; it exists so an admin can see what the agent reports on a machine before enrolling it.
+
+### Gateway ingest contract (for SD4b)
+
+Go types: `agents/endpoint/internal/contract`. Byte-exact example bodies: `internal/contract/testdata/`. A strict fake
+that SD4b's gateway must agree with: `internal/gatewaytest`.
+
+| Route | Auth | Request | Answer |
+|---|---|---|---|
+| `POST /v1/endpoint-agent/enrolment-tickets` | `Authorization: Bearer <bulk token>` | `{hostname, os, arch, agentVersion}` | `201 {ticket, ticketId, expiresAt (RFC 3339), identityCap}`. Refusals: `401`, `409 enrolment_cap_reached`, `410 token_expired`, `403 token_revoked` |
+| `POST /v1/endpoint-agent/register` | `Authorization: Bearer <device ticket>` | `{publicJwk (EC P-256, public members), keyProtection hardware\|software, keyProvider tpm\|tpm_ncrypt\|secure_enclave\|file\|dpapi, keyFallbackReason?, agentVersion, os, arch, deviceUser}` | `201 {identityId, clientId}`, where `clientId` is the RFC 9278 thumbprint URI of `publicJwk`; the agent refuses any other. Re-registering the same key is idempotent. Refusals: `401`, `409 ticket_exhausted`, `410 ticket_expired` |
+| `POST /oauth/token` | `private_key_jwt` + DPoP | form: `grant_type=client_credentials`, `client_id`, `client_assertion_type` (jwt-bearer), `client_assertion` (ES256, `typ JWT`, `kid` = thumbprint, `iss`=`sub`=client id, `aud` = token endpoint URL, `jti`, `iat`, `exp` = `iat`+60), `resource=<issuer>/v1/endpoint-agent`; header `DPoP` (ES256, `typ dpop+jwt`, `jwk` header, `htm`, `htu`, `iat`, `jti`, `nonce`) | `200 {access_token, token_type: DPoP, expires_in, regulait_credential_rotate_after?}`; `400 use_dpop_nonce` with `DPoP-Nonce`. ES256 must be accepted for kind `endpoint_agent` |
+| `GET /v1/endpoint-agent/config` | `Authorization: DPoP <token>` + DPoP proof with `ath` | — | `200 {pack: {manifest, signature, files: {name: base64}}, orgPolicy: {intervalSeconds, disabledKinds}}` (all standard base64). A `401` with `WWW-Authenticate: DPoP error="use_dpop_nonce"` is retried once |
+| `POST /v1/endpoint-agent/reports` | as above, plus `Content-Digest: sha-256=:<b64>:` and `Regulait-Report-Signature` | `regulait.endpoint-report/1`: `{snapshotId (UUID v4), collectedAt, agentVersion, os, arch, manifestVersion, manifestDigest, keyProtection, droppedSnapshots, facts[], gaps[], factsDigest}` | `202 {accepted: true, duplicate}`; idempotent on `snapshotId` |
+| `POST /v1/endpoint-agent/credentials` | as above | `{publicJwk, proof}`: proof is ES256 by the new key, `typ regulait-key-rotation+jwt`, `jwk` header, `aud` = this route's URL | `201 {identityId, clientId}` of the new key; the old key then mints nothing |
+
+- **Report signature** (new in SD4a; R15 did not specify one). DPoP covers the method, URL and token, not the body,
+  so the agent also sends `Regulait-Report-Signature`: a compact JWS by the device key, `typ
+  regulait-endpoint-report+jwt`, `kid` = thumbprint, claims `{iss: clientId, aud: <issuer>/v1/endpoint-agent/reports,
+  iat, jti, snapshotId, contentDigest}`. The gateway verifies it under the identity's bound key, requires
+  `contentDigest` to equal the `Content-Digest` it recomputes over the raw body, `snapshotId` to equal the body's,
+  and claims `jti` in its replay store.
+- **Facts**: `{kind, signatureId, provider, matchedOn, identifier, location: {root, path}, version?, port?, portOnly?,
+  keys?: [{keyName, ruleId?, present}]}`. `root` is one of `home`, `system_applications`, `appdata`,
+  `localappdata`, `path` (an absolute PATH directory outside the home), `registry` (`HKCU\…` or `HKLM\…`) or
+  `process_table`. `matchedOn` is one of `bundleId`, `desktopId`, `uninstallName`, `extensionId`, `processName`,
+  `port`, `processName+port`, `file`, `executable`, `envName`. `factsDigest` is opaque to the gateway (equality
+  only, never recomputed). Gaps are `{kind, reason}` with fixed reason codes (`internal/collect/collect.go`).
+- Every merged fact maps to `shadow_ai_findings` with signal source `endpoint_agent` and subject kind `device`
+  (decision 5a) on the gateway side; SD4b decides the mapping of `signatureId` to `ai_endpoint_signatures` rows.
+
+### Open-source search (ADR-0176)
+
+Recorded in `agents/endpoint/THIRD_PARTY.md`. Used: `go-jose/v4` 4.1.6 (Apache-2.0) for JWS over a
+`crypto.Signer`; `golang.org/x/sys` 0.49.0 (BSD-3-Clause); `google/go-tpm` 0.9.8 (Apache-2.0); `gopsutil/v4` 4.26.9
+(BSD-3-Clause) on Linux and macOS; `go-tpm-tools` 0.4.11 (Apache-2.0, test only: the reference TPM simulator); `nfpm`
+2.47.0 (MIT, build only). Not used: gopsutil on Windows (it links `wmi`, last release 2024-01, and `go-ole`, last
+release 2023-08, which fail the 12-month rule; Windows reads Toolhelp and `GetExtendedTcpTable` through `x/sys`);
+`howett.net/plist` (last release 2023-10; XML plists are read with `encoding/xml` and binary ones converted by the
+OS's `/usr/bin/plutil`); `google/uuid` (one v4 format); osquery embedded (R15 §2.5). Every linked module@version must
+be listed: `scripts/check-licences.sh` fails CI otherwise.
+
+### Executed (2026-10-17, Linux x86_64 container, unless marked CI)
+
+- `go test ./...`, and the TPM store against the reference TPM simulator (`go test -tags tpmsim
+  ./internal/devicekey/`): create, sign, verify, reload, delete.
+- Non-vacuity probes: disabling the pseudonymity guard, the hardware fail-closed rule, the pack signature check, the
+  token-file mode check, the JWT RE2 rewrite, the `(unnamed)` key-name rule and the issuer-only transport each made
+  its test fail.
+- Security-review round (2026-10-17), each probe made its test fail: the local `disabledKinds` narrowing, the Unix
+  file-owner check with another uid (run as root), `cleanVersion`, the not-regular-file guard in `readBounded`, the
+  absolute-locator refusal, the compiled pack minimum, the env-style key-name rule, the `ELOOP` mapping to
+  `token_file_unsafe`, a bulk token or ticket written to the log (`TestSecretsNeverReachLogsOrErrors`), the NCrypt
+  status classifier, the Windows DACL write check, and removing `environment: release` or the pull-request guard
+  from a signing job.
+- Recheck round (2026-10-17), each probe made its test fail: dropping any single bit from the Windows write mask
+  (`GENERIC_WRITE`, `MAXIMUM_ALLOWED`, `FILE_WRITE_EA`, `FILE_WRITE_ATTRIBUTES`, `DELETE`, `WRITE_OWNER`) or read mask
+  (`GENERIC_READ`, `FILE_EXECUTE`, `GENERIC_EXECUTE`; execute rights count as reads, because an execute mapping can be
+  read), trusting INTERACTIVE for writes, the Unix uid check without root (`readChecked` against another uid on a
+  file this user owns), the leading-backslash clause of the absolute-locator refusal (`\Windows\x`), and, in the
+  workflow guard, a `pull_request_target` trigger, a workflow-level `env` of `toJSON(secrets)`, `secrets['X']` or
+  `toJSON(secrets)` in a non-signing job, and a job that calls a reusable workflow (with or without `secrets:
+  inherit`). The guard now matches any mention of the `secrets` context outside whole-line comments and checks the
+  triggers are exactly `pull_request`, `push` and `workflow_dispatch`. The Windows file-ACL test sets the file's
+  owner to the runner's user explicitly, so the user-owned system-file case always runs, and the CI Windows job
+  runs `internal/agent` verbosely so its Windows tests are visible in the log.
+- `node scripts/check-secret-rules.mjs`: 12 rules and 20 vectors agree with `packages/shared`.
+- `scripts/build.sh`: all six targets (7.3 to 8.2 MiB each, stripped). `scripts/package-linux.sh`: `.deb` and `.rpm`
+  for amd64 and arm64.
+- The amd64 `.deb` installed with `dpkg -i` in the container (no systemd running, no gateway): the postinstall
+  created the group, enabled the user unit globally and exited 0 with outcome `config_invalid`; with a config and a
+  synthetic token naming an unreachable issuer, `gateway_unreachable`; with the token file made `0644`,
+  `token_file_unsafe` and nothing sent. Then purged.
+- `regulait-agent preview` against a local manifest on this Linux host.
+- **CI only** (the workflow `endpoint-agent.yml` runs them; results are in the PR): the unit tests on macOS (real
+  `plutil`, gopsutil) and on Windows (DPAPI round trip, the NCrypt probe, the Toolhelp and TCP tables, registry
+  reads), the reproducibility check, and the unsigned macOS `.pkg` build.
+
+### Pending execution, unverified, and deviations
+
+- **Not run on a real macOS or Windows machine** beyond the CI runners: no collector has seen a real installed
+  catalogue product, a real browser profile or a real IDE; the Windows uninstall and environment registry paths and
+  the macOS LaunchAgent have not run in a user session.
+- **NCrypt TPM keys are not run** where a TPM exists (CI runners are expected to report "no hardware"; the test
+  skips). The Linux TPM path ran on the simulator only, not on a physical TPM.
+- **macOS has no device key in this build** (it refuses; SD4j). The macOS fallback (Keychain) and the Linux Secret
+  Service fallback are not built; the Linux fallback is the `0600` file.
+- **Signing**: Developer ID signing and notarisation, OV Authenticode through the cloud HSM, and Linux package
+  signing are CI jobs that skip with their reason because the accounts, certificate and keys do not exist (owner
+  decisions 1 and 2). Pending execution. Owner decision 1 says the identity is kept in "a protected CI secret store
+  that only release jobs can use": the three jobs never run for a pull request (`if: github.event_name !=
+  'pull_request' && github.ref == 'refs/heads/main'`) and read their secrets from the `release` environment, not from
+  repository secrets (security review M1; `scripts/endpoint-agent-workflow.test.mjs` fails if any other job reads a
+  secret). **Pending (owner):** the `release` environment's protection (required reviewers, deployment branch `main`)
+  is a repository setting that is not in code and has not been configured; GitHub creates the environment unprotected
+  on first use. The pack and agent-release keys do not exist either: the compiled pack
+  keyring is empty, and no release manifest is verified (self-update is SD4i).
+- **No Windows installer.** The MSI needs WiX, whose licence terms R15 asks SD4h to confirm before pinning; the
+  per-user logon task is therefore not built, and nothing places the bulk token file's ACL on Windows yet.
+- **Windows file check (deviation from the first SD4a build, security review M3).** The first build checked only the
+  file type on Windows, so any regular file under `%ProgramData%` was trusted and `token_file_unsafe` could not
+  occur there. The agent now fails closed: it reads the owner and DACL of the handle it then reads from, and accepts
+  a system file only when it is owned by SYSTEM or Administrators, and the user's state only when owned by that user,
+  SYSTEM or Administrators. No other SID may hold any right that writes, appends, deletes or re-permissions the file;
+  nobody else may read the bulk token or the user's state; only INTERACTIVE may also read the ticket (R15 §3.2's
+  planned ACL); a NULL DACL or an entry type the check does not evaluate is refused. Reparse points and Unix symlinks
+  (`ELOOP`) are unsafe files too. Files the agent writes get a protected DACL at creation (SYSTEM, Administrators and
+  the writer in full; INTERACTIVE read for the ticket, Users read for the status file). Not covered: the parent
+  directory's ACL (a user with delete-child rights on the directory could still swap the file), which the MSI (SD4h)
+  must set. The judgement (`judgeWindowsFile`) is unit-tested on every OS; reading real DACLs runs only on the CI
+  Windows runner (`TestWindowsFileACLs`), not on a Windows host (pending execution, SD4j).
+- **No offline buffer** (SD4f): undelivered snapshots are counted, not kept. `launchctl getenv` for manifest-listed
+  names is not read.
+- **Windows sees more than Linux and macOS**: the Toolhelp snapshot names other users' processes, so a listener of
+  another user matches on its process name there, not on its port only. Only catalogue names are ever reported.
+- **The pseudonymity guard can block a device**: a user or host name that equals a catalogue token as a whole word
+  stops every upload from that device (fail closed). Posture should show it (SD4b).
+- **`product regulait-endpoint-pack`**: `scripts/verify-update-bundle.sh` accepts only `product regulait`, so it does
+  not verify packs; SD4g's customer-side verifier is to be built from `internal/pack`.
+- **Go 1.27.2**: R15 measured with 1.24, which is out of support; the toolchain is pinned in `go.mod`.
+
+### Open questions for the owner
+
+1. Is the report signature header (above) wanted in addition to DPoP, or should SD4b rely on DPoP and TLS alone?
+2. Should a user or host name colliding with a catalogue token block uploads (today), or should the guard drop the
+   colliding fact and send the rest?
+3. Windows installer: confirm WiX's licence terms, or name another MSI route, so SD4h can build it.

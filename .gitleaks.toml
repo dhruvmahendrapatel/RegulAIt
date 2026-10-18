@@ -216,7 +216,8 @@ description = "B4I-02 scrub-equivalence snapshot: a SHA-256 group digest of scru
 condition = "AND"
 paths = ['''^packages/shared/src/detection-content/scrub-equivalence\.snapshot\.json$''']
 regexTarget = "secret"
-regexes = ['''^283f4705bdec4d97544386f0aad190c9d4a7c09824b2adb8a65a25f6180e0355$''']
+# N4 regenerated the snapshot (dlp.secret.huggingface_token); the earlier digest stays listed because history holds it
+regexes = ['''^283f4705bdec4d97544386f0aad190c9d4a7c09824b2adb8a65a25f6180e0355$''', '''^2cd48187b0185b9ce3151e2ad1649ff4c29f0687780a0828e3790f52a28c714d$''']
 
 [[allowlists]]
 description = "B4I-02 scrub-equivalence corpus: synthetic secret-shaped inputs the scrubber must redact (placeholder token and the public jwt.io example JWT)"

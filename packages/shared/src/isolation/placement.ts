@@ -327,7 +327,12 @@ export function grantCoversPlacement(grantClass: RequirableIsolationClass | null
 /** POST /v1/execution-profiles/:name/retire (no body fields; a reason is not free prose) */
 export const retireExecutionProfileSchema = z.object({}).strict();
 
-/** GET /v1/execution-placements: newest first, `before` is the `createdAt` of the last row seen */
+/**
+ * GET /v1/execution-placements: newest first, by `(at, id)`. N11: `cursor` and `refusalsCursor` are the keyset
+ * cursors a response emits (`nextCursor`, `refusalsNextCursor`) for its two lists; a request that carries either
+ * continues only the list(s) it names. `before` (a `createdAt` instant) is still accepted for compatibility, but
+ * it skips rows that share the instant of the last row seen, so new clients use the cursors.
+ */
 export const executionPlacementsQuerySchema = z
   .object({
     limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -335,6 +340,8 @@ export const executionPlacementsQuerySchema = z
     workloadKind: z.enum(ISOLABLE_WORKLOAD_KINDS).optional(),
     reason: z.enum([...EXECUTION_REFUSAL_REASONS, "execution_profile_mismatch"]).optional(),
     before: z.string().datetime({ offset: true }).optional(),
+    cursor: z.string().min(1).max(256).optional(),
+    refusalsCursor: z.string().min(1).max(256).optional(),
   })
   .strict();
 

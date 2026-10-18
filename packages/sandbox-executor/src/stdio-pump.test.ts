@@ -102,6 +102,18 @@ describe("the executor's stdio session", () => {
     expect(backend.sandboxes[0]).toMatchObject({ released: false, killed: true, workload: null });
   });
 
+  it("multi-replica relay: a lost holder (`session_lost`) is final; a not-yet-written row (`stdio_session_pending`) is retried", async () => {
+    const backend = new FakeSandboxBackend({ stdioServer: () => [] });
+    const h = await sandbox(backend);
+    const { client } = gateway([], { refuse: "session_lost" });
+    expect(await pumpStdio({ client, offerId: offer.id, handle: h, macKey: KEY })).toBe("refused");
+    expect(backend.sandboxes[0]).toMatchObject({ released: false, killed: true, workload: null });
+    // NEGATIVE CONTROL: pending is not final; with no start ever coming, the session ends at its start deadline instead
+    const h2 = await sandbox(backend);
+    const { client: c2 } = gateway([], { refuse: "stdio_session_pending" });
+    expect(await pumpStdio({ client: c2, offerId: offer.id, handle: h2, macKey: KEY, startTimeoutMs: 300 })).toBe("no_start");
+  });
+
   it("no start within the deadline: never released, killed", async () => {
     const backend = new FakeSandboxBackend({ stdioServer: () => [] });
     const h = await sandbox(backend);
