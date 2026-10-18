@@ -28,12 +28,17 @@
  *                 credential: publicConfig tenantId, clientId (both modes); static secret: the client secret
  *  Public config keys and shapes are SD0's allowlist (`DISCOVERY_PUBLIC_CONFIG` in @regulait/shared).
  *
- * FEDERATION IS PENDING. A federated credential needs an OIDC token minted by RegulAIt's ADR-0188 issuer for the
- * cloud's audience, signed RS256 (the one algorithm AWS, GCP and Entra all accept; ADR-0195 SD2 notes). The issuer
- * signs with Ed25519 only today, and adding the RS256 federation key is key material and schema this slice does
- * not own. Until `oidcToken` is supplied, a federated run fails with an explicit reason instead of guessing; the
- * static relaxation runs end to end. (AWS AssumeRole with the SD0-generated external id would need RegulAIt's own
- * AWS principal; it is not offered: SD0's public config for `cloud_aws` is the role ARN only.)
+ * FEDERATION (ADR-0195 SD2b). A federated credential presents a short-lived RS256 token from RegulAIt's federation
+ * issuer (`federation-signing-keys.ts`), which the worker hands over as `ctx.federation` for federated credentials
+ * only: `sub` is the source, `aud` exactly the one audience its credential names (`federationAudiences`), anything
+ * else is refused at mint time. Federation is off by default; while it is off a federated run fails with that
+ * reason. For `cloud_aws` the target's `federation` picks the trust: `oidc` (default; the customer's role trusts
+ * the issuer, AssumeRoleWithWebIdentity) or `principal` (the customer's role trusts RegulAIt's own AWS principal,
+ * which RegulAIt reaches by web identity, and is assumed with the SD0-generated external id).
+ *
+ * ORGANISATIONS (SD2b). A `cloud_aws` target with `organizationAccounts=true` lists the organisation's accounts
+ * (Organizations ListAccounts, paginated, read-only); with `memberRoleName` each active member account is scanned
+ * by assuming that role with the source's external id (federated credentials only).
  *
  * WHAT COULD NOT BE READ. The adapters report every read's status; it is returned as SD0's `readOutcomes` (stored
  * with the run). When no read succeeded at all the run fails with the per-read summary as its error.
@@ -42,6 +47,8 @@ import {
   AwsCloudScanner,
   AzureCloudScanner,
   GcpCloudScanner,
+  awsCredentialProvider,
+  type AwsOrganizationScan,
   DEFAULT_AUDIT_LOOKBACK_DAYS,
   DEFAULT_MAX_PAGES_PER_CALL,
   type AwsCredentialInput,
@@ -52,11 +59,11 @@ import {
   type GcpCredentialInput,
   type OidcTokenSupplier,
 } from "@regulait/cloud-discovery";
-import { DISCOVERY_READ_OUTCOMES_MAX, type DiscoveryReadOutcome, type DiscoverySourceKind } from "@regulait/shared";
+import { FEDERATION_AUDIENCES, DISCOVERY_READ_OUTCOMES_MAX, type DiscoveryReadOutcome, type DiscoverySourceKind } from "@regulait/shared";
 import type { ScanContext, ScanObservation, Scanner } from "./discovery-scanners.js";
 
 export interface CloudScannerOptions {
-  /** mints a federation token for an audience (ADR-0188 issuer, RS256); absent until the federation key exists */
+  /** TEST SEAM: a token supplier used instead of `ctx.federation.sourceToken` */
   oidcToken?: OidcTokenSupplier;
 }
 
@@ -68,8 +75,38 @@ export class CloudSourceConfigError extends Error {
   }
 }
 
-const FEDERATION_PENDING =
-  "federated cloud credentials need RegulAIt's RS256 federation token from the ADR-0188 issuer, which is not configured yet (ADR-0195 SD2, pending); use a static credential (a relaxation) meanwhile";
+const FEDERATION_UNAVAILABLE =
+  "federated cloud credentials need RegulAIt's federation issuer, which this run was not given (ADR-0195 SD2b): an admin turns federation on under Discovery sources, Cloud federation";
+
+/** the source's token supplier: the test seam, else the worker's federation hook */
+function sourceToken(ctx: ScanContext, opts: CloudScannerOptions): OidcTokenSupplier {
+  const t = opts.oidcToken ?? ctx.federation?.sourceToken;
+  if (!t) throw new CloudSourceConfigError(FEDERATION_UNAVAILABLE);
+  return t;
+}
+
+/**
+ * The audiences a federated credential of this kind may have a token minted for (exactly one per target): AWS STS,
+ * the GCP pool provider named in the credential, or Entra's token exchange. Any other audience is refused at mint.
+ */
+export function federationAudiences(kind: DiscoverySourceKind, publicConfig: Readonly<Record<string, string>>): string[] {
+  switch (kind) {
+    case "cloud_aws":
+      return [FEDERATION_AUDIENCES.aws];
+    case "cloud_azure":
+      return [FEDERATION_AUDIENCES.azure];
+    case "cloud_gcp": {
+      const { projectNumber, workloadIdentityPool, workloadIdentityProvider } = publicConfig;
+      if (!projectNumber || !workloadIdentityPool || !workloadIdentityProvider) return [];
+      return [`https:${gcpWifAudience(projectNumber, workloadIdentityPool, workloadIdentityProvider)}`];
+    }
+    default:
+      return [];
+  }
+}
+
+/** an IAM role name (not a path): 1-64 of the characters IAM allows */
+const ROLE_NAME = /^[A-Za-z0-9+=,.@_-]{1,64}$/;
 
 function need(map: Readonly<Record<string, string>>, key: string, what: string): string {
   const v = map[key]?.trim();
@@ -149,8 +186,19 @@ function awsCredential(ctx: ScanContext, opts: CloudScannerOptions): AwsCredenti
     return { mode: "aws_static", accessKeyId, secretAccessKey, ...(typeof s.sessionToken === "string" ? { sessionToken: s.sessionToken } : {}) };
   }
   const roleArn = need(c.publicConfig, "roleArn", "cloud_aws");
-  if (!opts.oidcToken) throw new CloudSourceConfigError(FEDERATION_PENDING);
+  if (awsTrust(ctx) === "principal") {
+    return { mode: "aws_assume_role", roleArn, externalId: need(c.publicConfig, "externalId", "cloud_aws") };
+  }
+  sourceToken(ctx, opts);
   return { mode: "aws_web_identity", roleArn };
+}
+
+/** `cloud_aws` target `federation`: `oidc` (default) or `principal` */
+function awsTrust(ctx: ScanContext): "oidc" | "principal" {
+  const v = ctx.source.target.federation?.trim();
+  if (!v || v === "oidc") return "oidc";
+  if (v === "principal") return "principal";
+  throw new CloudSourceConfigError("cloud_aws: target 'federation' must be 'oidc' or 'principal'");
 }
 
 function gcpCredential(ctx: ScanContext, opts: CloudScannerOptions): GcpCredentialInput {
@@ -163,7 +211,7 @@ function gcpCredential(ctx: ScanContext, opts: CloudScannerOptions): GcpCredenti
   const pool = need(c.publicConfig, "workloadIdentityPool", "cloud_gcp");
   const provider = need(c.publicConfig, "workloadIdentityProvider", "cloud_gcp");
   const serviceAccountEmail = need(c.publicConfig, "serviceAccountEmail", "cloud_gcp");
-  if (!opts.oidcToken) throw new CloudSourceConfigError(FEDERATION_PENDING);
+  sourceToken(ctx, opts);
   return { mode: "gcp_workload_identity", audience: gcpWifAudience(projectNumber, pool, provider), serviceAccountEmail };
 }
 
@@ -175,8 +223,31 @@ function azureCredential(ctx: ScanContext, opts: CloudScannerOptions): AzureCred
     if (!c.secret) throw new CloudSourceConfigError("cloud_azure: the static credential has no secret");
     return { mode: "azure_client_secret", tenantId, clientId, clientSecret: c.secret };
   }
-  if (!opts.oidcToken) throw new CloudSourceConfigError(FEDERATION_PENDING);
+  sourceToken(ctx, opts);
   return { mode: "azure_federated", tenantId, clientId };
+}
+
+/** `cloud_aws` target `organizationAccounts=true`, `memberRoleName?`: the organisation scan (SD2b) */
+function awsOrganization(ctx: ScanContext): { organization?: AwsOrganizationScan } {
+  const t = ctx.source.target;
+  const flag = t.organizationAccounts?.trim();
+  if (!flag || flag === "false") {
+    if (t.memberRoleName) throw new CloudSourceConfigError("cloud_aws: 'memberRoleName' needs organizationAccounts=true");
+    return {};
+  }
+  if (flag !== "true") throw new CloudSourceConfigError("cloud_aws: 'organizationAccounts' must be true or false");
+  const memberRoleName = t.memberRoleName?.trim();
+  if (memberRoleName && !ROLE_NAME.test(memberRoleName)) throw new CloudSourceConfigError("cloud_aws: 'memberRoleName' must be an IAM role name");
+  const c = ctx.credential;
+  const externalId = c?.mode === "federated" ? c.publicConfig.externalId : undefined;
+  const partition = c?.mode === "federated" ? c.publicConfig.roleArn?.split(":")[1] : undefined;
+  return {
+    organization: {
+      ...(memberRoleName ? { memberRoleName } : {}),
+      ...(externalId ? { externalId } : {}),
+      ...(partition ? { partition } : {}),
+    },
+  };
 }
 
 const list = (v: string | undefined): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -187,21 +258,37 @@ export function buildCloudScanner(kind: DiscoverySourceKind, ctx: ScanContext, f
   const credFetch = { ...(credentialFetch ? { credentialFetch } : {}), onSecret: dedupedSecretSink(ctx.registerSecret) };
   const t = ctx.source.target;
   const scope = ctx.source.scope;
-  const oidc = opts.oidcToken ? { oidcToken: opts.oidcToken } : {};
+  const federated = ctx.credential?.mode === "federated";
+  const oidc = federated ? { oidcToken: sourceToken(ctx, opts) } : {};
   switch (kind) {
     case "cloud_aws": {
       const credential = awsCredential(ctx, opts);
       const trailBucket = t.trailBucket
         ? { trailBucket: { bucket: t.trailBucket, region: need(t, "trailBucketRegion", "cloud_aws"), ...(t.trailPrefix ? { prefix: t.trailPrefix } : {}) } }
         : {};
+      const stsRegion = t.stsRegion || "us-east-1";
+      // `principal` trust: the customer's role is assumed from RegulAIt's own AWS principal, which RegulAIt reaches
+      // by web identity with a token for the principal subject (never the default chain or instance metadata)
+      let sourceCredentials = {};
+      if (credential.mode === "aws_assume_role") {
+        const principal = ctx.federation?.awsPrincipal;
+        if (!principal) throw new CloudSourceConfigError("cloud_aws: federation=principal needs RegulAIt's own AWS principal (REGULAIT_AWS_PRINCIPAL_ROLE_ARN) and federation turned on");
+        sourceCredentials = {
+          sourceCredentials: awsCredentialProvider(
+            { fetch: fetchImpl, ...credFetch, credential: { mode: "aws_web_identity", roleArn: principal.roleArn, roleSessionName: "regulait-principal" }, oidcToken: principal.token },
+            stsRegion,
+          ),
+        };
+      }
       return new AwsCloudScanner(
         {
           accountId: need(t, "accountId", "cloud_aws"),
           ...(scope.orgLevel ? {} : { regions: [...scope.include] }),
           ...(t.stsRegion ? { stsRegion: t.stsRegion } : {}),
           ...trailBucket,
+          ...awsOrganization(ctx),
         },
-        { fetch: fetchImpl, ...credFetch, credential, ...oidc },
+        { fetch: fetchImpl, ...credFetch, credential, ...oidc, ...sourceCredentials },
       );
     }
     case "cloud_gcp": {

@@ -17,6 +17,7 @@ runtime. They reach only the cloud API hosts an admin allow-lists, through the g
 | `@aws-sdk/client-bedrock` | `3.1152.0` | Apache-2.0 | Bedrock custom and imported models, provisioned throughput, guardrails, invocation-logging setting. |
 | `@aws-sdk/client-bedrock-agent` | `3.1152.0` | Apache-2.0 | Bedrock agents and knowledge bases. |
 | `@aws-sdk/client-cloudtrail` | `3.1152.0` | Apache-2.0 | `LookupEvents` for Bedrock invocation events. |
+| `@aws-sdk/client-organizations` | `3.1152.0` | Apache-2.0 | `ListAccounts` (paginated, read-only) for an organisation-level AWS source, called from the management or delegated-admin account (SD2b). |
 | `@aws-sdk/client-s3` | `3.1152.0` | Apache-2.0 | Optional read of the customer's CloudTrail bucket for Bedrock data events. |
 | `@aws-sdk/client-sagemaker` | `3.1152.0` | Apache-2.0 | SageMaker endpoints and models. |
 | `@aws-sdk/client-sts` | `3.1152.0` | Apache-2.0 | `GetCallerIdentity`: the credential's account must equal the source's `accountId` before anything is read. |
