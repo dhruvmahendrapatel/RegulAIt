@@ -91,7 +91,9 @@ describe("a valid JWT-SVID (positive controls)", () => {
     const t = await svid({ claims: { jti: undefined } });
     const r = await verify(t);
     if (!r.ok) throw new Error(r.code);
-    expect(r.replayKey).toMatch(new RegExp(`^jwt-svid ${SUB} sha256 [A-Za-z0-9_-]{43}$`));
+    const prefix = `jwt-svid ${SUB} sha256 `;
+    expect(r.replayKey.startsWith(prefix)).toBe(true);
+    expect(r.replayKey.slice(prefix.length)).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect((await verify(t)).ok && (await verify(t)).ok).toBe(true);
     expect(((await verify(t)) as { replayKey: string }).replayKey).toBe(r.replayKey);
   });
