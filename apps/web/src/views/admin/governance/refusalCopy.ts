@@ -17,7 +17,9 @@ export function refusalSentence(err: unknown, sentences: RefusalSentences): stri
   if (!(err instanceof ApiError)) return null;
   const code = typeof err.payload.error === "string" ? err.payload.error : null;
   if (!code || !(code in sentences)) return null;
-  const detail = typeof err.payload.detail === "string" && err.payload.detail.trim() ? ` ${err.payload.detail.trim()}` : "";
+  const raw = typeof err.payload.detail === "string" ? err.payload.detail.trim() : "";
+  // the server's detail follows a full sentence, so it reads as one: capitalised and closed
+  const detail = raw ? ` ${raw.charAt(0).toUpperCase()}${raw.slice(1)}${/[.!?]$/.test(raw) ? "" : "."}` : "";
   return `${sentences[code]}${detail}`;
 }
 
