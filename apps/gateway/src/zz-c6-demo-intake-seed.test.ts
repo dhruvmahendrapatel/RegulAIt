@@ -11,11 +11,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aiPolicyAcknowledgements, aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, users, workflowTemplates, type Db } from "@regulait/db";
+import { aiIncidentActions, aiIncidentEvents, aiIncidents, aiPolicyAcknowledgements, aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, useCaseFeedback, users, workflowTemplates, type Db } from "@regulait/db";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
+import { revokeScriptKeys } from "./demo-identity.js";
 import type { DemoIntakeFixtures, IntakeAssistRequest } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { DEMO_AUP_EVIDENCE, DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { DEMO_AUP_EVIDENCE, DEMO_AUP_KEY, DEMO_OPEN_ACCOUNTABILITY_USE_CASE, DEMO_OPEN_INCIDENT_TITLE, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
@@ -74,6 +75,8 @@ const fixtures = (): DemoIntakeFixtures => ({
     uc("review", "under_review", intake({ profilesNaturalPersons: true, affectedPersons: ["customers"] }, "essential-services")),
     uc("prohibited", "rejected", intake({ socialScoring: true, affectedPersons: ["general-public"] }), "prohibited social scoring"),
     uc("retired", "retired", intake(), "replaced by a newer system"),
+    // the G9 records (an open incident and two feedback items in Ada's queue) belong to this key
+    uc(DEMO_OPEN_ACCOUNTABILITY_USE_CASE, "approved", intake()),
     { ...uc("proposed", "proposed", intake()), intendedAgentNames: [AGENT, `missing-agent-${RUN}`] },
   ],
   risks: [
@@ -181,11 +184,50 @@ describe("seedDemoIntake", () => {
     expect(aupAcks.every((a) => a.method === "admin_recorded" && a.evidenceRef === DEMO_AUP_EVIDENCE && a.recordedBy === null)).toBe(true);
     expect(first.failed.filter((f) => f.includes("acceptable-use"))).toEqual([]);
 
+    // G9 (owner, 2026-10-19): the screens open on unfinished work, so the seed leaves an OPEN incident (medium, not
+    // serious: it holds no deploy gate) with an owner, timeline entries and an open action, and two OPEN feedback
+    // items routed to Ada in different states, one an appeal
+    const g9 = byKey(DEMO_OPEN_ACCOUNTABILITY_USE_CASE);
+    const [ada] = await db.select().from(users).where(eq(users.email, "admin@regulait.local"));
+    const [dana] = await db.select().from(users).where(eq(users.email, "dana@regulait.local"));
+    const [avery] = await db.select().from(users).where(eq(users.email, "avery@regulait.local"));
+    const open = await db.select().from(aiIncidents).where(and(eq(aiIncidents.useCaseId, g9.id), eq(aiIncidents.title, DEMO_OPEN_INCIDENT_TITLE)));
+    expect(open).toHaveLength(1);
+    expect(open[0]!).toMatchObject({ status: "open", severity: "medium", serious: false, ownerUserId: dana!.id, createdBy: dana!.id });
+    const events = await db.select().from(aiIncidentEvents).where(eq(aiIncidentEvents.incidentId, open[0]!.id));
+    expect(events.filter((e) => e.kind === "note" && e.note).length).toBe(2);
+    expect(events.length).toBeGreaterThanOrEqual(3);
+    const actions = await db.select().from(aiIncidentActions).where(eq(aiIncidentActions.incidentId, open[0]!.id));
+    expect(actions).toHaveLength(1);
+    expect(actions[0]!).toMatchObject({ status: "open", ownerUserId: dana!.id });
+    expect(actions[0]!.dueAt!.getTime()).toBeGreaterThan(Date.now());
+    const items = await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.useCaseId, g9.id));
+    expect(items.map((f) => `${f.kind}:${f.status}`).sort()).toEqual(["appeal:acknowledged", "problem:received"]);
+    expect(items.every((f) => f.ownerUserId === ada!.id && f.submitterUserId === avery!.id && f.resolvedAt === null)).toBe(true);
+    // what Ada's screens ask for: the default filters (active incidents, open items in her queue)
+    const adaKey = await app.inject({
+      method: "POST", url: `/v1/users/${ada!.id}/keys`, headers: { authorization: `Bearer ${BOOT}` },
+      payload: { name: "c6-g9-read", expiresAt: new Date(Date.now() + 3_600_000).toISOString() },
+    });
+    expect(adaKey.statusCode, adaKey.body).toBe(201);
+    const asAda = { authorization: `Bearer ${adaKey.json().token as string}` };
+    try {
+      const listed = await app.inject({ method: "GET", url: "/v1/incidents?status=active", headers: asAda });
+      expect((listed.json().incidents as Array<{ title: string }>).map((i) => i.title)).toContain(DEMO_OPEN_INCIDENT_TITLE);
+      const queue = await app.inject({ method: "GET", url: `/v1/feedback?scope=queue&status=open&useCaseId=${g9.id}`, headers: asAda });
+      expect((queue.json().items as unknown[]).length).toBe(2);
+    } finally {
+      expect(await revokeScriptKeys(app, BOOT, [adaKey.json().id as string])).toEqual([]);
+    }
+
     // IDEMPOTENT: nothing new on a second run (the shadow import is evidence
     // and is re-imported by design — deduplication is the importer's job)
     const second = await seedDemoIntake(app, fixtures(), { bootstrapToken: BOOT });
     expect(second.failed, second.failed.join("\n")).toEqual([]);
     expect(second.created.filter((c) => !c.startsWith("shadow-AI"))).toEqual([]);
     expect(second.skipped.length).toBeGreaterThanOrEqual(3 + 5 + 5 + 1);
+    expect(second.skipped).toEqual(expect.arrayContaining(["open demo incident", "open demo incident action", "G9 problem report", "G9 appeal"]));
+    expect(await db.select().from(aiIncidents).where(eq(aiIncidents.title, DEMO_OPEN_INCIDENT_TITLE)).then((r) => r.filter((i) => i.useCaseId === g9.id))).toHaveLength(1);
+    expect(await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.useCaseId, g9.id))).toHaveLength(2);
   }, 120_000);
 });

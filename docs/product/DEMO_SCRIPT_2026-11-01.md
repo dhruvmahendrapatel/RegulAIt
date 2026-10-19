@@ -362,7 +362,16 @@ the day.
 ## Optional beats (only if ahead of the clock)
 
 ### G9. Accountability records — 1.5 minutes (10-05 beat 3F)
-Unchanged: `/ui/incidents`, `/ui/feedback`, the use case's **Decision records** tab.
+The 10-05 beat, with work in progress on both screens (`demo:intake` seeds it; `demo:check` beat
+"3 Incidents and feedback").
+- **URL:** `/ui/incidents`. The list opens on **Not closed** and shows the open, medium incident on the Real-Time Fraud
+  Detection Engine (owner Dana Developer, two timeline notes, one open corrective action due in a week). Medium and
+  not serious, so it starts no clock and holds no deploy gate. For the 10-05 story, set **Status** to **All** and
+  open the closed Customer Sentiment Analyzer incident.
+- **URL:** `/ui/feedback`. Ada's queue opens on **Open** and shows two items on the fraud engine, both routed to her
+  by its owner: a problem report (received) and an appeal against a card freeze (acknowledged). Dana owns the system
+  that made the decision, so the appeal goes to someone else for an independent answer.
+- The use case's **Decision records** tab, unchanged.
 
 ### G10. Content trust — Ada — 1.5 minutes (ADR-0193)
 UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.

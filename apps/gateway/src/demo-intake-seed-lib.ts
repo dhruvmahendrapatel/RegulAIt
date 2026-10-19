@@ -381,6 +381,8 @@ async function seedDemoIntakeRun(
 
   // --- accountability records (ADR-0182 D4): one feedback item that became a closed incident ---
   await seedDemoAccountability(call, { ada, dana, avery }, useCaseId, report);
+  // ...and the work still in progress the G9 screens show: an open incident and two feedback items in Ada's queue
+  await seedDemoOpenAccountability(call, { ada, dana, avery }, useCaseId, report);
 
   // --- shadow AI evidence (imported, never claimed as discovered) --------------------------
   if (fixtures.shadowAi.length > 0) {
@@ -607,6 +609,139 @@ async function seedDemoAccountability(
     resolutionNote: "Confirmed and fixed under the linked incident; the scoring threshold was re-validated.",
   }, dana.auth);
   if (!ok(resolved.status)) fail("demo feedback resolve", resolved);
+}
+
+/** the open demo incident (idempotency key: this title on the use case below) */
+export const DEMO_OPEN_INCIDENT_TITLE = "Fraud engine blocked more legitimate card payments after the merchant-category update";
+/** the approved use case the G9 work in progress belongs to (Real-Time Fraud Detection Engine) */
+export const DEMO_OPEN_ACCOUNTABILITY_USE_CASE = "uc-6";
+
+/**
+ * The G9 screens (owner, 2026-10-19: "Seed demo data for the G9 screens"). The story above ends closed and resolved,
+ * and both screens hide finished work by default (Incidents shows "active", Feedback shows "open"), so they showed
+ * empty states. This adds the work still in progress on the Real-Time Fraud Detection Engine:
+ *  - an OPEN incident, medium and not serious (so it holds no deploy gate and starts no clock), owned by Dana, with
+ *    two timeline notes and an open corrective action;
+ *  - a problem report from Avery, still `received`, which Dana (the use case's owner) hands to Ada;
+ *  - an appeal from Avery against a decision of the engine, `acknowledged` by Dana and handed to Ada, who did not
+ *    make the decision, for an independent answer.
+ * Every step is a real, audited API call. Idempotent and convergent: an existing record is found by its key (the
+ * incident's title; the submitter, kind and use case of a feedback item, whose body is sealed) and only a missing
+ * step is taken.
+ */
+async function seedDemoOpenAccountability(
+  call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
+  who: { ada: { id: string; auth: Headers }; dana: { id: string; auth: Headers }; avery: { id: string; auth: Headers } },
+  useCaseId: Map<string, string>,
+  report: DemoSeedReport,
+): Promise<void> {
+  const ok = (s: number) => s >= 200 && s < 300;
+  const fail = (what: string, r: { status: number; body: Json }): void => {
+    report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
+  };
+  const uc = useCaseId.get(DEMO_OPEN_ACCOUNTABILITY_USE_CASE);
+  if (!uc) {
+    report.notes.push(`G9 records: use case '${DEMO_OPEN_ACCOUNTABILITY_USE_CASE}' not seeded`);
+    return;
+  }
+  const { ada, dana, avery } = who;
+
+  // 1. the open incident
+  const existing: Json[] = (await call("GET", `/v1/incidents?useCaseId=${uc}`, undefined, ada.auth)).body.incidents ?? [];
+  let incident = existing.find((i) => i.title === DEMO_OPEN_INCIDENT_TITLE);
+  if (incident) report.skipped.push("open demo incident");
+  else {
+    const r = await call("POST", "/v1/incidents", {
+      title: DEMO_OPEN_INCIDENT_TITLE,
+      summary:
+        "After the merchant-category table was updated, the engine declined noticeably more legitimate card payments " +
+        "at travel and event merchants. Customers were inconvenienced; no funds were lost (synthetic demo record).",
+      severity: "medium",
+      detectionSource: "monitor_alert",
+      sourceRef: "Monitor: decline-rate drift on the fraud engine (synthetic)",
+      useCaseId: uc,
+      ownerUserId: dana.id,
+    }, dana.auth);
+    if (!ok(r.status)) return fail("open demo incident", r);
+    incident = (r.body.incident as Json | undefined) ?? r.body;
+    const inc = `/v1/incidents/${incident!.id}`;
+    for (const note of [
+      "Triage: the rise started with the merchant-category update; the previous table is kept for comparison.",
+      "Interim measure: declines at the affected merchant categories now go to a person for review before the card is frozen.",
+    ]) {
+      const n = await call("POST", `${inc}/events`, { note }, dana.auth);
+      if (!ok(n.status)) fail("open demo incident note", n);
+    }
+    report.created.push("incident: open, medium, with an interim measure on its timeline");
+  }
+  {
+    const inc = `/v1/incidents/${incident!.id}`;
+    const detail = await call("GET", inc, undefined, dana.auth);
+    if (!ok(detail.status)) return fail("open demo incident read", detail);
+    if (((detail.body.actions ?? []) as Json[]).length > 0) report.skipped.push("open demo incident action");
+    else {
+      const act = await call("POST", `${inc}/actions`, {
+        title: "Re-validate the decline threshold per merchant category against last quarter's confirmed fraud",
+        ownerUserId: dana.id,
+        dueAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      }, dana.auth);
+      if (ok(act.status)) report.created.push("incident action: open, due in a week");
+      else fail("open demo incident action", act);
+    }
+  }
+
+  // 2. the feedback items, each found by who filed what on this use case (its body is sealed)
+  const mine: Json[] =
+    (await call("GET", `/v1/feedback?scope=submitted&useCaseId=${uc}&status=all`, undefined, avery.auth)).body.items ?? [];
+  const items: Array<{ kind: "problem" | "appeal"; body: string; acknowledge: boolean; what: string }> = [
+    {
+      kind: "problem",
+      body:
+        "Synthetic demo report: my card was declined twice at the same hotel within an hour, and the decline message " +
+        "gave no reason or number to call.",
+      acknowledge: false,
+      what: "problem report",
+    },
+    {
+      kind: "appeal",
+      body:
+        "Synthetic demo appeal: the fraud engine froze my card after a payment to a conference venue. I contest that " +
+        "decision and ask for a person to review it and lift the freeze.",
+      acknowledge: true,
+      what: "appeal",
+    },
+  ];
+  for (const it of items) {
+    let item = mine.find((f) => f.kind === it.kind);
+    let changed = false;
+    if (!item) {
+      const r = await call("POST", `/v1/use-cases/${uc}/feedback`, { kind: it.kind, body: it.body }, avery.auth);
+      if (!ok(r.status)) {
+        fail(`G9 ${it.what}`, r);
+        continue;
+      }
+      item = r.body;
+      changed = true;
+    }
+    if (item!.resolvedAt) {
+      report.notes.push(`G9 ${it.what} is already resolved: it no longer shows in the open queue`);
+      continue;
+    }
+    // the owner acknowledges (the appeal) and hands each to Ada; an appeal goes to someone who did not make the decision
+    const patch: Json = {};
+    if (it.acknowledge && item!.status === "received") patch.status = "acknowledged";
+    if (item!.ownerUserId !== ada.id) patch.ownerUserId = ada.id;
+    if (Object.keys(patch).length > 0) {
+      const r = await call("PATCH", `/v1/feedback/${item!.id}`, patch, item!.ownerUserId === dana.id ? dana.auth : ada.auth);
+      if (!ok(r.status)) {
+        fail(`G9 ${it.what} routing`, r);
+        continue;
+      }
+      changed = true;
+    }
+    if (changed) report.created.push(`feedback: ${it.what} on the fraud engine, ${it.acknowledge ? "acknowledged" : "received"}, routed to Ada`);
+    else report.skipped.push(`G9 ${it.what}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

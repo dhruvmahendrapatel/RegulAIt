@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
-import { checkLiveDiscovery, fictionalDatasetMarkers, LIVE_DISCOVERY_BEATS, LIVE_LIST_CAP, runDemoCheck, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
+import { checkLiveDiscovery, fictionalDatasetMarkers, G9_BEAT, LIVE_DISCOVERY_BEATS, LIVE_LIST_CAP, runDemoCheck, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
 import { DEMO_SECURITY_LEAD } from "./demo-identity.js";
 import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME, shadowAiRemediationDefinition } from "./shadow-ai-remediation.js";
 
@@ -270,7 +270,8 @@ describe("runDemoCheck: the two modes", () => {
     for (const b of SHADOW_DISCOVERY_BEATS) expect(got.has(b), b).toBe(false);
     expect(got.has("1 Shadow AI")).toBe(false);
     // the governance beats stay
-    for (const b of ["0 Personas", "2 Register", "2 Approval gate", "3 Accountability", "3 Evidence"]) expect(got.has(b), b).toBe(true);
+    // ...including G9's open work: governance seed, which `demo:intake --live` loads too (not discovery data)
+    for (const b of ["0 Personas", "2 Register", "2 Approval gate", "3 Accountability", G9_BEAT, "3 Evidence"]) expect(got.has(b), b).toBe(true);
   });
 
   it("--live before the first scan: zero findings is not a FAIL of its own", async () => {
