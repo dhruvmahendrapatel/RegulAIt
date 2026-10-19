@@ -141,7 +141,7 @@ export const fmtWhen = (iso: string | null | undefined): string | null => fmtDat
 /**
  * One step as a sentence: what a graph node is called by assistive technology
  * and what the ordered list says. "Step 2 of 6: Model step 1. Done. Model:
- * claude-default. 2 Oct 2026, 15:25. Cost $0.0012."
+ * mock-balanced. 2 Oct 2026, 15:25. Cost $0.0012."
  */
 export function stepSentence(node: RunPathNode, index: number, total: number): string {
   const parts = [`Step ${index + 1} of ${total}: ${node.label}`, statusLabel(node.status)];

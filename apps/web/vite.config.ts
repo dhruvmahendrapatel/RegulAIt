@@ -12,8 +12,9 @@ export default defineConfig({
     outDir: "dist",
     sourcemap: false,
     chunkSizeWarningLimit: 900,
-    // every browser the build targets loads lazy chunks the same without it: the polyfill only prefetches
-    // <link rel="modulepreload"> on the few that lack it natively, and costs about 0.6 kB of the all-JS budget
+    // the polyfill only emulates <link rel="modulepreload"> on browsers without native support (older Firefox and
+    // Safari, which the default target still includes). Those still load every lazy chunk correctly, just without
+    // fetching its imports ahead; dropping it saves about 0.6 kB of the all-JS budget
     modulePreload: { polyfill: false },
     // ADR-0196 U4: the vendored logos (src/ui/logos/svg) stay files under /ui/assets instead of data: URIs inside
     // the JS, so a screen fetches only the marks it draws, as cacheable images, and parses no logo bytes as script
