@@ -107,10 +107,10 @@ export const BATCH4_REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
     "This rule can never be met: it needs more different approvers than its approver pool has (the person making the call never counts)",
   approval_requires_individual_signature:
     "This approval has to be signed on its own with a passkey — it can't be decided in bulk",
-  chatops_step_up_required: "This approval can't be decided from chat — open it in RegulAIt and confirm it's you there",
+  chatops_step_up_required: "This approval can't be decided from chat — open it in regulAIt and confirm it's you there",
   sso_reauth_stale: "Your sign-in at your identity provider wasn't fresh — sign in again when asked, then try again",
   sso_reauth_identity_mismatch:
-    "You signed in at your identity provider as someone other than the person using RegulAIt — sign in as yourself and try again",
+    "You signed in at your identity provider as someone other than the person using regulAIt — sign in as yourself and try again",
   passkey_signature_required: "Approving this call needs your passkey signature over it",
   passkey_signature_invalid: "Your passkey signature couldn't be verified — try again with the passkey registered to your account",
   passkey_challenge_expired: "The signing request expired — start again",
@@ -134,10 +134,10 @@ export const BATCH4_REFUSAL_SENTENCES: Readonly<Record<string, string>> = {
     "You can't decide this call: only an active account that already existed when it was queued can — someone who was an approver then must decide it",
   // ADR-0186 A (slice A1): the passkey and step-up ceremonies
   passkey_attestation_refused:
-    "That passkey sent manufacturer details RegulAIt doesn't accept — try again, or use a different passkey",
+    "That passkey sent manufacturer details regulAIt doesn't accept — try again, or use a different passkey",
   passkey_already_registered: "That passkey is already registered",
   fresh_sign_in_required: "Adding your first passkey needs a fresh sign-in — sign out, sign in again, then add it",
-  browser_session_required: "This can only be done by a person signed in to RegulAIt in a browser",
+  browser_session_required: "This can only be done by a person signed in to regulAIt in a browser",
   unknown_challenge: "That request isn't known for this session — start again",
   unknown_step_up: "That confirmation request isn't known for this session — start again",
   step_up_action_too_large: "This action can't be confirmed — its details are larger than any action has",

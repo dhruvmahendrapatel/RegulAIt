@@ -39,8 +39,8 @@ export const shortId = (id: string) => id.slice(0, 8) + "…";
  * reader can scan: separators become spaces, "signoff" becomes "sign-off", first letter up.
  * Display only — never parse the result back. */
 const ACRONYMS: Record<string, string> = {
-  ai: "AI", api: "API", aws: "AWS", byoc: "BYOC", dlp: "DLP", eu: "EU", gcp: "GCP", hipaa: "HIPAA",
-  id: "ID", iso: "ISO", llm: "LLM", mcp: "MCP", mrm: "MRM", nist: "NIST", openai: "OpenAI", pci: "PCI",
+  ai: "AI", api: "API", aws: "AWS", byoc: "BYOC", cli: "CLI", dlp: "DLP", eu: "EU", gcp: "GCP", github: "GitHub", hipaa: "HIPAA",
+  id: "ID", ide: "IDE", iso: "ISO", llm: "LLM", mcp: "MCP", mrm: "MRM", nist: "NIST", openai: "OpenAI", pci: "PCI",
   phi: "PHI", pii: "PII", saas: "SaaS", sdk: "SDK", sla: "SLA", soc: "SOC", sso: "SSO", url: "URL", usd: "USD",
 };
 
@@ -53,6 +53,10 @@ export function humanize(id: string | null | undefined): string {
     .replace(/\b[a-z]+\b/gi, (w) => ACRONYMS[w.toLowerCase()] ?? w);
   return words.replace(/^./, (c) => c.toUpperCase());
 }
+
+/** a product id (`github-copilot`) as a name (`GitHub Copilot`): every word capitalised. Display only. */
+export const titleWords = (id: string) =>
+  id.split(/[-_.\s]+/).filter(Boolean).map((w) => ACRONYMS[w.toLowerCase()] ?? w[0]!.toUpperCase() + w.slice(1)).join(" ");
 
 /** `n thing` / `n things` — the UI never writes "thing(s)" */
 export function plural(n: number, one: string, many = `${one}s`): string {
@@ -114,13 +118,24 @@ export function evidenceLabel(kind: string): string {
   return EVIDENCE_LABELS[kind] ?? humanize(kind);
 }
 
-/** an audit/event timestamp on one line: `2026-10-02 15:25` (local time) */
-export function fmtAt(iso: string | Date): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
+/** the product's copy is British English, so its dates are too: en-GB formatters, never the browser's default
+ * (`10/26/2026, 12:11:07 AM` next to "organisation" reads as two products) */
+const enGB = (extra: Intl.DateTimeFormatOptions) => {
+  const f = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", ...extra });
+  return (iso: string | number | Date | null | undefined, fallback = "—"): string => {
+    const d = new Date(iso ?? NaN);
+    return iso === "" || Number.isNaN(d.getTime()) ? fallback : f.format(d);
+  };
+};
+
+/** a timestamp as `26 Oct 2026, 00:11` (local time); `fallback` for a missing or unreadable value */
+export const fmtDateTime = enGB({ hour: "2-digit", minute: "2-digit" });
+
+/** an audit/event timestamp on one line, in the same form; an unreadable value is shown as it is */
+export const fmtAt = (iso: string | Date): string => fmtDateTime(iso, String(iso));
+
+/** "3 Oct 2026" — a date a reader scans in a column, never a timestamp (UTC, so a stored day never shifts) */
+export const fmtDay = enGB({ timeZone: "UTC" });
 
 /** the nil UUID is the gateway's own actor (monitor, scheduler, unauthenticated refusals) */
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";

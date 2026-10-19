@@ -6,6 +6,7 @@
  * alternative) is unit-tested without a browser.
  */
 import type { Tone } from "../kit";
+import { fmtDateTime } from "../../api/format";
 
 export type RunPathKind = "builder_turn" | "orchestration" | "use_case";
 export type RunPathStatus =
@@ -134,19 +135,13 @@ export function fmtCost(usd: number | null | undefined): string | null {
   return "$" + usd.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-/** an ISO time as `2026-10-02 15:25` (local) */
-export function fmtWhen(iso: string | null | undefined): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
+/** an ISO time as `2 Oct 2026, 15:25` (local), or null */
+export const fmtWhen = (iso: string | null | undefined): string | null => fmtDateTime(iso, "") || null;
 
 /**
  * One step as a sentence: what a graph node is called by assistive technology
  * and what the ordered list says. "Step 2 of 6: Model step 1. Done. Model:
- * claude-default. 2026-10-02 15:25. Cost $0.0012."
+ * mock-balanced. 2 Oct 2026, 15:25. Cost $0.0012."
  */
 export function stepSentence(node: RunPathNode, index: number, total: number): string {
   const parts = [`Step ${index + 1} of ${total}: ${node.label}`, statusLabel(node.status)];

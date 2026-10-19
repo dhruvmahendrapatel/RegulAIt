@@ -31,6 +31,7 @@ import a from "../admin.module.css";
 import v from "../../views.module.css";
 import { putOrgSettings, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { fmtDateTime } from "../../../api/format";
 
 export default function SsoPage() {
   return (
@@ -790,7 +791,7 @@ function LinkRequestsCard() {
           { key: "provider", header: "Identity provider", render: (r) => `${r.provider} (${r.protocol.toUpperCase()})` },
           { key: "email", header: "Asserted email", render: (r) => <span className={v.mono}>{r.email}</span> },
           { key: "mfa", header: "MFA", render: (r) => (r.idpMfa ? <Badge tone="ok">asserted</Badge> : <Badge>not asserted</Badge>) },
-          { key: "when", header: "Requested", render: (r) => new Date(r.createdAt).toLocaleString() },
+          { key: "when", header: "Requested", render: (r) => fmtDateTime(r.createdAt) },
           {
             key: "approvals",
             header: "Approvals",
