@@ -8,9 +8,11 @@
  * trust). Full-page shots at 1440x900, light theme; the opening Shadow-AI screens in dark as well. The pack is
  * uploaded as the `demo-screens` artifact on every run (`.github/workflows/demo.yml`).
  *
- * The QA pass is machine-checkable only: every screen's text is scanned for leaks ("undefined", "NaN",
- * "[object Object]", secret-shaped values) and the signed-in persona's name, and the spec fails on any console error
- * or uncaught page error. Raw ids, ISO timestamps, truncated text and horizontal overflow are recorded per screen in
+ * The QA pass is machine-checkable only: every screen's text, and every input and textarea value, is scanned for
+ * leaks ("undefined", "NaN", "[object Object]", secret-shaped values including this product's own token prefixes) and
+ * the signed-in persona's name, and the spec fails on any console error or uncaught page error. A 4xx console line is
+ * ignored only for a path the walk reaches on purpose (`EXPECTED_4XX`), and every ignored line is kept in
+ * `qa-report.json`. Raw ids, ISO timestamps, truncated text and horizontal overflow are recorded per screen in
  * `qa-report.json` for the human review in `docs/product/DEMO_SCREENS_QA_2026-11-01.md`, never asserted: some ids
  * are shown on purpose (a workflow id in a status line).
  *
@@ -31,6 +33,7 @@ const BASE_URL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const VIEWPORT = { width: 1440, height: 900 };
 
 const ADMIN_PASSWORD = disposablePassword("E2E_DEMO_ADMIN_PASSWORD");
+const AVERY_PASSWORD = disposablePassword("E2E_DEMO_AVERY_PASSWORD");
 const MORGAN_PASSWORD = disposablePassword("E2E_DEMO_MORGAN_PASSWORD");
 const REMEDIATION_REPO = "gitlab:acme-bank-demo/credit-memo-assistant";
 const LIVE_FINDING = /branch-faq-bot/;
@@ -38,14 +41,32 @@ const LIVE_FINDING = /branch-faq-bot/;
 type Check = { name: string; persona: string; url: string; files: string[]; leaks: string[]; ids: string[]; isoTimestamps: string[]; truncated: string[]; overflowX: number; empty: string[]; personaShown: boolean; notes: string[] };
 const report: Check[] = [];
 const consoleProblems: string[] = [];
+const ignoredConsole: string[] = [];
 
-/** every console error and uncaught error, per persona; a 4xx resource line is the expected answer to a probe */
+/**
+ * The API paths whose 4xx the walk causes on purpose, so the browser's "Failed to load resource" line for them is
+ * not a defect: the step-up refusal (403 step_up_required) a protected write answers before `settleWithStepUp`
+ * steps up and retries it. Any other 4xx, an asset's included, fails the walk.
+ */
+const EXPECTED_4XX: RegExp[] = [
+  /^\/v1\/workflows\/instances$/, // S3 Start and link: the workflow
+  /^\/v1\/shadow-ai\/findings\/[^/]+\/remediate$/, // S3 Start and link: the link to the finding
+  /^\/v1\/approvals\/[^/]+\/decide$/, // S3 Morgan's sign-off
+];
+
+/** every console error and uncaught error, per persona; a 4xx line is ignored (and recorded) only for EXPECTED_4XX */
 function watch(page: Page, persona: string) {
   page.on("console", (msg) => {
     if (msg.type() !== "error") return;
     const text = msg.text();
-    if (/^Failed to load resource: the server responded with a status of 4\d\d/.test(text)) return;
-    consoleProblems.push(`${persona} ${page.url()}: ${text}`);
+    const from = msg.location().url;
+    const where = from ? new URL(from, BASE_URL).pathname : "";
+    const line = `${persona} ${new URL(page.url()).pathname}: ${text}${where ? ` (${where})` : ""}`;
+    if (/^Failed to load resource: the server responded with a status of 4\d\d/.test(text) && EXPECTED_4XX.some((re) => re.test(where))) {
+      ignoredConsole.push(line);
+      return;
+    }
+    consoleProblems.push(line);
   });
   page.on("pageerror", (err) => consoleProblems.push(`${persona} ${page.url()}: uncaught ${err.message}`));
 }
@@ -80,6 +101,10 @@ const SECRET_SHAPES = [
   /\bgh[pousr]_[0-9A-Za-z]{36}\b/, // GitHub token
   /\bsk-[0-9A-Za-z_-]{20,}\b/, // provider API key
   /\botpauth:\/\/\S+/, // an authenticator secret
+  // this product's own: API key, virtual key, session, feedback link, SCIM, step-up, endpoint bulk token and ticket,
+  // engine enrolment token and runner key. The prefixes are not all exported from @regulait/shared (several live in
+  // apps/gateway), so they are listed here; `packages/shared/src/guardrails.ts` holds the DLP form of the same set.
+  /\brg(?:l|lv|ls|lf|lscim|su|ea|at|ee|ek)_[0-9A-Za-z_-]{16,}/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 
@@ -95,6 +120,11 @@ async function capture(page: Page, persona: { key: string; displayName: string }
   }
   await setTheme(page, "light");
   const seen = await page.evaluate(() => {
+    // a secret shown in a read-only field is in its value, not in innerText
+    const fields = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"))
+      .filter((el) => el.type !== "password")
+      .map((el) => el.value)
+      .filter(Boolean);
     const text = document.body.innerText;
     const truncated = Array.from(document.querySelectorAll("body *"))
       .filter((el) => {
@@ -107,11 +137,12 @@ async function capture(page: Page, persona: { key: string; displayName: string }
       .slice(0, 25)
       .map((el) => (el.textContent ?? "").trim().slice(0, 90));
     const empty = Array.from(document.querySelectorAll('[class*="_emptyTitle_"]')).map((el) => (el.textContent ?? "").trim());
-    return { text, truncated, empty, overflowX: document.documentElement.scrollWidth - window.innerWidth };
+    return { text, fields: fields.join("\n"), truncated, empty, overflowX: document.documentElement.scrollWidth - window.innerWidth };
   });
   const leaks = [
     ...[/\bundefined\b/, /\bNaN\b/, /\[object Object\]/].flatMap((re) => (re.test(seen.text) ? [`"${re.source}"`] : [])),
     ...SECRET_SHAPES.flatMap((re) => (re.test(seen.text) ? [`secret-shaped: ${re.source}`] : [])),
+    ...SECRET_SHAPES.flatMap((re) => (re.test(seen.fields) ? [`secret-shaped field value: ${re.source}`] : [])),
   ];
   const uniq = (xs: string[]) => [...new Set(xs)].slice(0, 12);
   const check: Check = {
@@ -147,9 +178,20 @@ async function personaPage(browser: Browser, persona: string) {
 
 const ADA = { key: "ada", displayName: "Ada Admin" };
 const MORGAN = { key: "morgan", displayName: "Morgan Reyes" };
+const AVERY = { key: "avery", displayName: "Avery Approver" };
+
+/** the AI-policy acknowledgement gate a persona's first sign-in can meet: acknowledge, or defer what stays open */
+async function passPolicyGate(page: Page, gate: ReturnType<Page["getByRole"]>) {
+  if (!(await gate.isVisible())) return;
+  for (const box of await gate.getByRole("checkbox").all()) await box.check();
+  for (const button of await gate.getByRole("button", { name: "Acknowledge" }).all()) await button.click();
+  // the gate closes once nothing is outstanding; if a document stays open it is deferred, never forced
+  if (!(await gate.waitFor({ state: "hidden", timeout: 5_000 }).then(() => true, () => false))) await gate.getByRole("button", { name: "Not now" }).click();
+  await expect(gate).toBeHidden();
+}
 
 test.afterAll(() => {
-  writeFileSync(path.join(SHOTS, "qa-report.json"), JSON.stringify({ screens: report, consoleProblems }, null, 2));
+  writeFileSync(path.join(SHOTS, "qa-report.json"), JSON.stringify({ screens: report, consoleProblems, ignoredConsole }, null, 2));
   // the job log carries the summary, so the QA review does not depend on opening the artifact
   for (const c of report) {
     console.log(
@@ -162,6 +204,7 @@ test.afterAll(() => {
     );
   }
   for (const p of consoleProblems) console.log(`[demo-screens] console: ${p}`);
+  for (const p of ignoredConsole) console.log(`[demo-screens] console (expected 4xx, ignored): ${p}`);
 });
 
 test("2026-11-01 demo screens, in script order: Shadow AI, then governance", async ({ browser }) => {
@@ -174,6 +217,9 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S1 discovery sources", async () => {
     await ada.goto("/ui/admin/shadow-ai/discovery-sources");
     await expect(ada.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
+    // W2: with the one endpoint agent source, its device table shows without a click, counted in words
+    await expect(ada.getByRole("columnheader", { name: "Users (self-reported)" })).toBeVisible();
+    await expect(ada.getByText(/^1 device, 0 revoked, /)).toBeVisible();
     await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true });
   });
 
@@ -205,6 +251,8 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await ada.getByRole("button", { name: `Remediation plan for ${REMEDIATION_REPO}` }).click();
     await expect(ada.getByTestId("shadow-remediation")).toBeVisible();
     await ada.getByTestId("shadow-remediation").scrollIntoViewIfNeeded();
+    // W3: the linked workflow's status reads in words, never "blocked on_approval"
+    await expect(ada.getByTestId("shadow-remediation")).toContainText("blocked on approval");
     await capture(ada, ADA, "ds-s3a-remediation-plan-seeded", { dark: true });
   });
 
@@ -271,11 +319,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     expect(ok, "demo:prepare's output names Morgan (the second admin)").toBe(true);
     if (await gate.isVisible()) {
       await capture(morgan, MORGAN, "ds-s3g2-morgan-policy-gate", { notes: ["Morgan's first sign-in: the AI-policy acknowledgement gate"] });
-      for (const box of await gate.getByRole("checkbox").all()) await box.check();
-      for (const button of await gate.getByRole("button", { name: "Acknowledge" }).all()) await button.click();
-      // the gate closes once nothing is outstanding; if a document stays open it is deferred, never forced
-      if (!(await gate.waitFor({ state: "hidden", timeout: 5_000 }).then(() => true, () => false))) await gate.getByRole("button", { name: "Not now" }).click();
-      await expect(gate).toBeHidden();
+      await passPolicyGate(morgan, gate);
     }
     await morgan.goto("/ui/inbox");
     await expect(morgan.getByRole("heading", { name: "Inbox" })).toBeVisible();
@@ -305,6 +349,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   });
 
   // ---------------------------------------------------------------- Act 2: govern it
+  let recordId: string | null = null;
   await test.step("G1 the use-case registry and record", async () => {
     await ada.goto("/ui/admin/use-cases");
     await expect(ada.getByRole("heading", { name: "AI registry" })).toBeVisible();
@@ -312,9 +357,36 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     const list = (await (await ada.request.get("/v1/use-cases")).json()) as { useCases: Array<{ id: string; name: string }> };
     const record = list.useCases.find((u) => u.name.startsWith("Govern ")) ?? list.useCases[0];
     expect(record, "the registry has a use case").toBeTruthy();
-    await ada.goto(`/ui/admin/governance/use-cases/${record!.id}`);
+    recordId = record!.id;
+    await ada.goto(`/ui/admin/governance/use-cases/${recordId}`);
     await expect(ada.getByText("Lifecycle tracker")).toBeVisible();
     await capture(ada, ADA, "ds-g1b-use-case-record");
+  });
+
+  await test.step("G2 Avery's independent review: Approve with conditions (captured, not submitted)", async () => {
+    const avery = await personaPage(browser, "avery");
+    const gate = avery.getByRole("region", { name: "AI policy acknowledgement" });
+    const ok = await signInPrepared(avery, PERSONA_EMAIL.avery, AVERY_PASSWORD, avery.getByRole("heading", { name: /Welcome back/ }).or(gate));
+    expect(ok, "demo:prepare's output names Avery").toBe(true);
+    await passPolicyGate(avery, gate);
+    await avery.goto("/ui/inbox");
+    await expect(avery.getByRole("heading", { name: "Inbox" })).toBeVisible();
+    await capture(avery, AVERY, "ds-g2a-avery-inbox");
+    const review = avery.getByRole("button", { name: /^Review sign-off for / });
+    // the 10-05 journey decides its own registration, so a pending sign-off is not guaranteed here: record it
+    if ((await review.count()) === 0) {
+      report.at(-1)!.notes.push("no use-case sign-off pending for Avery: the review dialog was not captured");
+    } else {
+      await review.last().click();
+      const dialog = avery.getByRole("dialog", { name: "Review use case sign-off" });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("radio", { name: "Approve with conditions" }).check();
+      await expect(dialog.getByRole("group", { name: "Condition 1" })).toBeVisible();
+      await capture(avery, AVERY, "ds-g2b-avery-review-conditions", { notes: ["Approve with conditions chosen, not submitted"] });
+      await dialog.getByRole("button", { name: "Close review" }).click();
+      await expect(dialog).toBeHidden();
+    }
+    await avery.context().close();
   });
 
   const pages: Array<[string, string, string]> = [
@@ -324,16 +396,26 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     ["G7 regulatory intelligence", "/ui/admin/governance/regulatory", "Regulatory & policy intelligence"],
     ["G8 evidence: the audit log and signed export", "/ui/admin/audit", "Audit log"],
     ["posture", "/ui/admin/posture", "Posture"],
-    ["G10 content trust", "/ui/admin/content-trust", "Content trust"],
+    ["G9 incidents", "/ui/incidents", "AI incidents"],
+    ["G9 feedback", "/ui/feedback", "Feedback and appeals"],
   ];
-  for (const [beat, url, heading] of pages) {
+  const shoot = async ([beat, url, heading]: [string, string, string]) => {
     await test.step(beat, async () => {
       await ada.goto(url);
       await expect(ada.getByRole("heading", { name: heading, exact: true })).toBeVisible();
       if (url.endsWith("/audit")) await expect(ada.getByRole("button", { name: "Download signed bundle" })).toBeVisible();
       await capture(ada, ADA, `ds-${beat.split(" ")[0]!.toLowerCase()}-${url.split("/").pop()}`);
     });
-  }
+  };
+  for (const p of pages) await shoot(p);
+  await test.step("G9 the use case's Decision records tab", async () => {
+    expect(recordId, "G1 opened a use-case record").toBeTruthy();
+    await ada.goto(`/ui/admin/governance/use-cases/${recordId}`);
+    await ada.getByRole("tab", { name: "Decision records" }).click();
+    await expect(ada.getByText("Decision records").last()).toBeVisible();
+    await capture(ada, ADA, "ds-g9-decision-records");
+  });
+  await shoot(["G10 content trust", "/ui/admin/content-trust", "Content trust"]);
   await ada.context().close();
 
   expect(consoleProblems, "console errors and uncaught page errors across the walk").toEqual([]);
