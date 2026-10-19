@@ -635,26 +635,40 @@ async function ensurePolicyLibrary(h: Harness, data: DemoShadowDiscoveryDataset,
 // the two phases
 // ---------------------------------------------------------------------------
 
+/**
+ * The fictional provider the Shadow AI import example names (owner decision on #453): a real vendor never appears in
+ * the demo's own sample evidence, and the dry run still shows a match. Created once: a rerun neither rewrites the row
+ * (no audit row, no `lastUpdatedAt` bump) nor undoes an admin's edit, as the shipped `/seed` route behaves.
+ */
+async function ensureExampleSignature(h: Harness, data: DemoShadowDiscoveryDataset) {
+  const { provider, host } = data.importExample;
+  const label = `catalogue entry '${host}' (${provider}, fictional)`;
+  const cat = await h.call("GET", "/v1/shadow-ai/catalogue");
+  if (!h.ok(cat.status)) return h.fail("read the signature catalogue", cat);
+  const rows: Json[] = cat.body.signatures ?? [];
+  if (rows.some((r) => r.kind === "hostname" && String(r.value).toLowerCase() === host.toLowerCase())) {
+    h.report.skipped.push(label);
+    return;
+  }
+  const r = await h.call("POST", "/v1/shadow-ai/catalogue", {
+    provider,
+    kind: "hostname",
+    value: host,
+    matchType: "exact_host",
+    provenance: "demo dataset (fictional provider)",
+    note: "Fictional provider for the Shadow AI import example. Not a real vendor.",
+  });
+  if (h.ok(r.status)) h.report.created.push(label);
+  else h.fail("catalogue fictional demo provider", r);
+}
+
 async function ensureDiscovery(h: Harness, db: Db, data: DemoShadowDiscoveryDataset, opts: ShadowSeedOptions, allowStepUps: boolean) {
   // the catalogues the matcher reads: the shadow-AI signatures (including the cloud rows) and SD3's endpoint rows
   for (const url of ["/v1/shadow-ai/catalogue/seed", "/v1/discovery/endpoint-signatures/seed"]) {
     const r = await h.call("POST", url, {});
     if (!h.ok(r.status)) h.fail(`catalogue ${url}`, r);
   }
-  // the fictional provider the Shadow AI import example names (owner decision on #453): a real vendor never appears in
-  // the demo's own sample evidence, and the dry run still shows a match. The route upserts on kind + value, so a rerun
-  // leaves one row.
-  {
-    const r = await h.call("POST", "/v1/shadow-ai/catalogue", {
-      provider: "Acme LLM",
-      kind: "hostname",
-      value: "api.acme-llm.example",
-      matchType: "exact_host",
-      provenance: "demo dataset (fictional provider)",
-      note: "Fictional provider for the Shadow AI import example. Not a real vendor.",
-    });
-    if (!h.ok(r.status)) h.fail("catalogue fictional demo provider", r);
-  }
+  await ensureExampleSignature(h, data);
   const sources = new Map<string, Json>();
   for (const spec of demoSourceSpecs(data)) {
     const s = await ensureSource(h, spec, allowStepUps);

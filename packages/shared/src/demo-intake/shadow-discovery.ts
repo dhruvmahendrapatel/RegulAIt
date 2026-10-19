@@ -113,6 +113,11 @@ export interface DemoShadowDiscoveryDataset {
    * endpoint catalogue has no CLI row for it, so the gateway drops it as unmatched (counted, never stored).
    */
   presenceSignatures: string[];
+  /**
+   * the fictional provider the Shadow AI import example names (owner decision on #453): the seeder catalogues its host
+   * so the example's dry run matches on the fallback stack. The SPA mirrors it (`shadowAiExample.ts`, pinned by its test).
+   */
+  importExample: { provider: string; host: string };
 }
 
 const SUFFIX = " (demo dataset)";
@@ -299,4 +304,5 @@ export const DEMO_SHADOW_DISCOVERY: DemoShadowDiscoveryDataset = {
     objects: ["lending-policy", "complaints-handling-policy"],
   },
   presenceSignatures: ["env.anthropic.api-key"],
+  importExample: { provider: "Acme LLM", host: "api.acme-llm.example" },
 };
