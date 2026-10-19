@@ -45,10 +45,11 @@ const ignoredConsole: string[] = [];
 
 /**
  * The API paths whose 4xx the walk causes on purpose, so the browser's "Failed to load resource" line for them is
- * not a defect: the step-up refusal (403 step_up_required) a protected write answers before `settleWithStepUp`
- * steps up and retries it. Any other 4xx, an asset's included, fails the walk.
+ * not a defect: the signed-out session probe, and the step-up refusal (403 step_up_required) a protected write
+ * answers before `settleWithStepUp` steps up and retries it. Any other 4xx, an asset's included, fails the walk.
  */
 const EXPECTED_4XX: RegExp[] = [
+  /^\/auth\/me$/, // the SPA's session probe on the sign-in screen answers 401 before anyone signs in
   /^\/v1\/workflows\/instances$/, // S3 Start and link: the workflow
   /^\/v1\/shadow-ai\/findings\/[^/]+\/remediate$/, // S3 Start and link: the link to the finding
   /^\/v1\/approvals\/[^/]+\/decide$/, // S3 Morgan's sign-off
@@ -218,8 +219,9 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await ada.goto("/ui/admin/shadow-ai/discovery-sources");
     await expect(ada.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
     // W2: with the one endpoint agent source, its device table shows without a click, counted in words
-    await expect(ada.getByRole("columnheader", { name: "Users (self-reported)" })).toBeVisible();
     await expect(ada.getByText(/^1 device, 0 revoked, /)).toBeVisible();
+    await expect(ada.getByText("Users (self-reported)", { exact: true })).toBeVisible();
+    await expect(ada.getByText(/^psn:[0-9a-f]+$/).first()).toBeVisible();
     await capture(ada, ADA, "ds-s1-discovery-sources", { dark: true });
   });
 
