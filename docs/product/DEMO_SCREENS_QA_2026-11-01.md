@@ -9,18 +9,17 @@ is terminal output and is not in this pack (see Unverified). Decision record: AD
 PNGs at 1440x900, light theme; S1, S2 and S3a also in dark. The spec fails on console errors, uncaught page errors,
 `undefined` / `NaN` / `[object Object]` or secret-shaped text, horizontal page scroll, and a missing persona name.
 The secret scan covers the page text and every input and textarea value, and includes this product's own token
-prefixes (`rgl_`, `rglv_`, `rgls_`, `rglf_`, `rglscim_`, `rgsu_`, `rgea_`, `rgat_`, `rgee_`, `rgek_`). A 4xx console
+prefixes (`rgl_`, `rglv_`, `rgls_`, `rglf_`, `rglscim_`, `rglwh_`, `rgsu_`, `rgea_`, `rgat_`, `rgee_`, `rgek_`). A 4xx console
 line is ignored only for the step-up retries the walk makes on purpose (`EXPECTED_4XX` in the spec), and every ignored
 line is listed in `qa-report.json` (`ignoredConsole`). The spec also asserts the S1 device table with "1 device" and
 "blocked on approval" on S3a. It records raw ids, ISO timestamps, truncated text and empty states per screen in
 `qa-report.json`.
 
-**Pack of record:** workflow run `39177579271` (head `6df1b58`), artifact `demo-screens` (id `12155450893`), 30
-files, ~25 MB. The PNGs are not committed: most are over 300 KB and the S2/S3 pages are ~15,000 px tall. That
-artifact was uploaded with 14-day retention (it expires 2026-11-01 23:47 UTC). Packs from later runs keep 30 days,
-so take the deck from the latest green `Demo journey` run on `main` before rehearsal.
+**Pack of record:** workflow run `39242692026` (head `f3872428`), artifact `demo-screens` (id `12182267171`), 34
+files, ~27 MB. The PNGs are not committed: most are over 300 KB and the S2/S3 pages are ~15,000 px tall. That
+artifact keeps 30 days, so take the deck from the latest green `Demo journey` run on `main` before rehearsal.
 
-**Automated result (run 39177579271):** 0 console errors, 0 uncaught errors, 0 text leaks, 0 secret-shaped values,
+**Automated result (run 39242692026):** 0 console errors, 0 uncaught errors, 0 text leaks, 0 secret-shaped values,
 0 horizontal page overflow, persona name shown on every screen (Ada Admin; Morgan Reyes on her screens).
 
 **State note:** the pack runs after the 10-05 journeys in the same job, so it shows their records too. Examples are
@@ -49,17 +48,17 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 | S4 Intake prefilled | `ds-s4-intake-prefilled-light.png` | pass | Banner, name `Govern gitlab:acme-bank-demo/credit-memo-assistant`, Similar use cases shown. Not submitted (the 10-05 journey drives the intake end to end). |
 | G1 Registry | `ds-g1a-registry-light.png` | pass | 13 use cases, tiles populated. Descriptions are ellipsised on purpose. |
 | G1 Use-case record | `ds-g1b-use-case-record-light.png` | pass | Govern Credit Team LLM Prototype: Approved, High, approval valid until, one before-go-live condition. |
-| G2 Avery's Inbox | `ds-g2a-avery-inbox-light.png` | to confirm | Added in the fix round; result from the next green run. |
-| G2 Review, Approve with conditions | `ds-g2b-avery-review-conditions-light.png` | to confirm | Approve with conditions chosen, dialog closed unsubmitted. Captured only if a use-case sign-off is still pending after the 10-05 journeys (recorded in `qa-report.json`). |
+| G2 Avery's Inbox | `ds-g2a-avery-inbox-light.png` | pass | Avery's pending use-case review is listed. |
+| G2 Review, Approve with conditions | `ds-g2b-avery-review-conditions-light.png` | pass | A sign-off was pending, so the dialog was captured with Approve with conditions chosen and closed unsubmitted. The Conditions fields sit below the dialog's own scroll, so the shot shows the chosen option and the "Conditions" heading but not Condition 1. |
 | G4 Trust & evidence | `ds-g4-trust-light.png` | pass | 40 risks, 80 % coverage. Safety reads 0 % (0/2 controls evidenced): a real gap, not an empty tile. |
 | G5 Alerts | `ds-g5-alerts-light.png` | pass | 24 open, 2 resolved (the journey's remediation). |
 | G6 Graph | `ds-g6-graph-light.png` | pass | 32 nodes, 19 propagated high. |
 | G7 Regulatory | `ds-g7-regulatory-light.png` | pass | 13 entries, 6 in force, 7 with control gaps. |
 | G8 Audit / signed export | `ds-g8-audit-light.png` | pass with findings | **Download signed bundle** present; Morgan's sign-off and acknowledgement rows at the top. Reason column clipped and ISO timestamps in reason text (F11). |
 | Posture | `ds-posture-posture-light.png` | pass with findings | Populated; internal references and "NOT tamper-resistant" on the executive page (F10). |
-| G9 Incidents | `ds-g9-incidents-light.png` | to confirm | |
-| G9 Feedback and appeals | `ds-g9-feedback-light.png` | to confirm | |
-| G9 Decision records tab | `ds-g9-decision-records-light.png` | to confirm | On the G1 record. |
+| G9 Incidents | `ds-g9-incidents-light.png` | pass | Empty state "No incidents". Decide whether the demo needs seeded incidents. |
+| G9 Feedback and appeals | `ds-g9-feedback-light.png` | pass | Empty state "Nothing routed to you". Decide whether the demo needs seeded feedback. |
+| G9 Decision records tab | `ds-g9-decision-records-light.png` | pass | On the G1 record: one record, approved by Avery Approver, digests shown. |
 | G10 Content trust | `ds-g10-content-trust-light.png` | pass | One trusted connector, five provenance records. |
 
 ## Fixed in this PR (`apps/web`)

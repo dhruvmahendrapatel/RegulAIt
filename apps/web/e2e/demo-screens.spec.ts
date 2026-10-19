@@ -105,7 +105,7 @@ const SECRET_SHAPES = [
   // this product's own: API key, virtual key, session, feedback link, SCIM, step-up, endpoint bulk token and ticket,
   // engine enrolment token and runner key. The prefixes are not all exported from @regulait/shared (several live in
   // apps/gateway), so they are listed here; `packages/shared/src/guardrails.ts` holds the DLP form of the same set.
-  /\brg(?:l|lv|ls|lf|lscim|su|ea|at|ee|ek)_[0-9A-Za-z_-]{16,}/,
+  /\brg(?:l|lv|ls|lf|lscim|lwh|su|ea|at|ee|ek)_[0-9A-Za-z_-]{16,}/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 
