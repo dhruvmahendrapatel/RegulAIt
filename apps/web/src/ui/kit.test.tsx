@@ -5,7 +5,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
-import { EmptyState, Field, Fieldset, Input, RecordError, Table, Tabs, tabIds } from "./kit";
+import { Badge, Card, EmptyState, Field, Fieldset, InfoButton, Input, RecordError, RowActions, Table, Tabs, tabIds } from "./kit";
 // Digest lives with the BOM evidence panel; it is tested here with the other shared primitives
 import { Digest } from "../views/admin/governance/BomEvidencePanel";
 
@@ -204,5 +204,61 @@ describe("Digest — sighted users see a prefix, assistive tech gets the full va
     const html = renderToStaticMarkup(<Digest value="abc" />);
     expect(html).toContain('<span aria-hidden="true">abc…</span>');
     expect(html).toMatch(/<span style="[^"]*">abc<\/span>/);
+  });
+});
+
+describe("InfoTip slots — every (i) is a real, named button (X1)", () => {
+  it("names the Card title's (i) after the title and keeps it out of the heading text", () => {
+    const html = renderToStaticMarkup(<Card title="Coverage" info="What each evidence class can see.">body</Card>);
+    expect(html).toContain('aria-label="What is Coverage?"');
+    expect(html).toContain('aria-expanded="false"');
+  });
+
+  it("puts a column header's (i) inside the header cell, named by the header", () => {
+    const html = render({
+      columns: [{ key: "confidence", header: "Confidence", info: "How sure the match is.", render: (r: Row) => r.name }],
+      rows: [{ id: "1", name: "high" }],
+    });
+    expect(html).toMatch(/<th[^>]*>Confidence<span[^>]*><button[^>]*aria-label="What is Confidence\?"/);
+  });
+
+  it("gives a Badge's explanation a focusable button instead of a hover-only title (X2)", () => {
+    const html = renderToStaticMarkup(<Badge tone="warn" info="A recorded reason is required.">Your own request</Badge>);
+    expect(html).toContain('aria-label="What is Your own request?"');
+    expect(html).not.toContain("title=");
+  });
+
+  it("renders a closed InfoButton without its panel", () => {
+    const html = renderToStaticMarkup(<InfoButton label="residual risk" term="Residual risk">After controls.</InfoButton>);
+    expect(html).not.toContain('role="note"');
+  });
+});
+
+describe("Card contain — a long body scrolls in a named, focusable region (X6)", () => {
+  it("wraps the body in a keyboard-scrollable region named after the card", () => {
+    const html = renderToStaticMarkup(<Card title="Findings" contain>rows</Card>);
+    expect(html).toMatch(/<div[^>]*tabindex="0"[^>]*role="region"[^>]*aria-label="Findings, scrollable"/);
+  });
+
+  it("offers Expand only once the box is known to overflow, so short cards look as they did", () => {
+    const html = renderToStaticMarkup(<Card title="Findings" contain>rows</Card>);
+    expect(html).not.toContain(">Expand<");
+  });
+
+  it("leaves a card without contain exactly as before", () => {
+    const html = renderToStaticMarkup(<Card title="Findings">rows</Card>);
+    expect(html).not.toContain('role="region"');
+  });
+});
+
+describe("RowActions — fixed slots keep every row's primary button in one column (X7)", () => {
+  it("keeps the primary slot even when a row has no primary action", () => {
+    const html = renderToStaticMarkup(<RowActions secondary={<button>Triage</button>} />);
+    expect(html).toMatch(/^<div[^>]*><span><\/span><span><button>Triage<\/button><\/span><span><\/span><\/div>$/);
+  });
+
+  it("uses one minimum width for the primary slot", () => {
+    const html = renderToStaticMarkup(<RowActions primary={<button>Plan remediation</button>} slot="11rem" />);
+    expect(html).toContain("grid-template-columns:minmax(11rem, max-content) auto auto");
   });
 });
