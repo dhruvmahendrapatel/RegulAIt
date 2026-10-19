@@ -752,7 +752,8 @@
   gap: var(--s1);
   padding: var(--s1-5) 0;
   border-top: 1px solid var(--border);
-  background: var(--rg-glass);
+  /* opaque: the alert detail scrolls beneath this bar inside the drawer */
+  background: var(--surface-1);
 }
 @media (max-width: 900px) {
   .ackFooter {

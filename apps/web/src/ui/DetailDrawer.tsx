@@ -29,6 +29,16 @@ export function DetailDrawer(props: {
   const { onClose } = props;
 
   useEffect(() => {
+    // the page reserves room for an open drawer (detailDrawer.module.css); counted, as two may be open at once
+    const root = document.documentElement;
+    root.dataset.rgDrawer = String(Number(root.dataset.rgDrawer ?? 0) + 1);
+    return () => {
+      const left = Number(root.dataset.rgDrawer ?? 1) - 1;
+      if (left > 0) root.dataset.rgDrawer = String(left);
+      else delete root.dataset.rgDrawer;
+    };
+  }, []);
+  useEffect(() => {
     opener.current = document.activeElement;
     return () => {
       const el = opener.current;

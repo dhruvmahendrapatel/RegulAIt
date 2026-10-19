@@ -1,7 +1,8 @@
 /* A1: the shared detail drawer. Same shape as the registry preview, so every row detail opens the same way. */
 .drawer {
   position: fixed;
-  inset-block: 0;
+  /* below the top bar (shell .topbar, 52px), so the account menu and theme toggle stay reachable */
+  inset-block: 52px 0;
   inset-inline-end: 0;
   z-index: 45;
   inline-size: min(560px, 100vw);
@@ -62,4 +63,17 @@
 }
 @keyframes drawerIn {
   from { transform: translateX(16px); opacity: 0; }
+}
+/* On a wide screen the page makes room for the drawer instead of sliding under it, so nothing on the
+   page (e.g. Evaluate now) is hidden while a record is open. Narrower screens keep the overlay. */
+@media (min-width: 1280px) {
+  /* the drawer's width (.drawer inline-size) */
+  :global(html[data-rg-drawer]) {
+    --rg-drawer-room: 560px;
+  }
+  :global(html[data-rg-drawer] #rgMain) {
+    padding-inline-end: calc(var(--rg-drawer-room) + var(--s3));
+    /* the shell caps the column at 1180px; widen the cap by the room so the page keeps its own width */
+    max-width: calc(1180px + var(--rg-drawer-room));
+  }
 }
