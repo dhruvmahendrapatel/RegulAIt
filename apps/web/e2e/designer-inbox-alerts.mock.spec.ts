@@ -72,7 +72,9 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
 
   // the admin override names itself and explains why a reason is needed
   await expect(page.getByText("You are not the named approver, so a reason is required.")).toBeVisible();
-  await expect(page.getByRole("region", { name: "Recently decided, scrollable" })).toBeVisible();
+  // one decided item fits, so the contained card is no scroll stop (the region role appears only while it scrolls)
+  await expect(page.locator("section[data-rg-card]").filter({ hasText: "Recently decided" })).toContainText("Retire a vendor link");
+  await expect(page.getByRole("region", { name: "Recently decided, scrollable" })).toHaveCount(0);
 });
 
 test("Alert detail: path as chips, fix options labelled, acknowledgement at the bottom", async ({ page }) => {
