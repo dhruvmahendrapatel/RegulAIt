@@ -453,9 +453,14 @@ point there rather than repeating commands nobody has run.
 ### 7.1 What runs where
 
 - **Live instance:** the hosted dev instance over public HTTPS (ADR-0197 decision 1). The laptop is only a browser.
-  Its database carries the governance seed (`demo:prepare`) and the four real discovery sources. Whether it also
-  carries the seeded discovery dataset, which would put seeded findings next to the real ones, is an **open
-  question** for the owner; the script assumes it does not.
+  Its database carries the governance seed and the four real discovery sources, and **only real findings** (owner,
+  2026-10-19, ADR-0197 addendum decision 3, option A): no seeded discovery dataset. Prepare it from empty with
+  `pnpm --filter @regulait/gateway demo:prepare --live`: the same pipeline without either `demo:shadow` phase, with
+  `demo:intake --live` (the shipped signature catalogues, not the synthetic SaaS export), ending in
+  `demo:check --live`. That check FAILs on any trace of the fictional dataset, and on "1 Real discovery sources" until
+  one real source is enabled, so on a fresh database it ends with that one FAIL: add the sources (§7.2) and re-run
+  `pnpm --filter @regulait/gateway demo:check --live`. CI runs both on an empty database (`demo.yml`, `demo-live`);
+  on the dev instance host this is **pending execution**.
 - **Fallback database:** a second database prepared with `demo:prepare`, including the seeded discovery dataset the
   `demo-shadow-seed` lane is building (ADR-0197 decision 7). It must pass `demo:check` with 0 fail; the expected pass
   count changes when that lane merges (19 today), **to confirm against the seeded data**. Where it is served from
@@ -494,6 +499,7 @@ owner's notes and the infrastructure lane's state.
 | T-3d | Code freeze held (2026-10-29: only demo-blocker fixes merge, ADR-0197 decision 9); the live instance runs the frozen build | pending execution |
 | T-24h | **Run now** on every live source; each run **succeeded**; the findings the script names are on `/ui/admin/shadow-ai` | pending execution |
 | T-24h | The chosen finding has **no** remediation workflow yet, on both the live and the fallback database (S3 creates one) | pending execution |
+| T-24h | `demo:check --live` on the live instance: 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | Fallback database prepared with `demo:prepare`; `demo:check` 0 fail; signed in as both personas there too | pending execution |
 | T-24h | Deploy-gate output captured to `real-gate.txt` on a fresh fallback database (the 10-05 fallback step 1), in case the gate cannot run live | pending execution |

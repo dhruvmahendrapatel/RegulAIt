@@ -5,6 +5,10 @@
  * DATABASE_URL, REGULAIT_BOOTSTRAP_TOKEN, REGULAIT_DATA_KEY.
  *
  * In-process like `demo-setup.ts`: no running gateway needed. Idempotent.
+ *
+ * `--live` (`demo:prepare --live`; ADR-0197 addendum decision 3): the live database holds real findings only, so the
+ * synthetic SaaS export is not imported. The shipped signature catalogues it would have loaded are loaded on their
+ * own: without them a real scan matches nothing.
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,7 +38,17 @@ await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)
 const app = buildApp(db, { bootstrapToken: BOOT, dataKey: process.env.REGULAIT_DATA_KEY });
 await app.ready();
 
-const report = await seedDemoIntake(app, fixtures, { bootstrapToken: BOOT });
+const live = process.argv.includes("--live");
+if (live) {
+  for (const url of ["/v1/shadow-ai/catalogue/seed", "/v1/discovery/endpoint-signatures/seed"]) {
+    const r = await app.inject({ method: "POST", url, headers: { authorization: `Bearer ${BOOT}` }, payload: {} });
+    if (r.statusCode >= 300) {
+      console.error(`demo:intake --live — catalogue ${url} answered ${r.statusCode}: ${r.body}`);
+      process.exit(1);
+    }
+  }
+}
+const report = await seedDemoIntake(app, live ? { ...fixtures, shadowAi: [] } : fixtures, { bootstrapToken: BOOT });
 console.log(`demo:intake — ${fixtures.company.name}`);
 console.log(`  created ${report.created.length}, skipped ${report.skipped.length}, failed ${report.failed.length}`);
 for (const n of report.notes) console.log(`  note    ${n}`);
