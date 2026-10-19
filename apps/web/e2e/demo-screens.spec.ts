@@ -237,7 +237,10 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S2 a pseudonym link opens Reveal, prefilled", async () => {
     expect.soft(pseudonymHref, "a sighting links its pseudonym to Reveal").toBeTruthy();
     if (!pseudonymHref) return;
-    await ada.locator(`a[href="${pseudonymHref}"]`).first().click();
+    // "Where seen" folds each finding's sightings behind a count (SH, #456): open that disclosure first, as a person would
+    const link = ada.locator(`a[href="${pseudonymHref}"]`).first();
+    if (!(await link.isVisible())) await ada.locator("details").filter({ has: link }).last().locator(":scope > summary").click();
+    await link.click();
     await expect(ada.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
     await capture(ada, ADA, "ds-s2b-pseudonym-reveal-prefilled", { notes: ["Reveal not pressed (step-up, audited)"] });
   });
