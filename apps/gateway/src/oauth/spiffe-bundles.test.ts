@@ -80,10 +80,14 @@ describe("a bundle upload: PEM or the SPIFFE bundle format, public CAs only", ()
     expect(c.authoritiesPem).not.toContain("PRIVATE");
   });
 
-  it("jwt-svid keys are counted and not stored (JWT-SVID client authentication is not built)", async () => {
+  it("S9 follow-up: jwt-svid keys are kept as JWT authorities, and the digest covers them", async () => {
     const jwt = { use: "jwt-svid", kid: "k1", ...(await exportJWK(new X509Certificate(root2.der).publicKey)) };
     const p = ok(parseSpiffeBundle(await spiffeJwks([root], [jwt]), now()));
-    expect([p.views.length, p.jwtAuthoritiesIgnored]).toEqual([1, 1]);
+    expect([p.views.length, p.jwtAuthorities.length, p.jwtViews[0]!.kid]).toEqual([1, 1, "k1"]);
+    // only the public members are kept
+    expect(Object.keys(p.jwtAuthorities[0]!).sort()).toEqual(["crv", "kid", "kty", "x", "y"]);
+    // the same X.509 authorities without the JWT authority are a different bundle (a JWT-key change is a change)
+    expect(p.digest).not.toBe(ok(parseSpiffeBundle(await spiffeJwks([root]), now())).digest);
     // a bundle of jwt-svid keys only holds no X.509 authority: refused
     expect(code(parseSpiffeBundle(JSON.stringify({ keys: [jwt] }), now()))).toBe("spiffe_bundle_invalid");
   });
@@ -188,11 +192,13 @@ describe("a bundle upload: PEM or the SPIFFE bundle format, public CAs only", ()
 });
 
 describe("a REAL SPIRE 1.13.3 bundle and X.509-SVID (testing/spire-1.13.3)", () => {
-  it("the SPIFFE-format and PEM exports of the same SPIRE CA are the same bundle, with its jwt-svid key ignored", () => {
+  it("the SPIFFE-format and PEM exports of the same SPIRE CA hold the same X.509 authority; the JWT authority is kept", () => {
     const jwks = ok(parseSpiffeBundle(fixture("bundle.spiffe.json"), SPIRE_VALID_AT));
     const pem = ok(parseSpiffeBundle(fixture("bundle.crt"), SPIRE_VALID_AT));
-    expect([jwks.format, jwks.jwtAuthoritiesIgnored, jwks.views.length]).toEqual(["spiffe_jwks", 1, 1]);
-    expect(jwks.digest).toBe(pem.digest);
+    expect([jwks.format, jwks.jwtAuthorities.length, jwks.views.length]).toEqual(["spiffe_jwks", 1, 1]);
+    // the same X.509 authority; the SPIFFE export also carries SPIRE's JWT authority, so its digest covers that too
+    expect(jwks.views.map((v) => v.thumbprint)).toEqual(pem.views.map((v) => v.thumbprint));
+    expect(jwks.digest).not.toBe(pem.digest);
   });
 
   it("the SVID validates offline under the uploaded bundle, inside its window (positive control)", async () => {

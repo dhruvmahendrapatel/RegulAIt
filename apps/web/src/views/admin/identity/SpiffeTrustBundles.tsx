@@ -23,18 +23,15 @@ import {
 } from "./spiffeBundleModel";
 import s from "./workloadIdentities.module.css";
 
-const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
+export const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
 const STATUS_TONE = { active: "ok", superseded: "neutral", revoked: "danger" } as const;
 
-/** a bundle refusal in the page's words, else the client's own reading */
-async function bundleCall<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (e) {
-    const text = e instanceof ApiError ? spiffeBundleRefusal(e.payload.error) : null;
+/** a refusal in the page's words (`words` reads its code; bundle refusals by default), else the client's own reading */
+export const inWords = <T,>(call: Promise<T>, words: (code: unknown) => string | null = spiffeBundleRefusal): Promise<T> =>
+  call.catch((e: unknown) => {
+    const text = e instanceof ApiError ? words(e.payload.error ?? e.payload.code) : null;
     throw text ? new Error(text) : e;
-  }
-}
+  });
 
 export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfirmation) => void }) {
   const q = useQuery({ queryKey: spiffeBundleKeys.list, queryFn: listSpiffeTrustBundles });
@@ -65,14 +62,12 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
     >
       <div data-testid="spiffe-trust-bundles">
         <p>
-          A workload whose SPIRE issues it an X.509-SVID can authenticate to the token endpoint with it, once its trust domain&apos;s CA certificates are
-          uploaded here and its SPIFFE ID is bound as a credential of its identity. SPIFFE is off until a bundle is uploaded. Nothing is fetched: paste the
-          output of <code>spire-server bundle show -format spiffe</code> (or <code>-format pem</code>). Only public CA certificates are accepted.
+          SPIFFE sign-in is off until a domain&apos;s bundle is here and the SPIFFE ID is bound to an identity. Paste{" "}
+          <code>spire-server bundle show -format spiffe</code> (or <code>-format pem</code>) output: public keys and CA certificates only.
         </p>
         {list?.legacyEnvironmentIgnored && (
           <p role="note">
-            <Badge tone="warn">Ignored</Badge> The deployment still sets <code>REGULAIT_SPIFFE_TRUST_BUNDLES</code>. It is not read any more: upload each
-            bundle here instead, then ask the operator to remove the variable.
+            <Badge tone="warn">Ignored</Badge> <code>REGULAIT_SPIFFE_TRUST_BUNDLES</code> is set but not read: upload bundles here, then remove it.
           </p>
         )}
         <form
@@ -106,7 +101,7 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                 </>
               ),
               run: async () => {
-                await bundleCall(() => uploadSpiffeTrustBundle(body));
+                await inWords(uploadSpiffeTrustBundle(body));
                 setBundle("");
                 setReplaces(null);
               },
@@ -178,12 +173,12 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                 render: (b) => (
                   <>
                     {b.authorities.length} (earliest expiry {dateLabel(earliestAuthorityExpiry(b))})
-                    {b.jwtAuthoritiesIgnored > 0 && <div>{b.jwtAuthoritiesIgnored} JWT-SVID key(s) not used</div>}
+                    {!!b.jwtAuthorities?.length && <div>{b.jwtAuthorities.length} JWT-SVID key(s)</div>}
                   </>
                 ),
               },
               { key: "digest", header: "Digest", render: (b) => <code title={b.digest}>{b.digest.slice(0, 12)}…</code> },
-              { key: "created", header: "Uploaded", render: (b) => dateLabel(b.createdAt) },
+              { key: "created", header: "Added", render: (b) => <>{dateLabel(b.createdAt)}{b.source === "fetch" && <div>fetched</div>}</> },
               {
                 key: "actions",
                 header: "Actions",
@@ -213,7 +208,7 @@ export function SpiffeTrustBundlesCard(props: { busy: boolean; ask: (c: AskConfi
                                 cannot be undone.
                               </>
                             ),
-                            run: () => bundleCall(() => revokeSpiffeTrustBundle(b.id)),
+                            run: () => inWords(revokeSpiffeTrustBundle(b.id)),
                           })
                         }
                       >

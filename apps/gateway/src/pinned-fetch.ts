@@ -94,6 +94,18 @@ export interface PinnedTarget {
   port: number;
   /** every address the guard validated, in resolver order */
   addresses: string[];
+  /**
+   * ADR-0188 S9 follow-up: replace Web PKI server authentication with a caller's own (the trust bundle endpoint's
+   * workload-identity profile: the server presents a workload certificate chained to that domain's bundle). `ca` REPLACES the system trust
+   * store and `checkServerIdentity` REPLACES the hostname check; `rejectUnauthorized` stays true. Such a request never
+   * shares a pooled connection (a socket verified one way is never reused for a request verified another way).
+   */
+  tls?: PinnedTls;
+}
+
+export interface PinnedTls {
+  ca: string[];
+  checkServerIdentity: (host: string, cert: import("node:tls").PeerCertificate) => Error | undefined;
 }
 
 type LookupAllCallback = (
@@ -279,10 +291,13 @@ export async function pinnedFetch(target: PinnedTarget, init?: RequestInit): Pro
       path,
       method: normalized.method,
       headers,
-      agent: agentFor(target.protocol, addresses),
+      // a TLS override gets a one-request agent: its verified socket is never pooled with Web PKI ones
+      agent: target.tls && target.protocol === "https:" ? false : agentFor(target.protocol, addresses),
       // THE PIN. No `servername` override and no `checkServerIdentity` override:
       // `host` is still the hostname, so TLS does both from it, unchanged.
+      // (Unless the caller supplied its own server authentication, ADR-0188 S9 follow-up, above.)
       lookup: pinnedLookup(addresses),
+      ...(target.tls && target.protocol === "https:" ? { ca: target.tls.ca, checkServerIdentity: target.tls.checkServerIdentity, rejectUnauthorized: true } : {}),
       ...(normalized.signal ? { signal: normalized.signal } : {}),
     };
     const clientReq = mod.request(options, (res) => {

@@ -37,6 +37,9 @@ import {
 import { kidOk, type DelegationGrantDetailView, type IdentitySigningKeyListView } from "./signingKeyModel";
 import {
   bundleDraftError,
+  type PutSpiffeBundleEndpointBody,
+  type SpiffeBundleEndpointListView,
+  type SpiffeBundleEndpointView,
   type PutSpiffeTrustBundleBody,
   type SpiffeTrustBundleListView,
   type SpiffeTrustBundleRevokeResult,
@@ -229,6 +232,28 @@ export function uploadSpiffeTrustBundle(input: PutSpiffeTrustBundleBody): Promis
 export function revokeSpiffeTrustBundle(bundleId: string): Promise<SpiffeTrustBundleRevokeResult> {
   const id = seg(bundleId);
   return withStepUp((h) => stepUpApi.post<SpiffeTrustBundleRevokeResult>(`/v1/identity/spiffe-trust-bundles/${id}/revoke`, {}, h));
+}
+
+// ---- ADR-0188 S9 follow-up: SPIFFE bundle endpoints (identity_manage step-up on every write) --
+
+export const spiffeEndpointKeys = { list: ["admin", "workload-identities", "spiffe-bundle-endpoints"] as const };
+
+/** `GET /v1/identity/spiffe-bundle-endpoints`: every configured endpoint and its refresh state */
+export function listSpiffeBundleEndpoints(): Promise<SpiffeBundleEndpointListView> {
+  return api.get<SpiffeBundleEndpointListView>("/v1/identity/spiffe-bundle-endpoints");
+}
+
+/** set (or stop) where a domain's bundle is fetched from; an enabled endpoint is fetched once at once */
+export interface SetSpiffeBundleEndpointResult {
+  endpoint: SpiffeBundleEndpointView;
+  /** the fetch made at once when enabled: changed, unchanged or failed (with its code) */
+  refresh: { outcome: string; code?: string } | null;
+}
+
+export function setSpiffeBundleEndpoint(trustDomain: string, input: PutSpiffeBundleEndpointBody): Promise<SetSpiffeBundleEndpointResult> {
+  // the form checked the draft (endpointDraftError); the gateway checks it again, exactly
+  const body = deepFreeze({ url: input.url, profile: input.profile, endpointSpiffeId: input.profile === "https_spiffe" ? input.endpointSpiffeId : null, enabled: input.enabled });
+  return withStepUp((h) => stepUpApi.put<SetSpiffeBundleEndpointResult>(`/v1/identity/spiffe-bundle-endpoints/${encodeURIComponent(trustDomain)}`, body, h));
 }
 
 /** `GET /v1/delegation-grants/:grantId`: one grant with its incoming and outgoing allocations */
