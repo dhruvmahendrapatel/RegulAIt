@@ -249,7 +249,8 @@ test("enterprise governance demo surfaces render and complete their core actions
   await expect(page.getByText("No entries match these filters")).toBeVisible();
   await expect(page.getByText("2 curated entries; absence is not assurance.", { exact: true }).first()).toBeVisible();
 
-  await page.goto("/ui/admin/shadow-ai");
+  // A2 (#453): the MCP importer is on the Import evidence tab
+  await page.goto("/ui/admin/shadow-ai?tab=import");
   await page.getByLabel("MCP log evidence").fill('POST https://tools.unknown.example/mcp MCP-Protocol-Version: 2025-06-18 {"method":"tools/list"}');
   await page.getByRole("button", { name: "Compare with registry (writes nothing)" }).click();
   await expect(page.getByText("tools.unknown.example", { exact: true })).toBeVisible();

@@ -20,7 +20,7 @@ import { aiPolicyAcknowledgements, aiPolicyDocuments, and, createDb, eq, isNull,
 const like = (col: unknown, pattern: string) => sql`${col} like ${pattern}`;
 import { DEMO_INTAKE_FIXTURES } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { runDemoCheck, SHADOW_DISCOVERY_BEATS, type DemoCheck } from "./demo-check-lib.js";
+import { G9_BEAT, runDemoCheck, SHADOW_DISCOVERY_BEATS, type DemoCheck } from "./demo-check-lib.js";
 import { DEMO_AUP_KEY, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { runDemoGate } from "./demo-gate-lib.js";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
@@ -101,7 +101,7 @@ describe("demo:check over the real dataset", () => {
     for (const b of [
       "0 Personas", "1 Shadow AI", "1 Intake assistant", "2 Register", "2 Use-case 360", "2 Risks",
       "3 Trust dashboard", "3 Dependency graph", "3 Monitor", "3 Regulatory", "2 Approval gate", "2 Deploy gate",
-      "3 Evidence", "3 Accountability",
+      "3 Evidence", "3 Accountability", G9_BEAT,
     ]) {
       expect(beats.has(b), `missing beat ${b}`).toBe(true);
     }
@@ -159,6 +159,13 @@ describe("demo:check over the real dataset", () => {
       await db.insert(aiPolicyAcknowledgements).values(removed[0]!);
     }
   }, 120_000);
+
+  it("G9: the Incidents and Feedback screens have open work to show (the seeded open incident and Ada's queue)", () => {
+    const beat = checks.find((c) => c.beat === G9_BEAT)!;
+    expect(beat.level, beat.detail).toBe("PASS");
+    expect(beat.detail).toMatch(/incident \S+ open, medium, owned by Dana Developer, \d+ timeline entries/);
+    expect(beat.detail).toMatch(/open feedback items routed to Ada \(acknowledged, in_review; an appeal among them\)/);
+  });
 
   it("3 Evidence FAILs — with the fix — when the export-signing key is missing (the 3E button would 409)", async () => {
     expect(checks.find((c) => c.beat === "3 Evidence")!.level).toBe("PASS");

@@ -1,0 +1,140 @@
+/* Shadow AI page (Governed - Designer batch 2, owner-approved on #453). Lazy CSS: it ships with the page's chunk,
+   never the entry. Colours and spacing are tokens only (ADR-0169, ADR-0196 token ratchet). */
+.callout {
+  display: flex;
+  gap: var(--s1);
+  padding: var(--s1-5) var(--s2);
+  border-radius: var(--radius-md);
+  background: var(--rg-signal-tint);
+  color: var(--rg-ink);
+}
+.linkButton {
+  min-block-size: 24px; /* WCAG 2.5.8 target size */
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--rg-signal-700);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: var(--s2);
+}
+.kpis > * {
+  position: relative;
+  padding: var(--s2);
+  padding-inline-start: var(--s2-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--rg-glass);
+}
+/* the severity stripe: colour carries state, the label carries meaning (never colour alone) */
+.critical::before,
+.high::before,
+.medium::before,
+.low::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 4px;
+  border-start-start-radius: var(--radius-md);
+  border-end-start-radius: var(--radius-md);
+}
+.critical::before { background: var(--rg-critical); }
+.high::before { background: var(--rg-high); }
+.medium::before { background: var(--rg-medium); }
+.low::before { background: var(--rg-low); }
+.chip {
+  min-block-size: 24px; /* WCAG 2.5.8 target size */
+  padding: var(--s0) var(--s1-5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--rg-r-pill);
+  background: var(--rg-glass);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.chip[aria-pressed="true"] {
+  border-color: var(--rg-signal-ring);
+  background: var(--rg-signal-tint);
+  color: var(--rg-ink);
+}
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tile,
+.tileMissing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  padding: var(--s1-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.tileMissing {
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+/* SH5 remediation stepper */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.step,
+.stepBlocked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  padding-block-start: var(--s1);
+  border-block-start: 2px solid var(--border-strong);
+}
+.stepBlocked {
+  border-block-start-color: var(--rg-critical-deep);
+}
+.stepMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.5rem;
+  block-size: 1.5rem;
+  border: 2px solid var(--border-strong);
+  border-radius: var(--rg-r-pill);
+  font-weight: 700;
+  font-size: var(--text-sm);
+}
+.stepBlocked .stepMark {
+  border-color: var(--rg-critical-deep);
+  color: var(--rg-critical-deep);
+}
+.whoNext {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  padding: var(--s1-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--rg-raised);
+}
+
+.tabsScroll {
+  overflow-x: auto;
+}
+.tabsScroll [role="tab"] {
+  white-space: nowrap;
+}

@@ -73,7 +73,8 @@ test("first-party discovery: classify, review the split, confirm ingest, see the
   await page.goto("/ui/admin/shadow-ai");
   await expect(page.getByRole("heading", { name: "Shadow-AI discovery", exact: true })).toBeVisible();
 
-  // the card and its honesty text, from the API
+  // the card and its honesty text, from the API (A2, #453: the importers are on the Import evidence tab)
+  await page.getByRole("tab", { name: "Import evidence" }).click();
   await expect(page.getByText("First-party discovery (classify what you already hold)")).toBeVisible();
   await expect(page.getByText(/COMPILED INTO THIS BUILD/)).toBeVisible();
   // the phrase appears in BOTH honesty sentences (posture and limits) — assert presence, not uniqueness
@@ -85,8 +86,10 @@ test("first-party discovery: classify, review the split, confirm ingest, see the
   const seeded = page.waitForResponse(
     (r) => r.url().endsWith("/v1/shadow-ai/catalogue/seed") && r.request().method() === "POST",
   );
+  await page.getByRole("tab", { name: "Detection catalogue" }).click();
   await page.getByRole("button", { name: "Install / refresh shipped seed" }).click();
   expect((await seeded).status()).toBe(200);
+  await page.getByRole("tab", { name: "Import evidence" }).click();
 
   // classify a small DNS excerpt
   await page.getByTestId("disc-kind").selectOption("dns_log");
@@ -109,5 +112,6 @@ test("first-party discovery: classify, review the split, confirm ingest, see the
   await expect(page.getByTestId("disc-ingest-summary")).toContainText(/Ingested: 1 shadow row/);
 
   // the finding landed in the page's own inventory, under the subject label
-  await expect(page.getByRole("cell", { name: "zz-e2e-resolver" })).toBeVisible();
+  await page.getByRole("tab", { name: /^Findings/ }).click();
+  await expect(page.getByRole("cell", { name: /zz-e2e-resolver/ })).toBeVisible();
 });

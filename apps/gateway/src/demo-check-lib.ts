@@ -22,7 +22,7 @@
 import type { FastifyInstance } from "fastify";
 import { DEMO_SCRIPT_KEY_TTL_DAYS, DEMO_SECURITY_LEAD, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import { DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures, type DemoShadowDiscoveryDataset } from "@regulait/shared";
-import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
+import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE, DEMO_OPEN_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
 import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
 import { APPROVER_ADMIN_NOT_INITIATOR } from "./workflow-approvers.js";
 
@@ -35,6 +35,51 @@ export interface DemoCheck {
 }
 
 type Json = Record<string, any>;
+
+/** the G9 beat (owner, 2026-10-19): governance seed, so it runs unchanged on the live database (not discovery data) */
+export const G9_BEAT = "3 Incidents and feedback";
+
+/**
+ * The G9 screens open on unfinished work: Incidents lists the `active` ones, and Feedback and appeals lists the
+ * `open` items in the signed-in person's queue (an admin's queue is every item). Ada signs in for them, so PASS needs
+ * an open demo incident with an owner, timeline entries and an open action, and at least two open feedback items
+ * routed to Ada, in different states, one of them an appeal.
+ */
+export async function checkG9Records(
+  get: (url: string) => Promise<{ status: number; body: Json }>,
+  adaId: string | undefined,
+): Promise<DemoCheck[]> {
+  const problems: string[] = [];
+  const facts: string[] = [];
+  const active: Json[] = (await get("/v1/incidents?status=active")).body.incidents ?? [];
+  const inc = active.find((i) => i.title === DEMO_OPEN_INCIDENT_TITLE);
+  if (!inc) problems.push("no open demo incident");
+  else {
+    const detail = await get(`/v1/incidents/${inc.id}`);
+    const events: Json[] = detail.body.events ?? [];
+    const openActions = ((detail.body.actions ?? []) as Json[]).filter((a) => a.status === "open");
+    if (!inc.ownerUserId) problems.push(`incident ${inc.ref} has no owner`);
+    if (events.length < 3) problems.push(`incident ${inc.ref} has ${events.length} timeline entr${events.length === 1 ? "y" : "ies"}`);
+    if (openActions.length === 0) problems.push(`incident ${inc.ref} has no open corrective action`);
+    if (inc.ownerUserId && events.length >= 3 && openActions.length > 0) {
+      facts.push(`incident ${inc.ref} ${inc.status}, ${inc.severity}, owned by ${inc.ownerName ?? "its owner"}, ${events.length} timeline entries`);
+    }
+  }
+  const queue: Json[] = (await get("/v1/feedback?scope=queue&status=open")).body.items ?? [];
+  const routed = adaId ? queue.filter((f) => f.ownerUserId === adaId) : [];
+  const states = new Set(routed.map((f) => f.status));
+  if (routed.length < 2) problems.push(`${routed.length} open feedback item(s) routed to Ada (2 needed)`);
+  else if (states.size < 2) problems.push(`the feedback items routed to Ada are all ${[...states][0]}`);
+  else if (!routed.some((f) => f.kind === "appeal")) problems.push("no open appeal routed to Ada");
+  else if (routed.some((f) => f.status === "received")) {
+    // an unacknowledged item breaches its acknowledgement SLA (72 h by default) and raises an alert on the Monitor
+    problems.push("a feedback item routed to Ada is not acknowledged");
+  }
+  else facts.push(`${routed.length} open feedback items routed to Ada (${[...states].sort().join(", ")}; an appeal among them)`);
+  return problems.length
+    ? [{ beat: G9_BEAT, level: "FAIL", detail: problems.join("; "), fix: "re-run `demo:intake` on this database (it seeds the G9 records; `demo:intake --live` on the live one)" }]
+    : [{ beat: G9_BEAT, level: "PASS", detail: facts.join("; ") }];
+}
 
 /**
  * `live` (ADR-0197 addendum decision 3, owner decision of 2026-10-19): the live database holds real findings only. The
@@ -304,6 +349,9 @@ async function runDemoCheckRun(
     else add("3 Accountability", "PASS", facts.join("; "));
   }
 
+  // --- 3 Incidents and feedback (G9): the open work the two screens show by default -------------
+  out.push(...(await checkG9Records((url) => call("GET", url, auth), ada?.id as string | undefined)));
+
   // --- 3 Evidence (ADR-0116): the closing beat downloads a SIGNED bundle, which needs the
   // deployment's export key — without it the button answers 409 in front of the audience
   const signing = await call("GET", "/v1/exports/signing-key", auth);
@@ -552,8 +600,8 @@ export const LIVE_DISCOVERY_BEATS = ["1 Fictional dataset", "1 Signature catalog
 /**
  * The strings only the fictional dataset carries: its company, its source names and their " (demo dataset)" suffix, and
  * every identifier it records (repositories and commits, the account, tenant, client and subscription ids, resource
- * subjects, the exporter, fleet, device, device user, connector and deploy target). None is a catalogue value, so a
- * real finding never carries one.
+ * subjects, the exporter, fleet, device, device user, connector and deploy target), and the fictional provider and host
+ * of the import example. None is a real catalogue value, so a real finding or catalogue row never carries one.
  */
 export function fictionalDatasetMarkers(data: DemoShadowDiscoveryDataset = DEMO_SHADOW_DISCOVERY): string[] {
   return [
@@ -579,6 +627,8 @@ export function fictionalDatasetMarkers(data: DemoShadowDiscoveryDataset = DEMO_
     data.agent.deviceUser,
     data.contentTrust.connectorName,
     data.remediation.deployTargetName,
+    data.importExample.provider,
+    data.importExample.host,
   ]
     .map((m) => m.trim())
     .filter((m, i, all) => m && all.indexOf(m) === i);
@@ -592,8 +642,8 @@ const SEEDED_IMPORT_SOURCE = /^demo-(intake|shadow)-seed\b/i;
 
 /**
  * ADR-0197 addendum decision 3 (owner, 2026-10-19: option A): the live database holds real findings only. Fails closed:
- * any discovery source, run, finding, import, enrolled device, connector or provenance record of the fictional dataset
- * is a FAIL, never a warning. Then the real side: the signature catalogue is loaded (with it empty, discovery matches
+ * any discovery source, run, finding, import, enrolled device, connector, provenance record or catalogue entry of the
+ * fictional dataset is a FAIL, never a warning. Then the real side: the signature catalogue is loaded (with it empty, discovery matches
  * nothing); at least one real source is enabled (each is listed with its kind and last run, and a source never run is
  * named, so this can run before the first scan); and the remediation default routes its sign-off to the security lead
  * alone (the only active admin other than Ada, with MFA), checked from the users and the default template because no
@@ -618,12 +668,14 @@ export async function checkLiveDiscovery(
   const importsRes = await get("/v1/shadow-ai/imports");
   const connectorsRes = await get("/v1/connectors");
   const recordsRes = await get(`/v1/content-provenance/records?limit=${LIVE_LIST_CAP}`);
+  const cat = await get("/v1/shadow-ai/catalogue");
   const reads: Array<[string, { status: number; body: Json }]> = [
     ["sources", sourcesRes],
     ["runs", runsRes],
     ["imports", importsRes],
     ["connectors", connectorsRes],
     ["provenance records", recordsRes],
+    ["catalogue", cat],
   ];
   const sources: Json[] = sourcesRes.body.sources ?? [];
   const fakeSources = sources.filter(fictional);
@@ -634,6 +686,8 @@ export async function checkLiveDiscovery(
   const fakeConnectors = ((connectorsRes.body.connectors ?? []) as Json[]).filter((c) => c.name === data.contentTrust.connectorName);
   const fakeConnectorIds = new Set(fakeConnectors.map((c) => c.id));
   const fakeRecords = ((recordsRes.body.records ?? []) as Json[]).filter((r) => fakeConnectorIds.has(r.sourceId) || fictional(r));
+  // the import example's fictional provider, which `demo:shadow` catalogues on the fallback stack
+  const fakeSignatures = ((cat.body.signatures ?? []) as Json[]).filter(fictional);
   let fakeDevices = 0;
   for (const s of sources.filter((x) => x.kind === "endpoint_agent" || fakeSourceIds.has(x.id))) {
     const res = await get(`/v1/discovery/sources/${s.id}/endpoint-devices`);
@@ -659,6 +713,7 @@ export async function checkLiveDiscovery(
     ["device", fakeDevices],
     ["connector", fakeConnectors.length],
     ["provenance record", fakeRecords.length],
+    ["catalogue entry", fakeSignatures.length],
   ];
   const found = traces.filter(([, n]) => n > 0);
   if (unread.length) add("1 Fictional dataset", "FAIL", `could not read ${unread.map(([l, r]) => `${l} (${r.status})`).join(", ")}: absence not proven`);
@@ -671,10 +726,9 @@ export async function checkLiveDiscovery(
       "the live database holds real findings only (ADR-0197 addendum 3): rebuild it from empty with `demo:prepare --live`; the dataset belongs on the fallback stack",
     );
   } else if (capped.length) add("1 Fictional dataset", "FAIL", `${capped.map(([l]) => `${LIVE_LIST_CAP} or more ${l} (the list cap)`).join(", ")}: absence not proven`);
-  else add("1 Fictional dataset", "PASS", `no source, run, finding, import, device, connector or provenance record of the fictional dataset (${markers.length} markers)`);
+  else add("1 Fictional dataset", "PASS", `no source, run, finding, import, device, connector, provenance record or catalogue entry of the fictional dataset (${markers.length} markers)`);
 
   // --- the signature catalogue the matcher reads ------------------------------------------------
-  const cat = await get("/v1/shadow-ai/catalogue");
   if (cat.status !== 200) add("1 Signature catalogue", "FAIL", `catalogue ${cat.status}`);
   else if (!(Number(cat.body.enabled) > 0)) {
     add("1 Signature catalogue", "FAIL", "the signature catalogue is empty: a real scan would match nothing", "run `demo:prepare --live` (its `demo:intake --live` step loads the shipped catalogues)");

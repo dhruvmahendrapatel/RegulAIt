@@ -381,6 +381,8 @@ async function seedDemoIntakeRun(
 
   // --- accountability records (ADR-0182 D4): one feedback item that became a closed incident ---
   await seedDemoAccountability(call, { ada, dana, avery }, useCaseId, report);
+  // ...and the work still in progress the G9 screens show: an open incident and two feedback items in Ada's queue
+  await seedDemoOpenAccountability(call, { ada, dana, avery }, useCaseId, report);
 
   // --- shadow AI evidence (imported, never claimed as discovered) --------------------------
   if (fixtures.shadowAi.length > 0) {
@@ -607,6 +609,154 @@ async function seedDemoAccountability(
     resolutionNote: "Confirmed and fixed under the linked incident; the scoring threshold was re-validated.",
   }, dana.auth);
   if (!ok(resolved.status)) fail("demo feedback resolve", resolved);
+}
+
+/** the open demo incident (idempotency key: this title, on an ACTIVE incident of the use case below) */
+export const DEMO_OPEN_INCIDENT_TITLE = "IT knowledge bot gave outdated VPN setup steps after the wiki migration";
+/**
+ * The approved use case the G9 work in progress belongs to (Internal IT Knowledge Base Bot). Not the Real-Time Fraud
+ * Detection Engine: that is the G3 `demo:gate` subject, and the gate counts every open alert on its use case, so a
+ * record here must never be able to add a line to the gate's printout (PR #461 review M1).
+ */
+export const DEMO_OPEN_ACCOUNTABILITY_USE_CASE = "uc-4";
+/** the open corrective action falls due after the demo day (2026-11-01), so it is not overdue on stage */
+export const DEMO_OPEN_ACTION_NOT_DUE_BEFORE = "2026-11-08T12:00:00.000Z";
+
+/**
+ * The G9 screens (owner, 2026-10-19: "Seed demo data for the G9 screens"). The story above ends closed and resolved,
+ * and both screens hide finished work by default (Incidents shows "active", Feedback shows "open"), so they showed
+ * empty states. This adds the work still in progress on the Internal IT Knowledge Base Bot:
+ *  - an OPEN incident, medium and not serious (so it holds no deploy gate and starts no clock), owned by Dana, with
+ *    two timeline notes and an open corrective action due after the demo day;
+ *  - a problem report from Avery, `acknowledged` by Dana (the use case's owner) and handed to Ada;
+ *  - an appeal from Avery against an answer of the bot, acknowledged by Dana, handed to Ada for an independent
+ *    answer, and `in_review` with her.
+ * Both items are acknowledged, so neither can breach the acknowledgement SLA (72 h by default) and raise a
+ * `feedback_sla_breached` alert; the resolution SLA (30 days by default) runs past the demo day.
+ * Every step is a real, audited API call. Idempotent and convergent over OPEN work only: an active incident with this
+ * title, an open action on it, and an open item of each kind filed by Avery on the use case (its body is sealed) are
+ * reused and driven to the state above; a closed incident, a finished action or a resolved item is left as it is and a
+ * new one is made, so a re-run repairs a database a rehearsal moved on.
+ */
+async function seedDemoOpenAccountability(
+  call: (method: string, url: string, payload?: unknown, headers?: Record<string, string>) => Promise<{ status: number; body: Json }>,
+  who: { ada: { id: string; auth: Headers }; dana: { id: string; auth: Headers }; avery: { id: string; auth: Headers } },
+  useCaseId: Map<string, string>,
+  report: DemoSeedReport,
+): Promise<void> {
+  const ok = (s: number) => s >= 200 && s < 300;
+  const fail = (what: string, r: { status: number; body: Json }): void => {
+    report.failed.push(`${what}: ${r.status} ${String(r.body.error ?? "")} ${String(r.body.detail ?? "").slice(0, 160)}`.trim());
+  };
+  const uc = useCaseId.get(DEMO_OPEN_ACCOUNTABILITY_USE_CASE);
+  if (!uc) {
+    report.notes.push(`G9 records: use case '${DEMO_OPEN_ACCOUNTABILITY_USE_CASE}' not seeded`);
+    return;
+  }
+  const { ada, dana, avery } = who;
+
+  // 1. the open incident (a closed one with this title is history, not the work in progress)
+  const active: Json[] = (await call("GET", `/v1/incidents?useCaseId=${uc}&status=active`, undefined, ada.auth)).body.incidents ?? [];
+  let incident = active.find((i) => i.title === DEMO_OPEN_INCIDENT_TITLE);
+  if (incident) report.skipped.push("open demo incident");
+  else {
+    const r = await call("POST", "/v1/incidents", {
+      title: DEMO_OPEN_INCIDENT_TITLE,
+      summary:
+        "After the internal wiki moved, the knowledge bot kept answering VPN questions from the archived pages, so " +
+        "employees followed retired setup steps and opened avoidable helpdesk tickets. No data was exposed " +
+        "(synthetic demo record).",
+      severity: "medium",
+      // a `monitor_alert` source must cite a real governance alert, and the demo has none on this bot
+      detectionSource: "manual",
+      useCaseId: uc,
+      ownerUserId: dana.id,
+    }, dana.auth);
+    if (!ok(r.status)) return fail("open demo incident", r);
+    incident = (r.body.incident as Json | undefined) ?? r.body;
+    const inc = `/v1/incidents/${incident!.id}`;
+    for (const note of [
+      "Triage: the wrong answers started with the wiki migration; the bot's index still holds the archived pages.",
+      "Interim measure: VPN questions now get a link to the current helpdesk article instead of a generated answer.",
+    ]) {
+      const n = await call("POST", `${inc}/events`, { note }, dana.auth);
+      if (!ok(n.status)) fail("open demo incident note", n);
+    }
+    report.created.push("incident: open, medium, with an interim measure on its timeline");
+  }
+  {
+    const inc = `/v1/incidents/${incident!.id}`;
+    const detail = await call("GET", inc, undefined, dana.auth);
+    if (!ok(detail.status)) return fail("open demo incident read", detail);
+    if (((detail.body.actions ?? []) as Json[]).some((a) => a.status === "open")) report.skipped.push("open demo incident action");
+    else {
+      const act = await call("POST", `${inc}/actions`, {
+        title: "Rebuild the bot's index from the migrated wiki and retire the archived pages from retrieval",
+        ownerUserId: dana.id,
+        dueAt: new Date(Math.max(Date.now() + 7 * 24 * 60 * 60 * 1000, Date.parse(DEMO_OPEN_ACTION_NOT_DUE_BEFORE))).toISOString(),
+      }, dana.auth);
+      if (ok(act.status)) report.created.push("incident action: open, due after the demo day");
+      else fail("open demo incident action", act);
+    }
+  }
+
+  // 2. the feedback items, each found by who filed what on this use case (its body is sealed), open ones only
+  const mine: Json[] =
+    (await call("GET", `/v1/feedback?scope=submitted&useCaseId=${uc}&status=open`, undefined, avery.auth)).body.items ?? [];
+  const items: Array<{ kind: "problem" | "appeal"; body: string; review: boolean; what: string }> = [
+    {
+      kind: "problem",
+      body:
+        "Synthetic demo report: the IT bot told me to reset my password on a page that no longer exists, and gave no " +
+        "way to reach a person.",
+      review: false,
+      what: "problem report",
+    },
+    {
+      kind: "appeal",
+      body:
+        "Synthetic demo appeal: the IT bot refused my request for a second monitor as not covered by policy and closed " +
+        "the ticket. I contest that answer and ask for a person to review it.",
+      review: true,
+      what: "appeal",
+    },
+  ];
+  for (const it of items) {
+    let item = mine.find((f) => f.kind === it.kind && !f.resolvedAt);
+    let changed = false;
+    if (!item) {
+      const r = await call("POST", `/v1/use-cases/${uc}/feedback`, { kind: it.kind, body: it.body }, avery.auth);
+      if (!ok(r.status)) {
+        fail(`G9 ${it.what}`, r);
+        continue;
+      }
+      item = r.body;
+      changed = true;
+    }
+    // the owner acknowledges it (so no acknowledgement SLA can lapse) and hands it to Ada
+    const patch: Json = {};
+    if (item!.status === "received") patch.status = "acknowledged";
+    if (item!.ownerUserId !== ada.id) patch.ownerUserId = ada.id;
+    if (Object.keys(patch).length > 0) {
+      const r = await call("PATCH", `/v1/feedback/${item!.id}`, patch, item!.ownerUserId === dana.id ? dana.auth : ada.auth);
+      if (!ok(r.status)) {
+        fail(`G9 ${it.what} routing`, r);
+        continue;
+      }
+      changed = true;
+    }
+    // Ada takes the appeal into review
+    if (it.review && item!.status !== "in_review") {
+      const r = await call("PATCH", `/v1/feedback/${item!.id}`, { status: "in_review" }, ada.auth);
+      if (!ok(r.status)) {
+        fail(`G9 ${it.what} review`, r);
+        continue;
+      }
+      changed = true;
+    }
+    if (changed) report.created.push(`feedback: ${it.what} on the IT knowledge bot, ${it.review ? "in review" : "acknowledged"}, routed to Ada`);
+    else report.skipped.push(`G9 ${it.what}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
