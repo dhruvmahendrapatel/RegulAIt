@@ -95,8 +95,12 @@ test.beforeEach(async ({ page }) => {
 });
 
 /** every row's first action slot starts at one x (X7): read from the rendered slot, not a fixed list */
+// a contained card is a named scroll region only while it actually scrolls, so cards are found by title
+const cardOf = (page: Page, title: string) =>
+  page.locator("section[data-rg-card]").filter({ hasText: title }).filter({ has: page.locator("tbody tr") }).first();
+
 async function slotLefts(page: Page, card: string) {
-  return page.getByRole("region", { name: `${card}, scrollable` }).locator("tbody tr").evaluateAll((rows) =>
+  return cardOf(page, card).locator("tbody tr").evaluateAll((rows) =>
     rows.map((row) => {
       const slot = row.querySelector("td:last-child > div > span");
       return slot ? Math.round(slot.getBoundingClientRect().left) : null;
@@ -110,9 +114,9 @@ test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage til
   await expect(page.getByRole("note").filter({ hasText: "What this can see." })).toBeVisible();
   await expect(page.getByRole("button", { name: "What is Critical?" })).toBeVisible();
 
-  // X6a: the findings list is a named, focusable scroll region
-  const region = page.getByRole("region", { name: "Inventory, scrollable" });
-  await expect(region).toHaveAttribute("tabindex", "0");
+  // X6a: the full findings list overflows, so it is a named, focusable scroll region (a filtered short list is not)
+  const region = cardOf(page, "Inventory");
+  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveAttribute("tabindex", "0");
   // X7: every row's primary slot starts at the same x
   const lefts = await slotLefts(page, "Inventory");
   expect(lefts.length).toBe(findings.length);
@@ -159,7 +163,7 @@ test("Discovery sources: how it works, labelled figures, aligned row actions and
   const lefts = await slotLefts(page, "Sources");
   expect(lefts.length).toBe(sources.length);
   expect(new Set(lefts).size).toBe(1);
-  const sourcesRegion = page.getByRole("region", { name: "Sources, scrollable" });
+  const sourcesRegion = cardOf(page, "Sources");
   // the rarer actions stay one disclosure away; Delete keeps its disabled state and says why
   const row = sourcesRegion.locator("tbody tr", { hasText: "Demo GitLab group" });
   await row.getByText("More", { exact: true }).click();
