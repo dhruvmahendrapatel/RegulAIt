@@ -55,11 +55,12 @@ const sources = [
   source(1, { name: "Demo GitLab group" }),
   source(2, { name: "AWS demo sandbox", kind: "cloud_aws", credential: cred("federated", "unverified") }),
   source(3, { name: "Azure demo subscription", kind: "cloud_aws", enabled: false }),
+  source(4, { name: "Refused demo source", enabled: false, credential: cred("federated", "refused") }),
 ];
 const ref = (s: (typeof sources)[number]) => ({ sourceId: s.id, name: s.name, kind: s.kind });
 const posture = {
-  sourcesTotal: 3, sourcesEnabled: sources.filter((s) => s.enabled).map(ref), staticCredentials: [ref(sources[0]!)], staleCredentials: [],
-  writeScopeUnverified: [ref(sources[1]!)], credentialsRefused: [], credentialWarningAgeDays: 90, endpointRetentionDays: 90,
+  sourcesTotal: 4, sourcesEnabled: sources.filter((s) => s.enabled).map(ref), staticCredentials: [ref(sources[0]!)], staleCredentials: [],
+  writeScopeUnverified: [ref(sources[1]!)], credentialsRefused: [ref(sources[3]!)], credentialWarningAgeDays: 90, endpointRetentionDays: 90,
   statement: "2 of 3 discovery sources are enabled.",
 };
 
@@ -145,10 +146,15 @@ test("Shadow AI: tabs, figures with (i), aligned next steps and the coverage til
 
 test("Shadow AI remediation: the plan opens as steps, named approver rules, no raw id in the description", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai");
-  await page.getByRole("button", { name: "Remediation plan for team-17/payments-api" }).click();
+  await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
   const panel = page.getByTestId("shadow-remediation");
   await expect(panel.getByRole("list", { name: "Remediation steps" }).getByText("Blocked")).toBeVisible();
-  await expect(panel.getByRole("complementary", { name: "Who acts next" })).toContainText("Fresh MFA check");
+  // H1: sign-off has a separate approver; the gateway asks for no fresh MFA check on it, so the panel never claims one
+  const whoNext = panel.getByRole("complementary", { name: "Who acts next" });
+  await expect(whoNext).toContainText("Separate approver");
+  await expect(whoNext).not.toContainText(/MFA/i);
+  await whoNext.getByRole("button", { name: "What is the second approver?" }).click();
+  await expect(whoNext.getByRole("note")).not.toContainText(/MFA/i);
   await expect(panel.getByRole("textbox", { name: "Change description" })).toHaveValue("Remove ungoverned Acme LLM usage");
   // the confirm dialog still stands between the click and the workflow
   await panel.getByRole("textbox", { name: "Environment" }).fill("production");
@@ -158,7 +164,7 @@ test("Shadow AI remediation: the plan opens as steps, named approver rules, no r
 
 test("A1: a finding's plan and triage open in the one shared drawer; Escape closes it and focus returns", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai");
-  const opener = page.getByRole("button", { name: "Remediation plan for team-17/payments-api" });
+  const opener = page.getByRole("button", { name: "Plan remediation for team-17/payments-api" });
   await opener.click();
   const drawer = page.getByRole("dialog", { name: "team-17/payments-api" });
   await expect(drawer).toContainText("Remediation plan");
@@ -179,7 +185,7 @@ test("A1: a finding's plan and triage open in the one shared drawer; Escape clos
 
 test("Discovery sources: how it works, labelled figures, aligned row actions and More", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
-  await expect(page.getByRole("list", { name: "How discovery works" })).toContainText("2 of 3 sources enabled");
+  await expect(page.getByRole("list", { name: "How discovery works" })).toContainText("2 of 4 sources enabled");
   await expect(page.getByRole("button", { name: "What is Write scope unverified?" }).first()).toBeVisible();
   const lefts = await slotLefts(page, "Sources");
   expect(lefts.length).toBe(sources.length);
@@ -206,4 +212,95 @@ test("X6b: Show all lets a contained section flow at full length, remembered for
   await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
   await page.getByRole("button", { name: "Show all" }).first().click();
   await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
+});
+
+/** the plan and triage buttons' offsets inside each row's action stack: one left and one top per button, on every row */
+async function actionOffsets(page: Page) {
+  return cardOf(page, "Inventory").locator("tbody tr").evaluateAll((rows) =>
+    rows.map((row) => {
+      const box = row.querySelector("td:last-child > div")!.getBoundingClientRect();
+      const at = (b: Element | undefined) => {
+        const r = b!.getBoundingClientRect();
+        return `${Math.round(r.left - box.left)},${Math.round(r.top - box.top)}`;
+      };
+      const buttons = [...row.querySelectorAll("td:last-child button")];
+      return {
+        plan: at(buttons.find((b) => b.getAttribute("aria-label")?.startsWith("Plan remediation for "))),
+        triage: at(buttons.find((b) => /^(Triage|Review again)$/.test(b.textContent ?? ""))),
+      };
+    }));
+}
+
+for (const width of [1280, 390]) {
+  test(`M2: Plan remediation and Triage sit at one x and one y on every findings row (${width} px)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/ui/admin/shadow-ai");
+    await expect(page.getByRole("button", { name: /^Plan remediation for / })).toHaveCount(findings.length);
+    const at = await actionOffsets(page);
+    expect(at.length).toBe(findings.length);
+    // closed rows (false positive, remediated) included: an empty primary slot would shift both buttons up
+    expect(new Set(at.map((r) => r.plan)).size).toBe(1);
+    expect(new Set(at.map((r) => r.triage)).size).toBe(1);
+  });
+}
+
+test("M1: help text says what the server does", async ({ page }) => {
+  const tip = async (name: string) => {
+    await page.getByRole("button", { name, exact: true }).first().click();
+    const hide = page.getByRole("button", { name: name.replace(/^What is (.+)\?$/, "Hide help for $1"), exact: true }).first();
+    const text = await page.locator(`[id="${await hide.getAttribute("aria-controls")}"]`).textContent();
+    await hide.click();
+    return text ?? "";
+  };
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  // an empty include list is refused unless the organisation-level scope is chosen
+  expect(await tip("What is Scope: what to scan (one per line) field?")).toContain("To scan everything, choose the organisation-level scope.");
+  // the reveal route takes no reason: it is a step-up, and it is audited
+  const reveal = await tip("What is Pseudonym field?");
+  expect(reveal).toContain("asks you to confirm it's you");
+  expect(reveal).not.toContain("reason");
+  // retention deletes device findings and pseudonyms; only the audit log survives
+  const retention = await tip("What is Endpoint evidence retention (days) field?");
+  expect(retention).toContain("Device findings and pseudonyms not seen within this window are deleted. The audit log is kept.");
+
+  await page.goto("/ui/admin/shadow-ai");
+  // confidence is the count of distinct corroborating sources (ADR-0055 §6)
+  expect(await tip("What is Confidence?")).toContain("High: three or more. Medium: two. Low: one");
+  expect(await tip("What is Status?")).toContain("Moving a finding off Open needs a reason.");
+
+  await page.getByRole("button", { name: "Plan remediation for team-17/payments-api" }).click();
+  const panel = page.getByTestId("shadow-remediation");
+  expect(await tip("What is a remediation plan?")).toContain("It does not change systems by itself.");
+  const env = await tip("What is Environment field?");
+  expect(env).toContain("Workflow assignment rules may give some environments extra stages.");
+  expect(env).not.toContain("production");
+  await expect(panel).not.toContainText("Nothing changes until");
+});
+
+test("M3: warnings stay outside the contained scroll boxes, each with a count or an action", async ({ page }) => {
+  const outsideCards = (sel: ReturnType<Page["getByTestId"]>) => sel.evaluate((el) => el.closest("section[data-rg-card], [role=region]") === null);
+
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  await expect(page.getByText("Credentials refused (write access)")).toBeVisible();
+  const warnings = page.getByRole("list", { name: "Sources that need attention" });
+  await expect(warnings).toContainText("Refused demo source");
+  await expect(warnings).toContainText("credential refused: it grants write access");
+  await expect(warnings).toContainText("AWS demo sandbox");
+  await expect(warnings).toContainText("write scope unverified");
+  expect(await outsideCards(page.getByTestId("source-warnings"))).toBe(true);
+
+  await page.goto("/ui/admin/shadow-ai");
+  const seenAgain = page.getByTestId("shadow-seen-again");
+  await expect(seenAgain).toContainText("Seen again 1");
+  expect(await outsideCards(seenAgain)).toBe(true);
+  // the warning carries its action: reviewing opens the disposition form, also outside the box
+  await seenAgain.getByRole("button", { name: "Review laptop psn:1a2b3c again" }).click();
+  await expect(page.getByRole("region", { name: "Record a disposition for laptop psn:1a2b3c" })).toBeVisible();
+});
+
+test("L3: the link buttons and status chips are at least 24 px high", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai");
+  for (const b of [page.getByRole("button", { name: "See coverage" }), page.getByRole("button", { name: /^All \d/ })]) {
+    expect((await b.boundingBox())!.height).toBeGreaterThanOrEqual(24);
+  }
 });

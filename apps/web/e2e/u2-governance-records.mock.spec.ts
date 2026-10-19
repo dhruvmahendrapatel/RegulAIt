@@ -360,7 +360,7 @@ test.describe("U2: governance records", () => {
   test("a shadow-AI plan starts a workflow through the one route and links it, after confirming", async ({ page }) => {
     const calls = await mockApi(page);
     await page.goto("/ui/admin/shadow-ai");
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
     await expect(plan).toContainText("no governed replacement is registered for this provider");
     await expect(plan.getByLabel("Environment", { exact: true })).toHaveValue("");
@@ -392,7 +392,7 @@ test.describe("U2: governance records", () => {
   test("with no assignment rule, the shadow-AI start says so and links nothing; an existing workflow can be linked", async ({ page }) => {
     const calls = await mockApi(page, { noWorkflowMatch: true });
     await page.goto("/ui/admin/shadow-ai");
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
     await plan.getByLabel("Environment", { exact: true }).fill("staging");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
@@ -413,7 +413,7 @@ test.describe("U2: governance records", () => {
   test("a workflow that started but failed to link is retried as a link only, never a second start", async ({ page }) => {
     const calls = await mockApi(page, { failLinkOnce: true });
     await page.goto("/ui/admin/shadow-ai");
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
     await plan.getByLabel("Environment", { exact: true }).fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
@@ -431,7 +431,7 @@ test.describe("U2: governance records", () => {
   test("a started-but-unlinked workflow survives a reload: only its link can be retried", async ({ page }) => {
     const calls = await mockApi(page, { failLinkOnce: true });
     await page.goto("/ui/admin/shadow-ai");
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     let plan = page.getByTestId("shadow-remediation");
     await plan.getByLabel("Environment", { exact: true }).fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
@@ -442,7 +442,7 @@ test.describe("U2: governance records", () => {
     await expect(plan.getByLabel("Or link an existing workflow")).toBeDisabled();
 
     await page.reload();
-    await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
+    await page.getByRole("button", { name: "Plan remediation for acme/billing" }).click();
     plan = page.getByTestId("shadow-remediation");
     const unlinked = plan.getByTestId("shadow-started-unlinked");
     await expect(unlinked).toContainText(`Workflow ${INSTANCE} was started but is not linked`);

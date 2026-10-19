@@ -60,8 +60,8 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
         <div className={v.sectionTitle} style={{ flex: 1 }}>
           Remediation plan
           <InfoButton label="a remediation plan">
-            A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. Nothing
-            changes until the workflow is approved.
+            A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. The
+            workflow tracks the change and its sign-off. It does not change systems by itself.
           </InfoButton>
         </div>
         <Button size="sm" variant="ghost" onClick={props.onClose}>
@@ -157,13 +157,11 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
       </ol>
       <aside className={rm.whoNext} aria-label="Who acts next">
         <strong>Who acts next</strong>
-        <span>A plan-only stage runs first and changes nothing. Then a human sign-off.</span>
+        <span>By default, a plan-only stage runs first and changes nothing. Then a human sign-off.</span>
         <span className={v.row}>
           <Badge tone="info">Separate approver</Badge>
-          <Badge>Fresh MFA check</Badge>
           <InfoButton label="the second approver">
-            A different admin must sign off. You cannot approve your own remediation, and sign-off asks for a fresh MFA
-            check.
+            By default, a different admin must sign off: you cannot approve your own remediation.
           </InfoButton>
         </span>
       </aside>
@@ -220,7 +218,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
           </Field>
           <Field
             label="Environment"
-            help="Where the change will be made. Changes scoped to production go through the stricter workflow stages."
+            help="Where the change will be made. Workflow assignment rules may give some environments extra stages."
           >
             <Input required value={form.environment} placeholder="for example production" aria-describedby={ids.env} onChange={(e) => set("environment", e.target.value)} />
           </Field>
