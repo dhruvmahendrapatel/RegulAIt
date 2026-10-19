@@ -99,3 +99,42 @@ The demo script lane (#434) raised five questions. The owner answered them:
 3. **Live database.** The live demo database holds only what the real GitLab, AWS and Azure scans find. The seeded discovery dataset exists only in the fallback database.
 4. **Fallback host.** The fallback runs as the local docker compose stack on the presenting laptop, prepared with `demo:prepare` the night before.
 5. **GitLab wording.** The script keeps its open statement. GitLab is read through a scoped, read-only group token because GitLab has no keyless federation for API reads, and RegulAIt lists that token as a relaxation on the posture page.
+
+## Addendum: owner decision, 2026-10-19 (how the live database is prepared)
+
+The runbook (`DEMO_RUNBOOK.md` §7.1) left open how the live database gets the governance seed without the seeded
+discovery dataset, since `demo:prepare` always runs both `demo:shadow` phases and `demo:check` requires that dataset.
+The master session put four options to the owner: a live mode for `demo:prepare`; manual steps; full preparation then
+deletion; or no governance data on the live instance (Act 2 on the fallback database). The owner chose:
+
+1. **Live mode.** `demo:prepare --live` runs the same pipeline without either `demo:shadow` phase, then
+   `demo:check --live`. Without the flag the pipeline is unchanged and still prepares the fallback database.
+2. **Live check.** `demo:check --live` keeps every governance check and fails closed if any record of the fictional
+   discovery dataset is present. It reports the real discovery sources and passes once at least one is enabled, so
+   it can run before the first real scan.
+3. Manual preparation and post-hoc deletion are not used: the first has no check, and the second leaves the
+   fictional records in the append-only audit trail.
+
+## As built: the live database, owner decision of 2026-10-19 (addendum decision 3, option A)
+Addendum decision 3 reads: "The live demo database holds only what the real GitLab, AWS and Azure scans find. The
+seeded discovery dataset exists only in the fallback database." On 2026-10-19 the owner chose option A for it: the
+live database holds the governance seed but only real Shadow-AI findings. Built as two flags:
+- **`demo:prepare --live`** runs `seed → demo:setup → demo:intake --live → demo:traffic → demo:check --live`. Both
+  `demo:shadow` phases are skipped, so `seed` is the first step and its first-admin-setup acts (the personas' one-time
+  passwords, Morgan Reyes's creation and both admins' TOTP enrolment, the B4S-06 assurance window) run inside that
+  window as before. `demo:intake --live` loads the shipped signature catalogues but not the synthetic SaaS export,
+  which is also fictional. Without the flag, `demo:prepare` is unchanged (the fallback database).
+- **`demo:check --live`** keeps every governance beat and replaces the seeded-dataset beats with: "1 Fictional
+  dataset", a FAIL (never a warning, ADR-0180) on any discovery source, run, finding, import, enrolled device,
+  connector or provenance record carrying the dataset's company, source names, " (demo dataset)" suffix or recorded
+  identifiers, when one of those lists (each endpoint agent's device list included) cannot be read, or when the runs,
+  imports or provenance records come back as a full page of 200 (those routes do not page, so absence past the cap is
+  not proven); "1 Signature catalogue" (empty means a real scan matches
+  nothing); "1 Real discovery sources", which lists every real source with its kind, enabled state and last run, notes
+  the ones never run, and FAILs only when none is enabled; and "1 Remediation routing", which checks that the default
+  sign-off resolves to Morgan alone (the only active admin other than Ada, with TOTP) and that the shipped default is
+  not retired or changed, since no remediation workflow exists before the live S3 beat; an unreadable users or
+  templates list is a FAIL of its own.
+- On a fresh live database `demo:prepare --live` therefore ends with one FAIL, "1 Real discovery sources", until the
+  sources of DEMO_RUNBOOK §7.2 are added. CI (`demo.yml`, `demo-live`) pins that, and a 0-fail run with one real source
+  enabled, on empty databases. On the dev instance host it is pending execution.

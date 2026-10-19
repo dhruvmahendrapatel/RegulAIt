@@ -4,6 +4,7 @@
  * component so they are unit-tested without a browser (ADR-0168 item 2).
  */
 import type { Tone } from "../../../ui/kit";
+import { fmtDay } from "../../../api/format";
 
 export type UseCaseStatus = "proposed" | "under_review" | "needs_info" | "approved" | "rejected" | "retired";
 export type EuTier = "prohibited" | "high" | "limited" | "minimal";
@@ -58,12 +59,7 @@ export const tierTone = (t: EuTier): Tone => (t === "prohibited" ? "danger" : t 
 export const tierLabel = (t: EuTier) => (t === "prohibited" ? "Prohibited" : `${t.charAt(0).toUpperCase()}${t.slice(1)}`);
 
 /** "3 Oct 2026" — a date a reader scans in a column, never a timestamp */
-export function fmtDay(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-}
+export { fmtDay };
 
 /** what the "Valid until" column says: a date, "—" before approval, and an expired approval called out */
 export function validity(approvedUntil: string | null | undefined, expiredFlag?: boolean, now: Date = new Date()): { text: string; expired: boolean } {

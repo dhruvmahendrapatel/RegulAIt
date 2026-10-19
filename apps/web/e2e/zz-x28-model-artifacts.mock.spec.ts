@@ -208,7 +208,7 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     await setup(page, { retentionDays: 45 });
     await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.gguf.id}`);
     await expect(page.getByTestId("artifact-retention")).toContainText("Kept for 45 days.");
-    await expect(page.getByTestId("artifact-retention")).toContainText(/It may be deleted from \w{3} \d{1,2}, \d{4}, unless a scan of it is cited as model-card evidence or a run on it is unfinished/);
+    await expect(page.getByTestId("artifact-retention")).toContainText(/It may be deleted from \d{1,2} \w{3,4} \d{4}, unless a scan of it is cited as model-card evidence or a run on it is unfinished/);
   });
 
   test("delete: a confirmation naming the audit and the step-up, then the same DELETE resent once with the grant", async ({ page }) => {
@@ -304,7 +304,7 @@ test.describe("ADR-0187 X28: Model artifacts in Admission review", () => {
     await expect(ret).toContainText("The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here.");
     await expect(ret).toContainText("the strict default is 30 days");
     await expect(ret).not.toContainText("Kept for");
-    await expect(ret).not.toContainText(/deleted from \w{3} \d{1,2}, \d{4}/);
+    await expect(ret).not.toContainText(/deleted from \d{1,2} \w{3,4} \d{4}/);
   });
 
   test("delete refused while in use: the fixed sentence, and the artifact stays", async ({ page }) => {
@@ -403,7 +403,7 @@ test.describe("ADR-0187 X28: the engine-scan evidence chip on a model card", () 
     await expect(clean.getByTestId("scan-status")).toHaveAttribute("data-clean", "true");
     await expect(clean).toContainText(ARTIFACT_CHIP.clean);
     await expect(clean).toContainText("Engine: modelscan v0.8.8");
-    await expect(clean).toContainText(/Scanned \w{3} \d{1,2}, \d{4}/);
+    await expect(clean).toContainText(/Scanned \d{1,2} \w{3,4} \d{4}/);
     await expect(clean).toContainText("Admissible");
     const pickle = chips.nth(1);
     await expect(pickle.getByTestId("scan-status")).toHaveAttribute("data-clean", "false");

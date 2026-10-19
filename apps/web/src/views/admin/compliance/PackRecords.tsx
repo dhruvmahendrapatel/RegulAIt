@@ -163,7 +163,7 @@ function AttestationFormView(props: { packId: string; controls: readonly PackCon
     >
       <div className={v.sectionTitle}>Record an attestation</div>
       <p className={v.faint} id={ids.intro}>
-        Your own statement about an organisational control, recorded under your name. RegulAIt collects no evidence for
+        Your own statement about an organisational control, recorded under your name. regulAIt collects no evidence for
         it; the scorecard shows it as attested, never as satisfied.
       </p>
       <div className={a.formRow}>

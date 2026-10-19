@@ -36,8 +36,10 @@ into the governed path with a second person's sign-off, and then governs it from
 - **Endpoint evidence** is kept 90 days by default; keeping it longer is a relaxation.
 
 ### 3. Keyless where the provider allows it (ADR-0195 SD2b; ADR-0197 decision 3)
-- AWS and Azure accept a five-minute token from RegulAIt's own federation issuer (RS256, one audience per token).
-  The customer's role or app registration trusts that issuer; no long-lived cloud secret is stored.
+- AWS and Azure accept a five-minute token from RegulAIt's own federation issuer (RS256, one audience per token),
+  `<REGULAIT_PUBLIC_URL>/federation`, which is separate from the workload-identity issuer, so a token from one never
+  verifies at the other. The customer's role or app registration trusts that issuer; no long-lived cloud secret is
+  stored.
 - Git providers are the stated exception today: repository scans use a read-only token, stored encrypted and never
   shown, and the posture page lists it as a relaxation. Federated git credentials are planned (ADR-0197 work plan,
   A5).
@@ -47,7 +49,8 @@ into the governed path with a second person's sign-off, and then governs it from
 - A finding's remediation plan starts a workflow through the one instantiation route, so assignment rules and the
   compliance cascade still apply.
 - The shipped default is strict: plan-only first, then a remediation-plan artifact, then a sign-off by an admin
-  other than the initiator. With no second admin, the workflow does not start.
+  other than the initiator. With no second admin, the workflow does not start. In the demo, Ada initiates and Morgan
+  Reyes, the security lead and second admin (with MFA), signs off; Avery stays the independent governance reviewer.
 - **Register as use case** opens intake prefilled with only what the evidence established: the name and the
   observed use. Every screening answer is the proposer's.
 
@@ -82,9 +85,13 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
 - **Never claim the inventory is complete**, or that RegulAIt "sees all AI in the company". It sees the sources an
   admin enabled and the evidence supplied, and says which.
 - **Never say the planted usage is a customer's.** It is ours, planted for the demo under fictional names.
+- **Never present the fallback's recorded runs as live scans.** On the prepared copy, the GitLab, AWS and Azure runs
+  are recorded replays through the real worker. The screen does not say so (**Reads** shows *all read*; only the
+  *(demo dataset)* suffix on each source name marks them), so say it aloud.
 - **Never call git scanning keyless.** It uses a read-only token today.
 - **Never call the endpoint agent signed and shipped.** Its packages are built unsigned today; keyless release
   signing is decided (owner decision Q2) and not built.
 - **Never present anything as production.** The AWS account is a non-production sandbox (ADR-0197 decision 2), and
-  the remediation workflow's environment is `sandbox`.
+  the remediation workflow's environment is `staging`. Type it before pointing at the field: its placeholder reads
+  *"for example production"*.
 - **Never name or describe another governance product.**

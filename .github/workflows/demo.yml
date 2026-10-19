@@ -213,6 +213,131 @@ jobs:
             ${{ runner.temp }}/gateway.log
           retention-days: 7
 
+  # ADR-0197 addendum decision 3 (owner, 2026-10-19: option A): the live database holds real findings only.
+  # `demo:prepare --live` on an empty database, twice: (1) with nothing before it, so `seed` is the first step and
+  # does its first-admin-setup acts (Morgan's creation, both admins' TOTP) without the dataset's setup phase; there
+  # the ONLY failing beat is "1 Real discovery sources", since no real source exists yet; (2) with one real source
+  # (an endpoint agent, which needs no credential) added and enabled in first-admin setup first, where
+  # `demo:check --live` must pass with 0 fail. Both then prove the fictional dataset absent straight from the tables.
+  demo-live:
+    needs: changes
+    if: needs.changes.outputs.demo == 'true'
+    concurrency:
+      group: demo-live-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    services:
+      postgres:
+        image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
+        env:
+          POSTGRES_USER: regulait
+          POSTGRES_PASSWORD: regulait
+          POSTGRES_DB: regulait_live
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regulait -d regulait_live"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PG: postgres://regulait:regulait@localhost:5432
+      REGULAIT_BOOTSTRAP_TOKEN: e2e-bootstrap-token
+      # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
+      REGULAIT_DATA_KEY: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      REGULAIT_EPHEMERAL_LICENSE: '1'
+      # ADR-0181: the CI Postgres service has no TLS (see demo-journey)
+      REGULAIT_DATABASE_SSL: disable
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -r build
+
+      - name: Demo export-signing key
+        run: pnpm -s --filter @regulait/gateway demo:export-key -- --env | sed -e "s/^export //" -e "s/'//g" >> "$GITHUB_ENV"
+        env:
+          REGULAIT_DEMO_KEY_DIR: ${{ runner.temp }}/demo-keys
+
+      - name: Second empty database
+        run: psql "$PG/regulait_live" -v ON_ERROR_STOP=1 -c "create database regulait_live_sourced"
+
+      - name: demo:prepare --live, nothing before it (the only FAIL is the missing real source)
+        env:
+          DATABASE_URL: ${{ env.PG }}/regulait_live
+          REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
+        run: |
+          set +e
+          pnpm --filter @regulait/gateway demo:prepare --live > "$RUNNER_TEMP/live-unsourced.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/live-unsourced.log"
+          test "$code" -ne 0 || { echo "::error::demo:check --live passed with no real discovery source"; exit 1; }
+          grep -q "^=== demo:check --live ===" "$RUNNER_TEMP/live-unsourced.log" || { echo "::error::demo:prepare --live stopped before demo:check --live"; exit 1; }
+          fails=$(grep -E "^FAIL  " "$RUNNER_TEMP/live-unsourced.log" || true)
+          echo "$fails"
+          test "$(echo "$fails" | wc -l)" -eq 1 && echo "$fails" | grep -q "1 Real discovery sources" \
+            || { echo "::error::expected exactly one FAIL, '1 Real discovery sources'"; exit 1; }
+          for beat in "1 Fictional dataset" "1 Signature catalogue" "1 Remediation routing"; do
+            grep -qE "^PASS  $beat" "$RUNNER_TEMP/live-unsourced.log" || { echo "::error::$beat did not PASS"; exit 1; }
+          done
+
+      - name: A real source enabled in first-admin setup, then demo:prepare --live (0 fail)
+        working-directory: apps/gateway
+        env:
+          DATABASE_URL: ${{ env.PG }}/regulait_live_sourced
+          REGULAIT_LICENSE_KEYRING: ${{ runner.temp }}/license-keys
+        run: |
+          node --input-type=module -e '
+            import path from "node:path";
+            import { createDb, runMigrations } from "@regulait/db";
+            import { buildApp } from "./dist/app.js";
+            const db = createDb(process.env.DATABASE_URL);
+            await runMigrations(db, path.resolve("../../packages/db/migrations"));
+            const app = buildApp(db, { bootstrapToken: process.env.REGULAIT_BOOTSTRAP_TOKEN, dataKey: process.env.REGULAIT_DATA_KEY });
+            await app.ready();
+            const headers = { authorization: `Bearer ${process.env.REGULAIT_BOOTSTRAP_TOKEN}` };
+            const c = await app.inject({ method: "POST", url: "/v1/discovery/sources", headers,
+              payload: { name: "CI endpoint agent", kind: "endpoint_agent", target: { fleet: "ci-pilot" }, scope: { orgLevel: true, include: [] } } });
+            if (c.statusCode !== 201) { console.error("create", c.statusCode, c.body); process.exit(1); }
+            const e = await app.inject({ method: "POST", url: `/v1/discovery/sources/${c.json().id}/enable`, headers, payload: { version: c.json().version } });
+            if (e.statusCode !== 200) { console.error("enable", e.statusCode, e.body); process.exit(1); }
+            console.log("enabled", c.json().kind, c.json().name);
+            await app.close();
+            await db.$client.end();
+          '
+          set -o pipefail
+          pnpm demo:prepare --live | tee "$RUNNER_TEMP/live-sourced.log"
+          grep -qE "^PASS  1 Real discovery sources .*endpoint_agent 'CI endpoint agent' enabled, never run" "$RUNNER_TEMP/live-sourced.log"
+          grep -qE "^PASS  1 Fictional dataset" "$RUNNER_TEMP/live-sourced.log"
+
+      - name: The fictional dataset is absent from both databases (straight from the tables)
+        run: |
+          for db in regulait_live regulait_live_sourced; do
+            n=$(psql "$PG/$db" -tA -v ON_ERROR_STOP=1 -c "
+              select (select count(*) from discovery_sources where name ilike '%(demo dataset)%' or name ilike '%acme bank%')
+                   + (select count(*) from discovery_runs)
+                   + (select count(*) from shadow_ai_findings)
+                   + (select count(*) from shadow_ai_imports)
+                   + (select count(*) from connectors where name = 'acme-policy-library')")
+            echo "$db: $n fictional-dataset or discovery row(s)"
+            test "$n" -eq 0
+          done
+
   # The mocked UI suite (ADR-0183 2.4), sharded, shared with ci.yml in
   # mock-ui-shards.yml — but here ONLY on a manual dispatch.
   #
