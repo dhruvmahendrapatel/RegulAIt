@@ -226,11 +226,12 @@ export default function DiscoverySourcesPage() {
               signature catalogue. Unmatched observations are listed per run as catalogue gaps.
             </p>
           </Card>
-          <div className={v.grid4}>
+          <div className={v.grid5}>
             <Stat value={`${posture?.sourcesEnabled.length ?? 0} of ${posture?.sourcesTotal ?? 0}`} label={<>Sources enabled<InfoButton label="Sources enabled">How many configured sources are switched on. A source that is off is never scanned, so anything it would find is missing from the findings.</InfoButton></>} />
             <Stat value={posture?.staticCredentials.length ?? 0} label={<>Static credentials in use<InfoButton label="Static credentials in use">Sources that sign in with a stored key instead of short-lived federated access. Allowed, but rotate them regularly. Federation is preferred.</InfoButton></>} />
             <Stat value={posture?.staleCredentials.length ?? 0} label={<>Static credentials older than {posture?.credentialWarningAgeDays ?? 90} days<InfoButton label="old static credentials">Stored keys past the warning age set in Settings on this page. Rotate them or switch the source to federated access.</InfoButton></>} />
             <Stat value={posture?.writeScopeUnverified.length ?? 0} label={<>Write scope unverified<InfoButton label="Write scope unverified">regulAIt asks only for read access. This counts credentials it could not confirm are read-only. Check the role in the provider console before the next scan.</InfoButton></>} />
+            <Stat value={posture?.credentialsRefused?.length ?? 0} label={<>Credentials refused (write access)<InfoButton label="Credentials refused">regulAIt refuses a credential that grants write access, and its source is not scanned until a read-only credential replaces it.</InfoButton></>} />
           </div>
 
           <Card title="Scanner kinds">
@@ -288,7 +289,7 @@ export default function DiscoverySourcesPage() {
                   Organisation-level scope (everything the target holds)
                 </label>
                 {!form.orgLevel && (
-                  <Field label="Scope: what to scan (one per line)" help="Limits the scan to the accounts, projects or groups listed, one per line. Leave it empty to scan everything the credential can read.">
+                  <Field label="Scope: what to scan (one per line)" help="List at least one account, project or group, one per line. To scan everything, choose the organisation-level scope.">
                     <Textarea rows={3} value={form.include} spellCheck={false} onChange={(e) => setForm({ ...form, include: e.target.value })} />
                   </Field>
                 )}
@@ -314,6 +315,7 @@ export default function DiscoverySourcesPage() {
             {act.error && <div className={v.errLine} role="alert">{act.error}</div>}
           </Card>
 
+          <SourceWarnings sources={list} />
           <Card title="Sources" contain>
             <Table<DiscoverySourceView>
               rows={list}
@@ -480,7 +482,7 @@ export default function DiscoverySourcesPage() {
                 confirm it&apos;s you and is audited.
               </p>
               <div className={v.row}>
-                <Field label="Pseudonym" help="People in findings appear as pseudonyms. Revealing a real name needs a reason, and every reveal is audited.">
+                <Field label="Pseudonym" help="People in findings appear as pseudonyms. Revealing a real name asks you to confirm it's you, and every reveal is audited.">
                   <Input value={pseudonym} spellCheck={false} placeholder="psn:…" onChange={(e) => setPseudonym(e.target.value)} />
                 </Field>
                 <Button disabled={act.busy || !/^psn:[0-9a-f]{24}$/.test(pseudonym.trim())} onClick={reveal}>Reveal</Button>
@@ -506,7 +508,7 @@ export default function DiscoverySourcesPage() {
                 <Field label="Credential warning age (days)" help="Static credentials older than this are flagged on this page.">
                   <Input type="number" min={1} max={365} placeholder={String(settings.data?.credentialWarningAgeDays ?? "")} value={warnDays} onChange={(e) => setWarnDays(e.target.value)} />
                 </Field>
-                <Field label="Endpoint evidence retention (days)" help="How long raw scan evidence is kept before deletion. Findings and their audit history are kept.">
+                <Field label="Endpoint evidence retention (days)" help="Device findings and pseudonyms not seen within this window are deleted. The audit log is kept.">
                   <Input type="number" min={1} max={3650} placeholder={String(settings.data?.endpointRetentionDays ?? "")} value={retentionDays} onChange={(e) => setRetentionDays(e.target.value)} />
                 </Field>
               </div>
@@ -519,5 +521,31 @@ export default function DiscoverySourcesPage() {
         </QueryGate>
       </div>
     </>
+  );
+}
+
+/**
+ * Every credential warning on the Sources table, listed above its scroll box: a warning never sits only inside a
+ * contained section (ADR-0180), so none can be scrolled out of sight. Renders nothing when no source needs attention.
+ */
+function SourceWarnings(props: { sources: DiscoverySourceView[] }) {
+  const items = props.sources.flatMap((s) => {
+    const c = s.credential;
+    if (!c) return [];
+    const out: { key: string; tone: "danger" | "warn"; text: string }[] = [];
+    if (c.writeScope === "refused") out.push({ key: "refused", tone: "danger", text: "credential refused: it grants write access" });
+    if (c.ageWarning) out.push({ key: "age", tone: "danger", text: `static key ${c.ageDays} days old` });
+    if (c.writeScope === "unverified") out.push({ key: "unverified", tone: "warn", text: "write scope unverified" });
+    return out.map((w) => ({ ...w, key: `${s.id}:${w.key}`, name: s.name }));
+  });
+  if (items.length === 0) return null;
+  return (
+    <div className={v.stackTight} role="list" aria-label="Sources that need attention" data-testid="source-warnings">
+      {items.map((w) => (
+        <div key={w.key} role="listitem">
+          <Badge tone={w.tone}>{w.name}</Badge> <span className={v.dim}>{w.text}</span>
+        </div>
+      ))}
+    </div>
   );
 }

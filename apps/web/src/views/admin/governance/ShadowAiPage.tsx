@@ -447,6 +447,7 @@ export default function ShadowAiPage() {
     }
     return out;
   }, [findings.data]);
+  const seenAgain = (findings.data?.findings ?? []).filter((f) => f.dispositionStale);
   const subjectOf = (id: string | null) => findings.data?.findings.find((f) => f.id === id)?.subject ?? "this finding";
   const panel = { id: "shadow", tab: tabIds("shadow", tab) };
 
@@ -508,9 +509,27 @@ export default function ShadowAiPage() {
           tone="low"
           value={`${findings.data?.coverage.sourcesOn ?? 0} / ${findings.data?.coverage.sourcesPossible ?? 4}`}
           label="Evidence classes supplied"
-          info="regulAIt can use four kinds of evidence: network egress logs, code scans, SaaS and identity records, and self-reported use. Each kind not supplied is a blind spot."
+          info="The four kinds of evidence you can import: network egress logs, code scans, SaaS and identity records, and self-reported use. Each kind not supplied is a blind spot. Findings from discovery sources (repository, cloud and endpoint scans) are not counted here."
         />
       </div>
+
+      {/* ADR-0180: a warning never sits only inside a scroll box, so every finding seen again after it was closed is
+          also listed here, above the contained Inventory, with its review action */}
+      {seenAgain.length > 0 ? (
+        <div className={sh.callout} role="note" aria-label="Seen again after closing" data-testid="shadow-seen-again" style={{ flexWrap: "wrap", alignItems: "center" }}>
+          <span>
+            <Badge tone="danger">Seen again {seenAgain.length}</Badge>{" "}
+            New evidence arrived after {seenAgain.length === 1 ? "this finding was" : "these findings were"} closed. Review the disposition again.
+          </span>
+          <span className={v.row}>
+            {seenAgain.map((f) => (
+              <Button key={f.id} size="sm" aria-label={`Review ${f.subject} again`} onClick={() => { setDispositionFor(f.id); setReason(""); }}>
+                {f.subject}
+              </Button>
+            ))}
+          </span>
+        </div>
+      ) : null}
 
       {/* the findings are the point of the page: they come straight after the figures */}
       <Card
@@ -583,11 +602,11 @@ export default function ShadowAiPage() {
                     const plan = (
                       <Button
                         variant={r.disposition === "open" || r.disposition === "confirmed" ? "primary" : "default"}
-                        aria-label={`Remediation plan for ${r.subject}`}
+                        aria-label={`Plan remediation for ${r.subject}`}
                         aria-pressed={remediationFor === r.id}
                         onClick={() => setRemediationFor(remediationFor === r.id ? null : r.id)}
                       >
-                        Remediation plan
+                        Plan remediation
                       </Button>
                     );
                     const triage = r.dispositionStale ? (
@@ -599,11 +618,12 @@ export default function ShadowAiPage() {
                       <RowActions
                         slot="11rem"
                         stacked
-                        primary={r.disposition === "open" || r.disposition === "confirmed" || r.dispositionStale ? plan : null}
+                        // X7 (owner): the plan button sits in the primary slot on every row, so it aligns on every row; a
+                        // closed finding shows it at default weight instead of moving it
+                        primary={plan}
                         secondary={triage}
                         rest={
                           <span className={v.stackTight} style={{ alignItems: "flex-start" }}>
-                            {r.disposition === "open" || r.disposition === "confirmed" || r.dispositionStale ? null : plan}
                             <Link to={`/admin/governance/intake?source=shadow-ai&findingId=${encodeURIComponent(r.id)}&title=${encodeURIComponent(`Govern ${r.subject}`)}&description=${encodeURIComponent(`Register and govern the ${providerLabel(r.provider)} usage observed for ${r.subject}. Evidence: ${r.signalSources.map(evidenceLabel).join(", ")}.`)}`}>Register as use case</Link>
                           </span>
                         }
@@ -1222,9 +1242,9 @@ const DISPOSITION_LABEL: Record<string, string> = {
   remediated: "Remediated",
 };
 const DISPOSITION_HELP =
-  "Your triage decision. Open: not reviewed. Confirmed: real ungoverned use. Sanctioned: allowed as it is. False positive: not AI use. Remediated: fixed. Every change needs a reason.";
+  "Your triage decision. Open: not reviewed. Confirmed: real ungoverned use. Sanctioned: allowed as it is. False positive: not AI use. Remediated: fixed. Moving a finding off Open needs a reason.";
 const CONFIDENCE_HELP =
-  "How sure the match is. High means an exact endpoint or key format matched. Medium and low are looser signals, such as a package name, and need a human check.";
+  "How many independent kinds of evidence agree. High: three or more. Medium: two. Low: one, so check it by hand.";
 
 /** a figure tile; `tone` paints the severity stripe, so the tile that needs attention reads first */
 function KpiFigure(props: { value: ReactNode; label: string; hint?: string; info?: ReactNode; tone?: "critical" | "high" | "medium" | "low" }) {

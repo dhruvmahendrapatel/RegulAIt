@@ -9,6 +9,7 @@
   color: var(--rg-ink);
 }
 .linkButton {
+  min-block-size: 24px; /* WCAG 2.5.8 target size */
   padding: 0;
   border: 0;
   background: none;
@@ -48,6 +49,7 @@
 .medium::before { background: var(--rg-medium); }
 .low::before { background: var(--rg-low); }
 .chip {
+  min-block-size: 24px; /* WCAG 2.5.8 target size */
   padding: var(--s0) var(--s1-5);
   border: 1px solid var(--border-strong);
   border-radius: var(--rg-r-pill);
