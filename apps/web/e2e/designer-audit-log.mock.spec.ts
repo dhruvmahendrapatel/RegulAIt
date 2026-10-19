@@ -47,7 +47,7 @@ test("Audit log: chain state first and never green unasked, entries contained, r
 
   // no hover-only titles on the downloads or the unrecorded deploy mode
   await expect(page.getByRole("button", { name: "Download CSV" })).not.toHaveAttribute("title", /.+/);
-  await page.getByRole("button", { name: "What is Download signed bundle?" }).click();
+  await page.getByRole("button", { name: "What is the signed bundle?" }).click();
   await expect(page.getByRole("note")).toContainText("verify offline");
   await page.keyboard.press("Escape");
   await expect(page.getByText("Not recorded", { exact: true })).toBeVisible();

@@ -128,7 +128,7 @@ export default function AuditLogPage() {
             >
               Download CSV
             </Button>
-            <InfoButton label="Download CSV" align="end">
+            <InfoButton label="the CSV export" align="end">
               <p>Downloads the full filtered trail, not only the rows loaded in the table.</p>
             </InfoButton>
             <Button
@@ -140,7 +140,7 @@ export default function AuditLogPage() {
             >
               Download signed bundle
             </Button>
-            <InfoButton label="Download signed bundle" align="end">
+            <InfoButton label="the signed bundle" align="end">
               <p>A signed package of the full filtered trail with a manifest, which an auditor can verify offline.</p>
             </InfoButton>
           </>
