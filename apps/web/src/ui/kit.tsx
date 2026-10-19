@@ -21,6 +21,7 @@ import {
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
+import { createPortal } from "react-dom";
 import s from "./kit.module.css";
 
 // ---- Button ---------------------------------------------------------------
@@ -436,16 +437,25 @@ export function Card(props: {
   /**
    * X6: a long, read-only body scrolls inside the card instead of stretching
    * the page, with an Expand button that opens the same body near full
-   * screen. Never for forms, warnings, decisions or step-ups — those must be
-   * fully visible, so this is opt-in per card. X6b: "Show all" lets the
-   * section flow at full length instead, remembered per page and section in
-   * this browser only.
+   * screen. Never for forms, warnings, decisions or step-ups: a body holding
+   * one (KEEP_VISIBLE) is refused at runtime and stays fully visible. X6b:
+   * "Show all" lets the section flow at full length instead, remembered per
+   * page and section in this browser only.
    */
   contain?: boolean;
+  /** X6 cue beside the title: how many rows the body holds */
+  count?: number;
+  /** singular and plural noun for `count`; row / rows by default */
+  countNoun?: [string, string];
 }) {
   const name = props.infoLabel ?? (typeof props.title === "string" ? props.title : "this section");
-  const body = useRef<HTMLDivElement>(null);
-  const [overflows, setOverflows] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const slot = useRef<HTMLDivElement>(null);
+  // The body renders once, through a portal into a host node that moves between
+  // the box and the expanded dialog: ids and test ids are never doubled, and its
+  // state survives Expand and close. On the server there is no host, so it renders inline.
+  const [host] = useState(() => (props.contain && typeof document !== "undefined" ? document.createElement("div") : null));
+  const [fit, setFit] = useState({ scrolls: false, long: false, refused: false });
   const [expanded, setExpanded] = useState(false);
   const memoryKey = `regulait.contain:${typeof location === "undefined" ? "" : location.pathname}:${name}`;
   const [showAll, setShowAll] = useState(() => {
@@ -465,19 +475,45 @@ export function Card(props: {
       // storage unavailable: the choice lasts for this visit only
     }
   };
-  const contained = props.contain === true && !showAll;
-  useEffect(() => {
-    const el = body.current;
-    if (!contained || !el || typeof ResizeObserver === "undefined") return;
-    // Expand is offered only when the box actually cuts content off
-    const check = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
+  useLayoutEffect(() => {
+    if (host) (expanded ? slot.current : box.current)?.appendChild(host);
+  }, [host, expanded]);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!host || !el || typeof ResizeObserver === "undefined") return;
+    let warned = false;
+    const check = () => {
+      // expanded: keep the Expand trigger until the dialog hands focus back to it
+      if (host.parentElement !== el) return;
+      const refused = host.querySelector(KEEP_VISIBLE) != null;
+      if (refused && !warned && import.meta.env.DEV) {
+        warned = true;
+        console.warn(`Card "${name}": contain refused, the body holds a form, warning, decision or step-up control`);
+      }
+      const next = {
+        refused,
+        // the region is a tab stop and a landmark only while it really scrolls
+        scrolls: !refused && el.scrollHeight > el.clientHeight + 1,
+        // measured against the desktop limit (.contain), so phones, where the
+        // body flows, still get Expand
+        long: !refused && host.offsetHeight > Math.min(window.innerHeight * 0.6, 560) + 1,
+      };
+      setFit((f) => (f.refused === next.refused && f.scrolls === next.scrolls && f.long === next.long ? f : next));
+    };
+    // the host wraps every child, so rows added after mount are seen too
     const ro = new ResizeObserver(check);
     ro.observe(el);
-    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    ro.observe(host);
+    window.addEventListener("resize", check);
     check();
-    return () => ro.disconnect();
-  }, [contained]);
-  const expand = props.contain && (overflows || showAll) && (
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", check);
+    };
+  }, [host, name]);
+  const containable = props.contain && !fit.refused;
+  const contained = containable && !showAll;
+  const expand = containable && fit.long && (
     <>
       <Button size="sm" variant="ghost" aria-pressed={showAll} onClick={toggleShowAll}>
         Show all
@@ -487,11 +523,12 @@ export function Card(props: {
       </Button>
     </>
   );
+  const [one, many] = props.countNoun ?? ["row", "rows"];
   return (
     <section
       className={[props.flush ? s.cardFlush : s.card, props.className ?? ""].join(" ")}
       style={props.style}
-      // lets layout primitives give cards a 24px gutter (views .stack / grids,
+      // data hook so page-level layout rules can address cards (e.g. the
       // shell .content) without a cross-module class reference
       data-rg-card=""
     >
@@ -501,25 +538,43 @@ export function Card(props: {
             {props.title}
             {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
           </span>
+          {props.count != null && (
+            <span style={{ color: "var(--text-faint)", fontSize: "var(--text-sm)", fontWeight: 400 }}>
+              {props.count} {props.count === 1 ? one : many}
+            </span>
+          )}
           {props.actions}
           {expand}
         </div>
       )}
-      {contained ? (
-        <div ref={body} className={s.contain} tabIndex={0} role="region" aria-label={`${name}, scrollable`}>
-          {props.children}
+      {props.contain ? (
+        <div
+          ref={box}
+          className={contained ? s.contain : undefined}
+          {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
+        >
+          {host ? createPortal(props.children, host) : props.children}
         </div>
       ) : (
         props.children
       )}
-      {props.contain && (
+      {host && (
         <Modal open={expanded} full title={typeof props.title === "string" ? props.title : name} onClose={() => setExpanded(false)}>
-          {props.children}
+          <div ref={slot} />
         </Modal>
       )}
     </section>
   );
 }
+
+/**
+ * What a contained card must never hide (X6, ADR-0180): forms and their fields,
+ * warnings and alerts, decisions and step-up prompts. Selection checkboxes in a
+ * read-only list are not a decision, so they do not count.
+ */
+const KEEP_VISIBLE =
+  'form, fieldset, textarea, select, input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), ' +
+  '[role="alert"], [role="alertdialog"], dialog';
 
 /**
  * X7 (owner rule, 2026-10-19): a row's actions sit in fixed slots so the

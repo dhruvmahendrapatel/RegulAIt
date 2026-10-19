@@ -353,7 +353,7 @@ function TryIt(props: { binding: ModelBinding | null; bindings: ModelBinding[]; 
         </pre>
       </div>
       <p className={s.hint}>
-        Calls from code use your own RegulAIt API key, read from <span className={s.mono}>{KEY_ENV}</span> — no key
+        Calls from code use your own regulAIt API key, read from <span className={s.mono}>{KEY_ENV}</span> — no key
         is ever shown here. The <span className={s.mono}>x-regulait-agent-id</span> header pins this exact model
         binding. These endpoints answer once an admin has enabled them under Client access, and they require an{" "}
         <span className={s.mono}>x-regulait-project-id</span> header naming one of your projects unless an admin has

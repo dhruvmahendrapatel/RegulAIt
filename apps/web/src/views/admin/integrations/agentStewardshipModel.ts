@@ -8,6 +8,7 @@
  * so the form can say so before the request, never instead of it.
  */
 import type { Tone } from "../../../ui/kit";
+import { fmtDay } from "../../../api/format";
 
 export const LIFECYCLE_STATUSES = ["proposed", "active", "under_review", "suspended", "deprecated", "retired"] as const;
 export type LifecycleStatus = (typeof LIFECYCLE_STATUSES)[number];
@@ -101,12 +102,7 @@ export function matchesFilter(a: AgentStewardship, f: StewardshipFilter): boolea
   return true;
 }
 
-export function fmtDay(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-}
+export { fmtDay };
 
 /** the "Next review" cell: a date, "Not scheduled", or an overdue date called out */
 export function reviewCell(a: AgentStewardship): { text: string; overdue: boolean } {

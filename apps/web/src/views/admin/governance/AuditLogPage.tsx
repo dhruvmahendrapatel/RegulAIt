@@ -144,39 +144,6 @@ export default function AuditLogPage() {
         }
       />
       <div className={v.stack}>
-        <DecisionReceiptsPanel />
-        <AnchorTimestampsPanel />
-        <Card title="Retention">
-          {ret == null ? (
-            <span className={v.dim}>Loading retention…</span>
-          ) : ret.retainedDays == null ? (
-            <p className={v.dim}>
-              No compliance profile sets a retention — nothing is eligible for pruning (all rows kept).
-            </p>
-          ) : (
-            <div className={v.row}>
-              <span>
-                Global floor <strong>{ret.retainedDays} days</strong>{" "}
-                <span className={v.dim}>
-                  (set by {(ret.floorSource ?? []).map(frameworkLabel).join(", ") || "the organisation default"}) ·{" "}
-                  <strong>{plural(ret.prunable, "row")}</strong> older than that
-                </span>
-              </span>
-              <span className={v.grow} />
-              <Button disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
-                Prune audit log
-              </Button>
-            </div>
-          )}
-          <p className={v.faint}>
-            Retention is the longest period any active compliance profile requires, combined with the
-            organisation default — a framework with a shorter period never shortens another framework's
-            trail. Pruning is itself audited.
-          </p>
-        </Card>
-
-        <ChainIntegrityCard />
-
         <Card>
           {onlyRow && (
             <p role="status" data-testid="audit-only-row">
@@ -306,6 +273,39 @@ export default function AuditLogPage() {
             <DecisionBomPanel key={bomAuditId} auditId={bomAuditId} onClose={() => setBomAuditId(null)} />
           </Suspense>
         )}
+        {/* the trail first, so the newest decisions are on screen without scrolling; the evidence tools follow it */}
+        <DecisionReceiptsPanel />
+        <AnchorTimestampsPanel />
+        <Card title="Retention">
+          {ret == null ? (
+            <span className={v.dim}>Loading retention…</span>
+          ) : ret.retainedDays == null ? (
+            <p className={v.dim}>
+              No compliance profile sets a retention — nothing is eligible for pruning (all rows kept).
+            </p>
+          ) : (
+            <div className={v.row}>
+              <span>
+                Global floor <strong>{ret.retainedDays} days</strong>{" "}
+                <span className={v.dim}>
+                  (set by {(ret.floorSource ?? []).map(frameworkLabel).join(", ") || "the organisation default"}) ·{" "}
+                  <strong>{plural(ret.prunable, "row")}</strong> older than that
+                </span>
+              </span>
+              <span className={v.grow} />
+              <Button disabled={!ret.prunable} onClick={() => setConfirmPrune(true)}>
+                Prune audit log
+              </Button>
+            </div>
+          )}
+          <p className={v.faint}>
+            Retention is the longest period any active compliance profile requires, combined with the
+            organisation default — a framework with a shorter period never shortens another framework's
+            trail. Pruning is itself audited.
+          </p>
+        </Card>
+
+        <ChainIntegrityCard />
       </div>
 
       <ConfirmModal

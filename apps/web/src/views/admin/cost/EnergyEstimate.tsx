@@ -215,7 +215,7 @@ export function EnergyFactorsCard() {
     <Card title="Energy factors">
       <div className={v.stack}>
         <span className={v.faint}>
-          {q.data?.notes.shipped ?? "RegulAIt ships no energy factors."} {q.data?.notes.unknown ?? ""}
+          {q.data?.notes.shipped ?? "regulAIt ships no energy factors."} {q.data?.notes.unknown ?? ""}
         </span>
         <Table
           rows={q.data?.factors ?? []}

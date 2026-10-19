@@ -457,8 +457,8 @@ export default function ShadowAiPage() {
         sub="AI use that nobody registered, found in evidence you already hold. Triage each lead and bring it into governance."
         info={
           <>
-            Shadow AI is AI use that is not registered or routed through RegulAIt. Findings come from evidence:
-            discovery scans and files you import. RegulAIt does not watch live traffic, so coverage is only as wide as
+            Shadow AI is AI use that is not registered or routed through regulAIt. Findings come from evidence:
+            discovery scans and files you import. regulAIt does not watch live traffic, so coverage is only as wide as
             the evidence.
           </>
         }
@@ -508,7 +508,7 @@ export default function ShadowAiPage() {
           tone="low"
           value={`${findings.data?.coverage.sourcesOn ?? 0} / ${findings.data?.coverage.sourcesPossible ?? 4}`}
           label="Evidence classes supplied"
-          info="RegulAIt can use four kinds of evidence: network egress logs, code scans, SaaS and identity records, and self-reported use. Each kind not supplied is a blind spot."
+          info="regulAIt can use four kinds of evidence: network egress logs, code scans, SaaS and identity records, and self-reported use. Each kind not supplied is a blind spot."
         />
       </div>
 

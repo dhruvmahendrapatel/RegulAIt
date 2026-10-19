@@ -92,8 +92,9 @@ import { SpiffeTrustBundlesCard } from "./SpiffeTrustBundles";
 import { SpiffeBundleEndpointsCard } from "./SpiffeBundleEndpoints";
 import s from "./workloadIdentities.module.css";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
+import { fmtDateTime } from "../../../api/format";
 
-const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Unmeasured");
+const dateLabel = (value: string | null) => fmtDateTime(value, "Unmeasured");
 
 /**
  * A control that exists but cannot act here, with the reason one focusable
