@@ -201,8 +201,9 @@
 
 /* ---- Contained card body (X6) ----
    Scrolls inside the card past the limit, so the next section still peeks in;
-   the sticky header, the bottom rule and Expand say there is more. Phones keep
-   the page scroll: a nested scroll box traps the thumb. Focus ring: the global
+   the sticky header, the bottom rule, the row count and Expand say there is
+   more. Phones keep the page scroll (a nested scroll box traps the thumb) and
+   still get Expand: Card measures against this limit in script. Focus ring: the global
    :focus-visible. (Entry CSS headroom is ~200 B, so no scroll-shadow layers.) */
 .contain {
   max-block-size: min(60vh, 560px);
@@ -432,6 +433,7 @@
   max-width: none;
   inline-size: calc(100vw - 2 * var(--s3));
   block-size: calc(100vh - 2 * var(--s3));
+  block-size: calc(100dvh - 2 * var(--s3));
   max-height: none;
 }
 .modalTitle {
@@ -666,9 +668,7 @@ a.barLabel {
   border: 0;
   border-radius: var(--rg-r-pill);
   background: transparent;
-  /* muted, not faint: faint is 3.3:1 on white and drops under the 3:1
-     non-text floor where the trigger sits on the shaded field */
-  color: var(--rg-ink-muted);
+  color: var(--text-faint);
   cursor: pointer;
   transition: color var(--rg-dur-fast) var(--rg-ease), background var(--rg-dur-fast) var(--rg-ease);
 }

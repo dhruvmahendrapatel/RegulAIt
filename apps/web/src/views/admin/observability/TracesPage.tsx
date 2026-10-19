@@ -41,7 +41,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
-import { ago, fmtDur, fmtUsd, shortId } from "../../../api/format";
+import { ago, fmtDateTime, fmtDur, fmtUsd, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -482,7 +482,7 @@ function TracesView() {
                       <Badge tone="warn">ERROR</Badge>,
                       "OTel Error, plus the standard error.type attribute — a real failure " +
                         "still shows up on an error dashboard built by somebody who has " +
-                        "never heard of RegulAIt.",
+                        "never heard of regulAIt.",
                     ],
                   ]}
                 />
@@ -1049,7 +1049,7 @@ function TracesView() {
                                     "Run / node",
                                     s.runId ? `${shortId(s.runId)}${s.nodeId ? ` / ${s.nodeId}` : ""}` : "—",
                                   ],
-                                  ["Started", new Date(s.startedAt).toLocaleString()],
+                                  ["Started", fmtDateTime(s.startedAt)],
                                 ]}
                               />
                               {s.contentWithheld && (

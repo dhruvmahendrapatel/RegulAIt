@@ -16,7 +16,7 @@
 import { lazy, Suspense, useEffect, useId, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "../../../../api/client";
-import { ago, fmtAt } from "../../../../api/format";
+import { ago, fmtAt, fmtDateTime } from "../../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../../stepup/stepUp";
 import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Input, Modal, Select, Table } from "../../../../ui/kit";
 import { useAction } from "../../adminKit";
@@ -995,8 +995,8 @@ export function PersonStdioRelaxationControl(props: { scopeKind: PersonStdioScop
           {current.expiresAt === null
             ? "The gateway does not report when it expires."
             : current.expired
-              ? `It expired ${new Date(current.expiresAt).toLocaleString()} and no longer applies; renewing it asks you to confirm it is you.`
-              : `It expires ${new Date(current.expiresAt).toLocaleString()} unless renewed.`}{" "}
+              ? `It expired ${fmtDateTime(current.expiresAt)} and no longer applies; renewing it asks you to confirm it is you.`
+              : `It expires ${fmtDateTime(current.expiresAt)} unless renewed.`}{" "}
           A saved setting is policy; it does not show that any call ran under it.
         </p>
       )}

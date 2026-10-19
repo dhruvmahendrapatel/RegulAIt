@@ -99,7 +99,7 @@ export async function decideApproval<T = unknown>(
 
 const REFUSAL_COPY: Readonly<Record<string, string>> = {
   passkey_signature_required:
-    "This approval must be signed with your passkey. Sign in to RegulAIt in your browser and try again.",
+    "This approval must be signed with your passkey. Sign in to regulAIt in your browser and try again.",
   passkey_signature_invalid:
     "Your passkey's signature couldn't be verified for this decision. Try again, using a passkey registered to your account.",
   passkey_challenge_expired: "The signing request expired before it was used. Try again.",

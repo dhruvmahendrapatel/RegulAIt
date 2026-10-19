@@ -14,7 +14,7 @@ import s from "./builder.module.css";
 export function Byline() {
   return (
     <span className={s.byline}>
-      {Icon.shield(13)} by RegulAIt
+      {Icon.shield(13)} by regulAIt
     </span>
   );
 }

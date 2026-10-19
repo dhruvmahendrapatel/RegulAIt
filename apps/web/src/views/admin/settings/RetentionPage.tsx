@@ -8,6 +8,7 @@ import { Button, Card, ConfirmModal, Field, Input, Table } from "../../../ui/kit
 import { QueryGate, readCurrentOrgSettings, reconfirmNeeded, StaleAfterWrite, useAction, useSettleAfterWrite, useSingleFlight } from "../adminKit";
 import v from "../../views.module.css";
 import { OrgSettingsCard } from "./OrgSettingsCard";
+import { fmtDateTime } from "../../../api/format";
 
 interface MemoryStore {
   kind: string;
@@ -43,10 +44,10 @@ export default function RetentionPage() {
           columns={[
             { key: "kind", header: "Store", render: (row) => STORE_NAMES[row.kind] ?? row.kind },
             { key: "rows", header: "Rows", render: (row) => row.rows.toLocaleString() },
-            { key: "oldest", header: "Oldest record", render: (row) => row.oldestAt ? new Date(row.oldestAt).toLocaleString() : "No records" },
+            { key: "oldest", header: "Oldest record", render: (row) => fmtDateTime(row.oldestAt, "No records") },
             { key: "isolation", header: "Isolation", render: (row) => row.isolation },
             { key: "retention", header: "Retention", render: (row) => row.retention.enforcedBy === null ? "No retention sweep implemented" : `${row.retention.value} ${row.retention.setting === "semanticCacheTtlSeconds" ? "seconds" : "days"}` },
-            { key: "run", header: "Last successful sweep", render: (row) => row.retention.enforcedBy === null ? "Not applicable" : row.retention.lastRunAt ? new Date(row.retention.lastRunAt).toLocaleString() : "No successful run recorded" },
+            { key: "run", header: "Last successful sweep", render: (row) => row.retention.enforcedBy === null ? "Not applicable" : row.retention.lastRunAt ? fmtDateTime(row.retention.lastRunAt) : "No successful run recorded" },
             { key: "held", header: "Held past retention", render: (row) => row.held === null ? "Not measured" : row.held },
             { key: "owner", header: "Owner", render: () => "Organisation" },
           ]} />

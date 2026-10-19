@@ -5,6 +5,9 @@
  * `demo:setup` → `demo:intake`) and prints PASS / WARN / FAIL per beat with
  * the fix. Exit 1 on any FAIL, 0 otherwise. Same environment as the seeders:
  * DATABASE_URL, REGULAIT_BOOTSTRAP_TOKEN, REGULAIT_DATA_KEY.
+ *
+ * `--live` (ADR-0197 addendum decision 3): the live database, which holds real findings only. The seeded-dataset
+ * beats are replaced: any trace of the fictional dataset FAILs, and the real discovery sources are reported.
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +19,7 @@ import { formatDemoCheck, runDemoCheck } from "./demo-check-lib.js";
 
 const connectionString = process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
 const BOOT = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "seed-bootstrap";
+const live = process.argv.includes("--live");
 const fixtures = (shared as unknown as { DEMO_INTAKE_FIXTURES?: DemoIntakeFixtures }).DEMO_INTAKE_FIXTURES ?? null;
 
 const db = createDb(connectionString);
@@ -23,8 +27,8 @@ await runMigrations(db, path.resolve(path.dirname(fileURLToPath(import.meta.url)
 const app = buildApp(db, { bootstrapToken: BOOT, dataKey: process.env.REGULAIT_DATA_KEY });
 await app.ready();
 
-const checks = await runDemoCheck(app, { bootstrapToken: BOOT, fixtures });
-console.log(`demo:check — ${fixtures?.company.name ?? "no fixtures"}\n`);
+const checks = await runDemoCheck(app, { bootstrapToken: BOOT, fixtures, live });
+console.log(`demo:check${live ? " --live" : ""} — ${fixtures?.company.name ?? "no fixtures"}${live ? " (live database: real discovery only)" : ""}\n`);
 console.log(formatDemoCheck(checks));
 await app.close();
 await (db.$client as { end: () => Promise<void> }).end();

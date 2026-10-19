@@ -29,7 +29,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { ago, fmtUsd, shortId } from "../../../api/format";
+import { ago, fmtDateTime, fmtUsd, shortId } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
   Badge,
@@ -478,7 +478,7 @@ export default function VirtualKeysPage() {
                     key: "expires",
                     header: "Expires",
                     render: (k) =>
-                      k.expiresAt ? new Date(k.expiresAt).toLocaleString() : <span className={v.faint}>never</span>,
+                      k.expiresAt ? fmtDateTime(k.expiresAt) : <span className={v.faint}>never</span>,
                   },
                   {
                     key: "used",
@@ -575,11 +575,11 @@ export default function VirtualKeysPage() {
                           "none — the ordinary credential resolution applies"
                         ),
                       ],
-                      ["Issued", new Date(usage.data.key.createdAt).toLocaleString()],
+                      ["Issued", fmtDateTime(usage.data.key.createdAt)],
                       [
                         "Revoked",
                         usage.data.key.revokedAt
-                          ? new Date(usage.data.key.revokedAt).toLocaleString()
+                          ? fmtDateTime(usage.data.key.revokedAt)
                           : "not revoked",
                       ],
                     ]}

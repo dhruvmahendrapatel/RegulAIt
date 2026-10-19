@@ -31,7 +31,7 @@ const PASSKEY_SENTENCES: Readonly<Record<string, string>> = {
   fresh_sign_in_required:
     "Adding your first passkey needs a fresh sign-in. Sign out, sign in again, and add it within 10 minutes.",
   passkey_attestation_refused:
-    "That passkey sent manufacturer details RegulAIt doesn't accept. Try again, or use a different passkey.",
+    "That passkey sent manufacturer details regulAIt doesn't accept. Try again, or use a different passkey.",
   passkey_already_registered: "That passkey is already registered to an account.",
   browser_session_required: "Passkeys are managed from a signed-in browser.",
 };
@@ -97,7 +97,7 @@ export default function PasskeysCard() {
     >
       <div className={v.stack}>
         <div className={v.dim}>
-          A passkey lets you confirm it's you with your device's fingerprint, face, PIN or security key. RegulAIt asks
+          A passkey lets you confirm it's you with your device's fingerprint, face, PIN or security key. regulAIt asks
           for it before sensitive actions, such as loosening a security setting or changing who owns something, and
           when you sign a tool-call approval.
         </div>

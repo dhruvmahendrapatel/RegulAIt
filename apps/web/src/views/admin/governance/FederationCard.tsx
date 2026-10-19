@@ -9,6 +9,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { fmtDateTime } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
@@ -36,7 +37,7 @@ export interface FederationStatusView {
 }
 
 const STATE_TONE = { pending: "neutral", active: "ok", retired: "info", revoked: "danger" } as const;
-const when = (iso: string | null) => (iso && Number.isFinite(Date.parse(iso)) ? new Date(iso).toLocaleString() : "—");
+const when = (iso: string | null) => <span style={{ whiteSpace: "nowrap" }}>{fmtDateTime(iso)}</span>;
 
 export default function FederationCard() {
   const act = useAction();
@@ -91,7 +92,12 @@ export default function FederationCard() {
         <p className={v.faint}>
           Generated keys are published at once so the clouds can cache them. {s?.enabled ? "Rotate" : "Activate"} after a few minutes.
         </p>
-        {s && !s.issuer && <p className={v.faint}>The issuer needs this deployment&apos;s public URL (REGULAIT_PUBLIC_URL); until it is set no token can be minted.</p>}
+        {s && !s.issuer && (
+          <p className={v.faint} data-testid="federation-no-public-url">
+            This deployment&apos;s public URL is not configured, so no token can be minted. An operator sets it as the cloud discovery
+            deployment guide describes (docs/deployment/CLOUD_DISCOVERY.md).
+          </p>
+        )}
         {s?.issuer && (
           <p className={v.faint}>
             Issuer <span className={v.mono}>{s.issuer}</span>, keys at <span className={v.mono}>{s.jwksUri}</span>. Subject{" "}
@@ -102,8 +108,8 @@ export default function FederationCard() {
         {s && (
           <p className={v.faint}>
             {s.awsPrincipal.configured
-              ? <>RegulAIt&apos;s own AWS principal is <span className={v.mono}>{s.awsPrincipal.roleArn}</span> (subject <span className={v.mono}>{s.awsPrincipal.subject}</span>); an AWS source with target <span className={v.mono}>federation=principal</span> assumes your role from it with the source&apos;s external id.</>
-              : "RegulAIt's own AWS principal is not configured, so AWS sources federate directly (AssumeRoleWithWebIdentity)."}
+              ? <>regulAIt&apos;s own AWS principal is <span className={v.mono}>{s.awsPrincipal.roleArn}</span> (subject <span className={v.mono}>{s.awsPrincipal.subject}</span>); an AWS source with target <span className={v.mono}>federation=principal</span> assumes your role from it with the source&apos;s external id.</>
+              : "regulAIt's own AWS principal is not configured, so AWS sources federate directly (AssumeRoleWithWebIdentity)."}
           </p>
         )}
         <Table

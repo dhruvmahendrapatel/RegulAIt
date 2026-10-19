@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import { plural } from "../../../api/format";
+import { fmtDateTime, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Card, EmptyState, StatusDot } from "../../../ui/kit";
 import { QueryGate, Stat } from "../adminKit";
@@ -150,7 +150,7 @@ function TrustReportView(props: {
         <span aria-hidden>·</span>
         <span>{d.packsEvaluated.length} active pack{d.packsEvaluated.length === 1 ? "" : "s"} evaluated</span>
         <span aria-hidden>·</span>
-        <span>generated {new Date(d.generatedAt).toLocaleString()}</span>
+        <span>generated {fmtDateTime(d.generatedAt)}</span>
         <span className={v.grow} />
         {props.monitor}
       </div>
