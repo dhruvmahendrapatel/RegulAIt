@@ -78,7 +78,7 @@ test("independent X30 unread retention does not promise a measured lifetime", as
   await page.route("**/v1/org/settings",route=>json(route,{error:"synthetic_settings_unavailable"},503));
   await page.goto(`/ui/admin/admission?tab=artifacts&artifact=${ARTIFACTS.safetensors.id}`);
   await expect(page.getByTestId("artifact-retention")).toContainText("retention period and deletion date are unknown here");
-  await expect(page.getByTestId("artifact-retention")).not.toContainText(/Kept for|deleted from \w{3} \d{1,2}, \d{4}/);
+  await expect(page.getByTestId("artifact-retention")).not.toContainText(/Kept for|deleted from \d{1,2} \w{3,4} \d{4}/);
 });
 
 

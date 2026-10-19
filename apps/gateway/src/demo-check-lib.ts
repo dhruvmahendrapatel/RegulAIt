@@ -23,6 +23,8 @@ import type { FastifyInstance } from "fastify";
 import { DEMO_SCRIPT_KEY_TTL_DAYS, DEMO_SECURITY_LEAD, demoKeyExpiresAt, revokeScriptKeys } from "./demo-identity.js";
 import { DEMO_SHADOW_DISCOVERY, type DemoIntakeFixtures, type DemoShadowDiscoveryDataset } from "@regulait/shared";
 import { DEMO_AUP_KEY, DEMO_INCIDENT_TITLE } from "./demo-intake-seed-lib.js";
+import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME } from "./shadow-ai-remediation.js";
+import { APPROVER_ADMIN_NOT_INITIATOR } from "./workflow-approvers.js";
 
 export type CheckLevel = "PASS" | "WARN" | "FAIL";
 export interface DemoCheck {
@@ -34,9 +36,19 @@ export interface DemoCheck {
 
 type Json = Record<string, any>;
 
+/**
+ * `live` (ADR-0197 addendum decision 3, owner decision of 2026-10-19): the live database holds real findings only. The
+ * seeded-dataset beats are replaced by `checkLiveDiscovery`; every governance beat is unchanged.
+ */
+export interface DemoCheckOptions {
+  bootstrapToken: string;
+  fixtures?: DemoIntakeFixtures | null;
+  live?: boolean;
+}
+
 export async function runDemoCheck(
   app: FastifyInstance,
-  opts: { bootstrapToken: string; fixtures?: DemoIntakeFixtures | null },
+  opts: DemoCheckOptions,
 ): Promise<DemoCheck[]> {
   const minted: string[] = [];
   let out: DemoCheck[] | undefined;
@@ -51,7 +63,7 @@ export async function runDemoCheck(
 
 async function runDemoCheckRun(
   app: FastifyInstance,
-  opts: { bootstrapToken: string; fixtures?: DemoIntakeFixtures | null },
+  opts: DemoCheckOptions,
   minted: string[],
 ): Promise<DemoCheck[]> {
   const out: DemoCheck[] = [];
@@ -92,9 +104,10 @@ async function runDemoCheckRun(
   const shadow = await call("GET", "/v1/shadow-ai/findings", auth);
   const findings: Json[] = shadow.body.findings ?? [];
   if (shadow.status !== 200) add("1 Shadow AI", "FAIL", `findings endpoint ${shadow.status}`);
+  else if (opts.live) out.push(...(await checkLiveDiscovery((url) => call("GET", url, auth), findings)));
   else if (findings.length === 0) add("1 Shadow AI", "FAIL", "no shadow-AI findings", "run `demo:intake` (it imports a synthetic export)");
   else add("1 Shadow AI", "PASS", `${findings.length} finding(s) to open the story with`);
-  if (shadow.status === 200) out.push(...(await checkShadowDiscovery((url) => call("GET", url, auth), findings)));
+  if (shadow.status === 200 && !opts.live) out.push(...(await checkShadowDiscovery((url) => call("GET", url, auth), findings)));
 
   // --- 1 Intake assistant: the hero's answers must land on HIGH -----------------------------
   if (opts.fixtures) {
@@ -477,7 +490,8 @@ export async function checkShadowDiscovery(
   }
 
   const repoFinding = findings.find((f) => f.subjectKind === "repo" && f.subject === `gitlab:${data.remediation.repo}`);
-  const users: Json[] = (await get("/v1/users")).body.users ?? [];
+  const usersRes = await get("/v1/users");
+  const users: Json[] = usersRes.body.users ?? [];
   const lead = users.find((u) => u.email === DEMO_SECURITY_LEAD.email);
   const LEAD = `${DEMO_SECURITY_LEAD.displayName} (${DEMO_SECURITY_LEAD.role})`;
   if (!repoFinding) add("1 Remediation plan", "FAIL", `no finding for gitlab:${data.remediation.repo}`, RERUN);
@@ -528,6 +542,210 @@ export async function checkShadowDiscovery(
     const fix = "re-run `demo:shadow` (it reads the trusted policy library as Dana)";
     if (trusted < min) add("3 Content trust", "FAIL", detail, fix);
     else add("3 Content trust", tiers.length > 1 ? "PASS" : "WARN", detail, tiers.length > 1 ? undefined : fix);
+  }
+  return out;
+}
+
+/** the beats `checkLiveDiscovery` reports in place of SHADOW_DISCOVERY_BEATS on the live database */
+export const LIVE_DISCOVERY_BEATS = ["1 Fictional dataset", "1 Signature catalogue", "1 Real discovery sources", "1 Remediation routing"] as const;
+
+/**
+ * The strings only the fictional dataset carries: its company, its source names and their " (demo dataset)" suffix, and
+ * every identifier it records (repositories and commits, the account, tenant, client and subscription ids, resource
+ * subjects, the exporter, fleet, device, device user, connector and deploy target). None is a catalogue value, so a
+ * real finding never carries one.
+ */
+export function fictionalDatasetMarkers(data: DemoShadowDiscoveryDataset = DEMO_SHADOW_DISCOVERY): string[] {
+  return [
+    data.company,
+    data.sourceSuffix.trim(),
+    data.gitlab.name,
+    data.aws.name,
+    data.azure.name,
+    data.inventory.name,
+    data.agent.name,
+    data.gitlab.namespace,
+    ...data.gitlab.repos.flatMap((r) => [r.fullName, r.commitSha]),
+    data.aws.accountId,
+    data.aws.roleArn,
+    data.azure.tenantId,
+    data.azure.clientId,
+    data.azure.subscriptionId,
+    ...[...data.aws.observations, ...data.azure.observations].map((o) => o.subject),
+    data.inventory.exporter,
+    data.agent.fleet,
+    data.agent.tokenLabel,
+    data.agent.hostname,
+    data.agent.deviceUser,
+    data.contentTrust.connectorName,
+    data.remediation.deployTargetName,
+  ]
+    .map((m) => m.trim())
+    .filter((m, i, all) => m && all.indexOf(m) === i);
+}
+
+/** the most rows the runs, imports and provenance-record routes return in one answer (they do not page) */
+export const LIVE_LIST_CAP = 200;
+
+/** the import sources the demo seeders write (the 10-05 synthetic SaaS export, the dataset's MDM export) */
+const SEEDED_IMPORT_SOURCE = /^demo-(intake|shadow)-seed\b/i;
+
+/**
+ * ADR-0197 addendum decision 3 (owner, 2026-10-19: option A): the live database holds real findings only. Fails closed:
+ * any discovery source, run, finding, import, enrolled device, connector or provenance record of the fictional dataset
+ * is a FAIL, never a warning. Then the real side: the signature catalogue is loaded (with it empty, discovery matches
+ * nothing); at least one real source is enabled (each is listed with its kind and last run, and a source never run is
+ * named, so this can run before the first scan); and the remediation default routes its sign-off to the security lead
+ * alone (the only active admin other than Ada, with MFA), checked from the users and the default template because no
+ * remediation workflow exists before the live S3 beat.
+ */
+export async function checkLiveDiscovery(
+  get: (url: string) => Promise<{ status: number; body: Json }>,
+  findings: Json[],
+  data: DemoShadowDiscoveryDataset = DEMO_SHADOW_DISCOVERY,
+): Promise<DemoCheck[]> {
+  const out: DemoCheck[] = [];
+  const add = (beat: string, level: CheckLevel, detail: string, fix?: string) => out.push({ beat, level, detail, ...(fix ? { fix } : {}) });
+  const markers = fictionalDatasetMarkers(data).map((m) => m.toLowerCase());
+  const fictional = (v: unknown) => {
+    const s = JSON.stringify(v ?? null).toLowerCase();
+    return markers.some((m) => s.includes(m));
+  };
+
+  // --- (a) no trace of the fictional dataset ----------------------------------------------------
+  const sourcesRes = await get("/v1/discovery/sources");
+  const runsRes = await get(`/v1/discovery/runs?limit=${LIVE_LIST_CAP}`);
+  const importsRes = await get("/v1/shadow-ai/imports");
+  const connectorsRes = await get("/v1/connectors");
+  const recordsRes = await get(`/v1/content-provenance/records?limit=${LIVE_LIST_CAP}`);
+  const reads: Array<[string, { status: number; body: Json }]> = [
+    ["sources", sourcesRes],
+    ["runs", runsRes],
+    ["imports", importsRes],
+    ["connectors", connectorsRes],
+    ["provenance records", recordsRes],
+  ];
+  const sources: Json[] = sourcesRes.body.sources ?? [];
+  const fakeSources = sources.filter(fictional);
+  const fakeSourceIds = new Set(fakeSources.map((s) => s.id));
+  const fakeRuns = ((runsRes.body.runs ?? []) as Json[]).filter((r) => fakeSourceIds.has(r.sourceId) || fictional(r));
+  const fakeFindings = findings.filter(fictional);
+  const fakeImports = ((importsRes.body.imports ?? []) as Json[]).filter((i) => SEEDED_IMPORT_SOURCE.test(String(i.source ?? "")) || fictional(i));
+  const fakeConnectors = ((connectorsRes.body.connectors ?? []) as Json[]).filter((c) => c.name === data.contentTrust.connectorName);
+  const fakeConnectorIds = new Set(fakeConnectors.map((c) => c.id));
+  const fakeRecords = ((recordsRes.body.records ?? []) as Json[]).filter((r) => fakeConnectorIds.has(r.sourceId) || fictional(r));
+  let fakeDevices = 0;
+  for (const s of sources.filter((x) => x.kind === "endpoint_agent" || fakeSourceIds.has(x.id))) {
+    const res = await get(`/v1/discovery/sources/${s.id}/endpoint-devices`);
+    reads.push([`devices of '${s.name}'`, res]);
+    const devices: Json[] = res.body.devices ?? [];
+    fakeDevices += fakeSourceIds.has(s.id) ? devices.length : devices.filter(fictional).length;
+  }
+  const unread = reads.filter(([, r]) => r.status !== 200);
+  // the list routes cap their answer (runs and provenance records at the `limit` asked, imports at 200) and do not page:
+  // a full page may hide a dataset row past the cap, so absence is not proven
+  const capped = (
+    [
+      ["runs", runsRes.body.runs],
+      ["imports", importsRes.body.imports],
+      ["provenance records", recordsRes.body.records],
+    ] as Array<[string, unknown]>
+  ).filter(([, rows]) => Array.isArray(rows) && rows.length >= LIVE_LIST_CAP);
+  const traces: Array<[string, number]> = [
+    ["source", fakeSources.length],
+    ["run", fakeRuns.length],
+    ["finding", fakeFindings.length],
+    ["import", fakeImports.length],
+    ["device", fakeDevices],
+    ["connector", fakeConnectors.length],
+    ["provenance record", fakeRecords.length],
+  ];
+  const found = traces.filter(([, n]) => n > 0);
+  if (unread.length) add("1 Fictional dataset", "FAIL", `could not read ${unread.map(([l, r]) => `${l} (${r.status})`).join(", ")}: absence not proven`);
+  else if (found.length) {
+    add(
+      "1 Fictional dataset",
+      "FAIL",
+      `the live database holds the fictional dataset: ${found.map(([l, n]) => `${n} ${l}(s)`).join(", ")}` +
+        (fakeSources.length ? ` (e.g. '${fakeSources[0]!.name}')` : ""),
+      "the live database holds real findings only (ADR-0197 addendum 3): rebuild it from empty with `demo:prepare --live`; the dataset belongs on the fallback stack",
+    );
+  } else if (capped.length) add("1 Fictional dataset", "FAIL", `${capped.map(([l]) => `${LIVE_LIST_CAP} or more ${l} (the list cap)`).join(", ")}: absence not proven`);
+  else add("1 Fictional dataset", "PASS", `no source, run, finding, import, device, connector or provenance record of the fictional dataset (${markers.length} markers)`);
+
+  // --- the signature catalogue the matcher reads ------------------------------------------------
+  const cat = await get("/v1/shadow-ai/catalogue");
+  if (cat.status !== 200) add("1 Signature catalogue", "FAIL", `catalogue ${cat.status}`);
+  else if (!(Number(cat.body.enabled) > 0)) {
+    add("1 Signature catalogue", "FAIL", "the signature catalogue is empty: a real scan would match nothing", "run `demo:prepare --live` (its `demo:intake --live` step loads the shipped catalogues)");
+  } else add("1 Signature catalogue", "PASS", `${cat.body.enabled} of ${cat.body.total} signature(s) enabled`);
+
+  // --- (b) the configured real discovery sources -------------------------------------------------
+  const real = sources.filter((s) => !fakeSourceIds.has(s.id));
+  const enabled = real.filter((s) => s.enabled);
+  const neverRun = real.filter((s) => !s.lastRun);
+  const listed = real.map((s) => {
+    const run = s.lastRun as Json | null | undefined;
+    const last = run ? `last run ${run.status}${run.errorCode ? ` (${run.errorCode})` : ""}` : "never run";
+    return `${s.kind} '${s.name}' ${s.enabled ? "enabled" : "disabled"}, ${last}`;
+  });
+  const realFindings = findings.length - fakeFindings.length;
+  const note = neverRun.length ? `; note: never run yet: ${neverRun.map((s) => `'${s.name}'`).join(", ")} (Run now before T-24h)` : "";
+  if (!enabled.length) {
+    add(
+      "1 Real discovery sources",
+      "FAIL",
+      real.length ? `no real discovery source is enabled: ${listed.join("; ")}` : "no real discovery source is configured",
+      "add, credential and enable the live sources (DEMO_RUNBOOK §7.2), then re-run `demo:check --live`",
+    );
+  } else add("1 Real discovery sources", "PASS", `${enabled.length} of ${real.length} real source(s) enabled, ${realFindings} finding(s): ${listed.join("; ")}${note}`);
+
+  // --- the remediation default's sign-off: the security lead alone -------------------------------
+  const usersRes = await get("/v1/users");
+  const users: Json[] = usersRes.body.users ?? [];
+  const ada = users.find((u) => u.email === "admin@regulait.local");
+  const lead = users.find((u) => u.email === DEMO_SECURITY_LEAD.email);
+  const LEAD = `${DEMO_SECURITY_LEAD.displayName} (${DEMO_SECURITY_LEAD.role})`;
+  const otherAdmins = users.filter((u) => u.isAdmin && !u.disabledAt && u.id !== ada?.id);
+  const templatesRes = await get("/v1/workflows/templates");
+  const templates: Json[] = templatesRes.body.templates ?? [];
+  const tpl = templates.find((t) => t.name === SHADOW_AI_REMEDIATION_TEMPLATE_NAME);
+  const signoff = ((tpl?.definition?.stages ?? []) as Json[]).find((st) => st.type === "human_approval");
+  if (usersRes.status !== 200) {
+    add("1 Remediation routing", "FAIL", `users (${usersRes.status}): users unreadable, routing not proven`);
+  } else if (templatesRes.status !== 200) {
+    add("1 Remediation routing", "FAIL", `templates (${templatesRes.status}): routing not proven`);
+  } else if (!ada || !lead || !lead.isAdmin || lead.disabledAt) {
+    add(
+      "1 Remediation routing",
+      "FAIL",
+      `${!ada ? "admin@regulait.local" : DEMO_SECURITY_LEAD.email} ${!ada || !lead ? "missing" : !lead.isAdmin ? "is not an admin" : "is deactivated"}: the remediation sign-off needs a second admin with MFA`,
+      "`seed` creates and enrols her during first-admin setup: run `demo:prepare --live` on an empty database",
+    );
+  } else if (otherAdmins.length !== 1 || otherAdmins[0]!.id !== lead.id) {
+    add(
+      "1 Remediation routing",
+      "FAIL",
+      `the default sign-off (an admin other than the initiator) would wait on ${otherAdmins.length} admin(s) (${otherAdmins.map((u) => u.email).join(", ") || "none"}), not on ${LEAD} alone`,
+      "Ada and Morgan are the only admins on the demo database: deactivate the extra admin(s) after the demo, or rebuild with `demo:prepare --live`",
+    );
+  } else if (lead.totpEnabled !== true) {
+    add(
+      "1 Remediation routing",
+      "FAIL",
+      `${DEMO_SECURITY_LEAD.email} has no TOTP enrolled: the remediation sign-off needs a second admin with MFA`,
+      `${DEMO_SECURITY_LEAD.displayName} signs in once and enrols her authenticator when the app asks, before her Approve in /ui/inbox; then re-run \`demo:check --live\``,
+    );
+  } else if (tpl?.retiredAt) {
+    add("1 Remediation routing", "FAIL", `the shipped remediation default '${tpl.name}' is retired: an admin's own assignment decides the sign-off`, "route the change type back to the default, or rebuild with `demo:prepare --live`");
+  } else if (tpl && !(signoff?.approvers ?? []).includes(APPROVER_ADMIN_NOT_INITIATOR)) {
+    add("1 Remediation routing", "FAIL", `the remediation template '${tpl.name}' has no sign-off by an admin other than the initiator`, "rebuild with `demo:prepare --live`");
+  } else {
+    add(
+      "1 Remediation routing",
+      "PASS",
+      `the remediation default (${tpl ? "installed" : "installs at the first remediation"}) routes the sign-off to ${LEAD} alone: the only active admin other than Ada, with MFA`,
+    );
   }
   return out;
 }

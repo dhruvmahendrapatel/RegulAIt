@@ -12,9 +12,9 @@ import { Link } from "react-router-dom";
 import { Badge, IdChip } from "../../../ui/kit";
 import { scanStatus, statusWord, SCAN_ENGINE_ID, type ArtifactScan, type ModelArtifact, type ScanStatus } from "./modelArtifacts";
 import m from "./modelArtifacts.module.css";
+import { fmtDay } from "../../../api/format";
 
-const day = (iso: string | null | undefined) =>
-  iso ? new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "—";
+const day = fmtDay;
 
 /** the status word and the gateway's chip wording, side by side */
 export function ScanStatusBadge(props: { status: ScanStatus }) {

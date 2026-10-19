@@ -22,6 +22,15 @@ export interface NavEntry {
   also?: string[];
 }
 
+/**
+ * True when another entry's route matches `pathname` more specifically than `to`. The rail then highlights only
+ * that entry: on /admin/shadow-ai/discovery-sources, Discovery sources, not also Shadow-AI discovery.
+ */
+export function shadowedByMoreSpecific(to: string, pathname: string, routes: readonly string[]): boolean {
+  const under = (p: string) => pathname === p || pathname.startsWith(`${p}/`);
+  return routes.some((r) => r !== to && r.startsWith(`${to === "/" ? "" : to}/`) && under(r));
+}
+
 export const WORKSPACE: NavEntry[] = [
   { label: "Home", to: "/" },
   { label: "Chat", to: "/chat" },

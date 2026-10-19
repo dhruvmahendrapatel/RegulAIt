@@ -113,6 +113,11 @@ async function mock(route: Route) {
   else if (p === "/v1/shadow-ai/imports") body = { imports: [] };
   else if (p === "/v1/shadow-ai/adapters") body = { adapters: [], posture: "Operator supplied evidence only.", pipeline: "No raw content retained." };
   else if (p === "/v1/shadow-ai/discovery/catalog") body = { catalogVersion: 1, total: 0, endpoints: 0, sdks: 0, entries: [], governedHosts: [], posture: "Catalogue classification only.", limits: "No scan is performed." };
+  else if (p === "/v1/discovery/scanners") body = { kinds: [{ kind: "repo_github", label: "GitHub repositories", family: "repo", slice: "SD1", evidenceKinds: ["repo_scan"], subjectKinds: ["repo"], built: true, requiresCredential: true }] };
+  else if (p === "/v1/discovery/sources") body = { sources: [], posture: { sourcesTotal: 0, sourcesEnabled: [], staticCredentials: [], staleCredentials: [], writeScopeUnverified: [], credentialWarningAgeDays: 90, endpointRetentionDays: 90, statement: "Nothing is scanned." } };
+  else if (p === "/v1/discovery/runs") body = { runs: [] };
+  else if (p === "/v1/discovery/settings") body = { credentialWarningAgeDays: 90, endpointRetentionDays: 90, version: 1 };
+  else if (p === "/v1/discovery/federation") body = { enabled: false, issuer: null, jwksUri: null, tokenTtlSeconds: 300, keys: [], awsPrincipal: { configured: false, roleArn: null, subject: "" }, subjectFormat: "", audiences: { aws: "", azure: "", gcp: "" } };
   else if (p === "/v1/shadow-ai/mcp-discovery") body = { posture: "Evidence triage only; no scan, connection, or crawl was performed.", observed: 1, unregistered: 1, registryCount: 2, results: [{ host: "tools.unknown.example", path: "/mcp", indicators: ["protocol-version-header", "transport-path:/mcp"], confidence: "high", occurrences: 1, samples: [], registered: false, registeredAs: null, verdict: "UNREGISTERED — this host appears in supplied evidence and matches no MCP server in this deployment's registry." }] };
   await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 }
@@ -439,4 +444,23 @@ test("ChatOps workspace alert threshold is editable and the exact post refusal i
   await page.getByRole("button", { name: /inherits a HIGH rating/ }).click();
   await page.getByRole("button", { name: "Post to chat" }).click();
   await expect(page.getByRole("alert")).toContainText("Post failed — see the chatops-alert-post-failed audit row");
+});
+
+test("discovery sources highlights only its own nav entry and keeps Add source off until a kind is chosen", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai/discovery-sources");
+  await expect(page.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
+  // the shorter /admin/shadow-ai entry is a prefix of this route; only the more specific entry is current (AppShell `shadowed`)
+  const nav = page.locator('aside[aria-label="Primary navigation"]');
+  await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
+  await expect(nav.locator('[aria-current="page"]')).toHaveAttribute("href", "/ui/admin/shadow-ai/discovery-sources");
+  const parent = nav.getByRole("link", { name: "Shadow-AI discovery", exact: true });
+  await expect(parent).toBeVisible();
+  await expect(parent).not.toHaveAttribute("aria-current", "page");
+  await expect(parent).not.toHaveClass(/navItemActive/);
+
+  const add = page.getByRole("button", { name: "Add source", exact: true });
+  await expect(add).toBeDisabled();
+  await expect(add).toHaveAttribute("title", "Choose a kind first");
+  await page.getByLabel("Kind").selectOption("repo_github");
+  await expect(add).toBeEnabled();
 });

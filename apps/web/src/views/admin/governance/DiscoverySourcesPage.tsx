@@ -18,6 +18,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
+import { fmtDateTime, humanize } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
@@ -28,6 +29,7 @@ import { EndpointImportCard } from "./EndpointImportCard";
 import { EndpointAgentCard } from "./EndpointAgentCard";
 import {
   couldNotRead,
+  describeGap,
   describeSchedule,
   describeScope,
   editablePublicConfig,
@@ -42,7 +44,7 @@ import {
   type ScannerKindView,
 } from "./discoverySourcesModel";
 
-const when = (iso: string | null) => (iso && Number.isFinite(Date.parse(iso)) ? new Date(iso).toLocaleString() : "—");
+const nowrap = { whiteSpace: "nowrap" } as const;
 const RUN_TONE = { queued: "neutral", running: "info", succeeded: "ok", failed: "danger" } as const;
 
 interface SourceForm {
@@ -114,7 +116,7 @@ export default function DiscoverySourcesPage() {
       }
       setForm(EMPTY_FORM);
       await refetchAll();
-    }, editing ? (editing.enabled && scopeWidens(editing.scope, scope) ? "Source widened" : "Source saved") : "Source added (disabled)");
+    }, editing ? (editing.enabled && scopeWidens(editing.scope, scope) ? "Source widened" : "Source saved") : "Source added. It stays off until you enable it.");
   };
 
   const enable = (s: DiscoverySourceView) =>
@@ -188,7 +190,7 @@ export default function DiscoverySourcesPage() {
 
   return (
     <>
-      <PageHeader title="Discovery sources" sub="Where RegulAIt may scan, read-only, for shadow AI. Every source is off until you enable it." />
+      <PageHeader title="Discovery sources" sub="Where regulAIt may scan, read-only, for shadow-AI use. Every source is off until you enable it." />
       <div className={v.stack}>
         <QueryGate loading={sources.isPending || scanners.isPending} error={sources.error ?? scanners.error} onRetry={() => void refetchAll()}>
           <Card title="Active discovery">
@@ -210,14 +212,13 @@ export default function DiscoverySourcesPage() {
               rows={kinds}
               rowKey={(k) => k.kind}
               columns={[
-                { key: "kind", header: "Kind", render: (k) => <span className={v.mono}>{k.kind}</span> },
-                { key: "label", header: "Scans", render: (k) => k.label },
+                { key: "kind", header: "Kind", render: (k) => <>{k.label}<div className={`${v.faint} ${v.mono}`}>{k.kind}</div></> },
                 {
                   key: "state",
                   header: "State",
                   render: (k) => (k.built ? <Badge tone="ok">built</Badge> : <Badge tone="neutral">{`not built yet (${k.slice})`}</Badge>),
                 },
-                { key: "evidence", header: "Evidence kinds", render: (k) => k.evidenceKinds.join(", ") },
+                { key: "evidence", header: "Evidence kinds", render: (k) => <span title={k.evidenceKinds.join(", ")}>{k.evidenceKinds.map(humanize).join(", ")}</span> },
               ]}
             />
           </Card>
@@ -266,11 +267,22 @@ export default function DiscoverySourcesPage() {
                   </Field>
                 )}
                 <div className={v.row}>
-                  <Button variant="primary" disabled={act.busy || (!form.editing && !form.kind)} onClick={submitSource}>
-                    {form.editing ? "Save source" : "Add source (disabled)"}
+                  <Button
+                    variant="primary"
+                    disabled={act.busy || (!form.editing && !form.kind)}
+                    title={!form.editing && !form.kind ? "Choose a kind first" : undefined}
+                    aria-describedby={form.editing ? undefined : "add-source-hint"}
+                    onClick={submitSource}
+                  >
+                    {form.editing ? "Save source" : "Add source"}
                   </Button>
                   {form.editing && <Button onClick={() => setForm(EMPTY_FORM)}>Cancel</Button>}
                 </div>
+                {!form.editing && (
+                  <p id="add-source-hint" className={v.faint} data-testid="add-source-hint">
+                    A new source is added turned off. Enabling it asks you to confirm it&apos;s you.
+                  </p>
+                )}
               </div>
             )}
             {act.error && <div className={v.errLine} role="alert">{act.error}</div>}
@@ -282,7 +294,7 @@ export default function DiscoverySourcesPage() {
               rowKey={(s) => s.id}
               empty={<EmptyState title="No discovery source" body="Nothing is scanned yet. Add a source above to start scanning, read-only." />}
               columns={[
-                { key: "name", header: "Source", render: (s) => <><strong>{s.name}</strong><div className={v.mono}>{s.kind}</div></> },
+                { key: "name", header: "Source", render: (s) => <><strong>{s.name}</strong><div className={v.faint}>{kinds.find((k) => k.kind === s.kind)?.label ?? s.kind}</div></> },
                 { key: "state", header: "State", render: (s) => (s.enabled ? <Badge tone="warn">enabled</Badge> : <Badge tone="neutral">disabled</Badge>) },
                 { key: "scope", header: "Scope", render: (s) => <>{describeScope(s.scope)}<div className={v.faint}>{kinds.find((k) => k.kind === s.kind)?.uploadFed ? "fed by uploads" : describeSchedule(s.scheduleIntervalSeconds)}</div></> },
                 {
@@ -386,11 +398,30 @@ export default function DiscoverySourcesPage() {
               columns={[
                 { key: "source", header: "Source", render: (r) => list.find((s) => s.id === r.sourceId)?.name ?? r.sourceId },
                 { key: "status", header: "Status", render: (r) => <><Badge tone={RUN_TONE[r.status]}>{r.status}</Badge>{r.errorCode && <div className={v.faint}>{r.errorCode}</div>}</> },
-                { key: "when", header: "Queued", render: (r) => <>{when(r.createdAt)}<div className={v.faint}>{r.trigger}, attempt {r.attempt}</div></> },
+                { key: "when", header: "Queued", render: (r) => <><span style={nowrap}>{fmtDateTime(r.createdAt)}</span><div className={v.faint}>{r.trigger}, attempt {r.attempt}</div></> },
                 { key: "counts", header: "Observed / matched", render: (r) => `${r.observed} / ${r.matched}` },
                 { key: "findings", header: "Findings", render: (r) => `${r.findingsCreated} new, ${r.findingsUpdated} updated` },
-                { key: "gaps", header: "Catalogue gaps", render: (r) => (r.catalogueGaps.length ? r.catalogueGaps.map((g) => `${g.kind}:${g.value}`).join(", ") : "none") },
-                { key: "reads", header: "Reads", render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint}>all read</span> },
+                {
+                  key: "gaps",
+                  header: "Catalogue gaps",
+                  render: (r) =>
+                    r.catalogueGaps.length ? (
+                      <div className={v.stackTight}>
+                        {r.catalogueGaps.map((g) => {
+                          const d = describeGap(g);
+                          return (
+                            <div key={d.code} data-testid="catalogue-gap">
+                              {d.kind}: <strong>{d.name}</strong>
+                              <div className={`${v.faint} ${v.mono}`}>{d.code}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      "none"
+                    ),
+                },
+                { key: "reads", header: "Reads", render: (r) => couldNotRead(r.readOutcomes) ?? <span className={v.faint} style={nowrap}>all read</span> },
               ]}
             />
           </Card>

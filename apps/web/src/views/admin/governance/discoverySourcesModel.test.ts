@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   couldNotRead,
+  describeGap,
   describeSchedule,
   describeScope,
   editablePublicConfig,
@@ -69,5 +70,28 @@ describe("discovery sources model (ADR-0195 SD0)", () => {
     expect(describeSchedule(3600)).toBe("hourly");
     expect(describeSchedule(7200)).toBe("every 2 hours");
     expect(describeSchedule(172800)).toBe("every 2 days");
+  });
+});
+
+describe("catalogue gaps and evidence kinds in words (the codes stay available)", () => {
+  it("names an IDE extension id by its publisher and name, with its kind, and keeps the raw code", () => {
+    const gap = { kind: "ide_extension", value: "github.copilot" };
+    expect(describeGap(gap)).toEqual({
+      kind: "IDE extension",
+      name: "GitHub Copilot",
+      code: "ide_extension:github.copilot",
+    });
+  });
+  it("names a presence signature id by its provider and binary", () => {
+    expect(describeGap({ kind: "desktop_app", value: "cli.anthropic.claude" })).toEqual({
+      kind: "Desktop app",
+      name: "Anthropic Claude",
+      code: "desktop_app:cli.anthropic.claude",
+    });
+  });
+  it("shows an identifier the catalogue cannot name as itself", () => {
+    const d = describeGap({ kind: "browser_extension", value: "abcdefghijklmnop" });
+    expect(d.name).toBe("abcdefghijklmnop");
+    expect(d.kind).toBe("Browser extension");
   });
 });

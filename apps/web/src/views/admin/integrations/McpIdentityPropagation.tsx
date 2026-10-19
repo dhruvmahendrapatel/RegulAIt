@@ -204,7 +204,7 @@ export function McpIdentityAssertionCard(props: { server: McpServer | undefined 
             Header <span className={v.mono}>{IDENTITY_ASSERTION_HEADER}</span>: a JWT signed with EdDSA, type{" "}
             <span className={v.mono}>{IDENTITY_ASSERTION_TYP}</span>, lifetime 60 seconds. Its audience for this server is{" "}
             <span className={v.mono}>{audience ?? "not available (the URL is not an http(s) URL)"}</span>. The upstream verifies it
-            against this deployment&apos;s public keys at <span className={v.mono}>{`<your RegulAIt public URL>${JWKS_PATH}`}</span>.
+            against this deployment&apos;s public keys at <span className={v.mono}>{`<your regulAIt public URL>${JWKS_PATH}`}</span>.
           </p>
           <ul aria-label="Claims in the assertion">
             {ASSERTION_CLAIMS.map((c) => (

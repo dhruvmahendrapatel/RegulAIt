@@ -16,8 +16,9 @@ import { getDelegationGrant, listSigningKeys, revokeSigningKey, rotateSigningKey
 import { SIGNING_KEY_SOURCE_TEXT, SIGNING_KEY_STATE_TEXT, kidOk, signingKeyRefusal, signingKeyState, type IdentitySigningKeyView } from "./signingKeyModel";
 import { formatMicros, type DelegationAllocationView } from "./workloadIdentityModel";
 import s from "./workloadIdentities.module.css";
+import { fmtDateTime } from "../../../api/format";
 
-const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
+const dateLabel = (value: string | null) => fmtDateTime(value);
 
 /** the page's confirmation (WorkloadIdentitiesPage `ask`) */
 export interface AskConfirmation {
