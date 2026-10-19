@@ -356,3 +356,21 @@ no ceiling moved.
 Performance (`perf.ent.spec.ts`, Chromium, all 113 screens, this container, mocked API): LCP median 1,248 to
 1,180 ms, p90 1,312 to 1,248 ms, highest 1,368 to 1,300 ms; highest INP 16 ms both times. No screen was over a budget
 before or after, so `baselines/perf.json` stays empty: `--update` rewrote it with 0 keys and no diff.
+
+## Exception — "all JS" ceiling 1,020 kB → 1,035 kB (owner, 2026-10-19)
+
+The owner approved this exception in the Governed - Designer session on 2026-10-19 (issue #453). It is the
+ADR-recorded exception that the `--guard` rule above requires before a ceiling may rise.
+
+- **Why.** On main at c5b921a, "all JS" measured 1,019,950 B against 1,020,000 B, leaving 50 bytes. The owner has
+  approved UI items for the 2026-11-01 demo, and together they need about 10–15 kB of gzip JS:
+  - the InfoTip (i) pattern and the 45 (i) explanations;
+  - contained sections with an expanded view;
+  - row-action alignment;
+  - the Shadow AI, Inbox, alert, trust and audit screen changes;
+  - the shared detail drawer, Shadow AI tabs, designed empty states and use-case tab grouping.
+  None of them adds a library. Batch 1 alone, the kit, measured +870 B.
+- **What moves.** Only `all JS`, from `1020 kB` to `1035 kB`. Entry JS (137.5 kB) and entry CSS (10.6 kB) are
+  unchanged, and the work must fit them. Batch 1 measured entry JS 135.6 kB and entry CSS 10,575 B of 10,600 B.
+  Kit CSS is therefore near its limit, so new screen styles go in each view's lazy CSS module, not in `kit.module.css`.
+- **Landing.** `ui-enterprise-baseline.mjs --guard` fails on this diff by design. Per this ADR the owner lands it.
