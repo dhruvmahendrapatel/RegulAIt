@@ -34,7 +34,7 @@ function world() {
     devices: { [REAL_AGENT]: [{ id: "d1", devicePseudonym: "dev:9a1b", lastReportAt: null, revokedAt: null }] } as Record<string, Json[]>,
     connectors: [{ id: "c1", name: "governed-docs" }] as Json[],
     records: [] as Json[],
-    catalogue: { total: 40, enabled: 38 } as Json,
+    catalogue: { total: 40, enabled: 38, signatures: [{ id: "sig1", provider: "In-house LLM", kind: "hostname", value: "llm.internal.test", provenance: "admin" }] } as Json,
     users: [
       { id: ADA, email: "admin@regulait.local", isAdmin: true, totpEnabled: true, disabledAt: null },
       { id: DANA, email: "dana@regulait.local", isAdmin: false, totpEnabled: false, disabledAt: null },
@@ -96,6 +96,8 @@ describe("checkLiveDiscovery: real findings only, fail closed", () => {
     expect(markers).toContain(D.company);
     expect(markers).toContain("(demo dataset)");
     expect(markers).toContain(D.aws.accountId);
+    expect(markers).toContain(D.importExample.provider);
+    expect(markers).toContain(D.importExample.host);
     for (const m of markers) expect(m.length, m).toBeGreaterThanOrEqual(8);
     for (const generic of ["claude", "openai", "com.openai.chat", "OPENAI_API_KEY", "api.openai.com"]) expect(markers).not.toContain(generic);
   });
@@ -113,6 +115,7 @@ describe("checkLiveDiscovery: real findings only, fail closed", () => {
     ["a device on a real source carrying the dataset's hostname", (w) => void (w.devices[REAL_AGENT] = [{ id: "d2", hostname: D.agent.hostname }])],
     ["the trusted policy library connector", (w) => void w.connectors.push({ id: "c-lib", name: D.contentTrust.connectorName })],
     ["a provenance record of a read of the library", (w) => void w.records.push({ id: "p1", sourceId: "c-lib", trustTier: "trusted", objectRef: D.contentTrust.objects[0], connector: D.contentTrust.connectorName })],
+    ["the import example's fictional catalogue entry", (w) => void w.catalogue.signatures.push({ id: "sig-x", provider: D.importExample.provider, kind: "hostname", value: D.importExample.host, provenance: "demo dataset (fictional provider)" })],
   ];
   for (const [what, broken] of traces) {
     it(`${what} → 1 Fictional dataset FAILs`, async () => {
@@ -123,6 +126,14 @@ describe("checkLiveDiscovery: real findings only, fail closed", () => {
       expect(c.fix).toContain("demo:prepare --live");
     });
   }
+
+  it("the seeded fictional catalogue row is counted as a catalogue entry", async () => {
+    const w = world();
+    w.catalogue.signatures.push({ id: "sig-x", provider: D.importExample.provider, kind: "hostname", value: D.importExample.host, enabled: true });
+    const c = (await live(w))["1 Fictional dataset"]!;
+    expect(c.level).toBe("FAIL");
+    expect(c.detail).toContain("1 catalogue entry(s)");
+  });
 
   it("a device of the dataset's own source FAILs even with no marker on the device row", async () => {
     const w = world();
