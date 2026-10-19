@@ -88,7 +88,9 @@ jobs:
     # gateway and the real journey — was ~4 min. The mocked suite now runs in
     # `demo-mock` below, sharded; this cap is ~4 min plus margin for a slow
     # runner. It is a blast-radius cap: re-measure before raising it.
-    timeout-minutes: 12
+    # +4 (2026-10-18, ADR-0197) for the demo-screens step: ~30 full-page shots and two TOTP sign-ins, estimated
+    # 2-3 min; re-measure from its first green run.
+    timeout-minutes: 16
 
     services:
       postgres:
@@ -175,9 +177,30 @@ jobs:
       - run: pnpm --filter @regulait/web exec playwright install --with-deps chromium
 
       - name: Real seeded-database journey
+        id: journey
         run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-real.config.ts --reporter=list,github
         env:
           E2E_DEMO_PREPARE_LOG: ${{ runner.temp }}/demo-prepare.log
+
+      # ADR-0197: the 2026-11-01 demo's populated-state screenshot pack and its automated QA pass, in script order
+      # (Shadow AI first, Morgan's remediation sign-off, then governance), on the database the journey above leaves.
+      # A separate spec and config, so the journey is unchanged; it runs even when the journey failed, so a red run
+      # still shows every screen it can reach.
+      - name: Demo screens (2026-11-01 script)
+        if: ${{ !cancelled() && steps.journey.outcome != 'skipped' }}
+        run: pnpm --filter @regulait/web exec playwright test -c playwright.demo-screens.config.ts --reporter=list,github
+        env:
+          E2E_DEMO_PREPARE_LOG: ${{ runner.temp }}/demo-prepare.log
+
+      - name: Keep the demo screens (every run)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: demo-screens
+          path: apps/web/e2e/artifacts/demo-screens
+          if-no-files-found: warn
+          # 30: a pack captured two weeks before the demo still exists on the day (the screens are not committed)
+          retention-days: 30
 
       - name: Keep the evidence when it fails
         if: failure()

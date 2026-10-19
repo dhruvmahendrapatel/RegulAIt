@@ -13,6 +13,7 @@ import { api } from "../../../api/client";
 import { fmtDateTime } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, CodeBlock, ConfirmModal, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { plural } from "../../../api/format";
 import { useAction } from "../adminKit";
 import v from "../../views.module.css";
 import type { DiscoverySourceView } from "./discoverySourcesModel";
@@ -61,7 +62,9 @@ const TOKEN_RELAXED_DAYS = 90;
 export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySourceView[] }) {
   const act = useAction();
   const targets = sources.filter((s) => s.kind === "endpoint_agent");
-  const [sourceId, setSourceId] = useState("");
+  const [picked, setPicked] = useState("");
+  // with one endpoint agent source there is nothing to choose: its devices show without a click
+  const sourceId = picked || (targets.length === 1 ? targets[0]!.id : "");
   const [label, setLabel] = useState("");
   const [deviceCap, setDeviceCap] = useState("");
   const [days, setDays] = useState("30");
@@ -113,11 +116,11 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
         const out = await api.post<{ devicesRevoked?: number }>(`/v1/discovery/enrolment-tokens/${r.row.id}/revoke`, { revokeDevices });
         await tokens.refetch();
         if (revokeDevices) await devices.refetch();
-        return revokeDevices ? `Enrolment token '${r.row.label}' revoked with ${out.devicesRevoked ?? 0} device(s)` : `Enrolment token '${r.row.label}' revoked`;
+        return revokeDevices ? `Enrolment token '${r.row.label}' revoked with ${plural(out.devicesRevoked ?? 0, "device")}` : `Enrolment token '${r.row.label}' revoked`;
       }
       const out = await api.post<{ identitiesRevoked: number }>(`/v1/discovery/endpoint-devices/${r.row.id}/revoke`, {});
       await devices.refetch();
-      return `Device ${r.row.devicePseudonym} revoked (${out.identitiesRevoked} agent identity(ies))`;
+      return `Device ${r.row.devicePseudonym} revoked (${plural(out.identitiesRevoked, "agent identity", "agent identities")})`;
     });
   };
 
@@ -134,7 +137,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
         ) : (
           <>
             <Field label="Endpoint agent source" error={error}>
-              <Select value={sourceId} onChange={(e) => { setSourceId(e.target.value); setEnrolFile(null); }}>
+              <Select value={sourceId} onChange={(e) => { setPicked(e.target.value); setEnrolFile(null); }}>
                 <option value="">Choose a source</option>
                 {targets.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -193,7 +196,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                 />
                 <p className={v.faint}>
                   {devices.data
-                    ? `${devices.data.summary.devices} device(s), ${devices.data.summary.revoked} revoked, ${devices.data.summary.softwareKeys} agent identity(ies) with a software key (no key hardware on the device).`
+                    ? `${plural(devices.data.summary.devices, "device")}, ${devices.data.summary.revoked} revoked, ${plural(devices.data.summary.softwareKeys, "agent identity", "agent identities")} with a software key (no key hardware on the device).`
                     : "Loading devices…"}
                 </p>
                 <Table<DeviceView>
@@ -253,7 +256,7 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
                 <input type="checkbox" checked={alsoDevices} onChange={(e) => setAlsoDevices(e.target.checked)} />
                 <span>
                   {revoking?.kind === "token" && revoking.row.devicesActive !== undefined
-                    ? `Also revoke the ${revoking.row.devicesActive} device(s) it enrolled`
+                    ? `Also revoke the ${plural(revoking.row.devicesActive, "device")} it enrolled`
                     : "Also revoke the devices it enrolled"}
                   {" "}(their agent identities, keys and tokens; they upload nothing more)
                 </span>
