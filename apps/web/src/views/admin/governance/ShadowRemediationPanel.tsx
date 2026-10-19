@@ -14,12 +14,12 @@
  * workflow that ended denied, aborted or rolled back does not stand: a new
  * workflow may replace it, and the server audits the replace.
  */
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { WorkflowListResponse } from "../../../api/types";
 import { ago } from "../../../api/format";
-import { Badge, Button, ConfirmModal, Field, Input, Select } from "../../../ui/kit";
+import { Badge, Button, ConfirmModal, Field, InfoButton, Input, Select, SeverityBadge } from "../../../ui/kit";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
 import { withRefusalCopy } from "./refusalCopy";
 import {
@@ -35,6 +35,7 @@ import {
 } from "./shadowRemediationModel";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
+import rm from "./shadowAi.module.css";
 
 type Pending = { kind: "start"; body: StartInstanceBody } | { kind: "link"; instanceId: string };
 
@@ -47,11 +48,20 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
         SHADOW_REMEDIATION_REFUSALS,
       ),
   });
+  // SH4: the plan opens below the findings table, so it is brought into view when it opens
+  const section = useRef<HTMLElement>(null);
+  useEffect(() => {
+    section.current?.scrollIntoView({ block: "nearest" });
+  }, []);
   return (
-    <section className={a.subSection} aria-label="Remediation plan" data-testid="shadow-remediation">
+    <section ref={section} className={a.subSection} aria-label="Remediation plan" data-testid="shadow-remediation">
       <div className={v.row}>
         <div className={v.sectionTitle} style={{ flex: 1 }}>
           Remediation plan
+          <InfoButton label="a remediation plan">
+            A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. The
+            workflow tracks the change and its sign-off. It does not change systems by itself.
+          </InfoButton>
         </div>
         <Button size="sm" variant="ghost" onClick={props.onClose}>
           Close plan
@@ -121,25 +131,39 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
       <div className={v.row}>
         <strong>{p.subject}</strong>
         <Badge tone="neutral">{p.provider}</Badge>
-        <Badge tone={p.severity === "critical" ? "danger" : p.severity === "high" ? "warn" : "neutral"}>{p.severity}</Badge>
+        <SeverityBadge severity={p.severity} />
         {p.replacementAgent ? (
           <Badge tone="ok">governed replacement: {p.replacementAgent.name}</Badge>
         ) : (
           <Badge tone="warn">no governed replacement registered</Badge>
         )}
       </div>
-      <ol className={v.stackTight}>
-        {p.steps.map((s) => (
-          <li key={s.step}>
-            <strong>{s.step}</strong> <span className={v.faint}>— {s.why}</span>
+      {/* SH5: the plan as a stepper. The plan reports what blocks a step, not which steps are done, so a step shows
+          its number or "Blocked" and never claims progress the server did not report */}
+      <ol className={rm.steps} aria-label="Remediation steps">
+        {p.steps.map((s, i) => (
+          <li key={s.step} className={s.blocked ? rm.stepBlocked : rm.step}>
+            <span className={rm.stepMark} aria-hidden="true">{i + 1}</span>
+            <strong>{s.step.charAt(0).toUpperCase() + s.step.slice(1)}</strong>
             {s.blocked ? (
-              <div>
-                <Badge tone="danger">blocked</Badge> <span className={v.dim}>{s.blocked}</span>
-              </div>
+              <span>
+                <Badge tone="danger">Blocked</Badge> <span className={v.dim}>{s.blocked}</span>
+              </span>
             ) : null}
+            <span className={v.dim}>{s.why}</span>
           </li>
         ))}
       </ol>
+      <aside className={rm.whoNext} aria-label="Who acts next">
+        <strong>Who acts next</strong>
+        <span>By default, a plan-only stage runs first and changes nothing. Then a human sign-off.</span>
+        <span className={v.row}>
+          <Badge tone="info">Separate approver</Badge>
+          <InfoButton label="the second approver">
+            By default, a different admin must sign off: you cannot approve your own remediation.
+          </InfoButton>
+        </span>
+      </aside>
       <p className={v.faint} id={ids.note}>
         {p.note}
       </p>
@@ -191,15 +215,22 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
           <Field label="Change description" grow>
             <Input value={form.description} onChange={(e) => set("description", e.target.value)} />
           </Field>
-          <Field label="Environment">
+          <Field
+            label="Environment"
+            help="Where the change will be made. Workflow assignment rules may give some environments extra stages."
+          >
             <Input required value={form.environment} placeholder="for example production" aria-describedby={ids.env} onChange={(e) => set("environment", e.target.value)} />
           </Field>
-          <Field label="Bill to project (optional)">
+          <Field label="Bill to project (optional)" help="Charges the workflow's AI spend to this project's budget.">
             <Select value={form.projectId} onChange={(e) => set("projectId", e.target.value)}>
               {optionEls(projectOpts(projects.data?.projects), "— no project —")}
             </Select>
           </Field>
         </div>
+        <p className={v.faint}>
+          Linked to <Badge>Finding {p.findingId.slice(0, 8)}</Badge> automatically: the reference is added to the workflow
+          for you.
+        </p>
         <p className={v.faint} id={ids.env}>
           Where the ungoverned usage runs today. Workflow assignment rules and a project's compliance requirements decide
           which stages the workflow has.

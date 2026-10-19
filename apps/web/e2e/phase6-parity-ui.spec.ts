@@ -507,8 +507,11 @@ test.describe("ADR-0071 raw evidence import — the verification claim reaches t
     const seeded = page.waitForResponse(
       (r) => r.url().endsWith("/v1/shadow-ai/catalogue/seed") && r.request().method() === "POST",
     );
+    // A2 (#453): the seed button lives on the Detection catalogue tab, the importers on Import evidence
+    await page.getByRole("tab", { name: "Detection catalogue" }).click();
     await page.getByRole("button", { name: "Install / refresh shipped seed" }).click();
     expect((await seeded).status()).toBe(200);
+    await page.getByRole("tab", { name: "Import evidence" }).click();
 
     await expect(page.getByText("Import a raw log file (format adapters)")).toBeVisible();
 
