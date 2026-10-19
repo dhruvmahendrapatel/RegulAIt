@@ -234,15 +234,25 @@ describe("InfoTip slots — every (i) is a real, named button (X1)", () => {
   });
 });
 
-describe("Card contain — a long body scrolls in a named, focusable region (X6)", () => {
-  it("wraps the body in a keyboard-scrollable region named after the card", () => {
+describe("Card contain — a long body scrolls in a contained box (X6)", () => {
+  it("is not a tab stop or a landmark until the box is known to scroll", () => {
     const html = renderToStaticMarkup(<Card title="Findings" contain>rows</Card>);
-    expect(html).toMatch(/<div[^>]*tabindex="0"[^>]*role="region"[^>]*aria-label="Findings, scrollable"/);
+    expect(html).toContain(">rows<");
+    expect(html).not.toContain("tabindex");
+    expect(html).not.toContain('role="region"');
   });
 
-  it("offers Expand only once the box is known to overflow, so short cards look as they did", () => {
+  it("offers Expand only once the body is known to be long, so short cards look as they did", () => {
     const html = renderToStaticMarkup(<Card title="Findings" contain>rows</Card>);
     expect(html).not.toContain(">Expand<");
+  });
+
+  it("shows the row count cue beside the title, with a plural that agrees", () => {
+    expect(renderToStaticMarkup(<Card title="Findings" contain count={42}>rows</Card>)).toContain(">42 rows<");
+    expect(renderToStaticMarkup(<Card title="Findings" contain count={1}>rows</Card>)).toContain(">1 row<");
+    expect(renderToStaticMarkup(<Card title="Audit" contain count={3} countNoun={["entry", "entries"]}>rows</Card>)).toContain(
+      ">3 entries<",
+    );
   });
 
   it("leaves a card without contain exactly as before", () => {
