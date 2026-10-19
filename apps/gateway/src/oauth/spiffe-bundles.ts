@@ -18,8 +18,10 @@
  *    whose key parameters must be that certificate's public key). Each
  *    authority must be a CA with `keyCertSign`, inside its validity window on
  *    the DATABASE clock, and no private key may appear anywhere in the upload.
- *    `jwt-svid` keys are counted and not stored (JWT-SVID client authentication
- *    is not built);
+ *    S9 follow-up: `jwt-svid` keys are stored as the domain's JWT authorities
+ *    (public RSA or EC keys with a unique `kid`), which verify JWT-SVIDs
+ *    (`spiffe-jwt-svid.ts`); a bundle may also be fetched from the domain's
+ *    bundle endpoint (`spiffe-bundle-endpoint.ts`), through the same checks;
  *  - one ACTIVE bundle per domain. Replacing it names the active bundle's id
  *    (compare-and-set) and supersedes it: rotation, nothing is revoked, tokens
  *    already issued live to their own expiry (decision 12 "rotation is not
@@ -40,7 +42,7 @@
  * SPIRE agent, the workload side); none parses or validates a bundle on the
  * relying-party side, so the bundle-format checks here are ours.
  */
-import { createPublicKey, randomUUID, X509Certificate } from "node:crypto";
+import { createHash, createPublicKey, randomUUID, X509Certificate } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { and, asc, auditLog, delegationGrants, desc, eq, inArray, isNull, or, spiffeTrustBundles, sql, type Db, type SpiffeTrustBundleRow } from "@regulait/db";
@@ -50,9 +52,12 @@ import {
   revokeSpiffeTrustBundleSchema,
   sha256Hex,
   SPIFFE_BUNDLE_MAX_AUTHORITIES,
+  SPIFFE_BUNDLE_MAX_JWT_AUTHORITIES,
   SPIFFE_TRUST_BUNDLES_LEGACY_ENV,
   type PutSpiffeTrustBundle,
   type SpiffeBundleFormat,
+  type SpiffeBundleSource,
+  type SpiffeJwtAuthorityView,
   type SpiffeTrustAuthorityView,
   type SpiffeTrustBundleListView,
   type SpiffeTrustBundleRevokeResult,
@@ -79,15 +84,66 @@ export interface ParsedSpiffeBundle {
   /** hex SHA-256 over the sorted thumbprints: independent of order and of the upload format */
   digest: string;
   authoritiesPem: string;
-  jwtAuthoritiesIgnored: number;
+  /** S9 follow-up: the `jwt-svid` keys, reduced to their public members (and `kid`, `alg` when named) */
+  jwtAuthorities: Array<Record<string, string>>;
+  jwtViews: SpiffeJwtAuthorityView[];
 }
 
 const refused = (code: string, detail: string) => new IdentityAdminError(code, 422, detail);
 
 const toPem = (der: Buffer) => `${PEM_BEGIN}\n${der.toString("base64").replace(/(.{64})/g, "$1\n").replace(/\n$/, "")}\n-----END CERTIFICATE-----\n`;
 
-/** the X.509 authorities of a SPIFFE bundle (JWKS) document; jwt-svid keys counted, anything else refused */
-function authoritiesFromJwks(text: string): { ders: Buffer[]; jwtIgnored: number } | IdentityAdminError {
+/** JWT-SVID §2.1: the signature algorithms a JWT authority may serve, by key type */
+const JWT_SVID_EC_CURVES: ReadonlyMap<string, string> = new Map([
+  ["P-256", "ES256"],
+  ["P-384", "ES384"],
+  ["P-521", "ES512"],
+]);
+const JWT_SVID_RSA_ALGS: ReadonlySet<string> = new Set(["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"]);
+const JWT_KID_MAX = 256;
+const RSA_MIN_BITS = 2048;
+
+/** RFC 7638 SHA-256 thumbprint of a public RSA or EC JWK (base64url) */
+export function jwkThumbprintOf(k: Record<string, string>): string {
+  const members = k.kty === "RSA" ? { e: k.e, kty: k.kty, n: k.n } : { crv: k.crv, kty: k.kty, x: k.x, y: k.y };
+  return createHash("sha256").update(JSON.stringify(members)).digest("base64url");
+}
+
+/**
+ * One `jwt-svid` key (JWT-SVID §6.1: `use` jwt-svid and a `kid`), reduced to its public members. Only the key types
+ * JWT-SVID §2.1 signs with: RSA (at least 2048 bits) or EC on P-256, P-384 or P-521. A named `alg` must be one that
+ * key serves. Node's `createPublicKey` proves the members are a public key of that type.
+ */
+function jwtAuthorityOf(k: Record<string, unknown>, i: number): { jwk: Record<string, string>; view: SpiffeJwtAuthorityView } | IdentityAdminError {
+  const str = (m: string) => (typeof k[m] === "string" && (k[m] as string).length > 0 ? (k[m] as string) : null);
+  const kid = str("kid");
+  if (!kid || kid.length > JWT_KID_MAX) return refused("spiffe_bundle_invalid", `key ${i}: a jwt-svid key carries a kid (JWT-SVID §6.1)`);
+  const alg = k.alg === undefined ? null : str("alg");
+  if (k.alg !== undefined && !alg) return refused("spiffe_bundle_invalid", `key ${i}: alg is not a string`);
+  let jwk: Record<string, string>;
+  if (k.kty === "RSA" && str("n") && str("e")) {
+    jwk = { kty: "RSA", kid, n: str("n")!, e: str("e")! };
+    if (alg !== null && !JWT_SVID_RSA_ALGS.has(alg)) return refused("spiffe_bundle_jwt_key_unsupported", `key ${i}: alg ${alg} is not an RSA JWT-SVID algorithm`);
+  } else if (k.kty === "EC" && str("crv") && str("x") && str("y") && JWT_SVID_EC_CURVES.has(str("crv")!)) {
+    jwk = { kty: "EC", kid, crv: str("crv")!, x: str("x")!, y: str("y")! };
+    if (alg !== null && JWT_SVID_EC_CURVES.get(jwk.crv!) !== alg) return refused("spiffe_bundle_jwt_key_unsupported", `key ${i}: alg ${alg} does not match curve ${jwk.crv}`);
+  } else {
+    return refused("spiffe_bundle_jwt_key_unsupported", `key ${i}: a jwt-svid key is RSA or EC on P-256, P-384 or P-521 (JWT-SVID §2.1)`);
+  }
+  if (alg !== null) jwk.alg = alg;
+  try {
+    const pub = createPublicKey({ key: { ...jwk } as never, format: "jwk" });
+    if (jwk.kty === "RSA" && (pub.asymmetricKeyDetails?.modulusLength ?? 0) < RSA_MIN_BITS) {
+      return refused("spiffe_bundle_jwt_key_unsupported", `key ${i}: an RSA jwt-svid key has at least ${RSA_MIN_BITS} bits`);
+    }
+  } catch {
+    return refused("spiffe_bundle_invalid", `key ${i}: the jwt-svid key's members are not a public key`);
+  }
+  return { jwk, view: { kid, kty: jwk.kty!, crv: jwk.crv ?? null, thumbprint: jwkThumbprintOf(jwk) } };
+}
+
+/** the X.509 and JWT authorities of a SPIFFE bundle (JWKS) document; anything else refused */
+function authoritiesFromJwks(text: string): { ders: Buffer[]; jwt: Array<Record<string, string>>; jwtViews: SpiffeJwtAuthorityView[] } | IdentityAdminError {
   let doc: unknown;
   try {
     doc = JSON.parse(text);
@@ -98,15 +154,22 @@ function authoritiesFromJwks(text: string): { ders: Buffer[]; jwtIgnored: number
   if (!doc || typeof doc !== "object" || Array.isArray(doc) || !Array.isArray(keys)) {
     return refused("spiffe_bundle_invalid", "a SPIFFE bundle is a JSON object with a `keys` array (RFC 7517)");
   }
-  if (keys.length > SPIFFE_BUNDLE_MAX_AUTHORITIES * 2) return refused("spiffe_bundle_too_large", `a bundle holds at most ${SPIFFE_BUNDLE_MAX_AUTHORITIES} X.509 authorities`);
+  if (keys.length > SPIFFE_BUNDLE_MAX_AUTHORITIES + SPIFFE_BUNDLE_MAX_JWT_AUTHORITIES) {
+    return refused("spiffe_bundle_too_large", `a bundle holds at most ${SPIFFE_BUNDLE_MAX_AUTHORITIES} X.509 and ${SPIFFE_BUNDLE_MAX_JWT_AUTHORITIES} JWT authorities`);
+  }
   const ders: Buffer[] = [];
-  let jwtIgnored = 0;
+  const jwt: Array<Record<string, string>> = [];
+  const jwtViews: SpiffeJwtAuthorityView[] = [];
   for (const [i, raw] of keys.entries()) {
     const k = raw as Record<string, unknown> | null;
     if (!k || typeof k !== "object" || Array.isArray(k)) return refused("spiffe_bundle_invalid", `key ${i} is not a JWK`);
     if (["d", "p", "q", "dp", "dq", "qi", "oth", "k"].some((m) => m in k)) return refused("spiffe_bundle_private_material", `key ${i} carries private key material`);
     if (k.use === "jwt-svid") {
-      jwtIgnored++;
+      const a = jwtAuthorityOf(k, i);
+      if (a instanceof IdentityAdminError) return a;
+      if (jwt.some((j) => j.kid === a.jwk.kid)) return refused("spiffe_bundle_duplicate", `key ${i}: kid ${a.jwk.kid} appears twice`);
+      jwt.push(a.jwk);
+      jwtViews.push(a.view);
       continue;
     }
     if (k.use !== "x509-svid") return refused("spiffe_bundle_invalid", `key ${i}: \`use\` must be x509-svid or jwt-svid`);
@@ -131,7 +194,8 @@ function authoritiesFromJwks(text: string): { ders: Buffer[]; jwtIgnored: number
     }
     ders.push(der);
   }
-  return { ders, jwtIgnored };
+  if (jwt.length > SPIFFE_BUNDLE_MAX_JWT_AUTHORITIES) return refused("spiffe_bundle_too_large", `a bundle holds at most ${SPIFFE_BUNDLE_MAX_JWT_AUTHORITIES} JWT authorities`);
+  return { ders, jwt, jwtViews };
 }
 
 /**
@@ -144,13 +208,15 @@ export function parseSpiffeBundle(text: string, now: Date): ParsedSpiffeBundle |
   const trimmed = text.trim();
   let format: SpiffeBundleFormat;
   let ders: Buffer[];
-  let jwtIgnored = 0;
+  let jwt: Array<Record<string, string>> = [];
+  let jwtViews: SpiffeJwtAuthorityView[] = [];
   if (trimmed.startsWith("{")) {
     const out = authoritiesFromJwks(trimmed);
     if (out instanceof IdentityAdminError) return out;
     format = "spiffe_jwks";
     ders = out.ders;
-    jwtIgnored = out.jwtIgnored;
+    jwt = out.jwt;
+    jwtViews = out.jwtViews;
   } else if (trimmed.includes(PEM_BEGIN)) {
     try {
       ders = pemBundleToDer(trimmed);
@@ -187,8 +253,18 @@ export function parseSpiffeBundle(text: string, now: Date): ParsedSpiffeBundle |
     }
     views.push({ thumbprint, subject: cert.subject.replace(/\n/g, ", "), notBefore: from.toISOString(), notAfter: to.toISOString() });
   }
-  const digest = sha256Hex(canonicalJson([...seen].sort()));
-  return { format, authorities: ders, views, digest, authoritiesPem: ders.map(toPem).join(""), jwtAuthoritiesIgnored: jwtIgnored };
+  return { format, authorities: ders, views, digest: spiffeBundleDigest([...seen], jwtViews), authoritiesPem: ders.map(toPem).join(""), jwtAuthorities: jwt, jwtViews };
+}
+
+/**
+ * What a bundle trusts, as one hex SHA-256 (the step-up binds it; an identical digest is `spiffe_bundle_unchanged`).
+ * A bundle with X.509 authorities only keeps S9's form (the sorted thumbprints), so every stored digest still compares;
+ * one with JWT authorities covers them too (each as `kid` and thumbprint: a re-keyed `kid` is a change).
+ */
+export function spiffeBundleDigest(x509Thumbprints: string[], jwt: ReadonlyArray<SpiffeJwtAuthorityView>): string {
+  const x509 = [...x509Thumbprints].sort();
+  if (jwt.length === 0) return sha256Hex(canonicalJson(x509));
+  return sha256Hex(canonicalJson({ x509, jwt: jwt.map((j) => `${j.kid} ${j.thumbprint}`).sort() }));
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +279,10 @@ export function spiffeBundleView(r: SpiffeTrustBundleRow): SpiffeTrustBundleView
     format: r.format,
     digest: r.digest,
     authorities: [...r.authorities],
+    jwtAuthorities: [...r.jwtAuthorityViews],
     jwtAuthoritiesIgnored: r.jwtAuthoritiesIgnored,
+    source: r.source,
+    sequence: r.sequence,
     createdBy: r.createdBy,
     createdAt: r.createdAt.toISOString(),
     supersededAt: r.supersededAt ? r.supersededAt.toISOString() : null,
@@ -285,10 +364,24 @@ export class StepUpRefusedInWrite extends Error {
   }
 }
 
-async function spendOrThrow(conn: Db, spend: SpendStepUp | undefined): Promise<void> {
+export async function spendOrThrow(conn: Db, spend: SpendStepUp | undefined): Promise<void> {
   if (!spend) return;
   const su = await spend(conn);
   if (!su.ok) throw new StepUpRefusedInWrite(su.status, su.body);
+}
+
+/**
+ * S9 follow-up: a FETCHED bundle (`spiffe-bundle-endpoint.ts`) is written through this same compare-and-set, by the
+ * system principal, with no step-up (the admin's step-up authorised the endpoint). Its `spiffe_sequence` may never go
+ * backwards against an active fetched bundle, nor stay the same while the content changes (SPIFFE Trust Domain and
+ * Bundle §4.1.1), so a replayed older bundle is refused `spiffe_bundle_sequence_rollback`. `inTx` runs last in the
+ * same transaction (the endpoint's refresh state).
+ */
+export interface FetchedBundleWrite {
+  source: Extract<SpiffeBundleSource, "fetch">;
+  sequence: number | null;
+  endpointUrl: string;
+  inTx: (t: Db, bundleId: string) => Promise<void>;
 }
 
 export async function setSpiffeTrustBundle(
@@ -297,6 +390,7 @@ export async function setSpiffeTrustBundle(
   parsed: ParsedSpiffeBundle,
   actorUserId: string,
   spend?: SpendStepUp,
+  fetched?: FetchedBundleWrite,
 ): Promise<SpiffeTrustBundleView> {
   let out: SpiffeTrustBundleView | IdentityAdminError;
   try {
@@ -317,6 +411,9 @@ export async function setSpiffeTrustBundle(
         );
       }
       if (active && active.digest === parsed.digest) return new IdentityAdminError("spiffe_bundle_unchanged", 409, "the active bundle already holds exactly these authorities");
+      if (fetched && active?.source === "fetch" && active.sequence !== null && fetched.sequence !== null && fetched.sequence <= active.sequence) {
+        return new IdentityAdminError("spiffe_bundle_sequence_rollback", 409, `the fetched bundle's spiffe_sequence ${fetched.sequence} does not follow the active one's ${active.sequence}`);
+      }
       if (spiffeBundleWriteTestHooks.beforeInsert) await spiffeBundleWriteTestHooks.beforeInsert();
       const id = randomUUID();
       // the old row first: the one-active index allows no overlap; the self-reference is checked at commit
@@ -335,7 +432,10 @@ export async function setSpiffeTrustBundle(
           authoritiesPem: parsed.authoritiesPem,
           authorities: parsed.views,
           digest: parsed.digest,
-          jwtAuthoritiesIgnored: parsed.jwtAuthoritiesIgnored,
+          jwtAuthorities: parsed.jwtAuthorities,
+          jwtAuthorityViews: parsed.jwtViews,
+          source: fetched ? "fetch" : "upload",
+          sequence: fetched?.sequence ?? null,
           createdBy: actorUserId,
         })
         .returning();
@@ -352,15 +452,17 @@ export async function setSpiffeTrustBundle(
           previousDigest: active?.digest ?? null,
           format: parsed.format,
           authorities: parsed.views.map((v) => v.thumbprint),
-          jwtAuthoritiesIgnored: parsed.jwtAuthoritiesIgnored,
+          jwtAuthorities: parsed.jwtViews.map((v) => ({ kid: v.kid, thumbprint: v.thumbprint })),
+          previousJwtAuthorities: active ? active.jwtAuthorityViews.map((v) => ({ kid: v.kid, thumbprint: v.thumbprint })) : [],
+          source: fetched ? "fetch" : "upload",
+          ...(fetched ? { sequence: fetched.sequence, previousSequence: active?.sequence ?? null, endpointUrl: fetched.endpointUrl } : {}),
         },
         effect: "allow",
         ruleId: "spiffe-trust-bundle-set",
         ruleChain: [],
-        reason: active
-          ? `SPIFFE trust bundle for ${input.trustDomain} replaced (rotation: nothing revoked; tokens already issued live to their own expiry)`
-          : `SPIFFE trust bundle for ${input.trustDomain} added: X.509-SVIDs from this trust domain can now authenticate registered SPIFFE ID credentials`,
+        reason: `${active ? `SPIFFE trust bundle for ${input.trustDomain} replaced (rotation: nothing revoked; tokens already issued live to their own expiry)` : `SPIFFE trust bundle for ${input.trustDomain} added: SVIDs from this trust domain can now authenticate registered SPIFFE ID credentials`}${fetched ? ", fetched from its bundle endpoint" : ""}`,
       });
+      if (fetched) await fetched.inTx(t, id);
       // the write is certain (the compare-and-set held and the insert raised no unique violation): only now is the
       // step-up claimed, on this transaction's connection
       await spendOrThrow(t, spend);
@@ -371,7 +473,13 @@ export async function setSpiffeTrustBundle(
     out = new IdentityAdminError("spiffe_bundle_conflict", 409, `a bundle for ${input.trustDomain} was uploaded concurrently; refresh and try again`);
   }
   if (out instanceof IdentityAdminError) {
-    throw await auditRefusal(db, actorUserId, input.replacesBundleId, "set_refused", out, { trustDomain: input.trustDomain, digest: parsed.digest });
+    // a refresh that found the bundle unchanged is routine, not a refusal worth a row (the endpoint row records it)
+    if (fetched && out.code === "spiffe_bundle_unchanged") throw out;
+    throw await auditRefusal(db, actorUserId, input.replacesBundleId, fetched ? "fetch_refused" : "set_refused", out, {
+      trustDomain: input.trustDomain,
+      digest: parsed.digest,
+      ...(fetched ? { source: "fetch", sequence: fetched.sequence } : {}),
+    });
   }
   return out;
 }
@@ -406,11 +514,16 @@ export async function revokeSpiffeTrustBundle(db: Db, bundleId: string, actorUse
       update issued_tokens set revoked_at = GREATEST(now(), issued_at)
       where revoked_at is null and expires_at > now() and auth_credential_id in (${domainCredentials(bundle.trustDomain)})
       returning jti`);
+    // S9 follow-up: a revocation is never undone by a fetch. The domain's bundle endpoint is disabled in the same
+    // transaction; only a stepped-up PUT re-enables it (and the fetch refuses a write after a later revocation)
+    const endpoint = await t.execute<{ trust_domain: string }>(sql`
+      update spiffe_bundle_endpoints set enabled = false, next_refresh_at = null, updated_by = ${actorUserId}, updated_at = now()
+      where trust_domain = ${bundle.trustDomain} and enabled returning trust_domain`);
     await t.insert(auditLog).values({
       userId: actorUserId,
       objectType: "spiffe_trust_bundle",
       objectId: bundleId,
-      detail: { phase: "revoke", trustDomain: bundle.trustDomain, bundleId, digest: bundle.digest, tokensRevoked: tokens.rows.length },
+      detail: { phase: "revoke", trustDomain: bundle.trustDomain, bundleId, digest: bundle.digest, tokensRevoked: tokens.rows.length, endpointDisabled: endpoint.rows.length > 0 },
       effect: "allow",
       ruleId: "spiffe-trust-bundle-revoked",
       ruleChain: [],
@@ -458,12 +571,12 @@ async function invalidRequest(db: Db, req: FastifyRequest, reply: FastifyReply, 
 
 /** a claim refused inside the write rolled its own `step-up-grant-refused` row back with it: record it again (a look
  * writes that row and spends nothing) */
-async function rerecordRefusal(db: Db, req: FastifyRequest, args: StepUpCheckArgs, err: unknown): Promise<unknown> {
+export async function rerecordRefusal(db: Db, req: FastifyRequest, args: StepUpCheckArgs, err: unknown): Promise<unknown> {
   if (err instanceof StepUpRefusedInWrite) await checkStepUp(db, req, args, { spend: false });
   return err;
 }
 
-function answer(reply: FastifyReply, err: unknown) {
+export function answer(reply: FastifyReply, err: unknown) {
   if (err instanceof StepUpRefusedInWrite) return reply.status(err.status).send(err.body);
   if (!(err instanceof IdentityAdminError)) throw err;
   return reply.status(err.status).send({ error: err.code, detail: err.message });

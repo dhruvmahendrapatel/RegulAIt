@@ -81,7 +81,7 @@ import {
   AGENT_ENTITLEMENT_MODES,
   CONNECTOR_GRANT_MODES,
   IDENTITY_PROPAGATION_MODES,
-  WORKLOAD_CLIENT_AUTH_METHODS,
+  WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT,
   WORKLOAD_IDENTITY_KINDS,
   WORKLOAD_IDENTITY_STATUSES,
   WORKLOAD_CREDENTIAL_KINDS,
@@ -95,6 +95,9 @@ import {
   type WorkloadPublicJwk,
   // ADR-0188 S9 (migration 0199): SPIFFE trust bundles
   SPIFFE_BUNDLE_FORMATS,
+  SPIFFE_BUNDLE_SOURCES,
+  SPIFFE_BUNDLE_ENDPOINT_PROFILES,
+  type SpiffeJwtAuthorityView,
   type SpiffeTrustAuthorityView,
   // ADR-0189 (migration 0182): the BOM vocabularies, in lockstep with the CHECKs
   AI_BOM_SNAPSHOT_TRIGGERS,
@@ -4039,7 +4042,7 @@ export const orgSettings = pgTable(
     workloadClientAuthMethods: jsonb("workload_client_auth_methods")
       .$type<WorkloadClientAuthMethod[]>()
       .notNull()
-      .default([...WORKLOAD_CLIENT_AUTH_METHODS]),
+      .default([...WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT]),
     /** every DPoP proof carries a gateway nonce; off relaxes it */
     dpopNonceRequired: boolean("dpop_nonce_required").notNull().default(true),
     /** the longest a registered workload key is accepted, 1–90 days */
@@ -4736,7 +4739,7 @@ export const orgSettings = pgTable(
     check("org_settings_delegation_max_depth_check", sql`${t.delegationMaxDepth} BETWEEN 0 AND 8`),
     check(
       "org_settings_workload_client_auth_methods_check",
-      sql`jsonb_typeof(${t.workloadClientAuthMethods}) = 'array' AND ${t.workloadClientAuthMethods} <@ '["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid"]'::jsonb`,
+      sql`jsonb_typeof(${t.workloadClientAuthMethods}) = 'array' AND ${t.workloadClientAuthMethods} <@ '["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid", "spiffe_jwt_svid"]'::jsonb`,
     ),
     check("org_settings_workload_key_max_age_days_check", sql`${t.workloadKeyMaxAgeDays} BETWEEN 1 AND 90`),
     // ADR-0188 S5 review item 6 (migration 0188)
@@ -13495,6 +13498,14 @@ export const spiffeTrustBundles = pgTable(
     /** hex SHA-256 over the sorted authority thumbprints */
     digest: text("digest").notNull(),
     jwtAuthoritiesIgnored: integer("jwt_authorities_ignored").notNull().default(0),
+    /** S9 follow-up (migration 0209): the bundle's `jwt-svid` keys, PUBLIC JWKs only (each with its `kid`) */
+    jwtAuthorities: jsonb("jwt_authorities").$type<Array<Record<string, string>>>().notNull().default([]),
+    /** public facts of each JWT authority, for the list view */
+    jwtAuthorityViews: jsonb("jwt_authority_views").$type<SpiffeJwtAuthorityView[]>().notNull().default([]),
+    /** S9 follow-up: `upload` (an admin) or `fetch` (the domain's bundle endpoint) */
+    source: text("source", { enum: SPIFFE_BUNDLE_SOURCES }).notNull().default("upload"),
+    /** a fetched bundle's `spiffe_sequence` */
+    sequence: bigint("sequence", { mode: "number" }),
     /** the acting principal, as in `audit_log.user_id` (no foreign key: the system principal acts for the bootstrap token) */
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13512,6 +13523,12 @@ export const spiffeTrustBundles = pgTable(
     check("spiffe_trust_bundles_public_only_check", sql`position('PRIVATE KEY' in ${t.authoritiesPem}) = 0`),
     check("spiffe_trust_bundles_jwt_ignored_check", sql`${t.jwtAuthoritiesIgnored} >= 0`),
     check(
+      "spiffe_trust_bundles_jwt_authorities_check",
+      sql`jsonb_typeof(${t.jwtAuthorities}) = 'array' AND jsonb_array_length(${t.jwtAuthorities}) <= 64 AND jsonb_typeof(${t.jwtAuthorityViews}) = 'array' AND jsonb_array_length(${t.jwtAuthorityViews}) = jsonb_array_length(${t.jwtAuthorities}) AND NOT jsonb_path_exists(${t.jwtAuthorities}, '$[*] ? (exists(@.d) || exists(@.p) || exists(@.q) || exists(@.dp) || exists(@.dq) || exists(@.qi) || exists(@.oth) || exists(@.k))')`,
+    ),
+    check("spiffe_trust_bundles_source_check", sql`${t.source} IN ('upload', 'fetch')`),
+    check("spiffe_trust_bundles_sequence_check", sql`${t.sequence} IS NULL OR (${t.source} = 'fetch' AND ${t.sequence} >= 0)`),
+    check(
       "spiffe_trust_bundles_lifecycle_check",
       sql`(${t.supersededAt} IS NULL) = (${t.supersededByBundleId} IS NULL) AND (${t.revokedAt} IS NULL) = (${t.revokedBy} IS NULL) AND NOT (${t.supersededAt} IS NOT NULL AND ${t.revokedAt} IS NOT NULL) AND (${t.supersededAt} IS NULL OR ${t.supersededAt} >= ${t.createdAt}) AND (${t.revokedAt} IS NULL OR ${t.revokedAt} >= ${t.createdAt})`,
     ),
@@ -13521,6 +13538,50 @@ export const spiffeTrustBundles = pgTable(
   ],
 );
 export type SpiffeTrustBundleRow = typeof spiffeTrustBundles.$inferSelect;
+
+/**
+ * ADR-0188 S9 follow-up (migration 0209) — a trust domain's SPIFFE BUNDLE
+ * ENDPOINT (SPIFFE Federation §5): where its bundle is fetched from, how the
+ * endpoint is authenticated (`https_web` or `https_spiffe`), and the refresh
+ * state. One row per domain, set only by the audited admin route (step-up);
+ * no row = no fetch (the strict default; air-gapped installs upload instead).
+ * The scheduler's `spiffe-bundle-refresh` job claims due rows, fetches through
+ * the egress guard and writes a changed bundle as a new `spiffe_trust_bundles`
+ * row (`source = 'fetch'`). `trust_until` bounds how long the last good fetched
+ * bundle is used when refreshes fail.
+ */
+export const spiffeBundleEndpoints = pgTable(
+  "spiffe_bundle_endpoints",
+  {
+    trustDomain: text("trust_domain").primaryKey(),
+    url: text("url").notNull(),
+    profile: text("profile", { enum: SPIFFE_BUNDLE_ENDPOINT_PROFILES }).notNull(),
+    endpointSpiffeId: text("endpoint_spiffe_id"),
+    enabled: boolean("enabled").notNull(),
+    nextRefreshAt: timestamp("next_refresh_at", { withTimezone: true }),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    trustUntil: timestamp("trust_until", { withTimezone: true }),
+    /** the acting principal, as in `audit_log.user_id` (no foreign key) */
+    updatedBy: uuid("updated_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("spiffe_bundle_endpoints_trust_domain_check", sql`${t.trustDomain} ~ '^[a-z0-9._-]{1,255}$'`),
+    check("spiffe_bundle_endpoints_url_check", sql`length(${t.url}) <= 2048 AND ${t.url} ~ '^https://[^/@]+(/|$)'`),
+    check("spiffe_bundle_endpoints_profile_check", sql`${t.profile} IN ('https_web', 'https_spiffe')`),
+    check(
+      "spiffe_bundle_endpoints_spiffe_id_check",
+      sql`(${t.profile} = 'https_spiffe') = (${t.endpointSpiffeId} IS NOT NULL) AND (${t.endpointSpiffeId} IS NULL OR (length(${t.endpointSpiffeId}) <= 2048 AND ${t.endpointSpiffeId} ~ '^spiffe://[a-z0-9._-]{1,255}(/[A-Za-z0-9._-]+)+$'))`,
+    ),
+    check("spiffe_bundle_endpoints_failures_check", sql`${t.consecutiveFailures} >= 0`),
+    check("spiffe_bundle_endpoints_error_code_check", sql`${t.lastErrorCode} IS NULL OR ${t.lastErrorCode} ~ '^[a-z0-9_]{1,64}$'`),
+  ],
+);
+export type SpiffeBundleEndpointRow = typeof spiffeBundleEndpoints.$inferSelect;
 
 /**
  * THE UNIT OF AUTHORITY (decisions 4, 12, 17, 22): one row per delegation.

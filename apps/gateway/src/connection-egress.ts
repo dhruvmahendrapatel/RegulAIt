@@ -109,6 +109,7 @@ import {
   type EgressResolver,
 } from "./egress-guard.js";
 import { loadEgressAllowList } from "./custom-providers.js";
+import type { PinnedTls } from "./pinned-fetch.js";
 import {
   auditCompiledDefaultDenied,
   decideCompiledDefault,
@@ -126,6 +127,8 @@ export interface ConnectionEgressDeps {
   resolve?: EgressResolver;
   fetchImpl?: typeof fetch;
   beforeSend?: () => Promise<void>;
+  /** ADR-0188 S9 follow-up: the bundle endpoint's own server authentication instead of Web PKI (see `PinnedTarget.tls`) */
+  tls?: PinnedTls;
 }
 
 export interface ConnectionEgressCheck {
@@ -203,6 +206,7 @@ export function connectionGuardedFetch(
     ...(deps.resolve ? { resolve: deps.resolve } : {}),
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
     ...(deps.beforeSend ? { beforeSend: deps.beforeSend } : {}),
+    ...(deps.tls ? { tls: deps.tls } : {}),
   });
 }
 
