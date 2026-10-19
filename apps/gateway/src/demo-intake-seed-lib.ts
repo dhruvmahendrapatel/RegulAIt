@@ -655,10 +655,11 @@ async function seedDemoOpenAccountability(
       title: DEMO_OPEN_INCIDENT_TITLE,
       summary:
         "After the merchant-category table was updated, the engine declined noticeably more legitimate card payments " +
-        "at travel and event merchants. Customers were inconvenienced; no funds were lost (synthetic demo record).",
+        "at travel and event merchants, spotted in the weekly decline-rate review. Customers were inconvenienced; no " +
+        "funds were lost (synthetic demo record).",
       severity: "medium",
-      detectionSource: "monitor_alert",
-      sourceRef: "Monitor: decline-rate drift on the fraud engine (synthetic)",
+      // a `monitor_alert` source must cite a real governance alert, and the demo has none on this engine
+      detectionSource: "manual",
       useCaseId: uc,
       ownerUserId: dana.id,
     }, dana.auth);
