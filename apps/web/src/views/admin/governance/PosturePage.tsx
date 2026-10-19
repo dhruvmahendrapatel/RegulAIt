@@ -23,7 +23,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { resyncOutcomeText, resyncRefusalText, resyncUseCase } from "./useCaseResync";
 import { api } from "../../../api/client";
-import { fmtUsd, ago } from "../../../api/format";
+import { fmtUsd, ago, plural } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState } from "../../../ui/kit";
 import { QueryGate } from "../adminKit";
@@ -223,6 +223,13 @@ function ColumnTrend(props: {
  */
 function BehindCompletedInstance(props: { item: { count: number; sampleUseCaseIds: string[]; action: string } }) {
   const queryClient = useQueryClient();
+  // names for the links: a bare UUID tells the reader nothing (X5); shares the registry's cache entry
+  const useCases = useQuery({
+    queryKey: ["admin", "use-cases"],
+    queryFn: () => api.get<{ useCases?: Array<{ id: string; name: string }> }>("/v1/use-cases"),
+    enabled: props.item.count > 0,
+  });
+  const nameOf = (id: string) => useCases.data?.useCases?.find((u) => u.id === id)?.name ?? `Use case ${id.slice(0, 8)}`;
   const [busyId, setBusyId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [outcome, setOutcome] = useState<string | null>(null);
@@ -248,7 +255,7 @@ function BehindCompletedInstance(props: { item: { count: number; sampleUseCaseId
     <div className={v.stack}>
       {props.item.count > 0 && (
         <div className={p.oneLiner}>
-          <Badge tone="warn">needs a re-sync</Badge> {props.item.count} use case(s) whose intake workflow completed were never
+          <Badge tone="warn">needs a re-sync</Badge> {plural(props.item.count, "use case")} whose intake workflow completed {props.item.count === 1 ? "was" : "were"} never
           approved.
         </div>
       )}
@@ -256,7 +263,7 @@ function BehindCompletedInstance(props: { item: { count: number; sampleUseCaseId
         {props.item.sampleUseCaseIds.map((id) => (
           <li key={id} className={v.listRow}>
             <Link className={v.grow} to={`/admin/governance/use-cases/${id}`}>
-              {id}
+              {nameOf(id)}
             </Link>
             <span className={p.noPrint}>
               {/* aria-disabled, not disabled: a disabled button drops focus to the page,
@@ -364,7 +371,7 @@ export default function PosturePage() {
                       Against '{d.redteam.latest.agentName}' {ago(d.redteam.latest.startedAt)}: {pct(d.redteam.latest.asr)} of{" "}
                       {d.redteam.latest.asrTrials} trials succeeded (95% interval {pct(d.redteam.latest.asrLower)}–{pct(d.redteam.latest.asrUpper)},
                       quality: {d.redteam.latest.measurementQuality ?? "unlabelled"}); the platform itself stopped{" "}
-                      {d.redteam.latest.platformHeld} induced call(s). <SectionLink to="/admin/redteam" />
+                      {plural(d.redteam.latest.platformHeld, "induced call")}. <SectionLink to="/admin/redteam" />
                     </>
                   ) : (
                     <>
@@ -378,7 +385,7 @@ export default function PosturePage() {
                 label={`AI spend — ${d.spend.period.label}`}
                 line={
                   <>
-                    {d.spend.events.toLocaleString()} metered calls; {d.spend.overBudgetProjects} project(s) over budget;{" "}
+                    {d.spend.events.toLocaleString()} metered calls; {plural(d.spend.overBudgetProjects, "project")} over budget;{" "}
                     {fmtUsd(d.spend.unattributedCostUsd)} unattributed. List-price estimate, stated as such.{" "}
                     <SectionLink to="/admin/cost" />
                   </>
@@ -418,10 +425,9 @@ export default function PosturePage() {
               <Card title="Governance activity" actions={<SectionLink to="/admin/audit" label="audit log →" />}>
                 <div className={v.stack}>
                   <div className={p.oneLiner}>
-                    In the last {d.window.days} days the gateway refused {d.governance.denials.toLocaleString()} governed
-                    call(s), {d.governance.piiBlocks.toLocaleString()} of them PII blocks, and{" "}
-                    {d.governance.approvalsDecidedInWindow.toLocaleString()} approval(s) were decided.{" "}
-                    {d.governance.approvalsPending.toLocaleString()} approval(s) are pending right now.
+                    In the last {d.window.days} days the gateway refused {plural(d.governance.denials, "governed call")}, {d.governance.piiBlocks.toLocaleString()} of them PII blocks, and{" "}
+                    {plural(d.governance.approvalsDecidedInWindow, "approval")} {d.governance.approvalsDecidedInWindow === 1 ? "was" : "were"} decided.{" "}
+                    {plural(d.governance.approvalsPending, "approval")} {d.governance.approvalsPending === 1 ? "is" : "are"} pending right now.
                   </div>
                   <div className={p.oneLiner}>
                     <SectionLink to="/admin/approvals" label="approvals queue →" />
@@ -439,7 +445,7 @@ export default function PosturePage() {
                       <Badge tone="warn">no anchor sink</Badge>
                     )}{" "}
                     <span className={v.faint}>
-                      {d.auditChain.anchors} anchor(s)
+                      {plural(d.auditChain.anchors, "anchor")}
                       {d.auditChain.latestAnchorAt ? `, latest ${ago(d.auditChain.latestAnchorAt)}` : ""}
                     </span>
                   </div>
@@ -452,7 +458,7 @@ export default function PosturePage() {
                     <>No eval run in the window — model quality is unmeasured here, not assumed.</>
                   ) : (
                     <>
-                      {d.evals.runsInWindow.toLocaleString()} eval run(s) in the window,{" "}
+                      {plural(d.evals.runsInWindow, "eval run")} in the window,{" "}
                       {d.evals.groundedness.runsInWindow.toLocaleString()} of them groundedness-scored
                       {d.evals.groundedness.latest?.passRate != null && (
                         <> — latest groundedness pass rate {pct(d.evals.groundedness.latest.passRate)}</>
@@ -470,9 +476,9 @@ export default function PosturePage() {
                       <>No agent is registered yet.</>
                     ) : (
                       <>
-                        Of {d.agentOwnership.total} registered agent(s), {d.agentOwnership.owned} have a recorded owner,{" "}
-                        {d.agentOwnership.unowned} are unowned (no owner recorded), and {d.agentOwnership.orphaned} are
-                        orphaned (owner deactivated). Lifecycle: {d.agentOwnership.lifecycle.active} active,{" "}
+                        Of {plural(d.agentOwnership.total, "registered agent")}, {d.agentOwnership.owned} {d.agentOwnership.owned === 1 ? "has" : "have"} a recorded owner,{" "}
+                        {d.agentOwnership.unowned} {d.agentOwnership.unowned === 1 ? "is" : "are"} unowned (no owner recorded), and {d.agentOwnership.orphaned}{" "}
+                        {d.agentOwnership.orphaned === 1 ? "is" : "are"} orphaned (owner deactivated). Lifecycle: {d.agentOwnership.lifecycle.active} active,{" "}
                         {d.agentOwnership.lifecycle.deprecated} deprecated, {d.agentOwnership.lifecycle.retired} retired.
                       </>
                     )}
@@ -493,7 +499,7 @@ export default function PosturePage() {
                       <>No certification campaign has ever been run — gateway grants have never been re-attested.</>
                     ) : (
                       <>
-                        {d.certificationCampaigns.total} campaign(s): {d.certificationCampaigns.open} open,{" "}
+                        {plural(d.certificationCampaigns.total, "campaign")}: {d.certificationCampaigns.open} open,{" "}
                         {d.certificationCampaigns.completed} completed, {d.certificationCampaigns.expiredIncomplete}{" "}
                         expired-incomplete.
                       </>
@@ -514,14 +520,14 @@ export default function PosturePage() {
                       <>No SoD rule is defined — no capability combination is declared toxic.</>
                     ) : (
                       <>
-                        {d.sod.rules} SoD rule(s), {d.sod.enabled} enabled — {d.sod.currentViolations} current
-                        violation(s).
+                        {plural(d.sod.rules, "SoD rule")}, {d.sod.enabled} enabled — {d.sod.currentViolations} current{" "}
+                        {d.sod.currentViolations === 1 ? "violation" : "violations"}.
                       </>
                     )}
                   </div>
                   {d.sod.currentViolations > 0 && (
                     <div>
-                      <Badge tone="danger">{d.sod.currentViolations} violation(s)</Badge>
+                      <Badge tone="danger">{plural(d.sod.currentViolations, "violation")}</Badge>
                     </div>
                   )}
                   <div className={v.faint}>{d.sod.note}</div>
@@ -537,7 +543,7 @@ export default function PosturePage() {
                       <>None — no deterministic rule currently flags any grant.</>
                     ) : (
                       <>
-                        {d.accessRecommendations.totalFindings} finding(s) across the v
+                        {plural(d.accessRecommendations.totalFindings, "finding")} across the v
                         {d.accessRecommendations.rulesVersion} rules:{" "}
                         {d.accessRecommendations.byRule
                           .filter((r) => r.findings > 0)
@@ -547,7 +553,7 @@ export default function PosturePage() {
                       </>
                     )}{" "}
                     {d.accessRecommendations.totalNotAssessable > 0 && (
-                      <>{d.accessRecommendations.totalNotAssessable} grant(s) not assessable.</>
+                      <>{plural(d.accessRecommendations.totalNotAssessable, "grant")} not assessable.</>
                     )}
                   </div>
                   <div className={v.faint}>{d.accessRecommendations.note}</div>
