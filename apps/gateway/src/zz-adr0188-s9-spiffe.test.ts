@@ -747,7 +747,6 @@ describe("S9 — rotation and revocation (decision 12)", () => {
           authoritiesPem: racer.authoritiesPem,
           authorities: racer.views,
           digest: racer.digest,
-          jwtAuthoritiesIgnored: racer.jwtAuthoritiesIgnored,
           createdBy: admin.id,
         });
       };

@@ -92,6 +92,8 @@ const RELAXED: Partial<Record<IdentitySettingKey, unknown>> = {
   delegationUncappedRootAllowed: true,
   delegationRootDefaultCapMicros: 1_000_000,
   delegationRootMaxLifetimeSeconds: 86_400,
+  // ADR-0188 S9 follow-up: the bearer JWT-SVID is the one method outside the strict default; adding it relaxes
+  workloadClientAuthMethods: ["private_key_jwt", "tls_client_auth", "self_signed_tls_client_auth", "spiffe_svid", "spiffe_jwt_svid"],
 };
 
 function refusalText(e: unknown): string {

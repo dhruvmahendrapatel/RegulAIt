@@ -116,6 +116,8 @@ export const SCHEDULER_JOB_NAMES = {
   discoveryScanSweep: "discovery-scan-sweep",
   // ADR-0195 SD4b: merges accepted endpoint agent reports into the findings (endpoint-agent-routes.ts)
   endpointAgentIngest: "endpoint-agent-ingest",
+  // ADR-0188 S9 follow-up: fetches due SPIFFE bundle endpoints (oauth/spiffe-bundle-endpoint.ts)
+  spiffeBundleRefresh: "spiffe-bundle-refresh",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -784,6 +786,7 @@ import { engineJobDefinitions } from "./engine-runs.js";
 import { modelArtifactJobDefinitions, type ArtifactStore } from "./model-artifacts.js";
 import { discoveryJobDefinitions } from "./discovery-worker.js";
 import { endpointAgentJobDefinitions } from "./endpoint-agent-routes.js";
+import { spiffeBundleRefreshJobDefinitions } from "./oauth/spiffe-bundle-endpoint.js";
 
 function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
   return [
@@ -798,6 +801,7 @@ function adr0182Jobs(opts: SchedulerJobsOptions): SchedulerJobDefinition[] {
     ...modelArtifactJobDefinitions(opts.artifactStore === undefined ? {} : { artifactStore: opts.artifactStore }), // ADR-0187 decision 127: model-artifact-retention-sweep
     ...discoveryJobDefinitions({ dataKey: opts.dataKey }), // ADR-0195 SD0: discovery-scan-sweep
     ...endpointAgentJobDefinitions(), // ADR-0195 SD4b: endpoint-agent-ingest
+    ...spiffeBundleRefreshJobDefinitions(), // ADR-0188 S9 follow-up: spiffe-bundle-refresh
   ];
 }
 // ===== end ADR-0182 block ====================================================

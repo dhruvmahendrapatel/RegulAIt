@@ -74,9 +74,17 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
 }
 
+/** the rules that look for the global `fetch` read code with every string blanked and `typeof fetch` (a type)
+ * removed: an audit rule id, a `source: "fetch"` value or a module specifier is not a call (S9 follow-up, the fetch
+ * module itself is scanned now). Template literals are left as they are */
+const FETCH_RULES: ReadonlySet<string> = new Set(["bare fetch", "globalThis.fetch", "destructured fetch"]);
+// quoted strings only: a template literal can hold `${fetch(u)}`, so it is never blanked
+const blankStrings = (code: string) => code.replace(/(["'])(?:\\.|(?!\1)[^\\\n])*\1/g, '""').replace(/\btypeof\s+fetch\b/g, "typeof _");
+
 function violations(src: string): string[] {
   const code = stripComments(src);
-  return RAW_EGRESS.filter(([, re]) => re.test(code)).map(([name]) => name);
+  const noStrings = blankStrings(code);
+  return RAW_EGRESS.filter(([name, re]) => re.test(FETCH_RULES.has(name) ? noStrings : code)).map(([name]) => name);
 }
 
 describe("SPIFFE modules reach the network only through the egress guard", () => {
@@ -116,5 +124,17 @@ describe("SPIFFE modules reach the network only through the egress guard", () =>
     expect(violations('import { BlockList, isIP } from "node:net";\nimport type { TLSSocket } from "node:tls";')).toEqual([]);
     expect(violations("const g = await guardConnectionCall(db, a); await g.fetchImpl(url);")).toEqual([]);
     expect(violations("// a bundle could be fetch(ed) one day\n/* fetch(x) */ const a = 1;")).toEqual([]);
+    // S9 follow-up: a string or a type naming fetch is not a call; a call next to one still is
+    expect(violations('const r = { ruleId: "spiffe-bundle-fetch-failed", source: "fetch" }; let f: typeof fetch;')).toEqual([]);
+    expect(violations('import type { PinnedTls } from "../pinned-fetch.js";')).toEqual([]);
+    expect(violations('const s = "fetch"; await fetch(u);')).toEqual(["bare fetch"]);
+    expect(violations("const f = `x${fetch(u)}`;")).toEqual(["bare fetch"]);
+  });
+
+  it("the bundle endpoint module is scanned, and fetches only through guardConnectionCall", () => {
+    const src = readFileSync(path.join(SRC, "oauth/spiffe-bundle-endpoint.ts"), "utf8");
+    expect(spiffeModules().map((p) => path.relative(SRC, p).split(path.sep).join("/"))).toContain("oauth/spiffe-bundle-endpoint.ts");
+    expect(violations(src)).toEqual([]);
+    expect(src).toContain("guardConnectionCall(db, {");
   });
 });
