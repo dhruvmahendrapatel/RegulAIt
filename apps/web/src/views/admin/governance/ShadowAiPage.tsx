@@ -54,6 +54,7 @@ import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
 import { DiscoverySightings } from "./DiscoverySightings";
 import type { SightingView } from "./discoverySourcesModel";
+import { IMPORT_EXAMPLE } from "./shadowAiExample";
 import v from "../../views.module.css";
 import sh from "./shadowAi.module.css";
 
@@ -268,16 +269,7 @@ const ADAPTER_CONFIG_HINT: Record<string, string> = {
     'REQUIRED: {"kind":"egress_log"} (or code_scan / saas_export / self_reported). Add "mapping" to name the columns yourself; omit it and header inference proposes them and REFUSES on ambiguity.',
 };
 
-const EXAMPLE = JSON.stringify(
-  {
-    kind: "egress_log",
-    mode: "dry_run",
-    source: "acme forward proxy, week 31",
-    rows: [{ observedAt: "2026-07-28T09:00:00Z", destinationHost: "api.openai.com", sourceIdentity: "build-runner-01", requestCount: 412 }],
-  },
-  null,
-  2,
-);
+const EXAMPLE = JSON.stringify(IMPORT_EXAMPLE, null, 2);
 
 export default function ShadowAiPage() {
   const catalogue = useQuery({ queryKey: ["shadow-ai", "catalogue"], queryFn: () => api.get<CatalogueResponse>("/v1/shadow-ai/catalogue") });
