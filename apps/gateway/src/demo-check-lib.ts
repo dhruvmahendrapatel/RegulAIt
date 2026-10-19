@@ -490,7 +490,8 @@ export async function checkShadowDiscovery(
   }
 
   const repoFinding = findings.find((f) => f.subjectKind === "repo" && f.subject === `gitlab:${data.remediation.repo}`);
-  const users: Json[] = (await get("/v1/users")).body.users ?? [];
+  const usersRes = await get("/v1/users");
+  const users: Json[] = usersRes.body.users ?? [];
   const lead = users.find((u) => u.email === DEMO_SECURITY_LEAD.email);
   const LEAD = `${DEMO_SECURITY_LEAD.displayName} (${DEMO_SECURITY_LEAD.role})`;
   if (!repoFinding) add("1 Remediation plan", "FAIL", `no finding for gitlab:${data.remediation.repo}`, RERUN);
@@ -583,6 +584,9 @@ export function fictionalDatasetMarkers(data: DemoShadowDiscoveryDataset = DEMO_
     .filter((m, i, all) => m && all.indexOf(m) === i);
 }
 
+/** the most rows the runs, imports and provenance-record routes return in one answer (they do not page) */
+export const LIVE_LIST_CAP = 200;
+
 /** the import sources the demo seeders write (the 10-05 synthetic SaaS export, the dataset's MDM export) */
 const SEEDED_IMPORT_SOURCE = /^demo-(intake|shadow)-seed\b/i;
 
@@ -610,17 +614,17 @@ export async function checkLiveDiscovery(
 
   // --- (a) no trace of the fictional dataset ----------------------------------------------------
   const sourcesRes = await get("/v1/discovery/sources");
-  const runsRes = await get("/v1/discovery/runs?limit=200");
+  const runsRes = await get(`/v1/discovery/runs?limit=${LIVE_LIST_CAP}`);
   const importsRes = await get("/v1/shadow-ai/imports");
   const connectorsRes = await get("/v1/connectors");
-  const recordsRes = await get("/v1/content-provenance/records?limit=200");
-  const unread = [
+  const recordsRes = await get(`/v1/content-provenance/records?limit=${LIVE_LIST_CAP}`);
+  const reads: Array<[string, { status: number; body: Json }]> = [
     ["sources", sourcesRes],
     ["runs", runsRes],
     ["imports", importsRes],
     ["connectors", connectorsRes],
     ["provenance records", recordsRes],
-  ].filter(([, r]) => (r as { status: number }).status !== 200);
+  ];
   const sources: Json[] = sourcesRes.body.sources ?? [];
   const fakeSources = sources.filter(fictional);
   const fakeSourceIds = new Set(fakeSources.map((s) => s.id));
@@ -632,9 +636,21 @@ export async function checkLiveDiscovery(
   const fakeRecords = ((recordsRes.body.records ?? []) as Json[]).filter((r) => fakeConnectorIds.has(r.sourceId) || fictional(r));
   let fakeDevices = 0;
   for (const s of sources.filter((x) => x.kind === "endpoint_agent" || fakeSourceIds.has(x.id))) {
-    const devices: Json[] = (await get(`/v1/discovery/sources/${s.id}/endpoint-devices`)).body.devices ?? [];
+    const res = await get(`/v1/discovery/sources/${s.id}/endpoint-devices`);
+    reads.push([`devices of '${s.name}'`, res]);
+    const devices: Json[] = res.body.devices ?? [];
     fakeDevices += fakeSourceIds.has(s.id) ? devices.length : devices.filter(fictional).length;
   }
+  const unread = reads.filter(([, r]) => r.status !== 200);
+  // the list routes cap their answer (runs and provenance records at the `limit` asked, imports at 200) and do not page:
+  // a full page may hide a dataset row past the cap, so absence is not proven
+  const capped = (
+    [
+      ["runs", runsRes.body.runs],
+      ["imports", importsRes.body.imports],
+      ["provenance records", recordsRes.body.records],
+    ] as Array<[string, unknown]>
+  ).filter(([, rows]) => Array.isArray(rows) && rows.length >= LIVE_LIST_CAP);
   const traces: Array<[string, number]> = [
     ["source", fakeSources.length],
     ["run", fakeRuns.length],
@@ -645,7 +661,7 @@ export async function checkLiveDiscovery(
     ["provenance record", fakeRecords.length],
   ];
   const found = traces.filter(([, n]) => n > 0);
-  if (unread.length) add("1 Fictional dataset", "FAIL", `could not read ${unread.map(([l, r]) => `${l} (${(r as { status: number }).status})`).join(", ")}: absence not proven`);
+  if (unread.length) add("1 Fictional dataset", "FAIL", `could not read ${unread.map(([l, r]) => `${l} (${r.status})`).join(", ")}: absence not proven`);
   else if (found.length) {
     add(
       "1 Fictional dataset",
@@ -654,7 +670,8 @@ export async function checkLiveDiscovery(
         (fakeSources.length ? ` (e.g. '${fakeSources[0]!.name}')` : ""),
       "the live database holds real findings only (ADR-0197 addendum 3): rebuild it from empty with `demo:prepare --live`; the dataset belongs on the fallback stack",
     );
-  } else add("1 Fictional dataset", "PASS", `no source, run, finding, import, device, connector or provenance record of the fictional dataset (${markers.length} markers)`);
+  } else if (capped.length) add("1 Fictional dataset", "FAIL", `${capped.map(([l]) => `${LIVE_LIST_CAP} or more ${l} (the list cap)`).join(", ")}: absence not proven`);
+  else add("1 Fictional dataset", "PASS", `no source, run, finding, import, device, connector or provenance record of the fictional dataset (${markers.length} markers)`);
 
   // --- the signature catalogue the matcher reads ------------------------------------------------
   const cat = await get("/v1/shadow-ai/catalogue");
@@ -684,15 +701,21 @@ export async function checkLiveDiscovery(
   } else add("1 Real discovery sources", "PASS", `${enabled.length} of ${real.length} real source(s) enabled, ${realFindings} finding(s): ${listed.join("; ")}${note}`);
 
   // --- the remediation default's sign-off: the security lead alone -------------------------------
-  const users: Json[] = (await get("/v1/users")).body.users ?? [];
+  const usersRes = await get("/v1/users");
+  const users: Json[] = usersRes.body.users ?? [];
   const ada = users.find((u) => u.email === "admin@regulait.local");
   const lead = users.find((u) => u.email === DEMO_SECURITY_LEAD.email);
   const LEAD = `${DEMO_SECURITY_LEAD.displayName} (${DEMO_SECURITY_LEAD.role})`;
   const otherAdmins = users.filter((u) => u.isAdmin && !u.disabledAt && u.id !== ada?.id);
-  const templates: Json[] = (await get("/v1/workflows/templates")).body.templates ?? [];
+  const templatesRes = await get("/v1/workflows/templates");
+  const templates: Json[] = templatesRes.body.templates ?? [];
   const tpl = templates.find((t) => t.name === SHADOW_AI_REMEDIATION_TEMPLATE_NAME);
   const signoff = ((tpl?.definition?.stages ?? []) as Json[]).find((st) => st.type === "human_approval");
-  if (!ada || !lead || !lead.isAdmin || lead.disabledAt) {
+  if (usersRes.status !== 200) {
+    add("1 Remediation routing", "FAIL", `users (${usersRes.status}): users unreadable, routing not proven`);
+  } else if (templatesRes.status !== 200) {
+    add("1 Remediation routing", "FAIL", `templates (${templatesRes.status}): routing not proven`);
+  } else if (!ada || !lead || !lead.isAdmin || lead.disabledAt) {
     add(
       "1 Remediation routing",
       "FAIL",

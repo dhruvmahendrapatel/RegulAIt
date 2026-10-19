@@ -127,11 +127,14 @@ live database holds the governance seed but only real Shadow-AI findings. Built 
 - **`demo:check --live`** keeps every governance beat and replaces the seeded-dataset beats with: "1 Fictional
   dataset", a FAIL (never a warning, ADR-0180) on any discovery source, run, finding, import, enrolled device,
   connector or provenance record carrying the dataset's company, source names, " (demo dataset)" suffix or recorded
-  identifiers, or when one of those lists cannot be read; "1 Signature catalogue" (empty means a real scan matches
+  identifiers, when one of those lists (each endpoint agent's device list included) cannot be read, or when the runs,
+  imports or provenance records come back as a full page of 200 (those routes do not page, so absence past the cap is
+  not proven); "1 Signature catalogue" (empty means a real scan matches
   nothing); "1 Real discovery sources", which lists every real source with its kind, enabled state and last run, notes
   the ones never run, and FAILs only when none is enabled; and "1 Remediation routing", which checks that the default
   sign-off resolves to Morgan alone (the only active admin other than Ada, with TOTP) and that the shipped default is
-  not retired or changed, since no remediation workflow exists before the live S3 beat.
+  not retired or changed, since no remediation workflow exists before the live S3 beat; an unreadable users or
+  templates list is a FAIL of its own.
 - On a fresh live database `demo:prepare --live` therefore ends with one FAIL, "1 Real discovery sources", until the
   sources of DEMO_RUNBOOK §7.2 are added. CI (`demo.yml`, `demo-live`) pins that, and a 0-fail run with one real source
   enabled, on empty databases. On the dev instance host it is pending execution.

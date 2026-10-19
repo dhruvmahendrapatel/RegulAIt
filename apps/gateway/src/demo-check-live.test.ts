@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { DEMO_SHADOW_DISCOVERY as D } from "@regulait/shared";
-import { checkLiveDiscovery, fictionalDatasetMarkers, LIVE_DISCOVERY_BEATS, runDemoCheck, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
+import { checkLiveDiscovery, fictionalDatasetMarkers, LIVE_DISCOVERY_BEATS, LIVE_LIST_CAP, runDemoCheck, SHADOW_DISCOVERY_BEATS } from "./demo-check-lib.js";
 import { DEMO_SECURITY_LEAD } from "./demo-identity.js";
 import { SHADOW_AI_REMEDIATION_TEMPLATE_NAME, shadowAiRemediationDefinition } from "./shadow-ai-remediation.js";
 
@@ -133,7 +133,61 @@ describe("checkLiveDiscovery: real findings only, fail closed", () => {
     expect(c.detail).toContain("1 device(s)");
   });
 
-  for (const path of ["/v1/discovery/runs", "/v1/shadow-ai/imports", "/v1/content-provenance/records"]) {
+  it("a run matched only by the sourceId of a dataset source counts as a run", async () => {
+    const w = world();
+    w.sources.push({ id: "s-aws", name: D.aws.name, kind: "cloud_aws", enabled: false, target: {} });
+    w.runs.push({ id: "r-y", sourceId: "s-aws", status: "succeeded" });
+    expect((await live(w))["1 Fictional dataset"]!.detail).toContain("1 run(s)");
+  });
+
+  it("a provenance record matched only by the library connector's id counts as a record", async () => {
+    const w = world();
+    w.connectors.push({ id: "c-lib", name: D.contentTrust.connectorName });
+    w.records.push({ id: "p2", sourceId: "c-lib", trustTier: "trusted", objectRef: "doc:1" });
+    expect((await live(w))["1 Fictional dataset"]!.detail).toContain("1 provenance record(s)");
+  });
+
+  for (const [list, fill] of [
+    ["runs", (w: World, rows: Json[]) => void (w.runs = rows)],
+    ["imports", (w: World, rows: Json[]) => void (w.imports = rows)],
+    ["provenance records", (w: World, rows: Json[]) => void (w.records = rows)],
+  ] as const) {
+    it(`a full page of ${list} (the list cap) FAILs: absence is not proven past it`, async () => {
+      const w = world();
+      fill(w, Array.from({ length: LIVE_LIST_CAP }, (_, i) => ({ id: `row-${i}`, sourceId: REAL_GITLAB, source: "real.csv" })));
+      const c = (await live(w))["1 Fictional dataset"]!;
+      expect(c.level).toBe("FAIL");
+      expect(c.detail).toBe(`${LIVE_LIST_CAP} or more ${list} (the list cap): absence not proven`);
+      fill(w, Array.from({ length: LIVE_LIST_CAP - 1 }, (_, i) => ({ id: `row-${i}`, sourceId: REAL_GITLAB, source: "real.csv" })));
+      expect((await live(w))["1 Fictional dataset"]!.level).toBe("PASS");
+    });
+  }
+
+  it("an unreadable endpoint-devices list FAILs, named by its source: a 500 is not zero devices", async () => {
+    const w = world();
+    w.failing.add(`/v1/discovery/sources/${REAL_AGENT}/endpoint-devices`);
+    const c = (await live(w))["1 Fictional dataset"]!;
+    expect(c.level).toBe("FAIL");
+    expect(c.detail).toBe("could not read devices of 'Pilot laptops' (500): absence not proven");
+  });
+
+  it("unreadable templates FAIL the routing: a retired default or a fixed approver would go unseen", async () => {
+    const w = world();
+    w.failing.add("/v1/workflows/templates");
+    const c = (await live(w))["1 Remediation routing"]!;
+    expect(c.level).toBe("FAIL");
+    expect(c.detail).toBe("templates (500): routing not proven");
+  });
+
+  it("unreadable users FAIL the routing with their own detail", async () => {
+    const w = world();
+    w.failing.add("/v1/users");
+    const c = (await live(w))["1 Remediation routing"]!;
+    expect(c.level).toBe("FAIL");
+    expect(c.detail).toContain("users unreadable");
+  });
+
+  for (const path of ["/v1/discovery/sources", "/v1/discovery/runs", "/v1/shadow-ai/imports", "/v1/connectors", "/v1/content-provenance/records"]) {
     it(`an unreadable ${path} FAILs: absence is not proven`, async () => {
       const w = world();
       w.failing.add(path);
@@ -169,6 +223,11 @@ describe("checkLiveDiscovery: real findings only, fail closed", () => {
     ["the security lead is not an admin", (w) => void (w.users = w.users.map((u) => (u.id === MORGAN ? { ...u, isAdmin: false } : u))), "empty database"],
     ["the security lead is deactivated", (w) => void (w.users = w.users.map((u) => (u.id === MORGAN ? { ...u, disabledAt: "2026-10-19T09:00:00Z" } : u))), "empty database"],
     ["a third admin would share the sign-off", (w) => void (w.users = w.users.map((u) => (u.id === AVERY ? { ...u, isAdmin: true } : u))), "extra admin"],
+    [
+      "a third admin listed after the security lead would share the sign-off",
+      (w) => void w.users.push({ id: "00000000-0000-4000-8000-0000000000a3", email: "extra@regulait.local", isAdmin: true, totpEnabled: true, disabledAt: null }),
+      "extra admin",
+    ],
     ["the security lead has no TOTP", (w) => void (w.users = w.users.map((u) => (u.id === MORGAN ? { ...u, totpEnabled: false } : u))), "enrols her authenticator"],
     ["the default template is retired", (w) => void (w.templates = [{ name: SHADOW_AI_REMEDIATION_TEMPLATE_NAME, definition: shadowAiRemediationDefinition(), retiredAt: "2026-10-19T09:00:00Z" }]), "route the change type"],
     [
