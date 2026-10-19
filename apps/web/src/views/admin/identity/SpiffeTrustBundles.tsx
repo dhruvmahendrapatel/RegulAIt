@@ -22,8 +22,9 @@ import {
   type SpiffeTrustBundleView,
 } from "./spiffeBundleModel";
 import s from "./workloadIdentities.module.css";
+import { fmtDateTime } from "../../../api/format";
 
-export const dateLabel = (value: string | null) => (value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "—");
+export const dateLabel = (value: string | null) => fmtDateTime(value);
 const STATUS_TONE = { active: "ok", superseded: "neutral", revoked: "danger" } as const;
 
 /** a refusal in the page's words (`words` reads its code; bundle refusals by default), else the client's own reading */

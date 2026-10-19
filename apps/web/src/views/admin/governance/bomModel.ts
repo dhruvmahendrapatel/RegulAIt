@@ -15,6 +15,7 @@
  *    so a missing signing key never reads as a success or a generic failure.
  */
 import { ApiError } from "../../../api/client";
+import { fmtDateTime } from "../../../api/format";
 
 // ---------------------------------------------------------------------------
 // vocabularies (mirrored; pinned by bomModel.test.ts)
@@ -1202,8 +1203,7 @@ export const GAP_LABELS: Readonly<Record<BomGap["kind"], string>> = {
 
 /** a recorded time for display; the ISO value stays available as the title */
 export function shownTime(iso: string): string {
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? new Date(t).toLocaleString() : iso;
+  return fmtDateTime(iso, iso);
 }
 
 /** save a verified download (a transient object URL; nothing is kept) */

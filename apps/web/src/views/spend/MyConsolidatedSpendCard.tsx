@@ -74,7 +74,7 @@ export function MyConsolidatedSpendCard(props: { userId: string }) {
                     <div className={v.stat}>
                       <span className={v.statValue}>{fmtUsd(subject.metered.usd ?? 0)}</span>
                       <span className={v.statLabel}>
-                        metered by RegulAIt · {subject.metered.events} calls
+                        metered by regulAIt · {subject.metered.events} calls
                         {subject.metered.unpricedEvents > 0 ? ` (${subject.metered.unpricedEvents} unpriced, not counted as zero)` : ""}
                       </span>
                     </div>

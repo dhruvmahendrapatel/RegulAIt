@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { actorLabel, evidenceLabel, fmtAt, frameworkLabel, humanize, plural, providerLabel } from "./format";
+import { actorLabel, evidenceLabel, fmtAt, fmtDateTime, frameworkLabel, humanize, plural, providerLabel } from "./format";
+
+describe("fmtDateTime — one British-English date format across the screens", () => {
+  it("writes day, short month, year and a 24-hour time, never the US form", () => {
+    const out = fmtDateTime("2026-10-26T00:11:07.000Z");
+    expect(out).toMatch(/^\d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}$/);
+    expect(out).not.toMatch(/AM|PM|\//);
+  });
+  it("falls back for a missing or unreadable value", () => {
+    expect(fmtDateTime(null)).toBe("—");
+    expect(fmtDateTime("")).toBe("—");
+    expect(fmtDateTime("not a date", "never")).toBe("never");
+  });
+});
 
 describe("display helpers — the UI never shows identifiers where words belong", () => {
   it("humanize turns ids into words and spells sign-off", () => {
@@ -43,7 +56,7 @@ describe("display helpers — the UI never shows identifiers where words belong"
   });
 
   it("formats a timestamp on one line, to the minute", () => {
-    expect(fmtAt("2026-10-02T15:25:01.000Z")).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    expect(fmtAt("2026-10-02T15:25:01.000Z")).toMatch(/^\d{1,2} [A-Z][a-z]{2,3} 2026, \d{2}:\d{2}$/);
     expect(fmtAt("not a date")).toBe("not a date");
   });
 });
