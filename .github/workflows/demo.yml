@@ -289,7 +289,7 @@ jobs:
             await app.ready();
             const headers = { authorization: `Bearer ${process.env.REGULAIT_BOOTSTRAP_TOKEN}` };
             const c = await app.inject({ method: "POST", url: "/v1/discovery/sources", headers,
-              payload: { name: "CI endpoint agent", kind: "endpoint_agent", target: {}, scope: { orgLevel: true, include: [] } } });
+              payload: { name: "CI endpoint agent", kind: "endpoint_agent", target: { fleet: "ci-pilot" }, scope: { orgLevel: true, include: [] } } });
             if (c.statusCode !== 201) { console.error("create", c.statusCode, c.body); process.exit(1); }
             const e = await app.inject({ method: "POST", url: `/v1/discovery/sources/${c.json().id}/enable`, headers, payload: { version: c.json().version } });
             if (e.statusCode !== 200) { console.error("enable", e.statusCode, e.body); process.exit(1); }
