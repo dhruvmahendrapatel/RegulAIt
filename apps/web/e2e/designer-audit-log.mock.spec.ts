@@ -50,5 +50,6 @@ test("Audit log: chain state first and never green unasked, entries contained, r
   await page.getByRole("button", { name: "What is the signed bundle?" }).click();
   await expect(page.getByRole("note")).toContainText("verify offline");
   await page.keyboard.press("Escape");
-  await expect(page.getByText("Not recorded", { exact: true })).toBeVisible();
+  // phase2.spec (real stack) counts these cells by their exact name
+  await expect(page.getByRole("cell", { name: "Not recorded", exact: true })).toHaveCount(1);
 });
