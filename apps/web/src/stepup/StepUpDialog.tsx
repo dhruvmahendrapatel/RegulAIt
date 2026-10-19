@@ -171,7 +171,7 @@ export default function StepUpDialog() {
     >
       <div className={v.stack} data-testid="step-up-dialog">
         <p style={{ margin: 0 }}>
-          You're {what}. RegulAIt asks you to prove it's you right now, for this one action. The confirmation can't be
+          You're {what}. regulAIt asks you to prove it's you right now, for this one action. The confirmation can't be
           reused for anything else.
         </p>
         {error && (

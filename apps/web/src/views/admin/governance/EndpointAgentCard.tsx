@@ -10,6 +10,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
+import { fmtDateTime } from "../../../api/format";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { Badge, Button, Card, CodeBlock, ConfirmModal, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import { useAction } from "../adminKit";
@@ -52,7 +53,7 @@ interface DevicesView {
   summary: { devices: number; revoked: number; softwareKeys: number };
 }
 
-const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
+const when = (iso: string | null) => <span style={{ whiteSpace: "nowrap" }}>{fmtDateTime(iso, "never")}</span>;
 /** ADR-0197 Q13: the default and strict maximum, and the most a step-up relaxation allows */
 const TOKEN_DAYS = 30;
 const TOKEN_RELAXED_DAYS = 90;
@@ -124,12 +125,12 @@ export function EndpointAgentCard({ sources }: { sources: readonly DiscoverySour
     <Card title="Endpoint agent enrolment">
       <div className={v.stack}>
         <p className={v.faint}>
-          The RegulAIt endpoint agent is distributed through your MDM. Issue an enrolment token here and deliver the enrolment file to each device; the
+          The regulAIt endpoint agent is distributed through your MDM. Issue an enrolment token here and deliver the enrolment file to each device; the
           agent&apos;s install step redeems it once for that device, and each user of the device registers their own device key. Nothing enrols or uploads
           while the source is disabled. Devices and their users are shown only as pseudonyms; a device user&apos;s name is self-reported by the device.
         </p>
         {targets.length === 0 ? (
-          <p className={v.faint}>Add and enable a RegulAIt endpoint agent source above to enrol devices.</p>
+          <p className={v.faint}>Add and enable a regulAIt endpoint agent source above to enrol devices.</p>
         ) : (
           <>
             <Field label="Endpoint agent source" error={error}>

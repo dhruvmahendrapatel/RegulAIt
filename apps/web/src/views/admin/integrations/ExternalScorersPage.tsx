@@ -1,6 +1,6 @@
 /**
  * External eval scorers (ADR-0088) — the admin surface for plugging a
- * Fiddler-class scoring endpoint the operator runs or buys into the eval
+ * third-party scoring endpoint the operator runs or buys into the eval
  * harness as a GOVERNED, DISCLOSED instrument.
  *
  * The page idiom is CustomProvidersPage's, because the decision is the same
@@ -66,8 +66,8 @@ export default function ExternalScorersPage() {
     <>
       <PageHeader
         title="External scorers"
-        sub="Bring your own scoring instrument. RegulAIt governs the call and records provenance; it does not validate the instrument."
-        info={<p>Bring your own scoring instrument — a Fiddler-class endpoint you run or buy — as a governed, disclosed eval scorer. RegulAIt governs the call and records provenance; it does not validate the instrument.</p>}
+        sub="Bring your own scoring instrument. regulAIt governs the call and records provenance; it does not validate the instrument."
+        info={<p>Bring your own scoring instrument — a scoring endpoint you run or buy — as a governed, disclosed eval scorer. regulAIt governs the call and records provenance; it does not validate the instrument.</p>}
       />
       <div className={v.stack}>
         <Card title="What an external score is, and is not">

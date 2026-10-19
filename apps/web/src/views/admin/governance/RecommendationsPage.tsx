@@ -28,6 +28,7 @@ import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Table, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction } from "../adminKit";
 import v from "../../views.module.css";
+import { fmtDateTime } from "../../../api/format";
 
 interface JudgeAnnotation {
   method: "model-judged";
@@ -126,7 +127,7 @@ export default function RecommendationsPage() {
           <div className={v.stack}>
             <div className={v.faint}>
               Rules v{d.rulesVersion} · window {d.window.days} days (a parameter, not a truth) · computed{" "}
-              {new Date(d.computedAt).toLocaleString()} · {d.notes.observed}
+              {fmtDateTime(d.computedAt)} · {d.notes.observed}
             </div>
             <div>
               {d.judged.enabled === false ? (

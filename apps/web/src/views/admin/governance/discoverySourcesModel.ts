@@ -3,6 +3,7 @@
  * gateway returns and the parsing of the page's simple text fields. No React,
  * no network, so it is unit-tested directly.
  */
+import { humanize, providerLabel, titleWords } from "../../../api/format";
 
 export interface ScannerKindView {
   kind: string;
@@ -164,6 +165,21 @@ export function describeSchedule(seconds: number): string {
   if (seconds % 86400 === 0) return seconds === 86400 ? "daily" : `every ${seconds / 86400} days`;
   if (seconds % 3600 === 0) return seconds === 3600 ? "hourly" : `every ${seconds / 3600} hours`;
   return `every ${Math.round(seconds / 60)} minutes`;
+}
+
+/**
+ * A run's catalogue gap in words: its kind, a product name where the identifier's own form carries one (a presence
+ * signature id `cli.<provider>.<binary>`, an IDE extension id `<publisher>.<name>`), and the raw `kind:value` code
+ * kept as secondary text. Any other identifier is shown as itself. A gap has no catalogue row to take a name from.
+ */
+export function describeGap(gap: { kind: string; value: string }): { kind: string; name: string; code: string } {
+  const presence = /^(?:cli|env)\.([a-z0-9-]+)\.([a-z0-9-]+)$/.exec(gap.value);
+  const name = presence
+    ? `${providerLabel(presence[1]!)} ${titleWords(presence[2]!)}`
+    : gap.kind === "ide_extension" && /^[\w-]+\.[\w-]+$/.test(gap.value)
+      ? titleWords(gap.value)
+      : gap.value;
+  return { kind: humanize(gap.kind), name, code: `${gap.kind}:${gap.value}` };
 }
 
 /** the gateway's refusal codes in the page's words */

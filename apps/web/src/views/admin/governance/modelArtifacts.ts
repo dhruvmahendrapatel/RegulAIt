@@ -17,6 +17,7 @@
  *    reduced to the gateway's own `[A-Za-z0-9_./-]` alphabet before display.
  */
 import { apiErrorFrom, ApiError, CSRF_HEADER, type ApiErrorPayload } from "../../../api/client";
+import { fmtDay } from "../../../api/format";
 
 export type ArtifactScanVerdict = "clean" | "no_known_unsafe" | "unsafe" | "unknown" | "not_run";
 
@@ -346,7 +347,7 @@ export const DEFAULT_MAX_MEGABYTES = 512;
 export const DEFAULT_RETENTION_DAYS = 30;
 
 const DAY_MS = 24 * 3_600_000;
-const day = (t: number) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+const day = fmtDay;
 
 /**
  * Retention as the gateway applies it (ADR-0187 decision 127): an artifact older
