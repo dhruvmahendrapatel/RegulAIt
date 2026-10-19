@@ -23,6 +23,13 @@
  *                                     validated against THAT trust domain's
  *                                     ACTIVE uploaded bundle (S9), URI SAN =
  *                                     the registered ID
+ *   - `spiffe_jwt_svid`               a `spiffe_id` credential: a JWT-SVID
+ *                                     (`client_assertion_type` jwt-spiffe)
+ *                                     verified against THAT trust domain's
+ *                                     JWT authorities, `sub` = the registered
+ *                                     ID (S9 follow-up). Off by default: a
+ *                                     bearer credential, so its token is
+ *                                     always DPoP-bound
  * `client_secret_*` does not exist.
  */
 import { and, eq, isNull, workloadCredentials, workloadIdentities, type Db, type WorkloadCredentialRow } from "@regulait/db";
@@ -31,7 +38,8 @@ import { credentialLiveAt } from "../delegation.js";
 import { importJWK, jwtVerify, type JWK } from "jose";
 import { loadOrgSettings } from "../org-settings.js";
 import { loadMtlsCaBundle, selfSignedCertificateFacts, spiffeIdParts, validateClientCertificate, type PresentedCertificate, type TrustConfig } from "./x509.js";
-import { loadSpiffeTrustAnchors } from "./spiffe-trust-domains.js";
+import { loadSpiffeJwtAuthorities, loadSpiffeTrustAnchors } from "./spiffe-trust-domains.js";
+import { verifyJwtSvid } from "./spiffe-jwt-svid.js";
 
 export interface WorkloadClient {
   identity: typeof workloadIdentities.$inferSelect;
@@ -190,6 +198,32 @@ export async function matchCertificateCredential(
     }
   }
   return { ok: false, code: last };
+}
+
+export type JwtSvidMatch =
+  | { ok: true; credentialId: string; spiffeId: string; spiffeBundleId: string; replayKey: string; exp: number }
+  | { ok: false; code: string };
+
+/**
+ * ADR-0188 S9 follow-up: which LIVE `spiffe_id` credential of `client` this JWT-SVID proves (`verifyJwtSvid`, then
+ * `sub` = the registered SPIFFE ID), when the org allows `spiffe_jwt_svid`. The JWT authorities are read at the point
+ * of use, like the X.509 anchors, so an upload, a fetch or a revocation applies to the very next request.
+ */
+export async function matchJwtSvidCredential(db: Db, client: WorkloadClient, assertion: string, audience: string, now: Date): Promise<JwtSvidMatch> {
+  if (!client.methods.has("spiffe_jwt_svid")) return { ok: false, code: "method_not_allowed" };
+  if (client.alias) return { ok: false, code: "no_spiffe_credential" };
+  const spiffeCreds = client.credentials.filter((c) => c.kind === "spiffe_id" && c.spiffeId);
+  if (spiffeCreds.length === 0) return { ok: false, code: "no_spiffe_credential" };
+  let v: Awaited<ReturnType<typeof verifyJwtSvid>>;
+  try {
+    v = await verifyJwtSvid(assertion, { audience, now, authorities: (td) => loadSpiffeJwtAuthorities(db, td) });
+  } catch {
+    return { ok: false, code: "trust_config_invalid" };
+  }
+  if (!v.ok) return v;
+  const c = spiffeCreds.find((x) => x.spiffeId === v.spiffeId);
+  if (!c) return { ok: false, code: "spiffe_id_mismatch" };
+  return { ok: true, credentialId: c.id, spiffeId: v.spiffeId, spiffeBundleId: v.bundleId, replayKey: v.replayKey, exp: v.exp };
 }
 
 /** the JWS labels of a workload key's signature: an Ed25519 key signs under both, a P-256 key under ES256 */

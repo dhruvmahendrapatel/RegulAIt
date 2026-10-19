@@ -15,7 +15,7 @@
  * delegation being narrowed instead of refused. None of them has a column.
  */
 import { z } from "zod";
-import { AGENT_ENTITLEMENT_MODES, WORKLOAD_CLIENT_AUTH_METHODS, type WorkloadClientAuthMethod } from "./contract.js";
+import { AGENT_ENTITLEMENT_MODES, WORKLOAD_CLIENT_AUTH_METHODS, WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT, type WorkloadClientAuthMethod } from "./contract.js";
 
 /** the bounds (zod and the DB CHECKs of migration 0180 hold the same numbers) */
 export const IDENTITY_SETTING_LIMITS = {
@@ -39,7 +39,8 @@ export const IDENTITY_STRICT_DEFAULTS = Object.freeze({
   agentEntitlementMode: "own_grants" as (typeof AGENT_ENTITLEMENT_MODES)[number],
   delegatedTokenTtlSeconds: 300 as number,
   delegationMaxDepth: 3 as number,
-  workloadClientAuthMethods: [...WORKLOAD_CLIENT_AUTH_METHODS] as WorkloadClientAuthMethod[],
+  // every method but the bearer JWT-SVID (ADR-0188 S9 follow-up: `spiffe_jwt_svid` is off until an admin adds it)
+  workloadClientAuthMethods: [...WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT] as WorkloadClientAuthMethod[],
   dpopNonceRequired: true as boolean,
   workloadKeyMaxAgeDays: 90 as number,
   // S5 security review item 6 (migration 0188): a root grant is capped and short-lived unless an admin relaxes it
@@ -94,9 +95,9 @@ export const IDENTITY_SETTING_COPY: Readonly<Record<IdentitySettingKey, { label:
   workloadClientAuthMethods: {
     label: "How workloads may sign in",
     strict:
-      "Signed assertions from a registered key, client certificates and SPIFFE identities. Shared secrets are " +
-      "never offered.",
-    relaxed: "Adding back a method you removed lets workloads sign in that way again.",
+      "Signed assertions from a registered key, client certificates and SPIFFE identities; not SPIFFE JWT bearer " +
+      "tokens. Shared secrets are never offered.",
+    relaxed: "Adding a method lets workloads sign in that way.",
   },
   dpopNonceRequired: {
     label: "Require a server nonce in proof-of-possession",
@@ -128,9 +129,9 @@ export const IDENTITY_SETTING_COPY: Readonly<Record<IdentitySettingKey, { label:
 /**
  * Is `value` a RELAXATION of the strict default for `key`? Sponsor-only mode,
  * a longer token lifetime, a deeper chain, the nonce off, uncapped roots, a
- * default root cap and a longer root lifetime are. The auth
- * method list and the key age cannot be looser than their defaults (the
- * default is already the widest list and the longest age); only a change
+ * default root cap and a longer root lifetime are. The key age cannot be
+ * looser than its default (the longest age), and the auth method list only by
+ * naming `spiffe_jwt_svid` (ADR-0188 S9 follow-up); otherwise only a change
  * against a stricter STORED value is (see `identitySettingLooser`).
  */
 export function identitySettingRelaxed<K extends IdentitySettingKey>(key: K, value: IdentitySettings[K]): boolean {
@@ -142,6 +143,8 @@ export function identitySettingRelaxed<K extends IdentitySettingKey>(key: K, val
     case "delegationUncappedRootAllowed":
       return value === true;
     case "workloadClientAuthMethods":
+      // ADR-0188 S9 follow-up: the bearer JWT-SVID is the one method outside the strict default
+      return Array.isArray(value) && (value as readonly string[]).includes("spiffe_jwt_svid");
     case "workloadKeyMaxAgeDays":
       return false;
     default:
@@ -178,7 +181,7 @@ export const identityOrgSettingsFields = {
   delegatedTokenTtlSeconds: boundedInt(IDENTITY_SETTING_LIMITS.delegatedTokenTtlSeconds).optional(),
   /** strict 3; deeper, up to 8, relaxes it */
   delegationMaxDepth: boundedInt(IDENTITY_SETTING_LIMITS.delegationMaxDepth).optional(),
-  /** strict = all four; removing one tightens it; `client_secret_*` is not a member and cannot be added */
+  /** strict = all but `spiffe_jwt_svid`; removing one tightens it, adding one relaxes it; `client_secret_*` is not a member */
   workloadClientAuthMethods: z
     .array(z.enum(WORKLOAD_CLIENT_AUTH_METHODS))
     .max(WORKLOAD_CLIENT_AUTH_METHODS.length)

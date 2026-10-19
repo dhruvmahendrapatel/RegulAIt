@@ -33,6 +33,7 @@
  *   /v1/identity/signing-keys[...]          issuer key list, rotate, revoke (S3, built; the writes need a
  *                                           `key_management` step-up instead, migration 0203)
  *   /v1/identity/spiffe-trust-bundles[...]  SPIFFE trust bundles: list, upload, revoke (S9, `oauth/spiffe-bundles.ts`)
+ *   /v1/identity/spiffe-bundle-endpoints[...] SPIFFE bundle endpoints: list, set (S9 follow-up, `oauth/spiffe-bundle-endpoint.ts`)
  *
  * The routes are written out literally (not looped over IDENTITY_ROUTES) so the
  * affordance census (`scripts/preflight-ui-affordances.mjs`) sees the DELETE.
@@ -64,6 +65,7 @@ import {
 import { workloadIdentityAdminHandlers } from "./workload-identity-admin.js";
 import { workloadIdentityS6Handlers } from "./oauth/identity-admin.js";
 import { spiffeTrustBundleHandlers } from "./oauth/spiffe-bundles.js";
+import { spiffeBundleEndpointHandlers } from "./oauth/spiffe-bundle-endpoint.js";
 
 const SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
 const kidParam = z.object({ kid: z.string().regex(IDENTITY_SIGNING_KID_PATTERN) });
@@ -84,6 +86,7 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   const s4 = workloadIdentityAdminHandlers(db);
   const s6 = workloadIdentityS6Handlers(db);
   const s9 = spiffeTrustBundleHandlers(db);
+  const s9Fetch = spiffeBundleEndpointHandlers(db);
   // public: the issuer's PUBLIC keys (decision 5) — active, and retired ones
   // inside their overlap; never a revoked key. Short cache: a revocation must
   // reach verifiers quickly.
@@ -111,6 +114,9 @@ export function registerIdentityRoutes(app: FastifyInstance, db: Db, opts: { dat
   app.get("/v1/identity/spiffe-trust-bundles", s9.list);
   app.post("/v1/identity/spiffe-trust-bundles", s9.set);
   app.post("/v1/identity/spiffe-trust-bundles/:bundleId/revoke", s9.revoke);
+  // admin (S9 follow-up): where a domain's bundle is fetched from; the fetch goes through the egress guard
+  app.get("/v1/identity/spiffe-bundle-endpoints", s9Fetch.list);
+  app.put("/v1/identity/spiffe-bundle-endpoints/:trustDomain", s9Fetch.set);
   // admin: the issuer's signing keys (public halves only; every write needs a
   // `key_management` step-up bound to the op and the exact key, migration 0203,
   // and is audited inside identity-signing-keys.ts)

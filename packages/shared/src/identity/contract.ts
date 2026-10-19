@@ -319,8 +319,18 @@ export const WORKLOAD_CLIENT_AUTH_METHODS = [
   "tls_client_auth",
   "self_signed_tls_client_auth",
   "spiffe_svid",
+  // ADR-0188 S9 follow-up: a SPIFFE JWT-SVID as the client assertion (draft-ietf-oauth-spiffe-client-auth). A bearer
+  // credential, so it is OFF by default (not in `WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT`); adding it is a relaxation
+  "spiffe_jwt_svid",
 ] as const;
 export type WorkloadClientAuthMethod = (typeof WORKLOAD_CLIENT_AUTH_METHODS)[number];
+/** the strict default (migration 0180's column default): every method but the bearer JWT-SVID */
+export const WORKLOAD_CLIENT_AUTH_METHODS_DEFAULT: readonly WorkloadClientAuthMethod[] = [
+  "private_key_jwt",
+  "tls_client_auth",
+  "self_signed_tls_client_auth",
+  "spiffe_svid",
+];
 
 /** `mcp_servers.identity_propagation` (decision 8; OWNER DECISION 6: default `none`) */
 export const IDENTITY_PROPAGATION_MODES = ["none", "signed_assertion"] as const;
@@ -341,6 +351,8 @@ export const TOKEN_TYPE_ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_
 export const TOKEN_TYPE_DELEGATION_PROOF = "urn:regulait:params:oauth:token-type:delegation-proof" as const;
 export const TOKEN_TYPE_DELEGATION_AUTHZ = "urn:regulait:params:oauth:token-type:delegation-authz" as const;
 export const CLIENT_ASSERTION_TYPE_JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" as const;
+/** draft-ietf-oauth-spiffe-client-auth §3.1: a SPIFFE JWT-SVID as the client assertion */
+export const CLIENT_ASSERTION_TYPE_JWT_SPIFFE = "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe" as const;
 /** JOSE `typ` of the human's one-use delegation proof (decision 15) */
 export const DELEGATION_PROOF_TYP = "regulait-delegation-proof+jwt" as const;
 /** JOSE `typ` of a parent's delegation authorization (decision 23) */
@@ -1104,16 +1116,35 @@ export interface SpiffeTrustAuthorityView {
   notAfter: string;
 }
 
+/** one JWT authority (a `jwt-svid` key) of a bundle: public facts only */
+export interface SpiffeJwtAuthorityView {
+  kid: string;
+  kty: string;
+  /** the curve of an EC key, else null */
+  crv: string | null;
+  /** RFC 7638 SHA-256 thumbprint (base64url) */
+  thumbprint: string;
+}
+
 export interface SpiffeTrustBundleView {
   id: string;
   trustDomain: string;
   status: SpiffeBundleStatus;
   format: SpiffeBundleFormat;
-  /** hex SHA-256 over the sorted authority thumbprints (what the step-up binds) */
+  /**
+   * hex SHA-256 over the sorted authority thumbprints (what the step-up binds). A bundle with JWT authorities covers
+   * them too (S9 follow-up), so a JWT-key change is never `spiffe_bundle_unchanged`
+   */
   digest: string;
   authorities: SpiffeTrustAuthorityView[];
-  /** `jwt-svid` keys in an uploaded SPIFFE JWKS: not stored, JWT-SVID client authentication is not built */
+  /** the bundle's `jwt-svid` keys (S9 follow-up: stored, they verify JWT-SVIDs) */
+  jwtAuthorities: SpiffeJwtAuthorityView[];
+  /** `jwt-svid` keys of a bundle recorded before the S9 follow-up: counted, not stored (always 0 since) */
   jwtAuthoritiesIgnored: number;
+  /** `upload`: an admin uploaded it; `fetch`: fetched from the domain's bundle endpoint */
+  source: SpiffeBundleSource;
+  /** a fetched bundle's `spiffe_sequence`, when it carried one */
+  sequence: number | null;
   createdBy: string;
   createdAt: string;
   supersededAt: string | null;
@@ -1127,6 +1158,81 @@ export interface SpiffeTrustBundleListView {
   items: SpiffeTrustBundleView[];
   /** true when `REGULAIT_SPIFFE_TRUST_BUNDLES` is set: it is ignored, and the admin should remove it */
   legacyEnvironmentIgnored: boolean;
+}
+
+/** where a stored bundle came from */
+export const SPIFFE_BUNDLE_SOURCES = ["upload", "fetch"] as const;
+export type SpiffeBundleSource = (typeof SPIFFE_BUNDLE_SOURCES)[number];
+/** the most JWT authorities (`jwt-svid` keys) one bundle may hold */
+export const SPIFFE_BUNDLE_MAX_JWT_AUTHORITIES = 64;
+
+// ---------------------------------------------------------------------------
+// ADR-0188 S9 follow-up — the SPIFFE bundle endpoint (SPIFFE Federation §5)
+// ---------------------------------------------------------------------------
+
+/** SPIFFE Federation §5.2: the two endpoint profiles. A profile is never inferred from the URL */
+export const SPIFFE_BUNDLE_ENDPOINT_PROFILES = ["https_web", "https_spiffe"] as const;
+export type SpiffeBundleEndpointProfile = (typeof SPIFFE_BUNDLE_ENDPOINT_PROFILES)[number];
+/** the refresh interval bounds a `spiffe_refresh_hint` is clamped to, and the default when a bundle names none (§5: five minutes) */
+export const SPIFFE_REFRESH_HINT_FLOOR_SECONDS = 60;
+export const SPIFFE_REFRESH_HINT_CEILING_SECONDS = 24 * 3600;
+export const SPIFFE_REFRESH_DEFAULT_SECONDS = 300;
+/**
+ * A FETCHED bundle is trusted for at most this long after its last successful fetch. A failed refresh keeps the last
+ * good bundle (it never clears trust), but only until then: after it, the domain's fetched bundle authenticates
+ * nothing until a fetch succeeds again (fail closed). An uploaded bundle has no such limit (it is pinned).
+ */
+export const SPIFFE_FETCHED_BUNDLE_MAX_AGE_SECONDS = 24 * 3600;
+/** a fetch's whole budget (connect, headers, body) */
+export const SPIFFE_BUNDLE_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * `PUT /v1/identity/spiffe-bundle-endpoints/:trustDomain` (admin, `identity_manage` step-up bound to every field,
+ * audited). Off by default (ADR-0180): no domain has an endpoint until an admin sets one; `enabled: false` stops
+ * fetching (the last fetched bundle stays until it is replaced or revoked, and lapses at its maximum age). The URL
+ * must be `https` with no userinfo, and is checked against the egress allow-list when it is set and at every fetch.
+ * `https_spiffe` names the endpoint server's SPIFFE ID; its trust domain must already have an active bundle (upload
+ * one first to bootstrap, SPIFFE Federation §5.2.2).
+ */
+export const putSpiffeBundleEndpointSchema = z
+  .object({
+    url: z.string().min(1).max(2048),
+    profile: z.enum(SPIFFE_BUNDLE_ENDPOINT_PROFILES),
+    endpointSpiffeId: z.string().max(SPIFFE_ID_MAX_LENGTH).nullable(),
+    enabled: z.boolean(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if ((v.profile === "https_spiffe") !== (v.endpointSpiffeId !== null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endpointSpiffeId"], message: "https_spiffe names the endpoint server's SPIFFE ID; https_web names none" });
+    }
+    if (v.endpointSpiffeId !== null && !isSpiffeId(v.endpointSpiffeId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["endpointSpiffeId"], message: "not a SPIFFE ID" });
+    }
+  });
+export type PutSpiffeBundleEndpoint = z.infer<typeof putSpiffeBundleEndpointSchema>;
+
+export interface SpiffeBundleEndpointView {
+  trustDomain: string;
+  url: string;
+  profile: SpiffeBundleEndpointProfile;
+  endpointSpiffeId: string | null;
+  enabled: boolean;
+  /** the next scheduled fetch, while enabled */
+  nextRefreshAt: string | null;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  /** the last failure's code (never the response text), cleared by a success */
+  lastErrorCode: string | null;
+  consecutiveFailures: number;
+  /** the fetched bundle authenticates until then; null before the first success */
+  trustUntil: string | null;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface SpiffeBundleEndpointListView {
+  items: SpiffeBundleEndpointView[];
 }
 
 export interface SpiffeTrustBundleRevokeResult {
@@ -1188,4 +1294,7 @@ export const IDENTITY_ROUTES: ReadonlyArray<{ method: "GET" | "POST" | "PUT" | "
   { method: "GET", path: "/v1/identity/spiffe-trust-bundles", cls: "admin", slice: "S9" },
   { method: "POST", path: "/v1/identity/spiffe-trust-bundles", cls: "admin", slice: "S9" },
   { method: "POST", path: "/v1/identity/spiffe-trust-bundles/:bundleId/revoke", cls: "admin", slice: "S9" },
+  // S9 follow-up: the SPIFFE bundle endpoint (fetch)
+  { method: "GET", path: "/v1/identity/spiffe-bundle-endpoints", cls: "admin", slice: "S9" },
+  { method: "PUT", path: "/v1/identity/spiffe-bundle-endpoints/:trustDomain", cls: "admin", slice: "S9" },
 ];
