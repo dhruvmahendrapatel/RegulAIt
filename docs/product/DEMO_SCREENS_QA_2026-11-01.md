@@ -49,7 +49,7 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 | G1 Registry | `ds-g1a-registry-light.png` | pass | 13 use cases, tiles populated. Descriptions are ellipsised on purpose. |
 | G1 Use-case record | `ds-g1b-use-case-record-light.png` | pass | Govern Credit Team LLM Prototype: Approved, High, approval valid until, one before-go-live condition. |
 | G2 Avery's Inbox | `ds-g2a-avery-inbox-light.png` | pass | Avery's pending use-case review is listed. |
-| G2 Review, Approve with conditions | `ds-g2b-avery-review-conditions-light.png` | pass | A sign-off was pending, so the dialog was captured with Approve with conditions chosen and closed unsubmitted. The Conditions fields sit below the dialog's own scroll, so the shot shows the chosen option and the "Conditions" heading but not Condition 1. |
+| G2 Review, Approve with conditions | `ds-g2b-avery-review-conditions-light.png` | pass | A sign-off was pending, so the dialog was captured with Approve with conditions chosen and closed unsubmitted. The Conditions fields sit below the dialog's own scroll, so the shot shows the Decision heading with Approve with conditions selected (radio cards clipped by the dialog footer), but not the Conditions fields. |
 | G4 Trust & evidence | `ds-g4-trust-light.png` | pass | 40 risks, 80 % coverage. Safety reads 0 % (0/2 controls evidenced): a real gap, not an empty tile. |
 | G5 Alerts | `ds-g5-alerts-light.png` | pass | 24 open, 2 resolved (the journey's remediation). |
 | G6 Graph | `ds-g6-graph-light.png` | pass | 32 nodes, 19 propagated high. |
