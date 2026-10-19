@@ -199,7 +199,8 @@ jobs:
           name: demo-screens
           path: apps/web/e2e/artifacts/demo-screens
           if-no-files-found: warn
-          retention-days: 14
+          # 30: a pack captured two weeks before the demo still exists on the day (the screens are not committed)
+          retention-days: 30
 
       - name: Keep the evidence when it fails
         if: failure()
