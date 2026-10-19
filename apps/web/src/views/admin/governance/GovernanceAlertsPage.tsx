@@ -159,6 +159,7 @@ export default function GovernanceAlertsPage() {
             />
           ) : (
             <div className={s.alertLayout}>
+              <Card flush contain title="Alerts" count={alerts.data?.alerts.length ?? 0} countNoun={["alert", "alerts"]}>
               <div className={s.alertList}>
                 {alerts.data?.alerts.map((alert) => (
                   <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} onClick={() => setSelectedId(alert.id)}>
@@ -168,6 +169,7 @@ export default function GovernanceAlertsPage() {
                   </button>
                 ))}
               </div>
+              </Card>
               <div className={s.alertDetail} ref={detailRef} data-testid="alert-detail">
               {selected ? (
                 <Card title={selected.subject.label}>

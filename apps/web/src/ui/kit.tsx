@@ -955,6 +955,8 @@ export function Modal(props: {
     // trap on the dialog after this effect has run, so listening here lets that inner trap decide first.
     const trap = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || event.defaultPrevented || !dialog.contains(event.target as Node)) return;
+      // a Modal nested in this one handles its own keys: each trap owns only the events from its own dialog
+      if ((event.target as Element).closest("dialog") !== dialog) return;
       const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
         'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
       )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&

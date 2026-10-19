@@ -33,7 +33,7 @@ import { ReviewPanel } from "../approvals/ReviewPanel";
 import { intakeUseCaseName, isIntakeSignoff } from "../approvals/reviewDecision";
 import { QuorumProgress } from "../approvals/QuorumProgress";
 import { decideApproval, isToolCallApproval, signatureModeOf, signedDecisionErrorText } from "../approvals/signedDecision";
-import { shortDate } from "../admin/governance/useCaseLifecycle";
+import { shortDate, type OverviewResponse } from "../admin/governance/useCaseLifecycle";
 import v from "../views.module.css";
 import ib from "./inbox.module.css";
 
@@ -214,10 +214,13 @@ export default function InboxPage() {
               const target = approvalTarget(a);
               const inst = a.instanceId ? instances[a.instanceId] : undefined;
               const intake = isIntakeSignoff(a);
-              const override = !toolCall && !named && !delegated && Boolean(auth?.isAdmin);
+              // an intake sign-off is decided in ReviewPanel, which owns its rules and copy (a proposer never decides
+              // their own use case; a role member is a named reviewer), so none of the override or own-request text here
+              const ownRules = !toolCall && !intake;
+              const override = ownRules && !named && !delegated && Boolean(auth?.isAdmin);
               // G2: where the server requires a reason (an override, or approving your own request), the field says so
               // and Approve waits for one. Stricter than before, never looser: the server still checks it
-              const reasonRequired = override || (!toolCall && Boolean(a.selfReview));
+              const reasonRequired = override || (ownRules && Boolean(a.selfReview));
               const missingReason = reasonRequired && !(reasons[a.id] ?? "").trim();
               const controls = (blockedReason: string | null) => <div className={ib.decide}>
                 <Input style={{ maxWidth: 260 }}
@@ -242,7 +245,8 @@ export default function InboxPage() {
                   {/* G2: the same order on every item: what kind, what, who asked and when, then any warning */}
                   <div className={v.row}>
                     <Badge>{approvalLabel(a)}</Badge>
-                    {!toolCall && a.selfReview && (
+                    {intake && <IntakeTier approval={a} />}
+                    {ownRules && a.selfReview && (
                       <Badge tone="warn" infoLabel="Your own request" info="Deciding this would approve your own request, whether you are the named approver or received it through a delegation. A recorded reason is required.">
                         Your own request
                       </Badge>
@@ -259,11 +263,13 @@ export default function InboxPage() {
                     )}
                     {a.assignment?.dueAt ? <Badge tone="warn">{`Due ${shortDate(a.assignment.dueAt)}`}</Badge> : null}
                   </div>
-                  <strong className={ib.title}>
-                    {a.objectLabel
-                      ? intake ? intakeUseCaseName(a) : target ? <Link to={target}>{a.objectLabel}</Link> : a.objectLabel
-                      : target ? <Link to={target}>{`View ${humanize(a.objectType)}`}</Link> : null}
-                  </strong>
+                  {(a.objectLabel || target) && (
+                    <strong className={ib.title}>
+                      {a.objectLabel
+                        ? intake ? intakeUseCaseName(a) : target ? <Link to={target}>{a.objectLabel}</Link> : a.objectLabel
+                        : <Link to={target!}>{`View ${humanize(a.objectType)}`}</Link>}
+                    </strong>
+                  )}
                   <div className={v.faint}>
                     {intake ? "Use case" : humanize(a.objectType)} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
                   </div>
@@ -328,6 +334,32 @@ export default function InboxPage() {
       </div>
     </>
   );
+}
+
+/**
+ * G2: the EU AI Act tier pill in an intake sign-off's header. It reads the same use-case overview the review
+ * drawer reads (one cache entry), and shows nothing when the reader may not open the use case record.
+ */
+function IntakeTier(props: { approval: Approval }) {
+  const a = props.approval;
+  const useCases = useQuery({
+    queryKey: ["admin", "use-cases"],
+    queryFn: () => api.get<{ useCases: Array<{ id: string; workflowInstanceId?: string | null }> }>("/v1/use-cases"),
+    enabled: !a.useCaseId,
+    retry: false,
+  });
+  const useCaseId = a.useCaseId ?? useCases.data?.useCases.find((u) => u.workflowInstanceId && u.workflowInstanceId === a.instanceId)?.id ?? null;
+  const overview = useQuery({
+    queryKey: ["governance", "use-case-overview", useCaseId],
+    queryFn: () => api.get<OverviewResponse>(`/v1/use-cases/${useCaseId}/overview`),
+    enabled: Boolean(useCaseId),
+    retry: false,
+  });
+  const screening = overview.data?.screening;
+  if (!screening) return null;
+  if (!screening.screened || !screening.tier) return <Badge tone="warn">EU AI Act: not screened</Badge>;
+  const tone = screening.tier === "prohibited" ? "danger" : screening.tier === "high" ? "warn" : "neutral";
+  return <Badge tone={tone}>{`EU AI Act: ${humanize(screening.tier).toLowerCase()} tier`}</Badge>;
 }
 
 /** ADR-0173 batch 2c (Q): one row of GET /v1/annotations/inbox */
@@ -448,7 +480,7 @@ function MergeGateEvidence(props: { inst: WorkflowDetailResponse }) {
       )}
       {deploys.some((d) => d?.dryRun) && (
         <div className={v.rowTight}>
-          <Badge tone="warn" title="The recorded deploy was a dry-run — nothing was actually mutated">
+          <Badge tone="warn" infoLabel="a dry-run deploy" info="The recorded deploy was a dry run. Nothing was actually changed.">
             deploy was a dry-run
           </Badge>
         </div>

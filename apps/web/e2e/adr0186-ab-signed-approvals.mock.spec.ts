@@ -269,6 +269,33 @@ test.describe("ADR-0186 A2+B: dual control and passkey-signed approvals", () => 
     await expect(review.getByRole("button", { name: "Close", exact: true })).toBeFocused();
   });
 
+  test("in the Inbox, the review's own Tab trap decides first: Tab from Close wraps to its first control", async ({ page }) => {
+    await mockApi(page, { me: BEN, admin: false, approvals: [toolApproval()] });
+    await page.goto("/ui/inbox");
+    await page.getByRole("button", { name: "Review action write_file" }).click();
+    const review = page.getByRole("dialog", { name: "Review MCP action" });
+    // the review counts Binding details (its first control) as a stop; the kit dialog trap, which does not, would
+    // send this Tab to the reason field if it ran first
+    await review.getByRole("button", { name: "Close", exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await expect(review.locator("summary")).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(review.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+  });
+
+  test("without StrictMode, as in a production build, the review's own Tab trap still decides before the kit's", async ({ page }) => {
+    // the dev server's StrictMode re-registers the review's trap last, so the Inbox test above passes whichever
+    // trap is listening first; this harness keeps the production order and fails if the kit trap decides first
+    await page.goto("/ui/e2e/harness/action-review.html");
+    await page.getByRole("button", { name: "Review action write_file" }).click();
+    const review = page.getByRole("dialog", { name: "Review MCP action" });
+    await review.getByRole("button", { name: "Close", exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await expect(review.locator("summary")).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(review.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+  });
+
   test("the admin queue signs a tool call with no override, and shows when you are waiting on another approver", async ({ page }) => {
     await fakeWebAuthn(page);
     const cap = await mockApi(page, {
@@ -278,7 +305,7 @@ test.describe("ADR-0186 A2+B: dual control and passkey-signed approvals", () => 
     });
     await page.goto("/ui/admin/approvals");
     await expect(page.getByTestId("quorum-a-tool-1")).toContainText("1 of 2 approvals");
-    await expect(page.getByText("override", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Admin override", { exact: true })).toHaveCount(0);
     await expect(page.getByText("You approved this; waiting for another approver.")).toBeVisible();
     await page.getByRole("button", { name: "Review action write_file" }).click();
     const review = page.getByRole("dialog", { name: "Review MCP action" });

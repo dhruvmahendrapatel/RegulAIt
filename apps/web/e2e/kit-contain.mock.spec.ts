@@ -161,3 +161,16 @@ test.describe("InfoButton", () => {
     expect(panel.y).toBeGreaterThanOrEqual(0);
   });
 });
+
+test("a Modal nested in another handles only its own Tab presses", async ({ page }) => {
+  await page.goto("/ui/e2e/harness/kit-contain.html?view=nested");
+  await page.getByRole("button", { name: "Open outer" }).click();
+  await page.getByRole("button", { name: "Open inner" }).click();
+  const inner = page.getByRole("dialog", { name: "Inner" });
+  await inner.getByRole("button", { name: "Inner first" }).focus();
+  // "Inner first" is also the outer dialog's first control: the outer trap must leave this key to the inner one
+  await page.keyboard.press("Shift+Tab");
+  await expect(inner.getByRole("button", { name: "Inner last" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(inner.getByRole("button", { name: "Inner first" })).toBeFocused();
+});
