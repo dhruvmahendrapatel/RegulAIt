@@ -1,0 +1,25 @@
+/* G8 (f): the audit log's folded evidence panels. The summary is the panel's name and live state. */
+.fold {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  cursor: pointer;
+  min-block-size: 2.75rem;
+}
+.summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.title {
+  font-weight: 600;
+}
+.body {
+  padding: 0 var(--s2) var(--s2);
+}

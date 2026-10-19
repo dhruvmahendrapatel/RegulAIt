@@ -15,6 +15,8 @@
  * different real things and cannot be resolved into a mode retroactively.
  */
 import { DecisionReceiptsPanel } from "./DecisionReceiptsPanel";
+import { anchorsStatus, receiptsStatus, retentionStatus, type EvidenceStatus } from "./auditEvidenceStatus";
+import ev from "./auditLog.module.css";
 import { AnchorTimestampsPanel } from "./AnchorTimestampsPanel";
 import { lazy, Suspense, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
@@ -111,6 +113,9 @@ export default function AuditLogPage() {
     [audit.data],
   );
   const ret = retention.data;
+  // the same reads the folded panels make (same query keys, so one request each), for the summaries' state
+  const receipts = useQuery({ queryKey: ["admin", "decision-receipts-status"], retry: false, queryFn: () => api.get<{ state?: string }>("/v1/receipts/status") });
+  const anchors = useQuery({ queryKey: ["admin", "anchor-timestamps"], retry: false, queryFn: () => api.get<{ anchors?: Array<{ timestamp?: { status?: string; verified?: boolean } }> }>("/v1/audit/anchors") });
 
   return (
     <>
@@ -279,10 +284,16 @@ export default function AuditLogPage() {
             <DecisionBomPanel key={bomAuditId} auditId={bomAuditId} onClose={() => setBomAuditId(null)} />
           </Suspense>
         )}
-        {/* the trail first, so the newest decisions are on screen without scrolling; the evidence tools follow it */}
-        <DecisionReceiptsPanel />
-        <AnchorTimestampsPanel />
-        <Card title="Retention">
+        {/* the trail first, so the newest decisions are on screen without scrolling; the evidence tools follow it,
+            folded, each summary carrying its live state so a warning is never behind the fold (G8 f, #453) */}
+        <EvidenceFold title="Signed decision receipts" status={receiptsStatus(receipts)}>
+          <DecisionReceiptsPanel bare />
+        </EvidenceFold>
+        <EvidenceFold title="Anchor timestamps" status={anchorsStatus(anchors)}>
+          <AnchorTimestampsPanel bare />
+        </EvidenceFold>
+        <EvidenceFold title="Retention" status={retentionStatus(ret, retention.isError)}>
+        <Card>
           {ret == null ? (
             <span className={v.dim}>Loading retention…</span>
           ) : ret.retainedDays == null ? (
@@ -310,6 +321,7 @@ export default function AuditLogPage() {
             trail. Pruning is itself audited.
           </p>
         </Card>
+        </EvidenceFold>
       </div>
 
       <ConfirmModal
@@ -334,6 +346,19 @@ export default function AuditLogPage() {
         }}
       />
     </>
+  );
+}
+
+/** G8 (f): a folded evidence panel; the summary names it and shows its state, so the fold never hides a warning */
+function EvidenceFold(props: { title: string; status: EvidenceStatus; children: React.ReactNode }) {
+  return (
+    <details className={ev.fold}>
+      <summary className={ev.summary}>
+        <span className={ev.title}>{props.title}</span>
+        <Badge tone={props.status.tone}>{props.status.label}</Badge>
+      </summary>
+      <div className={ev.body}>{props.children}</div>
+    </details>
   );
 }
 
