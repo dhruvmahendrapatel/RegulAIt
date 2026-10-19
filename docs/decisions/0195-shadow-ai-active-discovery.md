@@ -1500,3 +1500,7 @@ JWT is `jose` 6.2.12, key parsing is Node `crypto`. No provider SDK is added, as
   (500) exchange that still carries a token registers it for scrubbing and does not echo it; the foreign-host refusal
   with no exchange, no request and nothing signed; the scope narrowing; the missing-permissions refusal; and
   `REGULAIT_GITHUB_APP_API_URL` parsing. Each guard was broken once to see its test fail, then restored.
+- **Recheck follow-ups (2026-10-18)**: the foreign-host refusal now names the setting (`REGULAIT_GITHUB_APP_API_URL`)
+  instead of its value, since the run error is readable by source admins; new tests pin exact, normalised origin
+  matching (another path or an explicit `:443` is accepted and the JWT still goes only to the configured API; `:8443` is
+  refused before signing). Each guard was broken once to see its test fail, then restored.
