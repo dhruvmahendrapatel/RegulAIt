@@ -3,10 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
-import { ago } from "../../../api/format";
+import { ago, humanize } from "../../../api/format";
 import { useSession } from "../../../session/SessionContext";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Tabs, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, SeverityBadge, Tabs, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, useAction, useUsers } from "../adminKit";
 import v from "../../views.module.css";
 import s from "./demoGovernance.module.css";
@@ -172,39 +172,31 @@ export default function GovernanceAlertsPage() {
               {selected ? (
                 <Card title={selected.subject.label}>
                   <div className={v.stack}>
-                    <div className={v.row}><SeverityBadge severity={selected.severity} />{selected.status === "open" ? null : <span className={v.dim}>{selected.status}</span>}<span className={v.faint}>{selected.ruleLabel}</span></div>
-                    <p>{selected.title}</p>
-                    <SubjectLinks alert={selected} />
-                    <OwnershipPanel alert={selected} onChanged={refresh} />
+                    {/* G5: what it is first (severity, rule, title), then what you can do about it */}
+                    <div className={v.row}><SeverityBadge severity={selected.severity} />{selected.status === "open" ? null : <span className={v.dim}>{humanize(selected.status)}</span>}<span className={v.faint}>{selected.ruleLabel}</span></div>
+                    <h2 className={s.alertTitle}>{selected.title}</h2>
                     <div className={v.row}>
-                      <Button size="sm" variant="ghost" disabled={action.busy} onClick={() => void action.run(async () => {
+                      <SubjectLinks alert={selected} />
+                      <Button size="sm" disabled={action.busy} onClick={() => void action.run(async () => {
                         const posted = await api.post<{ posted: true; connection: string; channel: string }>(`/v1/governance/alerts/${selected.id}/post`);
                         setPostResult(`Posted to ${posted.connection} · ${posted.channel}`);
                       }, null)}>Post to chat</Button>
-                      <span className={v.faint}>Uses the first enabled workspace unless the API is given an explicit connection.</span>
+                      <InfoButton label="where alerts are posted">Posts this alert to the first enabled chat workspace, unless the API is given an explicit connection.</InfoButton>
                     </div>
+                    <OwnershipPanel alert={selected} onChanged={refresh} />
                     {postResult ? <p className={s.statusLine} role="status">{postResult}</p> : null}
                     {action.error ? <p className={v.errLine} role="alert">{action.error}</p> : null}
                     {(selected.detail.pathLabels ?? selected.detail.path)?.length ? (
-                      <div><strong>Inherited-risk path</strong><ol className={s.pathList}>{(selected.detail.pathLabels ?? selected.detail.path ?? []).map((part) => <li key={part}>{part}</li>)}</ol></div>
+                      <div>
+                        <strong>How the risk reaches this use case</strong>
+                        <InfoButton label="the inherited-risk path">How the use case picks up this risk: through the agent it uses, the model, and the vendor that supplies the model.</InfoButton>
+                        <ol className={s.pathList} aria-label="Inherited-risk path">{(selected.detail.pathLabels ?? selected.detail.path ?? []).map((part) => <li key={part}>{part}</li>)}</ol>
+                      </div>
                     ) : null}
                     {selected.detail.sourceRiskId ? <Link to={`/admin/risks?riskId=${selected.detail.sourceRiskId}`}>Open source risk</Link> : null}
                     {/* ADR-0182 A12: report an incident from this alert (the form arrives pre-linked to it) */}
                     <div><Link to={`/incidents?new=1&detectionSource=monitor_alert&sourceRef=${selected.id}`}>Open incident</Link></div>
                     {selected.ackNote ? <p className={v.dim}>Acknowledgement note: {selected.ackNote}</p> : null}
-                    {selected.status === "open" ? (
-                      <div className={v.stack}>
-                        <Field label="Acknowledgement note — required and audited">
-                          <Textarea rows={3} maxLength={500} value={ackNote} onChange={(event) => setAckNote(event.target.value)} />
-                        </Field>
-                        <span className={v.faint}>{ackNote.length}/500 characters</span>
-                        <div><Button disabled={action.busy || !ackNote.trim()} onClick={() => void action.run(async () => {
-                          await api.post(`/v1/governance/alerts/${selected.id}/acknowledge`, { note: ackNote.trim() });
-                          setAckNote("");
-                          await refresh();
-                        }, "Alert acknowledged")}>Acknowledge</Button></div>
-                      </div>
-                    ) : null}
                     {selected.detail.suggestedAction?.kind === "halt_agent" && selected.status !== "resolved" ? (
                       <p className={s.statusLine} role="note" data-testid="suggested-halt">
                         This KRI is set to suggest halting its agent when it breaches. Nothing has been filed and the agent is
@@ -213,6 +205,25 @@ export default function GovernanceAlertsPage() {
                       </p>
                     ) : null}
                     <RemediationPanel alertId={selected.id} />
+                    {selected.status === "open" ? (
+                      <div className={s.ackFooter}>
+                        <Field
+                          label="Acknowledgement note — required and audited"
+                          helpLabel="acknowledging an alert"
+                          help="Acknowledging records that someone is handling the alert. It stays active, and resolves on its own when the next evaluation no longer finds the condition."
+                        >
+                          <Textarea rows={2} maxLength={500} value={ackNote} onChange={(event) => setAckNote(event.target.value)} />
+                        </Field>
+                        <div className={v.row}>
+                          <span className={v.faint}>{ackNote.length}/500 characters</span>
+                          <Button variant="primary" disabled={action.busy || !ackNote.trim()} onClick={() => void action.run(async () => {
+                            await api.post(`/v1/governance/alerts/${selected.id}/acknowledge`, { note: ackNote.trim() });
+                            setAckNote("");
+                            await refresh();
+                          }, "Alert acknowledged")}>Acknowledge</Button>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </Card>
               ) : <Card><p className={v.dim}>Select an alert to inspect its condition, subject, and response history.</p></Card>}
@@ -481,7 +492,11 @@ function RemediationPanel({ alertId }: { alertId: string }) {
                 <div className={s.remediationCandidate} key={candidateKey}>
                   <div className={v.row}>
                     <strong>{candidate.title}</strong>
-                    <span className={v.faint}>{candidate.executable ? "approval-gated action" : "operator guidance"}</span>
+                    {candidate.executable ? (
+                      <Badge tone="info" infoLabel="Needs approval" info="This fix is proposed to the approvals queue. It does nothing until an independent approver approves it.">Needs approval</Badge>
+                    ) : (
+                      <Badge>Manual steps</Badge>
+                    )}
                   </div>
                   <p className={v.dim}>{candidate.rationale}</p>
                   {candidate.executable ? (

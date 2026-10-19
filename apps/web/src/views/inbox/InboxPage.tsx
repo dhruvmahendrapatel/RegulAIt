@@ -21,6 +21,7 @@ import {
   CodeBlock,
   EmptyState,
   ErrorState,
+  InfoButton,
   Input,
   SkeletonBlock,
   StatusBadge,
@@ -34,6 +35,7 @@ import { QuorumProgress } from "../approvals/QuorumProgress";
 import { decideApproval, isToolCallApproval, signatureModeOf, signedDecisionErrorText } from "../approvals/signedDecision";
 import { shortDate } from "../admin/governance/useCaseLifecycle";
 import v from "../views.module.css";
+import ib from "./inbox.module.css";
 
 const approvalLabel = (a: Approval): string => {
   if (isIntakeSignoff(a)) return "AI use case sign-off";
@@ -190,6 +192,7 @@ export default function InboxPage() {
       <PageHeader
         title="Inbox"
         sub="Everything that pauses for you: sign-offs, escalations, budget overages, context conflicts."
+        actions={pending.length > 0 ? <Badge tone="info">{`${pending.length} waiting on you`}</Badge> : undefined}
       />
       <div className={v.stack}>
         <Card>
@@ -211,58 +214,64 @@ export default function InboxPage() {
               const target = approvalTarget(a);
               const inst = a.instanceId ? instances[a.instanceId] : undefined;
               const intake = isIntakeSignoff(a);
-              const controls = (blockedReason: string | null) => <div className={v.row} style={{ flexWrap: "wrap" }}>
+              const override = !toolCall && !named && !delegated && Boolean(auth?.isAdmin);
+              // G2: where the server requires a reason (an override, or approving your own request), the field says so
+              // and Approve waits for one. Stricter than before, never looser: the server still checks it
+              const reasonRequired = override || (!toolCall && Boolean(a.selfReview));
+              const missingReason = reasonRequired && !(reasons[a.id] ?? "").trim();
+              const controls = (blockedReason: string | null) => <div className={ib.decide}>
+                <Input style={{ maxWidth: 260 }}
+                  placeholder={reasonRequired ? "Reason (required)" : "Reason (optional)"}
+                  aria-label="Decision reason" aria-required={reasonRequired || undefined} value={reasons[a.id] ?? ""}
+                  onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
+                <div className={v.row}>
+                  <Button size="sm" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
+                  <Button size="sm" variant="primary" disabled={deciding === a.id || !!blockedReason || missingReason} onClick={() => void decide(a, "approved")}>Approve</Button>
+                </div>
+                {missingReason && <span className={v.faint}>Approve unlocks once a reason is entered</span>}
                 {toolCall && signatureModeOf(a) === "passkey" && (
-                  <span className={v.faint} title="Your browser asks for your passkey: the signature covers this exact call">
-                    signs with your passkey
+                  <span className={v.faint}>
+                    Signs with your passkey
+                    <InfoButton label="passkey signing" align="end">Your browser asks for your passkey. The signature covers this exact call.</InfoButton>
                   </span>
                 )}
-                <Input style={{ maxWidth: 260 }}
-                  placeholder={named || delegated || toolCall ? "reason (optional)" : "reason (required - admin override)"}
-                  aria-label="Decision reason" value={reasons[a.id] ?? ""}
-                  onChange={(e) => setReasons((r) => ({ ...r, [a.id]: e.target.value }))} />
-                <Button size="sm" disabled={deciding === a.id || !!blockedReason} onClick={() => void decide(a, "approved")}>Approve</Button>
-                <Button size="sm" variant="ghost" disabled={deciding === a.id} onClick={() => void decide(a, "denied")}>Deny</Button>
                 {rowErrors[a.id] && <div className={v.errLine} role="alert">{rowErrors[a.id]}</div>}
               </div>;
               return (
                 <div key={a.id} className={v.listRow} style={{ flexDirection: "column", alignItems: "stretch", gap: "var(--s1)" }}>
+                  {/* G2: the same order on every item: what kind, what, who asked and when, then any warning */}
                   <div className={v.row}>
-                    <span className={v.grow} style={{ fontWeight: 550, fontSize: "var(--text-sm)" }}>
-                      {approvalLabel(a)}
-                      {a.objectLabel && (
-                        <>
-                          {" · "}
-                          {intake ? intakeUseCaseName(a) : target ? <Link to={target}>{a.objectLabel}</Link> : a.objectLabel}
-                        </>
-                      )}
-                      {!a.objectLabel && target && (
-                        <>
-                          {" · "}
-                          <Link to={target}>view {a.objectType}</Link>
-                        </>
-                      )}
-                    </span>
+                    <Badge>{approvalLabel(a)}</Badge>
                     {!toolCall && a.selfReview && (
-                      <Badge tone="warn" title="Deciding this would approve your own request — whether you are the named approver or received it through a delegation, a recorded reason is required">
-                        self-review
+                      <Badge tone="warn" infoLabel="Your own request" info="Deciding this would approve your own request, whether you are the named approver or received it through a delegation. A recorded reason is required.">
+                        Your own request
                       </Badge>
                     )}
                     {delegated && (
-                      <Badge tone="info" title={`Delegated to you — your decision is recorded on behalf of ${a.delegatedFrom}`}>
+                      <Badge tone="info" infoLabel="a delegated decision" info={`Delegated to you: your decision is recorded on behalf of ${a.delegatedFrom}.`}>
                         for {a.delegatedFrom}
                       </Badge>
                     )}
-                    {!toolCall && !named && !delegated && auth?.isAdmin && (
-                      <Badge tone="warn" title="You are not the named approver — a reason is required">
-                        override
+                    {override && (
+                      <Badge tone="warn" infoLabel="Admin override" info="You are not the named approver, so a reason is required.">
+                        Admin override
                       </Badge>
                     )}
+                    {a.assignment?.dueAt ? <Badge tone="warn">{`Due ${shortDate(a.assignment.dueAt)}`}</Badge> : null}
                   </div>
+                  <strong className={ib.title}>
+                    {a.objectLabel
+                      ? intake ? intakeUseCaseName(a) : target ? <Link to={target}>{a.objectLabel}</Link> : a.objectLabel
+                      : target ? <Link to={target}>{`View ${humanize(a.objectType)}`}</Link> : null}
+                  </strong>
                   <div className={v.faint}>
-                    {intake ? "Use case" : a.objectType} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
-                    {a.assignment?.dueAt ? ` · due ${shortDate(a.assignment.dueAt)}` : ""}
+                    {intake ? "Use case" : humanize(a.objectType)} · requested by {a.requestedByName ?? "unknown"} · {ago(a.requestedAt)}
                   </div>
+                  {reasonRequired && (
+                    <p className={ib.warning}>
+                      {override ? "You are not the named approver, so a reason is required." : "Deciding this approves your own request, so a reason is required."}
+                    </p>
+                  )}
                   {intake ? (
                     <div className={v.row}>
                       <ReviewPanel approval={a} />
@@ -296,7 +305,7 @@ export default function InboxPage() {
         {annotationItems.length > 0 && <AnnotationsCard items={annotationItems} />}
 
         {decided.length > 0 && (
-          <Card title="Recently decided">
+          <Card title="Recently decided" contain>
             {decided.map((a) => (
               <div key={a.id} className={v.listRow} style={{ alignItems: "center" }}>
                 <div className={v.grow}>
