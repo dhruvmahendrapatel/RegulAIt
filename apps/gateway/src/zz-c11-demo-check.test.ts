@@ -164,7 +164,7 @@ describe("demo:check over the real dataset", () => {
     const beat = checks.find((c) => c.beat === G9_BEAT)!;
     expect(beat.level, beat.detail).toBe("PASS");
     expect(beat.detail).toMatch(/incident \S+ open, medium, owned by Dana Developer, \d+ timeline entries/);
-    expect(beat.detail).toMatch(/open feedback items routed to Ada \([^)]*acknowledged[^)]*received[^)]*; an appeal among them\)/);
+    expect(beat.detail).toMatch(/open feedback items routed to Ada \(acknowledged, in_review; an appeal among them\)/);
   });
 
   it("3 Evidence FAILs — with the fix — when the export-signing key is missing (the 3E button would 409)", async () => {

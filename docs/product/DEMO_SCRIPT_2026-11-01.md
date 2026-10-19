@@ -364,13 +364,16 @@ the day.
 ### G9. Accountability records — 1.5 minutes (10-05 beat 3F)
 The 10-05 beat, with work in progress on both screens (`demo:intake` seeds it; `demo:check` beat
 "3 Incidents and feedback").
-- **URL:** `/ui/incidents`. The list opens on **Not closed** and shows the open, medium incident on the Real-Time Fraud
-  Detection Engine (owner Dana Developer, two timeline notes, one open corrective action due in a week). Medium and
-  not serious, so it starts no clock and holds no deploy gate. For the 10-05 story, set **Status** to **All** and
-  open the closed Customer Sentiment Analyzer incident.
-- **URL:** `/ui/feedback`. Ada's queue opens on **Open** and shows two items on the fraud engine, both routed to her
-  by its owner: a problem report (received) and an appeal against a card freeze (acknowledged). Dana owns the system
-  that made the decision, so the appeal goes to someone else for an independent answer.
+- **URL:** `/ui/incidents`. The list opens on **Not closed** and shows the open, medium incident on the Internal IT
+  Knowledge Base Bot (owner Dana Developer, two timeline notes, one open corrective action due after the demo day).
+  Medium and not serious, so it starts no clock and holds no deploy gate. For the 10-05 story, set **Status** to
+  **All** and open the closed Customer Sentiment Analyzer incident.
+- **URL:** `/ui/feedback`. Ada's queue opens on **Open** and shows two items on the IT knowledge bot, both
+  acknowledged by its owner, Dana, and routed to Ada: a problem report (acknowledged) and an appeal against a refused
+  request (in review). The appeal was handed to Ada for an independent answer.
+- **Why not the fraud engine:** G3 runs `demo:gate` on the Real-Time Fraud Detection Engine, and the gate counts every
+  open alert on its use case. These records sit on another approved use case, and both items are acknowledged, so no
+  lapsed feedback SLA or overdue action can add a line to the G3 printout (PR #461 review M1).
 - The use case's **Decision records** tab, unchanged.
 
 ### G10. Content trust — Ada — 1.5 minutes (ADR-0193)

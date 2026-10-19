@@ -71,6 +71,10 @@ export async function checkG9Records(
   if (routed.length < 2) problems.push(`${routed.length} open feedback item(s) routed to Ada (2 needed)`);
   else if (states.size < 2) problems.push(`the feedback items routed to Ada are all ${[...states][0]}`);
   else if (!routed.some((f) => f.kind === "appeal")) problems.push("no open appeal routed to Ada");
+  else if (routed.some((f) => f.status === "received")) {
+    // an unacknowledged item breaches its acknowledgement SLA (72 h by default) and raises an alert on the Monitor
+    problems.push("a feedback item routed to Ada is not acknowledged");
+  }
   else facts.push(`${routed.length} open feedback items routed to Ada (${[...states].sort().join(", ")}; an appeal among them)`);
   return problems.length
     ? [{ beat: G9_BEAT, level: "FAIL", detail: problems.join("; "), fix: "re-run `demo:intake` on this database (it seeds the G9 records; `demo:intake --live` on the live one)" }]

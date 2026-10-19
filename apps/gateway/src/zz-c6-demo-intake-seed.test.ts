@@ -11,12 +11,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { aiIncidentActions, aiIncidentEvents, aiIncidents, aiPolicyAcknowledgements, aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, useCaseFeedback, users, workflowTemplates, type Db } from "@regulait/db";
+import { aiIncidentActions, aiIncidentEvents, aiIncidents, aiPolicyAcknowledgements, auditLog, aiPolicyDocuments, aiRisks, aiUseCases, aiVendors, and, createDb, eq, inArray, isNull, modelCards, runMigrations, sql, useCaseFeedback, users, workflowTemplates, type Db } from "@regulait/db";
 import { forgetStepUpMethodsForTest } from "./testing/step-up-posture.js";
 import { revokeScriptKeys } from "./demo-identity.js";
 import type { DemoIntakeFixtures, IntakeAssistRequest } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { DEMO_AUP_EVIDENCE, DEMO_AUP_KEY, DEMO_OPEN_ACCOUNTABILITY_USE_CASE, DEMO_OPEN_INCIDENT_TITLE, seedDemoIntake } from "./demo-intake-seed-lib.js";
+import { DEMO_AUP_EVIDENCE, DEMO_AUP_KEY, DEMO_OPEN_ACCOUNTABILITY_USE_CASE, DEMO_OPEN_ACTION_NOT_DUE_BEFORE, DEMO_OPEN_INCIDENT_TITLE, seedDemoIntake } from "./demo-intake-seed-lib.js";
 import { relaxGovernanceGatesForTest } from "./testing/governance-gates.js";
 // ADR-0181: the governance gates this suite would trip but does not test, relaxed by name
 let restoreSb2Gates: () => Promise<void> = async () => {};
@@ -200,10 +200,13 @@ describe("seedDemoIntake", () => {
     const actions = await db.select().from(aiIncidentActions).where(eq(aiIncidentActions.incidentId, open[0]!.id));
     expect(actions).toHaveLength(1);
     expect(actions[0]!).toMatchObject({ status: "open", ownerUserId: dana!.id });
-    expect(actions[0]!.dueAt!.getTime()).toBeGreaterThan(Date.now());
+    // due after the demo day, so it is not overdue on stage (PR #461 review M1)
+    expect(actions[0]!.dueAt!.getTime()).toBeGreaterThanOrEqual(Date.parse(DEMO_OPEN_ACTION_NOT_DUE_BEFORE));
     const items = await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.useCaseId, g9.id));
-    expect(items.map((f) => `${f.kind}:${f.status}`).sort()).toEqual(["appeal:acknowledged", "problem:received"]);
+    expect(items.map((f) => `${f.kind}:${f.status}`).sort()).toEqual(["appeal:in_review", "problem:acknowledged"]);
     expect(items.every((f) => f.ownerUserId === ada!.id && f.submitterUserId === avery!.id && f.resolvedAt === null)).toBe(true);
+    // both acknowledged: no acknowledgement SLA can lapse into a `feedback_sla_breached` alert (PR #461 review M1)
+    expect(items.every((f) => f.acknowledgedAt !== null)).toBe(true);
     // what Ada's screens ask for: the default filters (active incidents, open items in her queue)
     const adaKey = await app.inject({
       method: "POST", url: `/v1/users/${ada!.id}/keys`, headers: { authorization: `Bearer ${BOOT}` },
@@ -229,5 +232,62 @@ describe("seedDemoIntake", () => {
     expect(second.skipped).toEqual(expect.arrayContaining(["open demo incident", "open demo incident action", "G9 problem report", "G9 appeal"]));
     expect(await db.select().from(aiIncidents).where(eq(aiIncidents.title, DEMO_OPEN_INCIDENT_TITLE)).then((r) => r.filter((i) => i.useCaseId === g9.id))).toHaveLength(1);
     expect(await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.useCaseId, g9.id))).toHaveLength(2);
-  }, 120_000);
+
+    // CONVERGENT (PR #461 review M2, L1): a rehearsal moves the records on; a re-run repairs them through the routes
+    const adaKey2 = await app.inject({
+      method: "POST", url: `/v1/users/${ada!.id}/keys`, headers: { authorization: `Bearer ${BOOT}` },
+      payload: { name: "c6-g9-rehearse", expiresAt: new Date(Date.now() + 3_600_000).toISOString() },
+    });
+    expect(adaKey2.statusCode, adaKey2.body).toBe(201);
+    const asAda2 = { authorization: `Bearer ${adaKey2.json().token as string}` };
+    const problem = items.find((f) => f.kind === "problem")!;
+    const appeal = items.find((f) => f.kind === "appeal")!;
+    try {
+      // (a) the problem report is handed back to Dana
+      const back = await app.inject({ method: "PATCH", url: `/v1/feedback/${problem.id}`, headers: asAda2, payload: { ownerUserId: dana!.id } });
+      expect(back.statusCode, back.body).toBeLessThan(300);
+      const beforeThird = new Date();
+      const third = await seedDemoIntake(app, fixtures(), { bootstrapToken: BOOT });
+      expect(third.failed, third.failed.join("\n")).toEqual([]);
+      expect(third.created).toContain("feedback: problem report on the IT knowledge bot, acknowledged, routed to Ada");
+      const [routed] = await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.id, problem.id));
+      expect(routed!).toMatchObject({ ownerUserId: ada!.id, status: "acknowledged" });
+      // the audit trail says Dana, the owner it was handed back to, made the reassignment
+      const trail = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.objectType, "use_case_feedback"), eq(auditLog.objectId, problem.id), eq(auditLog.ruleId, "feedback-updated")));
+      const reassigned = trail.filter((a) => a.at >= beforeThird);
+      expect(reassigned).toHaveLength(1);
+      expect(reassigned[0]!.userId).toBe(dana!.id);
+      expect((reassigned[0]!.detail as { transitions?: { ownerUserId?: unknown } }).transitions?.ownerUserId).toEqual({ from: dana!.id, to: ada!.id });
+
+      // (b) the incident is closed (its action done) and the appeal is decided
+      const inc = `/v1/incidents/${open[0]!.id}`;
+      const done = await app.inject({ method: "PATCH", url: `${inc}/actions/${actions[0]!.id}`, headers: asAda2, payload: { status: "done", evidenceRef: "c6 rehearsal (synthetic)" } });
+      expect(done.statusCode, done.body).toBeLessThan(300);
+      const closed = await app.inject({ method: "POST", url: `${inc}/close`, headers: asAda2, payload: { rootCause: "c6 rehearsal", lessonsLearned: "c6 rehearsal" } });
+      expect(closed.statusCode, closed.body).toBeLessThan(300);
+      const decided = await app.inject({ method: "PATCH", url: `/v1/feedback/${appeal.id}`, headers: asAda2, payload: { status: "upheld", resolutionNote: "c6 rehearsal" } });
+      expect(decided.statusCode, decided.body).toBeLessThan(300);
+    } finally {
+      expect(await revokeScriptKeys(app, BOOT, [adaKey2.json().id as string])).toEqual([]);
+    }
+    const fourth = await seedDemoIntake(app, fixtures(), { bootstrapToken: BOOT });
+    expect(fourth.failed, fourth.failed.join("\n")).toEqual([]);
+    expect(fourth.created).toEqual(expect.arrayContaining([
+      "incident: open, medium, with an interim measure on its timeline",
+      "incident action: open, due after the demo day",
+      "feedback: appeal on the IT knowledge bot, in review, routed to Ada",
+    ]));
+    const all = await db.select().from(aiIncidents).where(and(eq(aiIncidents.useCaseId, g9.id), eq(aiIncidents.title, DEMO_OPEN_INCIDENT_TITLE)));
+    expect(all.map((i) => i.status).sort()).toEqual(["closed", "open"]);
+    const reopened = all.find((i) => i.status === "open")!;
+    expect(reopened.id).not.toBe(open[0]!.id);
+    const newActions = await db.select().from(aiIncidentActions).where(eq(aiIncidentActions.incidentId, reopened.id));
+    expect(newActions.map((a) => a.status)).toEqual(["open"]);
+    const after = await db.select().from(useCaseFeedback).where(eq(useCaseFeedback.useCaseId, g9.id));
+    expect(after.filter((f) => f.resolvedAt === null).map((f) => `${f.kind}:${f.status}`).sort()).toEqual(["appeal:in_review", "problem:acknowledged"]);
+    expect(after.filter((f) => f.resolvedAt !== null).map((f) => f.id)).toEqual([appeal.id]);
+  }, 240_000);
 });
