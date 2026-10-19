@@ -83,3 +83,81 @@ test("a warning that appears under a long, already-clipped body releases it", as
   await expect(page.getByRole("button", { name: "Expand" })).toHaveCount(0);
   await expect(page.getByRole("region")).toHaveCount(0);
 });
+
+test("Tab and Shift+Tab stay inside the expanded view, through the portaled body", async ({ page }) => {
+  await open(page, "rows=60");
+  await page.getByRole("button", { name: "Expand" }).click();
+  const dialog = page.getByRole("dialog", { name: "Findings" });
+  const close = dialog.getByRole("button", { name: "Close" });
+  const pin = dialog.getByTestId("contain-toggle");
+  // Close is the first control, the portaled Pin the last
+  await pin.focus();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(pin).toBeFocused();
+});
+
+for (const width of [1280, 390]) {
+  test(`the expanded view has a visible Close that hands focus back to Expand (${width}px)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 800 });
+    await open(page, "rows=60");
+    const expand = page.getByRole("button", { name: "Expand" });
+    await expand.click();
+    const dialog = page.getByRole("dialog", { name: "Findings" });
+    // pinned in view even once the long body has scrolled
+    await dialog.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+    const close = dialog.getByRole("button", { name: "Close" });
+    await expect(close).toBeInViewport({ ratio: 1 });
+    await close.click();
+    await expect(dialog).toBeHidden();
+    await expect(expand).toBeFocused();
+  });
+}
+
+test("without StrictMode the body is in the document when its layout effects first run", async ({ page }) => {
+  await open(page, "rows=3&strict=0");
+  await expect(page.getByText("Finding 3")).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { probeConnected: boolean[] }).probeConnected)).toEqual([true]);
+});
+
+test("contain can switch on after mount", async ({ page }) => {
+  await open(page, "rows=60&contain=late");
+  await expect(page.getByRole("button", { name: "Expand" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Contain", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Findings, scrollable" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Expand" })).toBeVisible();
+  await expect(page.getByTestId("contain-toggle")).toHaveCount(1);
+});
+
+test.describe("InfoButton", () => {
+  test("clicking (i) in a sortable header opens it without sorting the column", async ({ page }) => {
+    await open(page, "view=info");
+    const header = page.locator("th", { hasText: "Name" });
+    await header.getByRole("button", { name: "What is Name?" }).click();
+    await expect(page.getByRole("note")).toHaveText("The record's display name.");
+    await expect(header).not.toHaveAttribute("aria-sort", /.*/);
+    await expect(page.locator("tbody td").first()).toHaveText("Beta");
+  });
+
+  test("shows the term as its first line and closes on a pointer down outside", async ({ page }) => {
+    await open(page, "view=info");
+    await page.getByRole("button", { name: "What is residual risk?" }).click();
+    const note = page.getByRole("note");
+    await expect(note.locator("b")).toHaveText("Residual risk");
+    await expect(note).toContainText("The risk left after controls apply.");
+    // a bare pointer down, no click: focus stays put, so blur cannot be what closes it
+    await page.getByText("Outside").dispatchEvent("pointerdown");
+    await expect(note).toHaveCount(0);
+  });
+
+  test("near the bottom edge the panel opens above its trigger", async ({ page }) => {
+    await open(page, "view=info");
+    const trigger = page.locator('button[aria-label$="residual risk?"], button[aria-label^="Hide help for residual risk"]');
+    await trigger.click();
+    const panel = (await page.getByRole("note").boundingBox())!;
+    const button = (await trigger.boundingBox())!;
+    expect(panel.y + panel.height).toBeLessThanOrEqual(button.y);
+    expect(panel.y).toBeGreaterThanOrEqual(0);
+  });
+});

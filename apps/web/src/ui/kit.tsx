@@ -453,8 +453,10 @@ export function Card(props: {
   const slot = useRef<HTMLDivElement>(null);
   // The body renders once, through a portal into a host node that moves between
   // the box and the expanded dialog: ids and test ids are never doubled, and its
-  // state survives Expand and close. On the server there is no host, so it renders inline.
-  const [host] = useState(() => (props.contain && typeof document !== "undefined" ? document.createElement("div") : null));
+  // state survives Expand and close. The host is made, and attached to the box,
+  // before the portal first renders, so a child's layout effects already see it
+  // in the document; `contain` may also switch on after mount. On the server
+  // there is no host, so the body renders inline.
   const [fit, setFit] = useState({ scrolls: false, long: false, refused: false });
   const [expanded, setExpanded] = useState(false);
   const memoryKey = `regulait.contain:${typeof location === "undefined" ? "" : location.pathname}:${name}`;
@@ -475,6 +477,18 @@ export function Card(props: {
       // storage unavailable: the choice lasts for this visit only
     }
   };
+  const [host, setHost] = useState<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    if (!props.contain || !box.current) return;
+    const el = document.createElement("div");
+    box.current.appendChild(el);
+    setHost(el);
+    return () => {
+      el.remove();
+      setHost(null);
+      setExpanded(false);
+    };
+  }, [props.contain]);
   useLayoutEffect(() => {
     if (host) (expanded ? slot.current : box.current)?.appendChild(host);
   }, [host, expanded]);
@@ -553,7 +567,7 @@ export function Card(props: {
           className={contained ? s.contain : undefined}
           {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
         >
-          {host ? createPortal(props.children, host) : props.children}
+          {host ? createPortal(props.children, host) : typeof document === "undefined" ? props.children : null}
         </div>
       ) : (
         props.children
@@ -960,7 +974,27 @@ export function Modal(props: {
     // Native modality makes the background inert and owns the focus cycle.
     // Open only on a visibility change: editing must not reset focus.
     dialog.showModal();
+    // A native listener, not React's onKeyDown: a contained card's body is
+    // portaled in (X6), so its key events bubble through the dialog in the DOM
+    // but never reach a React handler on it.
+    const trap = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || event.defaultPrevented) return;
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
+      )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
+        element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
+      const first = controls[0];
+      const last = controls.at(-1);
+      // Keep boundary Tab presses in the page rather than browser chrome.
+      if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) ||
+        (!event.shiftKey && document.activeElement === last)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first)?.focus();
+      }
+    };
+    dialog.addEventListener("keydown", trap);
     return () => {
+      dialog.removeEventListener("keydown", trap);
       const inside = dialog.contains(document.activeElement);
       dialog.close();
       const holder = trigger?.closest<HTMLElement>("main[tabindex]") ?? null;
@@ -976,21 +1010,6 @@ export function Modal(props: {
       aria-label={props.title}
       tabIndex={-1}
       ref={ref}
-      onKeyDown={(event) => {
-        if (event.key !== "Tab" || event.defaultPrevented) return;
-        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
-          'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
-        )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
-          element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden");
-        const first = controls[0];
-        const last = controls.at(-1);
-        // Keep boundary Tab presses in the page rather than browser chrome.
-        if (!first || (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) ||
-          (!event.shiftKey && document.activeElement === last)) {
-          event.preventDefault();
-          (event.shiftKey ? last : first)?.focus();
-        }
-      }}
       onCancel={(event) => {
         event.preventDefault();
         props.onClose();
@@ -1003,7 +1022,20 @@ export function Modal(props: {
         }
       }}
     >
-      <div className={s.modalTitle}>{props.title}</div>
+      {props.full ? (
+        // near full screen the body scrolls, so Close stays pinned beside the title
+        <div
+          className={s.modalTitle}
+          style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", background: "var(--surface-1)" }}
+        >
+          <span style={{ flex: 1 }}>{props.title}</span>
+          <Button size="sm" onClick={props.onClose}>
+            Close
+          </Button>
+        </div>
+      ) : (
+        <div className={s.modalTitle}>{props.title}</div>
+      )}
       {props.children != null && <div className={s.modalBody}>{props.children}</div>}
       {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}
     </dialog>
