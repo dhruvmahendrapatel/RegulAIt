@@ -68,6 +68,7 @@ const TABLES = {
   instances: sql`SELECT count(*)::int AS n FROM workflow_instances`,
   connectors: sql`SELECT count(*)::int AS n FROM connectors`,
   federationKeys: sql`SELECT count(*)::int AS n FROM federation_signing_keys`,
+  signatures: sql`SELECT count(*)::int AS n FROM ai_endpoint_signatures`,
 };
 async function counts(): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
@@ -129,6 +130,22 @@ describe("ADR-0197 decision 7: the fallback Shadow-AI discovery dataset", () => 
     for (const kind of ["cloud_aws", "cloud_azure", "repo_gitlab"]) {
       expect(Number(recorded.find((x) => x.kind === kind)?.matched), kind).toBeGreaterThan(0);
     }
+    // the Shadow AI import example (the SPA's prefilled evidence, mirrored in shadowAiExample.ts) dry-runs to a match on
+    // the fictional provider the seeder catalogued (owner decision on #453)
+    const dry = await app.inject({
+      method: "POST",
+      url: "/v1/shadow-ai/imports",
+      headers: AUTH,
+      payload: {
+        kind: "egress_log",
+        mode: "dry_run",
+        source: "acme forward proxy, week 31",
+        rows: [{ observedAt: "2026-07-28T09:00:00Z", destinationHost: D.importExample.host, sourceIdentity: "build-runner-01", requestCount: 412 }],
+      },
+    });
+    expect(dry.statusCode, dry.body).toBe(200);
+    expect(dry.json()).toMatchObject({ mode: "dry_run", matched: 1 });
+    expect(dry.json().findings.map((f: { provider: string }) => f.provider)).toEqual([D.importExample.provider]);
     // what `seed` does next, in the same first-admin-setup window: Ada and the security lead, both admins, MFA enrolled
     const ids: string[] = [];
     for (const [email, displayName] of [["admin@regulait.local", "Ada Admin"], [DEMO_SECURITY_LEAD.email, DEMO_SECURITY_LEAD.displayName]]) {
