@@ -229,7 +229,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S2 findings, sightings, coverage", async () => {
     await ada.goto("/ui/admin/shadow-ai");
     await expect(ada.getByRole("heading", { name: "Shadow-AI discovery" })).toBeVisible();
-    await expect(ada.getByRole("button", { name: `Remediation plan for ${REMEDIATION_REPO}` })).toBeVisible();
+    await expect(ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` })).toBeVisible();
     await capture(ada, ADA, "ds-s2-findings", { dark: true });
     pseudonymHref = await ada.locator('a[href*="discovery-sources?pseudonym="]').first().getAttribute("href", { timeout: 5_000 }).catch(() => null);
   });
@@ -237,7 +237,10 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S2 a pseudonym link opens Reveal, prefilled", async () => {
     expect.soft(pseudonymHref, "a sighting links its pseudonym to Reveal").toBeTruthy();
     if (!pseudonymHref) return;
-    await ada.locator(`a[href="${pseudonymHref}"]`).first().click();
+    // "Where seen" folds each finding's sightings behind a count (SH, #456): open that disclosure first, as a person would
+    const link = ada.locator(`a[href="${pseudonymHref}"]`).first();
+    if (!(await link.isVisible())) await ada.locator("details").filter({ has: link }).last().locator(":scope > summary").click();
+    await link.click();
     await expect(ada.getByRole("heading", { name: "Discovery sources" })).toBeVisible();
     await capture(ada, ADA, "ds-s2b-pseudonym-reveal-prefilled", { notes: ["Reveal not pressed (step-up, audited)"] });
   });
@@ -250,7 +253,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
 
   await test.step("S3 the seeded remediation plan (linked, waiting on Morgan)", async () => {
     await ada.goto("/ui/admin/shadow-ai");
-    await ada.getByRole("button", { name: `Remediation plan for ${REMEDIATION_REPO}` }).click();
+    await ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` }).click();
     await expect(ada.getByTestId("shadow-remediation")).toBeVisible();
     await ada.getByTestId("shadow-remediation").scrollIntoViewIfNeeded();
     // W3: the linked workflow's status reads in words, never "blocked on_approval"
@@ -274,12 +277,12 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     }
     expect(subject, "a finding with no remediation workflow yet, for the live start").toBeTruthy();
     await ada.goto("/ui/admin/shadow-ai");
-    await ada.getByRole("button", { name: `Remediation plan for ${subject}`, exact: true }).click();
+    await ada.getByRole("button", { name: `Plan remediation for ${subject}`, exact: true }).click();
     const panel = ada.getByTestId("shadow-remediation");
     await expect(panel).toBeVisible();
     // the script says `sandbox`, but the product accepts only an environment a deploy target or assignment rule uses;
     // the seed's demo company deploys to `staging` (QA finding F1 in DEMO_SCREENS_QA_2026-11-01.md)
-    await panel.getByLabel("Environment").fill("staging");
+    await panel.getByRole("textbox", { name: "Environment" }).fill("staging");
     await capture(ada, ADA, "ds-s3b-remediation-plan-live");
     await panel.getByRole("button", { name: "Start remediation workflow…" }).click();
     const dialog = ada.getByRole("dialog", { name: "Start a remediation workflow?" });
@@ -344,7 +347,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
 
   await test.step("S4 register as use case: the intake, prefilled from the finding", async () => {
     await ada.goto("/ui/admin/shadow-ai");
-    const register = ada.getByRole("row").filter({ has: ada.getByRole("button", { name: `Remediation plan for ${REMEDIATION_REPO}` }) }).getByRole("link", { name: "Register as use case" });
+    const register = ada.getByRole("row").filter({ has: ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` }) }).getByRole("link", { name: "Register as use case" });
     await register.first().click();
     await expect(ada.getByRole("heading", { name: "Register AI use case" })).toBeVisible();
     await capture(ada, ADA, "ds-s4-intake-prefilled", { notes: ["not submitted: the 10-05 journey already drove the intake end to end"] });

@@ -571,9 +571,13 @@ const KEEP_VISIBLE =
  * shifting its other actions left. `slot` is the primary slot's minimum width;
  * give one table one value.
  */
-export function RowActions(props: { primary?: ReactNode; secondary?: ReactNode; rest?: ReactNode; slot?: string }) {
+export function RowActions(props: { primary?: ReactNode; secondary?: ReactNode; rest?: ReactNode; slot?: string; stacked?: boolean }) {
   return (
-    <div className={s.rowActions} style={{ gridTemplateColumns: `minmax(${props.slot ?? "10rem"}, max-content) auto auto` }}>
+    <div
+      className={s.rowActions}
+      // stacked: one column (primary, then secondary, then the rest) for a wide table, so nothing is cut off at the edge
+      style={{ gridTemplateColumns: props.stacked ? `minmax(${props.slot ?? "10rem"}, max-content)` : `minmax(${props.slot ?? "10rem"}, max-content) auto auto` }}
+    >
       <span>{props.primary}</span>
       <span>{props.secondary}</span>
       <span>{props.rest}</span>
@@ -693,10 +697,12 @@ const sevClass: Record<string, string> = {
 };
 export function SeverityBadge(props: { severity: string; title?: string }) {
   const cls = sevClass[props.severity];
-  if (!cls) return <Badge title={props.title}>{props.severity}</Badge>;
+  // a word, not a code: "Critical", never "critical"
+  const word = props.severity.charAt(0).toUpperCase() + props.severity.slice(1);
+  if (!cls) return <Badge title={props.title}>{word}</Badge>;
   return (
     <span className={`${s.badge} ${cls}`} title={props.title}>
-      {props.severity}
+      {word}
     </span>
   );
 }
