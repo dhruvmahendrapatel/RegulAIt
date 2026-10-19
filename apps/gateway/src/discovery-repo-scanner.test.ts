@@ -328,9 +328,13 @@ describe("ADR-0195 A5 federated git credentials", () => {
     const key = appKey();
     const app = { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) };
     const other = githubAppFake();
-    await expect(
-      repoScanner("repo_github", { federation: app }).run(ctx(other.fetchImpl, { credential: { ...ghFederated, publicConfig: { appId: "999", installationId: INSTALLATION } } }).c),
-    ).rejects.toThrow(/^credential_unusable: the credential names GitHub App 999/);
+    const wrongApp = await repoScanner("repo_github", { federation: app })
+      .run(ctx(other.fetchImpl, { credential: { ...ghFederated, publicConfig: { appId: "999", installationId: INSTALLATION } } }).c)
+      .catch((e: Error) => e);
+    const msg = String((wrongApp as Error).message);
+    expect(msg).toMatch(/^credential_unusable: the credential names GitHub App 999/);
+    // the deployment's App id is an environment value: it never reaches the run's error detail or audit reason
+    expect(msg).not.toContain(APP_ID);
     expect(other.exchanges).toEqual([]);
 
     const write = githubAppFake({ contents: "write", metadata: "read" });
@@ -416,6 +420,9 @@ describe("ADR-0195 A5 federated git credentials", () => {
     // another port is another origin: refused before signing
     const r = await run("https://ghe.example.test:8443");
     expect(r.err).toMatch(/^RepoScanError: credential_unusable: a federated GitHub source reads through this deployment's configured GitHub API/);
+    // the configured API URL is an environment value: neither its host nor its path is named
+    expect(r.err).not.toContain("ghe.example.test");
+    expect(r.err).not.toContain("/api/v3");
     expect(r.seen).toEqual([]);
     expect(r.registered).toEqual([]);
   });

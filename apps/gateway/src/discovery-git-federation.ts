@@ -175,7 +175,7 @@ export async function githubInstallationToken(ctx: GitFederationContext, deps: G
   const { appId, installationId } = ctx.credential.publicConfig;
   if (!numericId(appId) || !numericId(installationId)) throw new GitFederationError("a federated GitHub credential names a numeric appId and installationId");
   // the credential is bound to one App: a token is never minted for an App the admin did not name
-  if (appId !== app.appId) throw new GitFederationError(`the credential names GitHub App ${appId}, but this deployment's GitHub App is ${app.appId}`);
+  if (appId !== app.appId) throw new GitFederationError(`the credential names GitHub App ${appId}, which is not this deployment's GitHub App (${GITHUB_APP_ID_ENV})`);
   // the JWT is a deployment-level credential: it goes only to the deployment's GitHub API, never to a host a source names
   const base = app.apiUrl;
   // (a source without a baseUrl is read at the public API, so it must match too)
