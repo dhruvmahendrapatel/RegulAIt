@@ -100,6 +100,21 @@ The demo script lane (#434) raised five questions. The owner answered them:
 4. **Fallback host.** The fallback runs as the local docker compose stack on the presenting laptop, prepared with `demo:prepare` the night before.
 5. **GitLab wording.** The script keeps its open statement. GitLab is read through a scoped, read-only group token because GitLab has no keyless federation for API reads, and RegulAIt lists that token as a relaxation on the posture page.
 
+## Addendum: owner decision, 2026-10-19 (how the live database is prepared)
+
+The runbook (`DEMO_RUNBOOK.md` §7.1) left open how the live database gets the governance seed without the seeded
+discovery dataset, since `demo:prepare` always runs both `demo:shadow` phases and `demo:check` requires that dataset.
+The master session put four options to the owner: a live mode for `demo:prepare`; manual steps; full preparation then
+deletion; or no governance data on the live instance (Act 2 on the fallback database). The owner chose:
+
+1. **Live mode.** `demo:prepare --live` runs the same pipeline without either `demo:shadow` phase, then
+   `demo:check --live`. Without the flag the pipeline is unchanged and still prepares the fallback database.
+2. **Live check.** `demo:check --live` keeps every governance check and fails closed if any record of the fictional
+   discovery dataset is present. It reports the real discovery sources and passes once at least one is enabled, so
+   it can run before the first real scan.
+3. Manual preparation and post-hoc deletion are not used: the first has no check, and the second leaves the
+   fictional records in the append-only audit trail.
+
 ## As built: the live database, owner decision of 2026-10-19 (addendum decision 3, option A)
 Addendum decision 3 reads: "The live demo database holds only what the real GitLab, AWS and Azure scans find. The
 seeded discovery dataset exists only in the fallback database." On 2026-10-19 the owner chose option A for it: the

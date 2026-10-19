@@ -129,6 +129,28 @@ describe("checkShadowDiscovery FAILs a step that silently produced nothing", () 
   }
 });
 
+describe("the security lead's missing TOTP (review L-E of #441)", () => {
+  it("still FAILs, and tells her to enrol at sign-in rather than to rebuild the database", async () => {
+    const w = world();
+    // what demo:set-passwords leaves: her password is set and the seed's TOTP is cleared (ADR-0181 FX2)
+    w.users = w.users.map((u) => (u.id === MORGAN ? { ...u, totpEnabled: false, hasPassword: true } : u));
+    const plan = (await checkShadowDiscovery(api(w), w.findings, D)).find((c) => c.beat === "1 Remediation plan")!;
+    expect(plan.level).toBe("FAIL");
+    expect(plan.fix).toContain(`${DEMO_SECURITY_LEAD.displayName} signs in once`);
+    expect(plan.fix).toContain("enrols her authenticator");
+    expect(plan.fix).toContain("/ui/inbox");
+    expect(plan.fix).not.toContain("empty database");
+  });
+
+  it("keeps the rebuild hint for a missing or non-admin security lead", async () => {
+    const w = world();
+    w.users = w.users.filter((u) => u.id !== MORGAN);
+    const plan = (await checkShadowDiscovery(api(w), w.findings, D)).find((c) => c.beat === "1 Remediation plan")!;
+    expect(plan.level).toBe("FAIL");
+    expect(plan.fix).toContain("empty database");
+  });
+});
+
 describe("the data-minimisation scan", () => {
   it("covers env names AND values, devices, device users and the raw principal, not catalogue identifiers", () => {
     const names = demoShadowNeverStored(D);

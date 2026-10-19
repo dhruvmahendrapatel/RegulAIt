@@ -328,9 +328,13 @@ describe("ADR-0195 A5 federated git credentials", () => {
     const key = appKey();
     const app = { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl: API }) };
     const other = githubAppFake();
-    await expect(
-      repoScanner("repo_github", { federation: app }).run(ctx(other.fetchImpl, { credential: { ...ghFederated, publicConfig: { appId: "999", installationId: INSTALLATION } } }).c),
-    ).rejects.toThrow(/^credential_unusable: the credential names GitHub App 999/);
+    const wrongApp = await repoScanner("repo_github", { federation: app })
+      .run(ctx(other.fetchImpl, { credential: { ...ghFederated, publicConfig: { appId: "999", installationId: INSTALLATION } } }).c)
+      .catch((e: Error) => e);
+    const msg = String((wrongApp as Error).message);
+    expect(msg).toMatch(/^credential_unusable: the credential names GitHub App 999/);
+    // the deployment's App id is an environment value: it never reaches the run's error detail or audit reason
+    expect(msg).not.toContain(APP_ID);
     expect(other.exchanges).toEqual([]);
 
     const write = githubAppFake({ contents: "write", metadata: "read" });
@@ -379,14 +383,48 @@ describe("ADR-0195 A5 federated git credentials", () => {
     for (const target of [{ baseUrl: "https://collector.example.test" }, {}] as Array<Record<string, string>>) {
       const fake = githubAppFake();
       const t = ctx(fake.fetchImpl, { credential: ghFederated }, target);
-      await expect(repoScanner("repo_github", { federation: app }).run(t.c), JSON.stringify(target)).rejects.toThrow(
-        /^credential_unusable: a federated GitHub source reads through this deployment's GitHub API \(https:\/\/git\.example\.test\)/,
+      const err = await repoScanner("repo_github", { federation: app }).run(t.c).catch((e: Error) => e);
+      expect(String(err), JSON.stringify(target)).toMatch(
+        /^RepoScanError: credential_unusable: a federated GitHub source reads through this deployment's configured GitHub API \(REGULAIT_GITHUB_APP_API_URL\)/,
       );
+      // the stored run error names the setting, never its value (an environment variable value is never echoed)
+      expect((err as Error).message).not.toContain(new URL(API).host);
       expect(fake.exchanges).toEqual([]);
       expect(fake.calls).toEqual([]);
       // nothing was signed: no JWT was registered
       expect(t.registered).toEqual([]);
     }
+  });
+
+  it("GitHub: the origin match is exact and normalised; the path may differ, the port may not", async () => {
+    const key = appKey();
+    const apiUrl = "https://ghe.example.test/api/v3";
+    const app = { githubApp: () => ({ appId: APP_ID, privateKey: key, apiUrl }) };
+    const run = async (baseUrl: string) => {
+      const seen: Array<{ method: string; url: string }> = [];
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        seen.push({ method: init?.method ?? "GET", url: new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).href });
+        return json({ message: "Bad credentials" }, 401);
+      }) as typeof fetch;
+      const t = ctx(fetchImpl, { credential: ghFederated }, { baseUrl });
+      const err = await repoScanner("repo_github", { federation: app }).run(t.c).catch((e: Error) => e);
+      return { err: String(err), seen, registered: t.registered };
+    };
+    // same origin, another path (or the default port written out): accepted, and the JWT goes only to the configured API
+    for (const baseUrl of ["https://ghe.example.test/other", "https://ghe.example.test:443/"]) {
+      const r = await run(baseUrl);
+      expect(r.err, baseUrl).not.toMatch(/configured GitHub API/);
+      expect(r.seen, baseUrl).toEqual([{ method: "POST", url: `${apiUrl}/app/installations/${INSTALLATION}/access_tokens` }]);
+      expect(r.registered.length, baseUrl).toBeGreaterThan(0);
+    }
+    // another port is another origin: refused before signing
+    const r = await run("https://ghe.example.test:8443");
+    expect(r.err).toMatch(/^RepoScanError: credential_unusable: a federated GitHub source reads through this deployment's configured GitHub API/);
+    // the configured API URL is an environment value: neither its host nor its path is named
+    expect(r.err).not.toContain("ghe.example.test");
+    expect(r.err).not.toContain("/api/v3");
+    expect(r.seen).toEqual([]);
+    expect(r.registered).toEqual([]);
   });
 
   it("GitHub: a repo-level scope narrows the installation token to its repositories", async () => {
