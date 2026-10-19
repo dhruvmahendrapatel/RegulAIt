@@ -481,12 +481,21 @@ export async function checkShadowDiscovery(
   const lead = users.find((u) => u.email === DEMO_SECURITY_LEAD.email);
   const LEAD = `${DEMO_SECURITY_LEAD.displayName} (${DEMO_SECURITY_LEAD.role})`;
   if (!repoFinding) add("1 Remediation plan", "FAIL", `no finding for gitlab:${data.remediation.repo}`, RERUN);
-  else if (!lead || !lead.isAdmin || lead.disabledAt || lead.totpEnabled !== true) {
+  else if (!lead || !lead.isAdmin || lead.disabledAt) {
     add(
       "1 Remediation plan",
       "FAIL",
-      `${DEMO_SECURITY_LEAD.email} ${!lead ? "missing" : !lead.isAdmin ? "is not an admin" : lead.disabledAt ? "is deactivated" : "has no TOTP enrolled"}: the remediation sign-off needs a second admin with MFA`,
+      `${DEMO_SECURITY_LEAD.email} ${!lead ? "missing" : !lead.isAdmin ? "is not an admin" : "is deactivated"}: the remediation sign-off needs a second admin with MFA`,
       "`seed` creates and enrols her during first-admin setup: run `demo:prepare` on an empty database",
+    );
+  } else if (lead.totpEnabled !== true) {
+    // still a FAIL: she cannot approve until she has a second factor. `demo:set-passwords` clears the seed's TOTP by
+    // design (ADR-0181 FX2), so this is the expected state after it, and the fix is hers, not a fresh database
+    add(
+      "1 Remediation plan",
+      "FAIL",
+      `${DEMO_SECURITY_LEAD.email} has no TOTP enrolled: the remediation sign-off needs a second admin with MFA`,
+      `${DEMO_SECURITY_LEAD.displayName} signs in once and enrols her authenticator when the app asks, before her Approve in /ui/inbox; then re-run \`demo:check\``,
     );
   } else {
     const plan = await get(`/v1/shadow-ai/findings/${repoFinding.id}/remediation-plan`);
