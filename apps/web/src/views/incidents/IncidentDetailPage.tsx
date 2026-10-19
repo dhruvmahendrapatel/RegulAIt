@@ -544,7 +544,7 @@ function LinksCard(props: { d: IncidentDetail; refetch: () => void }) {
   const [type, setType] = useState("agent");
   const [id, setId] = useState("");
   return (
-    <Card title="Linked records">
+    <Card title="Linked records" contain>
       <Table
         rows={props.d.links}
         rowKey={(l) => `${l.objectType}:${l.objectId}`}

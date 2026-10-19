@@ -33,7 +33,7 @@
  *    failure for a discovery product; `report_and_continue` is the explicit
  *    opt-in and is labelled as such.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
@@ -52,6 +52,7 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
+import { DetailDrawer } from "../../../ui/DetailDrawer";
 import { DiscoverySightings } from "./DiscoverySightings";
 import type { SightingView } from "./discoverySourcesModel";
 import v from "../../views.module.css";
@@ -309,11 +310,10 @@ export default function ShadowAiPage() {
   const tab = TAB_IDS.includes(params.get("tab") ?? "") ? params.get("tab")! : "findings";
   const setTab = (next: string) => setParams((prev) => { const out = new URLSearchParams(prev); out.set("tab", next); return out; }, { replace: true });
   const [statusFilter, setStatusFilter] = useState<StatusGroup>("all");
-  // SH4: the triage form opens below the table, so it is brought into view and named after its row
+  // A1: triage and the remediation plan open in the shared detail drawer, named after their row
   const dispositionRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    if (dispositionFor) dispositionRef.current?.scrollIntoView({ block: "nearest" });
-  }, [dispositionFor]);
+  const closeRemediation = useCallback(() => setRemediationFor(null), []);
+  const closeDisposition = useCallback(() => setDispositionFor(null), []);
 
   // ---- ADR-0071 raw-file import ----
   const [rawAdapter, setRawAdapter] = useState("cef");
@@ -585,15 +585,15 @@ export default function ShadowAiPage() {
                         variant={r.disposition === "open" || r.disposition === "confirmed" ? "primary" : "default"}
                         aria-label={`Remediation plan for ${r.subject}`}
                         aria-pressed={remediationFor === r.id}
-                        onClick={() => setRemediationFor(remediationFor === r.id ? null : r.id)}
+                        onClick={() => { setDispositionFor(null); setRemediationFor(remediationFor === r.id ? null : r.id); }}
                       >
                         Remediation plan
                       </Button>
                     );
                     const triage = r.dispositionStale ? (
-                      <Button onClick={() => { setDispositionFor(r.id); setReason(""); }}>Review again</Button>
+                      <Button onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Review again</Button>
                     ) : (
-                      <Button variant="ghost" onClick={() => { setDispositionFor(r.id); setReason(""); }}>Triage</Button>
+                      <Button variant="ghost" onClick={() => { setRemediationFor(null); setDispositionFor(r.id); setReason(""); }}>Triage</Button>
                     );
                     return (
                       <RowActions
@@ -617,18 +617,34 @@ export default function ShadowAiPage() {
         </QueryGate>
       </Card>
 
+        {/* A1: a finding's remediation plan and its triage open in the one shared detail drawer */}
         {remediationFor ? (
-          <ShadowRemediationPanel
-            key={remediationFor}
-            findingId={remediationFor}
-            onClose={() => setRemediationFor(null)}
-            onLinked={refresh}
-          />
+          <DetailDrawer
+            type="Remediation plan"
+            title={subjectOf(remediationFor)}
+            subjectKey={remediationFor}
+            closeLabel="Close plan"
+            meta={
+              <InfoButton label="a remediation plan">
+                A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. Nothing
+                changes until the workflow is approved.
+              </InfoButton>
+            }
+            onClose={closeRemediation}
+          >
+            <ShadowRemediationPanel
+              key={remediationFor}
+              findingId={remediationFor}
+              onClose={closeRemediation}
+              onLinked={refresh}
+              inDrawer
+            />
+          </DetailDrawer>
         ) : null}
 
         {dispositionFor ? (
-          <section className={a.subSection} ref={dispositionRef} aria-label={`Record a disposition for ${subjectOf(dispositionFor)}`}>
-            <div className={v.sectionTitle}>Record a disposition · {subjectOf(dispositionFor)}</div>
+          <DetailDrawer type="Triage" title={subjectOf(dispositionFor)} subjectKey={dispositionFor} closeLabel="Close triage" onClose={closeDisposition}>
+          <section ref={dispositionRef} aria-label={`Record a disposition for ${subjectOf(dispositionFor)}`}>
             <p className={v.faint}>
               Moving a finding off &lsquo;open&rsquo; requires a reason — a later reviewer has to be able to audit the
               judgement.
@@ -670,6 +686,7 @@ export default function ShadowAiPage() {
               <Button onClick={() => setDispositionFor(null)}>Cancel</Button>
             </div>
           </section>
+          </DetailDrawer>
         ) : null}
         </>
       )}

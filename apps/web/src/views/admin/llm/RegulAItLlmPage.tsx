@@ -781,7 +781,7 @@ export default function RegulAItLlmPage() {
 
           {openJob && <TrainingJobDetail key={openJob} jobId={openJob} onClose={() => setOpenJob(null)} />}
           {/* ---------------- jobs ---------------- */}
-          <Card title="Training jobs">
+          <Card title="Training jobs" contain>
             <Table
               rows={jobs.data?.jobs ?? []}
               rowKey={(r) => r.id}

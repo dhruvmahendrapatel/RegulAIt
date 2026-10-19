@@ -152,6 +152,27 @@ test("Shadow AI remediation: the plan opens as steps, named approver rules, no r
   await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toBeVisible();
 });
 
+test("A1: a finding's plan and triage open in the one shared drawer; Escape closes it and focus returns", async ({ page }) => {
+  await page.goto("/ui/admin/shadow-ai");
+  const opener = page.getByRole("button", { name: "Remediation plan for team-17/payments-api" });
+  await opener.click();
+  const drawer = page.getByRole("dialog", { name: "team-17/payments-api" });
+  await expect(drawer).toContainText("Remediation plan");
+  await expect(drawer.getByRole("heading", { name: "team-17/payments-api" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(drawer).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  // triage replaces the plan rather than stacking a second drawer
+  await opener.click();
+  const row = page.getByRole("region", { name: /Inventory, scrollable/ }).locator("tbody tr", { hasText: "team-17/payments-api" });
+  // the drawer covers the row, so the click is dispatched to the button itself
+  await row.getByRole("button", { name: /^(Triage|Review again)$/ }).dispatchEvent("click");
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await expect(page.getByRole("dialog")).toContainText("Triage");
+  await page.getByRole("button", { name: "Close triage" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
 test("Discovery sources: how it works, labelled figures, aligned row actions and More", async ({ page }) => {
   await page.goto("/ui/admin/shadow-ai/discovery-sources");
   await expect(page.getByRole("list", { name: "How discovery works" })).toContainText("2 of 3 sources enabled");
@@ -166,4 +187,19 @@ test("Discovery sources: how it works, labelled figures, aligned row actions and
   await expect(row.getByRole("button", { name: "Delete" })).toBeDisabled();
   await expect(row.getByText("Delete is available once the source is disabled.")).toBeVisible();
   await expect(sourcesRegion.locator("tbody tr", { hasText: "Azure demo subscription" }).getByRole("button", { name: "Enable" })).toBeVisible();
+});
+
+test("X6b: Show all lets a contained section flow at full length, remembered for that section", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await page.goto("/ui/admin/shadow-ai");
+  const inventory = page.locator("section[data-rg-card]").filter({ has: page.getByRole("region", { name: "Inventory, scrollable" }) });
+  const showAll = inventory.getByRole("button", { name: "Show all" });
+  await expect(showAll).toHaveAttribute("aria-pressed", "false");
+  await showAll.click();
+  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Show all" }).first()).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Show all" }).first().click();
+  await expect(page.getByRole("region", { name: "Inventory, scrollable" })).toBeVisible();
 });

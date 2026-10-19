@@ -39,7 +39,8 @@ import rm from "./shadowAi.module.css";
 
 type Pending = { kind: "start"; body: StartInstanceBody } | { kind: "link"; instanceId: string };
 
-export function ShadowRemediationPanel(props: { findingId: string; onClose: () => void; onLinked: () => void }) {
+/** `inDrawer` (A1): the shared DetailDrawer supplies the title, the (i) and Close, so the panel shows only its body */
+export function ShadowRemediationPanel(props: { findingId: string; onClose: () => void; onLinked: () => void; inDrawer?: boolean }) {
   const plan = useQuery({
     queryKey: ["admin", "shadow-ai-remediation-plan", props.findingId],
     queryFn: () =>
@@ -51,11 +52,11 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
   // SH4: the plan opens below the findings table, so it is brought into view when it opens
   const section = useRef<HTMLElement>(null);
   useEffect(() => {
-    section.current?.scrollIntoView({ block: "nearest" });
-  }, []);
+    if (!props.inDrawer) section.current?.scrollIntoView({ block: "nearest" });
+  }, [props.inDrawer]);
   return (
-    <section ref={section} className={a.subSection} aria-label="Remediation plan" data-testid="shadow-remediation">
-      <div className={v.row}>
+    <section ref={section} className={props.inDrawer ? undefined : a.subSection} aria-label="Remediation plan" data-testid="shadow-remediation">
+      {props.inDrawer ? null : <div className={v.row}>
         <div className={v.sectionTitle} style={{ flex: 1 }}>
           Remediation plan
           <InfoButton label="a remediation plan">
@@ -66,7 +67,7 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
         <Button size="sm" variant="ghost" onClick={props.onClose}>
           Close plan
         </Button>
-      </div>
+      </div>}
       <QueryGate loading={plan.isLoading} error={plan.error} onRetry={() => void plan.refetch()}>
         {plan.data ? <PlanBody key={plan.data.findingId} plan={plan.data} onLinked={props.onLinked} /> : null}
       </QueryGate>

@@ -852,7 +852,7 @@ export default function EvalsPage() {
           )}
 
           {/* ---------------- runs ---------------- */}
-          <Card title="Runs">
+          <Card title="Runs" contain>
             <Table
               rows={runs.data?.runs ?? []}
               rowKey={(r) => r.id}

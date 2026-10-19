@@ -358,7 +358,7 @@ export default function PromptVersionsPage() {
               </div>
             </Card>
 
-            <Card title="Activation history (append-only)">
+            <Card title="Activation history (append-only)" contain>
               <Table
                 rows={lineage.data?.history ?? []}
                 rowKey={(r) => r.id}

@@ -437,7 +437,9 @@ export function Card(props: {
    * X6: a long, read-only body scrolls inside the card instead of stretching
    * the page, with an Expand button that opens the same body near full
    * screen. Never for forms, warnings, decisions or step-ups — those must be
-   * fully visible, so this is opt-in per card.
+   * fully visible, so this is opt-in per card. X6b: "Show all" lets the
+   * section flow at full length instead, remembered per page and section in
+   * this browser only.
    */
   contain?: boolean;
 }) {
@@ -445,9 +447,28 @@ export function Card(props: {
   const body = useRef<HTMLDivElement>(null);
   const [overflows, setOverflows] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const memoryKey = `regulait.contain:${typeof location === "undefined" ? "" : location.pathname}:${name}`;
+  const [showAll, setShowAll] = useState(() => {
+    try {
+      return props.contain === true && localStorage.getItem(memoryKey) === "all";
+    } catch {
+      return false;
+    }
+  });
+  const toggleShowAll = () => {
+    const next = !showAll;
+    setShowAll(next);
+    try {
+      if (next) localStorage.setItem(memoryKey, "all");
+      else localStorage.removeItem(memoryKey);
+    } catch {
+      // storage unavailable: the choice lasts for this visit only
+    }
+  };
+  const contained = props.contain === true && !showAll;
   useEffect(() => {
     const el = body.current;
-    if (!props.contain || !el || typeof ResizeObserver === "undefined") return;
+    if (!contained || !el || typeof ResizeObserver === "undefined") return;
     // Expand is offered only when the box actually cuts content off
     const check = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
     const ro = new ResizeObserver(check);
@@ -455,11 +476,16 @@ export function Card(props: {
     if (el.firstElementChild) ro.observe(el.firstElementChild);
     check();
     return () => ro.disconnect();
-  }, [props.contain]);
-  const expand = props.contain && overflows && (
-    <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
-      Expand
-    </Button>
+  }, [contained]);
+  const expand = props.contain && (overflows || showAll) && (
+    <>
+      <Button size="sm" variant="ghost" aria-pressed={showAll} onClick={toggleShowAll}>
+        Show all
+      </Button>
+      <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
+        Expand
+      </Button>
+    </>
   );
   return (
     <section
@@ -479,7 +505,7 @@ export function Card(props: {
           {expand}
         </div>
       )}
-      {props.contain ? (
+      {contained ? (
         <div ref={body} className={s.contain} tabIndex={0} role="region" aria-label={`${name}, scrollable`}>
           {props.children}
         </div>

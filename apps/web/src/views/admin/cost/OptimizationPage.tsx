@@ -122,7 +122,7 @@ export default function OptimizationPage() {
           />
         </Card>
 
-        <Card title="Cost events — the raw optimization ledger">
+        <Card title="Cost events — the raw optimization ledger" contain>
           <Table
             columns={[
               {
@@ -159,7 +159,7 @@ export default function OptimizationPage() {
           />
         </Card>
 
-        <Card title="Usage events — measured actuals">
+        <Card title="Usage events — measured actuals" contain>
           <Table
             columns={[
               {
