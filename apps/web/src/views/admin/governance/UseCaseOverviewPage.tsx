@@ -87,10 +87,13 @@ const TABS = [
   { id: "incidents", label: "Incidents", group: "Activity" },
   { id: "feedback", label: "Feedback", group: "Activity" },
 ];
-const TAB_COUNT: Partial<Record<string, (d: OverviewResponse) => number>> = {
+// the overview returns only the newest audit rows (use-case-overview.ts, .limit(20)); a full page may have more behind it
+const AUDIT_ROW_LIMIT = 20;
+const TAB_COUNT: Partial<Record<string, (d: OverviewResponse) => number | string>> = {
   risks: (d) => d.risks.length,
   approvals: (d) => d.approvals.length,
-  audit: (d) => d.audit.length,
+  // M1: never a capped number that reads as the total
+  audit: (d) => (d.audit.length >= AUDIT_ROW_LIMIT ? `${AUDIT_ROW_LIMIT}+` : d.audit.length),
 };
 
 const AiBomPanel = lazy(() => import("./BomEvidencePanel").then((m) => ({ default: m.AiBomPanel })));
@@ -787,6 +790,6 @@ function ApprovalsTab({ approvals, userName }: { approvals: OverviewResponse["ap
 }
 
 function AuditTab({ rows }: { rows: OverviewResponse["audit"] }) {
-  return <Card title="Recent use-case audit evidence">{rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}<p><Link to="/admin/audit">Open the full audit log</Link></p></Card>;
+  return <Card title="Recent use-case audit evidence">{rows.length === 0 ? <EmptyState title="No audit rows returned" body="Every registration, review and lifecycle change on this use case writes an audit row. None has been recorded yet." /> : <Table rows={rows} rowKey={(row) => String(row.id)} columns={[{ key: "at", header: "When", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{ago(row.at)}</span> }, { key: "rule", header: "Event", render: (row) => <span style={{ whiteSpace: "nowrap" }}>{humanize(row.ruleId)}</span> }, { key: "effect", header: "Effect", render: (row) => <Badge tone={row.effect === "allow" ? "ok" : row.effect === "deny" ? "danger" : "warn"}>{row.effect}</Badge> }, { key: "reason", header: "Reason", render: (row) => row.reason }]} />}{rows.length >= AUDIT_ROW_LIMIT ? <p className={v.dim} data-testid="use-case-audit-partial">Showing the newest {AUDIT_ROW_LIMIT} rows; older rows may exist. The full audit log and its CSV export hold every row.</p> : null}<p><Link to="/admin/audit">Open the full audit log</Link></p></Card>;
 }
 

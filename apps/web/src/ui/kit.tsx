@@ -445,6 +445,8 @@ export function Card(props: {
   count?: number;
   /** singular and plural noun for `count`; row / rows by default */
   countNoun?: [string, string];
+  /** under the body and outside the X6 scroll box: paging and partial-data notices stay in view of the reader */
+  footer?: ReactNode;
 }) {
   const name = props.infoLabel ?? (typeof props.title === "string" ? props.title : "this section");
   const box = useRef<HTMLDivElement>(null);
@@ -546,6 +548,7 @@ export function Card(props: {
       ) : (
         props.children
       )}
+      {props.footer}
       {host && (
         <Modal open={expanded} full title={typeof props.title === "string" ? props.title : name} onClose={() => setExpanded(false)}>
           <div ref={slot} />

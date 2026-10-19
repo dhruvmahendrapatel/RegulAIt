@@ -157,6 +157,23 @@ export default function AuditLogPage() {
         <Card
           title="Entries"
           contain
+          // M2: the header says how much of the trail is loaded, and the paging line sits outside the scroll box
+          count={rows.length > 0 ? rows.length : undefined}
+          countNoun={audit.hasNextPage ? ["newest row loaded, older rows exist", "newest rows loaded, older rows exist"] : ["row", "rows"]}
+          footer={rows.length > 0 && (
+            <div className={v.row} data-testid="audit-paging">
+              <span className={v.dim}>
+                {audit.hasNextPage
+                  ? `Showing the newest ${plural(rows.length, "row")} — older rows exist`
+                  : `Showing all ${plural(rows.length, "row")}`}
+              </span>
+              {audit.hasNextPage && (
+                <Button size="sm" disabled={audit.isFetchingNextPage} onClick={() => void audit.fetchNextPage()}>
+                  {audit.isFetchingNextPage ? "Loading…" : "Load older"}
+                </Button>
+              )}
+            </div>
+          )}
           actions={
             <div className={a.formRow}>
               <Field label="Filter by user">
@@ -264,20 +281,6 @@ export default function AuditLogPage() {
               />
             }
           />
-          {rows.length > 0 && (
-            <div className={v.row} data-testid="audit-paging">
-              <span className={v.dim}>
-                {audit.hasNextPage
-                  ? `Showing the newest ${plural(rows.length, "row")} — older rows exist`
-                  : `Showing all ${plural(rows.length, "row")}`}
-              </span>
-              {audit.hasNextPage && (
-                <Button size="sm" disabled={audit.isFetchingNextPage} onClick={() => void audit.fetchNextPage()}>
-                  {audit.isFetchingNextPage ? "Loading…" : "Load older"}
-                </Button>
-              )}
-            </div>
-          )}
         </Card>
         {bomAuditId && (
           <Suspense fallback={<p role="status">Loading the Decision BOM…</p>}>

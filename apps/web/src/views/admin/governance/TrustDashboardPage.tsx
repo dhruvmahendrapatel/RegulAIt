@@ -165,7 +165,7 @@ function TrustReportView(props: {
         <div className={`${v.stat} ${s.tileOk}`}>
           <span className={v.statValue}>{d.totals.risksMitigated.toLocaleString()}</span>
           <span className={v.statLabel}>Mitigated</span>
-          <span className={v.faint}>Linked control or residual rating</span>
+          <span className={v.faint}>Closed, or a linked control and a residual rating</span>
         </div>
         <div className={`${v.stat} ${d.totals.risksUnmitigated > 0 ? s.tileAttention : ""}`}>
           <span className={v.statValue}>{d.totals.risksUnmitigated.toLocaleString()}</span>
@@ -386,8 +386,13 @@ function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
   const impacts: HeatCell["impact"][] = ["low", "medium", "high"];
   const count = (likelihood: HeatCell["likelihood"], impact: HeatCell["impact"]) =>
     cells.find((cell) => cell.likelihood === likelihood && cell.impact === impact)?.count ?? 0;
+  // the cells inside role="img" are presentational, so every cell's count and zone is in the image's own name
+  const cellNames = levels.flatMap((likelihood) => impacts.map((impact) => {
+    const zone = ZONE[RANK[likelihood] + RANK[impact]]!;
+    return `${likelihood} likelihood, ${impact} impact: ${count(likelihood, impact)} (${zone} zone)`;
+  }));
   return (
-    <div className={s.heatmap} role="img" aria-label={`${label} matrix by likelihood and impact`}>
+    <div className={s.heatmap} role="img" aria-label={`${label} matrix by likelihood and impact. ${cellNames.join("; ")}`}>
       <span />
       {impacts.map((impact) => <span key={impact} className={s.heatLabel}>{impact} impact</span>)}
       {levels.map((likelihood) => (
@@ -402,7 +407,6 @@ function Heatmap({ cells, label }: { cells: HeatCell[]; label: string }) {
               <div
                 key={`${likelihood}-${impact}`}
                 className={`${s.heatCell} ${s[`zone_${zone}`]} ${value === 0 ? s.zoneEmpty : ""}`}
-                aria-label={`${plural(value, `${label.toLowerCase()} item`)}: ${likelihood} likelihood, ${impact} impact, ${zone} zone`}
               >
                 <strong>{value}</strong>
                 <span className={s.zoneWord}>{zone.charAt(0).toUpperCase() + zone.slice(1)}</span>
