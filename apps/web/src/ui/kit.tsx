@@ -11,6 +11,7 @@ import {
   isValidElement,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -219,9 +220,12 @@ export function InfoButton(props: {
   children: ReactNode;
   /** nudges the panel left when the trigger sits near the right edge */
   align?: "start" | "end";
+  /** optional bold first line naming the term the panel explains */
+  term?: string;
 }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLSpanElement>(null);
+  const panel = useRef<HTMLSpanElement>(null);
   const panelId = useId();
 
   useEffect(() => {
@@ -234,19 +238,56 @@ export function InfoButton(props: {
         wrap.current?.querySelector("button")?.focus();
       }
     };
-    const onDown = (e: MouseEvent) => {
+    // pointerdown, not mousedown: a pen or a finger dismisses it the same way
+    const onDown = (e: PointerEvent) => {
       if (!wrap.current?.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener("keydown", onKey);
-    document.addEventListener("mousedown", onDown);
+    document.addEventListener("pointerdown", onDown);
     return () => {
       document.removeEventListener("keydown", onKey);
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("pointerdown", onDown);
     };
   }, [open]);
 
+  // ADR-0196 A4: in the top layer the panel can no longer be clipped by a
+  // table's scroll box or a card's overflow. Where the Popover API is missing
+  // (older engines, jsdom) it stays absolutely positioned under the trigger.
+  useLayoutEffect(() => {
+    const el = panel.current;
+    const trigger = wrap.current;
+    if (!open || !el || !trigger || typeof el.showPopover !== "function") return;
+    el.setAttribute("popover", "manual");
+    el.showPopover();
+    const place = () => {
+      const r = trigger.getBoundingClientRect();
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const below = r.bottom + 6 + h <= window.innerHeight - 8;
+      const left = props.align === "end" ? r.right - w : r.left;
+      el.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - 6 - h)}px`;
+      el.style.left = `${Math.min(Math.max(8, left), window.innerWidth - w - 8)}px`;
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, props.align]);
+
   return (
-    <span className={s.infoWrap} ref={wrap}>
+    <span
+      className={s.infoWrap}
+      ref={wrap}
+      // tabbing away closes it, so an open panel never trails behind focus
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
+      // inside a sortable header the click must not also sort the column
+      onClick={(e) => e.stopPropagation()}
+    >
       <button
         type="button"
         className={s.infoBtn}
@@ -264,7 +305,13 @@ export function InfoButton(props: {
         </svg>
       </button>
       {open && (
-        <span id={panelId} role="note" className={`${s.infoPanel} ${props.align === "end" ? s.infoPanelEnd : ""}`}>
+        <span id={panelId} ref={panel} role="note" className={`${s.infoPanel} ${props.align === "end" ? s.infoPanelEnd : ""}`}>
+          {props.term != null && (
+            <>
+              <b>{props.term}</b>
+              <br />
+            </>
+          )}
           {props.children}
         </span>
       )}
@@ -383,7 +430,37 @@ export function Card(props: {
   flush?: boolean;
   className?: string;
   style?: React.CSSProperties;
+  /** (i) beside the title; `infoLabel` names it when the title is not plain text */
+  info?: ReactNode;
+  infoLabel?: string;
+  /**
+   * X6: a long, read-only body scrolls inside the card instead of stretching
+   * the page, with an Expand button that opens the same body near full
+   * screen. Never for forms, warnings, decisions or step-ups — those must be
+   * fully visible, so this is opt-in per card.
+   */
+  contain?: boolean;
 }) {
+  const name = props.infoLabel ?? (typeof props.title === "string" ? props.title : "this section");
+  const body = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    const el = body.current;
+    if (!props.contain || !el || typeof ResizeObserver === "undefined") return;
+    // Expand is offered only when the box actually cuts content off
+    const check = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    check();
+    return () => ro.disconnect();
+  }, [props.contain]);
+  const expand = props.contain && overflows && (
+    <Button size="sm" onClick={() => setExpanded(true)} aria-haspopup="dialog">
+      Expand
+    </Button>
+  );
   return (
     <section
       className={[props.flush ? s.cardFlush : s.card, props.className ?? ""].join(" ")}
@@ -392,14 +469,46 @@ export function Card(props: {
       // shell .content) without a cross-module class reference
       data-rg-card=""
     >
-      {props.title != null && (
+      {(props.title != null || expand) && (
         <div className={s.cardTitle} style={props.flush ? { padding: "var(--s2) var(--s2) 0" } : undefined}>
-          <span style={{ flex: 1 }}>{props.title}</span>
+          <span style={{ flex: 1 }}>
+            {props.title}
+            {props.info != null && <InfoButton label={name}>{props.info}</InfoButton>}
+          </span>
           {props.actions}
+          {expand}
         </div>
       )}
-      {props.children}
+      {props.contain ? (
+        <div ref={body} className={s.contain} tabIndex={0} role="region" aria-label={`${name}, scrollable`}>
+          {props.children}
+        </div>
+      ) : (
+        props.children
+      )}
+      {props.contain && (
+        <Modal open={expanded} full title={typeof props.title === "string" ? props.title : name} onClose={() => setExpanded(false)}>
+          {props.children}
+        </Modal>
+      )}
     </section>
+  );
+}
+
+/**
+ * X7 (owner rule, 2026-10-19): a row's actions sit in fixed slots so the
+ * primary button of every row starts at the same x — primary, then secondary,
+ * then the rest. A row without a primary keeps the empty slot rather than
+ * shifting its other actions left. `slot` is the primary slot's minimum width;
+ * give one table one value.
+ */
+export function RowActions(props: { primary?: ReactNode; secondary?: ReactNode; rest?: ReactNode; slot?: string }) {
+  return (
+    <div className={s.rowActions} style={{ gridTemplateColumns: `minmax(${props.slot ?? "10rem"}, max-content) auto auto` }}>
+      <span>{props.primary}</span>
+      <span>{props.secondary}</span>
+      <span>{props.rest}</span>
+    </div>
   );
 }
 
@@ -414,11 +523,27 @@ const badgeTone: Record<Tone, string> = {
   info: `${s.badge} ${s.badgeInfo}`,
   primary: `${s.badge} ${s.badgePrimary}`,
 };
-export function Badge(props: { tone?: Tone; title?: string; children: ReactNode }) {
-  return (
+export function Badge(props: {
+  tone?: Tone;
+  title?: string;
+  children: ReactNode;
+  /** (i) after the badge — the accessible replacement for an explanatory `title` */
+  info?: ReactNode;
+  infoLabel?: string;
+}) {
+  const badge = (
     <span className={badgeTone[props.tone ?? "neutral"]} title={props.title}>
       {props.children}
     </span>
+  );
+  if (props.info == null) return badge;
+  return (
+    <>
+      {badge}
+      <InfoButton label={props.infoLabel ?? (typeof props.children === "string" ? props.children : "this status")}>
+        {props.info}
+      </InfoButton>
+    </>
   );
 }
 
@@ -516,6 +641,9 @@ export interface Column<T> {
   sort?: (row: T) => string | number;
   align?: "left" | "right";
   width?: string;
+  /** (i) beside the header text; `infoLabel` names it when the header is not plain text */
+  info?: ReactNode;
+  infoLabel?: string;
 }
 
 export function Table<T>(props: {
@@ -578,6 +706,9 @@ export function Table<T>(props: {
                   }
                 >
                   {c.header}
+                  {c.info != null && (
+                    <InfoButton label={c.infoLabel ?? (typeof c.header === "string" ? c.header : c.key)}>{c.info}</InfoButton>
+                  )}
                   {active && <span className={s.sortArrow}>{sortDir === 1 ? "▲" : "▼"}</span>}
                 </th>
               );
@@ -728,6 +859,8 @@ export function Modal(props: {
   actions?: ReactNode;
   /** roomier dialog — for side-by-side content, not for more prose */
   wide?: boolean;
+  /** near full screen — the expanded view of a contained card (X6) */
+  full?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -750,7 +883,7 @@ export function Modal(props: {
   if (!props.open) return null;
   return (
     <dialog
-      className={[s.modal, props.wide ? s.modalWide : "", props.className ?? ""].join(" ")}
+      className={[s.modal, props.wide ? s.modalWide : "", props.full ? s.modalFull : "", props.className ?? ""].join(" ")}
       role="dialog"
       aria-modal="true"
       aria-label={props.title}
