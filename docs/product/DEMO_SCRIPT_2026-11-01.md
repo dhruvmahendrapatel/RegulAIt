@@ -106,7 +106,7 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - Page header **Discovery sources**: *"Where RegulAIt may scan, read-only, for shadow AI. Every source is off until
     you enable it."*
   - **Active discovery** card: the posture sentence, which names each enabled source, for example *"Active discovery
-    scans 4 enabled source(s), read-only: … Nothing outside those sources is scanned."* (the count and names are the
+    scans n enabled source(s), read-only: … Nothing outside those sources is scanned."* (the count and names are the
     live data).
   - Four figures: **sources enabled**, **static credentials in use**, **static credentials older than 90 days**,
     **credentials with write scope unverified**.
@@ -145,9 +145,10 @@ UI: `apps/web/src/views/admin/governance/DiscoverySourcesPage.tsx`, `FederationC
   - *Acme Bank laptops (endpoint agent) (demo dataset)*, the endpoint agent, upload-fed.
 
   So the posture sentence reads *"Active discovery scans 5 enabled source(s), read-only: …"*. The GitLab, AWS and
-  Azure runs are **recorded runs**, replayed through the real discovery worker with no call to the provider, and the
-  **Reads** column says so: *recorded scan (demo:prepare fallback dataset)*. Say it: "on this prepared copy the
-  three network scans are recorded replays through the real worker". The **Cloud federation** card reads **off**: the
+  Azure runs are **recorded runs**, replayed through the real discovery worker with no call to the provider. The
+  screen does not say so: **Reads** shows *all read*, as for a live run, and the only marker is the *(demo dataset)*
+  suffix on each source name. So say it: "on this prepared copy the three network scans are recorded replays through
+  the real worker". The **Cloud federation** card reads **off**: the
   seed generates a signing key but does not turn federation on (that is the live instance's step-up). Skip step 2's
   scroll and say federation is on on the live instance. The device in the enrolment card has a **software key**
   badge, and it is there only if the laptop stack has `REGULAIT_PUBLIC_URL` set (otherwise `demo:check` FAILs
@@ -323,6 +324,8 @@ the day.
   the dev instance host**, over SSH or Session Manager (addendum, decision 2), opened before the demo. The exact
   command and environment on that host are **pending execution**: they are written into `DEMO_RUNBOOK.md` §7 only
   once run there.
+- **On LIVE:** the governance data this beat reads and the gate output it shows depend on the open `DEMO_RUNBOOK.md`
+  §7.1 step, which is **pending execution**.
 - **Fallback:** the output captured at T-24h (`real-gate.txt`, as in the 10-05 fallback). Say plainly it was captured
   from a real run.
 
@@ -387,7 +390,9 @@ UI: `apps/web/src/views/admin/governance/ContentTrustPage.tsx`.
   fictional demo-company names, with no personal data (ADR-0197 decisions 2-5 and 8). Say so: "we planted this
   usage; the scan is real".
 - **Seeded (FALLBACK path only):** the discovery dataset `demo:prepare` creates through the real API paths, with the
-  GitLab, AWS and Azure runs replayed as recorded scans through the real worker and labelled so in **Reads**. The live
+  GitLab, AWS and Azure runs replayed as recorded scans through the real worker. On screen only the *(demo dataset)*
+  suffix on each source name marks them (**Reads** shows *all read*), so the presenter says aloud that they are
+  recorded replays. The live
   database holds no seeded discovery data (ADR-0197 addendum, decision 3).
 - **Seeded (Act 2):** the governance data of the 10-05 demo (use cases, alerts, traffic).
 - **Mock:** the model provider for governed traffic (keyless mock agents); the governed traffic itself is generated

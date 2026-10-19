@@ -65,9 +65,10 @@ HOST=127.0.0.1 REGULAIT_OFFLINE_CHECKS=1 pnpm --filter @regulait/gateway start
 ```
 
 **Ada and Morgan enrol two-factor once (ADR-0181).** MFA is required for admins by default, and
-both are admins. At each one's first sign-in (or the first after `demo:set-passwords`, which clears
-the seed's enrolment) the app shows an enrolment secret: add it to an authenticator app on the
-presenting phone and type the 6-digit code. Every later sign-in asks for a code. **Morgan enrols
+both are admins. Without `demo:set-passwords` (4b), `seed` has already enrolled both and printed
+each one's otpauth URI once in its output: add the two URIs to an authenticator app on the
+presenting phone. After (4b), which clears the seed's enrolment, each admin enrols at her next
+sign-in: the app shows an enrolment secret, add it to the authenticator and type the 6-digit code. Every later sign-in asks for a code. **Morgan enrols
 before her Approve in `/ui/inbox`** (the remediation sign-off, script S3): until she has, `demo:check`
 FAILs "1 Remediation plan" and its hint says to sign in as her and enrol. Dana and Avery are not
 admins and are not asked. Do this during preparation, not in front of the audience. The API keys
@@ -508,7 +509,7 @@ owner's notes and the infrastructure lane's state.
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | Fallback stack on the laptop prepared with `demo:prepare` (the night before); `demo:check` 0 fail; Ada, Avery and Morgan signed in there too, in a separate browser | pending execution |
 | T-24h | `demo:gate` run once from the dev instance host terminal; its output captured to `real-gate.txt` as the fallback (the 10-05 fallback step 1) | pending execution |
-| T-24h | The AWS budget alarm (80% of USD 50) has not fired; planted usage still within budget (ADR-0197 decision 4) | pending execution |
+| T-24h | Neither demo budget alert has fired (AWS USD 40 and Azure USD 10, USD 50 in total; each alerts at 80%, USD 32 and USD 8, `docs/deployment/DEMO_REAL_ACCOUNTS.md`); planted usage still within budget (ADR-0197 decision 4) | pending execution |
 | T-1h | Browsers: Profile A (Ada), Profile B (Avery) and Profile C (Morgan) on the live instance, all signed in; the fallback browser signed in to the laptop stack; one spare browser installed | pending execution |
 | T-1h | A terminal open on the dev instance host for G3 | pending execution |
 | T-1h | Navigation pinned in every profile (**Pin navigation**) | pending execution |

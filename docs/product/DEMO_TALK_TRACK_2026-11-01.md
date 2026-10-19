@@ -86,7 +86,8 @@ defaults; respond with a human in the loop; the deploy gate; regulatory intellig
   admin enabled and the evidence supplied, and says which.
 - **Never say the planted usage is a customer's.** It is ours, planted for the demo under fictional names.
 - **Never present the fallback's recorded runs as live scans.** On the prepared copy, the GitLab, AWS and Azure runs
-  are recorded replays through the real worker, and the **Reads** column says so.
+  are recorded replays through the real worker. The screen does not say so (**Reads** shows *all read*; only the
+  *(demo dataset)* suffix on each source name marks them), so say it aloud.
 - **Never call git scanning keyless.** It uses a read-only token today.
 - **Never call the endpoint agent signed and shipped.** Its packages are built unsigned today; keyless release
   signing is decided (owner decision Q2) and not built.
