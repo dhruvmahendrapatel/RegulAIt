@@ -84,7 +84,7 @@ export function DecisionReceiptsPanel() {
       <Field label="First receipt sequence"><Input type="number" min={1} required step={1} value={from} onChange={(event) => setFrom(event.target.value)} /></Field>
       <Field label="Last receipt sequence (blank = latest)"><Input type="number" min={1} step={1} value={to} onChange={(event) => setTo(event.target.value)} /></Field>
       <p>Exporting is audited. A range starting after sequence 1 cannot verify the omitted prefix on its own.</p>
-      <Button type="submit" disabled={act.busy || reading || !measured || status.data!.lastSeq < 1}>Export receipt bundle</Button>
+      <div><Button type="submit" size="sm" disabled={act.busy || reading || !measured || status.data!.lastSeq < 1}>Export receipt bundle</Button></div>
     </form>
     <Field label="Receipt bundle to verify"><Input type="file" accept=".json,application/json" disabled={act.busy} onChange={(event) => {
       const version = ++readVersion.current;
@@ -98,9 +98,9 @@ export function DecisionReceiptsPanel() {
       }).catch(() => { if (version === readVersion.current) act.setError("The receipt file could not be read."); })
         .finally(() => { if (version === readVersion.current) setReading(false); });
     }} /></Field>
-    <Button disabled={act.busy || reading || bundle === null} onClick={() => void act.run(async () => { setResult(await api.post<Verification>("/v1/receipts/verify", bundle)); }, "Receipt bundle checked")}>Verify loaded receipt bundle</Button>
     <p>Online verification uses this deployment’s recorded public keys, never a key supplied only by the uploaded bundle.</p>
     <p>Offline verification is also available with the receipt verifier CLI. Pin public keys independently; keys supplied by an untrusted bundle do not establish the signer’s identity.</p>
+    <div><Button size="sm" disabled={act.busy || reading || bundle === null} onClick={() => void act.run(async () => { setResult(await api.post<Verification>("/v1/receipts/verify", bundle)); }, "Receipt bundle checked")}>Verify loaded receipt bundle</Button></div>
     {act.error && <p role="alert">{act.error}</p>}
     {result && <div role="status" className={v.stack}>
       {result.results.length === 0 ? <p>No receipts were checked; this is not a completeness finding.</p> : <ul>{result.results.map((row, i) => <li key={i}>Receipt {row.receiptSeq ?? "unknown"}: {row.status} — {row.reason}</li>)}</ul>}

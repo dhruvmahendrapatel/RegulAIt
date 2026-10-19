@@ -381,7 +381,7 @@ function RegisterServerForm() {
         <Field label="Closure image digest"><Input required pattern="sha256:[0-9a-f]{64}" value={image} onChange={(event) => setImage(event.target.value)} disabled={act.busy} placeholder="sha256:…" /></Field>
         <Field label="Entry point in the image"><Input required pattern="/.*" value={command} onChange={(event) => setCommand(event.target.value)} disabled={act.busy} placeholder="/srv/mcp/server.js" /></Field>
         <StdioArguments args={args} onChange={setArgs} disabled={act.busy} />
-        <p>Stdio must be enabled above. The server never runs on the gateway: it runs from the closure image (built from the RegulAIt stdio base, pinned by its digest) inside a sandbox an executor starts, only after the executor proves the isolation the call requires. Without such an executor every call is refused. Registration requires admission approval.</p>
+        <p>Stdio must be enabled above. The server never runs on the gateway: it runs from the closure image (built from the regulAIt stdio base, pinned by its digest) inside a sandbox an executor starts, only after the executor proves the isolation the call requires. Without such an executor every call is refused. Registration requires admission approval.</p>
       </> : <Field label="URL" grow>
         <Input required value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://mcp.internal/repo" />
       </Field>
@@ -755,7 +755,7 @@ function McpExecutionCard(props: { server: McpServer | undefined }) {
         </>
       ) : server?.transport === "streamable_http" || server?.transport === "sse" ? (
         <p>
-          This is a remote MCP server: it runs on its own host, which RegulAIt does not isolate. Its evidence records the execution as
+          This is a remote MCP server: it runs on its own host, which regulAIt does not isolate. Its evidence records the execution as
           external, never as an isolation class.
         </p>
       ) : (

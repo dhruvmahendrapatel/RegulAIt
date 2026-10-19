@@ -6,13 +6,13 @@ import { expect, test } from "@playwright/test";
 import { expectAxeClean, installBuilderMock, PROJECT, sent } from "./builder-fixtures";
 
 test.describe("ADR-0172: templates", () => {
-  test("cards by RegulAIt → detail explains the agent → Create agent seeds it from the template", async ({ page }) => {
+  test("cards by regulAIt → detail explains the agent → Create agent seeds it from the template", async ({ page }) => {
     const st = await installBuilderMock(page);
     await page.goto("/ui/builder/templates");
     await expect(page.getByRole("heading", { level: 1, name: "Agent templates" })).toBeVisible();
     const cards = page.getByRole("list", { name: "Templates" });
     await expect(cards.getByRole("link")).toHaveCount(2);
-    await expect(cards.getByText("by RegulAIt")).toHaveCount(2);
+    await expect(cards.getByText("by regulAIt")).toHaveCount(2);
     await expect(cards.getByRole("link", { name: /AI intake reviewer/ }).getByRole("img", { name: "jira" })).toBeVisible();
     await page.getByRole("radio", { name: "Risk" }).check();
     await expect(cards.getByRole("link")).toHaveCount(1);

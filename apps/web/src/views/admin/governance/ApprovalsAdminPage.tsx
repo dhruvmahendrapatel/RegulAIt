@@ -66,7 +66,7 @@ const OBJECT_TYPES: Array<[string, string]> = [
   ["infra_operation", "infrastructure operation"],
   ["model_card", "model-card sign-off (MRM)"],
   ["copilot_proposal", "governance-copilot proposal"],
-  ["training_job", "RegulAIt-LLM training run"],
+  ["training_job", "regulAIt-LLM training run"],
   ["grant_certification", "certification-campaign item"],
   ["sod_override", "separation-of-duties override"],
   ["remediation", "governance-alert remediation"],
