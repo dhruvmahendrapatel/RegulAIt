@@ -181,7 +181,7 @@ export default function GovernanceAlertsPage() {
                         const posted = await api.post<{ posted: true; connection: string; channel: string }>(`/v1/governance/alerts/${selected.id}/post`);
                         setPostResult(`Posted to ${posted.connection} · ${posted.channel}`);
                       }, null)}>Post to chat</Button>
-                      <InfoButton label="Post to chat">Posts this alert to the first enabled chat workspace, unless the API is given an explicit connection.</InfoButton>
+                      <InfoButton label="where alerts are posted">Posts this alert to the first enabled chat workspace, unless the API is given an explicit connection.</InfoButton>
                     </div>
                     <OwnershipPanel alert={selected} onChanged={refresh} />
                     {postResult ? <p className={s.statusLine} role="status">{postResult}</p> : null}
