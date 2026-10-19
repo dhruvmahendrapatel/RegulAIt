@@ -254,6 +254,21 @@ test.describe("ADR-0186 A2+B: dual control and passkey-signed approvals", () => 
     await expect(review.getByRole("alert")).toContainText("You've already decided this approval, or someone you're linked to by delegation has.");
   });
 
+  test("the review dialog's Tab loop includes Binding details, which the kit dialog trap must count as a stop", async ({ page }) => {
+    await mockApi(page, { me: { ...BEN, id: "u-admin", displayName: "Admin" }, admin: true, approvals: [toolApproval()] });
+    await page.goto("/ui/admin/approvals");
+    await page.getByRole("button", { name: "Review action write_file" }).click();
+    const review = page.getByRole("dialog", { name: "Review MCP action" });
+    await review.getByText("Binding details", { exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    // as mcp-action-review.spec (real stack): Tab from Close lands on the disclosure, Shift+Tab comes back
+    await review.getByRole("button", { name: "Close", exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await expect(review.locator("summary")).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(review.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+  });
+
   test("the admin queue signs a tool call with no override, and shows when you are waiting on another approver", async ({ page }) => {
     await fakeWebAuthn(page);
     const cap = await mockApi(page, {
