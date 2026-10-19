@@ -641,6 +641,20 @@ async function ensureDiscovery(h: Harness, db: Db, data: DemoShadowDiscoveryData
     const r = await h.call("POST", url, {});
     if (!h.ok(r.status)) h.fail(`catalogue ${url}`, r);
   }
+  // the fictional provider the Shadow AI import example names (owner decision on #453): a real vendor never appears in
+  // the demo's own sample evidence, and the dry run still shows a match. The route upserts on kind + value, so a rerun
+  // leaves one row.
+  {
+    const r = await h.call("POST", "/v1/shadow-ai/catalogue", {
+      provider: "Acme LLM",
+      kind: "hostname",
+      value: "api.acme-llm.example",
+      matchType: "exact_host",
+      provenance: "demo dataset (fictional provider)",
+      note: "Fictional provider for the Shadow AI import example. Not a real vendor.",
+    });
+    if (!h.ok(r.status)) h.fail("catalogue fictional demo provider", r);
+  }
   const sources = new Map<string, Json>();
   for (const spec of demoSourceSpecs(data)) {
     const s = await ensureSource(h, spec, allowStepUps);
