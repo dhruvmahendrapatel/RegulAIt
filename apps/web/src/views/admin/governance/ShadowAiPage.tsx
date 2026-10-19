@@ -709,7 +709,7 @@ export default function ShadowAiPage() {
                 value={rawContent}
                 onChange={(e) => setRawContent(e.target.value)}
                 spellCheck={false}
-                placeholder="CEF:0|Acme|Proxy|1.0|100|allowed|3|dhost=api.openai.com suser=alice"
+                placeholder="CEF:0|Acme|Proxy|1.0|100|allowed|3|dhost=llm.example suser=psn:4d2e"
                 data-testid="raw-content"
               />
             </Field>
@@ -854,7 +854,7 @@ export default function ShadowAiPage() {
                 placeholder={
                   discIsManifest
                     ? '{"dependencies": {"openai": "^4.0.0"}}'
-                    : "Aug 20 10:00:01 dnsmasq[812]: query[A] api.openai.com from 10.1.2.3"
+                    : "Aug 20 10:00:01 dnsmasq[812]: query[A] llm.example from laptop-07.example"
                 }
                 data-testid="disc-content"
               />

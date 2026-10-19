@@ -292,7 +292,7 @@ export default function DiscoverySourcesPage() {
             <Table<DiscoverySourceView>
               rows={list}
               rowKey={(s) => s.id}
-              empty={<EmptyState title="No discovery source" body="Nothing is scanned. Add a source once a scanner for its kind is built." />}
+              empty={<EmptyState title="No discovery source" body="Nothing is scanned yet. Add a source above to start scanning, read-only." />}
               columns={[
                 { key: "name", header: "Source", render: (s) => <><strong>{s.name}</strong><div className={v.faint}>{kinds.find((k) => k.kind === s.kind)?.label ?? s.kind}</div></> },
                 { key: "state", header: "State", render: (s) => (s.enabled ? <Badge tone="warn">enabled</Badge> : <Badge tone="neutral">disabled</Badge>) },
