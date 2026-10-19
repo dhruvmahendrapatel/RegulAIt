@@ -6,13 +6,14 @@
  * step-up there.
  */
 import { Link } from "react-router-dom";
+import { plural } from "../../../api/format";
 import v from "../../views.module.css";
 import { sightingLines, type SightingView } from "./discoverySourcesModel";
 
-export function DiscoverySightings(props: { evidence: readonly SightingView[] | undefined }) {
+export function DiscoverySightings(props: { evidence: readonly SightingView[] | undefined; collapsed?: boolean }) {
   const lines = sightingLines(props.evidence);
   if (lines.length === 0) return <span className={v.faint}>—</span>;
-  return (
+  const list = (
     <div className={v.stackTight}>
       {lines.map((l, i) => (
         <span key={i} className={v.faint}>
@@ -28,5 +29,13 @@ export function DiscoverySightings(props: { evidence: readonly SightingView[] | 
         </span>
       ))}
     </div>
+  );
+  // SH2: in the findings table the places fold behind a count; a native disclosure, keyboard and touch included
+  if (!props.collapsed) return list;
+  return (
+    <details>
+      <summary>{plural(lines.length, "place")}</summary>
+      {list}
+    </details>
   );
 }

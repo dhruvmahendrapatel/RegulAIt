@@ -18,9 +18,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../../api/client";
+import { humanize, plural } from "../../../api/format";
+import ds from "./discoverySources.module.css";
 import { api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, RowActions, Select, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, Stat, useAction } from "../adminKit";
 import v from "../../views.module.css";
 import FederationCard from "./FederationCard";
@@ -188,9 +190,34 @@ export default function DiscoverySourcesPage() {
 
   return (
     <>
-      <PageHeader title="Discovery sources" sub="Where RegulAIt may scan, read-only, for shadow AI. Every source is off until you enable it." />
+      <PageHeader
+        title="Discovery sources"
+        sub="Where RegulAIt may scan, read-only, for shadow AI. Every source is off until you enable it."
+        info={
+          <>
+            Discovery sources are the places RegulAIt reads, read-only, to find AI use nobody registered, such as cloud
+            accounts, code repositories and identity logs. Each source is off until an admin turns it on, and every scan
+            is audited.
+          </>
+        }
+      />
       <div className={v.stack}>
         <QueryGate loading={sources.isPending || scanners.isPending} error={sources.error ?? scanners.error} onRetry={() => void refetchAll()}>
+          {/* S1: how discovery works, in three steps drawn from the live posture */}
+          <ol className={ds.howItWorks} aria-label="How discovery works">
+            <li>
+              <span className={ds.stepNo} aria-hidden="true">1</span>
+              <span><strong>Connect read-only</strong><span className={v.faint}>{posture?.sourcesEnabled.length ?? 0} of {posture?.sourcesTotal ?? 0} sources enabled</span></span>
+            </li>
+            <li>
+              <span className={ds.stepNo} aria-hidden="true">2</span>
+              <span><strong>Scan on a schedule</strong><span className={v.faint}>{plural(runs.data?.runs.length ?? 0, "recent run")}</span></span>
+            </li>
+            <li>
+              <span className={ds.stepNo} aria-hidden="true">3</span>
+              <span><strong>Findings land in Shadow AI</strong><span className={v.faint}><Link to="/admin/shadow-ai">Open the findings</Link></span></span>
+            </li>
+          </ol>
           <Card title="Active discovery">
             <p data-testid="discovery-statement">{posture?.statement}</p>
             <p className={v.faint}>
@@ -199,10 +226,10 @@ export default function DiscoverySourcesPage() {
             </p>
           </Card>
           <div className={v.grid4}>
-            <Stat value={`${posture?.sourcesEnabled.length ?? 0} of ${posture?.sourcesTotal ?? 0}`} label="sources enabled" />
-            <Stat value={posture?.staticCredentials.length ?? 0} label="static credentials in use" />
-            <Stat value={posture?.staleCredentials.length ?? 0} label={`static credentials older than ${posture?.credentialWarningAgeDays ?? 90} days`} />
-            <Stat value={posture?.writeScopeUnverified.length ?? 0} label="credentials with write scope unverified" />
+            <Stat value={`${posture?.sourcesEnabled.length ?? 0} of ${posture?.sourcesTotal ?? 0}`} label={<>Sources enabled<InfoButton label="Sources enabled">How many configured sources are switched on. A source that is off is never scanned, so anything it would find is missing from the findings.</InfoButton></>} />
+            <Stat value={posture?.staticCredentials.length ?? 0} label={<>Static credentials in use<InfoButton label="Static credentials in use">Sources that sign in with a stored key instead of short-lived federated access. Allowed, but rotate them regularly. Federation is preferred.</InfoButton></>} />
+            <Stat value={posture?.staleCredentials.length ?? 0} label={<>Static credentials older than {posture?.credentialWarningAgeDays ?? 90} days<InfoButton label="old static credentials">Stored keys past the warning age set in Settings on this page. Rotate them or switch the source to federated access.</InfoButton></>} />
+            <Stat value={posture?.writeScopeUnverified.length ?? 0} label={<>Write scope unverified<InfoButton label="Write scope unverified">RegulAIt asks only for read access. This counts credentials it could not confirm are read-only. Check the role in the provider console before the next scan.</InfoButton></>} />
           </div>
 
           <Card title="Scanner kinds">
@@ -248,7 +275,7 @@ export default function DiscoverySourcesPage() {
                   )}
                   {/* an upload-fed kind (osquery results, MDM/EDR exports) is never scheduled */}
                   {!kinds.find((k) => k.kind === (form.editing?.kind ?? form.kind))?.uploadFed && (
-                    <Field label="Schedule (hours)">
+                    <Field label="Schedule (hours)" help="How often an enabled source is scanned. A shorter interval finds new use sooner and makes more calls to the provider.">
                       <Input type="number" min={1} max={720} value={form.scheduleHours} onChange={(e) => setForm({ ...form, scheduleHours: e.target.value })} />
                     </Field>
                   )}
@@ -261,7 +288,7 @@ export default function DiscoverySourcesPage() {
                   Organisation-level scope (everything the target holds)
                 </label>
                 {!form.orgLevel && (
-                  <Field label="Scope: what to scan (one per line)">
+                  <Field label="Scope: what to scan (one per line)" help="Limits the scan to the accounts, projects or groups listed, one per line. Leave it empty to scan everything the credential can read.">
                     <Textarea rows={3} value={form.include} spellCheck={false} onChange={(e) => setForm({ ...form, include: e.target.value })} />
                   </Field>
                 )}
@@ -276,7 +303,7 @@ export default function DiscoverySourcesPage() {
             {act.error && <div className={v.errLine} role="alert">{act.error}</div>}
           </Card>
 
-          <Card title="Sources">
+          <Card title="Sources" contain>
             <Table<DiscoverySourceView>
               rows={list}
               rowKey={(s) => s.id}
@@ -291,9 +318,13 @@ export default function DiscoverySourcesPage() {
                   render: (s) =>
                     s.credential ? (
                       <>
-                        <Badge tone={s.credential.mode === "static" ? "warn" : "ok"}>{s.credential.mode}</Badge>{" "}
+                        <Badge tone={s.credential.mode === "static" ? "warn" : "ok"}>{s.credential.mode === "static" ? "Static key" : humanize(s.credential.mode)}</Badge>{" "}
                         {s.credential.ageWarning && <Badge tone="danger">{`${s.credential.ageDays} days old`}</Badge>}
-                        {s.credential.writeScope === "unverified" && <div className={v.faint}>write scope unverified</div>}
+                        {s.credential.writeScope === "unverified" && (
+                          <div>
+                            <Badge tone="warn" info="RegulAIt asks only for read access and could not confirm this credential is read-only. Check the role in the provider console before the next scan.">Write scope unverified</Badge>
+                          </div>
+                        )}
                         {s.credential.writeScope === "refused" && <Badge tone="danger">refused: grants write access</Badge>}
                       </>
                     ) : (
@@ -309,14 +340,18 @@ export default function DiscoverySourcesPage() {
                   key: "actions",
                   header: "Actions",
                   render: (s) => (
-                    <div className={v.row}>
-                      {s.enabled ? (
-                        <Button size="sm" disabled={act.busy} onClick={() => disable(s)}>Disable</Button>
-                      ) : (
-                        <Button size="sm" disabled={act.busy || !s.scannerBuilt} onClick={() => enable(s)}>Enable</Button>
-                      )}
-                      <Button size="sm" disabled={act.busy || !s.enabled} onClick={() => runNow(s)}>Run now</Button>
-                      <Button
+                    <>
+                    <RowActions
+                      slot="6.5rem"
+                      primary={
+                        s.enabled ? (
+                          <Button size="sm" disabled={act.busy} onClick={() => runNow(s)}>Run now</Button>
+                        ) : (
+                          <Button size="sm" disabled={act.busy || !s.scannerBuilt} onClick={() => enable(s)}>Enable</Button>
+                        )
+                      }
+                      secondary={
+                        <Button
                         size="sm"
                         disabled={act.busy}
                         onClick={() =>
@@ -333,12 +368,24 @@ export default function DiscoverySourcesPage() {
                       >
                         Edit
                       </Button>
+                      }
+                      rest={
+                        <details className={ds.more}>
+                          <summary>More</summary>
+                          <div className={v.row}>
+                            {s.enabled ? <Button size="sm" disabled={act.busy} onClick={() => disable(s)}>Disable</Button> : null}
                       <Button size="sm" disabled={act.busy} onClick={() => setCred({ source: s, mode: "federated", publicConfig: s.credential ? formatKeyValues(editablePublicConfig(s.credential.publicConfig)) : "", secret: "" })}>
                         {s.credential ? "Replace credential" : "Add credential"}
                       </Button>
-                      {s.credential && <Button size="sm" variant="danger" disabled={act.busy} onClick={() => revoke(s)}>Revoke credential</Button>}
-                      <Button size="sm" variant="danger" disabled={act.busy || s.enabled} onClick={() => remove(s)}>Delete</Button>
-                    </div>
+                            {s.credential && <Button size="sm" variant="danger" disabled={act.busy} onClick={() => revoke(s)}>Revoke credential</Button>}
+                            <Button size="sm" variant="danger" disabled={act.busy || s.enabled} onClick={() => remove(s)}>Delete</Button>
+                          </div>
+                          {s.enabled ? <p className={v.faint}>Delete is available once the source is disabled.</p> : null}
+                        </details>
+                      }
+                    />
+                    {!s.enabled && !s.scannerBuilt ? <div className={v.faint}>Its scanner is not built yet, so it cannot be enabled.</div> : null}
+                    </>
                   ),
                 },
               ]}
@@ -378,7 +425,8 @@ export default function DiscoverySourcesPage() {
 
           <EndpointAgentCard sources={list} />
 
-          <Card title="Recent runs">
+          <div className={v.grid2}>
+          <Card title="Recent runs" contain>
             <Table<DiscoveryRunView>
               rows={runs.data?.runs ?? []}
               rowKey={(r) => r.id}
@@ -395,28 +443,6 @@ export default function DiscoverySourcesPage() {
             />
           </Card>
 
-          <FederationCard />
-
-          <Card title="Settings">
-            <div className={v.stack}>
-              <p className={v.faint}>
-                Static credentials older than {settings.data?.credentialWarningAgeDays ?? 90} days are flagged. Endpoint evidence is kept{" "}
-                {settings.data?.endpointRetentionDays ?? 90} days. Shortening either is free; lengthening either asks you to confirm it&apos;s you.
-              </p>
-              <div className={v.row}>
-                <Field label="Credential warning age (days)">
-                  <Input type="number" min={1} max={365} placeholder={String(settings.data?.credentialWarningAgeDays ?? "")} value={warnDays} onChange={(e) => setWarnDays(e.target.value)} />
-                </Field>
-                <Field label="Endpoint evidence retention (days)">
-                  <Input type="number" min={1} max={3650} placeholder={String(settings.data?.endpointRetentionDays ?? "")} value={retentionDays} onChange={(e) => setRetentionDays(e.target.value)} />
-                </Field>
-              </div>
-              <div>
-                <Button disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim())} onClick={saveSettings}>Save settings</Button>
-              </div>
-            </div>
-          </Card>
-
           <Card title="Reveal a pseudonym">
             <div className={v.stack}>
               <p className={v.faint}>
@@ -424,7 +450,7 @@ export default function DiscoverySourcesPage() {
                 confirm it&apos;s you and is audited.
               </p>
               <div className={v.row}>
-                <Field label="Pseudonym">
+                <Field label="Pseudonym" help="People in findings appear as pseudonyms. Revealing a real name needs a reason, and every reveal is audited.">
                   <Input value={pseudonym} spellCheck={false} placeholder="psn:…" onChange={(e) => setPseudonym(e.target.value)} />
                 </Field>
                 <Button disabled={act.busy || !/^psn:[0-9a-f]{24}$/.test(pseudonym.trim())} onClick={reveal}>Reveal</Button>
@@ -436,6 +462,30 @@ export default function DiscoverySourcesPage() {
               )}
             </div>
           </Card>
+          </div>
+
+          <FederationCard />
+
+          <Card title="Settings">
+            <div className={v.stack}>
+              <p className={v.faint}>
+                Static credentials older than {settings.data?.credentialWarningAgeDays ?? 90} days are flagged. Endpoint evidence is kept{" "}
+                {settings.data?.endpointRetentionDays ?? 90} days. Shortening either is free; lengthening either asks you to confirm it&apos;s you.
+              </p>
+              <div className={v.row}>
+                <Field label="Credential warning age (days)" help="Static credentials older than this are flagged on this page.">
+                  <Input type="number" min={1} max={365} placeholder={String(settings.data?.credentialWarningAgeDays ?? "")} value={warnDays} onChange={(e) => setWarnDays(e.target.value)} />
+                </Field>
+                <Field label="Endpoint evidence retention (days)" help="How long raw scan evidence is kept before deletion. Findings and their audit history are kept.">
+                  <Input type="number" min={1} max={3650} placeholder={String(settings.data?.endpointRetentionDays ?? "")} value={retentionDays} onChange={(e) => setRetentionDays(e.target.value)} />
+                </Field>
+              </div>
+              <div>
+                <Button disabled={act.busy || !settings.data || (!warnDays.trim() && !retentionDays.trim())} onClick={saveSettings}>Save settings</Button>
+              </div>
+            </div>
+          </Card>
+
         </QueryGate>
       </div>
     </>

@@ -46,6 +46,12 @@ export interface RemediationPlan {
 /** the reference every remediation workflow's description carries (how the server finds an unlinked start) */
 export const remediationReference = (findingId: string) => `shadow-AI finding ${findingId}`;
 
+/** a description without its trailing finding reference, as the form shows it */
+export const stripReference = (description: string, findingId: string): string => {
+  const suffix = ` — ${remediationReference(findingId)}`;
+  return description.endsWith(suffix) ? description.slice(0, -suffix.length) : description;
+};
+
 /** the terminal statuses that leave a finding unremediated (the gateway's UNSUCCESSFUL_TERMINAL_STATUSES): never
  * linkable, and a finding linked to one may take a new workflow. `completed` is the successful end */
 export const UNSUCCESSFUL_TERMINAL_STATUSES: readonly string[] = ["denied", "aborted", "rolled_back"];
@@ -80,7 +86,8 @@ export interface StartForm {
 }
 
 export const startFormFrom = (plan: RemediationPlan): StartForm => ({
-  description: plan.workflowRequest.body.change.description,
+  // SH5: the person edits words, not an id; startInstanceBody puts the finding reference back on every start
+  description: stripReference(plan.workflowRequest.body.change.description, plan.findingId),
   // no default: where the ungoverned usage runs is a fact the person states
   environment: "",
   projectId: "",

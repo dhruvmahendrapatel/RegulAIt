@@ -1,0 +1,45 @@
+/* Discovery sources (Governed - Designer batch 2, owner-approved on #453). Lazy CSS, tokens only. */
+.howItWorks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--s2);
+  margin: 0;
+  padding: var(--s2);
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--rg-glass);
+}
+.howItWorks li {
+  display: flex;
+  gap: var(--s1-5);
+  align-items: flex-start;
+}
+.howItWorks li > span:last-child {
+  display: flex;
+  flex-direction: column;
+}
+.stepNo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  inline-size: 1.5rem;
+  block-size: 1.5rem;
+  border-radius: var(--rg-r-pill);
+  background: var(--rg-positive-tint);
+  color: var(--rg-positive-deep);
+  font-weight: 700;
+  font-size: var(--text-sm);
+}
+/* "More": a native disclosure, so the rarer actions stay one keystroke away without a menu component */
+.more > summary {
+  cursor: pointer;
+  color: var(--rg-signal-700);
+  font-weight: 600;
+  font-size: var(--text-sm);
+  padding-block: var(--s0);
+}
+.more[open] > div {
+  margin-block-start: var(--s1);
+}

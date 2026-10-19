@@ -363,12 +363,12 @@ test.describe("U2: governance records", () => {
     await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
     await expect(plan).toContainText("no governed replacement is registered for this provider");
-    await expect(plan.getByLabel("Environment")).toHaveValue("");
+    await expect(plan.getByLabel("Environment", { exact: true })).toHaveValue("");
     // an assigned workflow: no "admin must assign" note
     await expect(plan.getByTestId("shadow-no-assignment-rule")).toHaveCount(0);
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await expect(page.getByRole("dialog", { name: "Start a remediation workflow?" })).toHaveCount(0);
-    await plan.getByLabel("Environment").fill("production");
+    await plan.getByLabel("Environment", { exact: true }).fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     const dialog = page.getByRole("dialog", { name: "Start a remediation workflow?" });
     await expect(dialog).toContainText("its disposition becomes confirmed");
@@ -394,7 +394,7 @@ test.describe("U2: governance records", () => {
     await page.goto("/ui/admin/shadow-ai");
     await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
-    await plan.getByLabel("Environment").fill("staging");
+    await plan.getByLabel("Environment", { exact: true }).fill("staging");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     await expect(plan.getByRole("alert")).toContainText("No workflow assignment rule covers the change type 'shadow-ai-remediation'");
@@ -415,7 +415,7 @@ test.describe("U2: governance records", () => {
     await page.goto("/ui/admin/shadow-ai");
     await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
     const plan = page.getByTestId("shadow-remediation");
-    await plan.getByLabel("Environment").fill("production");
+    await plan.getByLabel("Environment", { exact: true }).fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     const unlinked = plan.getByTestId("shadow-started-unlinked");
@@ -433,7 +433,7 @@ test.describe("U2: governance records", () => {
     await page.goto("/ui/admin/shadow-ai");
     await page.getByRole("button", { name: "Remediation plan for acme/billing" }).click();
     let plan = page.getByTestId("shadow-remediation");
-    await plan.getByLabel("Environment").fill("production");
+    await plan.getByLabel("Environment", { exact: true }).fill("production");
     await plan.getByRole("button", { name: "Start remediation workflow…" }).click();
     await page.getByRole("dialog", { name: "Start a remediation workflow?" }).getByRole("button", { name: "Start and link" }).click();
     await expect(plan.getByTestId("shadow-started-unlinked")).toBeVisible();

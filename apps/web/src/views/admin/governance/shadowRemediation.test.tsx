@@ -71,6 +71,14 @@ describe("shadow-AI remediation start body", () => {
     expect(kept.ok && kept.body.change.paths).toEqual(["acme/billing", "src/llm.ts"]);
   });
 
+  it("shows the description without the raw finding id, and the start puts the reference back (SH5)", () => {
+    const shown = startFormFrom(plan()).description;
+    expect(shown).not.toContain(FINDING);
+    expect(shown).toBe("Pull acme/billing (example-provider) into governance");
+    const built = startInstanceBody(plan(), { ...startFormFrom(plan()), environment: "staging" });
+    expect(built.ok && built.body.change.description).toContain(remediationReference(FINDING));
+  });
+
   it("never accepts the placeholder environment", () => {
     expect(startInstanceBody(plan(), { ...startFormFrom(plan()), environment: "unstated" })).toMatchObject({ ok: false });
   });
