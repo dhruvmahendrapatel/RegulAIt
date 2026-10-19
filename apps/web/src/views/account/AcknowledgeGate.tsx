@@ -247,7 +247,8 @@ export default function AcknowledgeGate(props: { children: ReactNode }) {
       <div ref={gate} tabIndex={-1} role="region" aria-label="AI policy acknowledgement">
         <Card title="Before you continue: AI policies to acknowledge">
           <div className={v.stack}>
-            <p className={v.hint}>
+            {/* `hint` centres itself (it is made for empty states); in this stack the text starts at the card's edge */}
+            <p className={v.hint} style={{ alignSelf: "flex-start", maxWidth: "80ch" }}>
               Your organisation asks everyone who uses AI systems through regulAIt to read and acknowledge its AI
               policies and trainings. This is one of the measures it takes to support the development of AI literacy
               (Regulation (EU) 2024/1689, Article 4, as amended). It records that you read the current version; it is

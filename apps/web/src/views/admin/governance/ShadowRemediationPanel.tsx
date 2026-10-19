@@ -192,7 +192,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
           <Badge tone={p.currentLink.replaceable ? "warn" : "ok"}>linked</Badge>{" "}
           <span className={v.dim}>
             This finding is linked to workflow <code>{p.currentLink.instanceId}</code>
-            {p.currentLink.status ? ` (${p.currentLink.status.replace("_", " ")})` : ""}.
+            {p.currentLink.status ? ` (${p.currentLink.status.replaceAll("_", " ")})` : ""}.
             {p.currentLink.replaceable
               ? " That workflow ended without remediating the finding, so a new one can be started or linked; it replaces the old link, and the replace is recorded in the audit log."
               : " A new workflow can replace it only if that one is denied, aborted or rolled back."}

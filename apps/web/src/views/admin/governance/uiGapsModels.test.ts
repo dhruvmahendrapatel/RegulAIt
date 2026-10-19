@@ -15,7 +15,11 @@ describe("refusal copy", () => {
   it("says a mapped refusal in the screen's words, with the server's detail", () => {
     expect(refusalSentence(new ApiError(422, { error: "invalid_timezone" }), map)).toBe("That timezone is not known.");
     expect(refusalSentence(new ApiError(422, { error: "invalid_timezone", detail: "'Mars/Base' is not IANA" }), map)).toBe(
-      "That timezone is not known. 'Mars/Base' is not IANA",
+      "That timezone is not known. 'Mars/Base' is not IANA.",
+    );
+    // a lowercase detail after the screen's sentence starts a sentence of its own (seen on the 11-01 demo screens)
+    expect(refusalSentence(new ApiError(422, { error: "invalid_timezone", detail: "name one the gateway knows" }), map)).toBe(
+      "That timezone is not known. Name one the gateway knows.",
     );
   });
   it("leaves every other refusal exactly as it was", async () => {
