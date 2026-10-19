@@ -167,12 +167,19 @@ test("enterprise governance demo surfaces render and complete their core actions
 
   await page.goto("/ui/admin/governance/trust");
   await expect(page.getByRole("heading", { name: "Trust & evidence" })).toBeVisible();
+  // G4: Bars is the default view; the radar is one click away and keeps its unmeasured label
+  await expect(page.getByRole("button", { name: "Bars" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Radar" }).click();
   await expect(page.locator('svg[aria-label^="Evidence coverage radar"]').getByText("unmeasured", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Bars" }).click();
   await shotBoth(page, "03-trust-dashboard");
 
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
   await expect(page.getByRole("heading", { name: "Credit-limit-increase assistant" })).toBeVisible();
   await shotBoth(page, "04-use-case-overview");
+  // A5: grouped tabs keep their plain names (the group caption is not part of the name) and show counts
+  await expect(page.getByRole("tab", { name: "Risks 1" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^Frameworks$/ })).toBeVisible();
   await page.getByRole("tab", { name: "Frameworks" }).click();
   await expect(page.getByText("EU AI Act · v2")).toBeVisible();
   await page.getByRole("tab", { name: "Risks" }).click();

@@ -24,10 +24,9 @@ import type { AuditEntry } from "../../../api/types";
 import { UUID_RE, actorLabel, fmtAt, frameworkLabel, humanize, plural, shortId } from "../../../api/format";
 import type { AuditRetention } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Select, Table, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, ConfirmModal, EmptyState, Field, InfoButton, Select, Table, type Tone } from "../../../ui/kit";
 import { useToast } from "../../../ui/toast";
 import { downloadCsv, optionEls, useAction, useUsers, userOpts } from "../adminKit";
-import k from "../../../ui/kit.module.css";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -123,16 +122,17 @@ export default function AuditLogPage() {
           <>
             <Button
               variant="ghost"
-              title="Download the FULL filtered trail, not only the rows loaded in the table"
               onClick={() =>
                 void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
               }
             >
               Download CSV
             </Button>
+            <InfoButton label="Download CSV" align="end">
+              <p>Downloads the full filtered trail, not only the rows loaded in the table.</p>
+            </InfoButton>
             <Button
               variant="primary"
-              title="Download an offline-verifiable bundle containing the full filtered audit CSV, manifest, and signature"
               onClick={() => {
                 const join = qs ? "&" : "?";
                 void downloadCsv(`/v1/audit.csv${qs}${join}signed=1`, "audit-log.signed.tar.gz", (msg) => toast(msg, "error"));
@@ -140,11 +140,43 @@ export default function AuditLogPage() {
             >
               Download signed bundle
             </Button>
+            <InfoButton label="Download signed bundle" align="end">
+              <p>A signed package of the full filtered trail with a manifest, which an auditor can verify offline.</p>
+            </InfoButton>
           </>
         }
       />
       <div className={v.stack}>
-        <Card>
+        {/* G8: the chain's state is the first thing an auditor asks, so it leads; it is never green until a check runs */}
+        <ChainIntegrityCard />
+        <Card
+          title="Entries"
+          contain
+          actions={
+            <div className={a.formRow}>
+              <Field label="Filter by user">
+                <Select value={userId} onChange={(e) => setUserId(e.target.value)}>
+                  {optionEls(userOpts(users.data?.users), "— all users —")}
+                </Select>
+              </Field>
+              <Field
+                label="Filter by deploy mode"
+                helpLabel="a recorded deploy mode"
+                help={
+                  <p>
+                    Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
+                    carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>not recorded</strong>, and
+                    older rows recorded before deploy modes existed are never back-filled or guessed.
+                  </p>
+                }
+              >
+                <Select value={deployMode} onChange={(e) => setDeployMode(e.target.value)}>
+                  {optionEls(MODE_OPTS, "— any mode —")}
+                </Select>
+              </Field>
+            </div>
+          }
+        >
           {onlyRow && (
             <p role="status" data-testid="audit-only-row">
               Showing one audit row, <code className={v.mono}>{onlyRow}</code>.{" "}
@@ -153,28 +185,6 @@ export default function AuditLogPage() {
               </Button>
             </p>
           )}
-          <div className={a.formRow}>
-            <Field label="Filter by user">
-              <Select value={userId} onChange={(e) => setUserId(e.target.value)}>
-                {optionEls(userOpts(users.data?.users), "— all users —")}
-              </Select>
-            </Field>
-            <Field
-              label="Filter by deploy mode"
-              helpLabel="a recorded deploy mode"
-              help={
-                <p>
-                  Only deploy-scoped actions — workflow deploys and rollbacks, governed infrastructure changes —
-                  carry a deploy mode. Other rows (tool calls, membership, settings) show <strong>none</strong>, and
-                  older rows recorded before deploy modes existed are never back-filled or guessed.
-                </p>
-              }
-            >
-              <Select value={deployMode} onChange={(e) => setDeployMode(e.target.value)}>
-                {optionEls(MODE_OPTS, "— any mode —")}
-              </Select>
-            </Field>
-          </div>
           <Table<AuditEntry & { rowKey: string }>
             columns={[
               {
@@ -212,20 +222,16 @@ export default function AuditLogPage() {
               {
                 key: "deployMode",
                 header: "Deploy mode",
+                info: <p>&ldquo;Not recorded&rdquo; means no deploy mode was recorded, because the action is not deploy-scoped or predates deploy modes. It is never back-filled.</p>,
                 sort: (e) => e.deployMode ?? "unknown",
                 render: (e) =>
                   e.deployMode ? (
                     <span>{modeLabel(e.deployMode)}</span>
                   ) : (
-                    <span
-                      className={v.dim}
-                      title="No deploy mode was recorded: the action is not deploy-scoped, or it predates deploy modes. Never back-filled."
-                    >
-                      none
-                    </span>
+                    <span className={v.dim} style={{ whiteSpace: "nowrap" }}>Not recorded</span>
                   ),
               },
-              { key: "reason", header: "Reason", render: (e) => <span className={`${v.dim} ${k.clamp2}`} title={e.reason ?? undefined}>{e.reason ?? "—"}</span> },
+              { key: "reason", header: "Reason", render: (e) => <ReasonCell reason={e.reason} /> },
               {
                 key: "bom",
                 header: "Evidence",
@@ -304,8 +310,6 @@ export default function AuditLogPage() {
             trail. Pruning is itself audited.
           </p>
         </Card>
-
-        <ChainIntegrityCard />
       </div>
 
       <ConfirmModal
@@ -330,6 +334,21 @@ export default function AuditLogPage() {
         }}
       />
     </>
+  );
+}
+
+/** G8: a long reason opens in place (Show more) instead of hiding behind a hover-only title */
+function ReasonCell({ reason }: { reason?: string | null }) {
+  const [open, setOpen] = useState(false);
+  if (!reason) return <span className={v.dim}>—</span>;
+  if (reason.length <= 90) return <span className={v.dim}>{reason}</span>;
+  return (
+    <span className={v.dim}>
+      {open ? reason : `${reason.slice(0, 80).trimEnd()}…`}{" "}
+      <Button size="sm" variant="ghost" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        {open ? "Show less" : "Show more"}
+      </Button>
+    </span>
   );
 }
 
@@ -398,12 +417,18 @@ function ChainIntegrityCard() {
     : "neutral";
 
   return (
-    <Card title="Chain integrity — tamper-evident hash chain with a write-once anchor">
+    <Card
+      title="Chain integrity"
+      info={
+        <p>
+          A tamper-evident hash chain with a write-once anchor. Every chained row commits to the one before it; the
+          head is anchored to write-once storage. Verification recomputes the whole chain against the anchor.
+        </p>
+      }
+    >
       <div className={v.row}>
-        <span className={v.dim}>
-          Every chained row commits to the one before it; the head is anchored to write-once storage.
-          Verification recomputes the whole chain against the anchor.
-        </span>
+        {!report && !busy && <Badge tone="neutral">Not verified yet</Badge>}
+        <span className={v.dim}>Recomputes the whole chain against its anchor when you ask.</span>
         <span className={v.grow} />
         <Button onClick={() => void run()} disabled={busy}>
           {busy ? "Verifying…" : report ? "Re-verify" : "Verify chain"}

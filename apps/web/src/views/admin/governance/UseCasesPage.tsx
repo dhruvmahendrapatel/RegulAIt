@@ -138,7 +138,7 @@ export default function UseCasesPage() {
                     opener.current = document.activeElement instanceof HTMLElement && document.activeElement.tagName === "TR" ? document.activeElement : null;
                     setOpenId(openId === row.id ? null : row.id);
                   }}
-                  empty={<EmptyState title="No use cases match these filters" action={<Button size="sm" onClick={() => setFilters(NO_FILTERS)}>Clear all</Button>} />}
+                  empty={<EmptyState title="No use cases match these filters" body="Use cases exist, but none fits every filter you chose." action={<Button size="sm" onClick={() => setFilters(NO_FILTERS)}>Clear all</Button>} />}
                   columns={[
                     {
                       key: "name",

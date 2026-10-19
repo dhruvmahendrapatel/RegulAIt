@@ -436,7 +436,7 @@ export function TrustSnapshotCard() {
             ))}
           </div>
         </div>
-      ) : <EmptyState title="No trust report" body="No evidence report is available yet." />}
+      ) : <EmptyState title="No trust report yet" body="The trust report summarises evidence coverage per dimension. It appears once an active compliance pack has controls with recorded evidence; enable a pack on Compliance packs to start." />}
     </Card>
   );
 }
