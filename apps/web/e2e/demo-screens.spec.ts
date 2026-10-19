@@ -282,7 +282,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     await expect(panel).toBeVisible();
     // the script says `sandbox`, but the product accepts only an environment a deploy target or assignment rule uses;
     // the seed's demo company deploys to `staging` (QA finding F1 in DEMO_SCREENS_QA_2026-11-01.md)
-    await panel.getByLabel("Environment").fill("staging");
+    await panel.getByRole("textbox", { name: "Environment" }).fill("staging");
     await capture(ada, ADA, "ds-s3b-remediation-plan-live");
     await panel.getByRole("button", { name: "Start remediation workflow…" }).click();
     const dialog = ada.getByRole("dialog", { name: "Start a remediation workflow?" });
