@@ -1,13 +1,19 @@
 # Demo screens QA — 2026-11-01 script
 
-**Scope:** every screen of `DEMO_SCRIPT_2026-11-01.md` in script order, on a database prepared by `demo:prepare`
-(fallback dataset including Shadow AI discovery and the second admin, Morgan Reyes). Decision record: ADR-0197.
+**Scope:** every browser screen of `DEMO_SCRIPT_2026-11-01.md` in script order (S1–S4, G1, G2, G4–G10), on a database
+prepared by `demo:prepare` (fallback dataset including Shadow AI discovery and the second admin, Morgan Reyes). G3
+is terminal output and is not in this pack (see Unverified). Decision record: ADR-0197.
 
 **How it was captured:** `apps/web/e2e/demo-screens.spec.ts` (config `playwright.demo-screens.config.ts`), run in
 `.github/workflows/demo.yml` → `demo-journey`, after the 10-05 journeys, on the database they leave behind. Full-page
 PNGs at 1440x900, light theme; S1, S2 and S3a also in dark. The spec fails on console errors, uncaught page errors,
 `undefined` / `NaN` / `[object Object]` or secret-shaped text, horizontal page scroll, and a missing persona name.
-It records raw ids, ISO timestamps, truncated text and empty states per screen in `qa-report.json`.
+The secret scan covers the page text and every input and textarea value, and includes this product's own token
+prefixes (`rgl_`, `rglv_`, `rgls_`, `rglf_`, `rglscim_`, `rgsu_`, `rgea_`, `rgat_`, `rgee_`, `rgek_`). A 4xx console
+line is ignored only for the step-up retries the walk makes on purpose (`EXPECTED_4XX` in the spec), and every ignored
+line is listed in `qa-report.json` (`ignoredConsole`). The spec also asserts the S1 device table with "1 device" and
+"blocked on approval" on S3a. It records raw ids, ISO timestamps, truncated text and empty states per screen in
+`qa-report.json`.
 
 **Pack of record:** workflow run `39177579271` (head `6df1b58`), artifact `demo-screens` (id `12155450893`), 30
 files, ~25 MB. The PNGs are not committed: most are over 300 KB and the S2/S3 pages are ~15,000 px tall. That
@@ -43,12 +49,17 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 | S4 Intake prefilled | `ds-s4-intake-prefilled-light.png` | pass | Banner, name `Govern gitlab:acme-bank-demo/credit-memo-assistant`, Similar use cases shown. Not submitted (the 10-05 journey drives the intake end to end). |
 | G1 Registry | `ds-g1a-registry-light.png` | pass | 13 use cases, tiles populated. Descriptions are ellipsised on purpose. |
 | G1 Use-case record | `ds-g1b-use-case-record-light.png` | pass | Govern Credit Team LLM Prototype: Approved, High, approval valid until, one before-go-live condition. |
+| G2 Avery's Inbox | `ds-g2a-avery-inbox-light.png` | to confirm | Added in the fix round; result from the next green run. |
+| G2 Review, Approve with conditions | `ds-g2b-avery-review-conditions-light.png` | to confirm | Approve with conditions chosen, dialog closed unsubmitted. Captured only if a use-case sign-off is still pending after the 10-05 journeys (recorded in `qa-report.json`). |
 | G4 Trust & evidence | `ds-g4-trust-light.png` | pass | 40 risks, 80 % coverage. Safety reads 0 % (0/2 controls evidenced): a real gap, not an empty tile. |
 | G5 Alerts | `ds-g5-alerts-light.png` | pass | 24 open, 2 resolved (the journey's remediation). |
 | G6 Graph | `ds-g6-graph-light.png` | pass | 32 nodes, 19 propagated high. |
 | G7 Regulatory | `ds-g7-regulatory-light.png` | pass | 13 entries, 6 in force, 7 with control gaps. |
 | G8 Audit / signed export | `ds-g8-audit-light.png` | pass with findings | **Download signed bundle** present; Morgan's sign-off and acknowledgement rows at the top. Reason column clipped and ISO timestamps in reason text (F11). |
 | Posture | `ds-posture-posture-light.png` | pass with findings | Populated; internal references and "NOT tamper-resistant" on the executive page (F10). |
+| G9 Incidents | `ds-g9-incidents-light.png` | to confirm | |
+| G9 Feedback and appeals | `ds-g9-feedback-light.png` | to confirm | |
+| G9 Decision records tab | `ds-g9-decision-records-light.png` | to confirm | On the G1 record. |
 | G10 Content trust | `ds-g10-content-trust-light.png` | pass | One trusted connector, five provenance records. |
 
 ## Fixed in this PR (`apps/web`)
@@ -64,7 +75,8 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 ## Findings (not fixed here)
 
 Script mismatches go to the lane that owns `DEMO_SCRIPT_2026-11-01.md` / `DEMO_RUNBOOK.md`. Product copy outside
-`apps/web` goes to its owner.
+`apps/web` goes to its owner. F14–F19 came from the independent review of this pack and are open for the UI polish
+lane.
 
 - **F1 (script, S3):** the script says type `sandbox` in **Environment**. The product refuses it: "That environment
   is not one a deploy target or workflow assignment rule uses." The seed's deploy target uses `staging`, so the
@@ -103,11 +115,29 @@ Script mismatches go to the lane that owns `DEMO_SCRIPT_2026-11-01.md` / `DEMO_R
 - **F13 (Inbox, S3):** as an admin, Morgan sees every pending item, marked **override**. The remediation sign-offs
   are at the top, but the screen is busy. Some of them come from the 10-05 journeys run before this spec; a fresh `demo:prepare`
   database has fewer.
+- **F14 (UI, S1/S2 navigation rail):** two identical eye icons at the bottom of the rail; on S1 both are highlighted,
+  so it is unclear which one is active.
+- **F15 (UI copy, S1):** a button reads literally "Add source (disabled)". The Scanner kinds table shows raw codes
+  (`repo_github`, `cloud_inventory, cloud_audit_log`). Cloud federation shows the env var `REGULAIT_PUBLIC_URL` on an
+  admin screen. Catalogue gaps show raw `desktop_app:cli.anthropic.claude` and `ide_extension:github.copilot`.
+- **F16 (UI, S1 tables):** dates use US format (`10/26/2026, 12:11:07 AM`) while the copy is British English
+  ("organisation", "enrolment"). Queued timestamps and the "all read" cells wrap awkwardly in narrow columns.
+- **F17 (copy, S1–S3, Inbox):** brand and term casing is inconsistent. "RegulAIt" (S1 subtitle, federation note)
+  against "regulAIt" (policy gate, PM work items); "Shadow-AI discovery", "Shadow AI remediation plan" and
+  "shadow-AI finding" all appear.
+- **F18 (UI, G8):** the audit rows start below about 1,500 px of receipt, anchor and retention forms, so Morgan's
+  sign-off ("at the top" of the rows) is off screen at 1440x900. The receipt-form buttons are laid out inconsistently:
+  a full-width "Export receipt bundle", a small "Open Decision BOM" placed after its hint, and a disabled "Verify
+  loaded receipt bundle". The F11 timestamps read a year after the run; if they are an "approval valid until" value
+  that is expected, otherwise it is a defect. To confirm.
+- **F19 (Inbox, S3h):** Ada has 8 items in the Inbox and Morgan has 9 (see F13).
 - **Screenshot artefact (not a defect):** in full-page captures the page background gradient covers only the first
   900 px; the browser keeps it fixed while scrolling.
 
 ## Unverified
 
+- **G3 (deploy gate)** is terminal output from `demo:gate`, not a browser screen, so it is not in this pack. It is
+  captured separately (`real-gate.txt`), and the script's open question on how to show it stands.
 - The LIVE path (hosted instance, real scans) is not covered. This pack is FALLBACK only.
 - The pack starts the live remediation on `staging` and has Morgan acknowledge the policy. Neither is a rehearsed
   presenter step until the script is updated (F1, F2).
