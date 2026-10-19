@@ -194,13 +194,13 @@ describe("the upload", () => {
   });
 
   it("retention states the setting and the first date the sweep may delete it", () => {
-    expect(retentionText("2026-10-01T12:00:00.000Z", 30, true)).toMatch(/^Kept for 30 days\. It may be deleted from Oct 31, 2026, unless a scan of it is cited/);
+    expect(retentionText("2026-10-01T12:00:00.000Z", 30, true)).toMatch(/^Kept for 30 days\. It may be deleted from 31 Oct 2026, unless a scan of it is cited/);
     // B5W-09: an unread setting promises no lifetime and no date
     const unread = retentionText("2026-10-01T12:00:00.000Z", 30, false);
     expect(unread).toMatch(/^The organisation's retention setting couldn't be read, so this artifact's retention period and deletion date are unknown here\./);
     expect(unread).toMatch(/the strict default is 30 days/);
     expect(unread).not.toMatch(/Kept for/);
-    expect(unread).not.toMatch(/Oct 31, 2026|deleted from/);
+    expect(unread).not.toMatch(/31 Oct 2026|deleted from/);
     expect(unread).toMatch(/never deletes an artifact while a scan of it is cited as model-card evidence or a run on it is unfinished/);
   });
 

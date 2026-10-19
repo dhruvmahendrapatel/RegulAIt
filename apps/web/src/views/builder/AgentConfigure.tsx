@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ago, fmtUsd, providerLabel } from "../../api/format";
+import { ago, fmtDateTime, fmtUsd, providerLabel } from "../../api/format";
 import type { BuilderAgentDetail, BuilderChannelProvider, BuilderSharing } from "../../api/types";
 import { useSession } from "../../session/SessionContext";
 import { Badge, Button, ConfirmModal, Field, Input, Meter, Select, Textarea } from "../../ui/kit";
@@ -339,7 +339,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
 
       <Section title="Channels" icon={Icon.chat()} count={agent.channels.length || undefined}>
         <p className={s.small} style={{ margin: 0 }}>
-          Choose where people can reach this agent. A channel uses one of the workspace's chat connections. In Slack and Teams, people whose chat account an admin has linked can mention the agent and get a reply in the thread; it runs with their own access, and anything needing a confirmation is finished here in RegulAIt. Email is send-only.
+          Choose where people can reach this agent. A channel uses one of the workspace's chat connections. In Slack and Teams, people whose chat account an admin has linked can mention the agent and get a reply in the thread; it runs with their own access, and anything needing a confirmation is finished here in regulAIt. Email is send-only.
         </p>
         <ChannelRows agent={agent} disabled={ro} />
       </Section>
@@ -594,7 +594,7 @@ export function ConfigurePanel(props: { agent: BuilderAgentDetail; onOpenSkills:
                     {scheduleSummary(sc.cadence, sc.timeUtc)}
                     {sc.enabled
                       ? sc.nextRunAt
-                        ? ` · next ${new Date(sc.nextRunAt).toLocaleString()}`
+                        ? ` · next ${fmtDateTime(sc.nextRunAt)}`
                         : ""
                       : sc.awaitingOwner
                         ? // it runs, and spends, as the owner — so only the owner switches it on

@@ -28,6 +28,7 @@ import v from "../../views.module.css";
 import { putOrgSettings, api as stepUpApi, withStepUp } from "../../../stepup/stepUp";
 import { OrgSettingsCard } from "../settings/OrgSettingsCard";
 import ModelArtifactsTab from "./ModelArtifactsTab";
+import { fmtDay } from "../../../api/format";
 
 interface ReviewSkill {
   id: string;
@@ -79,7 +80,7 @@ interface McpQueue {
 }
 
 const KEY = ["admin", "admission-review"] as const;
-const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "—");
+const day = fmtDay;
 const findingText = (f: AdmissionFindingCount[]) =>
   f.length ? f.map((x) => `${x.rule} in ${x.where} (${x.severity}, ×${x.count})`).join("; ") : "no findings recorded";
 

@@ -440,7 +440,7 @@ test("builder and MCP: a stricter profile is assigned without step-up, a looser 
   await expect(serverSelect).toBeEnabled();
   await expect(serverSelect).toHaveValue("");
   await page.getByRole("link", { name: "Show tools on Synthetic remote" }).click();
-  await expect(page.getByText(/This is a remote MCP server: it runs on its own host, which RegulAIt does not isolate/)).toBeVisible();
+  await expect(page.getByText(/This is a remote MCP server: it runs on its own host, which regulAIt does not isolate/)).toBeVisible();
   await axe(page);
 });
 
