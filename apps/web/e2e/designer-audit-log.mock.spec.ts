@@ -33,7 +33,8 @@ test("Audit log: chain state first and never green unasked, entries contained, r
   const cards = page.locator("section[data-rg-card]");
   await expect(cards.first()).toContainText("Chain integrity");
   await expect(cards.first().getByText("Not verified yet", { exact: true })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Entries, scrollable" })).toBeVisible();
+  // two rows fit, so the contained entries card is no scroll stop (the region role appears only while it scrolls)
+  await expect(cards.filter({ hasText: "Entries" }).locator("tbody tr")).toHaveCount(2);
 
   // the filters sit in the entries header and keep their labels
   await expect(page.getByLabel("Filter by deploy mode")).toBeVisible();
