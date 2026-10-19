@@ -238,10 +238,12 @@ test("inbox: a pending item is decidable with a reason", async () => {
   await shot(page, "09-inbox");
 
   // dana is the seeded arbiter of a context conflict — decide the first
-  // pending row that offers her the Approve control
-  const approve = page.getByRole("button", { name: "Approve" }).first();
+  // pending row; its decision opens in the shared detail drawer
+  await page.getByRole("button", { name: /^Review / }).first().click();
+  const item = page.getByTestId("inbox-item");
+  const approve = item.getByRole("button", { name: "Approve" });
   await expect(approve).toBeVisible();
-  await page.getByLabel("Decision reason").first().fill("e2e: arbitrated in the SPA rewrite journey");
+  await item.getByLabel("Decision reason").fill("e2e: arbitrated in the SPA rewrite journey");
   await approve.click();
   await expect(page.getByText("Approved", { exact: true })).toBeVisible();
   await shot(page, "10-inbox-decided");

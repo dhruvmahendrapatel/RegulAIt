@@ -61,7 +61,12 @@ test("Inbox: one item layout, visible reasons, and Approve waits for a required 
   await expect(page.getByRole("note")).toContainText("A recorded reason is required.");
   await page.keyboard.press("Escape");
 
-  const item = page.locator("div").filter({ hasText: /^Governance remediation/ }).filter({ has: page.getByRole("button", { name: "Approve" }) }).last();
+  const row = page.locator("div").filter({ hasText: /^Governance remediation/ }).filter({ has: page.getByRole("button", { name: /^Review / }) }).last();
+  // the row already says a reason is required; the decision opens in the shared detail drawer (owner decision on #453)
+  await expect(row.getByText("Deciding this approves your own request, so a reason is required.")).toBeVisible();
+  await row.getByRole("button", { name: /^Review / }).click();
+  const item = page.getByTestId("inbox-item");
+  await expect(item.getByRole("heading", { name: /Link the human-oversight control/ })).toBeFocused();
   await expect(item.getByText("Deciding this approves your own request, so a reason is required.")).toBeVisible();
   const approve = item.getByRole("button", { name: "Approve" });
   await expect(approve).toBeDisabled();

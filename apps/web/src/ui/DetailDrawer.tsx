@@ -20,6 +20,7 @@ export function DetailDrawer(props: {
   headingId?: string;
   /** changes when the drawer shows another record, to move focus to the new heading */
   subjectKey?: string;
+  testId?: string;
 }) {
   const autoId = useId();
   const headingId = props.headingId ?? `${autoId}-title`;
@@ -46,7 +47,7 @@ export function DetailDrawer(props: {
   }, [onClose]);
 
   return (
-    <aside className={d.drawer} role="dialog" aria-modal="false" aria-labelledby={headingId}>
+    <aside className={d.drawer} role="dialog" aria-modal="false" aria-labelledby={headingId} data-testid={props.testId}>
       <div className={d.head}>
         <div className={d.titleBlock}>
           <span className={d.type}>{props.type}</span>
