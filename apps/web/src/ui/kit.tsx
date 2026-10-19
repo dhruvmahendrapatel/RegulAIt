@@ -977,8 +977,10 @@ export function Modal(props: {
     // A native listener, not React's onKeyDown: a contained card's body is
     // portaled in (X6), so its key events bubble through the dialog in the DOM
     // but never reach a React handler on it.
+    // On the document, not the dialog: a dialog's own content (a review with its own Tab order) registers its
+    // trap on the dialog after this effect has run, so listening here lets that inner trap decide first.
     const trap = (event: KeyboardEvent) => {
-      if (event.key !== "Tab" || event.defaultPrevented) return;
+      if (event.key !== "Tab" || event.defaultPrevented || !dialog.contains(event.target as Node)) return;
       const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
         'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
       )).filter((element) => element.tabIndex >= 0 && !element.matches(":disabled") &&
@@ -992,9 +994,9 @@ export function Modal(props: {
         (event.shiftKey ? last : first)?.focus();
       }
     };
-    dialog.addEventListener("keydown", trap);
+    document.addEventListener("keydown", trap);
     return () => {
-      dialog.removeEventListener("keydown", trap);
+      document.removeEventListener("keydown", trap);
       const inside = dialog.contains(document.activeElement);
       dialog.close();
       const holder = trigger?.closest<HTMLElement>("main[tabindex]") ?? null;

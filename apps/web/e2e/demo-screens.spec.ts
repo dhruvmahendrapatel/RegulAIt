@@ -229,7 +229,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
   await test.step("S2 findings, sightings, coverage", async () => {
     await ada.goto("/ui/admin/shadow-ai");
     await expect(ada.getByRole("heading", { name: "Shadow-AI discovery" })).toBeVisible();
-    await expect(ada.getByRole("button", { name: `Remediation plan for ${REMEDIATION_REPO}` })).toBeVisible();
+    await expect(ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` })).toBeVisible();
     await capture(ada, ADA, "ds-s2-findings", { dark: true });
     pseudonymHref = await ada.locator('a[href*="discovery-sources?pseudonym="]').first().getAttribute("href", { timeout: 5_000 }).catch(() => null);
   });
@@ -250,7 +250,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
 
   await test.step("S3 the seeded remediation plan (linked, waiting on Morgan)", async () => {
     await ada.goto("/ui/admin/shadow-ai");
-    await ada.getByRole("button", { name: `Remediation plan for ${REMEDIATION_REPO}` }).click();
+    await ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` }).click();
     await expect(ada.getByTestId("shadow-remediation")).toBeVisible();
     await ada.getByTestId("shadow-remediation").scrollIntoViewIfNeeded();
     // W3: the linked workflow's status reads in words, never "blocked on_approval"
@@ -274,7 +274,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
     }
     expect(subject, "a finding with no remediation workflow yet, for the live start").toBeTruthy();
     await ada.goto("/ui/admin/shadow-ai");
-    await ada.getByRole("button", { name: `Remediation plan for ${subject}`, exact: true }).click();
+    await ada.getByRole("button", { name: `Plan remediation for ${subject}`, exact: true }).click();
     const panel = ada.getByTestId("shadow-remediation");
     await expect(panel).toBeVisible();
     // the script says `sandbox`, but the product accepts only an environment a deploy target or assignment rule uses;
@@ -344,7 +344,7 @@ test("2026-11-01 demo screens, in script order: Shadow AI, then governance", asy
 
   await test.step("S4 register as use case: the intake, prefilled from the finding", async () => {
     await ada.goto("/ui/admin/shadow-ai");
-    const register = ada.getByRole("row").filter({ has: ada.getByRole("button", { name: `Remediation plan for ${REMEDIATION_REPO}` }) }).getByRole("link", { name: "Register as use case" });
+    const register = ada.getByRole("row").filter({ has: ada.getByRole("button", { name: `Plan remediation for ${REMEDIATION_REPO}` }) }).getByRole("link", { name: "Register as use case" });
     await register.first().click();
     await expect(ada.getByRole("heading", { name: "Register AI use case" })).toBeVisible();
     await capture(ada, ADA, "ds-s4-intake-prefilled", { notes: ["not submitted: the 10-05 journey already drove the intake end to end"] });
