@@ -459,10 +459,15 @@ point there rather than repeating commands nobody has run.
 ### 7.1 What runs where
 
 - **Live instance:** the hosted dev instance over public HTTPS (ADR-0197 decision 1). The laptop is only a browser.
-  Its database holds **only what the real GitLab, AWS and Azure scans (and the real endpoint device) find**; the
-  seeded discovery dataset is not on it (ADR-0197 addendum, decision 3). Note that `demo:prepare` runs the discovery
-  seeder (`demo:shadow`) unconditionally, and `demo:intake` imports the four 10-05 SaaS-export rows, so how the live
-  database gets the governance seed without seeded discovery data is **pending execution** and is not decided here.
+  Its database carries the governance seed and the four real discovery sources, and **only real findings**: what the real
+  GitLab, AWS and Azure scans and the real endpoint device find (owner, 2026-10-19, ADR-0197 addendum decision 3,
+  option A). No seeded discovery dataset. Prepare it from empty with
+  `pnpm --filter @regulait/gateway demo:prepare --live`: the same pipeline without either `demo:shadow` phase, with
+  `demo:intake --live` (the shipped signature catalogues, not the synthetic SaaS export), ending in
+  `demo:check --live`. That check FAILs on any trace of the fictional dataset, and on "1 Real discovery sources" until
+  one real source is enabled, so on a fresh database it ends with that one FAIL: add the sources (§7.2) and re-run
+  `pnpm --filter @regulait/gateway demo:check --live`. CI runs both on an empty database (`demo.yml`, `demo-live`);
+  on the dev instance host this is **pending execution**.
 - **Fallback:** the local docker compose stack on the presenting laptop (§1.3), prepared with `demo:prepare` the night
   before (addendum, decision 4), including the seeded discovery dataset (ADR-0197 decision 7). It must pass
   `demo:check` with 0 fail; read the pass count off its output. For the endpoint device to enrol, the stack needs
@@ -506,6 +511,7 @@ owner's notes and the infrastructure lane's state.
 | T-24h | **Run now** on every live source (the endpoint agent's only if the device has reported since); each run **succeeded**; choose the rows S2-S4 walk from the real findings on `/ui/admin/shadow-ai` | pending execution |
 | T-24h | On the live database, the chosen finding has **no** remediation workflow yet (S3 creates one). On the fallback, `gitlab:acme-bank-demo/credit-memo-assistant`'s workflow waits on Morgan (`demo:check` "1 Remediation plan" PASS); nobody approved it at rehearsal | pending execution |
 | T-24h | The environment S3 types (`staging` on a `demo:prepare`d database) is configured on the live instance | pending execution |
+| T-24h | `demo:check --live` on the live instance: 0 fail (no fictional-dataset trace, every real source listed with its last run) | pending execution |
 | T-24h | Screen recording of one real scan captured and played back once | pending execution |
 | T-24h | Fallback stack on the laptop prepared with `demo:prepare` (the night before); `demo:check` 0 fail; Ada, Avery and Morgan signed in there too, in a separate browser | pending execution |
 | T-24h | `demo:gate` run once from the dev instance host terminal; its output captured to `real-gate.txt` as the fallback (the 10-05 fallback step 1) | pending execution |
