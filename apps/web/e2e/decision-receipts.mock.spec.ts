@@ -24,6 +24,8 @@ async function setup(page: Page, state: unknown = { state: "no_key", lastSeq: 0,
     return json(route, {});
   });
   await page.goto("/ui/admin/audit");
+  // G8f: the panel sits in a closed fold; open it first.
+  await page.locator("summary", { hasText: "Signed decision receipts" }).click();
   await expect(page.getByText("Signed decision receipts", { exact: true })).toBeVisible();
   return calls;
 }

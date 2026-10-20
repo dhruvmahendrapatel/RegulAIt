@@ -365,7 +365,7 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
   // the table refetches on every filter change, so settle on a CONSISTENT
   // snapshot (loading renders skeleton rows) before judging it.
   // The cells carry the page's LABELS (the same `MODE_OPTS` the filter uses),
-  // not the API values: a null mode renders as a plain "none", and a set mode
+  // not the API values: a null mode renders as a plain "Not recorded" (G8, #453; the column header explains it), and a set mode
   // as its label. The filter's option VALUES are still the API values.
   const MODE_LABEL: Record<string, string> = { hosted: "Hosted", byoc: "BYOC", air_gapped: "Air-gapped" };
   const modeCells = (text: string) => page.getByRole("cell", { name: text, exact: true });
@@ -373,7 +373,7 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
   const settled = async () => {
     const [rows, unknown, hosted, byoc, air, empty] = await Promise.all([
       page.locator("tbody tr").count(),
-      modeCells("none").count(),
+      modeCells("Not recorded").count(),
       modeCells(MODE_LABEL.hosted!).count(),
       modeCells(MODE_LABEL.byoc!).count(),
       modeCells(MODE_LABEL.air_gapped!).count(),
@@ -382,7 +382,7 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
     return { rows, unknown, empty, byMode: { hosted, byoc, air_gapped: air } as Record<string, number> };
   };
 
-  // unfiltered: rows exist, and the null-mode ones render as a plain "none"
+  // unfiltered: rows exist, and the null-mode ones render as a plain "Not recorded"
   await expect(page.locator("tbody tr").first()).toBeVisible();
   await expect.poll(async () => (await settled()).unknown).toBeGreaterThan(0);
 

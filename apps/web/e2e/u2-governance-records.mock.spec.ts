@@ -475,7 +475,8 @@ test.describe("U2: governance records", () => {
   test("audit anchoring: anchor now and write out pending anchors, each saying what happened", async ({ page }) => {
     const calls = await mockApi(page);
     await page.goto("/ui/admin/audit");
-    const c = card(page, "Anchor timestamps");
+    await page.locator("summary", { hasText: "Anchor timestamps" }).click();
+    const c = page.locator("details", { hasText: "Anchor timestamps" });
     await expect(c).toContainText("No anchor sink is configured");
     await c.getByRole("button", { name: "Anchor the chain now" }).click();
     await expect(c.getByTestId("anchor-said")).toContainText("Anchored the chain at row 57: waiting to be written out, to this database only");

@@ -17,6 +17,8 @@ async function setup(page: Page, state: "not_configured" | "failed" | "pending" 
     return json(route, {});
   });
   await page.goto("/ui/admin/audit");
+  // G8f: the panel sits in a closed fold; open it first.
+  await page.locator("summary", { hasText: "Anchor timestamps" }).click();
   await expect(page.getByText("Anchor timestamps", { exact: true })).toBeVisible();
   return calls;
 }

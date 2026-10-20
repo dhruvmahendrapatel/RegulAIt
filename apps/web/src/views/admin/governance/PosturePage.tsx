@@ -181,7 +181,7 @@ function ColumnTrend(props: {
   format: (v: number) => string;
 }) {
   const pts = props.points.slice(-14);
-  if (pts.length === 0) return <EmptyState title="No data in the window" />;
+  if (pts.length === 0) return <EmptyState title="No data in the window" body="This trend fills in as governed calls are recorded. Widen the time window, or check back after the next calls." />;
   const max = Math.max(...pts.map((d) => d.value), 1e-9);
   const w = 640;
   const h = 120;

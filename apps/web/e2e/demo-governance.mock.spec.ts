@@ -167,12 +167,24 @@ test("enterprise governance demo surfaces render and complete their core actions
 
   await page.goto("/ui/admin/governance/trust");
   await expect(page.getByRole("heading", { name: "Trust & evidence" })).toBeVisible();
+  // G4: Bars is the default view; the radar is one click away and keeps its unmeasured label
+  await expect(page.getByRole("button", { name: "Bars" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Radar" }).click();
   await expect(page.locator('svg[aria-label^="Evidence coverage radar"]').getByText("unmeasured", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Bars" }).click();
   await shotBoth(page, "03-trust-dashboard");
 
   await page.goto(`/ui/admin/governance/use-cases/${ID}`);
   await expect(page.getByRole("heading", { name: "Credit-limit-increase assistant" })).toBeVisible();
   await shotBoth(page, "04-use-case-overview");
+  // A5: grouped tabs keep their plain names (the group caption is not part of the name) and show counts
+  await expect(page.getByRole("tab", { name: "Risks 1" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^Frameworks$/ })).toBeVisible();
+  // owner decision on #453 (2026-10-20): a screen reader also hears each tab's group, as its description
+  await expect(page.getByRole("tab", { name: /^Frameworks$/ })).toHaveAccessibleDescription("Assessment group");
+  await expect(page.getByRole("tab", { name: "Risks 1" })).toHaveAccessibleDescription("Assessment group");
+  await expect(page.getByRole("tab", { name: /^Audit/ })).toHaveAccessibleDescription("Evidence group");
+  await expect(page.getByRole("tab", { name: /^Overview$/ })).toHaveAccessibleDescription("Overview group");
   await page.getByRole("tab", { name: "Frameworks" }).click();
   await expect(page.getByText("EU AI Act · v2")).toBeVisible();
   await page.getByRole("tab", { name: "Risks" }).click();
@@ -464,4 +476,57 @@ test("discovery sources highlights only its own nav entry and keeps Add source o
   await expect(add).toHaveAttribute("title", "Choose a kind first");
   await page.getByLabel("Kind").selectOption("repo_github");
   await expect(add).toBeEnabled();
+});
+
+test("use-case Audit tab never shows the capped row count as the total (M1)", async ({ page }) => {
+  // the overview returns at most the newest 20 audit rows
+  const full = Array.from({ length: 20 }, (_, i) => ({ ...overview.audit[0]!, id: i + 1 }));
+  await page.route(`**/v1/use-cases/${ID}/overview`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...overview, audit: full }) }));
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  const tab = page.getByRole("tab", { name: /^Audit/ });
+  await expect(tab).toHaveText("Audit 20+");
+  await tab.click();
+  await expect(page.getByTestId("use-case-audit-partial")).toContainText("older rows may exist");
+  await expect(page.getByRole("link", { name: "Open the full audit log" })).toBeVisible();
+});
+
+test("use-case Audit tab under the cap shows the exact count and no partial notice (M1)", async ({ page }) => {
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  const tab = page.getByRole("tab", { name: /^Audit/ });
+  await expect(tab).toHaveText("Audit 1");
+  await tab.click();
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveCount(0);
+});
+
+test("trust coverage view is remembered across a reload (L3)", async ({ page }) => {
+  await page.goto("/ui/admin/governance/trust");
+  await page.getByRole("button", { name: "Radar" }).click();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Radar" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Bars" })).toHaveAttribute("aria-pressed", "false");
+});
+
+test("trust coverage falls back to Bars when storage throws (L3)", async ({ page }) => {
+  await page.addInitScript(() => {
+    const boom = () => { throw new Error("storage blocked"); };
+    Object.defineProperty(window, "localStorage", { configurable: true, get: () => ({ getItem: boom, setItem: boom, removeItem: boom, clear: boom, key: boom, length: 0 }) });
+  });
+  await page.goto("/ui/admin/governance/trust");
+  await expect(page.getByRole("button", { name: "Bars" })).toHaveAttribute("aria-pressed", "true");
+  // choosing Radar still works for this visit; only remembering it is skipped
+  await page.getByRole("button", { name: "Radar" }).click();
+  await expect(page.getByRole("button", { name: "Radar" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("each heatmap names every cell's count and zone in its accessible name (L2)", async ({ page }) => {
+  await page.goto("/ui/admin/governance/trust");
+  // L1: the Mitigated hint matches the gateway definition (closed, or a control AND a residual position)
+  await expect(page.getByText("Closed, or a linked control and a residual rating", { exact: true })).toBeVisible();
+  // fixture: inherent count = likelihood rank + impact rank, so high/high is 4
+  const inherent = page.getByRole("img", { name: /^Inherent risk matrix by likelihood and impact\./ });
+  await expect(inherent).toHaveAttribute("aria-label", /high likelihood, high impact: 4 \(high zone\)/);
+  await expect(inherent).toHaveAttribute("aria-label", /low likelihood, low impact: 0 \(low zone\)/);
+  const residual = page.getByRole("img", { name: /^Residual risk matrix by likelihood and impact\./ });
+  await expect(residual).toHaveAttribute("aria-label", /low likelihood, low impact: 3 \(low zone\)/);
 });
