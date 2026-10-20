@@ -67,7 +67,7 @@ describe("decision 1: isolation classes", () => {
     expect(BACKEND_ATTESTABLE_CLASSES.gvisor).toContain("user_space_kernel");
     expect(BACKEND_ATTESTABLE_CLASSES.kata).toContain("microvm");
     expect(BACKEND_ATTESTABLE_CLASSES.customer).toEqual(["customer_declared"]);
-    const base = { workloadIdentityId: "7b0b1c2e-0000-4000-8000-000000000001", name: "exec-a", runtimeVersion: "release-20261005.0" };
+    const base = { workloadIdentityId: "7b0b1c2e-0000-4000-8000-000000000001", name: "exec-a", runtimeVersion: "release-20261012.0" };
     expect(registerExecutorSchema.safeParse({ ...base, backend: "openshell", classesDeclared: ["user_space_kernel"] }).success).toBe(false);
     expect(registerExecutorSchema.safeParse({ ...base, backend: "runc", classesDeclared: ["microvm"] }).success).toBe(false);
     expect(registerExecutorSchema.safeParse({ ...base, backend: "gvisor", classesDeclared: ["user_space_kernel"] }).success).toBe(true);

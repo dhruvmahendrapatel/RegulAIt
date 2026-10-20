@@ -540,7 +540,7 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
 
 1. **Install gVisor on the Docker host, as one unit** (amendment E). The release tarball holds `runsc`, its shim and
    the `gvisor-bin/` sidecars; a bare `runsc` copy no longer runs. Fetch and verify it with the I0 script, which pins
-   the sha512 of `release-20261005.0` and re-checks the published one:
+   the sha512 of `release-20261012.0` and re-checks the published one:
    `spikes/isolation-i0/fetch-gvisor.sh /tmp/gvisor`. Then copy the extracted tree to a directory every user can
    traverse (amendment E: a `0700` parent breaks `--directfs=false`), for example `/usr/local/lib/gvisor` (`0755`).
    Air-gapped: bring the tarball in the bundle and run the same verification offline.
@@ -561,7 +561,7 @@ refuses until an admin relaxes that requirement or an L3 executor exists (see th
 
    The executor checks this before it announces anything, from OUTSIDE any sandbox: the daemon must name the
    `runsc` runtime at exactly `$REGULAIT_GVISOR_HOST_DIR/runsc` (default `/usr/local/lib/gvisor/runsc`), and that
-   binary must hash (sha512) to the pinned `release-20261005.0` binary. Compose mounts the gVisor DIRECTORY read-only
+   binary must hash (sha512) to the pinned `release-20261012.0` binary. Compose mounts the gVisor DIRECTORY read-only
    into the executor (never the file alone, which would pin the old inode across an upgrade), and the executor
    re-hashes the binary at every self-test and whenever its device, inode, size or times change.
    Anything else stops it at start (exit 2). Each sandbox's own runtime is then read with `docker inspect`; a
