@@ -1,6 +1,9 @@
 /* A1: the shared detail drawer. Same shape as the registry preview, so every row detail opens the same way.
    It is a <dialog>: author rules beat the UA sheet, so every UA box default (margin, padding, border, max sizes) is
    reset here, and display is set only while it is open. */
+:root {
+  --detail-drawer-w: 560px;
+}
 .drawer {
   position: fixed;
   inset-block: 0;
@@ -11,7 +14,7 @@
   padding: 0;
   border: 0;
   border-inline-start: 1px solid var(--border);
-  inline-size: min(560px, 100vw);
+  inline-size: min(var(--detail-drawer-w), 100vw);
   block-size: 100%;
   max-inline-size: none;
   max-block-size: none;
@@ -24,11 +27,9 @@
   display: flex;
   flex-direction: column;
 }
-/* As a side panel it starts below the top bar (shell .topbar, 52px), so the account menu and theme toggle stay
-   reachable. The modal overlay below keeps the full height: the page, top bar included, is inert behind it. */
-.drawer:not(.overlay) {
-  inset-block-start: 52px;
-  block-size: auto;
+/* N1 (WCAG 2.4.11): while the drawer is a side panel the page gives up its width, so no page control sits under it */
+:global(:root[data-detail-drawer="side"]) body {
+  padding-inline-end: var(--detail-drawer-w);
 }
 /* M2: below the overlay width (DRAWER_OVERLAY_QUERY) the drawer is modal and covers the page */
 .overlay::backdrop {
@@ -100,17 +101,4 @@
 }
 @keyframes drawerIn {
   from { transform: translateX(16px); opacity: 0; }
-}
-/* On a wide screen the page makes room for the side panel instead of sliding under it, so nothing on the page
-   (e.g. Evaluate now) is hidden while a record is open. Between this and the overlay width it overlaps the page. */
-@media (min-width: 1280px) {
-  /* the drawer's width (.drawer inline-size) */
-  :global(html[data-rg-drawer]) {
-    --rg-drawer-room: 560px;
-  }
-  :global(html[data-rg-drawer] #rgMain) {
-    padding-inline-end: calc(var(--rg-drawer-room) + var(--s3));
-    /* the shell caps the column at 1180px; widen the cap by the room so the page keeps its own width */
-    max-width: calc(1180px + var(--rg-drawer-room));
-  }
 }

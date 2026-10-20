@@ -39,12 +39,14 @@ export function DrawerActions(props: { children: ReactNode; className?: string }
  * A1: the one detail drawer for a row's detail (a finding's triage or remediation plan, a use-case preview).
  *
  * Focus and the page behind it (M2):
- * - Wide screens (above DRAWER_OVERLAY_QUERY): a non-modal side panel (`dialog.show()`). The list stays visible and
- *   reachable beside it: Tab leaves the drawer into the page in document order, and a pointer can pick another row,
- *   which re-targets the drawer.
+ * - Wide screens (above DRAWER_OVERLAY_QUERY): a non-modal side panel (`dialog.show()`). The page gives up the
+ *   drawer's width while it is open (N1, WCAG 2.4.11), so nothing focusable sits under it: Tab leaves the drawer into
+ *   the page in document order, and a pointer can pick another row, which re-targets the drawer.
  * - Phones and narrow windows: the drawer covers the page, so it is modal (`dialog.showModal()`). The page behind it is
  *   inert (not focusable, not in the accessibility tree), Tab wraps inside the drawer, and the top bar is
- *   unreachable until the drawer closes. Resizing across the width switches the mode in place.
+ *   unreachable until the drawer closes. Resizing across the width switches the mode in place, but never while a
+ *   dialog opened from the drawer is open (N2): the switch waits until it closes, so the drawer is never re-stacked
+ *   over a confirm.
  *
  * Escape closes only the innermost layer (M1): an open (i) tip or a dialog opened from the drawer takes it first.
  * The heading takes focus whenever the subject changes; on close, focus returns to the control that opened the
@@ -72,33 +74,59 @@ export function DetailDrawer(props: {
   const opener = useRef<HTMLElement | null>(null);
   const [footer, setFooter] = useState<HTMLDivElement | null>(null);
   const overlay = useOverlay();
+  // the mode in force; it follows `overlay` except while a nested dialog is open (N2)
+  const [modal, setModal] = useState(overlay);
   const { onClose } = props;
 
-  // the page reserves room for an open side panel (detailDrawer.module.css); counted, as two may be open at once
-  useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.rgDrawer = String(Number(root.dataset.rgDrawer ?? 0) + 1);
-    return () => {
-      const left = Number(root.dataset.rgDrawer ?? 1) - 1;
-      if (left > 0) root.dataset.rgDrawer = String(left);
-      else delete root.dataset.rgDrawer;
-    };
-  }, []);
   // L1: the opener is whatever had focus when this subject was opened, captured before the drawer takes focus.
   // Focus already inside the drawer means the subject changed from within it, so the earlier opener stands.
   useLayoutEffect(() => {
     const active = document.activeElement;
     if (active instanceof HTMLElement && active !== document.body && !ref.current?.contains(active)) opener.current = active;
   }, [props.subjectKey]);
+  // N2: re-entering the top layer would paint the drawer over a confirm opened from it, so the switch waits for it
+  useEffect(() => {
+    const dialog = ref.current;
+    if (modal === overlay || !dialog) return;
+    const nestedOpen = () => dialog.querySelector("dialog[open]") !== null;
+    if (!nestedOpen()) {
+      setModal(overlay);
+      return;
+    }
+    const watch = new MutationObserver(() => {
+      if (!nestedOpen()) setModal(overlay);
+    });
+    watch.observe(dialog, { subtree: true, childList: true, attributes: true, attributeFilter: ["open"] });
+    return () => watch.disconnect();
+  }, [overlay, modal]);
   useLayoutEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
     const had = dialog.contains(document.activeElement) ? (document.activeElement as HTMLElement) : null;
     if (dialog.open) dialog.close();
-    if (overlay) dialog.showModal();
+    if (modal) dialog.showModal();
     else dialog.show();
     had?.focus();
-  }, [overlay]);
+  }, [modal]);
+  // N1: beside the page, the page reflows into the space left of the drawer (detailDrawer.module.css). Tab from the
+  // drawer into the page scrolls each control clear of the sticky top bar, whatever height that bar wraps to.
+  useLayoutEffect(() => {
+    if (modal) return;
+    const root = document.documentElement;
+    root.setAttribute("data-detail-drawer", "side");
+    const bar = document.querySelector("header");
+    const fit = bar && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => {
+          root.style.scrollPaddingBlockStart = `${Math.ceil(bar.getBoundingClientRect().height) + 8}px`;
+        })
+      : null;
+    if (bar) fit?.observe(bar);
+    return () => {
+      fit?.disconnect();
+      root.style.scrollPaddingBlockStart = "";
+      root.removeAttribute("data-detail-drawer");
+    };
+  }, [modal]);
   useLayoutEffect(() => {
     heading.current?.focus();
   }, [props.subjectKey]);
@@ -115,7 +143,7 @@ export function DetailDrawer(props: {
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
-    if (overlay) {
+    if (modal) {
       // modal: the browser sends Escape to the topmost dialog as `cancel`; Tab wraps like the kit Modal's
       const trap = tabTrap(dialog);
       document.addEventListener("keydown", trap);
@@ -133,13 +161,13 @@ export function DetailDrawer(props: {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [overlay, onClose]);
+  }, [modal, onClose]);
 
   return (
     <dialog
       ref={ref}
-      className={overlay ? `${d.drawer} ${d.overlay}` : d.drawer}
-      aria-modal={overlay ? "true" : "false"}
+      className={modal ? `${d.drawer} ${d.overlay}` : d.drawer}
+      aria-modal={modal ? "true" : "false"}
       aria-labelledby={headingId}
       data-testid={props["data-testid"]}
       onCancel={(e) => {

@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type FocusEvent as ReactFocusEvent,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -567,6 +568,7 @@ export function Card(props: {
         <div
           ref={box}
           className={contained ? s.contain : undefined}
+          onFocus={contained ? revealInBox : undefined}
           {...(contained && fit.scrolls ? { tabIndex: 0, role: "region", "aria-label": `${name}, scrollable` } : {})}
         >
           {host ? createPortal(props.children, host) : typeof document === "undefined" ? props.children : null}
@@ -581,6 +583,21 @@ export function Card(props: {
       )}
     </section>
   );
+}
+
+/**
+ * WCAG 2.4.11: a control focused inside a contained card is scrolled fully into the box. The browser leaves a control
+ * that is only partly clipped where it is, e.g. an (i) at the clipped edge of a wide table's header.
+ */
+function revealInBox(event: ReactFocusEvent<HTMLDivElement>) {
+  const box = event.currentTarget;
+  const r = event.target.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  const left = b.left + box.clientLeft;
+  const top = b.top + box.clientTop;
+  if (r.left < left || r.right > left + box.clientWidth || r.top < top || r.bottom > top + box.clientHeight) {
+    event.target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
 }
 
 /**
