@@ -119,6 +119,21 @@ export default function AppShell(props: { children: ReactNode }) {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+  // WCAG 2.4.11: a control that takes focus is scrolled clear of the sticky topbar, whatever height it wraps to
+  const topbar = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const bar = topbar.current;
+    if (!bar || typeof ResizeObserver === "undefined") return;
+    const root = document.documentElement;
+    const fit = new ResizeObserver(() => {
+      root.style.scrollPaddingBlockStart = `${Math.ceil(bar.getBoundingClientRect().height) + 8}px`;
+    });
+    fit.observe(bar);
+    return () => {
+      fit.disconnect();
+      root.style.scrollPaddingBlockStart = "";
+    };
+  }, []);
   const togglePin = () => {
     setPinned((p) => {
       writePinned(!p);
@@ -413,7 +428,7 @@ export default function AppShell(props: { children: ReactNode }) {
       </aside>
 
       <div className={s.mainCol}>
-        <header className={s.topbar} data-scrolled={scrolled ? "true" : "false"}>
+        <header ref={topbar} className={s.topbar} data-scrolled={scrolled ? "true" : "false"}>
           <button
             className={`${s.iconBtn} ${s.hamburger}`}
             aria-label="Toggle navigation"

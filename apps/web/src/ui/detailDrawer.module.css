@@ -1,6 +1,9 @@
 /* A1: the shared detail drawer. Same shape as the registry preview, so every row detail opens the same way.
    It is a <dialog>: author rules beat the UA sheet, so every UA box default (margin, padding, border, max sizes) is
    reset here, and display is set only while it is open. */
+:root {
+  --detail-drawer-w: 560px;
+}
 .drawer {
   position: fixed;
   inset-block: 0;
@@ -11,7 +14,7 @@
   padding: 0;
   border: 0;
   border-inline-start: 1px solid var(--border);
-  inline-size: min(560px, 100vw);
+  inline-size: min(var(--detail-drawer-w), 100vw);
   block-size: 100%;
   max-inline-size: none;
   max-block-size: none;
@@ -23,6 +26,10 @@
 .drawer[open] {
   display: flex;
   flex-direction: column;
+}
+/* N1 (WCAG 2.4.11): while the drawer is a side panel the page gives up its width, so no page control sits under it */
+:global(:root[data-detail-drawer="side"]) body {
+  padding-inline-end: var(--detail-drawer-w);
 }
 /* M2: below the overlay width (DRAWER_OVERLAY_QUERY) the drawer is modal and covers the page */
 .overlay::backdrop {
