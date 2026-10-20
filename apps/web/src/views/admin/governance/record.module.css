@@ -282,7 +282,8 @@
   border: 0;
 }
 
-/* A5: captioned tab groups. The caption is CSS text with empty alternative text, so tab names stay "Risks", not "Assessment Risks" */
+/* A5: captioned tab groups. The caption is CSS text with empty alternative text, so tab names stay "Risks", not "Assessment Risks";
+   screen readers get the group from each tab's aria-describedby (kit Tabs) instead */
 .groupedTabs [role="tablist"] {
   overflow-x: auto;
   align-items: flex-end;

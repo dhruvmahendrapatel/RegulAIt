@@ -1117,7 +1117,11 @@ export function ConfirmModal(props: {
 export const tabIds = (prefix: string, id: string) => ({ tab: `${prefix}-tab-${id}`, panel: `${prefix}-panel-${id}` });
 
 export function Tabs(props: {
-  /** `group` (A5): the first tab of each group carries `data-group`, which a page's own CSS can caption */
+  /**
+   * `group` (A5): the first tab of each group carries `data-group`, which a page's own CSS can caption. Every tab in a
+   * group is also described by the group name (`aria-describedby`), so a screen reader announces the grouping that the
+   * visual caption shows, while each tab keeps its own name
+   */
   tabs: Array<{ id: string; label: ReactNode; group?: string }>;
   active: string;
   onChange: (id: string) => void;
@@ -1129,13 +1133,18 @@ export function Tabs(props: {
   idPrefix?: string;
 }) {
   const tabStop = props.tabs.find((tab) => tab.id === props.active)?.id ?? props.tabs[0]?.id;
+  const groupPrefix = useId();
+  const groups = [...new Set(props.tabs.map((t) => t.group).filter((g): g is string => Boolean(g)))];
+  const groupId = (group: string) => `${groupPrefix}-group-${groups.indexOf(group)}`;
   return (
+    <>
     <div className={s.tabs} role="tablist">
       {props.tabs.map((t, i) => (
         <button
           key={t.id}
           role="tab"
           data-group={t.group && t.group !== props.tabs[i - 1]?.group ? t.group : undefined}
+          aria-describedby={t.group ? groupId(t.group) : undefined}
           id={props.idPrefix ? tabIds(props.idPrefix, t.id).tab : undefined}
           // only the selected tab names its panel: an unselected panel is not rendered, and a dangling reference is invalid
           aria-controls={props.idPrefix && t.id === props.active ? tabIds(props.idPrefix, t.id).panel : undefined}
@@ -1158,6 +1167,13 @@ export function Tabs(props: {
         </button>
       ))}
     </div>
+    {groups.length > 0 && (
+      // the group names the tabs' aria-describedby points at; hidden, as the page shows them as captions already
+      <div hidden>
+        {groups.map((g) => <span key={g} id={groupId(g)}>{`${g} group`}</span>)}
+      </div>
+    )}
+    </>
   );
 }
 

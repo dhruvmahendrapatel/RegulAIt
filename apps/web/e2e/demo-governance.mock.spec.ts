@@ -180,6 +180,11 @@ test("enterprise governance demo surfaces render and complete their core actions
   // A5: grouped tabs keep their plain names (the group caption is not part of the name) and show counts
   await expect(page.getByRole("tab", { name: "Risks 1" })).toBeVisible();
   await expect(page.getByRole("tab", { name: /^Frameworks$/ })).toBeVisible();
+  // owner decision on #453 (2026-10-20): a screen reader also hears each tab's group, as its description
+  await expect(page.getByRole("tab", { name: /^Frameworks$/ })).toHaveAccessibleDescription("Assessment group");
+  await expect(page.getByRole("tab", { name: "Risks 1" })).toHaveAccessibleDescription("Assessment group");
+  await expect(page.getByRole("tab", { name: /^Audit/ })).toHaveAccessibleDescription("Evidence group");
+  await expect(page.getByRole("tab", { name: /^Overview$/ })).toHaveAccessibleDescription("Overview group");
   await page.getByRole("tab", { name: "Frameworks" }).click();
   await expect(page.getByText("EU AI Act · v2")).toBeVisible();
   await page.getByRole("tab", { name: "Risks" }).click();
