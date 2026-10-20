@@ -488,7 +488,31 @@ test("use-case Audit tab never shows the capped row count as the total (M1)", as
   await expect(tab).toHaveText("Audit 20+");
   await tab.click();
   await expect(page.getByTestId("use-case-audit-partial")).toContainText("older rows may exist");
-  await expect(page.getByRole("link", { name: "Open the full audit log" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open this use case's full audit trail" })).toBeVisible();
+});
+
+test("use-case Audit tab shows the true total and deep-links to that use case's own trail (owner decision 2026-10-20)", async ({ page }) => {
+  const full = Array.from({ length: 20 }, (_, i) => ({ ...overview.audit[0]!, id: i + 1 }));
+  await page.route(`**/v1/use-cases/${ID}/overview`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...overview, audit: full, auditTotal: 57 }) }));
+  const asked: string[] = [];
+  await page.route("**/v1/audit?**", (route) => {
+    asked.push(new URL(route.request().url()).search);
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [], pageSize: 0, maxPageSize: 500, hasMore: false, nextCursor: null }) });
+  });
+  await page.goto(`/ui/admin/governance/use-cases/${ID}`);
+  const tab = page.getByRole("tab", { name: /^Audit/ });
+  await expect(tab).toHaveText("Audit 57");
+  await tab.click();
+  await expect(page.getByTestId("use-case-audit-partial")).toHaveText("Showing the newest 20 of 57 rows. This use case's full audit trail, and its CSV export, hold every row.");
+  const link = page.getByRole("link", { name: "Open this use case's full audit trail" });
+  await expect(link).toHaveAttribute("href", `/ui/admin/audit?objectType=ai_use_case&objectId=${ID}`);
+  await link.click();
+  await expect(page.getByTestId("audit-only-object")).toContainText(`Showing the audit trail of one AI use case, ${ID}.`);
+  await expect.poll(() => asked.some((q) => q.includes("objectType=ai_use_case") && q.includes(`objectId=${ID}`))).toBe(true);
+  await page.getByTestId("audit-only-object").getByRole("button", { name: "Show every row" }).click();
+  await expect(page.getByTestId("audit-only-object")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/objectId=/);
 });
 
 test("use-case Audit tab under the cap shows the exact count and no partial notice (M1)", async ({ page }) => {

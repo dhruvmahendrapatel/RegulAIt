@@ -31,6 +31,7 @@ import {
   approvals,
   auditLog,
   and,
+  count,
   desc,
   eq,
   inArray,
@@ -164,6 +165,12 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
       .where(and(eq(auditLog.objectType, "ai_use_case"), eq(auditLog.objectId, useCaseId)))
       .orderBy(desc(auditLog.at))
       .limit(20);
+    // owner decision on #453 (2026-10-20): the true size of this use case's trail, so the Audit tab shows an exact
+    // count instead of "20+"; the full trail is GET /v1/audit?objectType=ai_use_case&objectId=<id>
+    const [auditCount] = await db
+      .select({ n: count() })
+      .from(auditLog)
+      .where(and(eq(auditLog.objectType, "ai_use_case"), eq(auditLog.objectId, useCaseId)));
 
     const live = risks.filter((r) => r.status === "open" || r.status === "mitigating");
     return {
@@ -204,6 +211,7 @@ export function registerUseCaseOverviewRoutes(app: FastifyInstance, db: Db): voi
       },
       approvals: approvalRows,
       audit,
+      auditTotal: Number(auditCount?.n ?? audit.length),
       links: { frameworks: `/v1/use-cases/${useCaseId}/frameworks` },
     };
   });

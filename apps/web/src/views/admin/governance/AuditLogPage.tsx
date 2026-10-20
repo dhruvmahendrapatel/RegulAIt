@@ -75,15 +75,26 @@ export default function AuditLogPage() {
   const [search, setSearch] = useSearchParams();
   const rowParam = search.get("id");
   const onlyRow = rowParam !== null && UUID_RE.test(rowParam) ? rowParam.toLowerCase() : null;
+  // owner decision on #453 (2026-10-20): `?objectType=…&objectId=…` shows one object's trail, e.g. a use case's,
+  // linked from its Audit tab. Both are needed; a malformed id is ignored rather than sent
+  const objectParam = search.get("objectId");
+  const objectTypeParam = search.get("objectType");
+  const onlyObject = objectParam !== null && UUID_RE.test(objectParam) && objectTypeParam && /^[a-z_]{1,64}$/.test(objectTypeParam)
+    ? { type: objectTypeParam, id: objectParam.toLowerCase() }
+    : null;
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
     if (onlyRow) p.set("id", onlyRow);
+    if (onlyObject) {
+      p.set("objectType", onlyObject.type);
+      p.set("objectId", onlyObject.id);
+    }
     if (userId) p.set("userId", userId);
     if (deployMode) p.set("deployMode", deployMode);
     const s = p.toString();
     return s ? `?${s}` : "";
-  }, [onlyRow, userId, deployMode]);
+  }, [onlyRow, onlyObject?.type, onlyObject?.id, userId, deployMode]);
 
   const retention = useQuery({
     queryKey: ["admin", "audit-retention"],
@@ -94,7 +105,7 @@ export default function AuditLogPage() {
   // older rows existed (UIA-02); now it says how many are shown and loads
   // older pages on request.
   const audit = useInfiniteQuery({
-    queryKey: ["admin", "audit", onlyRow, userId, deployMode],
+    queryKey: ["admin", "audit", onlyRow, onlyObject?.type ?? null, onlyObject?.id ?? null, userId, deployMode],
     queryFn: ({ pageParam }) =>
       api.get<AuditPage>(`/v1/audit${qs}${pageParam ? `${qs ? "&" : "?"}cursor=${encodeURIComponent(pageParam)}` : ""}`),
     initialPageParam: null as string | null,
@@ -203,6 +214,15 @@ export default function AuditLogPage() {
             <p role="status" data-testid="audit-only-row">
               Showing one audit row, <code className={v.mono}>{onlyRow}</code>.{" "}
               <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("id"); return n; })}>
+                Show every row
+              </Button>
+            </p>
+          )}
+          {onlyObject && (
+            <p role="status" data-testid="audit-only-object">
+              Showing the audit trail of one {onlyObject.type === "ai_use_case" ? "AI use case" : humanize(onlyObject.type).toLowerCase()},{" "}
+              <code className={v.mono}>{onlyObject.id}</code>. The CSV export covers the same rows.{" "}
+              <Button size="sm" variant="ghost" onClick={() => setSearch((p) => { const n = new URLSearchParams(p); n.delete("objectType"); n.delete("objectId"); return n; })}>
                 Show every row
               </Button>
             </p>

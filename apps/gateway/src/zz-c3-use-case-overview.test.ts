@@ -119,6 +119,8 @@ describe("the use-case 360", () => {
     expect(b.summary.liveWithoutControls).toBe(1);
 
     expect(b.audit.length).toBeGreaterThan(0);
+    // owner decision on #453 (2026-10-20): the true trail size, under the 20-row list cap here
+    expect(b.auditTotal).toBe(b.audit.length);
     expect(b.links.frameworks).toBe(`/v1/use-cases/${useCaseId}/frameworks`);
 
     // visibility: the detail route's rule
