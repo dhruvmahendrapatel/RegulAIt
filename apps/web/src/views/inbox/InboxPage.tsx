@@ -331,6 +331,11 @@ export default function InboxPage() {
             {openView.toolCall && <QuorumProgress approval={open} />}
             {openView.inst && <MergeGateEvidence inst={openView.inst} />}
             {open.contextConflict && <ConflictPreview conflict={open.contextConflict} />}
+            {/* owner decision on #453: say so when the request carries no evidence, rather than leave the body blank.
+                A workflow item whose evidence is still loading is not "no evidence", so it waits for the load */}
+            {!openView.toolCall && !open.instanceId && !open.contextConflict ? (
+              <p className={v.faint} data-testid="inbox-no-evidence">No evidence attached to this request.</p>
+            ) : null}
             {/* L2 (ADR-0180): the reason warning, the reason and the decision stay together in the pinned footer */}
             {openView.canDecide ? (
               <DrawerActions>

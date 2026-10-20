@@ -163,6 +163,24 @@ test("Inbox: the dry-run deploy badge explains itself with an (i), not a hover t
   await expect(page.getByRole("note")).toContainText("The recorded deploy was a dry run. Nothing was actually changed.");
 });
 
+test("Inbox: a request with no evidence says so in the drawer; one with evidence does not", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/ui/inbox");
+  // the governance remediation carries no workflow, quorum or context conflict
+  await page.locator("div").filter({ hasText: /^Governance remediation/ }).getByRole("button", { name: /^Review / }).last().click();
+  const item = page.getByTestId("inbox-item");
+  await expect(item.getByTestId("inbox-no-evidence")).toHaveText("No evidence attached to this request.");
+  // the decision row stays pinned in the footer (ADR-0180)
+  await expect(item.getByTestId("inbox-decision").getByRole("button", { name: "Approve" })).toBeInViewport();
+  await item.getByRole("button", { name: "Close review" }).click();
+
+  shown = [dryRun];
+  await page.goto("/ui/inbox");
+  await page.getByRole("button", { name: /^Review / }).first().click();
+  await expect(page.getByTestId("inbox-item").getByText("deploy was a dry-run")).toBeVisible();
+  await expect(page.getByTestId("inbox-no-evidence")).toHaveCount(0);
+});
+
 test("Alerts: the list is a contained card with a count, and the acknowledgement stays in view beside long remediation", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   const many = Array.from({ length: 12 }, (_, i) => ({ kind: "assess_vendor", executable: false, title: `Manual option ${i + 1}`, rationale: "Operator-led.", params: {}, steps: ["Open the record.", "Record the evidence.", "Confirm with the owner."] }));
