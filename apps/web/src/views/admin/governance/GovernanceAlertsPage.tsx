@@ -154,6 +154,7 @@ export default function GovernanceAlertsPage() {
                 : "Alerts appear here when their lifecycle reaches this state."}
             />
           ) : (
+            <Card flush contain title="Alerts" count={alerts.data?.alerts.length ?? 0} countNoun={["alert", "alerts"]}>
             <div className={s.alertList}>
               {alerts.data?.alerts.map((alert) => (
                 <button key={alert.id} className={`${s.alertRow} ${selectedId === alert.id ? s.alertRowActive : ""}`} aria-current={selectedId === alert.id ? "true" : undefined} onClick={() => setSelectedId(alert.id)}>
@@ -163,6 +164,7 @@ export default function GovernanceAlertsPage() {
                 </button>
               ))}
             </div>
+            </Card>
           )}
         </QueryGate>
         {/* owner decision on #453: an alert's detail opens in the shared detail drawer (A1), not a split column */}
@@ -172,7 +174,7 @@ export default function GovernanceAlertsPage() {
             title={selected.title}
             subjectKey={selected.id}
             closeLabel="Close alert"
-            testId="alert-detail"
+            data-testid="alert-detail"
             meta={<><SeverityBadge severity={selected.severity} />{selected.status === "open" ? null : <span className={v.dim}>{humanize(selected.status)}</span>}<span className={v.faint}>{selected.ruleLabel}</span></>}
             onClose={closeDetail}
           >

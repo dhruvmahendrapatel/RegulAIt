@@ -52,9 +52,10 @@ import {
 } from "../adminKit";
 import a from "../admin.module.css";
 import { ShadowRemediationPanel } from "./ShadowRemediationPanel";
-import { DetailDrawer } from "../../../ui/DetailDrawer";
+import { DetailDrawer, DrawerActions } from "../../../ui/DetailDrawer";
 import { DiscoverySightings } from "./DiscoverySightings";
 import type { SightingView } from "./discoverySourcesModel";
+import { IMPORT_EXAMPLE } from "./shadowAiExample";
 import v from "../../views.module.css";
 import sh from "./shadowAi.module.css";
 
@@ -269,16 +270,7 @@ const ADAPTER_CONFIG_HINT: Record<string, string> = {
     'REQUIRED: {"kind":"egress_log"} (or code_scan / saas_export / self_reported). Add "mapping" to name the columns yourself; omit it and header inference proposes them and REFUSES on ambiguity.',
 };
 
-const EXAMPLE = JSON.stringify(
-  {
-    kind: "egress_log",
-    mode: "dry_run",
-    source: "acme forward proxy, week 31",
-    rows: [{ observedAt: "2026-07-28T09:00:00Z", destinationHost: "api.openai.com", sourceIdentity: "build-runner-01", requestCount: 412 }],
-  },
-  null,
-  2,
-);
+const EXAMPLE = JSON.stringify(IMPORT_EXAMPLE, null, 2);
 
 export default function ShadowAiPage() {
   const catalogue = useQuery({ queryKey: ["shadow-ai", "catalogue"], queryFn: () => api.get<CatalogueResponse>("/v1/shadow-ai/catalogue") });
@@ -644,6 +636,7 @@ export default function ShadowAiPage() {
             title={subjectOf(remediationFor)}
             subjectKey={remediationFor}
             closeLabel="Close plan"
+            data-testid="shadow-remediation"
             meta={
               <InfoButton label="a remediation plan">
                 A remediation plan turns a finding into tracked work: a governed workflow with a separate approver. The
@@ -679,7 +672,7 @@ export default function ShadowAiPage() {
             <Field label="Reason">
               <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="why this judgement" />
             </Field>
-            <div className={v.row}>
+            <DrawerActions className={v.row}>
               <Button
                 variant="primary"
                 disabled={act.busy}
@@ -704,7 +697,7 @@ export default function ShadowAiPage() {
                 Record
               </Button>
               <Button onClick={() => setDispositionFor(null)}>Cancel</Button>
-            </div>
+            </DrawerActions>
           </section>
           </DetailDrawer>
         ) : null}

@@ -56,8 +56,8 @@ acknowledged or resolved. A database straight from `demo:prepare` does not have 
 | G7 Regulatory | `ds-g7-regulatory-light.png` | pass | 13 entries, 6 in force, 7 with control gaps. |
 | G8 Audit / signed export | `ds-g8-audit-light.png` | pass with findings | **Download signed bundle** present; Morgan's sign-off and acknowledgement rows at the top. Reason column clipped and ISO timestamps in reason text (F11). |
 | Posture | `ds-posture-posture-light.png` | pass with findings | Populated; internal references and "NOT tamper-resistant" on the executive page (F10). |
-| G9 Incidents | `ds-g9-incidents-light.png` | pass | Empty state "No incidents". Decide whether the demo needs seeded incidents. |
-| G9 Feedback and appeals | `ds-g9-feedback-light.png` | pass | Empty state "Nothing routed to you". Decide whether the demo needs seeded feedback. |
+| G9 Incidents | `ds-g9-incidents-light.png` | pass (run `39320770844`, head `e1adab1`, no empty state) | Was the empty state "No incidents": the seeded incident is closed and the list opens on "Not closed". `demo:intake` now also seeds an open, medium incident on the Internal IT Knowledge Base Bot (owner Dana, timeline notes, an open action due after the demo day); `demo:check` beat "3 Incidents and feedback" checks it. |
+| G9 Feedback and appeals | `ds-g9-feedback-light.png` | pass (run `39320770844`, head `e1adab1`, no empty state) | Was the empty state "Nothing routed to you": the seeded item is resolved and the queue opens on "Open". `demo:intake` now also seeds two open items on the IT knowledge bot routed to Ada: a problem report (acknowledged) and an appeal (in review). |
 | G9 Decision records tab | `ds-g9-decision-records-light.png` | pass | On the G1 record: one record, approved by Avery Approver, digests shown. |
 | G10 Content trust | `ds-g10-content-trust-light.png` | pass | One trusted connector, five provenance records. |
 

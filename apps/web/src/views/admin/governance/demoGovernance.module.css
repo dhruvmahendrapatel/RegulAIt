@@ -408,16 +408,10 @@
   grid-column: 1 / -1;
 }
 
-/* one list container, divider rows — not a stack of bordered boxes */
+/* divider rows inside one card — not a stack of bordered boxes; the card's X6a
+   contain keeps a long list in its own box, and the detail opens in the drawer */
 .alertList {
   display: grid;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface-1);
-  /* X6a: a long list scrolls in place instead of stretching the page; the detail opens in the drawer */
-  max-block-size: min(70vh, 720px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .alertRow {
@@ -479,8 +473,6 @@
   gap: var(--s1);
   color: var(--text);
   font-size: var(--text-sm);
-}
-.pathList li {
   border-radius: var(--radius-md);
   padding: var(--s0) var(--s1);
   border: 1px solid var(--border-strong);

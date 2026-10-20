@@ -544,7 +544,8 @@ function LinksCard(props: { d: IncidentDetail; refetch: () => void }) {
   const [type, setType] = useState("agent");
   const [id, setId] = useState("");
   return (
-    <Card title="Linked records" contain>
+    // L3: no `contain`: for an editor this card holds the add-link form, and a contained section never wraps a form
+    <Card title="Linked records">
       <Table
         rows={props.d.links}
         rowKey={(l) => `${l.objectType}:${l.objectId}`}

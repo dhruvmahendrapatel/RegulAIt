@@ -22,7 +22,7 @@ import { api } from "../../api/client";
 import type { Approval, DirectoryUser, ReviewPolicy, UseCaseLifecycleDetail, WorkflowDetailResponse } from "../../api/types";
 import { ago, frameworkLabel, humanize } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
-import { Badge, Button, Field, Input, Select, Textarea } from "../../ui/kit";
+import { Badge, Button, Field, InfoButton, Input, Select, Textarea } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import { QuestionnaireView } from "../admin/governance/UseCaseQuestionnaire";
 import { shortDate, type OverviewResponse } from "../admin/governance/useCaseLifecycle";
@@ -421,7 +421,10 @@ function ReviewDrawer(props: { approval: Approval; onClose: () => void; onDecide
           ) : (
             <form className={r.section} noValidate onSubmit={(e) => { e.preventDefault(); void submit(); }}>
               <fieldset className={r.outcomes}>
-                <legend>Decision</legend>
+                <legend>
+                  Decision
+                  <InfoButton label="Decision outcomes">Approve, approve with conditions, send back for more information, or reject. Your reason is stored with the decision.</InfoButton>
+                </legend>
                 {OUTCOMES.map((o) => (
                   <label key={o.id} className={r.outcome}>
                     <input

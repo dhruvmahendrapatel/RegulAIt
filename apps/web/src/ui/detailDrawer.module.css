@@ -1,16 +1,38 @@
-/* A1: the shared detail drawer. Same shape as the registry preview, so every row detail opens the same way. */
+/* A1: the shared detail drawer. Same shape as the registry preview, so every row detail opens the same way.
+   It is a <dialog>: author rules beat the UA sheet, so every UA box default (margin, padding, border, max sizes) is
+   reset here, and display is set only while it is open. */
 .drawer {
   position: fixed;
-  /* below the top bar (shell .topbar, 52px), so the account menu and theme toggle stay reachable */
-  inset-block: 52px 0;
+  inset-block: 0;
+  inset-inline-start: auto;
   inset-inline-end: 0;
   z-index: 45;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-inline-start: 1px solid var(--border);
   inline-size: min(560px, 100vw);
+  block-size: 100%;
+  max-inline-size: none;
+  max-block-size: none;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-lg);
+}
+.drawer[open] {
   display: flex;
   flex-direction: column;
-  background: var(--surface-1);
-  border-inline-start: 1px solid var(--border);
-  box-shadow: var(--shadow-lg);
+}
+/* As a side panel it starts below the top bar (shell .topbar, 52px), so the account menu and theme toggle stay
+   reachable. The modal overlay below keeps the full height: the page, top bar included, is inert behind it. */
+.drawer:not(.overlay) {
+  inset-block-start: 52px;
+  block-size: auto;
+}
+/* M2: below the overlay width (DRAWER_OVERLAY_QUERY) the drawer is modal and covers the page */
+.overlay::backdrop {
+  background: var(--scrim);
 }
 .head {
   display: flex;
@@ -51,6 +73,7 @@
 }
 .body {
   flex: 1;
+  min-block-size: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--s3);
@@ -58,14 +81,28 @@
   flex-direction: column;
   gap: var(--s3);
 }
+/* L2: decision and step-up actions are pinned here, outside the scrolling body, so they never scroll out of view */
+.footer {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-block-start: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.footer:empty {
+  display: none;
+}
 @media (prefers-reduced-motion: no-preference) {
   .drawer { animation: drawerIn 160ms ease-out; }
 }
 @keyframes drawerIn {
   from { transform: translateX(16px); opacity: 0; }
 }
-/* On a wide screen the page makes room for the drawer instead of sliding under it, so nothing on the
-   page (e.g. Evaluate now) is hidden while a record is open. Narrower screens keep the overlay. */
+/* On a wide screen the page makes room for the side panel instead of sliding under it, so nothing on the page
+   (e.g. Evaluate now) is hidden while a record is open. Between this and the overlay width it overlaps the page. */
 @media (min-width: 1280px) {
   /* the drawer's width (.drawer inline-size) */
   :global(html[data-rg-drawer]) {

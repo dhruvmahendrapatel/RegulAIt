@@ -20,6 +20,7 @@ import { api } from "../../../api/client";
 import type { WorkflowListResponse } from "../../../api/types";
 import { ago } from "../../../api/format";
 import { Badge, Button, ConfirmModal, Field, InfoButton, Input, Select, SeverityBadge } from "../../../ui/kit";
+import { DrawerActions } from "../../../ui/DetailDrawer";
 import { QueryGate, optionEls, projectOpts, useAction, useProjects } from "../adminKit";
 import { withRefusalCopy } from "./refusalCopy";
 import {
@@ -39,7 +40,8 @@ import rm from "./shadowAi.module.css";
 
 type Pending = { kind: "start"; body: StartInstanceBody } | { kind: "link"; instanceId: string };
 
-/** `inDrawer` (A1): the shared DetailDrawer supplies the title, the (i) and Close, so the panel shows only its body */
+/** `inDrawer` (A1): the shared DetailDrawer supplies the title, the (i), Close and the test id, and pins the Start and
+ * Link buttons in its footer (L2), so the panel shows only its body */
 export function ShadowRemediationPanel(props: { findingId: string; onClose: () => void; onLinked: () => void; inDrawer?: boolean }) {
   const plan = useQuery({
     queryKey: ["admin", "shadow-ai-remediation-plan", props.findingId],
@@ -55,7 +57,7 @@ export function ShadowRemediationPanel(props: { findingId: string; onClose: () =
     if (!props.inDrawer) section.current?.scrollIntoView({ block: "nearest" });
   }, [props.inDrawer]);
   return (
-    <section ref={section} className={props.inDrawer ? undefined : a.subSection} aria-label="Remediation plan" data-testid="shadow-remediation">
+    <section ref={section} className={props.inDrawer ? undefined : a.subSection} aria-label="Remediation plan" data-testid={props.inDrawer ? undefined : "shadow-remediation"}>
       {props.inDrawer ? null : <div className={v.row}>
         <div className={v.sectionTitle} style={{ flex: 1 }}>
           Remediation plan
@@ -87,7 +89,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
   // a workflow that started but whose link failed: a retry links THIS one and never starts or links another.
   // Seeded from the server, so it survives a reload
   const [startedUnlinked, setStartedUnlinked] = useState<string | null>(p.pendingLink?.instanceId ?? null);
-  const ids = { note: useId(), env: useId(), problem: useId() };
+  const ids = { note: useId(), env: useId(), problem: useId(), start: useId(), link: useId() };
   // linked to a workflow that is still live (or completed): nothing here may start or link another
   const locked = startedUnlinked !== null || linkStands(p);
   const instances = useQuery({
@@ -199,6 +201,7 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
       ) : null}
 
       <form
+        id={ids.start}
         aria-label="Start a remediation workflow"
         aria-describedby={ids.note}
         className={v.stack}
@@ -236,19 +239,21 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
           Where the ungoverned usage runs today. Workflow assignment rules and a project's compliance requirements decide
           which stages the workflow has.
         </p>
-        <div className={v.row}>
+        <DrawerActions className={v.row}>
           <Button
             type="submit"
+            form={ids.start}
             variant="primary"
             disabled={act.busy || locked}
             aria-describedby={problem ? ids.problem : undefined}
           >
             Start remediation workflow…
           </Button>
-        </div>
+        </DrawerActions>
       </form>
 
       <form
+        id={ids.link}
         aria-label="Link an existing workflow"
         className={a.formRow}
         onSubmit={(e) => {
@@ -276,9 +281,11 @@ export function PlanBody(props: { plan: RemediationPlan; onLinked: () => void })
             )}
           </Select>
         </Field>
-        <Button type="submit" disabled={act.busy || locked}>
-          Link workflow…
-        </Button>
+        <DrawerActions>
+          <Button type="submit" form={ids.link} disabled={act.busy || locked}>
+            Link workflow…
+          </Button>
+        </DrawerActions>
       </form>
 
       {startedUnlinked && (
