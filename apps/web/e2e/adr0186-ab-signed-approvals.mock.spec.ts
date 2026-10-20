@@ -310,6 +310,11 @@ test.describe("ADR-0186 A2+B: dual control and passkey-signed approvals", () => 
     await page.getByRole("button", { name: "Review action write_file" }).click();
     const review = page.getByRole("dialog", { name: "Review MCP action" });
     await expect(review.getByText("signs with your passkey")).toBeVisible();
+    // ADR-0186: no admin override on a tool call. The decision controls render inside this dialog, and the queue's
+    // badge reads "override" (PR #457 recheck L1: the "Admin override" check above cannot fail on its own)
+    await expect(review.getByText("override", { exact: true })).toHaveCount(0);
+    await expect(review.getByPlaceholder("reason (override)")).toHaveCount(0);
+    await expect(review.getByPlaceholder("reason (optional)")).toBeVisible();
     await review.getByRole("button", { name: "approve", exact: true }).click();
     await expect.poll(() => cap.decides.length).toBe(1);
     expect(cap.signingOptions).toEqual([{ id: "a-tool-1", body: { decision: "approved" } }]);
