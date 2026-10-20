@@ -2002,14 +2002,13 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
       // refuses the result now: the run ends not_run, nothing is ingested
       const heldRefusal = engineTaskRefusalOf(run.id);
       if (heldRefusal !== null) {
-        const refused = await finishEngineRun(db, run.id, ["leased"], {
+        await finishEngineRun(db, run.id, ["leased"], {
           status: "not_run",
           errorCode: ENGINE_TASK_ISOLATION_UNAVAILABLE,
           normalised: noResult("not_run"),
           cause: `engine_task_${heldRefusal}`.slice(0, 120),
           actorUserId: run.runAsUserId ?? NO_IDENTITY,
         });
-        if (!refused) return refuseLate();
         return reply.status(409).send({ error: "engine_task_refused", refusal: heldRefusal, status: "not_run" });
       }
       const parsed = engineResultEnvelopeSchema.safeParse(req.body);
@@ -2051,9 +2050,8 @@ export function registerEngineRunRoutes(app: FastifyInstance, db: Db, opts: Engi
           requireLive: true,
           requirePlacedTask: true,
         });
-        if (!failed) return refuseLate();
-        if (failed.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
-        if (isUnplacedEnd(failed)) return unplacedReply(reply);
+        if (failed?.status === "timeout") return reply.status(409).send({ error: "engine_run_timed_out", status: "timeout" });
+        if (failed && isUnplacedEnd(failed)) return unplacedReply(reply);
         return reply.status(422).send({
           error: "engine_result_invalid",
           detail: problem,
