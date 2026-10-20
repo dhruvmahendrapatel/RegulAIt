@@ -43,6 +43,9 @@ const remediation = {
 };
 
 let alertsShown: unknown[] = [alert];
+// The Active tab lists every alert that is not resolved (governance-monitor.ts), so by default an acknowledgement
+// keeps the alert listed with status "acknowledged"; the remove-from-list path opts in with ackRemoves
+let ackRemoves = false;
 
 async function mock(route: Route) {
   const p = new URL(route.request().url()).pathname;
@@ -50,7 +53,9 @@ async function mock(route: Route) {
   const decided = route.request().method() === "POST" ? /^\/v1\/approvals\/([^/]+)\/decide$/.exec(p) : null;
   const acked = route.request().method() === "POST" ? /^\/v1\/governance\/alerts\/([^/]+)\/acknowledge$/.exec(p) : null;
   if (decided) shown = shown.filter((a) => (a as { id: string }).id !== decided[1]);
-  else if (acked) alertsShown = alertsShown.filter((a) => (a as { id: string }).id !== acked[1]);
+  else if (acked) alertsShown = ackRemoves
+    ? alertsShown.filter((a) => (a as { id: string }).id !== acked[1])
+    : alertsShown.map((a) => ((a as { id: string }).id === acked[1] ? { ...(a as object), status: "acknowledged", acknowledgedAt: ago(0), acknowledgedBy: "Avery Approver", ackNote: "acknowledged" } : a));
   else if (p === "/auth/me") body = { userId: ME, isAdmin: true, via: "session", user: { id: ME, email: "avery@example.test", displayName: "Avery Approver" }, mustChangePassword: false, totpEnabled: true, passwordSet: true, mfaSetupRequired: false };
   else if (p === "/v1/me") body = { userId: ME, isAdmin: true, user: { id: ME, email: "avery@example.test", displayName: "Avery Approver" } };
   else if (p === "/v1/approvals") body = { approvals: shown };
@@ -73,6 +78,7 @@ async function mock(route: Route) {
 test.beforeEach(async ({ page }) => {
   shown = approvals;
   alertsShown = [alert];
+  ackRemoves = false;
   await page.route("**/*", async (route) => {
     const p = new URL(route.request().url()).pathname;
     return route.request().resourceType() === "document" || (!p.startsWith("/v1") && !p.startsWith("/auth")) ? route.continue() : mock(route);
@@ -259,6 +265,7 @@ test("L1: after an Inbox decision, focus moves to the next item's Review button,
 
 test("L1: after an acknowledgement removes the alert, focus moves to the alert in its place, then to the page heading", async ({ page }) => {
   alertsShown = [alert, { ...alert, id: "al2", title: "Support assistant inherits a medium rating" }];
+  ackRemoves = true;
   await page.goto("/ui/admin/governance/alerts");
   await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
   await page.getByTestId("alert-detail").getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
@@ -272,6 +279,20 @@ test("L1: after an acknowledgement removes the alert, focus moves to the alert i
   await page.getByTestId("alert-detail").getByRole("button", { name: "Acknowledge" }).click();
   await expect(page.getByTestId("alert-detail")).toHaveCount(0);
   await expect(page.getByRole("heading", { level: 1, name: "Governance alerts" })).toBeFocused();
+  expect(await focusIsOnBody(page)).toBe(false);
+});
+
+test("M2: an acknowledgement on the Active tab keeps the alert listed and moves focus to the drawer heading", async ({ page }) => {
+  await page.goto("/ui/admin/governance/alerts");
+  await page.getByRole("button", { name: /Credit-limit assistant inherits/ }).click();
+  const detail = page.getByTestId("alert-detail");
+  await expect(detail.getByRole("button", { name: "Acknowledge" })).toBeDisabled();
+  await detail.getByLabel("Acknowledgement note — required and audited").fill("Avery owns the response.");
+  await detail.getByRole("button", { name: "Acknowledge" }).click();
+  await expect(detail.getByRole("button", { name: "Acknowledge" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Credit-limit assistant inherits/ })).toHaveCount(1);
+  await expect(detail.getByText("Acknowledged", { exact: true })).toBeVisible();
+  await expect(detail.getByRole("heading", { level: 2, name: /Credit-limit assistant inherits/ })).toBeFocused();
   expect(await focusIsOnBody(page)).toBe(false);
 });
 

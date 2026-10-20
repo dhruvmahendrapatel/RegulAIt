@@ -1,5 +1,5 @@
 import { batch4SettingRelaxed, BATCH4_SETTING_COPY, BATCH4_STRICT_DEFAULTS } from "./monitorThresholds";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
@@ -123,6 +123,17 @@ export default function GovernanceAlertsPage() {
     const at = Math.min(ackedAt.current, (rows?.length ?? 0) - 1);
     (rows?.[at] ?? document.querySelector<HTMLElement>("h1"))?.focus();
   }, [selectedId, selected, alerts.data]);
+  // M2 (WCAG 2.4.3): under Active the server keeps an acknowledged alert listed, so the drawer stays open while its
+  // Acknowledge footer unmounts with focus inside it; focus moves to the drawer heading instead of falling to <body>
+  const drawerHeadingId = useId();
+  const ackedId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selected || selected.status === "open" || ackedId.current !== selected.id) return;
+    ackedId.current = null;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    document.getElementById(drawerHeadingId)?.focus();
+  }, [selected, drawerHeadingId]);
 
   return (
     <>
@@ -186,6 +197,7 @@ export default function GovernanceAlertsPage() {
             type="Governance alert"
             title={selected.title}
             subjectKey={selected.id}
+            headingId={drawerHeadingId}
             closeLabel="Close alert"
             data-testid="alert-detail"
             meta={<><SeverityBadge severity={selected.severity} />{selected.status === "open" ? null : <span className={v.dim}>{humanize(selected.status)}</span>}<span className={v.faint}>{selected.ruleLabel}</span></>}
@@ -237,6 +249,7 @@ export default function GovernanceAlertsPage() {
                     <Button variant="primary" disabled={action.busy || !ackNote.trim()} onClick={() => void action.run(async () => {
                       await api.post(`/v1/governance/alerts/${selected.id}/acknowledge`, { note: ackNote.trim() });
                       setAckNote("");
+                      ackedId.current = selected.id;
                       ackedAt.current = Math.max(0, alerts.data?.alerts.findIndex((alert) => alert.id === selected.id) ?? 0);
                       await refresh();
                     }, "Alert acknowledged")}>Acknowledge</Button>
