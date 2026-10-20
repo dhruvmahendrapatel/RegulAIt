@@ -34,6 +34,7 @@ import {
   engineRunItems,
   engineRuns,
   eq,
+  executionPlacements,
   interceptionSettings,
   INTERCEPTION_SETTINGS_ID,
   orgSettings,
@@ -66,11 +67,14 @@ import {
   RunnerFatalError,
   runRunnerLoop,
   supersedeProof,
+  type EngineAdapter,
   type RunnerHttp,
 } from "@regulait/engine-runner";
 import { promptfooAdapter } from "@regulait/engine-promptfoo";
 import { buildApp } from "./app.js";
 import { engineRunTestHooks, engineRuntime, runEngineRunSweep, runEngineScheduleSweep, setEngineRuntime } from "./engine-runs.js";
+import { engineTaskRefusalOf } from "./engine-tasks.js";
+import { forgetStdioSessionForTest } from "./executor-stdio.js";
 import { recordVirtualKeySpend } from "./virtual-keys.js";
 import { SoftAuthenticator } from "./webauthn-soft-authenticator.js";
 import { relaxIdentityForTest } from "./testing/identity-posture.js";
@@ -283,8 +287,8 @@ async function keyOf(runId: string) {
   const [k] = await db.select().from(virtualKeys).where(eq(virtualKeys.id, (await runRow(runId)).virtualKeyId!));
   return k!;
 }
-async function once(standIn: ReturnType<typeof promptfooStandIn>, heartbeatMs = 25) {
-  const adapter = promptfooAdapter({ entrypoint: "/opt/promptfoo/node_modules/promptfoo/dist/src/entrypoint.js", run: standIn.run });
+async function once(standIn: ReturnType<typeof promptfooStandIn>, heartbeatMs = 25, wrap: (a: EngineAdapter) => EngineAdapter = (a) => a) {
+  const adapter = wrap(promptfooAdapter({ entrypoint: "/opt/promptfoo/node_modules/promptfoo/dist/src/entrypoint.js", run: standIn.run }));
   return runOnce(client, adapter, { engineId: "promptfoo", imageDigest: PF_DIGEST, engineVersion: MANIFEST.promptfoo.version, workRoot: await mkdtemp(path.join(tmpdir(), "b5p-")), heartbeatMs, retryBaseMs: 10 });
 }
 /** resolves once the run's signal aborts (the runner killed the engine), never on a timer */
@@ -504,6 +508,56 @@ describe("B5-P promptfoo through the real gateway", () => {
       expect(hooked).toBe(1);
       expect(s.calls.every((c) => c.status === 200)).toBe(true);
       await expectCancelWon(runId, out);
+    } finally {
+      delete engineRunTestHooks.beforeResultTx;
+    }
+  });
+
+  it("RED PROOF cancel inside an INVALID result post: the locked failed-end refuses it as late and audits it, never 422", async () => {
+    const runId = await startRun();
+    let hooked = 0;
+    engineRunTestHooks.beforeResultTx = async (id) => {
+      if (id !== runId) return;
+      hooked++;
+      const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, { reason: "stop" });
+      expect(c.statusCode, c.body).toBe(200);
+    };
+    try {
+      const s = promptfooStandIn();
+      // the envelope names a version the run was not leased at (PR #203 review [12]): the result_mismatch path
+      const mismatched = (a: EngineAdapter): EngineAdapter => async (lease, ctx) => ({ ...(await a(lease, ctx)), engineVersion: "0.0.0-b5p-mismatch" }) as Awaited<ReturnType<EngineAdapter>>;
+      const out = await once(s, NO_RUNNING_HEARTBEAT_MS, mismatched);
+      expect(hooked).toBe(1);
+      await expectCancelWon(runId, out);
+    } finally {
+      delete engineRunTestHooks.beforeResultTx;
+    }
+  });
+
+  it("RED PROOF cancel inside a result post whose task refusal is held: the locked not_run end refuses it as late and audits it", async () => {
+    const runId = await startRun();
+    let hooked = 0;
+    engineRunTestHooks.beforeResultTx = async (id) => {
+      if (id !== runId) return;
+      hooked++;
+      // the rig placed the run's task before this post; its executor side is lost, so this process holds a refusal
+      const placementId = (await runRow(runId)).taskPlacementId;
+      expect(placementId).not.toBeNull();
+      const [mp] = await db.select().from(executionPlacements).where(eq(executionPlacements.id, placementId!));
+      const session = forgetStdioSessionForTest(mp!.offerId!);
+      expect(session).not.toBeNull();
+      session!.lose("b5p_test_session_lost");
+      const c = await inject("POST", `/v1/engine-runs/${runId}/cancel`, alice.key, { reason: "stop" });
+      expect(c.statusCode, c.body).toBe(200);
+      expect(engineTaskRefusalOf(runId)).toBe("session_lost");
+    };
+    try {
+      const s = promptfooStandIn();
+      const out = await once(s, NO_RUNNING_HEARTBEAT_MS);
+      expect(hooked).toBe(1);
+      await expectCancelWon(runId, out);
+      // the cancel is the run's only end: the held refusal did not end it not_run
+      expect((await runRow(runId)).status).toBe("cancelled");
     } finally {
       delete engineRunTestHooks.beforeResultTx;
     }
